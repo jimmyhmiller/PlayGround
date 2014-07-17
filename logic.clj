@@ -39,7 +39,7 @@
 
 (defmacro defconjfn [fn-name params & body]
   `(defn ~fn-name ~params
-     (alt-fn ~(first params)
+     (conj-fn ~(first params)
             (fn [~(first params)] ~@body))))
 
 
