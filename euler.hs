@@ -9,17 +9,19 @@ intSqrt n = floor $ sqrt $ fromIntegral n
 
 fibs = 1 : 1 : zipWith (+) fibs (tail fibs)
 
+zero = (== 0)
+
 is_prime n = case (n) of 
 	 1 -> False
 	 2 -> True
-	 n -> not $ any (\x -> n `mod` x == 0) (takeWhile (<= (intSqrt n)) primes)
+	 n -> not $ any (zero . mod n) $ takeWhile (<= (intSqrt n)) primes
 
 
-prime_factors n = [x | x <- (takeWhile (<= (intSqrt n)) primes), n `mod` x == 0]
+prime_factors n = filter (zero . mod n) $ takeWhile (<= (intSqrt n)) primes
 
-euler1 = sum [x | x <- [0..999], x `mod` 3 == 0 || x `mod` 5 == 0]
+euler1 = sum $ filter (\x -> x `mod` 3 == 0 || x `mod` 5 == 0)  [0..999]
 
-euler2 = sum [ x | x <- takeWhile (<= 4000000) fibs, even x]
+euler2 = sum $ filter even $ takeWhile (<= 4000000) fibs
 
 euler3 = maximum $ prime_factors 600851475143
 
@@ -30,3 +32,5 @@ euler5 = foldr1 lcm [1..20]
 euler6 = (sum [1..100])^2 - (sum $ map (^2) [1..100])
 
 euler7 = primes !! 10000
+
+
