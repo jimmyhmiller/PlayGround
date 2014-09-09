@@ -62,12 +62,12 @@
     (square (- (:y object1) (:y object2))))))
 
 
-
 (defn neighbors [object coll]
-  (filter
-   #(and (< (distance object %) MAXDISTANCE)
-         (not= (distance object %) 0))
-   coll))
+  (->> coll
+       (sort-by (partial distance object))
+       (drop 1)
+       (take-while #(and (< (distance object %) MAXDISTANCE)))))
+
 
 (defn steer [object coll]
   (let [direction (direction object)
@@ -108,16 +108,16 @@
      :width 0
      :height 0
      :font-size 5
-     :border-left "5px solid transparent"
-     :border-right "5px solid transparent"
-     :border-bottom "5px solid black"
+     :border-left "10px solid transparent"
+     :border-right "10px solid transparent"
+     :border-bottom "10px solid black"
      :transform (str "rotate(" direction "rad) scaleY(" 3 ")")}}])
 
 
 
 (defn main-loop [app]
   (let [objects (:objects @app)]
-    (om/update! app [:objects] (map #(step % objects 0.032) objects))))
+    (om/update! app [:objects] (map #(step % objects 0.064) objects))))
 
 
 (defn flock [app owner]
@@ -132,7 +132,7 @@
      (om/update! app [:browser]
                  {:width (aget js/window "innerWidth")
                   :height (aget js/window "innerHeight")})
-     (.setInterval js/window #(main-loop app) 110))
+     (.setInterval js/window #(main-loop app) 80))
     om/IRender
     (render
      [this]
