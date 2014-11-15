@@ -184,6 +184,55 @@
        (:contains 2))
 
 
+(defclass Num [a]
+  {:isZero (fn [self] false)
+   :plus (fn [self b] (Num (+ a b)))
+   :show (fn [self] a)})
+
+
+(defclass Succ [n]
+  {:isZero (fn [self] false)
+   :inc (fn [self] (Succ self))
+   :dec (fn [self] n)
+   :toNum (fn [self] (Num (+ 1 (obj-> self :dec :toNum :show))))
+   :plus (fn [self b] ((self :dec) :plus (b :inc)))
+   :sub (fn [self b]
+          (if (b :isZero)
+            self
+            (obj-> self :dec (:sub (b :dec)))))
+   :lt (fn [self b]
+         (if (b :isZero)
+           false
+           (obj-> self :dec (:lt (b :dec)))))
+   :gt (fn [self b] (b :lt self))
+   :eq (fn [self b] (and (not (self :lt b)) (not (self :gt b))))
+   :show (fn [self] ((self :toNum) :show))})
+
+
+
+
+(defclass Zero []
+  {:isZero (fn [self] true)
+   :inc (fn [self] (Succ self))
+   :dec (fn [self] self)
+   :toNum (fn [self] (Num 0))
+   :plus (fn [self b] b)
+   :sub (fn [self b] b)
+   :lt (fn [self b] (not (b :isZero)))
+   :gt (fn [self b] (b :lt self))
+   :eq (fn [self b] (and (not (self :lt b)) (not (self :gt b))))
+   :show (fn [self] ((self :toNum) :show))})
+
+
+(defclass FromNum [a]
+  (if (zero? a)
+    (Zero)
+    (Succ (FromNum (dec a)))))
+
+(obj-> (FromNum 2)
+       (:eq (FromNum 2)))
+
+
 (defclass Nil []
   {:isEmpty (fn [self] true)
    :first (fn [self] "error")
@@ -235,8 +284,8 @@
                    (if (b :eq e)
                      (Nil)
                      (Range (b :inc) e)))
-          :show (fn [self](
-                            str "[" (b :show) ".." (e :show) "]" ))})))
+           :show (fn [self]
+                   (str "[" (b :show) ".." (e :show) "]" ))})))
 
 (defclass Infinite []
   (Increase (Zero)))
@@ -245,55 +294,10 @@
 (obj-> (Range (FromNum 0) (FromNum 2))
        :show)
 
-(obj->
- (Plus
-  (obj-> (Zero)
-         :inc
-         :inc)
-  (obj-> (Zero)))
- :dec
- :dec
- :isZero)
-
-(defclass Zero []
-  {:isZero (fn [self] true)
-   :inc (fn [self] (Succ self))
-   :dec (fn [self] self)
-   :toNum (fn [self] (Num 0))
-   :plus (fn [self b] b)
-   :sub (fn [self b] b)
-   :lt (fn [self b] (not (b :isZero)))
-   :gt (fn [self b] (b :lt self))
-   :eq (fn [self b] (and (not (self :lt b)) (not (self :gt b))))
-   :show (fn [self] ((self :toNum) :show))})
 
 
-(defclass Succ [n]
-  {:isZero (fn [self] false)
-   :inc (fn [self] (Succ self))
-   :dec (fn [self] n)
-   :toNum (fn [self] (Num (+ 1 (obj-> self :dec :toNum :show))))
-   :plus (fn [self b] ((self :dec) :plus (b :inc)))
-   :sub (fn [self b]
-          (if (b :isZero)
-            self
-            (obj-> self :dec (:sub (b :dec)))))
-   :lt (fn [self b]
-         (if (b :isZero)
-           false
-           (obj-> self :dec (:lt (b :dec)))))
-   :gt (fn [self b] (b :lt self))
-   :eq (fn [self b] (and (not (self :lt b)) (not (self :gt b))))
-   :show (fn [self] ((self :toNum) :show))})
 
 
-(defclass FromNum [a]
-  (if (zero? a)
-    (Zero)
-    (Succ (FromNum (dec a)))))
-
-(obj-> (FromNum 2)
-       (:eq (FromNum 2)))
 
 
 (obj-> (Zero)
@@ -301,11 +305,6 @@
        :inc
        :toNum
        :show)
-
-(defclass Num [a]
-  {:isZero (fn [self] false)
-   :plus (fn [self b] (Num (+ a b)))
-   :show (fn [self] a)})
 
 (obj-> (Infinite)
        :rest
