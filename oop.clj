@@ -28,9 +28,63 @@
    (apply (obj message)
           (cons (partial dispatcher obj) args))))
 
-(defmacro defclass [fn-name params body]
-  `(defn ~fn-name ~params
-     (partial dispatcher ~body)))
+(defmacro defclass
+  ([fn-name body]
+   `(def ~fn-name
+      (partial dispatcher ~body)))
+  ([fn-name params body]
+   `(defn ~fn-name ~params
+      (partial dispatcher ~body))))
+
+
+
+(def True)
+(def False)
+
+
+(defclass True
+  {:if (fn [this ifs]
+         (:true ifs))
+   :not (fn [this] False)
+   :and (fn [this a]
+          (obj-> a
+                 (:if {:true True
+                       :false False})))
+   :or (fn [this a] True)})
+
+
+
+(defclass False
+  {:if (fn [this ifs]
+         (:false ifs))
+   :not (fn [this] True)
+   :and (fn [this] False)
+   :or (fn [this a]
+         (obj-> a
+                (:if {:true True
+                      :false False})))})
+
+
+
+(obj-> True
+       (:and False)
+       (:if {:true true
+             :false false}))
+
+
+
+(obj-> False
+       (:or True)
+       (:if {:true true
+             :false false}))
+
+(obj-> False
+       (:if {:true true
+             :false false}))
+
+
+
+
 
 
 
@@ -41,8 +95,8 @@
 
 
 
-(defclass Empty []
-  {:isEmpty (fn [this] true)
+(defclass Empty
+  {:isEmpty (fn [this] True)
    :contains (fn [this i] false)
    :insert (fn [this i] (Insert this i))
    :union (fn [this s] s)})
@@ -50,7 +104,7 @@
 (defclass Insert [s n]
   (if (s :contains n)
     s
-    {:isEmpty (fn [this] false)
+    {:isEmpty (fn [this] False)
      :contains (fn [this i] (or (= i n) (s :contains i)))
      :insert (fn [this i] (Insert this i))
      :union (fn [this s] (Union this s))}))
@@ -61,17 +115,17 @@
    :insert (fn [this i] (Insert this i))
    :union (fn [this s] (Union this s))})
 
-(defclass Even []
-  {:isEmpty (fn [this] false)
+(defclass Even
+  {:isEmpty (fn [this] False)
    :contains (fn [this i] (even? i))
    :insert (fn [this i] (Insert this i))
    :union (fn [this s] (Union this s))})
 
 
-(obj-> (Empty)
+(obj-> Empty
        :methods)
 
-(obj-> (Even)
+(obj-> Even
        (:insert 3)
        (:contains 3))
 
@@ -82,7 +136,7 @@
    :assert (fn [self a t1] (if (self :isEqual a)
                              self
                              (Known (s :assert a t1) t)))
-   :isKnown (fn [self] true)
+   :isKnown (fn [self] True)
    :isTrue (fn [self] t)
    :isFalse (fn [self] (not t))
    :show (fn [self] t)
@@ -93,9 +147,9 @@
    :assert (fn [self a t1] (if (self :isEqual a)
                              (Known self t1)
                              self))
-   :isKnown (fn [self] false)
-   :isTrue (fn [self] false)
-   :isFalse (fn [self] false)
+   :isKnown (fn [self] False)
+   :isTrue (fn [self] False)
+   :isFalse (fn [self] False)
    :show (fn [self] p)
    :isEqual (fn [self e] (= (self :show) (e :show)))})
 
@@ -104,7 +158,7 @@
              (cond
               (p :isTrue) (q :reduce)
               (q :isTrue) (p :reduce)
-              (or (p :isFalse) (q :isFalse)) (self :assert self false)
+              (or (p :isFalse) (q :isFalse)) (self :assert self False)
               :else (And (p :reduce) (q :reduce))))
    :assert (fn [self a t1] (if (self :isEqual a)
                              (Known self t1)
@@ -121,7 +175,7 @@
              (cond
               (p :isFalse) (q :reduce)
               (q :isFalse) (p :reduce)
-              (or (p :isTrue) (q :isTrue)) (self :assert self true)
+              (or (p :isTrue) (q :isTrue)) (self :assert self True)
               :else (Or (p :reduce) (q :reduce))))
    :assert (fn [self a t1] (if (self :isEqual a)
                              (Known self t1)
@@ -136,8 +190,8 @@
 (defclass If [p q]
   {:reduce (fn [self] (cond
                        (p :isTrue) q
-                       (p :isFalse) (self :assert self true)
-                       (q :isTrue) (self :asert self true)))
+                       (p :isFalse) (self :assert self True)
+                       (q :isTrue) (self :asert self True)))
    :assert (fn [self a t1] (if (self :isEqual a)
                              (Known self t1)
                              (If (p :assert a t1) (q :assert a t1))))
@@ -165,14 +219,16 @@
 (obj-> (Prop :p)
        (:isEqual (Prop :p)))
 
-(obj-> (Even)
+(obj-> Even
        (:contains 2))
 
-(obj-> (Empty)
-       (:union (obj-> (Empty) (:insert 1)))
+(obj-> Empty
+       (:union (obj-> Empty (:insert 1)))
        (:insert 2)
        (:insert 2)
        (:contains 2))
+
+
 
 
 
@@ -180,18 +236,18 @@
   {:invoke (fn [self o] (apply o (cons method args)))})
 
 (obj-> (Mapper :insert 2)
-       (:invoke (Empty))
+       (:invoke Empty)
        (:contains 2))
 
 
 (defclass Num [a]
-  {:isZero (fn [self] false)
+  {:isZero (fn [self] False)
    :plus (fn [self b] (Num (+ a b)))
    :show (fn [self] a)})
 
 
 (defclass Succ [n]
-  {:isZero (fn [self] false)
+  {:isZero (fn [self] False)
    :inc (fn [self] (Succ self))
    :dec (fn [self] n)
    :toNum (fn [self] (Num (+ 1 (obj-> self :dec :toNum :show))))
@@ -211,8 +267,8 @@
 
 
 
-(defclass Zero []
-  {:isZero (fn [self] true)
+(defclass Zero
+  {:isZero (fn [self] True)
    :inc (fn [self] (Succ self))
    :dec (fn [self] self)
    :toNum (fn [self] (Num 0))
@@ -224,29 +280,21 @@
    :show (fn [self] ((self :toNum) :show))})
 
 
+
+(obj-> Zero
+       :isZero
+       (:if {:true true
+             :false false}))
+
+
 (defclass FromNum [a]
   (if (zero? a)
-    (Zero)
+    Zero
     (Succ (FromNum (dec a)))))
 
 (obj-> (FromNum 2)
        (:eq (FromNum 2)))
 
-
-(defclass Nil []
-  {:isEmpty (fn [self] true)
-   :first (fn [self] "error")
-   :rest (fn [self] "error")
-   :cons (fn [self i] (Cons i self))
-   :show (fn [self] [])})
-
-(defclass Cons [i coll]
-  {:isEmpty (fn [self] false)
-   :first (fn [self] i)
-   :rest (fn [self] coll)
-   :cons (fn [self elem] (Cons elem self))
-   :map (fn [self mapper] (Map mapper self))
-   :show (fn [self] (concat [(i :show)] (coll :show)))})
 
 (defclass Map [mapper coll]
   {:isEmpty (fn [self] (coll :isEmpty))
@@ -257,12 +305,30 @@
    :show (fn [self] (coll :show))})
 
 
+
+(defclass Cons [i coll]
+  {:isEmpty (fn [self] False)
+   :first (fn [self] i)
+   :rest (fn [self] coll)
+   :cons (fn [self elem] (Cons elem self))
+   :map (fn [self mapper] (Map mapper self))
+   :show (fn [self] (concat [(i :show)] (coll :show)))})
+
+
+
+(defclass Nil
+  {:isEmpty (fn [self] True)
+   :first (fn [self] "error")
+   :rest (fn [self] "error")
+   :cons (fn [self i] (Cons i self))
+   :show (fn [self] [])})
+
 (defclass Error' [message]
   {:message (fn [self] message)})
 
 
 (defclass Increase [n]
-  {:isEmpty (fn [self] false)
+  {:isEmpty (fn [self] False)
    :first (fn [self] n)
    :rest (fn [self] (Increase (n :inc)))
    :cons (fn [self i] (Cons i self))
@@ -274,7 +340,7 @@
          (:extend
           {:rest (fn [self]
                    (if (n :isZero)
-                     (Cons Zero (Nil))
+                     (Cons Zero Nil)
                      (Decrease (n :dec))))})))
 
 (defclass Range [b e]
@@ -282,34 +348,30 @@
          (:extend
           {:rest (fn [self]
                    (if (b :eq e)
-                     (Nil)
+                     Nil
                      (Range (b :inc) e)))
            :show (fn [self]
                    (str "[" (b :show) ".." (e :show) "]" ))})))
 
-(defclass Infinite []
-  (Increase (Zero)))
+(defclass Infinite
+  (Increase Zero))
 
 
-(obj-> (Range (FromNum 0) (FromNum 2))
+(obj-> (Range (FromNum 0) (FromNum 10))
        :show)
 
 
 
-
-
-
-
-(obj-> (Zero)
+(obj-> Zero
        :inc
        :inc
        :toNum
        :show)
 
-(obj-> (Infinite)
+(obj-> Infinite
+       :rest
        :rest
        (:map (Mapper :plus (FromNum 2)))
-       :rest
        :first
        :show)
 
