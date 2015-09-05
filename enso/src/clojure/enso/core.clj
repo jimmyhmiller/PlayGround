@@ -1,6 +1,7 @@
 (ns enso.core
   (:gen-class)
   (:import org.jnativehook.GlobalScreen)
+  (:import java.util.concurrent.AbstractExecutorService)
   (:import org.jnativehook.keyboard.NativeKeyListener))
 
 
@@ -35,6 +36,10 @@
 (defn log-key [e]
     (let [k (.getRawCode e)]
       (when (= k 58) (showit))))
+
+(defn voidDispatch []
+  (proxy [AbstractExecutorService]
+
 
 (defn myGlobalKeyListener []
   (reify

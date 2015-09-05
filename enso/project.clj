@@ -6,4 +6,6 @@
   :dependencies [[org.clojure/clojure "1.5.1"]
                  [org.clojars.pepijndevos/jnativehook "1.1.4"]
                  [seesaw "1.4.4"]]
+  :source-paths      ["src/clojure"]
+  :java-source-paths ["src/java"]
   :plugins [[lein-exec "0.3.3"]])
