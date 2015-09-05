@@ -1,0 +1,216 @@
+Elm.Main = Elm.Main || {};
+Elm.Main.make = function (_elm) {
+   "use strict";
+   _elm.Main = _elm.Main || {};
+   if (_elm.Main.values)
+   return _elm.Main.values;
+   var _op = {},
+   _N = Elm.Native,
+   _U = _N.Utils.make(_elm),
+   _L = _N.List.make(_elm),
+   _P = _N.Ports.make(_elm),
+   $moduleName = "Main",
+   $Array = Elm.Array.make(_elm),
+   $Graphics$Element = Elm.Graphics.Element.make(_elm),
+   $Html = Elm.Html.make(_elm),
+   $Html$Events = Elm.Html.Events.make(_elm),
+   $List = Elm.List.make(_elm),
+   $Maybe = Elm.Maybe.make(_elm),
+   $Signal = Elm.Signal.make(_elm),
+   $Window = Elm.Window.make(_elm);
+   var list = function (coll) {
+      return A2($Html.ul,
+      _L.fromArray([]),
+      A2($List.map,
+      function (i) {
+         return A2($Html.li,
+         _L.fromArray([]),
+         _L.fromArray([$Html.text(i)]));
+      },
+      coll));
+   };
+   var tableRow = F2(function (clms,
+   data) {
+      return A2($Html.tr,
+      _L.fromArray([]),
+      $Array.toList(A2($Array.map,
+      function (f) {
+         return A2($Html.td,
+         _L.fromArray([]),
+         _L.fromArray([$Html.text(f.field(data))]));
+      },
+      clms)));
+   });
+   var tableBody = F2(function (clms,
+   data) {
+      return A2($Html.tbody,
+      _L.fromArray([]),
+      A2($List.map,
+      tableRow(clms),
+      data));
+   });
+   var tableHead = function (clms) {
+      return A2($Html.thead,
+      _L.fromArray([]),
+      _L.fromArray([A2($Html.tr,
+      _L.fromArray([]),
+      $Array.toList(A2($Array.map,
+      function (x) {
+         return A2($Html.th,
+         _L.fromArray([]),
+         _L.fromArray([$Html.text(x.heading)]));
+      },
+      clms)))]));
+   };
+   var elmTable = F2(function (clms,
+   data) {
+      return A2($Html.table,
+      _L.fromArray([]),
+      _L.fromArray([tableHead(clms)
+                   ,A2(tableBody,clms,data)]));
+   });
+   var ReorderColumn = F2(function (a,
+   b) {
+      return {ctor: "ReorderColumn"
+             ,_0: a
+             ,_1: b};
+   });
+   var NoOp = {ctor: "NoOp"};
+   var updates = $Signal.channel(NoOp);
+   var view = function (_v0) {
+      return function () {
+         return A2($Html.div,
+         _L.fromArray([]),
+         _L.fromArray([A2($Html.a,
+                      _L.fromArray([$Html$Events.onClick(A2($Signal.send,
+                      updates,
+                      A2(ReorderColumn,0,1)))]),
+                      _L.fromArray([$Html.text("reorder")]))
+                      ,A2(elmTable,
+                      _v0.columnMappings,
+                      _v0.data)]));
+      }();
+   };
+   var scene = F2(function (state,
+   _v2) {
+      return function () {
+         switch (_v2.ctor)
+         {case "_Tuple2":
+            return A4($Graphics$Element.container,
+              _v2._0,
+              _v2._1,
+              $Graphics$Element.midTop,
+              A3($Html.toElement,
+              550,
+              _v2._1,
+              view(state)));}
+         _U.badCase($moduleName,
+         "on line 49, column 21 to 70");
+      }();
+   });
+   var swap = F3(function (a,
+   b,
+   coll) {
+      return function () {
+         var _v6 = A2($Array.get,
+         a,
+         coll);
+         switch (_v6.ctor)
+         {case "Just":
+            return function () {
+                 var _v8 = A2($Array.get,
+                 b,
+                 coll);
+                 switch (_v8.ctor)
+                 {case "Just":
+                    return A3($Array.set,
+                      b,
+                      _v6._0,
+                      A3($Array.set,a,_v8._0,coll));
+                    case "Nothing": return coll;}
+                 _U.badCase($moduleName,
+                 "between lines 28 and 31");
+              }();
+            case "Nothing": return coll;}
+         _U.badCase($moduleName,
+         "between lines 27 and 31");
+      }();
+   });
+   var step = F2(function (act,
+   state) {
+      return function () {
+         switch (act.ctor)
+         {case "NoOp": return state;
+            case "ReorderColumn":
+            return _U.replace([["columnMappings"
+                               ,A3(swap,
+                               act._0,
+                               act._1,
+                               state.columnMappings)]],
+              state);}
+         _U.badCase($moduleName,
+         "between lines 38 and 40");
+      }();
+   });
+   var startingState = {_: {}
+                       ,columnMappings: $Array.fromList(_L.fromArray([{_: {}
+                                                                      ,field: function (_) {
+                                                                         return _.name;
+                                                                      }
+                                                                      ,heading: "Name"}
+                                                                     ,{_: {}
+                                                                      ,field: function (_) {
+                                                                         return _.age;
+                                                                      }
+                                                                      ,heading: "Age"}]))
+                       ,data: _L.fromArray([{_: {}
+                                            ,age: "22"
+                                            ,name: "jimmy"}
+                                           ,{_: {}
+                                            ,age: "26"
+                                            ,name: "janice"}])};
+   var state = A3($Signal.foldp,
+   step,
+   startingState,
+   $Signal.subscribe(updates));
+   var main = A3($Signal.map2,
+   scene,
+   state,
+   $Window.dimensions);
+   var ColumnMapping = F2(function (a,
+   b) {
+      return {_: {}
+             ,field: b
+             ,heading: a};
+   });
+   var State = F2(function (a,b) {
+      return {_: {}
+             ,columnMappings: a
+             ,data: b};
+   });
+   var Data = F2(function (a,b) {
+      return {_: {}
+             ,age: b
+             ,name: a};
+   });
+   _elm.Main.values = {_op: _op
+                      ,Data: Data
+                      ,State: State
+                      ,ColumnMapping: ColumnMapping
+                      ,startingState: startingState
+                      ,swap: swap
+                      ,NoOp: NoOp
+                      ,ReorderColumn: ReorderColumn
+                      ,step: step
+                      ,state: state
+                      ,updates: updates
+                      ,scene: scene
+                      ,view: view
+                      ,elmTable: elmTable
+                      ,tableHead: tableHead
+                      ,tableBody: tableBody
+                      ,tableRow: tableRow
+                      ,list: list
+                      ,main: main};
+   return _elm.Main.values;
+};

@@ -1,0 +1,107 @@
+Elm.Table = Elm.Table || {};
+Elm.Table.make = function (_elm) {
+   "use strict";
+   _elm.Table = _elm.Table || {};
+   if (_elm.Table.values)
+   return _elm.Table.values;
+   var _op = {},
+   _N = Elm.Native,
+   _U = _N.Utils.make(_elm),
+   _L = _N.List.make(_elm),
+   _P = _N.Ports.make(_elm),
+   $moduleName = "Table",
+   $Debug = Elm.Debug.make(_elm),
+   $Graphics$Element = Elm.Graphics.Element.make(_elm),
+   $Html = Elm.Html.make(_elm),
+   $Html$Events = Elm.Html.Events.make(_elm),
+   $List = Elm.List.make(_elm),
+   $Signal = Elm.Signal.make(_elm),
+   $Window = Elm.Window.make(_elm);
+   var list = function (coll) {
+      return A2($Html.ul,
+      _L.fromArray([]),
+      A2($List.map,
+      function (i) {
+         return A2($Html.li,
+         _L.fromArray([]),
+         _L.fromArray([$Html.text(i)]));
+      },
+      coll));
+   };
+   var step = F2(function (act,
+   state) {
+      return function () {
+         switch (act.ctor)
+         {case "Add":
+            return _U.replace([["data"
+                               ,A2($List._op["::"],
+                               act._0,
+                               state.data)]],
+              state);
+            case "NoOp": return state;}
+         _U.badCase($moduleName,
+         "between lines 25 and 27");
+      }();
+   });
+   var Add = function (a) {
+      return {ctor: "Add",_0: a};
+   };
+   var NoOp = {ctor: "NoOp"};
+   var updates = $Signal.channel(NoOp);
+   var view = function (state) {
+      return A2($Html.div,
+      _L.fromArray([]),
+      _L.fromArray([A2($Html.a,
+                   _L.fromArray([$Html$Events.onClick(A2($Signal.send,
+                   updates,
+                   A2($Debug.watch,
+                   "Add",
+                   Add("test2"))))]),
+                   _L.fromArray([$Html.text("add")]))
+                   ,list(state.data)]));
+   };
+   var scene = F2(function (state,
+   _v2) {
+      return function () {
+         switch (_v2.ctor)
+         {case "_Tuple2":
+            return A4($Graphics$Element.container,
+              _v2._0,
+              _v2._1,
+              $Graphics$Element.midTop,
+              A3($Html.toElement,
+              550,
+              _v2._1,
+              view(state)));}
+         _U.badCase($moduleName,
+         "on line 36, column 21 to 70");
+      }();
+   });
+   var startingState = {_: {}
+                       ,data: _L.fromArray(["hello"
+                                           ,"test"])};
+   var state = A3($Signal.foldp,
+   step,
+   startingState,
+   $Signal.subscribe(updates));
+   var main = A3($Signal.map2,
+   scene,
+   state,
+   $Window.dimensions);
+   var State = function (a) {
+      return {_: {},data: a};
+   };
+   _elm.Table.values = {_op: _op
+                       ,State: State
+                       ,startingState: startingState
+                       ,NoOp: NoOp
+                       ,Add: Add
+                       ,step: step
+                       ,state: state
+                       ,updates: updates
+                       ,scene: scene
+                       ,view: view
+                       ,list: list
+                       ,main: main};
+   return _elm.Table.values;
+};
