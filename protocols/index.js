@@ -269,8 +269,12 @@ const partitionBy = _.curry((f, coll) => {
     }
 });
 
+log(
+map(x => x + 2, Immutable.List.of(1,2,3)))
 
 
+
+log('stuff')
 
 
 log('yep');
