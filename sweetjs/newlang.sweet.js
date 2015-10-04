@@ -1,19 +1,34 @@
 
-
+macro to_str {
+  case { _ ($toks ...) } => {
+    return [makeValue(#{ $toks ... }.map(unwrapSyntax).join(''), #{ here })];
+  }
+}
 
 macro class {
     rule {
         $name() 
             $body
     } => {
-        var $name = function() {
+        var $name = function() { 
+            var that = this;
+            var handler = {
+                get: (target, name) => {
+                    if (name in target) {
+                        return target[name]
+                    }
+                    return () => $name._methods[name](new Proxy(target, this))
+                }
+            }
             this.self = $body
-            return this.self
+            return new Proxy(this.self, handler)
         }
+        $name._methods = {}
         
     }
     rule {
         $name($x (,) ...) | $guard:expr = $y
+            
             $body
         
     } => {
@@ -32,9 +47,19 @@ macro class {
         
     } => {
         var $name = function($x (,) ...) {
+            var that = this;
+            var handler = {
+                get: (target, name) => {
+                    if (name in target) {
+                        return target[name]
+                    }
+                    return () => $name._methods[name](new Proxy(target, this))
+                }
+            }
             this.self = $body
-            return this.self
+            return new Proxy(this.self, handler)
         }
+        $name._methods = {}
     }
 
 }
@@ -63,46 +88,100 @@ let self = macro {
 }
 
 
+macro (::) {
+    rule infix {
+        $x($a (,) ...) | $y:expr
+    } => {
+        ($y[to_str($x)]($a (,) ...))
+    }
+}
+
+macro module {
+    rule {
+        $name {
+            $body ...
+        }
+    } => {
+        var $name = (function () {
+            $body ...
+        })()
+    }
+}
+
+macro extend {
+    rule {
+        $name {
+            $($type $[:] {
+                $methodName $[:] $fn:expr
+            }) (,) ...
+        }
+    } => {
+        $($name.$type._methods.$methodName = $fn)...
+    }
+}
 
 
+module List {
+    class Empty() {
+        empty: () => True,
+        first: () => "Error",
+        rest: () => self
+    };
+
+    class Cons(x, coll) {
+        empty: () => False,
+        first: () => x,
+        rest: () => coll
+    };
+    return { 
+        Cons: Cons,
+        Empty: Empty
+    }
+}
 
 
+module Tree {
+    class Empty() {
+        empty: () => True,
+        left: () => "Empty",
+        right: () => "Empty"
+    }
+
+    class Node(l, n, r) {
+        empty: () => False,
+        left: () => l,
+        right: () => r
+    }
+    return {
+        Empty: Empty,
+        Node: Node
+    }
+}
 
 
+extend List {
+    Empty: {
+        last: (s) => "Error"
+    },
+    Cons: {
+        last: (s) => {
+            if (s.rest().empty()) {
+                return s.first();
+            }
+            return s.rest().last();
+        }
+    }
+}
 
 
+var list = () => {
+    var result = List.Empty()
+    Array.prototype.slice.call(arguments).reverse().forEach(a => {
+        result = List.Cons(a, result);
+    });
+    return result;
+}
 
-
-class Empty() {
-    empty: () => True,
-    contains: (i) => False,
-    insert: (i) => Insert(self, i),
-    union: (s) => s
-};
-
-class Insert(s, n) | s.contains(n) = s {
-    empty: () => False,
-    contains: (i) => i == n || s.contains(i),
-    insert: (i) => Insert(self, i),
-    union: (s) => Union(self, s)
-};
-
-class Union(s1, s2) {
-    empty: () => s.empty(),
-    contains: (i) => s1.contains(i) || s2.contains(i),
-    insert: (i) => Insert(self, i),
-    union: (s) => Union(self, s)
-};
-
-
-
-
-
-
-
-
-
-
-
+console.log(list(1,2,3).last())
 
 
