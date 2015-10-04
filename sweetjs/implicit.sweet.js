@@ -23,7 +23,7 @@ let function = macro {
 	}
 }
 
-var add = implictFunction(x) {
+var add = function(x) {
 	x = 2
 	x
 }
