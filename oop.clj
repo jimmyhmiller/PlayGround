@@ -235,10 +235,11 @@
      :union (fn [this s] (Union this s))}))
 
 (defclass Union [s1 s2]
-  {:isEmpty (fn [this]  (and (s1 :isEmpty) (s2 :isEmpty)))
+  {:isEmpty (fn [this] (and (s1 :isEmpty) (s2 :isEmpty)))
    :contains (fn [this i] (or (s1 :contains i) (s2 :contains i)))
    :insert (fn [this i] (Insert this i))
    :union (fn [this s] (Union this s))})
+
 
 (defclass Even
   {:isEmpty (fn [this] False)
@@ -379,9 +380,6 @@
        (:map (Mapper :isZero))
        :show)
 
-(obj-> Zero
-       :isZero
-       :show)
 
 (defclass Num [a]
   {:isZero (fn [self] False)
@@ -422,6 +420,11 @@
    :eq (fn [self b] (and (not (self :lt b)) (not (self :gt b))))
    :show (fn [self] ((self :toNum) :show))})
 
+
+
+(obj-> Zero
+       :isZero
+       :show)
 
 
 (obj-> Zero

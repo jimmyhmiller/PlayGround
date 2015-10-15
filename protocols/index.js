@@ -23,9 +23,9 @@ Seq.implementation(Array, {
     empty: (coll) => [],
     first: (coll) => coll[0],
     rest: (coll) => {
-        coll = coll.slice();
-        coll.shift(0);
-        return coll;
+        var newcoll = coll.slice();
+        newcoll.shift(0);
+        return newcoll;
     },
     isEmpty: (coll) => coll.length == 0
 });
