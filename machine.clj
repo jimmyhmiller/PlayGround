@@ -30,6 +30,9 @@
                    1 :q2}})
 
 
+
+
+
 (def n-machine {:start :q1
                 :q1 {1 [:q1 :q2]
                      0 [:q1]}
@@ -96,7 +99,7 @@
    (into #{} (mapcat (partial transition-c-single machine input) states)))
 
 
-(transition-c c-machine 1 [:q2 '(0 0 :$)])
+(print (transition-c) c-machine 1 [:q2 '(0 0 :$)])
 (transition-c c-machine :e [:q1 '(:e)])
 
 (transition-c c-machine :e (map stack-e [[:q1 '()] [:q3 '(0 0 0 :$)]]))
