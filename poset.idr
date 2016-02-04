@@ -1,19 +1,21 @@
 
-%hide Nat
+%hide Nat.LTE
 
 
-data Nat = Z | S Nat
-    
+--data Nat = Z | S Nat
+
+
+
+
 
 data LTE : (n, m : Nat) -> Type where
   LteZero : LTE Z m
   LteSucc : LTE n m -> LTE (S n) (S m)
-
-zeroLessThanOrEqualAll : (n : Nat) -> LTE Z n
-zeroLessThanOrEqualAll n = LteZero
-
+  
+  
 succEqual : (n, m : Nat) -> n = m -> (S n) = (S m)
 succEqual n n Refl = Refl
+
 
 lteTransitive : (n, m, k : Nat) -> LTE n m -> LTE m k -> LTE n k
 lteTransitive Z m k (LteZero) _  = LteZero
