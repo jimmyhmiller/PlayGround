@@ -1,6 +1,8 @@
+import Prelude hiding (and, or)
 import Data.List (nub)
 import Data.Tree
 import Data.Tree.Pretty
+import Data.Char (toLower)
 
 data Operation = And | Or | If | Iff deriving (Show, Eq)
 
@@ -16,10 +18,20 @@ instance Show Statement where
     show T = "T"
     show F = "F"
     show (Neg p) = "~" ++ show p
-    show (Op o p q) = show o ++ " " ++ show p ++ " " ++ show q
+    show (Op If p q) = "(" ++ show p ++ " " ++ "->" ++ " " ++ show q ++ ")"
+    show (Op Iff p q) = "(" ++ show p ++ " " ++ "<->" ++ " " ++ show q ++ ")"
+    show (Op o p q) =  "(" ++ show p ++ " " ++ map toLower (show o) ++ " " ++ show q ++ ")"
+
+
+
+
+or p q = Op Or p q
+and p q = Op And p q
+
+
 
 s = (Op If (Op Or (Op And (Prop "p") (Prop "q")) (Op And (Prop "p'") (Prop "q'"))) (Op Iff (Prop "q") (Prop "r")))
-main = putStrLn $ drawVerticalTree $ fmap show $ fullLogicTree s
+main = putStrLn $ drawVerticalTree $ fmap show $ fullLogicTree (Prop "p" `or` Neg (Prop "p"))
 
 unique :: Eq a => [a] -> [a]
 unique a = nub a

@@ -67,69 +67,12 @@ freshN = do
   return n
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 n : St Int (Int, Int, Int)
 n = do
   a <- fresh
   b <- fresh
   c <- fresh
   return (a, b, c)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -313,7 +256,6 @@ l = do
   return (name ++ age)
   
 
-
 eval : (Validation a b) -> a -> Maybe b
 eval (Expect f) y = f y
 
@@ -325,4 +267,4 @@ x = [1,2,3,4]
 
 main : IO ()
 main = putStrLn $ show $ eval ((hasWordWithLetter "z" . hasKey "name") `or` hasKey "age") $ 
-  fromList [("name", "jimmy"), ("age", "20")]
+  fromList [("name", "jimmy"), ("age", "30")]

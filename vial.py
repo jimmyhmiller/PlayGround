@@ -69,7 +69,3 @@ class Vial(object):
 
     def run(self):
         self.listen()
-
-
-
-

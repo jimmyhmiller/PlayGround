@@ -10,7 +10,7 @@ from flask.ext.cors import CORS
 
 
 app = Flask(__name__)
-app.config['MONGO_HOST'] = '192.168.99.102'
+app.config['MONGO_HOST'] = '192.168.99.100'
 CORS(app)
 mongo = PyMongo(app)
 

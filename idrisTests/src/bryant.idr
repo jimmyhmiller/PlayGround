@@ -50,3 +50,17 @@ x = do
   b <- Some 4
   c <- Nothing <|> Some 1 
   return (a + b + c)
+
+
+
+
+
+data HList : List Type -> Type where
+  Nil : HList []
+  (::) : a -> HList as -> HList (a :: as)
+  
+
+
+q : HList [String, Int]
+q = ["jimmy", 2]
+

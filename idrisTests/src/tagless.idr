@@ -5,6 +5,7 @@ data BinaryTree : Type -> Type where
   Node : a -> BinaryTree a -> BinaryTree a -> BinaryTree a
   
 
+
 insert : Ord a => a -> BinaryTree a -> BinaryTree a
 insert x Empty = Node x Empty Empty
 insert x (Node v l r) = case compare x v of
@@ -27,9 +28,9 @@ contains x (Node v l r) = case compare x v of
 
 
 
-rightMost : BinaryTree a -> a
+rightMost : (t : BinaryTree a) -> a
 rightMost (Node v l Empty) = v
-rightMost (Node v l r) = rightMost r
+rightMost (Node v l r@(Node _ _ _)) = rightMost r
 
 
 delete : Ord a => a -> BinaryTree a -> BinaryTree a     
@@ -44,12 +45,15 @@ delete x (Node v l Empty) = case x == v of
                                  False => Node v (delete x l) Empty
                                  True => l
 delete x (Node v l r) = case compare x v of
-                             LT => Node v (delete x l) r
+                             LT => Node v (delete x l) r                  
                              EQ => let nextLeast = rightMost l in
                                    let allButNextLeast = delete nextLeast l in
                                    (Node nextLeast allButNextLeast r)
                              GT => Node v l (delete x r)
   
+
+
+
 
 
 fromList : Ord a => List a -> BinaryTree a
@@ -63,6 +67,7 @@ instance Functor BinaryTree where
   map f Empty = Empty
   map f (Node x l r) = Node (f x) (map f l) (map f r)
   
+
 instance Applicative BinaryTree where
     pure x = Node x Empty Empty
     (<*>) Empty y = Empty
