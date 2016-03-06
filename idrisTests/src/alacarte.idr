@@ -1,4 +1,3 @@
-%hide Language.Reflection.Const
 
 
 data Fix : (f : Type -> Type) -> Type where
@@ -10,8 +9,6 @@ infixr 5 :+:
 data (:+:) : (f : Type -> Type) -> (g : Type -> Type) -> (a : Type) -> Type where
   L : f a -> (f :+: g) a
   R : g a -> (f :+: g) a
-
-
 
 
 data Value r = Val Int

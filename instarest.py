@@ -18,7 +18,7 @@ def sane_ids(coll):
     print(type(coll))
     print(isinstance(coll, list))
     if isinstance(coll, dict) and "_id" in coll:
-        coll["id"] = str(coll["_id"])
+        coll["id"] = str(coll["_id")
         coll.pop("_id", None)
         return coll
     elif isinstance(coll, list):

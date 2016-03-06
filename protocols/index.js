@@ -77,16 +77,16 @@ const filter = _.curry((pred, coll) => {
     }
 })
 
-const reduce = _.curry((f, init, coll) => {
+const reduce = _.curry((init, f, coll) => {
     if (Seq.isEmpty(coll)) {
         return init;
     } else {
-        return reduce(f, f(init, first(coll)), rest(coll));
+        return reduce(f(init, first(coll)), f, rest(coll));
     }
 })
 
 const flow = function (v, ...fns) {
-    return reduce((v, f) => f(v), v, fns);
+    return reduce(v, (v, f) => f(v), fns);
 }
 
 const apply = function(f, ...args) {
@@ -106,7 +106,7 @@ const reject = _.curry((pred, coll) => filter(complement(pred), coll));
 
 
 const count = (coll) => {
-    return reduce((x, y) => x + 1, 0, coll);
+    return reduce(0, (x, y) => x + 1, coll);
 }
 
 const conj = _.curry((coll, elem) => {
@@ -138,7 +138,7 @@ const distinct = _.curry((coll) => {
 
 const mapcat = _.curry((f, coll) => {
     const x = map(f, coll)
-    return reduce(concat, first(x), rest(x));
+    return reduce(first(x), concat, rest(x));
 });
 
 const interleave = _.curry((coll1, coll2) => {
@@ -239,7 +239,7 @@ const dropLast = _.curry((n, coll) => {
 });
 
 const reverse = (coll) => {
-    return reduce(conj, Seq.empty(coll), coll);
+    return reduce(Seq.empty(coll), conj, coll);
 };
 
 const splitAt = _.curry((n, coll) => {
