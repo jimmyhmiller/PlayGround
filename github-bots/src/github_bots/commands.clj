@@ -3,7 +3,6 @@
   (:use [github-bots.core]))
 
 
-(def auth "nomic-awesome-bot:correct horse nomic staple")
 
 (defn check-quorum [comment]
   (if (proposal? (-> comment :issue :title))
