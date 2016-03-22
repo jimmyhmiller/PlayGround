@@ -6,7 +6,6 @@
 (def init-str
   [:bottom ""])
 
-
 (def server (atom init-str))
 
 

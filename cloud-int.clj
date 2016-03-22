@@ -9,12 +9,6 @@
 (def server (atom init-int))
 
 
-(defn send-to-server [state]
-  (let [forked (fork state)
-        server-state (first forked)
-        local-state (last forked)]
-    (swap! server join server-state)
-    local-state))
 
 (defn add [n [r b d]]
   [r b (+ d n)])
@@ -35,9 +29,21 @@
     [r1 b1 (+ d1 d2)]))
 
 
+(defn send-to-server [state]
+  (let [forked (fork state)
+        server-state (first forked)
+        local-state (last forked)]
+    (swap! server join server-state)
+    local-state))
+
+
 (->> init-int
      (add 2)
      (add 2)
+     (send-to-server)
+     (send-to-server)
+     (send-to-server)
+     (send-to-server)
      (send-to-server)
      (add 3)
      (send-to-server)

@@ -1,0 +1,21 @@
+Elm.Repl = Elm.Repl || {};
+Elm.Repl.make = function (_elm) {
+   "use strict";
+   _elm.Repl = _elm.Repl || {};
+   if (_elm.Repl.values) return _elm.Repl.values;
+   var _U = Elm.Native.Utils.make(_elm),
+   $Basics = Elm.Basics.make(_elm),
+   $Debug = Elm.Debug.make(_elm),
+   $List = Elm.List.make(_elm),
+   $Maybe = Elm.Maybe.make(_elm),
+   $Result = Elm.Result.make(_elm),
+   $Signal = Elm.Signal.make(_elm);
+   var _op = {};
+   var x = 2;
+   var tsol = {ctor: "_Tuple0"};
+   var factorial = function (n) {    return $List.product(_U.range(1,n));};
+   var $double = function (x) {    return x * 2;};
+   var Just = function (a) {    return {ctor: "Just",_0: a};};
+   var Nothing = {ctor: "Nothing"};
+   return _elm.Repl.values = {_op: _op,Nothing: Nothing,Just: Just,$double: $double,factorial: factorial,tsol: tsol,x: x};
+};

@@ -1,4 +1,10 @@
 import Data.SortedMap
+import Data.List
+
+
+data KeyedMap : (k : Type) -> (v : Type) -> List k -> Type where
+  Nil : KeyedMap k v []
+  (::) : (key : k) -> (value : v) -> KeyedMap k v xs -> KeyedMap k v (key :: xs)
 
 data Json : Type where
   Str : String -> Json
@@ -6,21 +12,25 @@ data Json : Type where
   Boolean : Bool -> Json
   Null : Json
   Array : List Json -> Json
-  Object : (SortedMap String Json) -> Json
+  Object : (KeyedMap String Json xs) -> Json
   
 data IsObjectType : Json -> Type where
   IsObject : IsObjectType (Object m)
 
 
 
+lookup : (key : k) -> KeyedMap k v xs -> {auto ok : Elem key xs} -> v
+lookup key x {ok = Here} = key
+lookup key x {ok = (There z)} = ?lookup_rhs_2
 
-data Contains : (s : String) -> (m : SortedMap String Json) -> Type where
-  Does : Contains s m
 
 
 get : (s : String) -> (j : Json) -> {auto ok: IsObjectType j} -> Maybe Json
-get s {ok = IsObject} (Object m) = lookup s m
+--get s {ok = IsObject} (Object m) = lookup s m
 
+
+keys : SortedMap k v -> List k
+keys x = map fst $ toList x
 
 
 q : SortedMap String Json
