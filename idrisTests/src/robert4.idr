@@ -13,9 +13,3 @@ ffilter pred xs = reduce (\x, ys => if pred x then x :: ys else ys) [] xs
 
 mapif : (a -> Bool) -> (a -> a) -> List a -> List a
 mapif pred f xs = reduce (\x, ys => if pred x then f x :: ys else x :: ys) [] xs
-
-add2AndMultiply : Double -> Double
-add2AndMultiply = (+2) . (/2)
-
-even : Integer -> Bool
-even x = mod x 2 == 0

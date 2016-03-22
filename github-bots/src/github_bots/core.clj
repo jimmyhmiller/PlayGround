@@ -78,11 +78,11 @@
   (repos/contents user repo "players.yaml" {:str? true}))
 
 (defn get-players
+  ([] (get-players (get-players-file)))
   ([file]
    (-> file
        :content
-       (yaml/parse-string)))
-  ([] (get-players (get-players-file))))
+       (yaml/parse-string))))
 
 
 (defn get-active-players
