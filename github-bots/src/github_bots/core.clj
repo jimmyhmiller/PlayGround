@@ -19,9 +19,11 @@
 
 
 (defn map-if [pred f coll]
-  (cond (empty? coll) coll
-        (pred (first coll)) (cons (f (first coll)) (map-if pred f (rest coll)))
-        :else (cons (first coll) (map-if pred f(rest coll)))))
+  (reduce (fn [xs x]
+            (if (pred x)
+              (concat xs (list (f x)))
+              (concat xs (list x))))
+          '() coll))
 
 (defn distinct-by
   "Removes duplicates as determines by pred. Keeps last duplicate."
