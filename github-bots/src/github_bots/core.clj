@@ -67,12 +67,25 @@
 (defn percent [a b]
   (* (/ a b) 100))
 
+(defn vote-percent [votes]
+  (let [{:keys [yay nay]} (vote-count votes)]
+    {:yay (percent yay (+ yay nay))
+     :nay (percent nay (+ yay nay))}))
+
+(defn vote-status [votes]
+  (let [vote-percents (vote-percent votes)
+        {:keys [yay]} vote-percents]
+    (cond (> yay 50) :passing
+          (< yay 50) :failing
+          :else :tied)))
+
 (defn quorum? [votes active-players]
   (> (percent (count votes) (count active-players))
      50))
 
 (def comments-by-issue-number
-  (partial issues/issue-comments user repo))
+  #(issues/issue-comments user repo % {:all-pages true}))
+
 
 (defn get-players-file []
   (repos/contents user repo "players.yaml" {:str? true}))
