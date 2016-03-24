@@ -83,9 +83,14 @@
   (> (percent (count votes) (count active-players))
      50))
 
+(def labels-by-issue-number
+  #(issues/issue-labels user repo %))
+
+(def get-labels
+  #(issues/repo-labels user repo))
+
 (def comments-by-issue-number
   #(issues/issue-comments user repo % {:all-pages true}))
-
 
 (defn get-players-file []
   (repos/contents user repo "players.yaml" {:str? true}))
@@ -137,8 +142,8 @@
 (defn update-player-points [file new-points]
   (let [players (get-players file)
         new-player-info (assoc players :activePlayers new-points)]
-  (repos/update-contents user repo "players.yaml" "update points"
-                         (yaml/generate-string new-player-info :dumper-options {:flow-style :block})
-                         (:sha file))))
+    (repos/update-contents user repo "players.yaml" "update points"
+                           (yaml/generate-string new-player-info :dumper-options {:flow-style :block})
+                           (:sha file))))
 
 
