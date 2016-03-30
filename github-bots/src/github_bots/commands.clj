@@ -1,27 +1,32 @@
 (ns github-bots.commands
-  (:require [tentacles.core :as core])
-  (:use [github-bots.core]))
+  (:require [tentacles.core :as core]
+            [environ.core :refer [env]])
+  (:use [github-bots.core]
+        [clojure.string :only [split lower-case]]))
 
+(def auth (str (env :username) ":" (env :password)))
 
+(defmulti command (fn [[command & _] issue-number comment] command))
 
-(defn check-quorum [comment]
-  (if (proposal? (-> comment :issue :title))
-    (let [active-players (get-active-players)
-          votes (get-votes (-> comment :issue :number) active-players)]
-      (quorum? votes active-players))
-    false))
+(defmethod command "/open" [_ issue-number _]
+  (add-label issue-number "Open For Voting"))
 
+(defmethod command "/roll" [[_ description] issue-number {:keys [user]}]
+  (add-comment issue-number (roll-comment description (:login user))))
 
-(defn update-points [pr-event]
-  (if (and
-       (proposal? (-> pr-event :pull_request :title))
-       (merged? pr-event))
-    (let [active-players (get-active-players)
-          votes (get-votes (-> pr-event :pull_request :number) active-players)
-          file (get-players-file)]
-      (update-player-points file (add-vote-points active-players votes)))))
+(defmethod command "yay" [_ issue-number {:keys [user]}]
+  (when (active? (:login user))
+    (swap-vote-status-label issue-number)))
 
+(defmethod command "nay" [_ issue-number _]
+  (when (active? (:login user))
+    (swap-vote-status-label issue-number)))
 
-(core/with-defaults {:auth auth :branch "feature/test-out-bot" :ref "feature/test-out-bot"}
-  (update-points {:pull_request {:title "304" :number 35}
-                  :action "closed"}))
+(defn comment->command [comment]
+  (let [{:keys [issue body]} comment]
+    (command (words (lower-case body)) (:number issue) comment)))
+
+(core/with-defaults {:auth auth}
+  (comment->command {:body "nay"
+                     :issue {:number 1}
+                     :user {:login "jimmyhmiller"}}))

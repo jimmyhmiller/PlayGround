@@ -5,11 +5,14 @@
             [tentacles.issues :as issues]
             [clj-yaml.core :as yaml]
             [dnddice.core :as dice])
-  (:use [clojure.string :only [lower-case]]))
+  (:use [clojure.string :only [lower-case]]
+        [clojure.repl :only [source]]))
 
-(def user "nomicness")
+;; (def user "nomicness")
+;; (def repo "a-whole-new-world")
+
+(def user "nomic-awesome-bot")
 (def repo "a-whole-new-world")
-
 
 (defn roll [roll-description]
   (-> roll-description
@@ -17,6 +20,10 @@
       dice/perform-roll
       :total))
 
+(defn roll-comment [description user]
+  (str "@" user " requested a roll \n\n"
+       "Below are the results:\n\n"
+       "`|" (roll description) "|`"))
 
 (defn map-if [pred f coll]
   (reduce (fn [xs x]
@@ -31,6 +38,13 @@
   (->> coll
        (group-by pred)
        (map (comp last last))))
+
+(defn words [word]
+  (split word #" "))
+
+
+(defn in? [coll target]
+  (some #(= target %) coll))
 
 (defn vote? [com]
   (or (= (lower-case com) "yay") (= (lower-case com) "nay")))
@@ -65,19 +79,37 @@
       (* (- proposal-number 291) ratio)))))
 
 (defn percent [a b]
-  (* (/ a b) 100))
+  (if (zero? b) 0
+    (* (/ a b) 100)))
 
 (defn vote-percent [votes]
-  (let [{:keys [yay nay]} (vote-count votes)]
+  (let [{:keys [yay nay] :or {yay 0 nay 0}} (vote-count votes)]
     {:yay (percent yay (+ yay nay))
      :nay (percent nay (+ yay nay))}))
 
-(defn vote-status [votes]
+(defn get-vote-status [votes]
   (let [vote-percents (vote-percent votes)
         {:keys [yay]} vote-percents]
     (cond (> yay 50) :passing
           (< yay 50) :failing
           :else :tied)))
+
+(def vote-status->label
+  {:failing "Failing"
+   :passing "Passing"
+   :tied "Tied"})
+
+
+
+(defn swap-vote-status-label [issue-number]
+  (let [labels (labels-by-issue-number issue-number)
+        vote-status (get-vote-status (get-votes issue-number))
+        status-labels (vals vote-status->label)
+        new-label {:name (vote-status->label vote-status)}]
+    (->> labels
+         (remove #(in? status-labels (:name %)))
+         (cons new-label)
+         (set-labels issue-number))))
 
 (defn quorum? [votes active-players]
   (> (percent (count votes) (count active-players))
@@ -88,6 +120,18 @@
 
 (def get-labels
   #(issues/repo-labels user repo))
+
+(def get-label
+  #(issues/specific-label user repo % {}))
+
+(def add-label
+  #(issues/add-labels user repo %1 [%2] {}))
+
+(def set-labels
+  #(issues/replace-labels user repo %1 %2 {}))
+
+(defn add-comment [issue-number body]
+  (issues/create-comment user repo issue-number body {}))
 
 (def comments-by-issue-number
   #(issues/issue-comments user repo % {:all-pages true}))
@@ -109,8 +153,10 @@
    (:activePlayers players)))
 
 
-(defn active? [active-players player-name]
-  (not (nil? (some #{player-name} (map :name active-players)))))
+(defn active?
+  ([player-name] (active? (get-active-players) player-name))
+  ([active-players player-name]
+   (not (nil? (some #{player-name} (map :name active-players))))))
 
 
 (defn get-votes
@@ -145,5 +191,22 @@
     (repos/update-contents user repo "players.yaml" "update points"
                            (yaml/generate-string new-player-info :dumper-options {:flow-style :block})
                            (:sha file))))
+
+(defn check-quorum [comment]
+  (if (proposal? (-> comment :issue :title))
+    (let [active-players (get-active-players)
+          votes (get-votes (-> comment :issue :number) active-players)]
+      (quorum? votes active-players))
+    false))
+
+(defn update-points [pr-event]
+  (if (and
+       (proposal? (-> pr-event :pull_request :title))
+       (merged? pr-event))
+    (let [active-players (get-active-players)
+          votes (get-votes (-> pr-event :pull_request :number) active-players)
+          file (get-players-file)]
+      (update-player-points file (add-vote-points active-players votes)))))
+
 
 
