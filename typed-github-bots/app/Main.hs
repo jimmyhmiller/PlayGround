@@ -64,7 +64,6 @@ infixl 0 |>
 (|>) :: a -> (a -> b) -> b
 (|>) a f = f a
 
-
 getFileContents :: Repos.Content -> String
 getFileContents (Repos.ContentFile cd) = decode $ Text.unpack $ Repos.contentFileContent cd
 
@@ -100,7 +99,6 @@ findPlayer :: [Player] -> GH.IssueComment -> Player
 findPlayer players comment = players
   |> filter (\player -> name player == (comment |> GH.issueCommentUser |> getUserName))
   |> head
-
 
 getVotes :: [Player] -> [GH.IssueComment] -> [Vote]
 getVotes players xs = xs
@@ -144,12 +142,9 @@ proposalStatus v
   | otherwise = Tied
   where yaypercent = percentYays v
 
-
 pointsPlus :: [Player] -> [Int] -> [Player]
 pointsPlus [] [] = []
 pointsPlus (Player name points:ps) (x:xs) = Player name (points + x) : pointsPlus ps xs
-
-
 
 updatePlayerPoints :: (MonadRandom m) => [Vote] -> m [Player]
 updatePlayerPoints votes = do
@@ -158,8 +153,6 @@ updatePlayerPoints votes = do
 
 data CustomError = CommentError Comments.Error | ParseError String
   deriving (Show)
-
-
 
 main = do
   result <- runExceptT $ do
