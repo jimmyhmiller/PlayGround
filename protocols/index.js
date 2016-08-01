@@ -3,8 +3,9 @@
 const protocol = require('protomorphism');
 const _ = require('lodash');
 const Immutable = require('immutable');
+const List = Immutable.List;
 
-let log = (x) => console.log(x);
+let log = (...args) => console.log(...args);
 
 const Seq = protocol({
     cons: function(coll, elem) {},
@@ -269,13 +270,35 @@ const partitionBy = _.curry((f, coll) => {
     }
 });
 
-log(
-map(x => x + 2, Immutable.List.of(1,2,3)))
+
+const logBoth = (fn, val) => {
+    console.log(
+        fn(Immutable.fromJS(val)),
+        fn(val)
+    )
+}
+
+logBoth(
+    map(x => x + 2), [1,2,3]
+)
+
+
+logBoth(
+    filter(isOdd), [1,2,3]
+)
+
+logBoth(
+   count, [1,2,3]
+)
+
+logBoth(
+    partitionBy(x => x > 3), [1,2,3,4,5,6]
+)
 
 
 
-log('stuff')
 
 
-log('yep');
+
+log('\n\n\n');
 

@@ -47,7 +47,9 @@
   (some #(= target %) coll))
 
 (defn vote? [com]
-  (or (= (lower-case com) "yay") (= (lower-case com) "nay")))
+  (or
+   (= (lower-case com) "yay")
+   (= (lower-case com) "nay")))
 
 (defn proposal? [title]
   (not (nil? (re-matches #"^[0-9]+.*" title))))
