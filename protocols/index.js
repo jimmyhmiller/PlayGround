@@ -31,9 +31,7 @@ Seq.implementation(Array, {
 });
 
 Seq.implementation(Immutable.List, {
-    cons: (coll, elem) => {
-        return coll.unshift(elem);
-    },
+    cons: (coll, elem) => coll.unshift(elem)
     empty: (coll) => Immutable.List.of(),
     first: (coll) => coll.first(),
     rest: (coll) => coll.rest(),

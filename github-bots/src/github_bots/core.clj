@@ -5,7 +5,7 @@
             [tentacles.issues :as issues]
             [clj-yaml.core :as yaml]
             [dnddice.core :as dice])
-  (:use [clojure.string :only [lower-case]]
+  (:use [clojure.string :only [lower-case split]]
         [clojure.repl :only [source]]))
 
 ;; (def user "nomicness")
@@ -101,6 +101,9 @@
 
 
 
+(def labels-by-issue-number
+  #(issues/issue-labels user repo %))
+
 (defn swap-vote-status-label [issue-number]
   (let [labels (labels-by-issue-number issue-number)
         vote-status (get-vote-status (get-votes issue-number))
@@ -115,8 +118,7 @@
   (> (percent (count votes) (count active-players))
      50))
 
-(def labels-by-issue-number
-  #(issues/issue-labels user repo %))
+
 
 (def get-labels
   #(issues/repo-labels user repo))

@@ -3,6 +3,8 @@
 ;; right.
 
 
+(use 'clojure.reflect)
+
 (defn register-type [lookup t f]
   (swap! lookup #(assoc % t f)))
 
@@ -18,8 +20,7 @@
     `(do
        (def ~lookup-name (atom {}))
        (defn ~name ~args
-         (((type ~proto-name) @~lookup-name) ~@args)))))
-
+         ((@~lookup-name (symbol (typename (type ~proto-name)))) ~@args)))))
 
 (defmacro defproto [name & methods]
   (let [method-bodies (map (partial create-method-body (str name)) (partition 2 methods))]
@@ -28,12 +29,15 @@
 
 (defn implement-method [t [name f]]
   (let [lookup-name (symbol (str name "-lookup"))]
-    `(register-type ~lookup-name ~t ~f)))
+    `(register-type ~lookup-name '~t ~f)))
 
 
 (defmacro defimpl [proto t & methods]
-  (let [method-bodies (map (partial implement-method (keyword t)) (partition 2 methods))]
-    `(do ~@method-bodies)))
+  (let [type-name (symbol t)
+        quoted-type `~type-name
+        method-bodies (map (partial implement-method quoted-type) (partition 2 methods))]
+     `(do
+       ~@method-bodies)))
 
 (defn create-type-constructor [t [name args]]
   `(defn ~name
@@ -41,13 +45,12 @@
      (with-meta [~(keyword name) ~@args] {:type ~t})))
 
 (defmacro defdata [t & constructors]
-  (let [constructor-bodies (map (partial create-type-constructor (keyword t)) (partition 2 constructors))]
+  (let [constructor-bodies (map (partial create-type-constructor `'~t) (partition 2 constructors))]
     `(do ~@constructor-bodies)))
 
 (defdata Maybe
   Some [x]
   Nothing [])
-
 
 (defproto Mappable
   fmap [f mappable])
@@ -59,16 +62,15 @@
             (Some (f (second obj)))
             (Nothing))))
 
-(defimpl Mappable List
+
+(defimpl Mappable clojure.lang.PersistentList
   fmap map)
 
 (def map-anything-plus-2 (partial fmap (partial + 2)))
 
-(Some 2)
-
 
 (map-anything-plus-2 (Some 2))
-(map-anything-plus-2 (create-type :List '(1 2)))
+(map-anything-plus-2 '(1 2))
 
 
 

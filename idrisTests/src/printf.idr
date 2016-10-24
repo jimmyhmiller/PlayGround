@@ -22,5 +22,5 @@ printf : (s : String) -> formatToType (charsToFormat (unpack s))
 printf s = formatToFormatType (charsToFormat (unpack s)) ""
 
 
-greeting : String -> Int -> String
-greeting = printf "Hello %s %d"
+greeting : String -> String
+greeting = printf "Hello %s"

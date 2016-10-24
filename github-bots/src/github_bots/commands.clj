@@ -1,10 +1,14 @@
 (ns github-bots.commands
   (:require [tentacles.core :as core]
-            [environ.core :refer [env]])
+            [environ.core :refer [env]]
+            [tentacles.issues :as issues]
+            [clojure.pprint :as pprint :refer [pprint print-table]])
   (:use [github-bots.core]
         [clojure.string :only [split lower-case]]))
 
 (def auth (str (env :username) ":" (env :password)))
+
+
 
 (defmulti command (fn [[command & _] issue-number comment] command))
 
@@ -30,3 +34,21 @@
   (comment->command {:body "nay"
                      :issue {:number 1}
                      :user {:login "jimmyhmiller"}}))
+
+(defn spit-clipboard [text]
+  (.setContents (get-clipboard) (java.awt.datatransfer.StringSelection. text) nil))
+
+
+(core/with-defaults {:auth auth :accept "application/vnd.github.squirrel-girl-preview"}
+  (->>
+   (issues/my-issues {:filter "created"})
+   (filter #(and (> (-> % :assignees count) 0) (= (-> % :reactions :+1) (-> % :assignees count))))
+   (map :url)))
+
+(core/with-defaults {:auth auth :accept "application/vnd.github.squirrel-girl-preview"}
+  (->>
+   (issues/my-issues {:filter "created"})
+   (filter #(and (> (-> % :assignees count) 0) (< (-> % :reactions :+1) (-> % :assignees count))))
+   (filter #(contains? % :pull_request))
+   (map :url)))
+
