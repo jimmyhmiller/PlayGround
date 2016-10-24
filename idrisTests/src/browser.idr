@@ -33,7 +33,7 @@ record Parser where
   input : String
   
  
-instance Default Parser where
+Default Parser where
     default = MkParser 0 ""
 
 
@@ -87,11 +87,8 @@ consumeWhile pred = do
 consumeWhitespace : Eff String [STATE Parser, EXCEPTION String]
 consumeWhitespace = consumeWhile isSpace
 
-
-
 parseTagName : Eff String [STATE Parser, EXCEPTION String]
 parseTagName = consumeWhile isAlphaNum
-
 
 parseAttrValue : Eff String [STATE Parser, EXCEPTION String]
 parseAttrValue = do
@@ -108,8 +105,6 @@ parseAttr = do
   value <- parseAttrValue
   pure (name, value)
 
-
-
 parseAttributes : Eff AttrMap [STATE Parser, EXCEPTION String]
 parseAttributes = do
   consumeWhitespace
@@ -125,9 +120,6 @@ parseText : Eff Node [STATE Parser, EXCEPTION String]
 parseText = do
   value <- consumeWhile (\x => x /= '<')
   pure (text value)
-
-
-
 
 mutual
 
@@ -212,21 +204,21 @@ showEnd : NodeType -> String
 showEnd (Text x) = ""
 showEnd (Element (MkElementData tagName attributes)) = "</" ++ tagName ++ ">"
 
-instance Show AttrMap where
+Show AttrMap where
     show x = case toList x of
                   [] => ""
                   ((key, value) :: xs) => " " ++ key ++ "=\"" ++ value ++ "\"" ++ show (fromList xs)
 
 
-instance Show ElementData where
+Show ElementData where
     show (MkElementData tagName attributes) = "<" ++ tagName ++ (show attributes) ++ ">" 
 
 
-instance Show NodeType where 
+Show NodeType where 
     show (Text x) = x
     show (Element x) = show x
     
-instance Show Node where
+Show Node where
     show (MkNode children nodeType) = show nodeType ++ unlines (map show children) ++ showEnd nodeType
 
 

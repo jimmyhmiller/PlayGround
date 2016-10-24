@@ -7,14 +7,21 @@ data Point = Point Float Float deriving (Show)
 data Category = Red | Blue deriving (Show, Ord, Eq)
 data Observation = Observation Point Category deriving (Show)
 
- 
+
 main = do
     g <- newStdGen
     let d = (generateData 1000 (0,20) pickCategory g)
+    let reds = filter (checkColor (const True) Red) d
     let v = map (\n -> knearest 5 n d) d
     let cat = map classify v
-    putStr $ show $ cat
+    let incorrect = filter (checkColor (pointXPredicate (> 10)) Red) cat
+    putStr $ show $ length $ incorrect
 
+checkColor :: (Observation -> Bool) -> Category -> Observation -> Bool
+checkColor pred color ob@(Observation (Point x _) obColor) = if ((pred ob) && (color /= obColor)) then True else False
+
+pointXPredicate :: (Float -> Bool) -> Observation -> Bool
+pointXPredicate pred (Observation (Point x _) _) = pred x
 
 mostCommon :: Ord a => [a] -> a
 mostCommon = head . maximumBy (comparing length) . group . sort
