@@ -5,7 +5,7 @@ const _ = require('lodash');
 const Immutable = require('immutable');
 const List = Immutable.List;
 
-let log = (...args) => console.log(...args);
+
 
 const Seq = protocol({
     cons: function(coll, elem) {},
@@ -24,17 +24,15 @@ Seq.implementation(Array, {
     empty: (coll) => [],
     first: (coll) => coll[0],
     rest: (coll) => {
-        var newcoll = coll.slice();
-        newcoll.shift(0);
-        return newcoll;
+        coll = coll.slice();
+        coll.shift(0);
+        return coll;
     },
     isEmpty: (coll) => coll.length == 0
 });
 
 Seq.implementation(Immutable.List, {
-    cons: (coll, elem) => {
-        return coll.unshift(elem);
-    },
+    cons: (coll, elem) => coll.unshift(elem),
     empty: (coll) => Immutable.List.of(),
     first: (coll) => coll.first(),
     rest: (coll) => coll.rest(),
@@ -59,6 +57,11 @@ const last = (coll) => {
     }
 }
 
+let log = (...args) => {
+    console.log(...args);
+    return last(args);
+}
+
 
 const map = _.curry((f, coll) => {
     if (Seq.isEmpty(coll)) {
@@ -78,16 +81,20 @@ const filter = _.curry((pred, coll) => {
     }
 })
 
-const reduce = _.curry((init, f, coll) => {
+const reduce = _.curry((f, init, coll) => {
     if (Seq.isEmpty(coll)) {
         return init;
     } else {
-        return reduce(f(init, first(coll)), f, rest(coll));
+        return f(reduce(f, init, rest(coll)), first(coll)) 
     }
 })
 
+const map2 = _.curry((f, coll) => {
+    return reduce((init, x) => cons(f(log(x)), init), Seq.empty(coll), coll)
+})
+
 const flow = function (v, ...fns) {
-    return reduce(v, (v, f) => f(v), fns);
+    return reduce((v, f) => f(v), v, fns);
 }
 
 const apply = function(f, ...args) {
@@ -107,7 +114,7 @@ const reject = _.curry((pred, coll) => filter(complement(pred), coll));
 
 
 const count = (coll) => {
-    return reduce(0, (x, y) => x + 1, coll);
+    return reduce((x, y) => x + 1, 0, coll);
 }
 
 const conj = _.curry((coll, elem) => {
@@ -139,7 +146,7 @@ const distinct = _.curry((coll) => {
 
 const mapcat = _.curry((f, coll) => {
     const x = map(f, coll)
-    return reduce(first(x), concat, rest(x));
+    return reduce(concat, first(x), rest(x));
 });
 
 const interleave = _.curry((coll1, coll2) => {
@@ -240,7 +247,7 @@ const dropLast = _.curry((n, coll) => {
 });
 
 const reverse = (coll) => {
-    return reduce(Seq.empty(coll), conj, coll);
+    return reduce(conj, Seq.empty(coll), coll);
 };
 
 const splitAt = _.curry((n, coll) => {
@@ -278,24 +285,27 @@ const logBoth = (fn, val) => {
     )
 }
 
-logBoth(
-    map(x => x + 2), [1,2,3]
-)
+// logBoth(
+//     map(x => x + 2), [1,2,3]
+// )
 
+ log(map2(x => x + 2, [1,2,3]))
 
-logBoth(
-    filter(isOdd), [1,2,3]
-)
+// logBoth(
+//     filter(isOdd), [1,2,3]
+// )
 
-logBoth(
-   count, [1,2,3]
-)
+// logBoth(
+//    count, [1,2,3]
+// )
 
-logBoth(
-    partitionBy(x => x > 3), [1,2,3,4,5,6]
-)
+// logBoth(
+//     partitionBy(x => x > 3), [1,2,3,4,5,6]
+// )
 
-
+// const coll = Immutable.fromJS([[1], [2], [3]])
+// log(second(coll)) // [2]
+// log(ffirst(coll)) // 1
 
 
 

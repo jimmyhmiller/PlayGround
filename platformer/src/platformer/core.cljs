@@ -22,6 +22,13 @@
           kvs))
 
 
+(defn compose-props [& reducers]
+  (fn [object app]
+    (->> reducers
+      (map #(partial % object))
+      (reduce (fn [a f] (f a)) app))))
+
+
 (defn gravity [object app]
   (if (true? (:standing object))
     app
@@ -37,27 +44,28 @@
                       [:objects (:name object)] {:y y :vy vy :x x}))))
 
 
-(defn walk [object app]
-  (let [keys (:keys app)
-        vx (cond
-            (contains? keys :right) 150
-            (contains? keys :left) -150
-            :else 0)
-        vy (if
-             (and
-              (contains? keys :up)
-              (true? (:standing object)))
-             15
-             (:vy object))
-        standing false]
-    (multi-assoc-in app
-                    [:objects (:name object)]
-                    {:vx vx :vy vy :standing standing})))
+(defn walk-with-velocity [velocity]
+    (fn [object app]
+      (let [keys (:keys app)
+            vx (cond
+                (contains? keys :right) velocity
+                (contains? keys :left) (* -1 velocity)
+                :else 0)
+            vy (if
+                 (and
+                  (contains? keys :up)
+                  (true? (:standing object)))
+                 15
+                 (:vy object))
+            standing false]
+        (multi-assoc-in app
+                        [:objects (:name object)]
+                        {:vx vx :vy vy :standing standing}))))
 
+(def walk (walk-with-velocity 150))
 
 (defn apply-attr [obj attr app]
   ((attr obj) obj app))
-
 
 (defn remove-overrides [object app]
   (assoc-in app [:objects (:name object) :overrides] {}))
@@ -148,7 +156,7 @@
     :y (fix-y obj floor)
     :vy 9.8
     :standing (= (fix-y obj floor) (top floor))
-    :overrides {:walk walk2}))
+    :overrides {:walk (walk-with-velocity 250)}))
 
 
 (defn portal [x obj floor]
