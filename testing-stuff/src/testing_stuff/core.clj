@@ -26,9 +26,10 @@
 
 (x :x 2 3)
 
-(defn square [x] (* x x))
+(defn square [x] 
+  (* x x))
 
-(time (list-of-primes 100000))
+(first (time (list-of-primes 100000000)))
 
 (defn divisible? [a b]
   (zero? (mod a b)))
@@ -46,13 +47,12 @@
           :else (recur (rest ps)))))
 
 
-(time (last (take 10000 primes)))
+(time (last (take 1000000 primes)))
 
 
 (defn sieve [s]
   (cons (first s)
-        (lazy-seq (sieve
-                   (filter #(not (divisible? % (first s)))
-                   (rest s))))))
+        (lazy-seq (sive (filter #(not (divisible? % (first s)))
+                                (rest s))))))
 
-(time (last (take 10000 (sieve (iterate inc 2)))))
+(time (last (take 1000 (sieve (iterate inc 2)))))
