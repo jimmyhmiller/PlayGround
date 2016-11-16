@@ -55,3 +55,39 @@
 (use 'testing-stuff.core)
 (doc list-of-primes)
 (doc map)
+(ns testing-stuff.spec
+)
+(scenario "1 + 2 = 3"
+          :given [x 1]
+          :and [y 2]
+          :when [z (+ x y)]
+          :then z :should-be 3
+          :and y :should-be 1)
+(defmacro scenario [& args]
+  (let [info (s/conform ::scenario args)]
+    (println info)
+    (:description info)))
+(ns testing-stuff.spec
+  (:require [clojure.spec :as s]))
+(scenario "1 + 2 = 3"
+(defmacro scenario [& args]
+  (let [info (s/conform ::scenario args)]
+    (println info)
+    (:description info)))
+(scenario "1 + 2 = 3"
+          :given [x 1]
+          :and [y 2]
+          :when [z (+ x y)]
+          :then z :should-be 3
+          :and y :should-be 1)
+(ns testing-stuff.spec)
+(scenario)
+(use 'testing-stuff.spec)
+(scenario)
+(use 'testing-stuff.spec)
+ls
+(load "src/testing_stuff/spec.clj")
+(load "src/testing-stuff/spec.clj")
+(load "src/testing_stuff/spec.clj")
+(load "src/testing_stuff/spec")
+(load "testing_stuff/spec")

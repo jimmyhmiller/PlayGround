@@ -50,7 +50,7 @@
 
 
 
-;; (defGenMethod scenario [desc]
+;; (defgen-method scenario [desc]
 ;;   (? (:given context) (* :and contexts))
 ;;   (:when event)
 ;;   (cat (:then expr) (:should-be val))

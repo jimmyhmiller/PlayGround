@@ -2,7 +2,6 @@ import Data.List
 
 %default total
 
-%hide Vect
 %hide fact
 
 
@@ -59,10 +58,6 @@ fact5 = Refl
 
 identity : a -> a
 identity x = x
-
-
-
-  
 
 
 fmap : (a -> b) -> Vect a n -> Vect b n

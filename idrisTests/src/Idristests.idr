@@ -14,7 +14,7 @@ mapState : (a -> b) -> (s -> (a, s)) -> (s -> (b, s))
 mapState f g x = case g x of
                       (y, z) => (f y, z)
 
-instance Functor (St s) where
+Functor (St s) where
     map m (S f) = S (mapState m f)
     
 pureState : a -> (s -> (a, s))
@@ -25,7 +25,7 @@ apState f g s = case f s of
                      (h, y) => (case g y of
                                      (z, s') => (h z, s'))
 
-instance Applicative (St s) where
+Applicative (St s) where
     pure x = S (pureState x)
     (<*>) (S f) (S g) = S (apState f g)
 
@@ -35,7 +35,7 @@ bindState f g s = case f s of
                        (a, s') => (case g a of
                                         (S h) => h s')
 
-instance Monad (St s) where
+Monad (St s) where
     (>>=) (S g) f = S (bindState g f)
 
 
@@ -92,7 +92,7 @@ mapMaybe f g x = case g x of
                       (Just y) => Just (f y)
 
 
-instance Functor (Validation a) where
+Functor (Validation a) where
     map f (Expect g) = Expect (f `mapMaybe` g)
    
  
@@ -104,7 +104,7 @@ appMaybe f g x = case g x of
                                         Nothing => Nothing
                                         (Just z) => Just (z y))
 
-instance Applicative (Validation a) where
+Applicative (Validation a) where
     pure x = Expect (constant) where
       constant : a -> Maybe a1
       constant y = Just x
@@ -118,7 +118,7 @@ bindMaybe f g x = case f x of
                                          (Expect h) => h x)
 
     
-instance Monad (Validation a) where
+Monad (Validation a) where
     (>>=) (Expect f) g = Expect (f `bindMaybe` g)
 
 nextMaybe : (a -> Maybe b) -> (b -> Maybe c) -> (a -> Maybe c)
@@ -133,7 +133,7 @@ orMaybe f g x = case f x of
                      Nothing => g x
                      y => y
    
-instance Alternative (Validation a) where
+Alternative (Validation a) where
     empty = Expect (nothing) where
       nothing : b -> Maybe a1
       nothing x = Nothing
@@ -143,7 +143,7 @@ instance Alternative (Validation a) where
 next : Validation a b -> Validation b c -> Validation a c
 next (Expect f) (Expect g) = Expect (f `nextMaybe` g)
 
-instance Category Validation where
+Category Validation where
     id = Expect Just
     (.) x y = y `next` x
 
@@ -158,7 +158,7 @@ firstMaybe f (a,c) = case f a of
                           (Just x) => Just (x, c)
                           
 
-instance Arrow Validation where
+Arrow Validation where
     arrow f = Expect (liftMaybe f)
     first (Expect f) = Expect (firstMaybe f)
 
@@ -264,7 +264,27 @@ x : List Int
 x = [1,2,3,4]
 
 
+infixr 1 >=>
+
+-- | Left-to-right Kleisli composition of monads.
+(>=>) : Monad m => (a -> m b) -> (b -> m c) -> (a -> m c)
+f >=> g = \x => f x >>= g
+
+
+intMaybeInt : Int -> Maybe Int
+intMaybeInt x = case x == 2 of
+                  False => Nothing
+                  True => Just x
+
+intMaybeBool : Int -> Maybe Bool
+intMaybeBool x = case x == 2 of
+                      False => Nothing
+                      True => Just True
+
+fish : Int -> Maybe Bool
+fish = (intMaybeInt >=> intMaybeBool)
+
 
 main : IO ()
-main = putStrLn $ show $ eval ((hasWordWithLetter "z" . hasKey "name") `or` hasKey "age") $ 
-  fromList [("name", "jimmy"), ("age", "30")]
+main = putStrLn $ show $ eval l $ 
+  fromList [("name", "jimmy")]
