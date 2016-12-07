@@ -7,4 +7,6 @@
                  [org.clojure/math.numeric-tower "0.0.2"]
                  [org.clojure/clojure "1.9.0-alpha11"]
                  [org.clojure/core.async "0.2.385"]
-                 [graphql-clj "0.1.18"]])
+                 [graphql-clj "0.1.18"]
+                 [org.clojure/test.check "0.9.0"]
+                 [juxt/dirwatch "0.2.3"]])
