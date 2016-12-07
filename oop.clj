@@ -49,12 +49,9 @@
 
 
 
-
-
-
 (defclass Unit [a]
   {:bind (fn [self k] (k a))
-   :show (fn [self] (str "Success: " (a :showval)))})
+   :show (fn [self] (str "Success: " (a :show)))})
 
 (defclass ErrorM [s]
   {:bind (fn [self k] self)
@@ -64,8 +61,15 @@
 (defclass Var [x]
   {:interp (fn [self e] (e :lookup x))})
 
+(defclass Num' [i]
+  {:show (fn [self] i)
+   :add (fn [self b] (b :bind
+                        (fn [b'] (Num' (+ i b')))))
+   :bind (fn [self k] (k i))})
+
+
 (defclass Con [i]
-  {:interp (fn [self e] (Unit (Num i)))})
+  {:interp (fn [self e] (Unit (Num' i)))})
 
 (defclass Add [u v]
   {:interp (fn [self e] (obj-> u
@@ -73,18 +77,12 @@
                                (:bind (fn [a]
                                         (obj-> v
                                                (:interp e)
-                                               (:bind (fn [b] (a :add b))))))))})
+                                               (:bind (fn [b] (Unit (a :add b)))))))))})
 (defclass Wrong
-  {:showval (fn [self] "<wrong>")})
-
-(defclass Num [i]
-  {:showval (fn [self] i)
-   :add (fn [self b] (b :bind
-                        (fn [b'] (Num (+ i b')))))
-   :bind (fn [self k] (k i))})
+  {:show (fn [self] "<wrong>")})
 
 (defclass Fun [f]
-  {:showval (fn [self] "<function>")
+  {:show (fn [self] "<function>")
    :apply (fn [self a] (f a))})
 
 (defclass Lam [x v]
@@ -113,12 +111,9 @@
 
 
 
-(obj-> (App (Lam "x" (Add (Var "x") (Var "x")))
-            (Add (Con 10) (Con 11)))
+(obj-> (App (Lam "x" (Var "x")) (Add (Con 10) (Con 10)))
        (:interp EmptyEnv)
        :show)
-
-
 
 
 
@@ -395,6 +390,10 @@
        (:map (Mapper :isZero))
        :show)
 
+(obj-> (Just (Succ Zero))
+       (:map (Mapper :isZero))
+       :show)
+
 
 (defclass Num [a]
   {:isZero (fn [self] False)
@@ -494,7 +493,7 @@
    :rest (fn [self] (Increase (n :inc)))
    :cons (fn [self i] (Cons i self))
    :map (fn [self mapper] (Map mapper self))
-   :show (fn [self] "infinite")})
+   :show (fn [self]  (str "[" (n :show) "..]" ))})
 
 (defclass Decrease [n]
   (obj-> (Increase n)
@@ -502,7 +501,8 @@
           {:rest (fn [self]
                    (if (n :isZero)
                      (Cons Zero Nil)
-                     (Decrease (n :dec))))})))
+                     (Decrease (n :dec))))
+           :show (fn [self] (str "[" (n :show) "..0]" ))})))
 
 (defclass Range [b e]
   (obj-> (Increase b)
@@ -521,6 +521,8 @@
 (obj-> (Range (FromNum 0) (FromNum 10))
        :show)
 
+(obj-> (Decrease (FromNum 3))
+       :show)
 
 
 (obj-> Zero

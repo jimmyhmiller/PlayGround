@@ -5,7 +5,7 @@ interface Group a where
   inverse : a -> a
   (<+>) : a -> a -> a
   
-
+
 interface Group a => VerifiedGroup a where
   prove_identity : (x : a) -> x <+> Main.identity = x
   prove_identity_r : (x : a) -> Main.identity <+> x = x
