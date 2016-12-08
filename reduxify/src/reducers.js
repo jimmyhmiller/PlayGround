@@ -1,4 +1,8 @@
-import { MAKE_ADMIN } from './actions';
+import { makeAdmin } from './actions';
+import { reducers, initial } from './reduxify';
+
+import { setIn } from 'zaphod/compat';
+
 
 const initialState = {
   users: {
@@ -14,33 +18,23 @@ const initialState = {
   }
 }
 
-const makeAdmin = (state, { id }) => {
+const setAdmin = (state, { id }) => {
   if (id === undefined || id === null) {
     return state;
   }
-  return {
-    ...state,
-    users: {
-      ...state.users,
-      [id]: {
-        ...state.users[id],
-        admin: true
-      }  
-    }
-  }
+  return setIn(state, ['users', id, 'admin'], true)
 }
 
+
+export default reducers(
+  initial(initialState),
+  makeAdmin.reduce(setAdmin),
+)
+
+// selectors
 
 const toArray = obj => Object.keys(obj).map(function (key) { return obj[key]; });
 
 export const getUserById = (state, { id }) => state.users[id] || {};
 export const getUserByName = (state, { name }) => toArray(state.users).find(u => u.name === name) || {};
 
-export default (state=initialState, action) => {
-  switch (action.type) {
-    case MAKE_ADMIN:
-      return makeAdmin(state, action)
-    default:
-      return state
-  }
-}

@@ -1,6 +1,6 @@
-export const MAKE_ADMIN = 'MAKE_ADMIN';
+import { action } from './reduxify';
 
-export const makeAdmin = ({ id }) => ({
-    type: MAKE_ADMIN,
-    id,
+export const makeAdmin = action({
+    type: 'MAKE_ADMIN',
+    id: undefined,
 })
