@@ -62,7 +62,7 @@
 
 (defn hide [e]
   (let [k (.getRawCode e)]
-    (when (= k 58)
+    (when (= k 53)
       (reset! state {:active false :command-text ""}))))
 
 
@@ -104,7 +104,7 @@
         (pack! f)
         (swap! state update :command-text (partial change-text key-text)))))
   (let [k (.getRawCode e)]
-    (when (= k 58) (swap! state assoc :active true))))
+    (when (= k 53) (swap! state assoc :active true))))
 
 
 (defn voidDispatchService []
