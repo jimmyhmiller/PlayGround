@@ -39,6 +39,8 @@
 (s/def ::image (s/keys :req [::size ::active ::shape]))
 
 
+
+
 (def image-size
   {:small 50
    :medium 100

@@ -14,6 +14,7 @@ class Link extends Component {
             <span>
                 {' '}
                 <span style={{borderBottom: "1px dashed"}} onClick={this.show}>{this.props.children}</span>
+                {' '}
             </span>
         );
     }
@@ -124,3 +125,4 @@ class ExpoundApp extends Component {
 }
 
 
+export default ExpoundApp;

@@ -1,6 +1,7 @@
 import React, { Component } from 'react';
+
 import './App.css';
-import { getUserByName } from './reducers';
+import { getUserByName } from './selectors';
 import User from './User';
 
 

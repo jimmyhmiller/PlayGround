@@ -1,6 +1,7 @@
 import React from 'react';
+
 import reduxify from './reduxify';
-import { getUserById } from './reducers';
+import { getUserById } from './selectors';
 import { makeAdmin } from './actions';
 
 const User = reduxify(({ name, id, makeAdmin, admin }) => 

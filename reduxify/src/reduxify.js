@@ -3,13 +3,12 @@ import { connect } from 'react-redux';
 import { keys } from 'zaphod/compat';
 
 const difference = function(setA, setB) {
-    var temp = new Set(setA);
-    for (var elem of setB) {
+    const temp = new Set(setA);
+    for (const elem of setB) {
         temp.delete(elem);
     }
     return temp;
 }
-
 
 const printWarningMessage = (schema, values, type) => {
   const schemaSet = new Set(keys(schema));
@@ -27,11 +26,18 @@ const printWarningMessage = (schema, values, type) => {
   }
 }
 
-
 export const reducers = (red, ...reds) => (state, action) => 
   reds.reduce((state, f) => f(state, action), red(state, action))
 
-export const initial = initialState => state => state ? state : initialState;
+export const initial = initialState => state => state || initialState;
+
+export const reducer = (actionCreatorOrType, f) => (state, action) => {
+  const type = typeof actionCreatorOrType === 'string' ? actionCreatorOrType : actionCreatorOrType.type;
+  if (action && action.type === type) {
+    return f(state, action)
+  } 
+  return state
+}
 
 export const action = ({ type, ...schema }) => {
     const actionCreator = (values) => {
@@ -40,13 +46,6 @@ export const action = ({ type, ...schema }) => {
             type,
             ...values,
         }
-    }
-
-    actionCreator.reduce = f => (state, action) => {
-      if (action && action.type === type) {
-        return f(state,action)
-      } 
-      return state
     }
     actionCreator.type = type;
     return actionCreator;

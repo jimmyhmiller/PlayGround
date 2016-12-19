@@ -13,6 +13,8 @@
 (use 'seesaw.dev)
 (use 'seesaw.color)
 (use 'seesaw.border)
+(use 'seesaw.util)
+(use 'seesaw.font)
 (require '[seesaw.bind :as bind])
 (require '[seesaw.graphics :as g])
 (require '[clojure.string :as string])
@@ -126,10 +128,16 @@
 
 (def f
   (doto (frame :undecorated? true)
-    (.setOpacity (float 0.9))
+    (.setOpacity (float 0.8))
     (.setLocation 0 20)
     (.setAlwaysOnTop true)
     (.setBackground (color 0 0 0 0))))
+
+
+(defn update-font! [container font-face]
+  (doseq [label (select container [:JLabel])]
+    (.setFont label (font font-face)))
+  container)
 
 
 (defn left-align [c]
@@ -140,8 +148,9 @@
   (let [labels [l]
         new-suggestions (suggestions (:command-text state))
         suggestion-labels (map (partial suggestion->label (:command-text state)) new-suggestions)
-        input (if (zero? (count suggestion-labels)) [input-label] [])]
-    (vertical-panel :background (color 0 0 0 0) :items (into [] (map left-align (concat labels input suggestion-labels))))))
+        input (if (zero? (count suggestion-labels)) [input-label] [])
+        new-labels (into [] (map left-align (concat labels input suggestion-labels)))]
+    (vertical-panel :background (color 0 0 0 0) :items (update-in new-labels [1] update-font! "Gentium-64"))))
 
 (bind/bind state (bind/transform default-labels) (bind/property f :content))
 
