@@ -48,7 +48,7 @@ var spinner = (0, _ora2.default)('Checking for eslint violations');
 
 var prompt = (0, _promptSync2.default)({ sigint: true });
 
-var helpText = '\nEslint Fixer - a fast way to fix eslint errors\n\nUsage:\n  eslint-fix <path>\n  eslint-fix -h | --help\n  eslint-fix --version\n  eslint-fix --args[=ESLINT_ARGS]\n  eslint-fix --exts[=FILE_EXTENSIONS]\n\nOptions:\n  <path>        Path to run eslint (default=\'.\')\n  -h --help     Show this screen.\n  --version     Show version.\n  --args        Pass args to eslint\n  --exts        Comma separated string of file extensions ".js,.jsx"';
+var helpText = '\nEslint Fixer - a fast way to fix eslint errors\n\nUsage:\n  eslint-fix [--args=<ESLINT_ARGS>] [--exts=<FILE_EXTENSIONS>] <path>\n  eslint-fix -h | --help\n  eslint-fix --version\n\nOptions:\n  <path>        Path to run eslint (default=\'.\')\n  -h --help     Show this screen.\n  --version     Show version.\n  --args        Pass args to eslint\n  --exts        Comma separated string of file extensions ".js,.jsx"';
 
 var clearConsole = function clearConsole() {
   console.log('\x1Bc');
@@ -64,7 +64,7 @@ var editFile = function editFile(_ref) {
       column = _ref.column;
 
   var editor = process.env.EDITOR || 'nano';
-  (0, _child_process.execSync)(editor, [file + ':' + line + ':' + column]); //
+  (0, _child_process.execSync)(editor + ' ' + file + ':' + line + ':' + column); // figure out how to make it work with all editors
 };
 
 var hashProblem = function hashProblem(_ref2) {
@@ -89,20 +89,43 @@ var getProblemInfo = function getProblemInfo(problem, skipped) {
   return { file: file, line: line, column: column, source: source, message: message };
 };
 
-var getNextProblem = function getNextProblem(_ref3) {
+var execIgnoreExitCode = function execIgnoreExitCode(command) {
+  try {
+    return (0, _child_process.execSync)(command);
+  } catch (e) {
+    return e.stdout;
+  }
+};
+
+var getProblems = function getProblems(_ref3) {
   var file = _ref3.file,
       _ref3$args = _ref3.args,
-      args = _ref3$args === undefined ? "" : _ref3$args,
-      skippedProblems = _ref3.skippedProblems;
+      args = _ref3$args === undefined ? "" : _ref3$args;
 
-  var problem = (0, _compat.first)(JSON.parse((0, _child_process.execSync)('./node_modules/eslint/bin/eslint.js --format=json ' + args + ' ' + file).toString('utf-8')));
+  return JSON.parse(execIgnoreExitCode(process.cwd() + '/node_modules/eslint/bin/eslint.js --format=json ' + args + ' ' + file).toString('utf-8'));
+};
+
+var getFiles = function getFiles(path, args) {
+  return getProblems({ file: path, args: args }).filter(function (p) {
+    return p.errorCount > 0 || p.warningCount > 0;
+  }).map(function (p) {
+    return p.filePath;
+  });
+};
+
+var getNextProblem = function getNextProblem(_ref4) {
+  var file = _ref4.file,
+      args = _ref4.args,
+      skippedProblems = _ref4.skippedProblems;
+
+  var problem = (0, _compat.first)(getProblems({ args: args, file: file }));
   return getProblemInfo(problem, skippedProblems);
 };
 
-var fixProblem = function fixProblem(_ref4) {
-  var file = _ref4.file,
-      line = _ref4.line,
-      column = _ref4.column;
+var fixProblem = function fixProblem(_ref5) {
+  var file = _ref5.file,
+      line = _ref5.line,
+      column = _ref5.column;
 
   editFile({ file: file, line: line, column: column });
 };
@@ -116,12 +139,12 @@ var stopSpinner = function stopSpinner() {
   spinner.stop();
 };
 
-var showProblem = function showProblem(_ref5) {
-  var file = _ref5.file,
-      line = _ref5.line,
-      column = _ref5.column,
-      source = _ref5.source,
-      message = _ref5.message;
+var showProblem = function showProblem(_ref6) {
+  var file = _ref6.file,
+      line = _ref6.line,
+      column = _ref6.column,
+      source = _ref6.source,
+      message = _ref6.message;
 
   stopSpinner();
   var result = (0, _babelCodeFrame2.default)(source, line, column, { highlightCode: true });
@@ -154,9 +177,9 @@ var processAction = function processAction(action, problemInfo, errors) {
   showSpinner();
 };
 
-function getErrors(_ref6) {
-  var file = _ref6.file,
-      args = _ref6.args;
+function getErrors(_ref7) {
+  var file = _ref7.file,
+      args = _ref7.args;
   var skippedProblems, problem, skipped;
   return regeneratorRuntime.wrap(function getErrors$(_context) {
     while (1) {
@@ -234,18 +257,18 @@ var main = function main() {
 
   var DEFAULT_IGNORE_DIRS = ["node_modules", "bower_components"];
 
-  var args = _neodoc2.default.run(helpText);
+  var args = _neodoc2.default.run(helpText, { smartOptions: true });
   var path = args['<path>'] || '.';
   var exts = (args['--exts'] || "").replace(',', '|') || '.js';
 
-  var eslintIgnore = _findConfig2.default.read('.eslintignore').split('\n');
-  var removeIgnored = function removeIgnored(files) {
-    return (0, _ignore2.default)().add(DEFAULT_IGNORE_DIRS).add(eslintIgnore).filter(files);
-  };
-  var filesPromise = (0, _globPromise2.default)(path + '/**/*@(' + exts + ')');
+  // const eslintIgnore = (findConfig.read('.eslintignore') || "").split('\n');
+  // const removeIgnored = files => ignore().add(DEFAULT_IGNORE_DIRS).add(eslintIgnore).filter(files);
+
 
   showSpinner();
-  filesPromise.then(removeIgnored).then(function (files) {
+
+  var filesPromise = Promise.resolve(getFiles(path, args['--args']));
+  filesPromise.then(function (files) {
     return files.forEach(processErrors.bind(null, args));
   }).catch(function (e) {
     return console.error(e);

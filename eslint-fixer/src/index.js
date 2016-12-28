@@ -18,11 +18,9 @@ const helpText = `
 Eslint Fixer - a fast way to fix eslint errors
 
 Usage:
-  eslint-fix <path>
+  eslint-fix [--args=<ESLINT_ARGS>] [--exts=<FILE_EXTENSIONS>] <path>
   eslint-fix -h | --help
   eslint-fix --version
-  eslint-fix --args[=ESLINT_ARGS]
-  eslint-fix --exts[=FILE_EXTENSIONS]
 
 Options:
   <path>        Path to run eslint (default='.')
@@ -59,8 +57,24 @@ const getProblemInfo = (problem, skipped) => {
   return { file, line, column, source, message };
 }
 
-const getNextProblem = ({ file, args="", skippedProblems }) => {
-  const problem = first(JSON.parse(execSync(`./node_modules/eslint/bin/eslint.js --format=json ${args} ${file}`).toString('utf-8')));
+const execIgnoreExitCode = (command) => {
+  try {
+    return execSync(command)
+  } catch (e) {
+    return e.stdout
+  }
+}
+
+const getProblems = ({ file, args="" }) => {
+  return JSON.parse(execIgnoreExitCode(`${process.cwd()}/node_modules/eslint/bin/eslint.js --format=json ${args} ${file}`).toString('utf-8'))
+}
+
+const getFiles = (path, args) => getProblems({file: path, args})
+  .filter(p => p.errorCount > 0 || p.warningCount > 0)
+  .map(p => p.filePath);
+
+const getNextProblem = ({ file, args, skippedProblems }) => {
+  const problem = first(getProblems({ args, file }));
   return getProblemInfo(problem, skippedProblems);
 }
 
@@ -137,17 +151,18 @@ const main = () => {
     "bower_components"
   ];
 
-  const args = neodoc.run(helpText)
+  const args = neodoc.run(helpText, { smartOptions: true })
   const path = args['<path>'] || '.';
   const exts = (args['--exts'] || "").replace(',', '|') || '.js';
 
-  const eslintIgnore = findConfig.read('.eslintignore').split('\n');
-  const removeIgnored = files => ignore().add(DEFAULT_IGNORE_DIRS).add(eslintIgnore).filter(files);
-  const filesPromise = glob(`${path}/**/*@(${exts})`)
+  // const eslintIgnore = (findConfig.read('.eslintignore') || "").split('\n');
+  // const removeIgnored = files => ignore().add(DEFAULT_IGNORE_DIRS).add(eslintIgnore).filter(files);
+
 
   showSpinner();
+
+  const filesPromise = Promise.resolve(getFiles(path, args['--args']))
   filesPromise
-    .then(removeIgnored)
     .then(files => files.forEach(processErrors.bind(null, args)))
     .catch(e => console.error(e))
     .then(stopSpinner)
