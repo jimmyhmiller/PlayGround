@@ -6,7 +6,8 @@
   (:import org.jnativehook.NativeInputEvent)
   (:import java.util.logging.Level)
   (:import java.util.logging.Logger)
-  (:import java.awt.Component))
+  (:import java.awt.Component)
+  (:import java.awt.GraphicsEnvironment))
 
 (use '[clojure.java.shell :only [sh]])
 (use 'seesaw.core)
@@ -19,11 +20,10 @@
 (require '[seesaw.graphics :as g])
 (require '[clojure.string :as string])
 
+
 (def state (atom
             {:active false
              :command-text ""}))
-
-
 
 (add-watch state :test
            (fn [key atom old-state new-state]
@@ -35,13 +35,13 @@
         :background "#ABC26B"
         :minimum-size [275 :by 100]
         :foreground :white
-        :font "Gentium-32"
+        :font "Gentium Plus-32"
         :border (empty-border :thickness 5)))
 
 (def input-label (label
                   :background "#000"
                   :foreground "#fff"
-                  :font "Gentium-32"
+                  :font "Gentium Plus-64"
                   :border (empty-border :thickness 5)
                   :visible? false))
 
@@ -51,21 +51,17 @@
   (.setUseParentHandlers logger false))
 
 
+
 (bind/bind state (bind/transform :command-text) (bind/property input-label :text))
 (bind/bind state (bind/transform #(not (zero? (count (% :command-text))))) (bind/property input-label :visible?))
 
 
 (defn change-text [key-text command-text]
-  (println key-text command-text)
   (string/lower-case (str command-text key-text)))
 
 
-(defn colorize-text [text match]
-  (str "<html><font color=white>" text "</font>" (subs match (count text)) "</html>"))
-
-
 (def applications
-  (.listFiles(clojure.java.io/file "/Applications")))
+  (.listFiles (clojure.java.io/file "/Applications")))
 
 (def open-suggestions
   (->> applications
@@ -97,17 +93,20 @@
       (concat (butlast new-suggestion) (split-words (rest words) (last new-suggestion))))))
 
 
-(defn generic-label [text color]
-  (label
-   :text text
-   :background "#000"
-   :foreground color
-   :font "Gentium-32"))
+(defn generic-label
+  ([text color font-size font-style]
+   (label
+    :text text
+    :background "#000"
+    :foreground color
+    :font (font :name "Gentium Plus" :style font-style :size font-size)))
+  ([text color font-size]
+   (generic-label text color font-size #{})))
 
-(defn match-label [match]
+(defn match-label [font-size match]
   (if (string? match)
-    (generic-label match "#ABC26B")
-    (generic-label (last match) :white)))
+    (generic-label match "#ABC26B" font-size #{:italic})
+    (generic-label (last match) :white font-size)))
 
 
 (defn suggestions [text]
@@ -117,18 +116,18 @@
       (take 15 (filter (partial match-suggestion text) suggs)))))
 
 
-(defn suggestion->label [text suggestion]
+(defn suggestion->label [text current suggestion]
   (let [words (string/split text #" ")
         matches (split-words words (string/lower-case suggestion))]
     (horizontal-panel
      :background "#000"
      :border (empty-border :thickness 5)
-     :items (map match-label matches))))
+     :items (map (partial match-label (if current 64 32)) matches))))
 
 
 (def f
   (doto (frame :undecorated? true)
-    (.setOpacity (float 0.8))
+    (.setOpacity (float 0.85))
     (.setLocation 0 20)
     (.setAlwaysOnTop true)
     (.setBackground (color 0 0 0 0))))
@@ -147,10 +146,10 @@
 (defn default-labels [state]
   (let [labels [l]
         new-suggestions (suggestions (:command-text state))
-        suggestion-labels (map (partial suggestion->label (:command-text state)) new-suggestions)
+        suggestion-labels (map-indexed (fn [i sugg] (suggestion->label (:command-text state) (= i 0) sugg)) new-suggestions)
         input (if (zero? (count suggestion-labels)) [input-label] [])
         new-labels (into [] (map left-align (concat labels input suggestion-labels)))]
-    (vertical-panel :background (color 0 0 0 0) :items (update-in new-labels [1] update-font! "Gentium-64"))))
+    (vertical-panel :background (color 0 0 0 0) :items new-labels)))
 
 (bind/bind state (bind/transform default-labels) (bind/property f :content))
 
@@ -256,3 +255,62 @@
   (GlobalScreen/addNativeKeyListener (myGlobalKeyListener)))
 
 ;(-main)
+
+
+
+
+
+
+;; (def state (atom {:commands []
+;;                   :suggestors []}))
+
+
+;; (defn register-command [command]
+;;   (swap! state update-in [:commands] conj command))
+
+;; (def open-command
+;;   {:name :open
+;;    :help-text "Continue typing to open an application"
+;;    :argument-names [:target]})
+
+;; (register-command open-command)
+
+
+;; (defn register-suggestor [suggestor]
+;;   (swap! state update-in [:suggestors] conj suggestor))
+
+;; (defn applications [suggestion]
+;;   (if (string/starts-with? suggestion "o")
+;;     [{:arguments {:target "terminal"}
+;;       :help-text "open terminal"}
+;;      {:arguments {:target "firefox"}
+;;       :help-text "open firefox"}]))
+
+;; (register-suggestor applications)
+
+
+
+;; (defn words [text]
+;;   (string/split text #" "))
+
+;; (defn find-commands [suggestion commands]
+;;   (->> commands
+;;        (filter #(string/starts-with? (name (:name %)) (first (words suggestion))))))
+
+;; (defn find-suggestions [suggestion suggestors]
+;;   (->> suggestors
+;;        (map #(% suggestion))))
+
+
+;; (defn fillout-arguments [command suggestions]
+;;   (->> suggestions
+;;        (map #(merge command %))
+;;        (map #(update % :arguments (fn [arguments s-keys ] (select-keys arguments s-keys)) (:argument-names %)))
+;;        (filter #(not (empty? (:arguments %))))))
+
+
+
+;; (map fillout-arguments
+;;  (find-commands "open firefox" (:commands @state))
+;;  (find-suggestions "o" (:suggestors @state)))
+
