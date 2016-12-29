@@ -1,13 +1,9 @@
-import "babel-polyfill";
-import { execSync, spawnSync } from 'child_process';
+import { execSync, exec } from 'child_process';
 import neodoc from 'neodoc';
 import { first, dropWhile } from 'zaphod/compat';
 import codeFrame from 'babel-code-frame';
 import chalk from 'chalk';
 import promptSync from 'prompt-sync';
-import glob from 'glob-promise';
-import findConfig from 'find-config';
-import ignore from 'ignore';
 import ora from 'ora';
 
 const spinner = ora('Checking for eslint violations');
@@ -58,23 +54,25 @@ const getProblemInfo = (problem, skipped) => {
 }
 
 const execIgnoreExitCode = (command) => {
-  try {
-    return execSync(command)
-  } catch (e) {
-    return e.stdout
-  }
+  return new Promise(resolve => {
+    exec(command, {maxBuffer: 2000 * 1024}, (e, stdout, stderr) => resolve(stdout.toString()))
+  })
 }
 
 const getProblems = ({ file, args="" }) => {
-  return JSON.parse(execIgnoreExitCode(`${process.cwd()}/node_modules/eslint/bin/eslint.js --format=json ${args} ${file}`).toString('utf-8'))
+  return execIgnoreExitCode(`${process.cwd()}/node_modules/eslint/bin/eslint.js --format=json ${args} ${file}`)
+    .then(JSON.parse)
 }
 
-const getFiles = (path, args) => getProblems({file: path, args})
-  .filter(p => p.errorCount > 0 || p.warningCount > 0)
-  .map(p => p.filePath);
+async function getFiles(path, args) {
+  const problems = await getProblems({file: path, args});
+  return problems
+    .filter(p => p.errorCount > 0 || p.warningCount > 0)
+    .map(p => p.filePath);
+} 
 
-const getNextProblem = ({ file, args, skippedProblems }) => {
-  const problem = first(getProblems({ args, file }));
+async function getNextProblem({ file, args, skippedProblems }) {
+  const problem = first(await getProblems({ args, file }));
   return getProblemInfo(problem, skippedProblems);
 }
 
@@ -121,10 +119,10 @@ const processAction = (action, problemInfo, errors) => {
   showSpinner();
 }
 
-function* getErrors({ file, args }) {
+async function* getErrors({ file, args }) {
   let skippedProblems = new Set();
   while (true) {
-    const problem = getNextProblem({file, args, skippedProblems});
+    const problem = await getNextProblem({file, args, skippedProblems});
     if (!problem) {
       break;
     }
@@ -135,35 +133,34 @@ function* getErrors({ file, args }) {
   }
 }
 
-const processErrors = (args, file) => {
-  const errors = getErrors({ file, args: args['--args'] })
-  for (const error of errors) {
+function forEach(ai, fn) {
+  return ai.next().then(function (r) {
+    if (!r.done) {
+      fn(r.value);
+      return forEach(ai, fn);
+    }
+  });
+}
+
+async function processErrors(args, file) {
+  const errors = await getErrors({ file, args: args['--args'] })
+  return forEach(errors, error => {
     showProblem(error);
     const action = getAction();
     processAction(action, error, errors);
-  }
+  })
 }
 
 const main = () => {
 
-  const DEFAULT_IGNORE_DIRS = [
-    "node_modules",
-    "bower_components"
-  ];
-
   const args = neodoc.run(helpText, { smartOptions: true })
-  const path = args['<path>'] || '.';
-  const exts = (args['--exts'] || "").replace(',', '|') || '.js';
-
-  // const eslintIgnore = (findConfig.read('.eslintignore') || "").split('\n');
-  // const removeIgnored = files => ignore().add(DEFAULT_IGNORE_DIRS).add(eslintIgnore).filter(files);
-
+  const path = args['<path>'] || process.cwd();
 
   showSpinner();
 
-  const filesPromise = Promise.resolve(getFiles(path, args['--args']))
+  const filesPromise = getFiles(path, args['--args'])
   filesPromise
-    .then(files => files.forEach(processErrors.bind(null, args)))
+    .then(files => Promise.all(files.map(processErrors.bind(null, args))))
     .catch(e => console.error(e))
     .then(stopSpinner)
 }

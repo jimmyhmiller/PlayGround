@@ -1,8 +1,178 @@
 'use strict';
 
-var _extends = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
+var _set = require('babel-runtime/core-js/set');
 
-require('babel-polyfill');
+var _set2 = _interopRequireDefault(_set);
+
+var _asyncGenerator2 = require('babel-runtime/helpers/asyncGenerator');
+
+var _asyncGenerator3 = _interopRequireDefault(_asyncGenerator2);
+
+var _regenerator = require('babel-runtime/regenerator');
+
+var _regenerator2 = _interopRequireDefault(_regenerator);
+
+var _asyncToGenerator2 = require('babel-runtime/helpers/asyncToGenerator');
+
+var _asyncToGenerator3 = _interopRequireDefault(_asyncToGenerator2);
+
+var _promise = require('babel-runtime/core-js/promise');
+
+var _promise2 = _interopRequireDefault(_promise);
+
+var _extends2 = require('babel-runtime/helpers/extends');
+
+var _extends3 = _interopRequireDefault(_extends2);
+
+var getFiles = function () {
+  var _ref4 = (0, _asyncToGenerator3.default)(_regenerator2.default.mark(function _callee(path, args) {
+    var problems;
+    return _regenerator2.default.wrap(function _callee$(_context) {
+      while (1) {
+        switch (_context.prev = _context.next) {
+          case 0:
+            _context.next = 2;
+            return getProblems({ file: path, args: args });
+
+          case 2:
+            problems = _context.sent;
+            return _context.abrupt('return', problems.filter(function (p) {
+              return p.errorCount > 0 || p.warningCount > 0;
+            }).map(function (p) {
+              return p.filePath;
+            }));
+
+          case 4:
+          case 'end':
+            return _context.stop();
+        }
+      }
+    }, _callee, this);
+  }));
+
+  return function getFiles(_x, _x2) {
+    return _ref4.apply(this, arguments);
+  };
+}();
+
+var getNextProblem = function () {
+  var _ref5 = (0, _asyncToGenerator3.default)(_regenerator2.default.mark(function _callee2(_ref6) {
+    var file = _ref6.file,
+        args = _ref6.args,
+        skippedProblems = _ref6.skippedProblems;
+    var problem;
+    return _regenerator2.default.wrap(function _callee2$(_context2) {
+      while (1) {
+        switch (_context2.prev = _context2.next) {
+          case 0:
+            _context2.t0 = _compat.first;
+            _context2.next = 3;
+            return getProblems({ args: args, file: file });
+
+          case 3:
+            _context2.t1 = _context2.sent;
+            problem = (0, _context2.t0)(_context2.t1);
+            return _context2.abrupt('return', getProblemInfo(problem, skippedProblems));
+
+          case 6:
+          case 'end':
+            return _context2.stop();
+        }
+      }
+    }, _callee2, this);
+  }));
+
+  return function getNextProblem(_x3) {
+    return _ref5.apply(this, arguments);
+  };
+}();
+
+var getErrors = function () {
+  var _ref9 = _asyncGenerator3.default.wrap(_regenerator2.default.mark(function _callee3(_ref10) {
+    var file = _ref10.file,
+        args = _ref10.args;
+    var skippedProblems, problem, skipped;
+    return _regenerator2.default.wrap(function _callee3$(_context3) {
+      while (1) {
+        switch (_context3.prev = _context3.next) {
+          case 0:
+            skippedProblems = new _set2.default();
+
+          case 1:
+            if (!true) {
+              _context3.next = 13;
+              break;
+            }
+
+            _context3.next = 4;
+            return _asyncGenerator3.default.await(getNextProblem({ file: file, args: args, skippedProblems: skippedProblems }));
+
+          case 4:
+            problem = _context3.sent;
+
+            if (problem) {
+              _context3.next = 7;
+              break;
+            }
+
+            return _context3.abrupt('break', 13);
+
+          case 7:
+            _context3.next = 9;
+            return problem;
+
+          case 9:
+            skipped = _context3.sent;
+
+            if (skipped) {
+              skippedProblems.add(hashProblem(problem));
+            }
+            _context3.next = 1;
+            break;
+
+          case 13:
+          case 'end':
+            return _context3.stop();
+        }
+      }
+    }, _callee3, this);
+  }));
+
+  return function getErrors(_x4) {
+    return _ref9.apply(this, arguments);
+  };
+}();
+
+var processErrors = function () {
+  var _ref11 = (0, _asyncToGenerator3.default)(_regenerator2.default.mark(function _callee4(args, file) {
+    var errors;
+    return _regenerator2.default.wrap(function _callee4$(_context4) {
+      while (1) {
+        switch (_context4.prev = _context4.next) {
+          case 0:
+            _context4.next = 2;
+            return getErrors({ file: file, args: args['--args'] });
+
+          case 2:
+            errors = _context4.sent;
+            return _context4.abrupt('return', forEach(errors, function (error) {
+              showProblem(error);
+              var action = getAction();
+              processAction(action, error, errors);
+            }));
+
+          case 4:
+          case 'end':
+            return _context4.stop();
+        }
+      }
+    }, _callee4, this);
+  }));
+
+  return function processErrors(_x5, _x6) {
+    return _ref11.apply(this, arguments);
+  };
+}();
 
 var _child_process = require('child_process');
 
@@ -24,29 +194,26 @@ var _promptSync = require('prompt-sync');
 
 var _promptSync2 = _interopRequireDefault(_promptSync);
 
-var _globPromise = require('glob-promise');
-
-var _globPromise2 = _interopRequireDefault(_globPromise);
-
-var _findConfig = require('find-config');
-
-var _findConfig2 = _interopRequireDefault(_findConfig);
-
-var _ignore = require('ignore');
-
-var _ignore2 = _interopRequireDefault(_ignore);
-
 var _ora = require('ora');
 
 var _ora2 = _interopRequireDefault(_ora);
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
-var _marked = [getErrors].map(regeneratorRuntime.mark);
-
 var spinner = (0, _ora2.default)('Checking for eslint violations');
 
 var prompt = (0, _promptSync2.default)({ sigint: true });
+
+var log = function log() {
+  var _console;
+
+  for (var _len = arguments.length, args = Array(_len), _key = 0; _key < _len; _key++) {
+    args[_key] = arguments[_key];
+  }
+
+  (_console = console).log.apply(_console, args);
+  return (0, _compat.peek)(args);
+};
 
 var helpText = '\nEslint Fixer - a fast way to fix eslint errors\n\nUsage:\n  eslint-fix [--args=<ESLINT_ARGS>] [--exts=<FILE_EXTENSIONS>] <path>\n  eslint-fix -h | --help\n  eslint-fix --version\n\nOptions:\n  <path>        Path to run eslint (default=\'.\')\n  -h --help     Show this screen.\n  --version     Show version.\n  --args        Pass args to eslint\n  --exts        Comma separated string of file extensions ".js,.jsx"';
 
@@ -78,7 +245,7 @@ var getProblemInfo = function getProblemInfo(problem, skipped) {
   var file = problem.filePath;
   var source = problem.source;
   var error = (0, _compat.first)((0, _compat.dropWhile)(problem.messages, function (m) {
-    return skipped.has(hashProblem(_extends({ file: file }, m)));
+    return skipped.has(hashProblem((0, _extends3.default)({ file: file }, m)));
   }));
   if (!error) {
     return undefined;
@@ -90,11 +257,11 @@ var getProblemInfo = function getProblemInfo(problem, skipped) {
 };
 
 var execIgnoreExitCode = function execIgnoreExitCode(command) {
-  try {
-    return (0, _child_process.execSync)(command);
-  } catch (e) {
-    return e.stdout;
-  }
+  return new _promise2.default(function (resolve) {
+    (0, _child_process.exec)(command, { maxBuffer: 2000 * 1024 }, function (e, stdout, stderr) {
+      return resolve(stdout.toString());
+    });
+  });
 };
 
 var getProblems = function getProblems(_ref3) {
@@ -102,30 +269,13 @@ var getProblems = function getProblems(_ref3) {
       _ref3$args = _ref3.args,
       args = _ref3$args === undefined ? "" : _ref3$args;
 
-  return JSON.parse(execIgnoreExitCode(process.cwd() + '/node_modules/eslint/bin/eslint.js --format=json ' + args + ' ' + file).toString('utf-8'));
+  return execIgnoreExitCode(process.cwd() + '/node_modules/eslint/bin/eslint.js --format=json ' + args + ' ' + file).then(JSON.parse);
 };
 
-var getFiles = function getFiles(path, args) {
-  return getProblems({ file: path, args: args }).filter(function (p) {
-    return p.errorCount > 0 || p.warningCount > 0;
-  }).map(function (p) {
-    return p.filePath;
-  });
-};
-
-var getNextProblem = function getNextProblem(_ref4) {
-  var file = _ref4.file,
-      args = _ref4.args,
-      skippedProblems = _ref4.skippedProblems;
-
-  var problem = (0, _compat.first)(getProblems({ args: args, file: file }));
-  return getProblemInfo(problem, skippedProblems);
-};
-
-var fixProblem = function fixProblem(_ref5) {
-  var file = _ref5.file,
-      line = _ref5.line,
-      column = _ref5.column;
+var fixProblem = function fixProblem(_ref7) {
+  var file = _ref7.file,
+      line = _ref7.line,
+      column = _ref7.column;
 
   editFile({ file: file, line: line, column: column });
 };
@@ -139,12 +289,12 @@ var stopSpinner = function stopSpinner() {
   spinner.stop();
 };
 
-var showProblem = function showProblem(_ref6) {
-  var file = _ref6.file,
-      line = _ref6.line,
-      column = _ref6.column,
-      source = _ref6.source,
-      message = _ref6.message;
+var showProblem = function showProblem(_ref8) {
+  var file = _ref8.file,
+      line = _ref8.line,
+      column = _ref8.column,
+      source = _ref8.source,
+      message = _ref8.message;
 
   stopSpinner();
   var result = (0, _babelCodeFrame2.default)(source, line, column, { highlightCode: true });
@@ -177,99 +327,25 @@ var processAction = function processAction(action, problemInfo, errors) {
   showSpinner();
 };
 
-function getErrors(_ref7) {
-  var file = _ref7.file,
-      args = _ref7.args;
-  var skippedProblems, problem, skipped;
-  return regeneratorRuntime.wrap(function getErrors$(_context) {
-    while (1) {
-      switch (_context.prev = _context.next) {
-        case 0:
-          skippedProblems = new Set();
-
-        case 1:
-          if (!true) {
-            _context.next = 11;
-            break;
-          }
-
-          problem = getNextProblem({ file: file, args: args, skippedProblems: skippedProblems });
-
-          if (problem) {
-            _context.next = 5;
-            break;
-          }
-
-          return _context.abrupt('break', 11);
-
-        case 5:
-          _context.next = 7;
-          return problem;
-
-        case 7:
-          skipped = _context.sent;
-
-          if (skipped) {
-            skippedProblems.add(hashProblem(problem));
-          }
-          _context.next = 1;
-          break;
-
-        case 11:
-        case 'end':
-          return _context.stop();
-      }
+function forEach(ai, fn) {
+  return ai.next().then(function (r) {
+    if (!r.done) {
+      fn(r.value);
+      return forEach(ai, fn);
     }
-  }, _marked[0], this);
+  });
 }
-
-var processErrors = function processErrors(args, file) {
-  var errors = getErrors({ file: file, args: args['--args'] });
-  var _iteratorNormalCompletion = true;
-  var _didIteratorError = false;
-  var _iteratorError = undefined;
-
-  try {
-    for (var _iterator = errors[Symbol.iterator](), _step; !(_iteratorNormalCompletion = (_step = _iterator.next()).done); _iteratorNormalCompletion = true) {
-      var error = _step.value;
-
-      showProblem(error);
-      var action = getAction();
-      processAction(action, error, errors);
-    }
-  } catch (err) {
-    _didIteratorError = true;
-    _iteratorError = err;
-  } finally {
-    try {
-      if (!_iteratorNormalCompletion && _iterator.return) {
-        _iterator.return();
-      }
-    } finally {
-      if (_didIteratorError) {
-        throw _iteratorError;
-      }
-    }
-  }
-};
 
 var main = function main() {
 
-  var DEFAULT_IGNORE_DIRS = ["node_modules", "bower_components"];
-
   var args = _neodoc2.default.run(helpText, { smartOptions: true });
-  var path = args['<path>'] || '.';
-  var exts = (args['--exts'] || "").replace(',', '|') || '.js';
-
-  // const eslintIgnore = (findConfig.read('.eslintignore') || "").split('\n');
-  // const removeIgnored = files => ignore().add(DEFAULT_IGNORE_DIRS).add(eslintIgnore).filter(files);
-
+  var path = args['<path>'] || process.cwd();
 
   showSpinner();
 
-  var filesPromise = Promise.resolve(getFiles(path, args['--args']));
+  var filesPromise = getFiles(path, args['--args']);
   filesPromise.then(function (files) {
-    return files.forEach(processErrors.bind(null, args));
+    return _promise2.default.all(files.map(processErrors.bind(null, args)));
   }).catch(function (e) {
     return console.error(e);
   }).then(stopSpinner);

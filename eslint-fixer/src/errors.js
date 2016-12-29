@@ -1,3 +1,5 @@
-const eslintError = () => {};
+// q + 1
+
+// const eslintError = () => {};
 // const cascade = () => eslintError();
-const asdff = () => {};
+// const asdff = () => {};

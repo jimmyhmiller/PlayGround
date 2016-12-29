@@ -1,5 +1,6 @@
-"use strict";
+// q + 1
 
-var eslintError = function eslintError() {};
+// const eslintError = () => {};
 // const cascade = () => eslintError();
-var asdff = function asdff() {};
+// const asdff = () => {};
+"use strict";
