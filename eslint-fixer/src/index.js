@@ -14,7 +14,7 @@ const helpText = `
 Eslint Fixer - a fast way to fix eslint errors
 
 Usage:
-  eslint-fix [--args=<ESLINT_ARGS>] [--exts=<FILE_EXTENSIONS>] <path>
+  eslint-fix [--args=<ESLINT_ARGS>] <path>
   eslint-fix -h | --help
   eslint-fix --version
 
@@ -22,8 +22,7 @@ Options:
   <path>        Path to run eslint (default='.')
   -h --help     Show this screen.
   --version     Show version.
-  --args        Pass args to eslint
-  --exts        Comma separated string of file extensions ".js,.jsx"`
+  --args        Pass args to eslint`
 
 const clearConsole = () => {
   console.log('\x1Bc');
