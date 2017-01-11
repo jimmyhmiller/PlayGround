@@ -88,10 +88,6 @@ const reduce = curry((f, init, coll) => {
     }
 })
 
-const map2 = curry((f, coll) => {
-    return reduce((init, x) => cons(f(log(x)), init), Seq.empty(coll), coll)
-})
-
 const flow = function (v, ...fns) {
     return reduce((v, f) => f(v), v, fns);
 }
@@ -287,8 +283,6 @@ const logBoth = (fn, val) => {
 logBoth(
     map(x => x + 2), [1,2,3]
 )
-
-log(map2(x => x + 2, [1,2,3]))
 
 logBoth(
     filter(isOdd), [1,2,3]
