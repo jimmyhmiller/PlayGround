@@ -6,7 +6,6 @@ const Immutable = require('immutable');
 const List = Immutable.List;
 
 
-
 const Seq = protocol({
     cons: function(coll, elem) {},
     first: function(coll) {},
@@ -285,28 +284,27 @@ const logBoth = (fn, val) => {
     )
 }
 
-// logBoth(
-//     map(x => x + 2), [1,2,3]
-// )
+logBoth(
+    map(x => x + 2), [1,2,3]
+)
 
- log(map2(x => x + 2, [1,2,3]))
+log(map2(x => x + 2, [1,2,3]))
 
-// logBoth(
-//     filter(isOdd), [1,2,3]
-// )
+logBoth(
+    filter(isOdd), [1,2,3]
+)
 
-// logBoth(
-//    count, [1,2,3]
-// )
+logBoth(
+   count, [1,2,3]
+)
 
-// logBoth(
-//     partitionBy(x => x > 3), [1,2,3,4,5,6]
-// )
+logBoth(
+    partitionBy(x => x > 3), [1,2,3,4,5,6]
+)
 
-// const coll = Immutable.fromJS([[1], [2], [3]])
-// log(second(coll)) // [2]
-// log(ffirst(coll)) // 1
-
+const coll = Immutable.fromJS([[1], [2], [3]])
+log(second(coll)) // [2]
+log(ffirst(coll)) // 1
 
 
 
