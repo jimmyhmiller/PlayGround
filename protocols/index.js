@@ -1,7 +1,7 @@
 "use strict"
 
 const protocol = require('protomorphism');
-const _ = require('lodash');
+const curry = require('lodash/function/curry');
 const Immutable = require('immutable');
 const List = Immutable.List;
 
@@ -40,12 +40,12 @@ Seq.implementation(Immutable.List, {
 
 
 
-const cons = _.curry((elem, coll) => Seq.cons(coll, elem));
+const cons = curry((elem, coll) => Seq.cons(coll, elem));
 const first = Seq.first;
 const rest = Seq.rest;
 const ffirst = (coll) => first(first(coll));
 const second = (coll) => first(rest(coll));
-const nth = _.curry((n, coll) => first(drop(n, coll)));
+const nth = curry((n, coll) => first(drop(n, coll)));
 const last = (coll) => {
     if (Seq.isEmpty(coll)) {
         return coll;
@@ -62,7 +62,7 @@ let log = (...args) => {
 }
 
 
-const map = _.curry((f, coll) => {
+const map = curry((f, coll) => {
     if (Seq.isEmpty(coll)) {
         return coll;
     } else {
@@ -70,7 +70,7 @@ const map = _.curry((f, coll) => {
     }
 })
 
-const filter = _.curry((pred, coll) => {
+const filter = curry((pred, coll) => {
     if (Seq.isEmpty(coll)) {
         return coll;
     } else if (pred(first(coll))) {
@@ -80,7 +80,7 @@ const filter = _.curry((pred, coll) => {
     }
 })
 
-const reduce = _.curry((f, init, coll) => {
+const reduce = curry((f, init, coll) => {
     if (Seq.isEmpty(coll)) {
         return init;
     } else {
@@ -88,7 +88,7 @@ const reduce = _.curry((f, init, coll) => {
     }
 })
 
-const map2 = _.curry((f, coll) => {
+const map2 = curry((f, coll) => {
     return reduce((init, x) => cons(f(log(x)), init), Seq.empty(coll), coll)
 })
 
@@ -109,18 +109,18 @@ const complement = (f) => {
 const isEven = (x) => x % 2 == 0;
 const isOdd = complement(isEven);
 
-const reject = _.curry((pred, coll) => filter(complement(pred), coll));
+const reject = curry((pred, coll) => filter(complement(pred), coll));
 
 
 const count = (coll) => {
     return reduce((x, y) => x + 1, 0, coll);
 }
 
-const conj = _.curry((coll, elem) => {
+const conj = curry((coll, elem) => {
     return cons(elem, coll);
 });
 
-const concat = _.curry((coll1, coll2) => {
+const concat = curry((coll1, coll2) => {
     if (Seq.isEmpty(coll1)) {
         return coll2;
     } else {
@@ -129,7 +129,7 @@ const concat = _.curry((coll1, coll2) => {
 });
 
 
-const distinct = _.curry((coll) => {
+const distinct = curry((coll) => {
     var innerDistinct = (coll, seen) => {
         if (Seq.isEmpty(coll)) {
             return coll;
@@ -143,12 +143,12 @@ const distinct = _.curry((coll) => {
     return innerDistinct(coll, new Set())
 });
 
-const mapcat = _.curry((f, coll) => {
+const mapcat = curry((f, coll) => {
     const x = map(f, coll)
     return reduce(concat, first(x), rest(x));
 });
 
-const interleave = _.curry((coll1, coll2) => {
+const interleave = curry((coll1, coll2) => {
     if (Seq.isEmpty(coll1)) {
         return coll1;
     } else if (Seq.isEmpty(coll2)) {
@@ -159,7 +159,7 @@ const interleave = _.curry((coll1, coll2) => {
 });
 
 
-const interpose = _.curry((sep, coll) => {
+const interpose = curry((sep, coll) => {
     if (Seq.isEmpty(coll)) {
         return coll;
     } else {
@@ -167,7 +167,7 @@ const interpose = _.curry((sep, coll) => {
     }
 });
 
-const drop = _.curry((n, coll) => {
+const drop = curry((n, coll) => {
     if (n <= 0 || Seq.isEmpty(coll)) {
         return coll;
     } else {
@@ -176,7 +176,7 @@ const drop = _.curry((n, coll) => {
 });
 
 
-const dropWhile = _.curry((pred, coll) => {
+const dropWhile = curry((pred, coll) => {
     if (Seq.isEmpty(coll)) {
         return coll;
     } else if (pred(first(coll))) {
@@ -186,7 +186,7 @@ const dropWhile = _.curry((pred, coll) => {
     }
 });
 
-const take = _.curry((n, coll) => {
+const take = curry((n, coll) => {
     if (n == 0) {
         return Seq.empty(coll);
     } else if (Seq.isEmpty(coll)) {
@@ -197,7 +197,7 @@ const take = _.curry((n, coll) => {
 });
 
 
-const takeNth = _.curry((n, coll) => {
+const takeNth = curry((n, coll) => {
 
     const innerTakeNth = (n, i, coll) => {
         if (Seq.isEmpty(coll)) {
@@ -211,7 +211,7 @@ const takeNth = _.curry((n, coll) => {
     return innerTakeNth(n, 0, coll);
 }); 
 
-const takeWhile = _.curry((pred, coll) => {
+const takeWhile = curry((pred, coll) => {
     if (Seq.isEmpty(coll)) {
         return coll;
     } else if (pred(first(coll))) {
@@ -222,7 +222,7 @@ const takeWhile = _.curry((pred, coll) => {
 });
 
 
-const butLast = _.curry((coll) => {
+const butLast = curry((coll) => {
     if (Seq.isEmpty(coll)) {
         return coll;
     } else if (Seq.isEmpty(rest(coll))) {
@@ -232,7 +232,7 @@ const butLast = _.curry((coll) => {
     }
 });
 
-const dropLast = _.curry((n, coll) => {
+const dropLast = curry((n, coll) => {
     const innerDropLast = (n, coll1, coll2) => {
         if (Seq.isEmpty(coll1)) {
             return coll1;
@@ -249,15 +249,15 @@ const reverse = (coll) => {
     return reduce(conj, Seq.empty(coll), coll);
 };
 
-const splitAt = _.curry((n, coll) => {
+const splitAt = curry((n, coll) => {
     return cons(take(n, coll), cons(drop(n, coll), Seq.empty(coll)));
 });
 
-const splitWith = _.curry((pred, coll) => {
+const splitWith = curry((pred, coll) => {
     return cons(takeWhile(pred, coll), cons(dropWhile(pred, coll), Seq.empty(coll)));
 });
 
-const partitionAll = _.curry((n, coll) => {
+const partitionAll = curry((n, coll) => {
     if (Seq.isEmpty(coll)) {
         return coll;
     } else {
@@ -265,7 +265,7 @@ const partitionAll = _.curry((n, coll) => {
     }
 });
 
-const partitionBy = _.curry((f, coll) => {
+const partitionBy = curry((f, coll) => {
     if (Seq.isEmpty(coll)) {
         return coll;
     } else {
@@ -305,8 +305,4 @@ logBoth(
 const coll = Immutable.fromJS([[1], [2], [3]])
 log(second(coll)) // [2]
 log(ffirst(coll)) // 1
-
-
-
-log('\n\n\n');
 
