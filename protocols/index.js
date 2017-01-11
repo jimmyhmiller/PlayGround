@@ -301,8 +301,3 @@ logBoth(
 logBoth(
     partitionBy(x => x > 3), [1,2,3,4,5,6]
 )
-
-const coll = Immutable.fromJS([[1], [2], [3]])
-log(second(coll)) // [2]
-log(ffirst(coll)) // 1
-
