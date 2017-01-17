@@ -25,7 +25,7 @@ var _extends2 = require('babel-runtime/helpers/extends');
 var _extends3 = _interopRequireDefault(_extends2);
 
 var getFiles = function () {
-  var _ref4 = (0, _asyncToGenerator3.default)(_regenerator2.default.mark(function _callee(path, args) {
+  var _ref5 = (0, _asyncToGenerator3.default)(_regenerator2.default.mark(function _callee(path, args) {
     var problems;
     return _regenerator2.default.wrap(function _callee$(_context) {
       while (1) {
@@ -51,15 +51,15 @@ var getFiles = function () {
   }));
 
   return function getFiles(_x, _x2) {
-    return _ref4.apply(this, arguments);
+    return _ref5.apply(this, arguments);
   };
 }();
 
 var getNextProblem = function () {
-  var _ref5 = (0, _asyncToGenerator3.default)(_regenerator2.default.mark(function _callee2(_ref6) {
-    var file = _ref6.file,
-        args = _ref6.args,
-        skippedProblems = _ref6.skippedProblems;
+  var _ref6 = (0, _asyncToGenerator3.default)(_regenerator2.default.mark(function _callee2(_ref7) {
+    var file = _ref7.file,
+        args = _ref7.args,
+        skippedProblems = _ref7.skippedProblems;
     var problem;
     return _regenerator2.default.wrap(function _callee2$(_context2) {
       while (1) {
@@ -83,14 +83,14 @@ var getNextProblem = function () {
   }));
 
   return function getNextProblem(_x3) {
-    return _ref5.apply(this, arguments);
+    return _ref6.apply(this, arguments);
   };
 }();
 
 var getErrors = function () {
-  var _ref9 = _asyncGenerator3.default.wrap(_regenerator2.default.mark(function _callee3(_ref10) {
-    var file = _ref10.file,
-        args = _ref10.args;
+  var _ref10 = _asyncGenerator3.default.wrap(_regenerator2.default.mark(function _callee3(_ref11) {
+    var file = _ref11.file,
+        args = _ref11.args;
     var skippedProblems, problem, skipped;
     return _regenerator2.default.wrap(function _callee3$(_context3) {
       while (1) {
@@ -139,12 +139,12 @@ var getErrors = function () {
   }));
 
   return function getErrors(_x4) {
-    return _ref9.apply(this, arguments);
+    return _ref10.apply(this, arguments);
   };
 }();
 
 var processErrors = function () {
-  var _ref11 = (0, _asyncToGenerator3.default)(_regenerator2.default.mark(function _callee4(args, file) {
+  var _ref12 = (0, _asyncToGenerator3.default)(_regenerator2.default.mark(function _callee4(args, file) {
     var errors;
     return _regenerator2.default.wrap(function _callee4$(_context4) {
       while (1) {
@@ -170,7 +170,7 @@ var processErrors = function () {
   }));
 
   return function processErrors(_x5, _x6) {
-    return _ref11.apply(this, arguments);
+    return _ref12.apply(this, arguments);
   };
 }();
 
@@ -204,18 +204,7 @@ var spinner = (0, _ora2.default)('Checking for eslint violations');
 
 var prompt = (0, _promptSync2.default)({ sigint: true });
 
-var log = function log() {
-  var _console;
-
-  for (var _len = arguments.length, args = Array(_len), _key = 0; _key < _len; _key++) {
-    args[_key] = arguments[_key];
-  }
-
-  (_console = console).log.apply(_console, args);
-  return (0, _compat.peek)(args);
-};
-
-var helpText = '\nEslint Fixer - a fast way to fix eslint errors\n\nUsage:\n  eslint-fix [--args=<ESLINT_ARGS>] [--exts=<FILE_EXTENSIONS>] <path>\n  eslint-fix -h | --help\n  eslint-fix --version\n\nOptions:\n  <path>        Path to run eslint (default=\'.\')\n  -h --help     Show this screen.\n  --version     Show version.\n  --args        Pass args to eslint\n  --exts        Comma separated string of file extensions ".js,.jsx"';
+var helpText = '\nEslint Fixer - a fast way to fix eslint errors\n\nUsage:\n  eslint-fix [--args=<ESLINT_ARGS>] <path>\n  eslint-fix -h | --help\n  eslint-fix --version\n\nOptions:\n  <path>        Path to run eslint\n  -h --help     Show this screen.\n  --version     Show version.\n  --args        Pass args to eslint';
 
 var clearConsole = function clearConsole() {
   console.log('\x1Bc');
@@ -225,19 +214,36 @@ var newLine = function newLine() {
   console.log('');
 };
 
-var editFile = function editFile(_ref) {
+var filloutEditorTemplate = function filloutEditorTemplate(str, _ref) {
   var file = _ref.file,
       line = _ref.line,
       column = _ref.column;
 
-  var editor = process.env.EDITOR || 'nano';
-  (0, _child_process.execSync)(editor + ' ' + file + ':' + line + ':' + column); // figure out how to make it work with all editors
+  var regex = function regex(name) {
+    return new RegExp('%' + name);
+  };
+  return str.replace(regex("file"), file).replace(regex("line"), line).replace(regex("column"), column);
 };
 
-var hashProblem = function hashProblem(_ref2) {
+var editFile = function editFile(_ref2) {
   var file = _ref2.file,
       line = _ref2.line,
       column = _ref2.column;
+
+  var editorTemplate = process.env.ESLINT_FIXER_EDITOR || 'nano +%line,%column %file';
+  var command = filloutEditorTemplate(editorTemplate, { file: file, line: line, column: column }).split(" ");
+  var editor = command[0];
+  var args = command.slice(1);
+  (0, _child_process.spawnSync)(editor, args, {
+    stdio: 'inherit',
+    shell: true
+  }); // figure out how to make it work with all editors
+};
+
+var hashProblem = function hashProblem(_ref3) {
+  var file = _ref3.file,
+      line = _ref3.line,
+      column = _ref3.column;
   return file + ':' + line + ':' + column;
 };
 
@@ -264,18 +270,18 @@ var execIgnoreExitCode = function execIgnoreExitCode(command) {
   });
 };
 
-var getProblems = function getProblems(_ref3) {
-  var file = _ref3.file,
-      _ref3$args = _ref3.args,
-      args = _ref3$args === undefined ? "" : _ref3$args;
+var getProblems = function getProblems(_ref4) {
+  var file = _ref4.file,
+      _ref4$args = _ref4.args,
+      args = _ref4$args === undefined ? "" : _ref4$args;
 
   return execIgnoreExitCode(process.cwd() + '/node_modules/eslint/bin/eslint.js --format=json ' + args + ' ' + file).then(JSON.parse);
 };
 
-var fixProblem = function fixProblem(_ref7) {
-  var file = _ref7.file,
-      line = _ref7.line,
-      column = _ref7.column;
+var fixProblem = function fixProblem(_ref8) {
+  var file = _ref8.file,
+      line = _ref8.line,
+      column = _ref8.column;
 
   editFile({ file: file, line: line, column: column });
 };
@@ -289,12 +295,12 @@ var stopSpinner = function stopSpinner() {
   spinner.stop();
 };
 
-var showProblem = function showProblem(_ref8) {
-  var file = _ref8.file,
-      line = _ref8.line,
-      column = _ref8.column,
-      source = _ref8.source,
-      message = _ref8.message;
+var showProblem = function showProblem(_ref9) {
+  var file = _ref9.file,
+      line = _ref9.line,
+      column = _ref9.column,
+      source = _ref9.source,
+      message = _ref9.message;
 
   stopSpinner();
   var result = (0, _babelCodeFrame2.default)(source, line, column, { highlightCode: true });
@@ -339,7 +345,12 @@ function forEach(ai, fn) {
 var main = function main() {
 
   var args = _neodoc2.default.run(helpText, { smartOptions: true });
-  var path = args['<path>'] || process.cwd();
+  var path = args['<path>'];
+
+  if (!path) {
+    console.log(helpText.trim());
+    process.exit();
+  }
 
   showSpinner();
 

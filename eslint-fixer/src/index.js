@@ -1,4 +1,4 @@
-import { execSync, exec } from 'child_process';
+import { exec, spawnSync } from 'child_process';
 import neodoc from 'neodoc';
 import { first, dropWhile } from 'zaphod/compat';
 import codeFrame from 'babel-code-frame';
@@ -19,7 +19,7 @@ Usage:
   eslint-fix --version
 
 Options:
-  <path>        Path to run eslint (default='.')
+  <path>        Path to run eslint
   -h --help     Show this screen.
   --version     Show version.
   --args        Pass args to eslint`
@@ -32,9 +32,22 @@ const newLine = () => {
   console.log('');
 }
 
+const filloutEditorTemplate = (str, { file, line, column }) => {
+  const regex = (name) => new RegExp(`%${name}`);
+  return str.replace(regex("file"), file)
+            .replace(regex("line"), line)
+            .replace(regex("column"), column)
+}
+
 const editFile = ({ file, line, column }) => {
-  const editor = process.env.EDITOR || 'nano';
-  execSync(`${editor} ${file}:${line}:${column}`) // figure out how to make it work with all editors
+  const editorTemplate = process.env.ESLINT_FIXER_EDITOR || 'nano +%line,%column %file';
+  const command = filloutEditorTemplate(editorTemplate, { file, line, column }).split(" ");
+  const editor = command[0];
+  const args = command.slice(1);
+  spawnSync(editor, args, {
+    stdio: 'inherit',
+    shell: true
+  }) // figure out how to make it work with all editors
 }
 
 const hashProblem = ({ file, line, column }) => `${file}:${line}:${column}`
@@ -153,7 +166,12 @@ async function processErrors(args, file) {
 const main = () => {
 
   const args = neodoc.run(helpText, { smartOptions: true })
-  const path = args['<path>'] || process.cwd();
+  const path = args['<path>'];
+
+  if (!path) {
+    console.log(helpText.trim());
+    process.exit();
+  }
 
   showSpinner();
 
