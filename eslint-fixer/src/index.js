@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { exec, spawnSync } from 'child_process';
 import neodoc from 'neodoc';
 import { first, dropWhile } from 'zaphod/compat';
