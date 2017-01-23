@@ -57,8 +57,8 @@ const overrideMerge = (stateProps, dispatchProps, ownProps) => ({
   ...ownProps,
 })
 
-const reduxify = Comp => ({ withSelector, withActions, ...rest }) => {
-  if (withSelector || withActions) {
+const reduxify = Comp => ({ withSelector, withActions, noConnect, ...rest }) => {
+  if ((withSelector || withActions) && !noConnect) {
     const NewComp = reduxify(connect(withSelector, withActions, overrideMerge)(Comp))
     return <NewComp {...rest} />
   }

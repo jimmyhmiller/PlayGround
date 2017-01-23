@@ -1,4 +1,4 @@
-from flask import Flask, make_response
+from flask import Flask, Response
 from flask import jsonify
 from flask.ext.pymongo import PyMongo
 from flask import request
@@ -10,26 +10,23 @@ from flask.ext.cors import CORS
 
 
 app = Flask(__name__)
-app.config['MONGO_HOST'] = '192.168.99.100'
+app.config['MONGO_HOST'] = 'localhost'
 CORS(app)
 mongo = PyMongo(app)
 
 def sane_ids(coll):
-    print(type(coll))
-    print(isinstance(coll, list))
     if isinstance(coll, dict) and "_id" in coll:
         coll["id"] = str(coll["_id"])
         coll.pop("_id", None)
         return coll
     elif isinstance(coll, list):
-        print("list!")
         return map(sane_ids, coll)
     else:
         return coll
 
 @app.route("/<collection>", methods=["GET"])
 def collections(collection):
-    return dumps(sane_ids([x for x in mongo.db[collection].find()]))
+    return Response(dumps(sane_ids([x for x in mongo.db[collection].find()])), mimetype='application/json')
 
 
 
@@ -38,7 +35,7 @@ def gets(collection, id):
     entity = mongo.db[collection].find_one({"_id" : ObjectId(id)})
     if not entity:
         return ('entity not found', 404)
-    return dumps(sane_ids(entity))
+    return Response(dumps(sane_ids(entity)), mimetype='application/json')
 
 
 
