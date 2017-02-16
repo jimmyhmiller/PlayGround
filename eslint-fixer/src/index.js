@@ -26,7 +26,7 @@ Options:
   --args        Pass args to eslint`
 
 const clearConsole = () => {
-  console.log('\x1Bc');
+  // console.log('\x1Bc');
 }
 
 const newLine = () => {
@@ -73,7 +73,7 @@ const execIgnoreExitCode = (command) => {
 }
 
 const getProblems = ({ file, args="" }) => {
-  return execIgnoreExitCode(`${process.cwd()}/node_modules/eslint/bin/eslint.js --format=json ${args} ${file}`)
+  return execIgnoreExitCode(`eslint --format=json ${args} ${file}`)
     .then(JSON.parse)
 }
 

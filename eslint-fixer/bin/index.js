@@ -208,7 +208,7 @@ var prompt = (0, _promptSync2.default)({ sigint: true });
 var helpText = '\nEslint Fixer - a fast way to fix eslint errors\n\nUsage:\n  eslint-fix [--args=<ESLINT_ARGS>] <path>\n  eslint-fix -h | --help\n  eslint-fix --version\n\nOptions:\n  <path>        Path to run eslint\n  -h --help     Show this screen.\n  --version     Show version.\n  --args        Pass args to eslint';
 
 var clearConsole = function clearConsole() {
-  console.log('\x1Bc');
+  // console.log('\x1Bc');
 };
 
 var newLine = function newLine() {
@@ -276,7 +276,7 @@ var getProblems = function getProblems(_ref4) {
       _ref4$args = _ref4.args,
       args = _ref4$args === undefined ? "" : _ref4$args;
 
-  return execIgnoreExitCode(process.cwd() + '/node_modules/eslint/bin/eslint.js --format=json ' + args + ' ' + file).then(JSON.parse);
+  return execIgnoreExitCode('eslint --format=json ' + args + ' ' + file).then(JSON.parse);
 };
 
 var fixProblem = function fixProblem(_ref8) {

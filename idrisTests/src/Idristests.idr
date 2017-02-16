@@ -48,7 +48,7 @@ fresh = S inc' where
 
 
 get : St s s
-get  = S (get') where
+get = S (get') where
   get' : (s -> (s,s))
   get' x = (x, x)
 
@@ -64,7 +64,7 @@ freshN : St Int Int
 freshN = do
   n <- get
   put (n+1)
-  return n
+  pure n
 
 
 n : St Int (Int, Int, Int)
@@ -72,8 +72,26 @@ n = do
   a <- fresh
   b <- fresh
   c <- fresh
-  return (a, b, c)
+  pure (a, b, c)
 
+
+data Action = Increment | Decrement
+
+
+inc : Int -> Int
+inc x = x + 1
+
+dec : Int -> Int
+dec x = x - 1
+
+r' : (Action, Int) -> Int
+r' (Increment, x) = inc x
+r' (Decrement, x) = dec x
+
+
+r : St (Action, Int) Int
+r = do
+  pure $ r' !get
 
 
 
@@ -100,16 +118,16 @@ Functor (Validation a) where
 appMaybe : (a -> Maybe (a1 -> b)) -> (a -> Maybe a1) -> (a -> Maybe b)
 appMaybe f g x = case g x of
                       Nothing => Nothing
-                      (Just y) => (case f x of
+                      (Just x') => (case f x of
                                         Nothing => Nothing
-                                        (Just z) => Just (z y))
+                                        (Just f') => Just (f' x'))
 
 Applicative (Validation a) where
     pure x = Expect (constant) where
       constant : a -> Maybe a1
       constant y = Just x
     (<*>) (Expect f) (Expect g) = Expect (f `appMaybe` g)
-    
+
 
 bindMaybe : (a -> Maybe a1) -> (a1 -> Validation a b) -> (a -> Maybe b)
 bindMaybe f g x = case f x of
@@ -253,7 +271,7 @@ l : Validation (SortedMap String String) String
 l = do
   name <- hasKey "name" <|> hasKey "otherName"
   age <- hasWordWithLetter "3" . hasKey "age"
-  return (name ++ age)
+  pure (name ++ age)
   
 
 eval : (Validation a b) -> a -> Maybe b
