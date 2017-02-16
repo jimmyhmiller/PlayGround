@@ -1,0 +1,178 @@
+# Loan App
+
+Add bootstrap css
+```eve
+bind @browser
+  [#link rel:"stylesheet" href:"https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css"]
+```
+
+
+Set Default size
+```eve
+search @components
+  option = [#option]
+  not(option.size)
+commit @components
+  option.size := 4
+```
+
+handle button click
+```
+search @browser @event
+  element = [#options-box field-name value]
+  [#click element]
+search @components
+  field = [#options-box name: field-name]
+commit @components
+  field.value := value
+```
+
+
+Button options
+```eve
+search @components
+  options = [#options-box name: field-name label
+                    options: [#option name size value]]
+  class = if value = options.value then "btn-primary" else "btn-default"
+search @browser
+    elem = [tag: field-name]
+bind @browser
+  elem.children := 
+  [#div class: "form-horizontal row" children:
+    [#div class: "form-group" children:
+      [#label text: label class:"col-sm-3 control-label"]
+      [#div #options-box field-name class:"col-sm-{{size}}" name value children:
+        [#button
+          value
+          type:"button" 
+          class:"btn-block btn {{ class }}"  
+          text: name]]]]
+```
+
+handle default input value
+```eve disabled
+search @components
+  input = [#input not(value)]
+commit @components
+  input.value := ""
+```
+
+handle input
+```
+search @components
+  input = [#input #field name: field-name label not(addon)]
+search @browser
+    elem = [tag: field-name]
+bind @browser
+   elem.children := 
+    [#div class: "form-horizontal row" children:
+      [#div class: "form-group" children:
+        [#label text: label class:"col-sm-3 control-label"]
+        [#div class: "col-sm-4" children:
+          [#div class: "input-group" children:
+            [#input #input-comp name: field-name class:"form-control"]]]]]
+
+```
+
+handle input addon
+```
+search @components
+  input = [#input name: field-name label addon]
+search @browser
+    elem = [tag: field-name]
+bind @browser
+   elem.children := 
+    [#div class: "form-horizontal row" children:
+      [#div class: "form-group" children:
+        [#label text: label class:"col-sm-3 control-label"]
+        [#div class: "col-sm-4" children:
+          [#div class: "input-group" children:
+            [#div class:"input-group-addon" text: addon]
+            [#input name: field-name #input-comp class:"form-control"]]]]]
+```
+
+handle input change
+```eve
+search @browser @components @event
+  element = [#input-comp name value]
+  kd = [#keydown element]
+  input = [#input #field name]
+commit @components
+  input.value := value
+```
+
+
+```eve
+commit @components
+  [#options-box 
+    #field
+    name: "car-type"
+    label: "Is it new or used?"
+    options:
+      [#option name:"New" value: "new"]
+      [#option name:"Used" value: "used"]]
+  
+  [#options-box 
+    #field
+    name: "refinance"
+    label: "What type of loan would you like?"
+    options:
+      [#option name:"Purchase" value: "pur"]
+      [#option name:"Refinance" value: "refi"]]
+  
+  [#input
+    #field
+    name: "year"
+    label: "What year model is it?"]
+  
+  [#input
+    #field
+    name: "amount"
+    addon: "$"
+    label: "How much would you like to borrow?"]
+  
+  [#options-box
+    #field
+    name: "credit"
+    label: "What do you think your credit score is?"
+    options:
+      [#option size: 1 name: "A+" value: "A+"]
+      [#option size: 1 name: "A" value: "A"]
+      [#option size: 1 name: "B" value: "B"]
+      [#option size: 1 name: "C" value: "C"]
+      [#option size: 1 name: "D" value: "D"]
+      [#option size: 1 name: "E" value: "E"]]
+  
+   [#options-box
+    #field
+    name: "term"
+    label: "Which term is right for you?"
+    options:
+      [#option size: 3 name: "1 Year" value: 1]
+      [#option size: 3 name: "3 Years" value: 3]
+      [#option size: 3 name: "5 Years" value: 5]]
+    
+```
+
+
+Refinance
+```eve
+commit @browser
+  [#div children:
+    [#h1 text:"Loan App"]
+    [#div #refinance]
+    [#div #car-type]
+    [#div #year]
+    [#div #amount]
+    [#div #credit]
+    [#div #term]]
+
+```
+
+Current form values
+```
+search @components
+  field = [#field name value]
+bind @view
+  [#value value:"{{name }}: {{value}}"]
+```

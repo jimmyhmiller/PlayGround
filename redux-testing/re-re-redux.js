@@ -4,7 +4,7 @@ const fluentCompose = (f, combinators) => {
     if (typeof(g) !== 'function') {
       return g;
     }
-    innerFunc = (...args) => g(...args);
+    const innerFunc = (...args) => g(...args);
     Object.keys(combinators).forEach(k => {
       innerFunc[k] = (...args) => wrapperFunction(combinators[k](g)(...args))
     })
@@ -89,7 +89,7 @@ reduxify
   .mapState(state => ({ y:1 }))
   .withActions({ increment })
   .withComponent(Comp)
-  .withActions({ decrement})
+  .withActions({ decrement })
   .render()
 
 
