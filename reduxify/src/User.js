@@ -5,7 +5,7 @@ import { getUserById } from './selectors';
 import { makeAdmin } from './actions';
 
 const User = reduxify(({ name, id, makeAdmin, admin }) => 
-  <div>
+  <div style={{ paddingBottom: 20 }}>
     <div>Name: {name}</div>
     <div>Admin: {admin ? "Yes" : "No"}</div>
     <button onClick={() => makeAdmin({ id })}>Make Admin</button>
