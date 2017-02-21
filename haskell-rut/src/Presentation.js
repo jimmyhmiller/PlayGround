@@ -2,20 +2,14 @@
 import React from "react";
 
 import {
-  Appear,
-  BlockQuote,
-  Cite,
   CodePane,
   Deck,
   Fill,
   Heading,
   Image,
   Layout,
-  Link,
   ListItem,
   List,
-  Markdown,
-  Quote,
   Slide,
   Spectacle,
   Text
@@ -99,6 +93,11 @@ const removeIndent = (indent, source) =>
   source.split("\n")
         .map(s => s.substring(indent, s.length))
         .join("\n")
+
+
+const BlankSlide = withSlide(() => {
+  return <span />;
+})
 
 const Code = withSlide(({ source, lang, title }) => {
   const spaces = detectIndent(source);
@@ -191,16 +190,22 @@ export default () =>
       } 
     />
 
-    <Points title="Audience">
-      <Point text="Experienced Developer" />
+    <Points title="Two Ruts">
       <Point text="Bored" />
-      <Point text="Open Minded" />
+      <Point text="Mess" />
     </Points>
 
-    <Headline 
-      textAlign="left"
-      text="haskell"
-      subtext="An advanced, purely functional programming language" />
+    <BlankSlide />
+
+    <Points title="Curry Howard Isomorphism">
+      <Point text="Types are Propositions" />
+      <Point text="Programs are Proofs" />
+      <Point text="Program Execution is Proof Simplification" />
+    </Points>
+
+    <Headline
+     text="Haskell Embraces Mathematics"
+     subtext="and so should we" />
 
     <Points title="Purely Functional">
       <Point text="No Loops (for, while, etc)" />
@@ -212,14 +217,6 @@ export default () =>
     </Points>
 
     <Headline caps={false} text="Haskell requires you to re-learn programming" />
-
-    <Code 
-      title="Hello World"
-      lang="haskell"
-      source={`
-        main = putStr "Hello World!"
-      `}
-    />
 
     <Code 
       title="Functions"
@@ -236,7 +233,8 @@ export default () =>
         double :: Int -> Int
         double x = x * 2
 
-        double 2 -- 4
+        double 2 
+        -- 4
       `}
     />
 
@@ -247,7 +245,8 @@ export default () =>
         add :: Int -> Int -> Int
         add x y = x + y
 
-        add 2 3 -- 5
+        add 2 3 
+        -- 5
       `}
     />
 
@@ -255,94 +254,15 @@ export default () =>
       title="Functions"
       lang="haskell"
       source={`
-        add :: Int -> Int -> Int
-        add x y = x + y
+        greet :: String -> String
+        greet name = "Hello " ++ name
 
-        add2 :: Int -> int
-        add2 = add 2
-
-        add2 3 -- 5
+        greet "Bob" 
+        -- "Hello Bob"
       `}
     />
 
-    <Code
-      title="Currying" 
-      lang="haskell"
-      source={`
-        add :: Int -> Int -> Int
-          -- is the same as
-        add :: Int -> (Int -> Int)
-      `}
-    />
-
-    <Code
-      title="Currying" 
-      lang="haskell"
-      source={`
-        add 2 3
-        -- is the same as
-        (add 2) 3
-      `}
-    />
-
-    <Code
-      title="Currying" 
-      lang="haskell"
-      source={`
-        addLots : Int -> Int -> Int -> Int
-        ((addLots 2) 2) 2
-        (addLots 2 2) 2
-        addLots 2 2 2
-      `}
-    />
-
-    <Code
-      title="polymorphism"
-      lang="haskell"
-      source={`
-        identity : Int -> Int
-        identity x = x
-      `}
-    />
-
-    <Code
-      title="polymorphism"
-      lang="haskell"
-      source={`
-        identity : a -> a
-        identity x = x
-      `}
-    />
-
-    <Code
-      title="polymorphism"
-      lang="haskell"
-      source={`
-        second : List a -> a
-        second xs = first (rest xs)
-      `}
-    />
-
-    <Code
-      title="Pattern Matching" 
-      lang="haskell"
-      source={`
-        fib :: Int -> Int
-        fib 0 = 0
-        fib 1 = 1
-        fib n = fib (n - 1) + fib (n - 2)
-      `}
-    />
-
-    <Code
-      title="Pattern Matching" 
-      lang="haskell"
-      source={`
-        not :: Bool -> Bool
-        not True = False
-        not False = True
-      `}
-    />
+    <BlankSlide />
 
     <Code
       title="Data Types" 
@@ -364,18 +284,6 @@ export default () =>
       title="Data Types"
       lang="haskell"
       source={`
-        data Color = Green | Blue | Red
-
-        isFavorite :: Color -> Bool
-        isFavorite Green = True
-        isFavorite _ = False
-      `}
-    />
-
-    <Code
-      title="Data Types"
-      lang="haskell"
-      source={`
         data Player 
           = Wizard Staff 
           | Warrior Sword
@@ -390,11 +298,64 @@ export default () =>
       `}
     />
 
+    <BlankSlide />
+
     <Code
-      title="Data Types"
+      title="Pattern Matching" 
       lang="haskell"
       source={`
-        data Special = Special Int | NotSpecial Int
+        not :: Bool -> Bool
+        not True = False
+        not False = True
+      `}
+    />
+
+    <Code
+      title="Pattern Matching" 
+      lang="haskell"
+      source={`
+        isFavorite :: Color -> Bool
+        isFavorite Green = True
+        isFavorite _ = False
+      `}
+    />
+
+    <Code
+      title="Pattern Matching" 
+      lang="haskell"
+      source={`
+        attackMultiplier :: Player -> Float
+        attackMultiplier (Warrior LongSword) = 3
+        attackMultiplier (Warrior ShortSword) = 2
+        attackMultiplier (Ranger _) = 0.8
+        attackMultiplier (Wizard _) = 0.5
+      `}
+    />
+
+    <BlankSlide />
+
+    <Code
+      title="polymorphism"
+      lang="haskell"
+      source={`
+        identityInt : Int -> Int
+        identityInt x = x
+
+        identityString : String -> String
+        identityString x = x
+      `}
+    />
+
+    <Code
+      title="polymorphism"
+      lang="haskell"
+      source={`
+        identity : a -> a
+        identity x = x
+
+        identity "Test"
+        identity False
+        identity 1
       `}
     />
 
@@ -402,9 +363,33 @@ export default () =>
       title="Data Types"
       lang="haskell"
       source={`
-        data Special a = Special a | NotSpecial a
+        data IsSpecialInt = Special Int | NotSpecial Int
+
+        data IsSpecialString = Special String | NotSpecial String
       `}
     />
+
+    <Code
+      title="Data Types"
+      lang="haskell"
+      source={`
+        data IsSpecial a = Special a | NotSpecial a
+      `}
+    />
+
+
+    <Code
+      title="Data Types"
+      lang="haskell"
+      source={`
+        data IsSpecial a = Special a | NotSpecial a
+
+        specialString :: IsSpecial String
+        specialString = Special "Everyone"
+      `}
+    />
+
+    <BlankSlide />
 
     <Code
       title="No Nulls"
@@ -437,6 +422,8 @@ export default () =>
       `}
     />
 
+    <BlankSlide />
+
     <Code
       title="Error Handling"
       lang="haskell"
@@ -459,13 +446,15 @@ export default () =>
       `}
     />
 
+    <BlankSlide />
+
     <Code
       title="Problem"
       lang="haskell"
       source={`
         helpTextPlayer :: Player -> String
         helpTextItem :: Item -> String
-        helpTextSword:: Sword -> String
+        helpTextSword :: Sword -> String
       `}
     />
 
@@ -511,39 +500,12 @@ export default () =>
       <Point text="ToJson" />
       <Point text="Num" />
       <Point text="Show" />
-      <Point text="Functor" />
+      <Point text="Monad" />
       <Point text="Alternative" />
       <Point text="Traversable" />
     </Points>
 
-    <Code
-      title="Do Notation"
-      lang="haskell"
-      source={`
-        main = do
-          putStrLn "Enter two words"
-          word1 <- getLine
-          word2 <- getLine
-          putStr (word1 ++ " " ++ word2)
-      `}
-    />
-
-    <Code
-      title="Do Notation"
-      lang="haskell"
-      source={`
-        getFoo :: Maybe Foo
-        getBar :: Foo -> Maybe Bar
-        getBaz :: Bar -> Maybe Baz
-
-        getFooBarBaz :: Maybe (Foo, Bar, Baz)
-        getFooBarBaz = do
-          foo <- getFoo
-          bar <- getBar foo
-          baz <- getBaz bar
-          return (foo, bar, baz)
-      `}
-    />
+    <BlankSlide />
 
     <Headline text="What Haskell gives us?" />
 
@@ -603,27 +565,10 @@ export default () =>
       `}
     />
 
-    <Code
-      title="Laziness"
-      lang="haskell"
-      source={`
-        [0..]
-        |> (*2)
-        |> filter even
-        |> take 10
-
-        fibs = 0 : 1 : zipWith (+) fibs (tail fibs)
-      `}
-    />
-
-    <ImageSlide src={images.functional} />
+    <Headline text="Right Reasoning" />
 
     <ImageSlide src={images.haxl} />
 
-    <ImageSlide src={images.propositions} />
 
-    <ImageSlide src={images.wadler} />
-
-    <ImageSlide src={images.propositions} />
 
   </Presentation>
