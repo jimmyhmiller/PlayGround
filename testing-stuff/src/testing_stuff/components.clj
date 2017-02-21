@@ -9,8 +9,6 @@
   `(defmethod choose-component ~field [_# _#] ~comp))
 
 
-
-
 (s/def :form/input (s/keys :req [:form/label]))
 (s/def :form/label string?)
 
@@ -44,7 +42,6 @@
     (f field fields)
     (throw (Exception. (str "No render for component " f)))))
 
-(render (fn [x y] x) :test :test)
 
 (defn get-and-render-comp [fields field]
   (choose-component field fields))
