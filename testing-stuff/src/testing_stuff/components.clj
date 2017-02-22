@@ -1,12 +1,6 @@
 (ns testing-stuff.components
   (:require  [clojure.spec :as s]))
 
-(defmulti choose-component (fn [field fields] field))
-(defmethod choose-component :default [_ _] :form/input)
-
-
-(defmacro field->comp [field comp]
-  `(defmethod choose-component ~field [_# _#] ~comp))
 
 
 (s/def :form/input (s/keys :req [:form/label]))
@@ -40,18 +34,14 @@
 (defmethod render :default [f field fields]
   (if (clojure.test/function? f)
     (f field fields)
-    (throw (Exception. (str "No render for component " f)))))
+    (render :form/input field fields)))
 
 
-(defn get-and-render-comp [fields field]
-  (choose-component field fields))
-
-
-(defn render-form [form fields]
+(defn render-form [form fields comps]
   [:div
    (->> form
         (map (fn [field] 
                (render 
-                (get-and-render-comp fields field) 
+                (field comps)
                 (field fields) 
                 fields))))])
