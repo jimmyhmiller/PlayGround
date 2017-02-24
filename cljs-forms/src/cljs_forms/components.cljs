@@ -1,4 +1,4 @@
-(ns testing-stuff.components
+(ns cljs-forms.components
   (:require  [clojure.spec :as s]))
 
 
@@ -14,9 +14,9 @@
 (defmulti render (fn [comp field fields] comp))
 
 (defmethod render :form/input [_ {:keys [:form/label]} _]
-  [:div 
-   [:label label]
-   [:input {:type :text}]])
+  [:div.form-group
+   [:label.control-label label]
+   [:input.form-control {:type :text}]])
 
 
 (defn radio [{:keys [:form/value :form/label]}]
@@ -27,11 +27,13 @@
 
 (defmethod render :form/radio [_ {:keys [:form/label :form/values]} _]
   (let [radios (map radio values)]
-    [:div radios]))
+    [:div 
+     [:label.control-label label]
+     radios]))
 
 
 (defmethod render :default [f field fields]
-  (if (clojure.test/function? f)
+  (if (fn? f)
     (f field fields)
     (render :form/input field fields)))
 

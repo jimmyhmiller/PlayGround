@@ -7,8 +7,8 @@
   {:form/amount {:form/label "Enter an amount"}
    :form/another {:form/label "another"}
    :form/new-used {:form/label "New or Used?"
-               :form/values [{:form/value :form/new :form/label "New"}
-                         {:form/value :form/used :form/label "Used"}]}})
+                   :form/values [{:form/value :form/new :form/label "New"}
+                                 {:form/value :form/used :form/label "Used"}]}})
 
 (def form
   [:form/new-used
@@ -18,10 +18,10 @@
 (defn another-component [{:keys [:form/label]} _] 
   [:div (str "Another: " label)])
 
-
 (def comps 
-  {:form/new :form/radio
+  {:form/new-used [:form/radio {:size 2}]
    :form/another another-component})
 
+
+
 (render-form form fields comps)
-         
