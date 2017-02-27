@@ -20,6 +20,14 @@
                    :form/values [{:form/value :form/new :form/label "New"}
                                  {:form/value :form/used :form/label "Used"}]}})
 
+
+
+;; (def new-form
+;;   [[:layout/horizontal [:form/first-name :form/middle-name :form/last-name]]
+;;    [:form/amount]])
+
+
+
 (def form
   [:form/new-used
    :form/amount
@@ -32,7 +40,7 @@
   {:form/new-used :form/radio
    :form/another another-component})
 
-(println (render-form form fields comps))
+
 
 (defn app []
   (render-form form fields comps))

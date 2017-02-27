@@ -190,10 +190,7 @@ export default () =>
       } 
     />
 
-    <Points title="Two Ruts">
-      <Point text="Bored" />
-      <Point text="Mess" />
-    </Points>
+    <Headline text="Two Ruts" color="green" />
 
     <BlankSlide />
 
@@ -216,7 +213,7 @@ export default () =>
       <Point text="No Nulls" />
     </Points>
 
-    <Headline caps={false} text="Haskell requires you to re-learn programming" />
+    <BlankSlide />
 
     <Code 
       title="Functions"
@@ -363,9 +360,13 @@ export default () =>
       title="Data Types"
       lang="haskell"
       source={`
-        data IsSpecialInt = Special Int | NotSpecial Int
+        data IsSpecialInt 
+          = Special Int 
+          | NotSpecial Int
 
-        data IsSpecialString = Special String | NotSpecial String
+        data IsSpecialString 
+          = Special String 
+          | NotSpecial String
       `}
     />
 
@@ -384,8 +385,8 @@ export default () =>
       source={`
         data IsSpecial a = Special a | NotSpecial a
 
-        specialString :: IsSpecial String
-        specialString = Special "Everyone"
+        special :: IsSpecial String
+        special = Special "Everyone"
       `}
     />
 
@@ -422,6 +423,23 @@ export default () =>
       `}
     />
 
+    <Code
+      title="No Nulls"
+      lang="haskell"
+      source={`
+        getFoo :: Maybe Foo
+        getBar :: Foo -> Maybe Bar
+        getBaz :: Bar -> Maybe Baz
+
+        fooBarBaz :: Maybe (Foo, Bar, Baz)
+        fooBarBaz = do
+          foo <- getFoo
+          bar <- getBar foo
+          baz <- getBaz bar
+          return $ (foo, bar, baz)
+      `}
+    />
+
     <BlankSlide />
 
     <Code
@@ -443,6 +461,25 @@ export default () =>
         useItem HealingPotion Wizard = Right Heal
         useItem DamagePotion Wizard = Right Damage
         useItem _ _ = Left "You can't use this item"
+      `}
+    />
+
+    <Code
+      title="Error Handling"
+      lang="haskell"
+      source={`
+        merge :: Data -> Data -> Data
+        getData :: Id -> Either StoreError Data
+        storeData :: Data -> Either StoreError Id
+
+        updateData :: Id -> Data -> Either StoreError Id
+        updateData id currentData = do
+          oldData <- getData isRequired
+          let newData = merge oldData currentData
+          newId <- storeData newData
+          return newId
+
+
       `}
     />
 
