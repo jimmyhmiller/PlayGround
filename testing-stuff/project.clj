@@ -9,4 +9,5 @@
                  [org.clojure/core.async "0.2.385"]
                  [graphql-clj "0.1.18"]
                  [org.clojure/test.check "0.9.0"]
-                 [juxt/dirwatch "0.2.3"]])
+                 [juxt/dirwatch "0.2.3"]
+                 [funcool/promesa "1.8.0"]])

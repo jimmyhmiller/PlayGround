@@ -5,20 +5,19 @@ data Free : (f : Type -> Type) -> (a : Type) -> Type where
   Pure : a -> Free f a
   Bind : f (Free f a) -> Free f a
   
-  
-
-instance Functor f => Functor (Free f) where
-  map f (Pure x) = Pure (f x)
+ 
+implementation Functor f => Functor (Free f) where
+  map f (Pure x) = assert_total Pure (f x)
   map f (Bind x) = assert_total (Bind (map (map f) x))
 
-instance Functor f => Applicative (Free f) where
+implementation Functor f => Applicative (Free f) where
   pure = Pure
 
-  (Pure f) <*> x = map f x
+  (Pure f) <*> x = assert_total map f x
   (Bind f) <*> x = assert_total (Bind (map (<*> x) f))
 
-instance Functor f => Monad (Free f) where
-  (Pure x) >>= f = f x
+implementation Functor f => Monad (Free f) where
+  (Pure x) >>= f = assert_total f x
   (Bind x) >>= f = assert_total (Bind (map (>>= f) x))
 
 
@@ -27,7 +26,6 @@ Url = String
 
 
 data Console a = Put String a | Get (String -> a)
-
 
 
 

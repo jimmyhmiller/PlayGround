@@ -175,21 +175,6 @@ export default () =>
       text="Getting out of the Rut"
       subtext="A dive into Haskell" />
 
-    <TwoColumn
-      title="About Me"
-      left={<Image src={images.me} />}
-      right={
-        <div style={{paddingTop: 80}}>
-          <Text textColor="blue" textSize={60} textAlign="left">Jimmy Miller</Text>
-          <Points noSlide styleContainer={{paddingTop: 10}}>
-            <Point textSize={40} text="Self Taught" /> 
-            <Point textSize={40} text="Lead Developer - Trabian" /> 
-            <Point textSize={40} text="FP Nerd" />
-          </Points>
-        </div>
-      } 
-    />
-
     <Headline text="Two Ruts" color="green" />
 
     <BlankSlide />
@@ -605,7 +590,5 @@ export default () =>
     <Headline text="Right Reasoning" />
 
     <ImageSlide src={images.haxl} />
-
-
 
   </Presentation>
