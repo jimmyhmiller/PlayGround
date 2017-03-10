@@ -10,7 +10,7 @@ const App = () => (
         <User id={1} />
         <User withSelector={getUserByName} name="Robert" />
         <User
-            noConnect
+            disconnect
             name="Static"
             makeAdmin={({ id }) => alert(`nope ${id}`) } id={3} />
     </div>

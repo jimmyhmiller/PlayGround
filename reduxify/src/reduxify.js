@@ -3,11 +3,11 @@ import { connect } from 'react-redux';
 import { keys } from 'zaphod/compat';
 
 const difference = function(setA, setB) {
-    const temp = new Set(setA);
-    for (const elem of setB) {
-        temp.delete(elem);
-    }
-    return temp;
+  const temp = new Set(setA);
+  for (const elem of setB) {
+    temp.delete(elem);
+  }
+  return temp;
 }
 
 const printWarningMessage = (schema, values, type) => {
@@ -16,13 +16,13 @@ const printWarningMessage = (schema, values, type) => {
   const missingKeys = difference(schemaSet, valuesSet);
   const extraKeys = difference(valuesSet, schemaSet);
   if (extraKeys.size > 0 && missingKeys.size > 0) {
-      console.warn(`Action of type ${type} is missing the following key(s): [${Array.from(missingKeys.values()).join(", ")}]\nIt also has the following extra key(s): [${Array.from(extraKeys.values()).join(", ")}]\nThe action creator was given the following object:\n${JSON.stringify(values, null, '  ')}`)
+    console.warn(`Action of type ${type} is missing the following key(s): [${Array.from(missingKeys.values()).join(", ")}]\nIt also has the following extra key(s): [${Array.from(extraKeys.values()).join(", ")}]\nThe action creator was given the following object:\n${JSON.stringify(values, null, '  ')}`)
   }
   else if (missingKeys.size > 0) {
-      console.warn(`Action of type ${type} is missing the following key(s): [${Array.from(missingKeys.values()).join(", ")}]\nThe action creator was given the following object:\n${JSON.stringify(values, null, '  ')}`)
+    console.warn(`Action of type ${type} is missing the following key(s): [${Array.from(missingKeys.values()).join(", ")}]\nThe action creator was given the following object:\n${JSON.stringify(values, null, '  ')}`)
   }
   else if (extraKeys.size > 0) {
-      console.warn(`Action of type ${type} has the following extra key(s): [${Array.from(extraKeys.values()).join(", ")}]\nThe action creator was given the following object:\n${JSON.stringify(values, null, '  ')}`)
+    console.warn(`Action of type ${type} has the following extra key(s): [${Array.from(extraKeys.values()).join(", ")}]\nThe action creator was given the following object:\n${JSON.stringify(values, null, '  ')}`)
   }
 }
 
@@ -57,8 +57,8 @@ const overrideMerge = (stateProps, dispatchProps, ownProps) => ({
   ...ownProps,
 })
 
-const reduxify = Comp => ({ withSelector, withActions, noConnect, ...rest }) => {
-  if ((withSelector || withActions) && !noConnect) {
+const reduxify = Comp => ({ withSelector, withActions, disconnect, ...rest }) => {
+  if ((withSelector || withActions) && !disconnect) {
     const NewComp = reduxify(connect(withSelector, withActions, overrideMerge)(Comp))
     return <NewComp {...rest} />
   }
