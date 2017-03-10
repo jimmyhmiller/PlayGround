@@ -38,3 +38,5 @@
 (handle-file {:file (clojure.java.io/file "/Users/jimmyhmiller/Desktop/test.multi")})
 
 (def watcher-agent (watch-dir handle-file (clojure.java.io/file "/Users/jimmyhmiller/Desktop/testmulti")))
+
+

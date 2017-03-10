@@ -276,132 +276,10 @@ export default () =>
       color="blue"
       text="((Parenthesis) are scary!!!)" />
 
-    <Code
-      title="A better Javascript"
-      lang="javascript"
-      source={`
-      // ugly
-      map(filter(_.range(100), even), add2) 
-
-      // better
-      _.chain(100)
-        .range() 
-        .filter(even)
-        .map(add2)
-        .value()
-
-      `} 
-    />
+    <Headline
+      text="Immutable Data Structures" />
 
     <Code
-      title="A better Javascript"
-      lang="javascript"
-      source={`
-      // ugly
-      escape(stripFooter(stripHeader(data)))
-
-      // better?
-      var dataNoHeader = stripHeader(data);
-      var dataNoHeadFoot = stripFooter(dataNoHeader);
-      var escapedData = espace(dataNoHeadFoot);
-      `} 
-    />
-
-    <Code
-      title="A better Javascript"
-      lang="clojure"
-      source={`
-      ; ugly
-      (map (filter even (range 100)) add2) 
-
-      ; better
-      (->> 100
-           range
-           (map add2)
-           (filter even?))
-
-      `} 
-    />
-
-    <Code
-      title="A better Javascript"
-      lang="clojure"
-      source={`
-      ; ugly
-      (escape (stripFooter (stripHeader data)))
-
-      ; better
-      (->> data
-           stripHeader
-           stripFooter
-           escape)
-      `} 
-    />
-
-    <Code
-      title="A better Javascript"
-      lang="javascript"
-      source={`
-        var x = ...
-        console.log(x.a.b) // bad
-
-        console.log(x && x.a && x.a.b) // good
-      `} 
-    />
-
-    <Code
-      title="A better Javascript"
-      lang="clojure"
-      source={`
-        (def x ...)
-        (println (-> x :a :b))
-      `} 
-    />
-
-    <Code
-      title="A better ES6/ES+"
-      lang="javascript"
-      source={`
-        function ([x, y]) {
-          return x + y;
-        }
-        function ({ x, y }) {
-          return x + y;
-        }
-      `} 
-    />
-
-    <Code
-      title="A better ES6/ES+"
-      lang="clojure"
-      source={`
-        (fn [[x y]]
-          (+ x y))
-        (fn [{:keys [x y]}]
-          (+ x y))
-      `} 
-    />
-
-    <Code
-      title="A better ES6/ES+"
-      lang="clojure"
-      source={`
-        (fn+ [x y] 
-          (+ x y))
-      `} 
-    />
-
-    <Code
-      title="A better ES6/ES+"
-      lang="clojure"
-      source={`
-        (defmacro fn+ [bindings & body]
-          \`(fn [{:keys ~bindings}] ~@body))
-      `} 
-    />
-
-    <Code
-      title="A better ES6/ES+"
       lang="javascript"
       source={`
         function getUserAndAddress(id) {
@@ -413,7 +291,6 @@ export default () =>
     />
 
     <Code
-      title="A better ES6/ES+"
       lang="javascript"
       source={`
         function getUserAndAddress(id) {
@@ -425,7 +302,6 @@ export default () =>
     />
 
     <Code
-      title="A better ES6/ES+"
       lang="javascript"
       source={`
         async function getUserAndAddress(id) {
@@ -437,29 +313,26 @@ export default () =>
     />
 
     <Code
-      title="A better ES6/ES+"
       lang="clojure"
       source={`
         (defn getUserAndAddress [id]
           (let [user (getUser id)
-                address (getAddress (user :id))]
+                address (getAddress (user :addressId))]
             (merge user address)))
       `} 
     />
 
     <Code
-      title="A better ES6/ES+"
       lang="clojure"
       source={`
         (defn getUserAndAddress [id]
           (async-let [user (getUser id)
-                      address (getAddress (user :id))]
+                      address (getAddress (user :addressId))]
             (merge user address)))
       `} 
     />
 
     <Code
-      title="A better ES6/ES+"
       lang="clojure"
       source={`
         (defmacro async-let

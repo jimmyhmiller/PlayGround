@@ -2,7 +2,7 @@
   (:require [promesa.core :refer [promise then bind]]))
 
 
-(defmacro alet
+(defmacro async-let
   [bindings & body]
   (->> (reverse (partition 2 bindings))
        (reduce (fn [acc [l r]]
@@ -26,6 +26,29 @@
   (promise (get-address id)))
 
 
-(alet [user (get-user-p 1)
-        address (get-address-p (:address user))]
-       [user address])
+(async-let [user (get-user-p 1)
+            address (get-address-p (:address user))]
+           [user address])
+
+
+
+
+(defn getUserAndAddress [id]
+  (let [user (getUser id)
+        address (getAddress (user :id))]
+    (merge user address)))
+
+(defmacro fn+ [bindings & body]
+  `(fn [{:keys ~bindings}] ~@body))
+
+
+(def add-point2 
+  (fn+ [x y] 
+       (+ x y)))
+
+
+(add-point2 {:x 1 :y 2 :z 3})
+
+
+
+      
