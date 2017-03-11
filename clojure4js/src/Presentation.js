@@ -17,6 +17,9 @@ import {
 
 import CodeSlide from 'spectacle-code-slide';
 
+import prettier from 'prettier';
+console.log(prettier)
+
 
 import preloader from "@jimmyhmiller/spectacle/lib/utils/preloader";
 
@@ -73,6 +76,19 @@ class Dark extends React.Component {
   }
 }
 
+// // Spectacle needs a ref
+// class Light extends React.Component {
+//   render() {
+//     const { children, ...rest } = this.props;
+//     return (
+//       <Slide bgColor="base3" {...rest}>
+//         {children}
+//       </Slide>
+//     )
+//   }
+// }
+
+
 // Spectacle needs a ref
 const withSlide = Comp => class WithSlide extends React.Component {
   render() {
@@ -104,12 +120,21 @@ const BlankSlide = withSlide(() => {
   return <span />;
 })
 
+const formatSource = ({lang, source}) => {
+  if (lang === 'javascript') {
+    return prettier(source, { printWidth: 60 });
+  }
+  return source;
+}
+
 const Code = withSlide(({ source, lang, title }) => {
   const spaces = detectIndent(source);
+  const unindentedSource = removeIndent(spaces, source);
+  const formattedSource = formatSource({ lang, source: unindentedSource });
   return (
     <div>
       <Headline noSlide textAlign="left" text={title} />
-      <CodePane textSize={20} source={removeIndent(spaces, source)} lang={lang} />
+      <CodePane textSize={20} source={formattedSource} lang={lang} />
     </div>
   )
 })
@@ -276,8 +301,70 @@ export default () =>
       color="blue"
       text="((Parenthesis) are scary!!!)" />
 
-    <Headline
-      text="Immutable Data Structures" />
+    <Points title="Benefits of Clojure">
+      <Point text="Immutability" />
+      <Point text="Purity" />
+      <Point text="Data as Code" />
+      <Point text="Code as Data" />
+    </Points>
+
+    <Code
+      title="Immutable Updates"
+      lang="clojure"
+      source={`
+        (def user 
+          {:name "jimmy"
+           :favorite-food "nachos"})
+
+        (assoc user :favorite-food "ice cream")
+        
+        (:favorite-food user) ;; "nachos"
+      `}
+    />
+
+    <Code
+      title="Immutable Updates"
+      lang="clojure"
+      source={`
+        (def nested {:a {:b {:c {:d 3}}}})
+
+        (assoc-in nested [:a :b :c :d] 4)
+        ;; {:a {:b {:c {:d 4}}}}
+      `}
+    />
+
+    <Code
+      title="Immutable Updates"
+      lang="clojure"
+      source={`
+        (def counter {:count 4})
+
+        (update counter :count inc)
+        ;; {:count 5}
+      `}
+    />
+
+    <Code
+      title="Practical Immutability"
+      lang="clojure"
+      source={`
+        (def counter (atom 4))
+        (def current-count @counter) ;; 4
+        
+        (swap! counter inc)
+
+        current-count ;; 4
+        @counter ;; 5
+      `}
+    />
+
+    <Points title="Practical Purity">
+      <Point text="Immutability makes purity easy" />
+      <Point text='Destructive functions end in "!"' />
+      <Point text="Side effects moved to the edges" />
+    </Points>
+
+    <Headline color="cyan" text="Data as Code" />
 
     <Code
       lang="javascript"
