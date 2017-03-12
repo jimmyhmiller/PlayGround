@@ -17,8 +17,7 @@ import {
 
 import CodeSlide from 'spectacle-code-slide';
 
-import prettier from 'prettier';
-console.log(prettier)
+import {format as prettier} from 'prettier';
 
 
 import preloader from "@jimmyhmiller/spectacle/lib/utils/preloader";
@@ -121,8 +120,8 @@ const BlankSlide = withSlide(() => {
 })
 
 const formatSource = ({lang, source}) => {
-  if (lang === 'javascript') {
-    return prettier(source, { printWidth: 60 });
+  if (lang === 'javascript' || lang === "jsx") {
+    return prettier(source, { printWidth: 50 });
   }
   return source;
 }
@@ -218,7 +217,7 @@ export default () =>
         </div>
       } 
     />
-
+    
     <CodeSlide
       className="datalang"
       lang="clojure"
@@ -367,6 +366,52 @@ export default () =>
     <Headline color="cyan" text="Data as Code" />
 
     <Code
+      lang="jsx"
+      source={`
+        const HomeLink = () =>{
+          return (
+            <a href="/">Home</a>
+          )
+        }
+
+      `}
+    />
+
+    <Code
+      lang="javascript"
+      source={`
+        const HomeLink = () => {
+          return React.createElement(
+            "a",
+            { href: "/" },
+            "Home"
+          );
+        };        
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        (defn home-link []
+          [:a {:href "/"} "Home"])
+      `}
+    />
+
+    <Code 
+      lang="clojure"
+      source={`
+        (select users
+          (where {:username [like "chris"]
+                  :status "active"
+                  :location [not= nil]}))
+
+      `}
+    />
+
+    <Headline color="blue" text="Code as Data" />
+
+    <Code
       lang="javascript"
       source={`
         function getUserAndAddress(id) {
@@ -383,7 +428,7 @@ export default () =>
         function getUserAndAddress(id) {
           return getUser(id)
             .then(user => getAddress(user.addressId)
-                .then(address => merge(user, address));
+                .then(address => merge(user, address)));
         }
       `} 
     />
@@ -404,7 +449,8 @@ export default () =>
       source={`
         (defn getUserAndAddress [id]
           (let [user (getUser id)
-                address (getAddress (user :addressId))]
+                address (getAddress
+                         (user :addressId))]
             (merge user address)))
       `} 
     />
@@ -414,7 +460,8 @@ export default () =>
       source={`
         (defn getUserAndAddress [id]
           (async-let [user (getUser id)
-                      address (getAddress (user :addressId))]
+                      address (getAddress 
+                               (user :addressId))]
             (merge user address)))
       `} 
     />
@@ -422,14 +469,20 @@ export default () =>
     <Code
       lang="clojure"
       source={`
-        (defmacro async-let
-          [bindings & body]
+        (defmacro async-let [bindings & body]
           (->> (reverse (partition 2 bindings))
                (reduce (fn [acc [l r]]
-                         \`(bind (promise ~r) (fn [~l] ~acc)))               
-                       \`(promise (do ~@body)))))
+                  \`(bind (promise ~r) (fn [~l] ~acc)))
+                \`(promise
+                   (do ~@body))))))
       `} 
     />
+
+    <Points title="Macros">
+      <Point text="Generate Code" />
+      <Point text="Remove Boilerplate" />
+      <Point text="Add New Language Features" />
+    </Points>
 
 
   
