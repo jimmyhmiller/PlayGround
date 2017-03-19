@@ -17,6 +17,8 @@ import {
 
 import CodeSlide from 'spectacle-code-slide';
 
+import {format as prettier} from 'prettier';
+
 
 import preloader from "@jimmyhmiller/spectacle/lib/utils/preloader";
 
@@ -73,6 +75,19 @@ class Dark extends React.Component {
   }
 }
 
+// // Spectacle needs a ref
+// class Light extends React.Component {
+//   render() {
+//     const { children, ...rest } = this.props;
+//     return (
+//       <Slide bgColor="base3" {...rest}>
+//         {children}
+//       </Slide>
+//     )
+//   }
+// }
+
+
 // Spectacle needs a ref
 const withSlide = Comp => class WithSlide extends React.Component {
   render() {
@@ -104,12 +119,21 @@ const BlankSlide = withSlide(() => {
   return <span />;
 })
 
+const formatSource = ({lang, source}) => {
+  if (lang === 'javascript' || lang === "jsx") {
+    return prettier(source, { printWidth: 50 });
+  }
+  return source;
+}
+
 const Code = withSlide(({ source, lang, title }) => {
   const spaces = detectIndent(source);
+  const unindentedSource = removeIndent(spaces, source);
+  const formattedSource = formatSource({ lang, source: unindentedSource });
   return (
     <div>
       <Headline noSlide textAlign="left" text={title} />
-      <CodePane textSize={20} source={removeIndent(spaces, source)} lang={lang} />
+      <CodePane textSize={20} source={formattedSource} lang={lang} />
     </div>
   )
 })
@@ -193,7 +217,7 @@ export default () =>
         </div>
       } 
     />
-
+    
     <CodeSlide
       className="datalang"
       lang="clojure"
@@ -276,8 +300,116 @@ export default () =>
       color="blue"
       text="((Parenthesis) are scary!!!)" />
 
-    <Headline
-      text="Immutable Data Structures" />
+    <Points title="Benefits of Clojure">
+      <Point text="Immutability" />
+      <Point text="Purity" />
+      <Point text="Data as Code" />
+      <Point text="Code as Data" />
+    </Points>
+
+    <Code
+      title="Immutable Updates"
+      lang="clojure"
+      source={`
+        (def user 
+          {:name "jimmy"
+           :favorite-food "nachos"})
+
+        (assoc user :favorite-food "ice cream")
+        
+        (:favorite-food user) ;; "nachos"
+      `}
+    />
+
+    <Code
+      title="Immutable Updates"
+      lang="clojure"
+      source={`
+        (def nested {:a {:b {:c {:d 3}}}})
+
+        (assoc-in nested [:a :b :c :d] 4)
+        ;; {:a {:b {:c {:d 4}}}}
+      `}
+    />
+
+    <Code
+      title="Immutable Updates"
+      lang="clojure"
+      source={`
+        (def counter {:count 4})
+
+        (update counter :count inc)
+        ;; {:count 5}
+      `}
+    />
+
+    <Code
+      title="Practical Immutability"
+      lang="clojure"
+      source={`
+        (def counter (atom 4))
+        (def current-count @counter) ;; 4
+        
+        (swap! counter inc)
+
+        current-count ;; 4
+        @counter ;; 5
+      `}
+    />
+
+    <Points title="Practical Purity">
+      <Point text="Immutability makes purity easy" />
+      <Point text='Destructive functions end in "!"' />
+      <Point text="Side effects moved to the edges" />
+    </Points>
+
+    <Headline color="cyan" text="Data as Code" />
+
+    <Code
+      lang="jsx"
+      source={`
+        const HomeLink = () =>{
+          return (
+            <a href="/">Home</a>
+          )
+        }
+
+      `}
+    />
+
+    <Code
+      lang="javascript"
+      source={`
+        const HomeLink = () => {
+          return React.createElement(
+            "a",
+            { href: "/" },
+            "Home"
+          );
+        };        
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        (defn home-link []
+          [:a {:href "/"} "Home"])
+      `}
+    />
+
+    <Code 
+      lang="clojure"
+      source={`
+        (select users
+          (where {:username [like "chris"]
+                  :status "active"
+                  :location [not= nil]}))
+
+      `}
+    />
+
+    <Headline color="blue" text="Code as Data" />
 
     <Code
       lang="javascript"
@@ -296,7 +428,7 @@ export default () =>
         function getUserAndAddress(id) {
           return getUser(id)
             .then(user => getAddress(user.addressId)
-                .then(address => merge(user, address));
+                .then(address => merge(user, address)));
         }
       `} 
     />
@@ -317,7 +449,8 @@ export default () =>
       source={`
         (defn getUserAndAddress [id]
           (let [user (getUser id)
-                address (getAddress (user :addressId))]
+                address (getAddress
+                         (user :addressId))]
             (merge user address)))
       `} 
     />
@@ -327,7 +460,8 @@ export default () =>
       source={`
         (defn getUserAndAddress [id]
           (async-let [user (getUser id)
-                      address (getAddress (user :addressId))]
+                      address (getAddress 
+                               (user :addressId))]
             (merge user address)))
       `} 
     />
@@ -335,14 +469,20 @@ export default () =>
     <Code
       lang="clojure"
       source={`
-        (defmacro async-let
-          [bindings & body]
+        (defmacro async-let [bindings & body]
           (->> (reverse (partition 2 bindings))
                (reduce (fn [acc [l r]]
-                         \`(bind (promise ~r) (fn [~l] ~acc)))               
-                       \`(promise (do ~@body)))))
+                  \`(bind (promise ~r) (fn [~l] ~acc)))
+                \`(promise
+                   (do ~@body))))))
       `} 
     />
+
+    <Points title="Macros">
+      <Point text="Generate Code" />
+      <Point text="Remove Boilerplate" />
+      <Point text="Add New Language Features" />
+    </Points>
 
 
   

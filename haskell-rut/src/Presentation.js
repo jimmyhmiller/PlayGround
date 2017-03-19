@@ -463,8 +463,6 @@ export default () =>
           let newData = merge oldData currentData
           newId <- storeData newData
           return newId
-
-
       `}
     />
 
