@@ -39,24 +39,32 @@
 
 
 
-(def g
-  (-> {}
-      (--> :CounterRelease [:Released-at-Counter :Exception])
-      (--> :Exception [:Ship-to-State])
-      (--> :Inventory [:Exception :Reassign :Ship-to-Seller])
-      (--> :Pre-Receipt [:Validate])
-      (--> :Reassign [:Exception :Ship-to-Buyer :CounterRelease])
-      (--> :Ship-to-Buyer [:Shipped-to-Buyer :Exception])
-      (--> :Ship-to-Seller [:Shipped-to-Seller :Exception])
-      (--> :Unmatched [:Validate])
-      (--> :Validate [:Inventory :Exception])
-      (--> :Verify [:Unmatched :Validate])
-      (--> :Shipped-to-State [:Validate])
-      (--> :Ship-to-State [:Shipped-to-State :Exception])
-      (--> :Shipped-to-Buyer [:Archive])
-      (--> :Shipped-to-Seller [:Archive])
-      (--> :Released-at-Counter [:Archive])))
+;; (def g
+;;   (-> {}
+;;       (--> :CounterRelease [:Released-at-Counter :Exception])
+;;       (--> :Exception [:Ship-to-State])
+;;       (--> :Inventory [:Exception :Reassign :Ship-to-Seller])
+;;       (--> :Pre-Receipt [:Validate])
+;;       (--> :Reassign [:Exception :Ship-to-Buyer :CounterRelease])
+;;       (--> :Ship-to-Buyer [:Shipped-to-Buyer :Exception])
+;;       (--> :Ship-to-Seller [:Shipped-to-Seller :Exception])
+;;       (--> :Unmatched [:Validate])
+;;       (--> :Validate [:Inventory :Exception])
+;;       (--> :Verify [:Unmatched :Validate])
+;;       (--> :Shipped-to-State [:Validate])
+;;       (--> :Ship-to-State [:Shipped-to-State :Exception])
+;;       (--> :Shipped-to-Buyer [:Archive])
+;;       (--> :Shipped-to-Seller [:Archive])
+;;       (--> :Released-at-Counter [:Archive])))
 
+
+
+(def g 
+  (-> {}
+      (--> :if1 [:end :take-stuff])
+      (--> :take-stuff [:call-get :call-take])
+      (--> :call-get [:if1])
+      (--> :call-take [:if1])))
 
 (save-image
  (graph->image (keys g) g
@@ -66,4 +74,4 @@
 
 (view-graph (keys g) g
             :node->descriptor (fn [n] {:label (name n)})
-            :options {:layout "circo"})
+            :options {:layout "dot"})
