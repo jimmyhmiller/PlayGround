@@ -38,7 +38,6 @@ def gets(collection, id):
     return Response(dumps(sane_ids(entity)), mimetype='application/json')
 
 
-
 @app.route("/<collection>/<id>", methods=["PATCH", "PUT"])
 def update(collection, id):
     mongo.db[collection].update({"_id": ObjectId(id)}, {"$set": request.get_json(True, True)})

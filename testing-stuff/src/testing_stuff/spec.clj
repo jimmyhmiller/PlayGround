@@ -2,9 +2,33 @@
   (:require [clojure.spec :as s]))
 
 
+(s/def :html/tag #{:a :abbr :address :area :article :aside :audio :b :base :bdi :bdo :blockquote :body :br :button :canvas :caption :cite :code :col :colgroup :command :datalist :dd :del :details :dfn :div :dl :dt :em :embed :fieldset :figcaption :figure :footer :form :h1 :h2 :h3 :h4 :h5 :h6 :head :header :hgroup :hr :html :i :iframe :img :input :ins})
+
+(s/def :html/element
+  (s/cat
+   :tag :html/tag
+   :attrs (s/map-of keyword? string?)
+   :children (s/* (s/alt :element :html/element 
+                         :string string?))))
+
+
+(s/def :html/elem 
+  (s/cat :tag :html/tag :attr :html/attr :body (s/? :html/elem)))
+
+(s/def :html/tag keyword?)
+
+(s/def :html/attr (s/map-of keyword? string?))
+
+
+(s/exercise :html/element 3)
+
+
+
+
+
 (s/def ::binding
   (s/cat
-    :name  symbol?
+    :name symbol?
     :value (constantly true)))
 
 (s/def ::bindings

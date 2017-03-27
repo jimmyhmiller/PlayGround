@@ -1,6 +1,9 @@
 (ns cljs-forms.components
-  (:require  [clojure.spec :as s]))
+  (:require [clojure.spec :as s]))
 
+
+
+(s/def :form/component (s/cat :tag keyword? :attr (s/? map?) :children (s/* :form/component)))
 
 (s/def :form/input (s/keys :req [:form/label]))
 (s/def :form/label string?)
@@ -11,38 +14,39 @@
 (s/def :form/value any?)
 
 
-(defmulti render (fn [comp field fields] comp))
+(defmulti render (fn [comp field fields field-name] comp))
 
-(defmethod render :form/input [_ {:keys [:form/label]} _]
+(defmethod render :form/input [_ {:keys [:form/label]} _ _]
   [:div.form-group
    [:label.control-label label]
    [:input.form-control {:type :text}]])
 
 
-(defn radio [{:keys [:form/value :form/label]}]
+(defn radio [field-name {:keys [:form/value :form/label]}]
   [:label.radio-inline 
-   [:input {:type :radio}]
+   [:input {:type :radio :name field-name}]
    label])
 
 
-(defmethod render :form/radio [_ {:keys [:form/label :form/values]} _]
-  (let [radios (map radio values)]
+(defmethod render :form/radio [_ {:keys [:form/label :form/values]} _  field-name]
+  (let [radios (map (partial radio field-name) values)]
     [:div 
      [:label.control-label label]
      radios]))
 
 
-(defmethod render :default [f field fields]
+(defmethod render :default [f field fields field-name]
   (if (fn? f)
-    (f field fields)
-    (render :form/input field fields)))
+    (f field fields field-name)
+    (render :form/input field fields field-name)))
 
 
 (defn render-form [form fields comps]
   [:div
    (->> form
-        (map (fn [field] 
-               (render 
-                (field comps)
-                (field fields) 
-                fields))))])
+        (map (fn [field-name] 
+               (render
+                (field-name comps)
+                (field-name fields)
+                fields
+                field-name))))])

@@ -161,10 +161,30 @@ const TwoColumn = withSlide(({ left, right, title }) =>
 
 const Presentation = ({ children }) => 
   <Spectacle theme={theme}>
-    <Deck transition={["slide"]} transitionDuration={0} progress="none">
+    <Deck style={{display: 'none'}} transition={["slide"]} transitionDuration={0} progress="none">
       {children}
     </Deck>
   </Spectacle>
+
+
+
+// This a hack to blank the screen.
+// On next render (slide transtion) it will go away.
+const blankScreen = (e) => {
+  if (e.key === 'blankSlide' && e.newValue === "true") {
+    document.querySelector(".spectacle-content").style["display"] = 'none'
+  }
+}
+window.addEventListener('storage', blankScreen);
+
+const keyShortcuts = (e) => {
+  if (e.altKey && e.keyCode === 66) {
+    localStorage.blankSlide = true;
+    localStorage.blankSlide = false;
+  }
+}
+
+document.addEventListener('keyup', keyShortcuts, false);
 
 export default () =>
   <Presentation>
@@ -175,19 +195,46 @@ export default () =>
       text="Getting out of the Rut"
       subtext="A dive into Haskell" />
 
+    <TwoColumn
+      title="About Me"
+      left={<Image src={images.me} />}
+      right={
+        <div style={{paddingTop: 80}}>
+          <Text textColor="blue" textSize={60} textAlign="left">Jimmy Miller</Text>
+          <Points noSlide styleContainer={{paddingTop: 10}}>
+            <Point textSize={40} text="Self Taught" /> 
+            <Point textSize={40} text="Lead Developer - Trabian" /> 
+            <Point textSize={40} text="FP Nerd" />
+          </Points>
+        </div>
+      } 
+    />
+
+    <Headline 
+      size={2} 
+      caps={false}
+      subtextSize={3}
+      text="Getting out of the Rut"
+      subtext="A dive into Haskell" />
+
     <Headline text="Two Ruts" color="green" />
+    
+    <Points title="About Haskell">
+      <Point text="Purely Functional" />
+      <Point text="Compiled" />
+      <Point text="Emphasis on Types" />
+    </Points>
 
-    <BlankSlide />
-
-    <Points title="Curry Howard Isomorphism">
-      <Point text="Types are Propositions" />
-      <Point text="Programs are Proofs" />
-      <Point text="Program Execution is Proof Simplification" />
+    <Points title="Haskell's Reputation">
+      <Point text="Esoteric" />
+      <Point text="Needlessly Complicated" />
+      <Point text="Not Practical" />
     </Points>
 
     <Headline
-     text="Haskell Embraces Mathematics"
-     subtext="and so should we" />
+      textAlign="left" 
+      text="Haskell Embraces Mathematics"
+      subtext="and so should we" />
 
     <Points title="Purely Functional">
       <Point text="No Loops (for, while, etc)" />
@@ -198,7 +245,9 @@ export default () =>
       <Point text="No Nulls" />
     </Points>
 
-    <BlankSlide />
+    <Headline
+      color="yellow"
+      text="Relearning Programming" />
 
     <Code 
       title="Functions"
@@ -244,13 +293,14 @@ export default () =>
       `}
     />
 
-    <BlankSlide />
-
     <Code
       title="Data Types" 
       lang="haskell"
       source={`
         data Bool = True | False
+
+        isAwesome :: Bool
+        isAwesome = True
       `}
     />
 
@@ -259,6 +309,9 @@ export default () =>
       lang="haskell"
       source={`
         data Color = Green | Blue | Red
+
+        favorite :: Color
+        favorite = Green
       `}
     />
 
@@ -279,8 +332,6 @@ export default () =>
         myPlayer = Warrior LongSword
       `}
     />
-
-    <BlankSlide />
 
     <Code
       title="Pattern Matching" 
@@ -314,13 +365,11 @@ export default () =>
       `}
     />
 
-    <BlankSlide />
-
     <Code
       title="polymorphism"
       lang="haskell"
       source={`
-        identityInt : Int -> Int
+        identityInt :: Int -> Int
         identityInt x = x
 
         identityString : String -> String
@@ -332,7 +381,7 @@ export default () =>
       title="polymorphism"
       lang="haskell"
       source={`
-        identity : a -> a
+        identity :: a -> a
         identity x = x
 
         identity "Test"
@@ -370,12 +419,13 @@ export default () =>
       source={`
         data IsSpecial a = Special a | NotSpecial a
 
-        special :: IsSpecial String
-        special = Special "Everyone"
+        special1 :: IsSpecial String
+        special1 = Special "Everyone"
+        
+        special2 :: IsSpecial Int
+        special2 = NotSpecial 6
       `}
     />
-
-    <BlankSlide />
 
     <Code
       title="No Nulls"
@@ -421,11 +471,9 @@ export default () =>
           foo <- getFoo
           bar <- getBar foo
           baz <- getBaz bar
-          return $ (foo, bar, baz)
+          return (foo, bar, baz)
       `}
     />
-
-    <BlankSlide />
 
     <Code
       title="Error Handling"
@@ -454,19 +502,17 @@ export default () =>
       lang="haskell"
       source={`
         merge :: Data -> Data -> Data
-        getData :: Id -> Either StoreError Data
-        storeData :: Data -> Either StoreError Id
+        getData :: Id -> Either Error Data
+        storeData :: Data -> Either Error Id
 
-        updateData :: Id -> Data -> Either StoreError Id
+        updateData :: Id -> Data -> Either Error Id
         updateData id currentData = do
-          oldData <- getData isRequired
+          oldData <- getData id
           let newData = merge oldData currentData
           newId <- storeData newData
           return newId
       `}
     />
-
-    <BlankSlide />
 
     <Code
       title="Problem"
@@ -510,7 +556,8 @@ export default () =>
       lang="haskell"
       source={`
         youShouldKnow :: Help a => a -> String
-        youShouldKnow x = "You should know... " ++ helpText x
+        youShouldKnow x = "You should know... " 
+                            ++ helpText x
       `}
     />
 
@@ -525,8 +572,6 @@ export default () =>
       <Point text="Traversable" />
     </Points>
 
-    <BlankSlide />
-
     <Headline text="What Haskell gives us?" />
 
     <Code
@@ -536,7 +581,7 @@ export default () =>
         [1..100]
         |> map (+2)
         |> filter even
-        |> filter (*2)
+        |> reduce + 0
       `}
     />
 
@@ -574,19 +619,53 @@ export default () =>
       title="Purity"
       lang="haskell"
       source={`
-        moveTo :: Vec -> Ai ()
-        moveTo pos = do
-          arrived <- isAt pos
+        moveTo :: Vector -> Ai ()
+        moveTo position = do
+          arrived <- isAt position
           unless arrived $ do
-            angle <- angleTo pos
+            angle <- angleTo position
             rotateTowards angle
             accelerate
-            moveTo pos
+            moveTo position
       `}
     />
 
-    <Headline text="Right Reasoning" />
+    <Headline text="Reason About Code" />
 
     <ImageSlide src={images.haxl} />
+
+    <Code
+      title="N+1 Fetches"
+      lang="haskell"
+      source={`
+        getAllUsernames :: IO [Name]
+        getAllUsernames = do
+          userIds <- getAllUserIds
+          for userIds $ \\userId -> do
+            getUsernameById userId
+      `}
+    />
+
+    <Code
+      title="N+1 Fetches"
+      lang="haskell"
+      source={`
+        getAllUsernames :: Haxl [Name]
+        getAllUsernames = do
+          userIds <- getAllUserIds
+          for userIds $ \\userId -> do
+            getUsernameById userId
+      `}
+    />
+
+
+    <Points title="Learn Haskell">
+      <Point text="Embrace Challenge" />
+      <Point text="Learn More Math" />
+      <Point text="Gain Confidence in Your Code" />
+      <Point text="New Tools for Problems" />
+    </Points>
+
+    <BlankSlide />
 
   </Presentation>

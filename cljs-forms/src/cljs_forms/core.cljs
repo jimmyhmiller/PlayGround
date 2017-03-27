@@ -1,6 +1,10 @@
 (ns cljs-forms.core
   (:require [reagent.core :as r]
-            [cljs-forms.components :refer [render-form]]))
+            [cljs-forms.components :refer [render-form]]
+            [clojure.walk :refer [postwalk postwalk-demo prewalk walk]]
+            [clojure.spec :as s]
+            [cljs.spec.impl.gen :as gen]
+            [clojure.test.check.generators :as generators]))
 
 (enable-console-print!)
 
@@ -10,8 +14,6 @@
 
 (defonce app-state (atom {:text "Hello world!"}))
 
-(println "hello")
-
 
 (def fields
   {:form/amount {:form/label "Enter an amount"}
@@ -20,13 +22,12 @@
                    :form/values [{:form/value :form/new :form/label "New"}
                                  {:form/value :form/used :form/label "Used"}]}})
 
-
-
-;; (def new-form
-;;   [[:layout/horizontal [:form/first-name :form/middle-name :form/last-name]]
-;;    [:form/amount]])
-
-
+(def new-form
+  [[:layout/horizontal 
+    [:form/first-name] 
+    [:form/middle-name] 
+    [:form/last-name]]
+   [:form/amount]])
 
 (def form
   [:form/new-used
@@ -40,10 +41,22 @@
   {:form/new-used :form/radio
    :form/another another-component})
 
-
-
 (defn app []
   (render-form form fields comps))
+
+
+(defn log [label x]
+  (println label x)
+  x)
+
+(set! *recursion-limit* 2)
+
+(s/exercise :form/component 4)
+
+
+(walk (partial log "inner") (partial log "outer") new-form)
+
+(app)
 
 (defn ^:export run []
   (r/render [app]

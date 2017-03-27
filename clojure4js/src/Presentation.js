@@ -40,8 +40,6 @@ require("normalize.css");
 require("@jimmyhmiller/spectacle/lib/themes/default/index.css");
 
 
-
-
 const theme = createTheme({
   primary: "#002b36",
   base03: "#002b36",
@@ -108,9 +106,11 @@ const detectIndent = source =>
   source ? / +/.exec(source)[0].length : 0;
 
 const removeIndent = (indent, source) =>
-  source.split("\n")
-        .map(s => s.substring(indent, s.length))
-        .join("\n")
+  source
+    .replace(/^\n/, '')
+    .split("\n")
+    .map(s => s.substring(indent, s.length))
+    .join("\n")
 
 const handleIndent = (source) =>
   removeIndent(detectIndent(source), source).trim()
@@ -126,13 +126,13 @@ const formatSource = ({lang, source}) => {
   return source;
 }
 
-const Code = withSlide(({ source, lang, title }) => {
+const Code = withSlide(({ source, lang, title, titleSize }) => {
   const spaces = detectIndent(source);
   const unindentedSource = removeIndent(spaces, source);
   const formattedSource = formatSource({ lang, source: unindentedSource });
   return (
     <div>
-      <Headline noSlide textAlign="left" text={title} />
+      <Headline size={titleSize} noSlide textAlign="left" text={title} />
       <CodePane textSize={20} source={formattedSource} lang={lang} />
     </div>
   )
@@ -143,9 +143,9 @@ const Point = ({ text, textSize=50 }) =>
     {text}
   </ListItem>
 
-const Points = withSlide(({ children, title, size, styleContainer }) =>
+const Points = withSlide(({ children, title, size, styleContainer, color }) =>
   <div style={styleContainer}>
-    <Headline noSlide size={size} textAlign="left" text={title} />
+    <Headline color={color} noSlide size={size} textAlign="left" text={title} />
     <List>
       {children}
     </List>
@@ -201,7 +201,8 @@ export default () =>
       size={2}
       caps={false}
       subtextSize={3}
-      text="Clojure(Script) for Javascript Developers" />
+      color="blue"
+      text={<span>Clojure<span style={{color: "#2aa198"}}>(Script)</span> for Javascript Developers</span>} />
 
     <TwoColumn
       title="About Me"
@@ -217,277 +218,274 @@ export default () =>
         </div>
       } 
     />
-    
-    <CodeSlide
-      className="datalang"
-      lang="clojure"
-      code={handleIndent(`
-        1
-        2
-        3
 
-        1.0
-        123.1234
-        3.14
+    <Headline text="Javascript Fatigue" />
 
-        "string"
-        "jimmy"
-        "test"
+    <Points title="Fatigue Causers">
+      <Point text="Build Tools" />
+      <Point text="ES6/ES7/ES2015/ES2016/ES.Next" />
+      <Point text="So many libraries" />
+    </Points>
 
-        false
-        true
 
-        nil
+    <Points color="blue" title="Progress">
+      <Point text="Better Tools" />
+      <Point text="New Language Features" />
+      <Point text="Functional Programming" />
+    </Points>
 
-        :test
-        :a
-        :name
-
-        +
-        def
-        map
-
-        (1 2 3 4 5)
-        ("test", "test1", "test2")
-        (false 2 2.1 "test")
-        (def x 2)
-
-        [1 false "stuff"]
-        [1 2 3]
-        [false, x, 30]
-
-        {:a 2
-         :b 3}
-
-        {:type "Warrior"
-         :attack 3 
-         :defense 5
-         :languages [:common :elven]}
-
-        (defn double [x]
-          (* x 2))
-
-        (get {:a 2} :a)
-      `)}
-      ranges={[
-        { loc: [0, 0], title: "A Data Language" },
-        { loc: [0, 3], note: "integer"},
-        { loc: [4, 7], note: "float"},
-        { loc: [8, 11], note: "string"},
-        { loc: [12, 14], note: "boolean"},
-        { loc: [15, 16], note: "nil (null)"},
-        { loc: [17, 20], note: "keyword"},
-        { loc: [21, 24], note: "symbol"},
-        { loc: [25, 29], note: "list"},
-        { loc: [30, 33], note: "vector"},
-        { loc: [34, 41], note: "map"},
-        { loc: [42, 46], note: "mixed all together"},
-      ]}
-    />
+    <Headline color="green" text="Going Against the Grain" />
 
     <Code
-      lang="clojure"
+      lang="javascript"
       source={`
-        (println "Hello World!")
-        (* 2 2)
-        (double 3)
-        (if true 2 3)
-        (def x 2)
+        function updateVeryNestedField(state, action) {
+            return {
+                ...state,
+                first : {
+                    ...state.first,
+                    second : {
+                        ...state.first.second,
+                        [action.someId] : {
+                            ...state.first.second[action.someId],
+                            fourth : action.someValue
+                        }
+                    }
+                }
+            }
+        }
       `}
     />
 
     <Headline
-      color="blue"
-      text="((Parenthesis) are scary!!!)" />
+      size={4}
+      caps={false}
+      textAlign="left"
+      text="Community === Wonderful"
+      subtextSize={4}
+      subtext="Javascript == Okay" />
 
-    <Points title="Benefits of Clojure">
-      <Point text="Immutability" />
-      <Point text="Purity" />
-      <Point text="Data as Code" />
-      <Point text="Code as Data" />
+    <Points title="Clojure(Script)">
+      <Point text="Functional" />
+      <Point text="Lisp" />
+      <Point text="JVM/Javascript" />
     </Points>
 
     <Code
-      title="Immutable Updates"
+      title="Immutable Datastructures"
       lang="clojure"
       source={`
-        (def user 
-          {:name "jimmy"
-           :favorite-food "nachos"})
+        ;; list
+        (1 2 3)
 
-        (assoc user :favorite-food "ice cream")
+        ;; vector
+        [1 2 3]
+
+        ;; map
+        {:name "jimmy"
+         :favorite-food "ice cream"}
+      `}
+    />
+
+    <Code
+      title="(= data-structures syntax)"
+      titleSize={4}
+      lang="clojure"
+      source={`
+        (defn double [x]
+          (* x 2))
+
+        (double 2) ;; 4
+      `}
+    />
+
+    <Code
+      title="(= data-structures syntax)"
+      titleSize={4}
+      lang="clojure"
+      source={`
+        (def x 3)
         
-        (:favorite-food user) ;; "nachos"
+        (if (= x 2)
+          "It's two"
+          "It's not two")
       `}
     />
 
     <Code
-      title="Immutable Updates"
+      title="(= data-structures syntax)"
+      titleSize={4}
       lang="clojure"
       source={`
-        (def nested {:a {:b {:c {:d 3}}}})
-
-        (assoc-in nested [:a :b :c :d] 4)
-        ;; {:a {:b {:c {:d 4}}}}
+        (->> (range 100)
+             (map (partial + 2))
+             (filter even?)
+             (reduce + 0))
       `}
     />
 
     <Code
-      title="Immutable Updates"
+      title="(= data-structures syntax)"
+      titleSize={4}
       lang="clojure"
       source={`
-        (def counter {:count 4})
-
-        (update counter :count inc)
-        ;; {:count 5}
+        (defn update-very-nested-field [state action]
+          (assoc-in state [:first :second 
+                           (:some-id action) :forth] 
+                    (:some-value action)))
       `}
     />
 
-    <Code
-      title="Practical Immutability"
-      lang="clojure"
-      source={`
-        (def counter (atom 4))
-        (def current-count @counter) ;; 4
-        
-        (swap! counter inc)
+    <Headline text="((Parentheses) are Scary!!!)" />
 
-        current-count ;; 4
-        @counter ;; 5
-      `}
-    />
+    <Headline color="green" text="State of Javascript Tooling" />
 
-    <Points title="Practical Purity">
-      <Point text="Immutability makes purity easy" />
-      <Point text='Destructive functions end in "!"' />
-      <Point text="Side effects moved to the edges" />
+    <Points title="Javascript Module Systems">
+      <Point text="AMD" />
+      <Point text="UMD" />
+      <Point text="CommonJS" />
+      <Point text="ES6 Modules" />
+      <Point text="Node ES6 Modules" />
     </Points>
 
-    <Headline color="cyan" text="Data as Code" />
+    <Points color="red" title="Javascript Bundlers">
+      <Point text="Webpack" />
+      <Point text="Webpack2" />
+      <Point text="Rollup" />
+      <Point text="Browserify" />
+      <Point text="Broccoli" />
+    </Points>
 
-    <Code
-      lang="jsx"
-      source={`
-        const HomeLink = () =>{
-          return (
-            <a href="/">Home</a>
-          )
-        }
+    <Headline color="violet" text="Create React App" />
 
-      `}
-    />
+    <Points title="ClojureScript Module System">
+      <Point text="Built-in" />
+    </Points>
+
+    <Points color="red" title="ClojureScript Bundlers">
+      <Point text="Built-in" />
+    </Points>
+
+    <Points title="Out of the Box">
+      <Point text="Minified" />
+      <Point text="Source Mapped" />
+      <Point text="Dead Code Eliminated" />
+      <Point text="Auto Building" />
+      <Point text="Browser Repl" />
+    </Points>
+
+    <Points color="green" title="Third Party">
+      <Point text="Hot Reloading That Actually Works" />
+    </Points>
+
+    <Points color="green" title="JS Language Extensions">
+      <Point text="ES.Next" />
+      <Point text="JSX" />
+      <Point text="Flow" />
+      <Point text="TypeScript" />
+    </Points>
+
+    <Points title="JS Compilers">
+      <Point text="Babel" />
+      <Point text="TypeScript" />
+    </Points>
+
+    <Headline 
+      color="cyan"
+      textAlign="left"
+      text="Clojure has Macros"
+      subtext="and great data literals" />
 
     <Code
       lang="javascript"
-      source={`
-        const HomeLink = () => {
-          return React.createElement(
-            "a",
-            { href: "/" },
-            "Home"
-          );
-        };        
-      `}
-    />
-
-    <Code
-      lang="clojure"
-      source={`
-        (defn home-link []
-          [:a {:href "/"} "Home"])
-      `}
-    />
-
-    <Code 
-      lang="clojure"
-      source={`
-        (select users
-          (where {:username [like "chris"]
-                  :status "active"
-                  :location [not= nil]}))
-
-      `}
-    />
-
-    <Headline color="blue" text="Code as Data" />
-
-    <Code
-      lang="javascript"
+      title="Async Await"
       source={`
         function getUserAndAddress(id) {
           const user = getUser(id);
           const address = getAddress(user.addressId);
           return merge(user, address);
         }
-      `} 
+      `}
     />
 
     <Code
       lang="javascript"
-      source={`
-        function getUserAndAddress(id) {
-          return getUser(id)
-            .then(user => getAddress(user.addressId)
-                .then(address => merge(user, address)));
-        }
-      `} 
-    />
-
-    <Code
-      lang="javascript"
+      title="Async Await"
       source={`
         async function getUserAndAddress(id) {
           const user = await getUser(id);
           const address = await getAddress(user.addressId);
           return merge(user, address);
         }
-      `} 
+      `}
     />
 
     <Code
       lang="clojure"
+      title="Async Await"
       source={`
         (defn getUserAndAddress [id]
           (let [user (getUser id)
-                address (getAddress
-                         (user :addressId))]
+                address (getAddress (user :addressId))]
             (merge user address)))
       `} 
     />
 
+
     <Code
       lang="clojure"
+      title="Async Await"
       source={`
         (defn getUserAndAddress [id]
           (async-let [user (getUser id)
-                      address (getAddress 
-                               (user :addressId))]
+                      address (getAddress (user :addressId))]
             (merge user address)))
-      `} 
+      `}
     />
 
     <Code
       lang="clojure"
+      title="Async Await"
       source={`
-        (defmacro async-let [bindings & body]
+        (defmacro async-let
+          [bindings & body]
           (->> (reverse (partition 2 bindings))
                (reduce (fn [acc [l r]]
-                  \`(bind (promise ~r) (fn [~l] ~acc)))
-                \`(promise
-                   (do ~@body))))))
-      `} 
+                         \`(bind (promise ~r) (fn [~l] ~acc)))               
+                       \`(promise (do ~@body)))))
+      `}
     />
 
-    <Points title="Macros">
-      <Point text="Generate Code" />
-      <Point text="Remove Boilerplate" />
-      <Point text="Add New Language Features" />
+    <Code
+      lang="javascript"
+      title="JSX"
+      source={`
+        const HomeLink = () => {
+         return <a href="#">Home</a>
+        }
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="JSX"
+      source={`
+        (defn home-link []
+          [:a {:href "#"} "Home"])
+      `}
+    />
+
+    <Points size={4} color="green" title='Other "Language" Features'>
+      <Point text="Type Checking" />
+      <Point text="Pattern Matching" />
+      <Point text="Graphql" />
+      <Point text="Core.Async - (Google Go)" />
+      <Point text="Specification" />
     </Points>
 
+    <Headline color="blue" text="Demo" />
 
-  
-
-
+    <Headline text="Moving Beyond" />
 
 
   </Presentation>

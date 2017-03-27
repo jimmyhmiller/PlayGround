@@ -95,3 +95,4 @@
 (def prog (-main))
 (-> (select prog [:#canvas])
     (repaint!))
+

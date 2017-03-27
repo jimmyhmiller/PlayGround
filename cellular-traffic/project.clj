@@ -1,4 +1,4 @@
-(defproject cljs-forms "0.1.0-SNAPSHOT"
+(defproject cellular-traffic "0.1.0-SNAPSHOT"
   :description "FIXME: write this!"
   :url "http://example.com/FIXME"
   :license {:name "Eclipse Public License"
@@ -7,11 +7,9 @@
   :min-lein-version "2.7.1"
 
   :dependencies [[org.clojure/clojure "1.8.0"]
-                 [org.clojure/clojurescript "1.9.494"]
+                 [org.clojure/clojurescript "1.9.229"]
                  [org.clojure/core.async "0.2.395"
-                  :exclusions [org.clojure/tools.reader]]
-                 [reagent "0.6.0"]
-                 [org.clojure/test.check "0.9.0"]]
+                  :exclusions [org.clojure/tools.reader]]]
 
   :plugins [[lein-figwheel "0.5.9"]
             [lein-cljsbuild "1.1.5" :exclusions [[org.clojure/clojure]]]]
@@ -27,16 +25,16 @@
                 ;; the presence of a :figwheel configuration here
                 ;; will cause figwheel to inject the figwheel client
                 ;; into your build
-                :figwheel {:on-jsload "cljs-forms.core/run"
+                :figwheel {:on-jsload "cellular-traffic.core/on-js-reload"
                            ;; :open-urls will pop open your application
                            ;; in the default browser once Figwheel has
                            ;; started and complied your application.
                            ;; Comment this out once it no longer serves you.
                            :open-urls ["http://localhost:3449/index.html"]}
 
-                :compiler {:main cljs-forms.core
+                :compiler {:main cellular-traffic.core
                            :asset-path "js/compiled/out"
-                           :output-to "resources/public/js/compiled/cljs_forms.js"
+                           :output-to "resources/public/js/compiled/cellular_traffic.js"
                            :output-dir "resources/public/js/compiled/out"
                            :source-map-timestamp true
                            ;; To console.log CLJS data-structures make sure you enable devtools in Chrome
@@ -47,8 +45,8 @@
                ;; lein cljsbuild once min
                {:id "min"
                 :source-paths ["src"]
-                :compiler {:output-to "resources/public/js/compiled/cljs_forms.js"
-                           :main cljs-forms.core
+                :compiler {:output-to "resources/public/js/compiled/cellular_traffic.js"
+                           :main cellular-traffic.core
                            :optimizations :advanced
                            :pretty-print false}}]}
 
@@ -59,7 +57,7 @@
              :css-dirs ["resources/public/css"] ;; watch and update CSS
 
              ;; Start an nREPL server into the running figwheel process
-             :nrepl-port 7888
+             ;; :nrepl-port 7888
 
              ;; Server Ring Handler (optional)
              ;; if you want to embed a ring handler into the figwheel http-kit
@@ -98,7 +96,9 @@
                                   [figwheel-sidecar "0.5.9"]
                                   [com.cemerick/piggieback "0.2.1"]]
                    ;; need to add dev source path here to get user.clj loaded
-                   :source-paths ["src" "dev"]                   ;; for CIDER
+                   :source-paths ["src" "dev"]
+                   ;; for CIDER
+                   ;; :plugins [[cider/cider-nrepl "0.12.0"]]
                    :repl-options {:nrepl-middleware [cemerick.piggieback/wrap-cljs-repl]}}}
 
 )
