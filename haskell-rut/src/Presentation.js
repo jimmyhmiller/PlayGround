@@ -666,6 +666,11 @@ export default () =>
       <Point text="New Tools for Problems" />
     </Points>
 
+    <Points title="Resources">
+      <Point text="Learn You a Haskell for the Great Good" />
+      <Point text="Haskell Programming from First Principles" />
+    </Points>
+
     <BlankSlide />
 
   </Presentation>
