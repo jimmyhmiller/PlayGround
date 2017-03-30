@@ -161,7 +161,7 @@ const TwoColumn = withSlide(({ left, right, title }) =>
 
 const Presentation = ({ children }) => 
   <Spectacle theme={theme}>
-    <Deck style={{display: 'none'}} transition={["slide"]} transitionDuration={0} progress="none">
+    <Deck controls={false} style={{display: 'none'}} transition={["slide"]} transitionDuration={0} progress="none">
       {children}
     </Deck>
   </Spectacle>
