@@ -7,7 +7,21 @@ import Effect.System
 
 
 
+greet : String -> String
+greet x = "Hello " ++ x
 
+
+
+
+hello : Eff () [STDIO]
+hello = do putStr "Name? "
+           x <- getStr
+           putStr $ greet x
+           
+           
+           
+           
+  
 emain : SimpleEff.Eff () [SYSTEM, STDIO]
 emain = do [prog, arg] <- getArgs | [] => putStrLn "Can't happen!"
                                   | [prog] => putStrLn "No arguments!"
@@ -16,4 +30,4 @@ emain = do [prog, arg] <- getArgs | [] => putStrLn "Can't happen!"
 
 
 main : IO ()
-main = run emain
+main = run hello

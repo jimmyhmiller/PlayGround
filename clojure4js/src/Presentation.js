@@ -15,8 +15,6 @@ import {
   Text
 } from "@jimmyhmiller/spectacle";
 
-import CodeSlide from 'spectacle-code-slide';
-
 import {format as prettier} from 'prettier';
 
 
@@ -112,16 +110,9 @@ const removeIndent = (indent, source) =>
     .map(s => s.substring(indent, s.length))
     .join("\n")
 
-const handleIndent = (source) =>
-  removeIndent(detectIndent(source), source).trim()
-
-const BlankSlide = withSlide(() => {
-  return <span />;
-})
-
 const formatSource = ({lang, source}) => {
   if (lang === 'javascript' || lang === "jsx") {
-    return prettier(source, { printWidth: 50 });
+    return prettier(source, { printWidth: 55 });
   }
   return source;
 }
@@ -151,8 +142,6 @@ const Points = withSlide(({ children, title, size, styleContainer, color }) =>
     </List>
   </div>
 )
-
-const ImageSlide = withSlide(Image);
 
 const Subtitle = ({ color="blue", size=5, text, ...props }) =>
   <Heading textColor={color} size={size} {...props}>
@@ -190,19 +179,38 @@ const TwoColumn = withSlide(({ left, right, title }) =>
 
 const Presentation = ({ children }) => 
   <Spectacle theme={theme}>
-    <Deck transition={["slide"]} transitionDuration={0} progress="none">
+    <Deck controls={false} transition={["slide"]} transitionDuration={0} progress="none">
       {children}
     </Deck>
   </Spectacle>
 
 export default () =>
   <Presentation>
+
     <Headline 
       size={2}
       caps={false}
       subtextSize={3}
       color="blue"
       text={<span>Clojure<span style={{color: "#2aa198"}}>(Script)</span> for Javascript Developers</span>} />
+
+    <Points title="What is Clojure(Script)">
+      <Point text="Functional Language" />
+      <Point text="Lisp" />
+      <Point text="JVM/Javascript" />
+    </Points>
+
+    <Points title="Javascript a brief opinonated history">
+      <Point text="Swampy mess" />
+      <Point text="JQuery" />
+      <Point text="Rise of MVC" />
+      <Point text="React" />
+    </Points>
+
+    <Headline 
+      caps={false}
+      color="blue"
+      text="f(state) => dom" />
 
     <TwoColumn
       title="About Me"
@@ -257,19 +265,52 @@ export default () =>
       `}
     />
 
-    <Headline
-      size={4}
-      caps={false}
-      textAlign="left"
-      text="Community === Wonderful"
-      subtextSize={4}
-      subtext="Javascript == Okay" />
-
-    <Points title="Clojure(Script)">
-      <Point text="Functional" />
-      <Point text="Lisp" />
-      <Point text="JVM/Javascript" />
+    <Points title="Functional AltJS">
+      <Point text="Elm" />
+      <Point text="Purescript" />
+      <Point text="Reason" />
     </Points>
+
+    <Headline
+      color="blue"
+      text="What Sets Clojure Apart?" />
+
+    <Points title="Compared to Javascript">
+      <Point text='No "wats"' />
+      <Point text="Functional by Design" />
+    </Points>
+
+    <Points title="Compared to Alternatives">
+      <Point text="Dynamically Typed" />
+      <Point text="Mature/Production Ready" />
+    </Points>
+
+
+    <Headline 
+      color="cyan"
+      text="Compared to All?" />
+
+    <Headline 
+      color="red"
+      text="Flexibility to Add Features to the Language" />
+
+    <Points color="green" title="JS Language Features">
+      <Point text="ES.Next" />
+      <Point text="JSX" />
+      <Point text="TypeScript/Flow" />
+    </Points>
+
+    <Headline
+      color="blue"
+      text="Write a compiler" />
+
+    <Headline
+      color="green"
+      text="The Democratization of Programming" />
+
+    <Headline
+      caps={false}
+      text="(> semantics syntax)" />
 
     <Code
       title="Immutable Datastructures"
@@ -338,63 +379,24 @@ export default () =>
 
     <Headline text="((Parentheses) are Scary!!!)" />
 
-    <Headline color="green" text="State of Javascript Tooling" />
+    <Code
+      lang="javascript"
+      title="JSX"
+      source={`
+        const HomeLink = () => {
+         return <a href="#">Home</a>
+        }
+      `}
+    />
 
-    <Points title="Javascript Module Systems">
-      <Point text="AMD" />
-      <Point text="UMD" />
-      <Point text="CommonJS" />
-      <Point text="ES6 Modules" />
-      <Point text="Node ES6 Modules" />
-    </Points>
-
-    <Points color="red" title="Javascript Bundlers">
-      <Point text="Webpack" />
-      <Point text="Webpack2" />
-      <Point text="Rollup" />
-      <Point text="Browserify" />
-      <Point text="Broccoli" />
-    </Points>
-
-    <Headline color="violet" text="Create React App" />
-
-    <Points title="ClojureScript Module System">
-      <Point text="Built-in" />
-    </Points>
-
-    <Points color="red" title="ClojureScript Bundlers">
-      <Point text="Built-in" />
-    </Points>
-
-    <Points title="Out of the Box">
-      <Point text="Minified" />
-      <Point text="Source Mapped" />
-      <Point text="Dead Code Eliminated" />
-      <Point text="Auto Building" />
-      <Point text="Browser Repl" />
-    </Points>
-
-    <Points color="green" title="Third Party">
-      <Point text="Hot Reloading That Actually Works" />
-    </Points>
-
-    <Points color="green" title="JS Language Extensions">
-      <Point text="ES.Next" />
-      <Point text="JSX" />
-      <Point text="Flow" />
-      <Point text="TypeScript" />
-    </Points>
-
-    <Points title="JS Compilers">
-      <Point text="Babel" />
-      <Point text="TypeScript" />
-    </Points>
-
-    <Headline 
-      color="cyan"
-      textAlign="left"
-      text="Clojure has Macros"
-      subtext="and great data literals" />
+    <Code
+      lang="clojure"
+      title="Plain Old Clojure"
+      source={`
+        (defn home-link []
+          [:a {:href "#"} "Home"])
+      `}
+    />
 
     <Code
       lang="javascript"
@@ -421,8 +423,8 @@ export default () =>
     />
 
     <Code
+      title="Async Let"
       lang="clojure"
-      title="Async Await"
       source={`
         (defn getUserAndAddress [id]
           (let [user (getUser id)
@@ -434,7 +436,7 @@ export default () =>
 
     <Code
       lang="clojure"
-      title="Async Await"
+      title="Async Let"
       source={`
         (defn getUserAndAddress [id]
           (async-let [user (getUser id)
@@ -456,36 +458,39 @@ export default () =>
       `}
     />
 
-    <Code
-      lang="javascript"
-      title="JSX"
-      source={`
-        const HomeLink = () => {
-         return <a href="#">Home</a>
-        }
-      `}
-    />
-
-    <Code
-      lang="clojure"
-      title="JSX"
-      source={`
-        (defn home-link []
-          [:a {:href "#"} "Home"])
-      `}
-    />
-
     <Points size={4} color="green" title='Other "Language" Features'>
       <Point text="Type Checking" />
       <Point text="Pattern Matching" />
       <Point text="Graphql" />
-      <Point text="Core.Async - (Google Go)" />
-      <Point text="Specification" />
+      <Point text="core.async - (Google Go)" />
+      <Point text="core.spec" />
+    </Points>
+
+    <Headline text="Working in Clojure" />
+
+    <Points title="Out of the Box">
+      <Point text="Javascript Interop" />
+      <Point text="Minified" />
+      <Point text="Source Mapped" />
+      <Point text="Dead Code Eliminated" />
+      <Point text="Auto Building" />
+      <Point text="Browser Repl" />
+    </Points>
+
+    <Points color="green" title="Third Party">
+      <Point text="Hot Reloading That Actually Works" />
     </Points>
 
     <Headline color="blue" text="Demo" />
 
     <Headline text="Moving Beyond" />
+
+    <Points title="Resources">
+      <Point text="SICP (The Wizard Book)" />
+      <Point text="Every Rich Hickey Talk" />
+      <Point text="Clojure for the Brave and True" />
+      <Point text="The Joy of Clojure" />
+    </Points>
 
 
   </Presentation>

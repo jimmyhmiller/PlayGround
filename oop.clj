@@ -5,7 +5,7 @@
 
 (defmacro obj->
   [x & forms]
-  (loop [x x, forms forms]
+  (loop [x x forms forms]
     (if forms
       (let [form (first forms)
             threaded (if (seq? form)

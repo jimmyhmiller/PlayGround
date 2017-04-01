@@ -161,7 +161,7 @@ const TwoColumn = withSlide(({ left, right, title }) =>
 
 const Presentation = ({ children }) => 
   <Spectacle theme={theme}>
-    <Deck style={{display: 'none'}} transition={["slide"]} transitionDuration={0} progress="none">
+    <Deck controls={false} style={{display: 'none'}} transition={["slide"]} transitionDuration={0} progress="none">
       {children}
     </Deck>
   </Spectacle>
@@ -556,8 +556,7 @@ export default () =>
       lang="haskell"
       source={`
         youShouldKnow :: Help a => a -> String
-        youShouldKnow x = "You should know... " 
-                            ++ helpText x
+        youShouldKnow x = "You should know... " ++ helpText x
       `}
     />
 
@@ -664,6 +663,11 @@ export default () =>
       <Point text="Learn More Math" />
       <Point text="Gain Confidence in Your Code" />
       <Point text="New Tools for Problems" />
+    </Points>
+
+    <Points title="Resources">
+      <Point text="Learn You a Haskell for the Great Good" />
+      <Point text="Haskell Programming from First Principles" />
     </Points>
 
     <BlankSlide />
