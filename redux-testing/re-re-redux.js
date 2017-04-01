@@ -1,3 +1,7 @@
+const zaphod = require('zaphod/compat');
+const { update } = zaphod;
+const { mapValues } = require('lodash'); 
+
 
 const fluentCompose = (f, combinators) => {
   const wrapperFunction = (g) => {
@@ -12,6 +16,41 @@ const fluentCompose = (f, combinators) => {
   }
   return wrapperFunction(f);
 }
+
+
+const identity = coll => coll
+
+const wrapZaphod = method => next => (...args) => coll => method(next(coll), ...args);
+
+const wrappedZaphod = mapValues(zaphod, (method) => wrapZaphod(method));
+
+const value = next => coll => next(coll);
+
+const withValue = next => init => coll => next(init)
+
+const transform = fluentCompose(identity, {
+  ...wrappedZaphod,
+  value,
+  withValue,
+})
+
+const transformer =
+  transform
+    .set('x', 2)
+    .set('y', 3)
+    .set('q', {})
+    .setIn(['q', 'a'], 3)
+    .updateIn(['q', 'a'], x => x + 1)
+
+
+transformer({}),
+// { x: 2, y: 3, q: { a: 4 } }
+
+update({settings: {}}, 'settings', transformer)
+//{ settings: { x: 2, y: 3, q: { a: 4 } } }
+
+
+
 
 const increment = () => ({
   type: 'INCREMENT'
@@ -42,13 +81,11 @@ const reduce = next => (type, f) => (state, action) => {
 
 const reducer = fluentCompose(baseReducer, { initialState, reduce, run })
 
-console.log(
   reducer
     .initialState(0)
     .reduce('INCREMENT', x => x + 1)
     .reduce('DECREMENT', x => x - 1)
     .run(increment())
-)
 
 
 const connect = (mapStateToProps, mapDispatchToProps) => 
@@ -84,13 +121,13 @@ const reduxify = fluentCompose(connect, {
 const Comp = (props) => console.log(props);
 const OtherComp = (props) => console.log('other', props);
 
-reduxify
-  .mapState(state => ({ count: state.count }))
-  .mapState(state => ({ y:1 }))
-  .withActions({ increment })
-  .withComponent(Comp)
-  .withActions({ decrement })
-  .render()
+// reduxify
+//   .mapState(state => ({ count: state.count }))
+//   .mapState(state => ({ y:1 }))
+//   .withActions({ increment })
+//   .withComponent(Comp)
+//   .withActions({ decrement })
+//   .render()
 
 
 
