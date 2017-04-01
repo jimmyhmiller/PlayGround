@@ -556,8 +556,7 @@ export default () =>
       lang="haskell"
       source={`
         youShouldKnow :: Help a => a -> String
-        youShouldKnow x = "You should know... " 
-                            ++ helpText x
+        youShouldKnow x = "You should know... " ++ helpText x
       `}
     />
 

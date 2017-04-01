@@ -112,7 +112,7 @@ const removeIndent = (indent, source) =>
 
 const formatSource = ({lang, source}) => {
   if (lang === 'javascript' || lang === "jsx") {
-    return prettier(source, { printWidth: 50 });
+    return prettier(source, { printWidth: 55 });
   }
   return source;
 }
@@ -186,6 +186,7 @@ const Presentation = ({ children }) =>
 
 export default () =>
   <Presentation>
+
     <Headline 
       size={2}
       caps={false}
@@ -198,6 +199,18 @@ export default () =>
       <Point text="Lisp" />
       <Point text="JVM/Javascript" />
     </Points>
+
+    <Points title="Javascript a brief opinonated history">
+      <Point text="Swampy mess" />
+      <Point text="JQuery" />
+      <Point text="Rise of MVC" />
+      <Point text="React" />
+    </Points>
+
+    <Headline 
+      caps={false}
+      color="blue"
+      text="f(state) => dom" />
 
     <TwoColumn
       title="About Me"
@@ -285,11 +298,6 @@ export default () =>
       <Point text="ES.Next" />
       <Point text="JSX" />
       <Point text="TypeScript/Flow" />
-    </Points>
-
-    <Points color="green" title="AltJS Language Features">
-      <Point text="Pattern Matching" />
-      <Point text="Static Typing" />
     </Points>
 
     <Headline
@@ -392,6 +400,7 @@ export default () =>
 
     <Code
       lang="javascript"
+      title="Async Await"
       source={`
         function getUserAndAddress(id) {
           const user = getUser(id);
@@ -414,6 +423,7 @@ export default () =>
     />
 
     <Code
+      title="Async Let"
       lang="clojure"
       source={`
         (defn getUserAndAddress [id]
@@ -474,6 +484,13 @@ export default () =>
     <Headline color="blue" text="Demo" />
 
     <Headline text="Moving Beyond" />
+
+    <Points title="Resources">
+      <Point text="SICP (The Wizard Book)" />
+      <Point text="Every Rich Hickey Talk" />
+      <Point text="Clojure for the Brave and True" />
+      <Point text="The Joy of Clojure" />
+    </Points>
 
 
   </Presentation>
