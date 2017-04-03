@@ -80,9 +80,18 @@ const execIgnoreExitCode = (command) => {
   })
 }
 
+const tryParseJsonOrAbort = (str) => {
+  try {
+    return JSON.parse(str);
+  } catch (e) {
+    console.log(str);
+    process.exit();
+  }
+}
+
 const getProblems = ({ file, args="" }) => {
   return execIgnoreExitCode(`eslint --format=json ${args} ${file}`)
-    .then(JSON.parse)
+    .then(tryParseJsonOrAbort)
 }
 
 async function getFiles(path, args) {

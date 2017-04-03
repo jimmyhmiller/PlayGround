@@ -226,6 +226,14 @@ var filloutEditorTemplate = function filloutEditorTemplate(str, _ref) {
   return str.replace(regex("file"), file).replace(regex("line"), line).replace(regex("column"), column);
 };
 
+// vim \"+call cursor(%line, %column)\" %file
+// nano +%line,%column %file
+// subl -w %file:%line:%column
+// emacs +%line:%column %file
+// atom -w %file:%line:%column
+// code -w -g %file:%line:%column --waits for app to close, not tab
+
+
 var editFile = function editFile(_ref2) {
   var file = _ref2.file,
       line = _ref2.line,
@@ -271,12 +279,21 @@ var execIgnoreExitCode = function execIgnoreExitCode(command) {
   });
 };
 
+var tryParseJsonOrAbort = function tryParseJsonOrAbort(str) {
+  try {
+    return JSON.parse(str);
+  } catch (e) {
+    console.log(str);
+    process.exit();
+  }
+};
+
 var getProblems = function getProblems(_ref4) {
   var file = _ref4.file,
       _ref4$args = _ref4.args,
       args = _ref4$args === undefined ? "" : _ref4$args;
 
-  return execIgnoreExitCode('eslint --format=json ' + args + ' ' + file).then(JSON.parse);
+  return execIgnoreExitCode('eslint --format=json ' + args + ' ' + file).then(tryParseJsonOrAbort);
 };
 
 var fixProblem = function fixProblem(_ref8) {

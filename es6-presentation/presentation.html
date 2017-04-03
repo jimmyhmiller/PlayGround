@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html class="remark-container"><head>
+    <title>ES6/ES7 - Why Language Matter</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <style type="text/css">
+     @import url(https://fonts.googleapis.com/css?family=Ubuntu+Mono:400,400italic,700,700italic);
+     @import url(https://fonts.googleapis.com/css?family=Lato:400,100,100italic,300,300italic,700,700italic,900,900italic);
+
+
+     .remark-position {
+         color: #eee8d5;
+     }
+     .light li {
+         font: 700 48px/72px lato;
+         color: #002B36;
+     }
+     .light.blue li {
+         font: 700 48px/72px lato;
+         color: #268bd2;
+     }
+
+     .dark.red li {
+         font: 700 48px/72px lato;
+         color: #dc322f;
+     }
+
+     .dark li {
+         font: 500 48px/72px lato;
+         color: #eee8d5;
+     }
+     
+     .dark.blue li {
+         color:#268bd2;
+     }
+
+     .dark ol {
+         font: 300 36px/72px lato;
+         color: #eee8d5;
+         margin-left:30px;
+     }
+     .dark p {
+         font: 700 20px/20px lato;
+     }
+     h1 {
+         font: 300 100px/100px lato;
+         margin-top: 10px;
+         margin-bottom: 10px;
+     }
+     .change h1 {
+         font: 300 80px/80px lato;
+     }
+     h2 {
+         font: 300 64px/64px lato;
+         margin-bottom: 0;
+     }
+     h3 {
+         font: 100 48px/48px lato;
+         font-style: italic;
+         padding: 0;
+         margin-top: -10px;
+     }
+     .dark {
+         background-color: #002b36;
+     }
+     .light {
+         background-color: #fdf6e3;
+     }
+     .base03 {
+         color:#002b36;
+     }
+     .base02 {
+         color:#073642;
+     }
+     .base01 {
+         color:#586e75;
+     }
+     .base00 {
+         color:#657b83;
+     }
+     .base0 {
+         color:#839496;
+     }
+     .base1 {
+         color:#93a1a1;
+     }
+     .base2 {
+         color:#eee8d5;
+     }
+     .base3 {
+         color:#fdf6e3;
+     }
+     .yellow {
+         color:#b58900;
+     }
+     .orange {
+         color:#cb4b16;
+     }
+     .red {
+         color:#dc322f;
+     }
+     .magenta {
+         color:#d33682;
+     }
+     .violet {
+         color:#6c71c4;
+     }
+     .blue {
+         color:#268bd2;
+     }
+     .cyan {
+         color:#2aa198;
+     }
+     .green {
+         color:#859900;
+     }
+     code {
+         font-size: 40px;
+         font-family: 'Ubuntu Mono', sans-serif;
+     }
+     .umd code {
+         font-size:35px;
+     }
+     input {
+         padding: 4px;
+     }
+     .navbar-brand  {
+         font: 300 22px/20px lato;
+     }
+     .navbar {
+         font: 300 20px/20px lato;
+         background-color: #073642;
+     }
+     .nav > li > a:hover, .nav > li > a:focus, .nav > li.active > a {
+         background-color: #eee8d5;
+     }
+    </style>
+</head>
+<body class="remark-container">
+    <textarea style="display: none;" id="source">class: dark
+
+
+class:dark
+---
+class:dark, middle
+#.cyan[ES6/ES7]
+###.blue[Why Language Matters]
+
+---
+class:dark,center,middle
+
+#.blue[1949]
+
+---
+
+class:dark,center
+##.cyan[Assembly Language]
+
+![Assembly](assembly.png)
+
+---
+
+class:dark,center,middle
+
+#.blue[1957]
+
+---
+
+class:dark,middle
+#.magenta[Problem]
+
+* .blue[Assembly took too long to write]
+* .blue[It was incredibly error prone]
+* .blue[90% of time was spent planning/debugging]
+
+
+
+---
+
+
+class: dark,center
+
+#.cyan[Solution]
+
+![fortran](fortran.png)
+
+---
+
+
+class:dark,center,middle
+
+#.blue[1969]
+
+---
+
+class: dark, center, middle
+
+#.magenta[Problem]
+
+##.blue[Programs were too slow!]
+
+
+---
+class: dark,center
+
+#.cyan[Solution]
+
+![c](c.png)
+
+
+---
+class:dark,center,middle
+
+#.blue[1989]
+
+---
+class:dark, middle
+#.magenta[Problem]
+
+* .blue[Telephone systems require high availability]
+* .blue[Large programs are error prone]
+* .blue[Realtime constraints make locks infeasible]
+
+---
+class: dark,center
+
+#.cyan[Solution]
+
+![erlang](erlang.png)
+
+---
+class:dark,center,middle
+
+#.blue[1995]
+
+---
+class:dark, middle
+#.magenta[Problem]
+
+* .blue[Computer architectures are heterogeneous]
+* .blue[Operating systems are varied]
+* .blue[Manual memory management is difficult]
+
+---
+class: dark,center
+#.cyan[Solution]
+
+![java](java.png)
+
+
+---
+class:dark,center,middle
+
+#.blue[2009]
+
+---
+class:dark, middle
+#.magenta[Problem]
+
+* .blue[Existing statically types languages are heavy weight]
+* .blue[Dynamically types languages are slow]
+* .blue[Concurrency is difficult]
+
+---
+class: dark,center
+#.cyan[Solution]
+
+![go](go.png)
+
+---
+
+class:dark,center,middle
+
+#.blue[2012]
+
+---
+class: dark,middle
+#.magenta[Problem]
+
+* .blue[Browsers are single threaded]
+* .blue[Browsers need to be highly performant]
+* .blue[Browsers are a huge attack vector]
+
+---
+class: dark,center
+#.cyan[Solution]
+
+![rust](rust.png)
+---
+class:dark,center,middle
+
+#.blue[1995]
+
+---
+class: dark,middle,center
+#.magenta[Problem]
+##.blue[Browsers need interactivity!]
+
+---
+class:dark,center,middle
+
+#.yellow[Javascript].blue[?]
+
+
+---
+class:dark,let
+#.yellow[Let - a better var]
+
+```Javascript
+for (var i = 0; i < 5; i++) {
+    promise().then(function () {
+        console.log(i);
+    });
+}
+```
+
+---
+class:dark,let
+#.yellow[Let - a better var]
+
+```Javascript
+for (let i = 0; i < 5; i++) {
+    promise().then(function () {
+        console.log(i);
+    });
+}
+```
+
+---
+class:dark
+#.yellow[Const]
+###.blue[because change is bad]
+
+```Javascript
+const x = 2;
+x = 3;
+console.log(x);
+```
+
+---
+class:dark
+##.yellow[Default Arguments]
+
+```Javascript
+function addSomeNums1 (x, y, z) {
+    y = y || 3;
+    z = z || 2;
+    return x + y + z;
+}
+
+function addSomeNums2 (x, y=3, z=2) {
+    return x + y + z;
+}
+
+```
+
+---
+class:dark
+##.yellow[Default Arguments Fixed]
+
+```Javascript
+function addSomeNums1 (x, y, z) {
+    y = y == undefined ? 3 : y;
+    z = z == undefined ? 2 : z;
+    return x + y + z;
+}
+
+function addSomeNums2 (x, y=3, z=2) {
+    return x + y + z;
+}
+
+```
+---
+class:dark
+#.yellow[Rest Parameters]
+
+```Javascript
+function addEmAll1() {
+    var args = Array.prototype
+        .slice.call(arguments, addEmAll1.length);
+    return _.sum(args);
+}
+function addEmAll2(...args) {
+    return _.sum(args);
+}
+addEmAll1(1,2,3)
+addEmAll2(1,2,3)
+
+```
+
+---
+class:dark
+##.yellow[Spread Parameters]
+
+```Javascript
+let coll = [1,2,3];
+
+addEmAll2.apply(null, coll);
+
+addEmAll2(...coll);
+```
+---
+class:dark
+##.yellow[Arrow Functions]
+
+```javascript
+function Person(age) {
+    this.age = age;
+    this.name = "jimmy";
+    this.data = {};
+    this.getMoreData = function () {
+        fetch("/person/" + this.name)
+           .then(function (data) {
+               this.data = data;
+           })
+    }
+}
+
+```
+
+---
+class:dark
+##.yellow[Arrow Functions]
+
+```javascript
+function Person(age) {
+    this.age = age;
+    this.name = "jimmy";
+    this.data = {};
+    this.getMoreData = function () {
+        fetch("/person/" + this.name)
+           .then(data => {
+               this.data = data;
+           })
+    }
+}
+
+```
+
+---
+class:dark
+##.yellow[Arrow Functions]
+
+```javascript
+_.map([1,2,3], function (x) {
+    return x + 2;
+});
+
+_.map([1,2,3], x => x + 2)
+
+```
+
+---
+class:dark
+##.yellow[Arrow Functions]
+
+```javascript
+data.then(function (data) {
+    return data.title
+}).then(function (title) {
+    return title.asset
+}).then(function (asset) {
+    return asset.batch
+});
+
+data.then(data => data.title)
+    .then(title => title.asset)
+    .then(asset => asset.batch);
+
+
+```
+
+---
+class:dark
+##.yellow[Destructuring]
+
+```javascript
+
+function distance(point1, point2) {
+    let x1 = point1.x;
+    let x2 = point2.x;
+    let y1 = point1.y;
+    let y2 = point2.y;
+    return Math.sqrt(
+        Math.pow((x2 - x1), 2) + 
+        Math.pow((y2 - y1), 2));
+}
+
+
+```
+
+---
+class:dark
+##.yellow[Destructuring]
+
+```javascript
+
+function distance({x: x1, y: y1}, 
+                  {x: x2, y: y2}) {
+    return Math.sqrt(
+        Math.pow((x2 - x1), 2) + 
+        Math.pow((y2 - y1), 2));
+}
+
+
+```
+
+---
+class:dark
+##.yellow[Classes]
+
+```javascript
+class Point {
+  constructor(x, y) {
+    this._x = x;
+    this._y = y;
+  }
+  get x() {
+    return this._x;
+  }
+  get y() {
+    return this._y;
+  }
+}
+
+```
+---
+class:dark,umd 
+##.yellow[Modules]
+
+```javascript
+(function (root, factory) {
+    if (typeof define === 'function' && define.amd) {
+        define([], factory);
+    } else if (typeof module === 'object' && module.exports) {
+        module.exports = factory();
+    } else {
+        root.returnExports = factory();
+  }
+}(this, function () {
+    return () => "stuff";
+}));
+
+
+```
+
+---
+class:dark 
+##.yellow[Modules]
+
+```javascript
+//stuff.js
+export default () => "stuff";
+
+//otherstuff.js
+import stuff from "stuff.js"
+
+```
+---
+class:dark 
+##.yellow[Promises]
+
+```javascript
+let promise = (x) => new Promise((res, rej) => res(x));
+
+promise(2)
+    .then(x => x + 2)
+    .then(x => x * 4)
+    .then(x => console.log(x));
+```
+
+
+---
+class:dark 
+##.yellow[Async Await]
+
+```javascript
+function addRands1() {
+    return getRand()
+        .then(a => getRand([a])
+            .then(b => getRand([a, b])
+                .then(c => a + b + c)));
+}
+async function addRands2() {
+    let a = await getRand();
+    let b = await getRand([a]);
+    let c = await getRand([a,b]);
+    return a + b + c;
+}
+```
+---
+class:dark,middle
+
+#.green[Is this really where we want to be?]
+
+---
+class: dark
+#.green[Macros]
+
+<pre>
+    <code>
+.green[macro] (.magenta[==]) {
+.green[    rule] .blue[infix] {
+.yellow[        $x] | .yellow[$y]
+.base0[    }] .magenta[=>] {
+.yellow[        $x] .magenta[===] .yellow[$y]
+    }
+}
+    </code>
+</pre>
+
+---
+class: dark
+#.green[Macros]
+
+```javascript
+let x = 3;
+if (x == 3) {
+    console.log("yep");
+}
+//turns into
+let x = 3;
+if (x === 3) {
+    console.log("yep");
+}
+```
+---
+class: dark
+#.green[Macros]
+
+```javascript
+function addRands3() {
+    return do {
+        a <- getRand();
+        b <- getRand([a]);
+        c <- getRand([a,b]);
+        return a + b + c;
+    }
+}
+```
+---
+class: dark
+##.green[Limitless Possibilities]
+
+* .blue[Directive Syntax]
+* .blue[Jasmine Macros]
+* .blue[Null Handling]
+* .blue[Type System]
+* .blue[Pattern Matching]
+* .blue[Whole New Lanugages]
+
+---
+class: dark,center,middle,change
+#.green[Problems Change]
+#.magenta[So Should Languages]
+
+
+
+
+
+
+
+    </textarea>
+    <script src="https://gnab.github.io/remark/downloads/remark-0.5.5.min.js" type="text/javascript">
+    </script>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.9.1/jquery.min.js"></script>
+    <script type="text/javascript">
+     var slideshow = remark.create({
+         ratio: "16:9",
+         highlightStyle: 'solarized_light'
+     });
+     $(document).ready(function() {
+         $(".light").addClass("hljs-solarized_light");
+         $(".dark").addClass("hljs-solarized_dark");
+         $(".let .keyword:contains('let')").css("color","#dc322f");
+         $(".let .keyword:contains('var')").css("color","#d33682");
+     });
+    </script><div class="remark-notes-area">
+
+
+
+</body></html>
