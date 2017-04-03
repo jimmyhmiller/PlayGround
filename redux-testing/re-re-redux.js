@@ -1,7 +1,7 @@
 const zaphod = require('zaphod/compat');
 const { update } = zaphod;
-const { mapValues } = require('lodash'); 
-
+const { mapValues } = require('lodash');
+const lodashArray = require('lodash/fp/collection');
 
 const fluentCompose = (f, combinators) => {
   const wrapperFunction = (g) => {
@@ -17,22 +17,41 @@ const fluentCompose = (f, combinators) => {
   return wrapperFunction(f);
 }
 
+const threadFirst = f => next => 
+  (...args) => coll => f(next(coll), ...args);
+
+const threadLast = f => next =>
+  (...args) => coll => f(...args, next(coll));
+
+
+const threadFirstAll = (obj) => mapValues(obj, threadFirst);
+const threadLastAll = (obj) => mapValues(obj, threadLast);
+
 
 const identity = coll => coll
-
-const wrapZaphod = method => next => (...args) => coll => method(next(coll), ...args);
-
-const wrappedZaphod = mapValues(zaphod, (method) => wrapZaphod(method));
 
 const value = next => coll => next(coll);
 
 const withValue = next => init => coll => next(init)
 
 const transform = fluentCompose(identity, {
-  ...wrappedZaphod,
+  ...threadFirstAll(zaphod),
   value,
   withValue,
 })
+
+const _ = fluentCompose(identity, {
+  ...threadLastAll(lodashArray),
+  value,
+  withValue,
+})
+
+
+const workflow =
+  _.map(x => x + 2)
+   .filter(x => x % 2 === 0)
+   .reduce((a, b) => a + b, 0)
+
 
 const transformer =
   transform
