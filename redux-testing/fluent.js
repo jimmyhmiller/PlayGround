@@ -47,6 +47,28 @@ const transform = fluentFirst(zaphod)
 const _ = fluentLast(lodashColl)
 
 
+
+const map = next => 
+  (f) => coll => {
+    if (coll === undefined || coll === null) {
+      return coll
+    }
+    return f(next(coll))
+}
+
+
+const Maybe = fluentCompose(identity, {
+  map
+})
+
+const nullable = Maybe
+  .map(x => x + 2)
+  .map(x => x * 3)
+
+
+console.log(nullable(0)) // 6
+console.log(nullable(null)) // null
+
 const workflow =
   _.map(x => x + 2)
    .filter(x => x % 2 === 0)
