@@ -1,7 +1,7 @@
 const zaphod = require('zaphod/compat');
 const { update } = zaphod;
 const { mapValues } = require('lodash');
-const lodashColl= require('lodash/fp/collection');
+const lodashColl = require('lodash/fp/collection');
 
 const fluentCompose = (f, combinators) => {
   const wrapperFunction = (g) => {

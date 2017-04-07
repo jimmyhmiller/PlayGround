@@ -1,5 +1,40 @@
 import Data.ZZ
+
+import Pruviloj
+import Pruviloj.Induction
+
 %hide (<+>)
+
+
+
+
+%language ElabReflection
+
+
+auto : Elab ()
+auto =
+  do compute
+     attack
+     try intros
+     hs <- map fst <$> getEnv
+     for_ hs $
+       \ih => try (rewriteWith (Var ih))
+     hypothesis <|> search
+     solve
+
+
+
+
+partial
+mush : Elab ()
+mush =
+    do attack
+       n <- gensym "j"
+       intro n
+       try intros
+       ignore $ induction (Var n) `andThen` auto
+       solve
+
 
 
 interface Group a where
@@ -51,24 +86,49 @@ test_rhs1 : (k : Nat) -> (j : Nat) -> (i : Nat) -> (\replaced => replaced = S (p
 test_rhs1 k j i = cong {f=S} (plusAssociative k j i)
 
 
+
+
+
 test : (k : Nat) -> (j : Nat) -> (i : Nat) -> plus k (S (plus j i)) = S (plus (plus k j) i)
 test k j i = rewrite (sym (plusSuccRightSucc k (plus j i))) in (test_rhs1 k j i)
 
-assoc_proof : (x : ZZ) -> (y : ZZ) -> (z : ZZ) -> plusZ x (plusZ y z) = plusZ (plusZ x y) z
-assoc_proof (Pos k) (Pos j) (Pos i) = cong {f=Pos} (plusAssociative k j i)
-assoc_proof (NegS k) (NegS j) (NegS i) =  cong {f=NegS} (cong {f=S} (test k j i))
-assoc_proof (Pos k) (Pos j) (NegS i) = ?assoc_proof_rhs_5
-assoc_proof (Pos k) (NegS j) (Pos i) = ?assoc_proof_rhs_1
-assoc_proof (Pos k) (NegS j) (NegS i) = ?assoc_proof_rhs_3
-assoc_proof (NegS k) (Pos j) (Pos i) = ?assoc_proof_rhs_2
-assoc_proof (NegS k) (Pos j) (NegS i) = ?assoc_proof_rhs_7
-assoc_proof (NegS k) (NegS j) (Pos i) = ?assoc_proof_rhs_4
+
+
 
 identity_proof : (x : ZZ) -> plusZ x (Pos 0) = x
 identity_proof (Pos Z) = Refl
 identity_proof (Pos (S k)) = rewrite plusZeroRightNeutral k in Refl
 identity_proof (NegS Z) = Refl
 identity_proof (NegS (S k)) = Refl
+
+identity_proof' : (x : ZZ) -> plusZ (Pos 0) x = x
+identity_proof' (Pos k) = Refl
+identity_proof' (NegS k) = Refl
+
+total
+assoc_proof_neg : (k, j, i : Nat) -> plusZ (Pos k) (minusNatZ j (S i)) = minusNatZ (plus k j) (S i)
+assoc_proof_neg Z Z Z = Refl
+assoc_proof_neg Z Z k = Refl
+assoc_proof_neg Z (S k) i = rewrite identity_proof' (minusNatZ k i) in Refl
+assoc_proof_neg k j i = ?test1
+
+
+total
+assoc_proof_rhs_1 : (k, j, i : Nat) -> plusZ (Pos k) (minusNatZ i (S j)) = plusZ (minusNatZ k (S j)) (Pos i)
+assoc_proof_rhs_1 Z Z Z = Refl
+assoc_proof_rhs_1 Z Z k = rewrite identity_proof' (minusNatZ k 1) in Refl
+assoc_proof_rhs_1 Z k i = rewrite identity_proof' (minusNatZ i (S k)) in Refl
+assoc_proof_rhs_1 k j i = ?test2
+
+assoc_proof_rhs_4 : (k, j, i : Nat) -> minusNatZ k (S (S (plus j i))) = plusZ (minusNatZ k (S j)) (NegS i)
+
+
+assoc_proof : (x, y, z : ZZ) -> plusZ x (plusZ y z) = plusZ (plusZ x y) z
+assoc_proof (Pos k) (Pos j) (Pos i) = cong {f=Pos} (plusAssociative k j i)
+assoc_proof (Pos k) (Pos j) (NegS i) = assoc_proof_neg k j i
+assoc_proof (Pos k) (NegS j) (Pos i) = assoc_proof_rhs_1 k j i
+assoc_proof (Pos k) (NegS j) (NegS i) = assoc_proof_rhs_4 k j i
+assoc_proof x y z = ?assoc_proof_rhs_2
 
 
 
@@ -128,3 +188,7 @@ cancel a b c prf = t3
 
 
     
+
+-- Local Variables:
+-- idris-load-packages: ("pruviloj")
+-- End:
