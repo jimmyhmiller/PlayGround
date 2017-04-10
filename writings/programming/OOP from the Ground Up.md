@@ -44,7 +44,6 @@ Our first object (I hope you can see that I am justified in remove those quotes)
 
 
 ```javascript
-
 function createPerson(firstName, lastName) {
 	return {
 		firstName: firstName,
@@ -96,7 +95,7 @@ person.fullName(); // Alonzo Church
 
 Alright, there we are, an object with a method, this won't be too hard to recreate using our function technique.
 
-```javascript 
+```javascript
 function createPerson(firstName, lastName) {
 	return function(property) {
 		if (property === 'firstName') {
