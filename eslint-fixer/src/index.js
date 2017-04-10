@@ -15,9 +15,9 @@ const helpText = `
 Eslint Fixer - a fast way to fix eslint errors
 
 Usage:
-  eslint-fix [--args=<ESLINT_ARGS>] <path>
-  eslint-fix -h | --help
-  eslint-fix --version
+  eslint-fixer [--args=<ESLINT_ARGS>] <path>
+  eslint-fixer -h | --help
+  eslint-fixer --version
 
 Options:
   <path>        Path to run eslint
@@ -26,7 +26,7 @@ Options:
   --args        Pass args to eslint`
 
 const clearConsole = () => {
-  // console.log('\x1Bc');
+  console.log('\x1Bc');
 }
 
 const newLine = () => {
@@ -40,14 +40,6 @@ const filloutEditorTemplate = (str, { file, line, column }) => {
             .replace(regex("column"), column)
 }
 
-// vim \"+call cursor(%line, %column)\" %file
-// nano +%line,%column %file
-// subl -w %file:%line:%column
-// emacs +%line:%column %file
-// atom -w %file:%line:%column
-// code -w -g %file:%line:%column --waits for app to close, not tab
-
-
 const editFile = ({ file, line, column }) => {
   const editorTemplate = process.env.ESLINT_FIXER_EDITOR || 'nano +%line,%column %file';
   const command = filloutEditorTemplate(editorTemplate, { file, line, column }).split(" ");
@@ -56,7 +48,7 @@ const editFile = ({ file, line, column }) => {
   spawnSync(editor, args, {
     stdio: 'inherit',
     shell: true
-  }) // figure out how to make it work with all editors
+  })
 }
 
 const hashProblem = ({ file, line, column }) => `${file}:${line}:${column}`
@@ -194,10 +186,12 @@ const main = () => {
   showSpinner();
 
   const filesPromise = getFiles(path, args['--args'])
+
   filesPromise
     .then(files => Promise.all(files.map(processErrors.bind(null, args))))
     .catch(e => console.error(e))
     .then(stopSpinner)
+    .then(() => console.log('No errors found.'))
 }
 
 main();
