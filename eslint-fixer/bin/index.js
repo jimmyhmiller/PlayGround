@@ -205,10 +205,10 @@ var spinner = (0, _ora2.default)('Checking for eslint violations');
 
 var prompt = (0, _promptSync2.default)({ sigint: true });
 
-var helpText = '\nEslint Fixer - a fast way to fix eslint errors\n\nUsage:\n  eslint-fix [--args=<ESLINT_ARGS>] <path>\n  eslint-fix -h | --help\n  eslint-fix --version\n\nOptions:\n  <path>        Path to run eslint\n  -h --help     Show this screen.\n  --version     Show version.\n  --args        Pass args to eslint';
+var helpText = '\nEslint Fixer - a fast way to fix eslint errors\n\nUsage:\n  eslint-fixer [--args=<ESLINT_ARGS>] <path>\n  eslint-fixer -h | --help\n  eslint-fixer --version\n\nOptions:\n  <path>        Path to run eslint\n  -h --help     Show this screen.\n  --version     Show version.\n  --args        Pass args to eslint';
 
 var clearConsole = function clearConsole() {
-  // console.log('\x1Bc');
+  console.log('\x1Bc');
 };
 
 var newLine = function newLine() {
@@ -226,14 +226,6 @@ var filloutEditorTemplate = function filloutEditorTemplate(str, _ref) {
   return str.replace(regex("file"), file).replace(regex("line"), line).replace(regex("column"), column);
 };
 
-// vim \"+call cursor(%line, %column)\" %file
-// nano +%line,%column %file
-// subl -w %file:%line:%column
-// emacs +%line:%column %file
-// atom -w %file:%line:%column
-// code -w -g %file:%line:%column --waits for app to close, not tab
-
-
 var editFile = function editFile(_ref2) {
   var file = _ref2.file,
       line = _ref2.line,
@@ -246,7 +238,7 @@ var editFile = function editFile(_ref2) {
   (0, _child_process.spawnSync)(editor, args, {
     stdio: 'inherit',
     shell: true
-  }); // figure out how to make it work with all editors
+  });
 };
 
 var hashProblem = function hashProblem(_ref3) {
@@ -373,11 +365,14 @@ var main = function main() {
   showSpinner();
 
   var filesPromise = getFiles(path, args['--args']);
+
   filesPromise.then(function (files) {
     return _promise2.default.all(files.map(processErrors.bind(null, args)));
   }).catch(function (e) {
     return console.error(e);
-  }).then(stopSpinner);
+  }).then(stopSpinner).then(function () {
+    return console.log('No errors found.');
+  });
 };
 
 main();
