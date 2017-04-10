@@ -2,13 +2,13 @@
 
 There are many concepts we learn as we continue our adventure in programming languages. Objects, polymorphism, inheritance, and a whole host of others. Often these concepts are taught with the goal of making our code simpler, yet more often than not, they makes our code more complex, in other words, they [complect](beautiful-code.html) them. In these post we dive into where most of the inessential complexity of our programs come from, side effects.
 
-##Programming Functions are Algebraic Functions
+## Programming Functions are Algebraic Functions
 
 A function in a programming language is the exact same thing as the function you learned about in mathematics.
 
-```Javascript
+```javascript
 f(x) = 2x
-const f = (x) => x*2; 
+const f = (x) => x * 2; 
 ```
 
 The first example above is a mathematical function. The second is the exact same function in javascript. Functions serve one purpose, to take an input, apply a transformation, and return the new value. When we start thinking about functions in programming as mathematical functions we can smuggle mathematical concepts into our programming.
@@ -23,7 +23,7 @@ var compose = (g, f) => (x) => g(f(x))
 
 This code says that compose is a function that takes two functions f and g. Compose returns a function that takes an x, and applies f  to x, and then g to the result of f applied to x.
 
-###What mathematics gains us
+### What mathematics gains us
 
 Our compose function has a limitation, it can only compose two functions, but it seems like we should be able to chain compositions together to get more than two things composed as follows:
 
@@ -63,7 +63,7 @@ First we renamed our old compose function. We use an es2015 feature here, rest p
 compose(add2, add4, add3)(2);
 ```
 
-##When Functions Aren't
+## When Functions Aren't
 
 Functions when they are mathematical objects give us ways to reason about our code. Even if we don't bust out the associative law all the time we do get some guarantees from functions. For instance:
 
@@ -90,17 +90,17 @@ f(2) === f(2)
 
 Here "functions" in javascript do something that algebraic functions certainly can't do, side effects. Side effects occur when our function accesses something outside itself. This reaching out of itself often involves changing the value of some variable, but can involve causing an effect, such as printing to the console or making an http request.
 
-###But They Are Still Functions
+### But They Are Still Functions
 
 Calling these side-effecting functions not "functions" is not great terminologically. Javascript is going to call them functions whether they have side effects or not. So while it may be true in the mathematics sense, it doesn't hold in javascript land. So instead let's refer to functions in the algebraic sense as *pure functions* and side effecting functions as *impure functions*.
 
 Pure functions are the perfect example of decomplected code. Pure functions do one thing, transform input. Impure functions are complecting a la carte. Inside an impure function we can change anything, we can return different results depending on the time of the day, in fact, we can return nothing. These side effects weave together the notion of an effect with the computation that needs to be done.
 
-###But My Programs Need to do Something
+### But My Programs Need to do Something
 
-Side-effects are of course necessary. Our programs must communicate with the outside world in some way. But unconstrained side-effects can incredibly complicate our code. Mixing our data transformations with side-effects causes to lose the ability to reason about our code accurately. Mutating variables causes us to have to keep track of more and more state as variables change. In fact, it is my conjecture that a large majority of hard to trace bugs come from some variable somewhere being changed to some value we did not expect.
+Side-effects (in Javascript) are of course necessary. Our programs must communicate with the outside world in some way. But unconstrained side-effects can incredibly complicate our code. Mixing our data transformations with side-effects causes to lose the ability to reason about our code accurately. Mutating variables causes us to have to keep track of more and more state as variables change. In fact, it is my conjecture that a large majority of hard to trace bugs come from some variable somewhere being changed to some value we did not expect.
 
-##Conclusion
+## Conclusion
 So how do we constrain side-effects? That deserves a whole post or three on that very topic but for now we can keep it simple. First, always strive to write pure functions. Secondly, avoid mutation if at all possible. Finally move all side effects to the edges of your programs. Future posts will explore these topics showing how constraining our side-effects eliminates whole classes of bugs commonly encountered in programming and leads to simpler code.
 
 

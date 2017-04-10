@@ -10,7 +10,7 @@ We saw a technique in our [previous post](protocols.html) that allows extensibil
 
 Here we enter into territory not explored by javascript yet again. So as we did in our previous exploration of protocols, we will begin with a fictional language which has first class support for multi-methods and then a follow-up post, we will see a library encoding of multi-methods.
 
-```Javascript
+```javascript
 multi area {
   (s) => s.shape
 }
@@ -39,7 +39,7 @@ Multi-methods can be incredibly useful and practical in many different situation
 
 The fundamental concept around redux is that of a reducer. From the redux documentation here is a very simple reducer.
 
-```Javascript
+```javascript
 function counter(state = 0, action) {
   switch (action.type) {
   case 'INCREMENT':
@@ -54,7 +54,7 @@ function counter(state = 0, action) {
 
 This reducer tells us how to transition our counter given an `INCREMENT` action, a `DECREMENT` action, any other action, or no action at all (our initial state). Let's see how we could implement the exact same reducer using a multi-method.
 
-```Javascript
+```javascript
 multi counter {
   (_, action) => action.type
 }

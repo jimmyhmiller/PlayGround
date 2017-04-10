@@ -35,7 +35,7 @@ data List = Nil | Cons(x, tail)
 ```javascript
 fn map {
 	(f, Nil) => Nil
-    (f, (Cons(x, tail)) => Cons(f(x), map(f, tail))
+  (f, (Cons(x, tail)) => Cons(f(x), map(f, tail))
 }
 ```
 

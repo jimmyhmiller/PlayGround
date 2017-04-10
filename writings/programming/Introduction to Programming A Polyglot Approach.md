@@ -40,6 +40,9 @@ To put it more exactly, this book is meant to be read without sitting at a compu
 
 ## Plan of Study
 
-Choosing the order in which to tackle these languages has been rather difficult. There was some temptation early on to simply ignore and create the first "Choose Your Own Adventure" introduction to programming. But better minds pervailed. The order in which a book proceeds uniquely shapes the text, so extra care was taken in organizing these chapters.
+Choosing the order in which to tackle these languages has been rather difficult. There was some temptation early on to simply ignore that issue and create the first "Choose Your Own Adventure" introduction to programming. But better minds pervailed. The order in which a book proceeds uniquely shapes the text, so extra care was taken in organizing these chapters.
 
-We begin and end with LISP. LISP is the perfect language to begin our journey in programming because of its inherent simplicity. 
+We begin and end with LISP. LISP is the perfect language to begin our journey in programming because of its inherent simplicity. Throughout the book we shift to different languages, each language offering its own unique perspective on the task of programming and yet, we will often return to LISP. LISP gives us to flexibility to reimplement these features, allow us a way to quickly see through what appear to be magical features in a language.
+
+
+

@@ -127,7 +127,7 @@ The definition above may seem a bit strange if this is your first time encounter
 ```javascript
 fn tryToGetUserId {
 	Something(user) => Something(getId(user))
-    Nothing => Nothing
+  Nothing => Nothing
 }
 ```
 

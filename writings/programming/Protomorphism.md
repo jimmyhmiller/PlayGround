@@ -63,7 +63,7 @@ const last = (coll) => {
   if (isEmpty(coll)) {
     return undefined
   } else (isEmpty(rest(coll))) {
-	return first(coll)
+	  return first(coll)
   } else {
     return last(rest(coll))
   }
@@ -126,7 +126,7 @@ The definition for Arrays is a tad bit uglier. This is due mainly to that fact t
 
 ## More Functions
 
-```Javascript
+```javascript
 const map = (f, coll) => {
     if (isEmpty(coll)) {
         return coll;
