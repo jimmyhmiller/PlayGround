@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/HoldFilter.xsd"
+  version="3.2.$Revision: 1000 $"
+  xmlns="http://cufxstandards.com/v3/HoldFilter.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+	xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+  xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+	xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+	xmlns:transaction="http://cufxstandards.com/v3/Transaction.xsd"
+  xmlns:hold="http://cufxstandards.com/v3/Hold.xsd"
+					 
+  elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+	
+	<xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Transaction.xsd" schemaLocation="Transaction.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Hold.xsd" schemaLocation="Hold.xsd" />
+
+	<xs:element name="holdFilter" type="HoldFilter">
+		<xs:annotation>
+			<xs:documentation>
+				The list of filter options for services requesting hold data.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="HoldFilter">
+		<xs:annotation>
+			<xs:documentation>
+				The list of filter options for services requesting hold data. The options can be used in
+				combination or by themselves. It is up to the data source to either return or affect the
+				data requested or return a standard error identifying why the request was rejected.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="holdIdList" type="hold:HoldIdList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of hold ID's that should have their associated holds either returned or affected
+						by a read, update or delete hold request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="partyIdList" type="party:PartyIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of party ID's that should be returned or affected by a read, update or
+						delete hold request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="accountIdList" type="account:AccountIdList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of account ID's that should have their associated cards either returned or affected
+						by a read, update or delete hold request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="relationshipIdList" type="relationship:RelationshipIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of relationship ID's that should be returned or affected by a read, update or
+						delete hold request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="transactionIdList" type="transaction:TransactionIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of transaction ID's that should be returned or affected by a read, update or
+						delete hold request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="holdStatus" type="hold:HoldStatus" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The status of the hold that should have their associated holds either returned or affected
+						by a read, update or delete hold request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="holdTypeList" type="hold:HoldTypeList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of hold types that should have their associated holds either returned or affected
+						by a read, update or delete hold request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="holdReasonTypeList" type="hold:HoldReasonTypeList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of hold reasons that should have their associated holds either returned or affected
+						by a read, update or delete hold request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="minAmount" type="common:Money" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Filter that is used to search the hold amounts.
+						min and max amount filters work together.
+						Must be less than or equal to the maxAmount if a max amount is supplied.
+						If neither minAmount nor maxAmount is provided, all applicable holds will be returned
+						based on other criteria.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="maxAmount" type="common:Money" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Filter that is used to search the hold amounts.
+						min and max amount filters work together.
+						Must be greater than or equal to the minAmount if a min amount is supplied.
+						If neither minAmount nor maxAmount is provided, all applicable holds will be returned
+						based on other criteria.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="holdEffectiveStartDateTime" type="xs:dateTime" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Filter that is used to start searching the holds.
+						Indicates the UTC posted date of the earliest hold to be sent back in the response.
+						Start and end date filter work together.
+						Must be less than or equal to the end date if an end date is supplied.
+						Should be less than or equal to todayâs date.
+						If neither holdEffectiveStartDateTime nor holdEffectiveEndDateTime is provided, NO hold history
+						data will be returned.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ (2011-03-28T12:00Z) or
+						yyyy-mm-dd (2011-03-28) formats are supported. The time is assumed to be 00:00Z if omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="holdEffectiveEndDateTime" type="xs:dateTime" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Filter that is used to end searching the holds.
+						Indicates the UTC posted date of the latest hold to be sent back in the response.
+						Start and end date filter work together.
+						Must be greater than or equal to the hold effective start date/time.
+						If it's not supplied, the response returns all of the holds on or after the
+						transaction start date.
+						If neither holdEffectiveStartDateTime nor holdEffectiveEndDateTime is provided, NO hold
+						history data will be returned.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ (2011-03-28T12:00Z) or
+						yyyy-mm-dd (2011-03-28) formats are supported.  The time is assumed to be 00:00Z if omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+</xs:schema>
+

@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema	
+	targetNamespace="http://cufxstandards.com/v3/QuestionList.xsd"
+	version="3.2.$Revision: 1000 $"
+	elementFormDefault="qualified"
+	xmlns="http://cufxstandards.com/v3/QuestionList.xsd"
+  xmlns:xs="http://www.w3.org/2001/XMLSchema"
+ 	xmlns:common="http://cufxstandards.com/v3/Common.xsd">
+  
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import schemaLocation="Application.xsd" namespace="http://cufxstandards.com/v3/Application.xsd"/>
+
+  <xs:element name="questionList" type="QuestionList" >
+    <xs:annotation>
+      <xs:documentation>
+        Top level element for list of multiple-choice questions to ask a potential party to verify that they know the answers
+        to validate their identity.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+  <xs:complexType name="QuestionList">
+    <xs:sequence>
+      <xs:element name="question" type="Question" minOccurs="1" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            List of multiple-choice questions to ask a potential party to verify that they know the answers
+            to validate their identity.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Question">
+    <xs:sequence>
+      <xs:element name="choiceList" type="ChoiceList" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            List of possible answers for each multiple-choice question. 
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element >
+      <xs:element name="questionId" type="QuestionId"  minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            An identifier for the out-of-wallet question.
+            Must be unique within the list of questions.
+            May be a serial number or letter (1, 2, 3  or A, B, C), a GUID, or other identifier.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    
+      <xs:element name="questionText" type="xs:string" minOccurs="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The text of the out-of-wallet question.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="customData" type="common:CustomData"  minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Question level name/data pairs list of fields that are not yet available in the general specification.
+            This should be used as a LAST RESORT as any customizations will not be supported by all data providers
+            or processed by all client applications. ANY use of this field must be reported to the architecture or
+            working group committee to ensure that fields are somehow handled in the future release of specifications.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="QuestionId">
+    <xs:annotation>
+      <xs:documentation>
+        An identifier for the out-of-wallet question.
+        Must be unique within the list of questions.
+        May be a serial number or letter (1, 2, 3  or A, B, C), a GUID, or other identifier.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string" />
+  </xs:simpleType>
+
+  <xs:complexType name="ChoiceList">
+    <xs:sequence>
+      <xs:element name="choice" type="Choice" minOccurs="2" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            List of possible answers for each multiple choice question.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element >
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Choice">
+		<xs:sequence>
+		  <xs:element name="choiceId" type="xs:string" minOccurs="1" maxOccurs ="1">
+			  <xs:annotation>
+				  <xs:documentation>
+					  An identifier for a multiple-choice answer to the out-of-wallet question.
+					  Must be unique within the list of choices.
+					  May be a serial number or letter (1, 2, 3  or A, B, C), a GUID, or other identifier.
+				  </xs:documentation>
+			  </xs:annotation>
+		  </xs:element>
+
+      <xs:element name="choiceText" type="xs:string" minOccurs="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The text of the choice.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="customData" type="common:CustomData"  minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Choice level name/data pairs list of fields that are not yet available in the general specification.
+            This should be used as a LAST RESORT as any customizations will not be supported by all data providers
+            or processed by all client applications. ANY use of this field must be reported to the architecture or
+            working group committee to ensure that fields are somehow handled in the future release of specifications.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+	</xs:complexType>
+
+  <xs:simpleType name="ChoiceId">
+    <xs:annotation>
+      <xs:documentation>
+        An identifier for a multiple-choice answer to the out-of-wallet question.
+        Must be unique within the list of choices.
+        May be a serial number or letter (1, 2, 3  or A, B, C), a GUID, or other identifier.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string" />
+  </xs:simpleType>
+</xs:schema>

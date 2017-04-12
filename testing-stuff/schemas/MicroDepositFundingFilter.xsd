@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/MicroDepositFundingFilter.xsd"
+	xmlns="http://cufxstandards.com/v3/MicroDepositFundingFilter.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+  xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+  xmlns:fundsTransferFilterBase="http://cufxstandards.com/v3/FundsTransferFilterBase.xsd"
+	xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+	xmlns:microDepositFunding="http://cufxstandards.com/v3/MicroDepositFunding.xsd"
+ 
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/FundsTransferFilterBase.xsd" schemaLocation="FundsTransferFilterBase.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/MicroDepositFunding.xsd" schemaLocation="MicroDepositFunding.xsd" />
+
+	<xs:element name="microDepositFundingFilter" type="MicroDepositFundingFilter">
+		<xs:annotation>
+			<xs:documentation>
+				Instance of a microdeposit funding filter.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="MicroDepositFundingFilter">
+		<xs:annotation>
+			<xs:documentation>
+				The list of options to filter microdeposits.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="MicroDepositFundingIdList" type="microDepositFunding:MicroDepositFundingIdList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of micro funding deposit ids to be returned or affected by a read, update or delete request.
+						The microDepositFundingId is a transactional level id.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="MicroDepositIdList" type="microDepositFunding:MicroDepositIdList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of micro deposit ids to be returned or affected by a read, update or delete request.
+						The microDepositId is the unique id for each individual microdeposit.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="partyIdList" type="party:PartyIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of party ID's that should have their associated micro deposits either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="relationshipIdList" type="relationship:RelationshipIdList" minOccurs ="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of relationship ID's that should have their associated micro deposits either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="sourceAccountIdList" type="account:AccountIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of source account ID's that should have their associated micro deposits either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			
+			<xs:element name="externalAccountIdList" type="account:AccountIdList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of external account ID's that should have their associated micro deposits either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="microDepositConfirmationCode" type="xs:string" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Confirmation code for microdeposits.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+		</xs:sequence>
+	</xs:complexType>
+</xs:schema>

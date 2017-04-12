@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema targetNamespace="http://cufxstandards.com/v3/OverdraftPriorityListFilter.xsd"
+   version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/OverdraftPriorityListFilter.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+  xmlns:overdraft="http://cufxstandards.com/v3/OverdraftPriorityList.xsd"
+  elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/OverdraftPriorityList.xsd" schemaLocation="OverdraftPriorityList.xsd" />
+
+  <xs:element name="overdraftPriorityListFilter" type="OverdraftPriorityListFilter">
+    <xs:annotation>
+      <xs:documentation>
+        The list of filter options for services requesting overdraft priority list data.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="OverdraftPriorityListFilter">
+    <xs:annotation>
+      <xs:documentation>
+        The list of filter options for services requesting overdraft priority list data.
+        The options can be used in combination or by themselves.  It is up to the data source
+        to either return or affect the data requested or return a standard error identifying
+        why the request was rejected.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="accountId" type="account:AccountId" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The account ID that should have its overdraft priority list either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="overdraftPriorityIdList" type="overdraft:OverdraftPriorityIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The ID's of the overdraft priority list entries to be returned or affected by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="priorityList" type="overdraft:PriorityList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The priorities to return or be affected by read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="overdraftFromAccountIdList" type="account:AccountIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The account ID's that an overdraft should pull from to be returned or affected by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+    </xs:sequence>
+  </xs:complexType>
+
+</xs:schema>

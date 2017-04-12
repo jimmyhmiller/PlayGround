@@ -1,0 +1,568 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema 	targetNamespace="http://cufxstandards.com/v3/Relationship.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/Relationship.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+	xmlns:contact="http://cufxstandards.com/v3/Contact.xsd"
+	xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+			
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Contact.xsd" schemaLocation="Contact.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+
+  <xs:element name ="relationshipList" type ="RelationshipList">
+    <xs:annotation>
+      <xs:documentation>
+        The relationships collection/array contains all the relationships, for instance, that the
+        credential set is authorized to access at the Institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+  
+  <xs:complexType name="RelationshipList">
+    <xs:sequence>
+      <xs:element name="relationship" type="Relationship" minOccurs="0" maxOccurs="unbounded" >
+        <xs:annotation>
+          <xs:documentation>
+            The relationships collection/array contains all the relationships, for instance, that the
+            credential set is authorized to access at the Institution based on applied filters.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Relationship">
+    <xs:annotation>
+      <xs:documentation>
+        A grouping of related accounts tied to one or more parties that have an account
+        relationship with the financial institution.  Some financial institutions may call
+        this a membership, parent account or other term.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="relationshipId" type="RelationshipId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The relationship ID is a persistent and unique identifier for the relationship.
+            It should be unique for all relationships across the institution and remain
+            the same over the life of the relationship with the financial institution.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="dateCreated" type="xs:date" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Date of the creation of the relationship (i.e. membership date).
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+			<xs:element name="dateRelationshipEnded" type="xs:date" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						End date of the relationship.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+      
+      <xs:element name="rewardsCode" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+             A code that represents a level of rewards that this relationship has access to
+             based on all of the products and services used by the relationship.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="relationshipPartyList" type="RelationshipPartyList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A specialized collection of party IDâs that uniquely identify each party associated to this relationship,
+            along with how the party is related to the relationship.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="accountIdList" type="account:AccountIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A collection of account IDâs that uniquely identify each account associated to this relationship.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+			
+			<xs:element name="relationshipStatus" type="RelationshipStatus" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Status of the Relationship.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+	<xs:simpleType name="RelationshipStatus">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Active" />
+			<xs:enumeration value="Closed" />
+			<xs:enumeration value="Deceased" />
+			<xs:enumeration value="Inactive" />
+			<xs:enumeration value="Prospect" />
+			<xs:enumeration value="Restricted" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="RelationshipStatusList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of relationship statuses that should have their accounts either returned or affected
+				by a read, update or delete request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="relationshipStatus" type="RelationshipStatus" minOccurs ="0" maxOccurs ="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Status of the Relationship.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+	
+  <xs:simpleType name ="RelationshipId">
+    <xs:annotation>
+      <xs:documentation>
+        The relationship ID is a persistent and unique identifier for the relationship.
+        It should be unique for all relationships across the institution and remain
+        the same over the life of the relationship with the financial institution.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string" />
+  </xs:simpleType>
+
+  <xs:complexType name="RelationshipIdList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of Relationship ID's that should be returned or affected by a read, update or delete request.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="relationshipId" type="RelationshipId" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            A Relationship ID that should have its associated relationship either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="RelationshipPartyList">
+    <xs:annotation>
+      <xs:documentation>
+        A collection of party IDâs that uniquely identify each party associated to this relationship,
+        along with how each party is related to the relationship.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="relationshipParty" type="RelationshipParty" minOccurs="0" maxOccurs="unbounded"
+				nillable="true">
+        <xs:annotation>
+          <xs:documentation>
+            A collection of fields required to relate this relationship with the identified
+            parties and what level of ownership they have on the underlying accounts
+            within the relationship.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="RelationshipParty">
+    <xs:annotation>
+      <xs:documentation>
+        A collection of fields required to relate this relationship with the identified
+        parties and what level of ownership they have on the underlying accounts
+        within the relationship.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="id" type="party:PartyId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Unique identifier for the party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="party" type="party:Party" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Used to provide new party details. The full party element is used for committing new parties
+            to a new relationship in case the relationship cannot be saved to the core without
+            providing parties with the relationship. The party object defines all the fields necessary
+            to define a person, business or vendor related to a financial institution.
+            Note: The party id above is used to retrieve party details with a separate party service call.
+            The ID uniquely identifies the party within the financial institution.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element >
+  
+      <xs:element name="partyRelationshipType" type="PartyRelationshipType" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Level of ownership that the party has over the relationship.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="ssnOverride" type="xs:boolean" minOccurs="0" maxOccurs="1" default ="false">
+        <xs:annotation>
+          <xs:documentation>
+            The partyâs SSN should be used rather the primaryâs SSN when reporting to the IRS.
+            Only used if party relationship type is NOT PRIMARY.  Only one of these can appear
+            on a relationship or an account, if applicable.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="contactIdList" type="contact:ContactIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Collection of contacts for the party within this relationship.  Only contains the
+            contact ID for each contact.  Overrides anything at the party ID level.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="customData" type="common:CustomData" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Name/data pairs list of fields that are not yet available in the general specification.
+            This should be used as a LAST RESORT as any customizations will not be supported by all
+            data providers or processed by all client applications.  ANY use of this field must be
+            reported to the architecture or working group committee to ensure that fields are somehow
+            handled in the future release of specifications.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence >
+  </xs:complexType>
+
+  <xs:complexType name="PartyRelationshipType">
+    <xs:annotation>
+      <xs:documentation>
+        The party relationship type is the textual representation of what the
+        party record represents to this relationship, such as primary or joint
+        ownership, beneficiary or some other type of relationship. This value
+        may be visible to the user and must be human-readable.  If the party does
+        not have full ownership or responsibility of all accounts within the
+        relationship, then the party should be related to those accounts via a
+        party list within the account object.  Specific loan level ownership will
+        also be in the accounts via a party list within the account object.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="holder" type="Holder" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Owner of all the products under the relationship.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="beneficiary" type="Beneficiary" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Receiver of funds in certain circumstances based on the product type.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="agent" type="common:Agent" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Acts on behalf of the account holders.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="payee" type="Payee" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Receives dividend or distribution checks from an account or relationship.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="guarantor" type="Guarantor" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Guarantees/carries liability for a deposit or loan from an account or across the entire
+            relationship.  If this is at the relationship level, guarantees all deposits and loans
+            within the relationship.  For deposit accounts, guarantees any negative account balances.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="collateralGrantor" type="CollateralGrantor" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Party who put up collateral for the loan but is not liabile for the loan balance.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="safeDepositBoxUser" type="SafeDepositBoxUser" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Party who has access to the safe deposit box attached to an account.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name ="Holder">
+    <xs:sequence>
+      <xs:element	name="qualifier" type="PrimaryJoint" minOccurs ="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies if it's a primary (only one on the account) or a joint owner.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element	name="authority" type ="common:Authority" minOccurs ="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Primary or joint holder has access to funds.	Only one primary party can exist on a relationship.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name ="Beneficiary">
+    <xs:sequence>
+      <xs:element	name="qualifier" type="BeneficiaryQualifier" minOccurs ="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies when the beneficiary receives the funds based on the account type.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element	name="authority" type ="common:Authority" minOccurs ="1" maxOccurs ="1" default ="Unauthorized">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies if beneficiary has access to the funds.  Most often this is unauthorized, but for 
+            flexibility it can allow the beneficiary to have access.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="beneficiaryPercent" type="xs:decimal" minOccurs ="1" maxOccurs ="1" default ="1.00">
+        <xs:annotation>
+          <xs:documentation>
+            Default to 100%.  If there is more than one beneficiary on the relationship,
+            then beneficiary percent should total to 100%.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="beneficiaryTypes" type="BeneficiaryTypes" minOccurs ="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Whether the beneficiary is the primary or contingent beneficiary, if the primary passes away.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="BeneficiaryTypes">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Primary" />
+      <xs:enumeration value="Contingent">
+        <xs:annotation>
+          <xs:documentation>
+            If the primary passes away, then the contingent beneficiary receives the benefits.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+  
+  <xs:complexType name ="Payee">
+    <xs:sequence>
+      <xs:element	name="qualifier" type="PayeeQualifier" minOccurs ="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies the type of payee to determine when payee receives funds from dividends.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element	name="authority" type ="xs:string" minOccurs ="1" maxOccurs ="1" default ="DIVIDEND_ONLY">
+        <xs:annotation>
+          <xs:documentation>
+            Always dividend-only.  Payee does not have access to any other funds.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name ="Guarantor">
+    <xs:sequence>
+      <xs:element	name="authority" type ="common:Authority" minOccurs ="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies whether guarantor has access to the funds on the account.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name ="CollateralGrantor">
+    <xs:sequence>
+      <xs:element	name="authority" type ="common:Authority" minOccurs ="1" maxOccurs ="1" default="Unauthorized">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies whether collateral grantor has access to the funds on the account.
+            Typically they do not, but this leaves the ability to change from the default
+            to allow for flexiblity.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name ="SafeDepositBoxUser">
+    <xs:sequence>
+      <xs:element	name="qualifier" type="SafeDepositBoxUserQualifier" minOccurs ="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies the type of ownership that the party has over the safe deposit box.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element	name="authority" type ="common:Authority" minOccurs ="1" maxOccurs ="1" default="Unauthorized">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies whether safe deposit box user has access to the funds on the account.
+            Typically they do not, but this leaves the ability to change from the default
+            to allow for flexiblity.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="PrimaryJoint">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value ="Primary">
+        <xs:annotation>
+          <xs:documentation>
+            Only one primary party can exist on a relationship or an account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="Joint" >
+        <xs:annotation>
+          <xs:documentation>
+            More than one joint may exist on a relationship or an account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="BeneficiaryQualifier">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value ="Standard">
+        <xs:annotation>
+          <xs:documentation>
+            Beneficiary does not have access to deposit funds unless all
+            holders are deceased.  If specified at the relationship level, the
+            beneficiary receives funds across all deposits in the relationship.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="Education" >
+        <xs:annotation>
+          <xs:documentation>
+            Student is the funds beneficiary in the event of a Coverdell
+            ESA when funds are distributed.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="PayeeQualifier">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value ="Dividend">
+        <xs:annotation>
+          <xs:documentation>
+            Payee can receive non-maturing dividend and interest payments from deposit accounts.
+            If this is defined at the relationship level, the party receives all non-maturing
+            dividends from all accounts within the relationship.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="Maturity" >
+        <xs:annotation>
+          <xs:documentation>
+            Party can receive maturing dividend and interest payments from maturing deposits.
+            If this is defined at the relationship level, the party receives all maturing
+            dividend and interest payments from all accounts within the relationship.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="DividendAndMaturity" >
+        <xs:annotation>
+          <xs:documentation>
+            Party can receive non-maturing dividend and interest payments as well as maturing dividend
+            and interest payments from maturing deposits.  If this is defined at the relationship level,
+            the party receives all non-maturing and maturing dividend and interest payments from all
+            accounts within the relationship.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="SafeDepositBoxUserQualifier">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value ="Colessee">
+        <xs:annotation>
+          <xs:documentation>
+            Safe deposit box user is a colessee of the safe deposit box.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="Deputy" >
+        <xs:annotation>
+          <xs:documentation>
+            Safe deposit box user is a deputy of the safe deposit box on behalf
+            of the account or relationship holder.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+    </xs:restriction>
+  </xs:simpleType>
+</xs:schema>

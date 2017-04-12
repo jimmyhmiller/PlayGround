@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/CardMessage.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/CardMessage.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:messageContext="http://cufxstandards.com/v3/MessageContext.xsd"
+  xmlns:card="http://cufxstandards.com/v3/Card.xsd"
+	xmlns:cardFilter="http://cufxstandards.com/v3/CardFilter.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/MessageContext.xsd" schemaLocation="MessageContext.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Card.xsd" schemaLocation="Card.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/CardFilter.xsd" schemaLocation="CardFilter.xsd" />
+
+  <xs:element name="cardMessage" type="CardMessage">
+    <xs:annotation>
+      <xs:documentation>
+        All values that can be sent in a card message.  Contains message context, card filter and a card list.
+        This is a wrapper used to more easily serialize the complete message.  All values are optional.  See
+        example specifications for usage.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="CardMessage">
+    <xs:annotation>
+      <xs:documentation>
+        All values that can be sent in a card message.  Contains message context, card filter and a card list.
+        This is a wrapper used to more easily serialize the complete message.  All values are optional.  See
+        example specifications for usage.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="messageContext" type="messageContext:MessageContext" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The message context contains information that is passed as part of each CUFX message call. It
+            identifies who is sending the request in and enables the service provider to execute some level
+            of security or processing.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="cardFilter" type="cardFilter:CardFilter" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Any filters applied to a read, update or delete card request.
+            Does not apply to a create message.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="cardList" type="card:CardList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            All the card data.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence >
+  </xs:complexType >
+</xs:schema>
+

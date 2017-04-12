@@ -1,0 +1,523 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema 	targetNamespace="http://cufxstandards.com/v3/Configuration.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/Configuration.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+	xmlns:isoCurrencyCodeType="http://cufxstandards.com/v3/ISOCurrencyCodeType.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/ISOCurrencyCodeType.xsd" schemaLocation="ISOCurrencyCodeType.xsd" />
+  
+  <xs:element name="configurationList" type="ConfigurationList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of configurations available in the CUFX instance.
+        There will be one configuration for one or more financial institutions.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="ConfigurationList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of configurations available in the CUFX instance. 
+        There will be one configuration for one or more financial institutions.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="configuration" type="Configuration" minOccurs ="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            The list of supported services, methods, limitations and options within the CUFX instance.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+   <xs:complexType name="Configuration">
+    <xs:sequence>
+      <xs:element name="fiIdList" type="FiIdList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The valid financial institution ID list for this instance.
+            Identifies that these configuration parameters are related to these financial institutions.
+            The FI ID is the "key" in the CUFX data model for identifying the FI for all services.
+            The FI ID will be passed in the message context to filter the request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="endPointTimeZoneUTOffset" type="xs:integer"  minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The offset of the time zone from Universal Time where this service resides.  If the service
+            provides a serviceTimeZoneUTOffset, it overrides this value for that service.
+            For example,
+            Atlantic Standard Time (AST) =  UT - 4 hours  (serviceTimeZoneUTOffset would be -4)
+            Eastern Standard Time (EST)  =  UT - 5 hours
+            Central Standard Time (CST)  =  UT - 6 hours
+            Mountain Standard Time (MST) =  UT - 7 hours
+            Pacific Standard Time (PST)  =  UT - 8 hours
+            If the location observes daylight savings time, this value may need to be updated.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="serviceList" type="ServiceList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of supported services and methods within the CUFX instance.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+     
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:complexType name="FiIdList">
+    <xs:annotation>
+      <xs:documentation>
+        The valid financial institution list for this instance.
+        Identifies that these configuration parameters are related to these financial institutions.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="fiId" type="xs:string" minOccurs ="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            A valid financial institution for this instance.
+            Identifies that these configuration parameters are related to this financial institution.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:complexType name="ServiceList">
+    <xs:sequence>
+      <xs:element name="service" type="Service" minOccurs ="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            A service and list of methods within the CUFX instance that are supported by this end point.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:complexType name="Service">
+    <xs:sequence>
+      <xs:element name="serviceName" type="ServiceName" minOccurs ="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Generic name for the service. (Key value)
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="protocol" type="Protocol" minOccurs ="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Technology web service protocol available. (Key value)
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="cufxVersion" type="CufxVersion" minOccurs ="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The version for the service. (Key value)
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="wsdlUri" type="xs:anyURI" minOccurs ="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            If the protocol is SOAP 1.1 or 1.2 provide the WSDL URL.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="currencySupportList" type="CurrencySupportList" minOccurs ="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Valid values for currency.  If zero currencies are listed then USD is the only supported currency.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="acceptLanguageList" type="AcceptLanguageList" minOccurs ="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies which language(s) can be received by the end point. This instructs it to
+            generate its response data and return its data and errors in the accepted language(s).
+            If none are specified then the default is US English (en-us).
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="fieldNotSupportedList" type="FieldNotSupportedList" minOccurs ="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            List of fields not supported in the service.  Do not include customData fields, which are assumed
+            to be unused unless listed in the customDataUseList in the Configuration.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="serviceTimeZoneUTOffset" type="xs:integer"  minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            If provided, serviceTimeZoneUTOffset overrides the endpointTimeZoneUTOffset.
+            The offset of the time zone from Universal Time where this service resides.
+            For example:
+            Atlantic Standard Time (AST) =  UT - 4 hours  (serviceTimeZoneUTOffset would be -4)
+            Eastern Standard Time (EST)  =  UT - 5 hours
+            Central Standard Time (CST)  =  UT - 6 hours
+            Mountain Standard Time (MST) =  UT - 7 hours
+            Pacific Standard Time (PST)  =  UT - 8 hours
+            If the location observes daylight savings time, this value may need to be updated.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="status" type="SystemStatus" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The status allows the requesting system to determine if the requested
+            system is available for subsequent requests. A recommended use includes this service upon
+            initial interaction as well as during exception handling. During a sequence of calls, an
+            exception may be generated because the requested system has become unavailable.
+            "Online" implies the system is available for subsequent requests.
+            "Offline" implies the system is not available for subsequent requests.
+            "MemoPost" implies that a subset of features is available. For example, the host system
+            may be in MemoPost mode and accept transactions that are processed at a later time. Examples
+            of such features are: intra-CU transfers and stop pay. Examples of features that may not be
+            available during MemoPost are: loan application and change security settings. These examples
+            are provided for demonstration purposes only, the exact feature list will vary depending on
+            each implementation.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="customDataUseList" type="CustomDataUseList"  minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            List of XSD paths and comments related to how the custom data sections are being used.
+            This is information only and not processed by the system.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="methodList" type="MethodList" minOccurs ="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Methods such as create, read, update and delete available in the service.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="MethodList">
+    <xs:sequence>
+      <xs:element name="method" type="Method" minOccurs ="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Method such as create, read, update or delete available in the service.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Method">
+    <xs:sequence>
+      <xs:element name="methodName" type="MethodName">
+        <xs:annotation>
+          <xs:documentation>
+            Generic name for the service. (Key value)
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="uri"  type="xs:anyURI"  minOccurs ="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The base URI for the service.  For example: POST https://api.dataprovider.com/deposit?subMethod=GET
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="methodDependencyList" type="MethodDependencyList" minOccurs ="0" maxOccurs="1" >
+        <xs:annotation>
+          <xs:documentation>
+            The methods that must be executed first before this method can be executed.
+            This allows for orchestration differences amongst different implementations of back end endpoints.
+            For example: Does the party need to be created first or after the account is created?
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="MethodDependencyList">
+    <xs:annotation>
+      <xs:documentation>
+        The methods that must be executed first before this method can be executed.
+        This allows for orchestration differences amongst different implementations of back end endpoints.
+        For example: Does the party need to be created first or after the account is created?
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="methodDependency" type="MethodDependency" minOccurs ="0" maxOccurs="1" >
+        <xs:annotation>
+          <xs:documentation>
+            The method that must be executed before another method.
+            This allows for orchestration differences amongst different implementations of back end endpoints.
+            For example: Does the party need to be created first or after the account is created?
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="MethodDependency">
+    <xs:sequence>
+      <xs:element name="serviceName" type="ServiceName" minOccurs ="1" maxOccurs="1" >
+        <xs:annotation>
+          <xs:documentation>
+            The service name of the method that must be executed first.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="methodName" type="xs:string" minOccurs ="1" maxOccurs="1" >
+        <xs:annotation>
+          <xs:documentation>
+            The method name of the method that must be executed first.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="cufxVersion" type="CufxVersion" minOccurs ="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The CUFX version of the method that must be executed first.  The CUFX version is part of the key
+            value since there may be implementation differences between different versions of the same 
+            service/method.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:simpleType name="Protocol">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value ="REST-XML"></xs:enumeration>
+      <xs:enumeration value ="REST-JSON"></xs:enumeration>
+      <xs:enumeration value ="SOAP1.1"></xs:enumeration>
+      <xs:enumeration value ="SOAP1.2"></xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="CurrencySupportList">
+    <xs:sequence>
+      <xs:element name="currencySupport" type="isoCurrencyCodeType:ISOCurrencyCodeType" minOccurs ="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Currency supported by the service.  If none were supplied, then USD is the only valid currency.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="AcceptLanguageList">
+    <xs:annotation>
+      <xs:documentation>
+        Specifies which language(s) can be received by the end point. This instructs it
+        to generate its response data and return its data and errors in the accepted language(s).
+        If none are specified then the default is US English (en-us).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="acceptLanguage" type="xs:string" minOccurs ="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies a valid language-region which can be received by the end point, which instructs it
+            to generate its response data and return its data and errors in the accepted language(s).
+            Combination of a language and a region.  For example en-us.
+            http://www.iana.org/assignments/language-subtag-registry
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="FieldNotSupportedList">
+    <xs:annotation>
+      <xs:documentation>
+        List of fields not supported in the service.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="fieldNotSupported" type="FieldNotSupported" minOccurs ="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Describe which fields are not supported by specifying the XSD path and any comments as to why it isn't supported.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="FieldNotSupported">
+    <xs:annotation>
+      <xs:documentation>
+       Field not supported by the end point.  Specify the XSD path and any comments as to why it isn't supported.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="xsdFile" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            An XSD file name in the CUFX library that is the parent of the field that is not supported.
+            For example: Party.xsd
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="xsdXPath" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            An XPath statement that identifies the XSD elements related of the field that is not supported. 
+            For example:
+            /partyList/party/characteristics/individual/citizenshipList/*
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="comment" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Comment as to why the field(s) is/are not supported.
+            For example: This end point does not support citizenship as the back end core does not support this concept.
+           </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:complexType name="CustomDataUseList">
+    <xs:annotation>
+      <xs:documentation>
+        List of XSD paths and comments related to how the custom data sections are being used.
+        This is information only and not processed by the system.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="customDataUse" type="CustomDataUse" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            List of comments related to how the custom data sections are being used.
+            This is informational only and not processed by the system.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="CustomDataUse" >
+    <xs:annotation>
+      <xs:documentation>
+        An XSD path and comment related to how the custom data section is being used.
+        This is information only and not processed by the system.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="xsdFile" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            An XSD filename in the CUFX library that is the parent of the node that holds the custom data.
+            For example: Party.xsd
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="xsdXPath" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            An XPath statement that identifies the XSD node of the custom data.  For example:
+            /partyList/party/customData/*
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="name" type="xs:string" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            The name that will show up in the value pair within the custom data.  For instance,
+            eye color.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="comment" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Comment as to what is stored in the custom data.
+            For example: Will hold the party's eye color in a value pair.
+            name=eyecolor and value=blue
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="CufxVersion">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value ="1.0.3"></xs:enumeration>
+      <xs:enumeration value ="1.0.6"></xs:enumeration>
+      <xs:enumeration value ="2.0.0"></xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="ServiceName">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value ="Account"></xs:enumeration>
+      <xs:enumeration value ="Application"></xs:enumeration>
+      <xs:enumeration value ="Artifact"></xs:enumeration>
+      <xs:enumeration value ="Card"></xs:enumeration>
+      <xs:enumeration value ="Configuration"></xs:enumeration>
+      <xs:enumeration value ="Contact"></xs:enumeration>
+      <xs:enumeration value ="CredentialGroup"></xs:enumeration>
+      <xs:enumeration value ="Deposit"></xs:enumeration>
+      <xs:enumeration value ="DepositFunding"></xs:enumeration>
+      <xs:enumeration value ="EligibilityRequirement"></xs:enumeration>
+      <xs:enumeration value ="Loan"></xs:enumeration>
+      <xs:enumeration value ="LoanDisbursement"></xs:enumeration>
+      <xs:enumeration value ="OverdraftPriority"></xs:enumeration>
+      <xs:enumeration value ="Party"></xs:enumeration>
+      <xs:enumeration value ="PartyAssociation"></xs:enumeration>
+      <xs:enumeration value ="Preference"></xs:enumeration>
+      <xs:enumeration value ="ProductOffering"></xs:enumeration>
+      <xs:enumeration value ="ProductServiceRequest"></xs:enumeration>
+      <xs:enumeration value ="Relationship"></xs:enumeration>
+      <xs:enumeration value ="SimpleValidationRequest"></xs:enumeration>
+      <xs:enumeration value ="CreditReporting"></xs:enumeration>
+      <xs:enumeration value ="Identification"></xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+  
+  <xs:simpleType name="MethodName">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value ="Create"></xs:enumeration>
+      <xs:enumeration value ="Read"></xs:enumeration>
+      <xs:enumeration value ="Update"></xs:enumeration>
+      <xs:enumeration value ="Delete"></xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="SystemStatus">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Online"></xs:enumeration>
+      <xs:enumeration value="OffLine"></xs:enumeration>
+      <xs:enumeration value="MemoPost"></xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+</xs:schema>

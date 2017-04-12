@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema
+targetNamespace="http://cufxstandards.com/v3/SystemStatus.xsd"
+version="3.2.$Revision: 1000 $"
+xmlns="http://cufxstandards.com/v3/SystemStatus.xsd"
+xmlns:xs="http://www.w3.org/2001/XMLSchema"
+xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+
+elementFormDefault="qualified"
+attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+
+  <xs:element name= "systemStatusList" type ="SystemStatusList">
+    <xs:annotation>
+      <xs:documentation>
+        The system status collection/array list contains all the system statuses that are authorized for access at
+        the Institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="SystemStatusList">
+    <xs:annotation>
+      <xs:documentation>
+        The system status collection/array list contains all the system statuses that are authorized for access at
+        the Institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="systemState" type="SystemState" minOccurs="0" maxOccurs="unbounded">
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="SystemState">
+    <xs:annotation>
+      <xs:documentation>
+        This returns the status of the system, commonly used for online systems attempting to
+        determine if the system is available for real-time transactions.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="systemName" type="SystemName" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The name of the system within the financial institution that is providing the status.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="systemId" type="SystemId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The identification value of the system within the financial institution that is providing the status.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="systemStatus" type="SystemStatus" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Current status of the identified system.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="SystemName">
+    <xs:annotation>
+      <xs:documentation>
+        The name of the system within the financial institution that is providing the status.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string"/>
+  </xs:simpleType>
+
+  <xs:simpleType name="SystemId">
+    <xs:annotation>
+      <xs:documentation>
+        The identification value of the system within the financial institution that is providing the status.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string"/>
+  </xs:simpleType>
+
+  <xs:simpleType name="SystemStatus">
+    <xs:annotation>
+      <xs:documentation>
+        Current status of the system, i.e. online, offline, etc.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Online">
+        <xs:annotation>
+          <xs:documentation>
+            "Online" implies the system is available for subsequent requests.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="Offline">
+        <xs:annotation>
+          <xs:documentation>
+            "Offline" implies the system is not available for subsequent requests.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="MemoPost">
+        <xs:annotation>
+          <xs:documentation>
+            "MemoPost" implies that a subset of features is available. For example, the host system
+            may be in MemoPost mode and accept transactions that are processed at a later time. Examples
+            of such features are: intra-CU transfers and stop pay. Examples of features that may not be
+            available during MemoPost are: loan application and change security settings. These examples
+            are provided for demonstration purposes only; the exact feature list will vary depending on
+            each implementation.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+</xs:schema>

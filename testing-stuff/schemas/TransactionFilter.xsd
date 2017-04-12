@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema id="TransactionFilter"
+    targetNamespace="http://cufxstandards.com/v3/TransactionFilter.xsd"
+    version="3.2.$Revision: 1000 $"
+    xmlns="http://cufxstandards.com/v3/TransactionFilter.xsd"
+    xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+    xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+    xmlns:party="http://cufxstandards.com/v3/Party.xsd"	
+    xmlns:transaction="http://cufxstandards.com/v3/Transaction.xsd"
+      xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           
+    elementFormDefault="qualified"
+    attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Transaction.xsd" schemaLocation="Transaction.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+
+  <xs:element name="transactionFilter" type="TransactionFilter">
+    <xs:annotation>
+      <xs:documentation>
+        The list of filter options for services using transaction account data.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="TransactionFilter">
+    <xs:annotation>
+      <xs:documentation>
+        The list of filter options for services requesting transaction data. The options can be used in
+        combination or by themselves. It is up to the data source to either return or affect the
+        data requested or return a standard error identifying why the request was rejected.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="transactionIdList" type="transaction:TransactionIdList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of transaction Ids that uniquely identify each transaction to be affected by the request. 
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+	  
+	  <xs:element name="partyIdList" type="party:PartyIdList" minOccurs ="0" maxOccurs ="1">
+		<xs:annotation>
+		  <xs:documentation>
+			The list of party ID's that should have their associated account transactions either returned or affected
+			by a read, update or delete request.
+		  </xs:documentation>
+		</xs:annotation>
+	  </xs:element>
+	  
+      <xs:element name="accountIdList" type="account:AccountIdList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Account IDs of transactions that should have its associated accounts either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="transactionType" type="transaction:TransactionType" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Apply filter to only debit or credit transactions.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="transactionStatusList" type="transaction:TransactionStatusList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of transaction statuses that identify each transaction to be affected by the request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+        <xs:element name="transactionMinAmount" type="common:Money" minOccurs="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Apply filter to transactions with this amount or higher.
+            Min and max amount filters work together to specify a range.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="transactionMaxAmount" type="common:Money" minOccurs="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Apply filter to transactions with this amount or lower.
+            Min and max amount filters work together to specify a range.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="descriptionContains" type="xs:string" minOccurs="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Apply filter to transactions with a description containing the text in this field.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="checkNumberList" type="transaction:CheckNumberList" minOccurs="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Check numbers of transactions that should have its associated accounts either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="transactionEffectiveStartDateTime" type="xs:dateTime" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Filter that is used to start searching the transactions.
+            Indicates the UTC effective date of the earliest transaction to be sent back
+            in the response.  Start and End Date filters work together.
+            Must be less than or equal to end date if an end date is supplied.
+            Should be less to or equal to todayâs date.
+            If neither transactionStartDateTime or transactionEndDateTime is provided,
+            NO transaction history data will be returned.
+            The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+            (2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+            supported.  The time is assumed to be 00:00Z if omitted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="transactionEffectiveEndDateTime" type="xs:dateTime" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Filter that is used to end searching the transaction.
+            Indicates the UTC effective date of the latest transaction to be sent back in the response.
+            Start and End date filter work together.
+            Must be greater than or equal to start date/time.
+            If it's not supplied, response returns all of the transactions on or after the transactionStartDateTime.
+            If neither transactionStartDateTime or transactionEndDateTime is provided,
+            no transaction history data will be returned.
+            The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+            (2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+            supported.  The time is assumed to be 00:00Z if omitted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="transactionPostedStartDateTime" type="xs:dateTime" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            transactions
+            Filter that is used to start searching the transactions.
+            Indicates the UTC posted date of the earliest transaction to be sent back
+            in the response.  Start and End Date filters work together.
+            Must be less than or equal to end date if an end date is supplied.
+            Should be less to or equal to todayâs date.
+            If neither transactionStartDateTime or transactionEndDateTime is provided,
+            NO transaction history data will be returned.
+            The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+            (2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+            supported.  The time is assumed to be 00:00Z if omitted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="transactionPostedEndDateTime" type="xs:dateTime" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Filter that is used to end searching the transaction.
+            Indicates the UTC posted date of the latest transaction to be sent back in the response.
+            Start and End date filter work together.
+            Must be greater than or equal to start date/time.
+            If it's not supplied, response returns all of the transactions on or after the transactionStartDateTime.
+            If neither transactionStartDateTime or transactionEndDateTime is provided,
+            no transaction history data will be returned.
+            The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+            (2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+            supported.  The time is assumed to be 00:00Z if omitted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="categoryList" type="transaction:TransactionCategoryList" minOccurs="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Apply filter to transactions with listed default or overridden category for personal financial management.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="sourceList" type="transaction:TransactionSourceList" minOccurs="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Apply filter to transactions with listed system or delivery channel that originated the transaction.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+    </xs:sequence>
+  </xs:complexType>
+
+</xs:schema>

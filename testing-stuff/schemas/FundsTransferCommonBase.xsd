@@ -1,0 +1,344 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema id="FundsTransferCommonBase"
+	targetNamespace="http://cufxstandards.com/v3/FundsTransferCommonBase.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/FundsTransferCommonBase.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+ 
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:simpleType name="RecurringId">
+		<xs:restriction base="xs:string">
+			<xs:annotation>
+				<xs:documentation>
+					ID to uniquely identify a recurring payment or transfer request.
+				</xs:documentation>
+			</xs:annotation>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="RecurringIdList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of recurring payments or transfer requests.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="recurringId" type="RecurringId" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						ID to uniquely identify a recurring payment or transfer request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="OccurrenceId">
+		<xs:restriction base="xs:string">
+			<xs:annotation>
+				<xs:documentation>
+					The occurrence ID to uniquely identify the occurrence of a payment or transfer.
+				</xs:documentation>
+			</xs:annotation>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="OccurrenceIdList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of payments or transfers occurrence ID's that should have their associated occurrence ID either returned
+				or affected by a read, update or delete request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="occurrenceId" type="OccurrenceId" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						An occurrence ID that should have its associated payments or transfers either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="OccurrenceStatus">
+		<xs:annotation>
+			<xs:documentation>
+				This is the enumeration of statuses for payments or transfers.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Scheduled">
+				<xs:annotation>
+					<xs:documentation>
+						The payment or transfer is in the process for immediate or future payment and is cancellable by the party since
+						it's not InProcess yet.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="InProcess">
+				<xs:annotation>
+					<xs:documentation>
+						The payment or transfer is in process and is no longer cancellable, but it has not been sent.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="CancelRequestedByParty">
+				<xs:annotation>
+					<xs:documentation>
+						A payment or transfer was requested to be cancelled by the party but has not yet been cancelled.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="CancelRequestedByFinancialInstitution">
+				<xs:annotation>
+					<xs:documentation>
+						A payment or transfer has been cancelled at the request of the originating party's financial institution.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="CancelRequestedByProcessor">
+				<xs:annotation>
+					<xs:documentation>
+						A payment or transfer has been cancelled at the request of the processor. Example is case of bill pay this would
+						be the bill payment processor.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Cancelled">
+				<xs:annotation>
+					<xs:documentation>
+						A payment or transfer has been cancelled.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Sent">
+				<xs:annotation>
+					<xs:documentation>
+						Payment or transfer has been sent to the payee but has not been received yet.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Completed">
+				<xs:annotation>
+					<xs:documentation>
+						The payment or transfer transaction has been cleared/completed by the financial institution.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Declined">
+				<xs:annotation>
+					<xs:documentation>
+						The payment or transfer was declined (for instance, in the case that a debit or card was used as the funding source).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="FundsOutbound">
+				<xs:annotation>
+					<xs:documentation>
+						The funds have been transferred to the payment processor but have not yet arrived at the payment processor.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="FundsCleared">
+				<xs:annotation>
+					<xs:documentation>
+						The funds for the payment or transfer have been received by the payment processor but the actual payment hasn't
+						cleared at the payee.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Held">
+				<xs:annotation>
+					<xs:documentation>
+						The payment or transfer has been held by the payment processor and has not been sent to the payee.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="InsufficientFunds">
+				<xs:annotation>
+					<xs:documentation>
+						The payment or transfer has attempted to clear the financial institution account but there was not enough funds available.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Returned">
+				<xs:annotation>
+					<xs:documentation>
+						Payment or transfer was returned by the payee and not cleared.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Suspended">
+				<xs:annotation>
+					<xs:documentation>
+						Payment or transfer was scheduled for recurring payment but has been suspended until taken out of suspended status.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="OccurrenceStatusList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of payments or transfers occurrence status's that should have their associated occurrence status either returned
+				or affected by a read, update or delete request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="occurrenceStatus" type="OccurrenceStatus" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						An occurrence status that should have its associated payments or transfers either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="BatchId">
+		<xs:restriction base="xs:string">
+			<xs:annotation>
+				<xs:documentation>
+					The BatchId is a persistent and unique identifier for a group of payments or transfers processed at the same time.
+				</xs:documentation>
+			</xs:annotation>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="BatchIdList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of batch ids that should have their associated payments or transfers either returned
+				or affected by a read, update or delete request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="batchId" type="BatchId" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						A batch id that should have its associated payments or transfers either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="FundsWithdrawalType">
+		<xs:annotation>
+			<xs:documentation>
+				This is the enumeration of statuses for a recurring payment or transfer request .
+			</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="WhenRequested">
+				<xs:annotation>
+					<xs:documentation>
+						The funds will be pulled out of the account at the time that the payment or transfer request is made
+						each time that the occurrence happens.  For example in a good funds model in bill payment.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="WhenCleared">
+				<xs:annotation>
+					<xs:documentation>
+						The funds will be pulled out of the account at the time that the payment or transfer clears the account
+						each time that the occurrence happens.  For example a check.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="RecurringStatus">
+		<xs:annotation>
+			<xs:documentation>
+				This is the enumeration of statuses for a recurring payment or transfer request .
+			</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Requested">
+				<xs:annotation>
+					<xs:documentation>
+						The payment or transfer request is in process for immediate or future payment and is still cancellable by the party
+						since it's not InProcess yet.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Active">
+				<xs:annotation>
+					<xs:documentation>
+						The recurring payment or transfer request has been scheduled.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="CancelRequestedByParty">
+				<xs:annotation>
+					<xs:documentation>
+						A recurring payment or transfer request was requested to be cancelled by the party, but has not yet been cancelled.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="CancelRequestedByFinancialInstitution">
+				<xs:annotation>
+					<xs:documentation>
+						A recurring payment or transfer request was requested to be cancelled by the party's financial institution.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="CancelRequestedByPaymentProvider">
+				<xs:annotation>
+					<xs:documentation>
+						A recurring payment or transfer request was requested to be cancelled by the party's payment provider.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Cancelled">
+				<xs:annotation>
+					<xs:documentation>
+						A recurring payment or transfer request has been cancelled.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Completed">
+				<xs:annotation>
+					<xs:documentation>
+						All recurring payments or transfer requests have been completed.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Suspended">
+				<xs:annotation>
+					<xs:documentation>
+						Payment or transfer request was scheduled for recurring payment but has been suspended until taken out
+						of suspended status.  This status might be used if a party wants to keep the payment/transfer request
+						in the system but temporarily stop payment or transfers from occurring.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="RecurringStatusList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of recurring status for payments or transfer requests for filtering.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="recurringStatus" type="RecurringStatus" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Request status for a recurring transfer or payment.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+</xs:schema>

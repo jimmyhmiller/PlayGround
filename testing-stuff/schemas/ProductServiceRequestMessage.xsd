@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/ProductServiceRequestMessage.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/ProductServiceRequestMessage.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:messageContext="http://cufxstandards.com/v3/MessageContext.xsd"
+  xmlns:productServiceRequest="http://cufxstandards.com/v3/ProductServiceRequest.xsd"
+	xmlns:productServiceRequestFilter="http://cufxstandards.com/v3/ProductServiceRequestFilter.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/MessageContext.xsd" schemaLocation="MessageContext.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/ProductServiceRequest.xsd" schemaLocation="ProductServiceRequest.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/ProductServiceRequestFilter.xsd" schemaLocation="ProductServiceRequestFilter.xsd" />
+
+  <xs:element name="productServiceRequestMessage" type="ProductServiceRequestMessage">
+    <xs:annotation>
+      <xs:documentation>
+        All values that can be sent in a product service request message.  Contains message context, product service request
+        filter and a product service request list.  This is a wrapper used to more easily serialize the complete message.
+        All values are optional.  See example specifications for usage.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="ProductServiceRequestMessage">
+    <xs:annotation>
+      <xs:documentation>
+        All values that can be sent in a product service request message.  Contains message context, product service request
+        filter and a product service request list.  This is a wrapper used to more easily serialize the complete message.
+        All values are optional.  See example specifications for usage.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="messageContext" type="messageContext:MessageContext" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The message context contains information that is passed as part of each CUFX message call. It
+            identifies who is sending the request in and enables the service provider to execute some level 
+            of security or processing.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="productServiceRequestFilter" type="productServiceRequestFilter:ProductServiceRequestFilter" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Any filters applied to a read, update or delete product service request request.
+            Does not apply to a create message.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="productServiceRequestList" type="productServiceRequest:ProductServiceRequestList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            All the product service request data.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence >
+  </xs:complexType >
+</xs:schema>

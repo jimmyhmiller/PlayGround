@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema targetNamespace="http://cufxstandards.com/v3/ApplicationFilter.xsd"
+  version="3.2.$Revision: 1000 $"
+  xmlns="http://cufxstandards.com/v3/ApplicationFilter.xsd"
+  xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+  xmlns:productOffering="http://cufxstandards.com/v3/ProductOffering.xsd"
+  xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+  xmlns:application="http://cufxstandards.com/v3/Application.xsd"       
+  xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+
+  elementFormDefault="qualified" >
+
+  <xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+  <xs:import namespace ="http://cufxstandards.com/v3/ProductOffering.xsd" schemaLocation ="ProductOffering.xsd" />
+  <xs:import namespace ="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation ="Relationship.xsd" />
+  <xs:import namespace ="http://cufxstandards.com/v3/Application.xsd" schemaLocation ="Application.xsd" />
+  <xs:import namespace ="http://cufxstandards.com/v3/Account.xsd" schemaLocation ="Account.xsd" />
+  
+  <xs:element name="applicationFilter" type="ApplicationFilter">
+    <xs:annotation>
+      <xs:documentation>
+        The list of filter options for services requesting application data.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="ApplicationFilter">
+    <xs:annotation>
+      <xs:documentation>
+        The list of filter options for services requesting application data.  The options can be used
+        in combination or by themselves.  It is up to the data source to either return the
+        data requested or return a standard error identifying why the request was rejected.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="applicationIdList" type="application:ApplicationIdList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of application ID's that should have their associated applications returned
+            or affected by a read, update or delete application request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="productTypeList" type="productOffering:ProductTypeList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of product types that should have their associated applications returned
+            or affected by a read, update or delete application service request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="productSubTypeList" type="productOffering:ProductSubType" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of product sub types that should have their associated applications
+            returned or affected by a read, update or delete application service request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="relationshipIdList" type="relationship:RelationshipIdList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of relationship ID's that should have their associated applications
+            either returned or affected by a read, update or delete associated application request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="partyIdList" type="party:PartyIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of party ID's that should have their associated applications returned
+            or affected by a read, update or delete associated application request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+			<xs:element name="applicationStartDateTime" type="xs:dateTime" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Filter that is used to start searching the applications.
+						Indicates the UTC posted date of the earliest application to be sent back
+						in the response.  Start and End Date filters work together.
+						Must be less than or equal to end date if an end date is supplied.
+						Should be less to or equal to todayâs date.
+						If neither applicationStartDate or applicationEndDate is provided,
+						NO application history data will be returned.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+						(2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+						supported.  The time is assumed to be 00:00Z if omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="applicationEndDateTime" type="xs:dateTime" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Filter that is used to end searching the applications.
+						Indicates the UTC posted date of the latest application to be sent back in the response.
+						Start and End date filter work together.
+						Must be greater than or equal to start date/time.
+						If it's not supplied, response returns all of the applications on or after the applicationStartDate.
+						If neither applicationStartDate or applicationEndDate is provided,
+						no application history data will be returned.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+						(2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+						supported.  The time is assumed to be 00:00Z if omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+    </xs:sequence >
+  </xs:complexType >
+
+</xs:schema>

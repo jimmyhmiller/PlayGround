@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/RemoteDepositFilter.xsd"
+  version="3.2.$Revision: 775 $"
+  xmlns="http://cufxstandards.com/v3/RemoteDepositFilter.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns:remoteDeposit="http://cufxstandards.com/v3/RemoteDeposit.xsd"
+  xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+           
+  elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/RemoteDeposit.xsd" schemaLocation="RemoteDeposit.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+
+  <xs:element name="remoteDepositFilter" type="RemoteDepositFilter">
+    <xs:annotation>
+      <xs:documentation>
+        The list of filter options for services requesting billPayee data.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="RemoteDepositFilter">
+    <xs:annotation>
+      <xs:documentation>
+        The list of filter options for services requesting RemoteDeposit data. The options can be used in
+        combination or by themselves. It is up to the data source to either return or affect the
+        data requested or return a standard error identifying why the request was rejected.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="remoteDepositIdList" type="remoteDeposit:RemoteDepositIdList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of Remote Deposits Ids that uniquely identify each remote deposit to be affected by the request. 
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="accountIdList" type="account:AccountIdList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            An account IDs that should have its associated accounts either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="statusList" type="remoteDeposit:RemoteDepositStatusList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of remote deposit statuses that identify each remote deposit to be affected by the request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="actionList" type="remoteDeposit:RemoteDepositActionList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of remote deposits actions that identify each remote deposit to be affected by the request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="imageValidationIssueList" type="remoteDeposit:ImageValidationIssueList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of possible image validation issues to be affected by the request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="remoteDepositStartDateTime" type="xs:dateTime" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>transactions
+            Filter that is used to start searching the remote deposits.
+            Indicates the UTC posted date of the earliest transaction to be sent back
+            in the response.  Start and End Date filters work together.
+            Must be less than or equal to end date if an end date is supplied.
+            Should be less to or equal to todayâs date.
+            If neither transactionStartDate or transactionEndDate is provided,
+            NO transaction history data will be returned.
+            The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+            (2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+            supported.  The time is assumed to be 00:00Z if omitted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="remoteDepositEndDateTime" type="xs:dateTime" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Filter that is used to end searching the remote deposits.
+            Indicates the UTC posted date of the latest transaction to be sent back in the response.
+            Start and End date filter work together.
+            Must be greater than or equal to start date/time.
+            If it's not supplied, response returns all of the transactions on or after the transactionStartDate.
+            If neither transactionStartDate or transactionEndDate is provided,
+            no transaction history data will be returned.
+            The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+            (2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+            supported.  The time is assumed to be 00:00Z if omitted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="includeImageOnRead" type="IncludeImageOnRead" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Used to define if images should be returned as part of the request and allows for differentiation for front, back images or both.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:simpleType name ="IncludeImageOnRead">
+    <xs:annotation>
+      <xs:documentation>
+        An enumeration of possible image types
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base ="xs:string">
+      <xs:enumeration value ="ArtifactIdOnly">
+        <xs:annotation>
+          <xs:documentation>
+            Indicates to not return an image as part of the request.
+        </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value ="FrontImage">
+        <xs:annotation>
+          <xs:documentation>
+            Return front images as part of the request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value ="BackImage">
+        <xs:annotation>
+          <xs:documentation>
+            Return back images as part of the request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value ="BothFrontBackImage">
+        <xs:annotation>
+          <xs:documentation>
+            Return front and back images as part of the request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+  
+</xs:schema>
+

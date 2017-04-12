@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/DepositFundingMessage.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/DepositFundingMessage.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:messageContext="http://cufxstandards.com/v3/MessageContext.xsd"
+  xmlns:depositFunding="http://cufxstandards.com/v3/DepositFunding.xsd"
+	xmlns:depositFilter="http://cufxstandards.com/v3/DepositFilter.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/MessageContext.xsd" schemaLocation="MessageContext.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/DepositFunding.xsd" schemaLocation="DepositFunding.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/DepositFilter.xsd" schemaLocation="DepositFilter.xsd" />
+
+  <xs:element name="depositFundingMessage" type="DepositFundingMessage">
+    <xs:annotation>
+      <xs:documentation>
+        All values that can be sent in a deposit funding message.  Contains message context, deposit filter and a
+        deposit funding list.  This is a wrapper used to more easily serialize the complete message.  All values
+        are optional.  See example specifications for usage.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="DepositFundingMessage">
+    <xs:annotation>
+      <xs:documentation>
+        All values that can be sent in a deposit funding message.  Contains message context, deposit filter and a
+        deposit funding list.  This is a wrapper used to more easily serialize the complete message.  All values
+        are optional.  See example specifications for usage.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="messageContext" type="messageContext:MessageContext" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The message context contains information that is passed as part of each CUFX message call. It
+            identifies who is sending the request in and enables the service provider to execute some level
+            of security or processing.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="depositFilter" type="depositFilter:DepositFilter" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Any filters applied to a read, update or delete deposit funding request.
+            Does not apply to a create message.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="depositFundingList" type="depositFunding:DepositFundingList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            All the deposit funding data.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence >
+  </xs:complexType >
+</xs:schema>
+

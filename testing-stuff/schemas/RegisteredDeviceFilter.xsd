@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/RegisteredDeviceFilter.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/RegisteredDeviceFilter.xsd"
+  xmlns:registeredDevice="http://cufxstandards.com/v3/RegisteredDevice.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+	xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+
+	
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/RegisteredDevice.xsd" schemaLocation="RegisteredDevice.xsd" />
+
+
+	<xs:element name= "registeredDeviceFilter" type ="RegisteredDeviceFilter">
+		<xs:annotation>
+			<xs:documentation>
+				The collection/array list contains all the devices to be created, read, updated or deleted with this
+				request.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="RegisteredDeviceFilter">
+		<xs:annotation>
+			<xs:documentation>
+				The collection/array contains all the devices to be created, read, updated or deleted with
+				this request.
+			</xs:documentation>
+		</xs:annotation>
+
+		<xs:sequence>
+			<xs:element name="deviceIDList" type="registeredDevice:RegisteredDeviceIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The registered device identification string.  The application should ensure that
+						this is unique across all accounts.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="partyIdList" type="party:PartyIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Collection of key fields that point to a list of existing parties for
+						which should be contacted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="relationshipIdList" type="relationship:RelationshipIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Collection of key fields that point to a list of
+						existing relationships for which the product service request applies.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="accountIdList" type="account:AccountIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Collection of key fields that point to a list of
+						existing acounts for which the product service request applies.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="encryptedFlag" type="xs:boolean" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						If True, indicates that the device ID was encrypted.
+						Encryption method is agreed upon by application end point
+						providers.  Assume itâs NOT encrypted if this flag is not provided.
+						The message context will be used by the service to understand which client is calling the service
+						to know which encryption algorithm to apply.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+</xs:schema>
+

@@ -1,0 +1,294 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/MessageContext.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/MessageContext.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+	elementFormDefault="qualified"
+
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+
+	<xs:complexType name="MessageContext">
+		<xs:annotation>
+			<xs:documentation>
+				The message context contains information that is passed as part of each CUFX message call.
+				All the fields are optional, and whether or not they contain information is determined by the specific
+        implementation requirements.
+				For example, in a multi-tenant environment where multiple financial institutions are hosted, the Financial
+        Institution ID (FIID) may be a required field, necessary for distinguishing which FI the message pertains to.
+        For a single tenant environment with only one financial institution, the Financial Institution ID may not be necessary.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="requestId" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The request ID is a unique identifier which identifies the request from the source system. The client application
+            sends this along with the messages so that it can be logged as a reference for troubleshooting purposes.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="vendorId" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The vendor ID is a unique identifier which identifies the vendor that is creating a message. The vendor ID is
+            assigned by the FI or established in concert by the vendor and FI.
+						The client application sends this along with the messages so that logging or other business may take place based
+            on the vendor utilizing the service.
+						This ID is not generated per data or security request but is generated "out-of-band" (i.e. prior generation by
+            some external mechanism) of this process and stored in the Financial Institution's and Vendorâs systems.
+						A standard error will be returned if the vendor ID is not provided when it is required.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="appId" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The app id is an "agreed upon" unique identifier that identifies the application that is creating a message.
+						The client application sends this along with the messages so that logging or other business may take place based
+            on the application utilizing the service.
+						This ID is not generated per data or security request but is generated "out-of-band" (i.e. prior generation by some
+            external mechanism) of this process and stored in the Financial Institution's and Vendorâs systems.
+						A standard error will be returned if the app ID is not provided when it is required.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+      <xs:element name="fiId" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The FIID  is used by systems to uniquely identify each financial institution.
+						This ID is determined outside of the process and stored in each system of record, e.g. local application
+            database, vendor configuration file, FI core database, etc.
+						This is helpful for applications that are multi-tenant and service more than one financial institution.
+						See dataSourceId for more information about multiple data sources for a single FI.
+						A standard error will be returned if the FIID is not provided when it is required.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="dataSourceId" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The data source ID  is used by the systems to uniquely identify a registered data source within the financial
+            institution.
+						This is an agreed upon ID determined outside of the process and stored in each system of record.
+						There may be more than one data source ID per financial institution.
+						For instance, one data source ID may represent the financial institutionâs core provider and another may be used
+            to represent the credit card provider that is not within the core.
+						There may be a one-to-many relationship between FIID  and data source ID.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+      <xs:element name="environment" type="Environment" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Indicates the environment in which the message is to be executed. If not specified, "Production" is assumed.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="returnDataFilter" type="ReturnDataFilter" minOccurs="0" maxOccurs="1" default="All">
+        <xs:annotation>
+          <xs:documentation>
+            Applicable to creates and updates.  The return data filter is used to streamline the amount of
+            information to return to the client after an update or create.  The client can request
+            all data from the object, only fields that were updated or created, or no data (just a confirmation
+            that it was successful).
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="includeBlankFields" type="xs:boolean" default="true">
+        <xs:annotation>
+          <xs:documentation>
+            A boolean to indicate the inclusion of blank or empty fields in the response message.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="includeZeroNumerics" type="xs:boolean" default="true">
+        <xs:annotation>
+          <xs:documentation>
+            A boolean to indicate the inclusion of zero values in the response message.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+			<xs:element name="user" type="User" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Collection of user(s) associated to a message.
+						Typically, there will be only one user associated to a message request, but this provides the flexibility
+            in the event that future use cases have two user IDâs associated to one message.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="customData" type="common:CustomData" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The custom data section allows the flexibility to add additional information to the message context.
+						This should be utilized as a last resort and any use should result in requested modifications to the message
+            or message context .
+						Note: typically the data required will be in the message (such as party ID, account ID, etc.) rather than
+            contained in the message context.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="User">
+		<xs:annotation>
+			<xs:documentation>
+				The message context contains information that is passed as part of each CUFX message call.
+				All the fields are optional, and whether or not they contain information is determined by the specific implementation
+        requirements.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="userId" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The user ID is a unique identifier for the user, based on the type of user (see userIdType below) that is requesting
+            the message to be performed.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="userType" type="UserType" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The user ID type identifies what type of user is requesting the service.
+						The following values can be passed in.
+						Note: if ANONYMOUS is used, most likely the user ID will be blank, not provided or some constant value.
+						FI_USER_ID would be used in the case a consumer is trying to perform functions via online banking.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="UserType">
+		<xs:restriction base="xs:string">
+      <xs:enumeration value="EmployeeId" >
+        <xs:annotation>
+          <xs:documentation>
+            The user ID is an employee ID for logging into the network.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="VendorEmployeeId">
+        <xs:annotation>
+          <xs:documentation>
+            The user ID is a vendor employee ID for logging into the network.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      
+			<xs:enumeration value="Anonymous" >
+        <xs:annotation>
+          <xs:documentation>
+            The user ID is essentially unknown, i.e. no credentials are required.
+            Business rules will have been applied to either prevent or allow anonymous access to the service in question.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      
+			<xs:enumeration value="FIUserId" >
+        <xs:annotation>
+          <xs:documentation>
+            The credential group identifier of a party that was used to access the service.  See credential group schema.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      
+      <xs:enumeration value="SystemAccountId" >
+        <xs:annotation>
+          <xs:documentation>
+            The system user identifier of a system account that was used to access the service.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      
+      <xs:enumeration value="SecurityToken" >
+        <xs:annotation>
+          <xs:documentation>
+            A security token which was created from an identity provider.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      
+			<xs:enumeration value="Custom" >
+        <xs:annotation>
+          <xs:documentation>
+            The user identification was not one of the above formats.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+
+  <xs:simpleType name="ReturnDataFilter">
+    <xs:annotation>
+      <xs:documentation>
+        Applicable to creates and updates.  The return data filter is used to streamline the amount of
+        information to return to the client after an update or create.  The client can request
+        all data from the object, only fields that were updated or created, 
+        or no data (just a confirmation that it was successful).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="All" />
+      <xs:enumeration value="OnlyCreatedOrChangedData" />
+      <xs:enumeration value="None" />
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="Environment">
+    <xs:annotation>
+      <xs:documentation>
+        Indicates the environment in which the message should be executed.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Development">
+        <xs:annotation>
+          <xs:documentation>
+            The message is to be executed in a development environment.
+            Test data stores are to be used and various functionality may be disabled.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="UAT">
+        <xs:annotation>
+          <xs:documentation>
+            The message is to be executed in a UAT environment.
+            Test data stores are to be used and various functionality may be disabled.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="Training">
+        <xs:annotation>
+          <xs:documentation>
+            The message is to be executed in a training environment.
+            Data stores containing training data are to be used and various functionality may be disabled.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="QA">
+        <xs:annotation>
+          <xs:documentation>
+            The message is to be executed in a QA environment.
+            Data stores intended for quality assurance procedures are to be used and all features and functionality are enabled.</xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="Production">
+        <xs:annotation>
+          <xs:documentation>
+            The message is to be executed in a production environment.
+            Production data stores are to be used and all features and functionality are enabled.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+</xs:schema>
+

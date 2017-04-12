@@ -1,0 +1,465 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema
+   targetNamespace="http://cufxstandards.com/v3/Hold.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/Hold.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+  xmlns:feeSchedule="http://cufxstandards.com/v3/FeeSchedule.xsd"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/FeeSchedule.xsd" schemaLocation="FeeSchedule.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+
+	<xs:element name="holdList" type="HoldList">
+		<xs:annotation>
+			<xs:documentation>
+				Top level hold list collection element.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="HoldList">
+		<xs:sequence>
+			<xs:annotation>
+				<xs:documentation>
+					Collection of holds data definition.
+				</xs:documentation>
+			</xs:annotation>
+			<xs:element name="hold" type="Hold" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Details relating to a hold.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="Hold">
+		<xs:sequence>
+			<xs:element name="holdId" type="HoldId" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The hold ID is a persistent and unique identifier for the hold.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="accountId" type="account:AccountId" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						ID of account related to the hold.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			
+			<xs:element name="transactionId" type="xs:string" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The transaction ID is a persistent and unique identifier for the transaction related to the hold.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="holdType" type="HoldType"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The hold type is the textual representation of the kind of stop/hold.
+						This value is visible to the user and must be human-readable.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="effectiveDate" type="xs:dateTime"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Date/time that the hold was created or should take effect.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+						(2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+						supported.  The time is assumed to be 00:00Z if omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="expirationDate" type="xs:dateTime"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Date/time that the hold should be released.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+						(2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+						supported.  The time is assumed to be 00:00Z if omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="actualReleaseDate" type="xs:dateTime"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Date/time that the hold was actually released.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+						(2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+						supported.  The time is assumed to be 00:00Z if omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			
+			<xs:element name="holdStatus" type="HoldStatus" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The status of the hold.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="description" type="xs:string"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Description of the hold and/or a note attached to the hold.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="amount" type="common:Money"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Amount of the hold.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="payee" type="xs:string"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						For stop payment holds, name of the draft or ACH payee.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="reason" type="HoldReasonType"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Reason for the stop/hold.
+						This value is visible to the user and must be human-readable.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="feeId" type="feeSchedule:FeeId"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						This is the definition of a fee that could be associated with a hold.
+						If the hold type is 'uncollected fee' then this field could be used
+						to link it to the type of fee.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="HoldId">
+		<xs:restriction base="xs:string">
+			<xs:annotation>
+				<xs:documentation>
+					The hold ID is a persistent and unique identifier for the hold.
+				</xs:documentation>
+			</xs:annotation>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="HoldIdList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of hold ID's that should have their associated hold records either returned or affected
+				by a read, update or delete request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="holdId" type="HoldId" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						A hold ID that should have its associated hold id either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="HoldType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="GeneralPurpose">
+				<xs:annotation>
+					<xs:documentation>
+						Hold any amount for any purpose.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="CheckHold">
+				<xs:annotation>
+					<xs:documentation>
+						Hold the entire amount of a check or a partial amount until the check clears.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="CertifiedDraft">
+				<xs:annotation>
+					<xs:documentation>
+						Hold the entire amount of a certified draft or a partial amount until the certified draft clears.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="StopDraft">
+				<xs:annotation>
+					<xs:documentation>
+						Stop payment on a draft/check (written authorization from the member).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="SignatureAuth">
+				<xs:annotation>
+					<xs:documentation>
+						Reserve funds for a preauthorized credit card purchase or for an ATM point of sale transaction.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="PledgeHold">
+				<xs:annotation>
+					<xs:documentation>
+						Hold funds pledged against a hold.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="StopACH">
+				<xs:annotation>
+					<xs:documentation>
+						Prevent posting an automated clearing house transaction (written authorization from the member).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="StopDraftVerbal">
+				<xs:annotation>
+					<xs:documentation>
+						Stop payment on a draft (verbal authorization from the member).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="StopACHVerbal">
+				<xs:annotation>
+					<xs:documentation>
+						Prevent posting an automated clearing house transaction (verbal authorization from the member).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="RevokeACH">
+				<xs:annotation>
+					<xs:documentation>
+						Prevent posting an automated clearing house transaction for as long as the hold remains in the account.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="MerchantVerification">
+				<xs:annotation>
+					<xs:documentation>
+						Hold funds when a merchant calls to verify that funds are available to cover a member's check.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="UncollectedFee">
+				<xs:annotation>
+					<xs:documentation>
+						Hold when fees cannot be collected due to insufficient funds.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="holdDraft">
+				<xs:annotation>
+					<xs:documentation>
+						Hold on a preapproved hold draft for a zero-balance preapproved hold.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="BillPayment">
+				<xs:annotation>
+					<xs:documentation>
+						Hold on a member draft used for bill payment until the draft posts to the account, or until the hold expires.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="UnauthorizedACHStop">
+				<xs:annotation>
+					<xs:documentation>
+						Hold for unauthorized ACH transactions.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="ACHOrigination">
+				<xs:annotation>
+					<xs:documentation>
+						Hold on an account that is being used for ACH origination.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="ACHDNE">
+				<xs:annotation>
+					<xs:documentation>
+						Hold on account when a Death Notification Entry (DNE) has been received.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="PinAuth">
+				<xs:annotation>
+					<xs:documentation>
+						Hold on PIN-based transactions.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="BusinessBlockACHDebit">
+				<xs:annotation>
+					<xs:documentation>
+						Prevent posting ACH debits for member business shares.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="WireHold">
+				<xs:annotation>
+					<xs:documentation>
+						Place the entire amount of a wire transfer on hold until the outgoing wire is posted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="HoldTypeList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of hold types that should have their associated hold records either returned or affected
+				by a read, update or delete request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="holdType" type="HoldType" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						A hold type that should have its associated hold record either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="HoldReasonType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Unknown">
+				<xs:annotation>
+					<xs:documentation>
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Lost">
+				<xs:annotation>
+					<xs:documentation>
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Stolen">
+				<xs:annotation>
+					<xs:documentation>
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Destroyed">
+				<xs:annotation>
+					<xs:documentation>
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="NotEndorsed">
+				<xs:annotation>
+					<xs:documentation>
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Certified">
+				<xs:annotation>
+					<xs:documentation>
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Disputed">
+				<xs:annotation>
+					<xs:documentation>
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="ReturnedMerchandise">
+				<xs:annotation>
+					<xs:documentation>
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="StoppedService">
+				<xs:annotation>
+					<xs:documentation>
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Other">
+				<xs:annotation>
+					<xs:documentation>
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="HoldReasonTypeList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of hold reason types that should have their associated hold records either returned or affected
+				by a read, update or delete request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="holdReasonType" type="HoldReasonType" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						A hold reason type that should have its associated holds either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+	
+	<xs:simpleType name="HoldStatus">
+		<xs:annotation>
+			<xs:documentation>
+				This is the enumeration of statuses for holds.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Active">
+				<xs:annotation>
+					<xs:documentation>
+						The hold is active.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="InActive">
+				<xs:annotation>
+					<xs:documentation>
+						The hold is Inactive.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+
+</xs:schema>

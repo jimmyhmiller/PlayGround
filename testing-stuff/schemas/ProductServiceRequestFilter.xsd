@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/ProductServiceRequestFilter.xsd"
+	xmlns="http://cufxstandards.com/v3/ProductServiceRequestFilter.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:contact="http://cufxstandards.com/v3/Contact.xsd"
+	xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+	xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+	xmlns:productServiceRequest="http://cufxstandards.com/v3/ProductServiceRequest.xsd"
+  xmlns:secureMessage="http://cufxstandards.com/v3/SecureMessage.xsd"  
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/Contact.xsd" schemaLocation="Contact.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/ProductServiceRequest.xsd" schemaLocation="ProductServiceRequest.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/SecureMessage.xsd" schemaLocation="SecureMessage.xsd" />
+
+	<xs:element name="productServiceRequestFilter" type="ProductServiceRequestFilter">
+		<xs:annotation>
+			<xs:documentation>
+        The list of filter options for services requesting product service request data.
+      </xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="ProductServiceRequestFilter">
+		<xs:annotation>
+			<xs:documentation>
+        The list of filter options for services requesting product service request data.  The options can be used
+        in combination or by themselves.  It is up to the data source to either return or affect the
+        data requested or return a standard error identifying why the request was rejected.
+      </xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="productServiceRequestIdList" type="productServiceRequest:ProductServiceRequestIdList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+            The list of product service request ID's that should be returned or affected by a read, update or delete
+            product service request request.
+          </xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="relationshipIdList" type="relationship:RelationshipIdList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+            The list of relationship ID's that should have their associated product service requests either returned or affected
+            by a read, update or delete product service request request.
+          </xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+      <xs:element name="accountIdList" type="account:AccountIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Collection of key fields that point to a list of
+            existing accounts for which the product service request applies.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+			<xs:element name="partyIdList" type="party:PartyIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+            The list of party ID's that should have their associated product service requests either returned or affected
+            by a read, update or delete product service request request.
+          </xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="contactIdList" type="contact:ContactIdList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+            The list of contact ID's that should have their associated product service requests either returned or affected
+            by a read, update or delete product service request request.
+          </xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+      <xs:element name="secureMessageIdList" type="secureMessage:SecureMessageIdList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of secure message ID's that should have their associated product service requests either returned or affected
+            by a read, update or delete product service request request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+			<xs:element name="productServiceRequestStatusList" type="productServiceRequest:ProductServiceStatusList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+            The list of contact ID's that should have their associated product service requests either returned or affected
+            by a read, update or delete product service request request.
+          </xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+</xs:schema>

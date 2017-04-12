@@ -1,0 +1,293 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema
+   targetNamespace="http://cufxstandards.com/v3/Card.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/Card.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+  xmlns:contact="http://cufxstandards.com/v3/Contact.xsd"
+  xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+  xmlns:artifact="http://cufxstandards.com/v3/Artifact.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Contact.xsd" schemaLocation="Contact.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Artifact.xsd" schemaLocation="Artifact.xsd" />
+  
+  
+  <xs:element name="cardList" type="CardList">
+    <xs:annotation>
+      <xs:documentation>
+        Top level element cards collection/array contains all the cards, for instance, that the credential set is
+        authorized to access at the Institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+  
+  <xs:complexType name="CardList">
+    <xs:annotation>
+      <xs:documentation>
+        The cards collection/array contains all the cards, for instance, that the credential set is
+        authorized to access at the Institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="card" type="Card" minOccurs="0" maxOccurs="unbounded">
+      </xs:element >
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Card">
+    <xs:sequence>
+      <xs:element name="cardId" type="CardId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The card ID is a persistent and unique identifier for the card.
+            It must be unique for all users across the institution and remain the same over the life of the card.
+            The card ID should not be the same as the card number embossed on the card.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="cardNumber" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The card number is the visible sequence of numbers that appear on the card.
+            It is up to the end points to determine if the card number can/should be transmitted.
+            It is up to the end points to determine the encryption methodology, if required.
+            It must be unique for all users across the institution and remain the same over the life of the card.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="cardType" type="CardType" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies what type of card to create.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="cardSubType" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies the "flavor" of the card (ie: platinum, sports team branded, etc.).
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="expirationDate" type="xs:date" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Expiration date is either the expiration date that is calculated by the 
+            card data provider or the expiration date that is provided in the creation of the card.
+            It is up to the end points to determine if the expiration date can/should be transmitted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+        <xs:element name="pin" type="xs:string" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+                <xs:documentation>
+                    PIN is the 4 digit security code that is used to authenticate the user and 
+                    allow them access to the associated accounts of the card.
+                    It is up to the end points to determine if the PIN can/should be transmitted.
+                    It is up to the end points to determine the encryption methodology, if required.
+                    The PIN is provided as a string in case encryption has been utilized.
+                </xs:documentation>
+            </xs:annotation>
+        </xs:element>
+      <xs:element name="cvv2" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            cvv2 is the 3 or 4 digit security code that is printed on the back of the card.
+            This field is typically read-only because it is generated 2-3 days after the card is
+            requested to be printed.
+            It is up to the end points to determine if the CVV2 date can/should be transmitted.
+            It is up to the end points to determine the encryption methodology, if required.
+            The CVV2 is provided as a string in case encryption has been utilized.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="linkedAccountList" type="LinkedAccountList" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of deposit or loan accounts linked to the card.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="partyId" type="party:PartyId" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies the party whose name appears on the card.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="overrideAddressContactId" type="contact:ContactId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Overrides the address information supplied by the party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="nameOnCard" type="xs:string" minOccurs="0" maxOccurs="2">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies the name on the card if overriding the name from the party.
+            0 instances - means use the party formatted name.
+            1st instance - use as line one.
+            2nd instance - use as line two.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="activationDateTime" type="xs:dateTime" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies the date when the card was activated.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="cardStatus" type="CardStatus" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Specifies the current status of the card.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="blockedReason" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            For a blocked card, specifies the reason for the block.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="blockedDateTime" type="xs:dateTime" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            For a blocked card, specifies the date on which the card was blocked.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="virtualNumber" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The virtual number associated with the card.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="merchantCountryCodes" type="MerchantCountryCodeList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A list of permissible country codes where this card can be used.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="cardDesignImageArtifactId" type="artifact:ArtifactId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            An image template for the card.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="CardType">
+    <xs:annotation>
+      <xs:documentation>
+        Enumeration of the different types of cards.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Atm"/>
+      <xs:enumeration value="Credit"/>
+      <xs:enumeration value="Debit"/>
+      <xs:enumeration value="Prepaid"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="CardStatus">
+    <xs:annotation>
+      <xs:documentation>
+        Enumeration of the different types of statuses for a card.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Inactive"/>
+      <xs:enumeration value="Active"/>
+      <xs:enumeration value="Blocked"/>
+    </xs:restriction>
+  </xs:simpleType>  
+  
+  <xs:complexType name="LinkedAccount">
+    <xs:annotation>
+      <xs:documentation>
+        A deposit or loan account that is accessible by the card.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="accountId" type="account:AccountId" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The ID of the linked account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="priority" type="xs:positiveInteger" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+             Indicates the priority order of the account.  Priority 1 is the first
+             account to hit, priority 2 is the second account to try, etc.
+           </xs:documentation>
+         </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="LinkedAccountList">
+    <xs:annotation>
+      <xs:documentation>
+        A collection of accounts linked to a card that are accessible from an ATM.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="linkedAccount" type="LinkedAccount" minOccurs="1" maxOccurs="unbounded" />
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="CardId">
+        <xs:annotation>
+          <xs:documentation>
+            The card ID is a persistent and unique identifier for the card.
+            It must be unique for all users across the institution and remain the same over the life of the card.
+            The card ID should not be the same as the card number embossed on the card.
+          </xs:documentation>
+        </xs:annotation>
+    <xs:restriction base ="xs:string" />
+  </xs:simpleType>
+
+  <xs:complexType name="CardIdList">
+    <xs:sequence>
+      <xs:element name="cardId" type="CardId" minOccurs="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Collection of unique card ID's that point to a list of cards.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="MerchantCountryCodeList">
+    <xs:sequence>
+      <xs:element name="countryCode" type="xs:string" minOccurs="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Collection of country codes.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+
+</xs:schema>

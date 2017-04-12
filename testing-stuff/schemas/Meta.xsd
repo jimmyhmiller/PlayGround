@@ -1,0 +1,356 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/Meta.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/Meta.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+
+
+	<xs:complexType name="Meta">
+		<xs:annotation>
+			<xs:documentation>
+				For each account type, optional meta information MAY be
+				provided with these tags depending upon account type
+				returned.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:choice>
+			<xs:element name="loanMeta" type="LoanMeta" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Auto loans, etc. Loans that are NOT line of credit or credit cards.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="checkingSavingsMeta" type="CheckingSavingsMeta" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Checking (e.g draft accounts) and savings accounts.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="creditCardMeta" type="CreditCardMeta" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Credit card accounts.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="investmentMeta" type="InvestmentMeta" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Investment accounts.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="lineOfCreditMeta" type="LineOfCreditMeta" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Line of credit accounts.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="mortgageMeta" type="MortgageMeta" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Mortgage accounts.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:choice>
+	</xs:complexType>
+
+	<xs:complexType name="LoanMeta">
+		<xs:annotation>
+			<xs:documentation>
+				Auto loans, etc. Loans that are NOT line of credit or credit cards.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="interestRate" type="xs:decimal" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Interest rate percent of the loan.
+						Determines the amount charged each time period based on the loan period.
+						4.500 may be displayed as 4.500% or 4.5% depending on the user interface.
+            Decimals available: 999.999
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="creditLimit" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Credit limit: institutions may not allow a person to charge more than this limit on the card.
+						In cases where the limit is exceeded, then typically over-the-limit charges occur.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="annualPercentageRate" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Calculated annual percentage rate (APR).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="rate" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Interest rate that is used for calculations.
+						Most of the time you would only use rate AND APR when there is a split or variable rate.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="minimumPayment" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The amount due each payment period to keep the credit card in good standing.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="maturityDate" type="xs:date" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The date that the loan must be paid off.
+						The date should be ISO 8601 format yyyy-mm-dd (2011-03-28).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="originalBalance" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Original balance of the loan, i.e. how much was borrowed.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="currentDueDate" type="xs:date" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The date that payment is due for the loan to keep in good standing and avoid penalties.
+						Many times institutions will institute a grace period beyond this date,
+						but this is the published due date.
+						The date should be ISO 8601 format yyyy-mm-dd (2011-03-28).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="currentPayoffBalance" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The current payoff balance represents the amount required to pay off the loan
+						at the date/time the request was made.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="CheckingSavingsMeta">
+		<xs:sequence>
+			<xs:element name="apy" type="xs:decimal" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Annual percentage yield.
+						4.500 may be displayed as 4.500% or 4.5% depending on the user interface.
+            Decimals available: 999.999
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="CreditCardMeta">
+		<xs:sequence>
+			<xs:element name="brand" type="xs:string" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The company that sponsors the card (i.e. Visa, MasterCard, American Express, etc.).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="creditLimit" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Credit limit: institutions may not allow a person to charge more than this limit on the card.
+						In cases where the limit is exceeded, then typically over-the-limit charges occur.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="minimumPayment" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The amount due each payment period to keep the credit card in good standing.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="currentDueDate" type="xs:date" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The date that payment is due for the loan to keep in good standing and avoid penalties.
+						Many times institutions will institute a grace period beyond this date,
+						but this is the published due date.
+						The date should be ISO 8601 format yyyy-mm-dd (2011-03-28).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+		
+	</xs:complexType>
+
+	<xs:complexType name="InvestmentMeta">
+		<xs:sequence>
+			<xs:element name="startingBalance" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Amount that was deposited into the investment product when it was originally opened.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="maturityDate" type="xs:date" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The date that the investment will pay out the full balance including any gains.
+						The date should be ISO 8601 format yyyy-mm-dd (2011-03-28).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="interestRate" type="xs:decimal" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Interest Rate earned by the investment.
+						Determines the amount earned each time period based on the period.
+						4.500 may be displayed as 4.500% or 4.5% depending on the user interface.
+            Decimals available: 999.999
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="compoundingFrequency" type="xs:string" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						How often the interest is paid.  This field is open text but some examples might be daily, monthly, etc.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="LineOfCreditMeta">
+		<xs:sequence>
+			<xs:element name="interestRate" type="xs:decimal" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Interest rate charged to the line of credit.
+						Determines the amount charged each time period based on the period.
+						4.500 may be displayed as 4.500% or 4.5% depending on the user interface.
+            Decimals available: 999.999
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="originalBalance" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Original balance of the line of credit, i.e. how much was borrowed.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="creditLimit" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Credit limit: institutions may not allow a person to charge more than this limit on the card.
+						In cases where the limit is exceeded, then typically over-the-limit charges occur.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="minimumPayment" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The amount due each payment period to keep the line of credit in good standing.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="currentDueDate" type="xs:date" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The date that payment is due for the line of credit to keep in good standing and avoid penalties.
+						Many times institutions will institute a grace period beyond this date,
+						but this is the published due date.
+						The date should be ISO 8601 format yyyy-mm-dd (2011-03-28).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="currentPayoffBalance" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The current payoff balance represents the amount required to pay off the line of credit
+						at the date/time that the request was made.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="MortgageMeta">
+		<xs:sequence>
+			<xs:element name="interestRate" type="xs:decimal" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Interest rate charged to the mortgage.
+						Determines the amount charged each time period based on the period.
+						4.500 may be displayed as 4.500% or 4.5% depending on the user interface.
+            Decimals available: 999.999
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="originalBalance" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Original balance of the mortgage, i.e. how much was borrowed.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="maturityDate" type="xs:date" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The date that the loan must be paid off.
+						The date should be ISO 8601 format yyyy-mm-dd (2011-03-28).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="escrowBalance" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Amount held in escrow for paying taxes on a mortgage financial instrument.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="minimumPayment" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The amount due each payment period to keep the mortgage in good standing.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="currentDueDate" type="xs:date" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The date that payment is due for the mortgage to keep in good standing and avoid penalties.
+						Many times institutions will institute a grace period beyond this date, but this is the 
+            published due date.  The date should be ISO 8601 format yyyy-mm-dd (2011-03-28).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="currentPayoffBalance" type="common:Money" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The current payoff balance represents the amount required to pay off the mortgage
+						at the date/time that the request was made.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+</xs:schema>

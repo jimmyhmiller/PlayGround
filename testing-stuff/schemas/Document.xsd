@@ -1,0 +1,823 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema
+targetNamespace="http://cufxstandards.com/v3/Document.xsd"
+version="3.2.$Revision: 1000 $"
+xmlns="http://cufxstandards.com/v3/Document.xsd"
+xmlns:xs="http://www.w3.org/2001/XMLSchema"
+xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+xmlns:artifact="http://cufxstandards.com/v3/Artifact.xsd"
+ 
+elementFormDefault="qualified"
+attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Artifact.xsd" schemaLocation="Artifact.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+
+  <xs:element name= "documentList" type ="DocumentList">
+    <xs:annotation>
+      <xs:documentation>
+        The documents collection/array list contains all the documents or document templates, for instance,
+        that the credential set is authorized to access at the Institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="DocumentList">
+    <xs:annotation>
+      <xs:documentation>
+        The documents collection/array list contains all the documents or document templates, for instance,
+        that the credential set is authorized to access at the Institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="document" type="Document" minOccurs="0" maxOccurs="unbounded">
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Document">
+    <xs:annotation>
+      <xs:documentation>
+        The document defines the information stored when a person signs a document or agreement either electronically
+        or manually.  This also relates documents to the party, relationship and/or account to which the document
+        is legally bound.
+      </xs:documentation>
+    </xs:annotation>
+
+    <xs:sequence>
+      <xs:element name="documentId" type="DocumentId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The document ID is a persistent and unique identifier for the document not related to the party, relationship
+            or accounts that the document is for. It should be unique for all documents across the institution and remain
+            the same over the life of the document within the financial institution.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="documentTitle" type="DocumentTitle" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Each document has a user-friendly title which is determined by the financial institution.
+            Examples are: Loan Dislosure, Savings Disclosure, Checking Disclosure, Membership Document, etc.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="documentType" type="DocumentType" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A valid type of document or document template, e.g. Notice, Statement, Disclosure, Check Images, etc.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="documentSubType" type="DocumentSubType" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A further drill-down into the type of document that it is, i.e. a category within a Type.  These are defined
+            by the financial institution based on the institution's needs.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="appliesTo" type="common:CustomData" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A further drill-down into what the document can be used for.  This is a list of name-value pairs that are able to
+            delineate when the product can be used.  For instance, it might be a list of States, SEGs, products, rates or other
+            scenarios where the document can be used.  For example: State TX, State OH, State MN.  This can be used in the filter
+            to select documents that only apply to those scenarios.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="documentStatus" type="DocumentStatus" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Current status of the document, stating if the document is in the process of being sent, presented,
+            signed, unsigned, etc.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="documentVersion" type="DocumentVersion" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A description that identifies the version of this document so that multiple versions of the same document
+            can be managed.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="effectiveDateTime" type="xs:dateTime" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The date and time that the document can be come effective.
+            The date/time should be ISO 8601 UTC format.
+            yyyy-mm-ddThh:mmZ (2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28)
+            formats are supported.  The time is assume to be 00:00Z if omitted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="expirationDateTime" type="xs:dateTime" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The date and time that the document expires.
+            The date/time should be ISO 8601 UTC format.
+            yyyy-mm-ddThh:mmZ (2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28)
+            formats are supported.  The time is assumed to be 00:00Z if omitted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="documentArtifactIdList" type="artifact:ArtifactIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Pointers to the document in the artifact repository.  This is provided as a list in case the document is made
+            up of multiple components.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="partyIdList" type="party:PartyIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of party ID's that relate to this document and may appear on the document.  This information is used if
+            the document is requested to be prefilled.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="relationshipId" type="relationship:RelationshipId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The relationship ID that relates to this document and may appear on the document.  This information is used if
+            the document is requested to be prefilled.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="accountIdList" type="account:AccountIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of account ID's that relate to this document.  This information is used if
+            the document is requested to be prefilled.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="prefillable" type="xs:boolean" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Identifies if the process can prefill the document template with party, relationship or account data.
+            If this document is no longer a template, was the document prefillable before it became an instance of a 
+            party-, relationship- or account-related document?
+            Refer to status field to determine if the document is a document template.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="prefilled" type="xs:boolean" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Identifies if the process prefilled a prefillable document template with party, relationship or account data.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="documentSignatureList" type="DocumentSignatureList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            If, when, and who signed the document.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="witnessList" type="WitnessList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            List of witness(es) of the document signing.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="customData" type="common:CustomData"  minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Document name/data pairs list of fields that are not yet available in the general specification.
+            This should be used as a LAST RESORT as any customizations will not be supported by all data
+            providers or processed by all client applications. ANY use of this field must be reported to the
+            architecture or working group committee to ensure that fields are somehow handled in the future
+            release of specifications.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:simpleType name="DocumentId">
+    <xs:annotation>
+      <xs:documentation>
+        The document ID is a persistent and unique identifier for the document not related to the party, 
+        relationship or accounts that the document is for. It should be unique for all documents across the
+        institution and remain the same over the life of the document within the financial institution.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string"/>
+  </xs:simpleType>
+
+  <xs:complexType name="DocumentIdList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of document ID's that should have their associated documents either returned or affected
+        by a read, update or delete request.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="documentId" type="DocumentId" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            A document ID that should have its associated documents either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+
+  <xs:simpleType name="DocumentTitle">
+    <xs:annotation>
+      <xs:documentation>
+        Each document has a title which is determined by the financial institution.
+        Examples are: Loan Dislosure, Savings Disclosure, Checking Disclosure, Membership Disclosure, etc.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base ="xs:string" />
+  </xs:simpleType>
+
+  <xs:complexType name="DocumentTitleList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of document titles that should have their associated documents either returned or affected
+        by a read, update or delete request.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="documentTitle" type="DocumentTitle" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            A document title that should have its associated documents either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:simpleType name="DocumentStatus">
+    <xs:annotation>
+      <xs:documentation>
+        Current status of the document, i.e. in the process of being sent, viewed, returned, etc.
+        (see signature type to determine if it was returned signed or not)
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Template">
+        <xs:annotation>
+          <xs:documentation>
+            The document has not yet been filled with information and can be used for any party, account or
+            relationship as a template.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="Sent">
+        <xs:annotation>
+          <xs:documentation>
+            The document has been sent to the person via mail or electronically, but it has not been signed.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="Viewed">
+        <xs:annotation>
+          <xs:documentation>
+            The document has been viewed online but it has not been signed.  Some documents may only require being viewed.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="Returned">
+        <xs:annotation>
+          <xs:documentation>
+            The document has been returned.  See signature type to determine if it has been signed.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="DocumentStatusList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of document statuses that should have their associated documents either returned or affected
+        by a read, update or delete request.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="documentStatus" type="DocumentStatus" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            A document status that should have its associated documents either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name ="DocumentType">
+    <xs:annotation>
+      <xs:documentation>
+        The type of document or document template, such as Notice, Statement, Disclosure, etc.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+  
+      <xs:enumeration value="CheckImage">
+        <xs:annotation>
+          <xs:documentation>
+            A picture of a check.  If separate documents are used to denote the front and the back, then you may use
+            the sub type to identify each side or just use the artifact collection to have each side.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      
+      <xs:enumeration value="Disclosure">
+        <xs:annotation>
+          <xs:documentation>
+            Legal information required to be delivered to party(ies) so they know how their accounts work and
+            what their legal rights are.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="IdentificationDocument">
+        <xs:annotation>
+          <xs:documentation>
+            Information that is used to ID the consumer, organization, estate or trust when the party arrives at the front line.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    
+      <xs:enumeration value="LoanDocument">
+        <xs:annotation>
+          <xs:documentation>
+            Information that relays the terms and agreements of a loan.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="MembershipDocument">
+        <xs:annotation>
+          <xs:documentation>
+            Information that contains information about their applicatoon and relays the terms and agreements of joining a 
+            financial institution when an agreement is necessary to join.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="Notice">
+        <xs:annotation>
+          <xs:documentation>
+            Legal notice to party(ies) that is required to be sent when an event happens on their associated accounts.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="Receipt">
+        <xs:annotation>
+          <xs:documentation>
+            Document that relays the image of a transaction or transactions that happened at a teller window, at an ATM
+            or other delivery method.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="Statement">
+        <xs:annotation>
+          <xs:documentation>
+            Balances, transactions and other information of the party(ies)'s accounts at a point in time.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="Report">
+        <xs:annotation>
+          <xs:documentation>
+            A report that summarizes activities, segmentation, transactions, etc.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="SignatureCard">
+        <xs:annotation>
+          <xs:documentation>
+            May contain, but not limited to, information regarding their account, an image of the person, and a signature 
+            of the person for identification purposes.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      
+      <xs:enumeration value="TaxForm">
+        <xs:annotation>
+          <xs:documentation>
+            IRS-related information about earnings on accounts.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      
+      <xs:enumeration value="Other">
+        <xs:annotation>
+          <xs:documentation>
+            This value can be used when no other types relate to the particular document.  What the document is can be found 
+            using the document title, sub type or appliesTo information.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction >
+  </xs:simpleType>
+
+  <xs:complexType name="DocumentSignatureList" >
+    <xs:annotation>
+      <xs:documentation>
+        If, when, and who signed the document.
+      </xs:documentation>
+    </xs:annotation>
+
+    <xs:sequence>
+      <xs:element name="documentSignature" type="DocumentSignature" minOccurs="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            An individual signature on the document.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="DocumentSignature">
+    <xs:sequence>
+      <xs:element name="documentSignatureType" type="DocumentSignatureType" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            If the document has been signed, how it was signed.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="signaturePurpose" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+           Defines the location and/or purpose of this instance of the signature.
+           This may be acknowledging the terms and conditions, initialing a location on the page, or final signature.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="signatureArtifactId" type="artifact:ArtifactId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            This element points to an electronic copy of the signature.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="documentSignedDateTime" type="xs:dateTime" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Current status of the document, such as if it's in the process of being sent, presented,
+            signed, unsigned, etc.  The date/time should be ISO 8601 UTC format.
+            yyyy-mm-ddThh:mmZ (2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28)
+            formats are supported.  The time is assumed to be 00:00Z if omitted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="signaturePartyId" type="party:PartyId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Which party signed the document.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="signedWithIpAddress" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            When electronically signed, the following IP address was used in the session.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="documentDigitalFingerprint" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The digital hash was created using a mathematical algorithm (typically SHA-1 but it is up to the 
+            end points to determine) on the document at the time that it was electronically signed.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="documentDigitalAlgorithm" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The mathematical algorithm used to create the digital hash
+            (typically SHA-1 but it is up to the end points to determine).
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="documentDigitalCertificate" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The user's digital certificate, issued by a certificate authority, that was used at the time that the document
+            was electronically signed.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="usersPublicKey" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            When electronically signed, this is the user's public key, which is part of the user's certificate that was used 
+            to create the digital signature.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="viewedConfirmationValue" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+          This is the value that the user is presented with to confirm that they were able to view document.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="viewedConfirmationStatus" type="ViewedConfirmationStatus" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+          This field shows the status of confirmation, i.e. presented, confirmed or failed.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:simpleType name="DocumentSignatureType">
+    <xs:annotation>
+      <xs:documentation>
+        If the document has been signed, how it was signed.
+      </xs:documentation>
+    </xs:annotation>
+    
+    <xs:restriction base="xs:string">
+
+      <xs:enumeration value="Unsigned">
+        <xs:annotation>
+          <xs:documentation>
+            The document has been been sent or viewed online, but it has not been signed.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ElectronicSignature">
+        <xs:annotation>
+          <xs:documentation>
+            The document has been viewed online and the person agreed to it electronically.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="SingleClickAcceptance">
+        <xs:annotation>
+          <xs:documentation>
+            The document has been viewed online and the person agreed to it electronically with a single click.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="WetSignature">
+        <xs:annotation>
+          <xs:documentation>
+            The document has been viewed and the person agreed to it in writing (handwrote signature in person).
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="DocumentSignatureTypeList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of document signature types that should have their associated documents either returned or affected
+        by a read, update or delete request.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="documentSignatureType" type="DocumentSignatureType" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            A document signature type that should have its associated documents either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+ 
+  <xs:simpleType name="DocumentVersion">
+    <xs:annotation>
+      <xs:documentation>
+        A description that identifies the version of this document so that multiple versions of the same document
+        can be managed.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string" />
+  </xs:simpleType>
+
+
+  <xs:complexType name="DocumentTypeList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of document types that should have their associated documents either returned or affected
+        by a read, update or delete request.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="documentType" type="DocumentType" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            A document type that should have its associated documents either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="DocumentSubTypeList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of document sub types that should have their associated documents either returned or affected
+        by a read, update or delete request.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="documentSubType" type="DocumentSubType" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            A document sub type that should have its associated documents either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+
+  <xs:simpleType name="DocumentSubType">
+    <xs:annotation>
+      <xs:documentation>
+        A further drill-down into the type of document that it is, i.e. a category within a Type.  These are defined
+        by the financial institution based on the institution's needs.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string" />
+  </xs:simpleType>
+
+  <xs:complexType name="WitnessList">
+    <xs:sequence>
+      <xs:annotation>
+        <xs:documentation>
+          Collection of witnesses.
+        </xs:documentation>
+      </xs:annotation>
+      <xs:element name="witness" type="Witness" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Details relating to the witness list.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  
+
+  <xs:complexType name="Witness">
+    <xs:annotation>
+      <xs:documentation>
+        Collection of document witness(es) associated with a document.  There can be multiple witnesses for a single document.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="witnessId" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The witness ID is a unique identifier for the witness based on the type of witness (see witnessIdType below).
+            In the case of a notary, the witness ID may be a concatenation of the 'name', 'county', and 'state' to ensure
+            a unique value.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="witnessIdType" type="WitnessIdType" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The witness ID type identifies what type of person has witnessed the document.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="WitnessIdType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="WitnessId" >
+        <xs:annotation>
+          <xs:documentation>
+            The type of witness.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="VendorEmployeeId">
+        <xs:annotation>
+          <xs:documentation>
+            The witness is from a third party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="SystemAccountId" >
+        <xs:annotation>
+          <xs:documentation>
+            The system user identifier, if an automated system witnessed the document.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="NotaryId" >
+        <xs:annotation>
+          <xs:documentation>
+            The witness is a notary.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      
+      <xs:enumeration value="Custom" >
+        <xs:annotation>
+          <xs:documentation>
+            The user identification was not one of the above formats.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="ViewedConfirmationStatus">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Presented" >
+        <xs:annotation>
+          <xs:documentation>
+            The value has been presented.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="Confirmed">
+        <xs:annotation>
+          <xs:documentation>
+            The user has confirmed the value presented.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="Failed" >
+        <xs:annotation>
+          <xs:documentation>
+            The user attempted to confirm value, but user value did not match presented value.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+    </xs:restriction>
+  </xs:simpleType>
+
+</xs:schema>

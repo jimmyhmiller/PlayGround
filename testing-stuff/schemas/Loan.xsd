@@ -1,0 +1,1820 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/Loan.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/Loan.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+	xmlns:credit="http://cufxstandards.com/v3/CreditReport.xsd"
+	xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+	xmlns:contact="http://cufxstandards.com/v3/Contact.xsd"
+	xmlns:collateral="http://cufxstandards.com/v3/Collateral.xsd"
+	xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+ 
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/CreditReport.xsd" schemaLocation="CreditReport.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Contact.xsd" schemaLocation="Contact.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Collateral.xsd" schemaLocation="Collateral.xsd" />
+
+	<xs:element name="loanList" type="LoanList">
+		<xs:annotation>
+			<xs:documentation>
+				Top level loan list collection element.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>	
+	
+	<xs:complexType name="LoanList">
+		<xs:sequence>
+			<xs:annotation>
+				<xs:documentation>
+					Collection of loans data definition.
+				</xs:documentation>
+			</xs:annotation>
+			<xs:element name="loan" type="Loan" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Details relating to a loan account.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="Loan">
+		<xs:complexContent>
+			<xs:annotation>
+				<xs:documentation>
+					Details relating to a loan account.
+				</xs:documentation>
+			</xs:annotation>
+			<xs:extension base="account:Account">
+				<xs:sequence>
+					<xs:element name="loanPartyList" type="LoanPartyList" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								A collection of parties and how each party is associated to this loan.
+								The details of the party can be pulled from the party object using the party ID.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+
+					<xs:element name="officerId" type="xs:string" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Officer initials/name/number indicating who approved the loan.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+
+					<xs:element name="processorId" type="xs:string" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								The processor of the loan.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+
+					<xs:element name="loanDecisionDate" type="xs:date" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								The date on which the loan was decisioned.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="applicationOriginationDate" type="xs:date" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								The date on which the application was originated.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="applicationDecisionStatus" type="LoanDecisionType" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Decision status.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="loanAccountStatus" type="LoanAccountStatus" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Status of the Loan Account.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="loanAccountSubStatus" type="xs:string" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								For use to support additional Loan acount statuses and sub status not present in enumerations.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="noteNumber" type="NoteNumber" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Number assigned to the specific loan note; this is optional and not all FI's will do this.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="category" type="LoanAccountCategory" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Defines which type of loan this loan account represents.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="purposeCode" type="xs:string" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Code that identifies the purpose for the loan.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="requestedAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								The original request loan amount from the member.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="noteAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								This includes fees, insurance, etc.
+								Because the financed amount includes fees, it will differ from the original loan amount;
+								MOST of the time this is the same as the original balance.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="creditLimit" type="common:Money" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Maximum approved credit limit for credit cards or lines of credit.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="creditLimitExpiration" type="xs:date" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Expiration date of the credit limit on a line of credit or credit card.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="creditLimitGroupCode" type="xs:string" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Used to aggregate a group of loan balances to determine their individual available balance.
+								Used to determine the total available credit amount you are allowed for all loans defined on the core that
+								are included in this group.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="ecoaGroup" type="EcoaGroupType" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Code used to indicate how the loan is to be reported to credit bureaus
+
+								Individual - This individual has contractual responsibility for this account and is primarily responsible
+                  for its payment.
+								Joint - This individual is contractually obligated to repay all debts arising on this account. There are 
+                  other people associated with this account who may or may not have contractual responsibility.
+								Authorized User - This individual is an authorized user of this account; another individual has contractual
+                  responsibility.
+								Co-Signer - This individual is liable for the credit, but does not receive the benefit of the loan. Note: 
+                  this individual is required to sign the Co-Signer Notice (Reg AA).
+								Maker - This individual is responsible for this account, which is guaranteed by a Co-maker (co-signer).
+								Co-Maker - The individual guarantees this account along with the Maker. Note: this is the same as the co-borrower.
+								Terminated - No further responsibility.
+								Undesignated - Responsibility not specified.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="creditReportingCode" type="xs:string" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Code used for reporting to the credit bureaus.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="isRevolvingLineOfCredit" type="xs:boolean" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Indicates revolving line of credit or non-revolving line of credit.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="minimumAdvanceAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								The minimum amount that is allowed for advances.
+								Revolving loans only, i.e. lines, credit cards.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="maximumAdvanceAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								The maximum amount that is allowed for advances.
+								Revolving loans only i.e. lines, credit cards.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="originationDate" type="xs:date" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Date on which the loan was originated.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="fundedDate" type="xs:date" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Date on which the loan was funded.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="disbursalDate" type="xs:date" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Date on which loan amount is disbursed.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="creationDate" type="xs:date" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Actual date (not system date) that a loan record is created on the host system.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="lastPaymentDate" type="xs:date" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Date on which the last loan payment was received.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="lastPaymentAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Amount of the last loan payment.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="term" type="xs:integer" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Term value of the loan.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="termType" type="LoanTermType" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Type of term value specified.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="creditReportList" type="credit:CreditReportList" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Collection of credit reports which relate credit scores used in determining loan approval.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="loanInterestRateDetail" type="LoanInterestRateDetail" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Details related to the interest rate for the loan.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="paymentOption" type="PaymentOption" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Details relating to the loan payment options.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="interestCalculationType" type="LoanInterestCalculationType" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Method for calculating the interest on the loan (360, 365).
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="dailyPeriodicRate" type="xs:decimal" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Daily periodic rate for calculating interest.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="totalNumberOfPayments" type="xs:integer" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Total number of payments in the term of the loan.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="prePaidFinanceCharges" type="common:Money" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Additional amounts included in a loan (points, flood ins, etc.).
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="prepaidInterest" type="common:Money" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Amount of interest pre-paid.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="interestPaidThruDate" type="xs:date" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Date through which the interest is paid.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="numberOfGraceDays" type="xs:integer" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Minimum number of days after a payment change before the payment becomes due,
+								e.g. the billing cycle closes on the 1st. Loan has 25 grace days. Payment is due on the 25th.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="balloonAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Balloon payment amount.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="balloonDueDate" type="xs:date" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Date the balloon payment becomes due.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="balloonDueDateTerm" type="BalloonDueDateTermType" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Call term/balloon term type.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="balloonDueDateTermValue" type="xs:integer" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Call term/balloon term value.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="prepaymentPenaltyBasis" type="PrepaymentPenaltyBasisType" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								How to handle prepayment penalties
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="prepaymentPenaltyBasisAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Amount of penalty amount, which
+								will be required depending on PrepaymentPenaltyBasis value.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="prepaymentPenaltyPercentage" type="xs:decimal" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Prepayment penalty percentage, which is required if PrepaymentPenaltyBasis is not Amount.
+								It will be required depending on PrepaymentPenaltyBasis value.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="prepaymentPenaltyExpirationDate" type="xs:date" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Prepayment penalty expiration date.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="statementCode" type="xs:string" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Used in statement generation programs.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="statementGroup" type="xs:string" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Used to define/categorize loans into statement groups
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="statementDate" type="xs:date" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Date for statement cut-off (billing date).
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="debtIncomeRatio" type="xs:decimal" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Debt to income percentage.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="loanFeeList" type="LoanFeeList" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Details related to loan fees.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="insuranceAddOnList" type="InsuranceAddOnList" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Details related to insurance details added to the loan, i.e.
+								insurance that is directly related to the loan.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="collateralList" type="collateral:CollateralList" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Details related to each collateral record.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="autoPaymentOption" type="AutoPaymentOption" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Details related to autopayment options.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="delinquencyNoticeList" type="DelinquencyNoticeList" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Details related to delinquency notices; describes/details the actions taken
+								when the loan is in a delinquent state.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="skipPayment" type="SkipPayment" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Details describing up front skip payment parameters, available to specific loan products.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="promotionCode" type="xs:string" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Promo code used to link applications to specific promotions.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="loanNoteList" type="common:NoteList" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Notes that have details related to the loan app or loan.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+          
+          <xs:element name= "creditLimitIncreaseRequestList" type ="CreditLimitIncreaseRequestList">
+            <xs:annotation>
+              <xs:documentation>
+                This is a collection of credit limit increase requests.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="customData" type="common:CustomData"  minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Loan level name/data pairs list of fields that are not yet available in the general specification.
+								This should be used as a LAST RESORT as any customizations will not be supported by all data providers
+								or processed by all client applications. ANY use of this field must be reported to the architecture
+								or working group committee to ensure that fields are somehow handled in the future release of specifications.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+				</xs:sequence>
+			</xs:extension>
+		</xs:complexContent>
+	</xs:complexType>
+
+	<xs:complexType name="AutoPaymentOption">
+		<xs:annotation>
+			<xs:documentation>
+				Details related to auto payment options.
+				Note: this is in the request; long-term may be added to inquiry response for maintenance.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="autoPaymentOption" type="AutoPaymentOptionType" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Can be used to set payment option for credit cards and LOC (minimum due, balance, set payment, principal, other).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="otherAutoPaymentOption" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Used when the AutoPaymentOption element value is Other.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="autoPaymentFrequency" type="AutoPaymentFrequencyType" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The payment frequency of the auto payment.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="autoPaymentDayOfTheWeek" type="common:DayOfTheWeek" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						A specific day of the month on a monthly basis, or a specific day of the week on a weekly basis, 
+            or bi-weekly, or yearly.  If you have this, you would not send AutoPaymentDayOfTheMonth.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="autoPaymentDayOfTheMonth" type="xs:integer" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						A specific day of the month (typically a subset of 1-31).
+						If you have this, you would not send AutoPaymentDayOfTheWeek.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="autoPaymentAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Autopayment amount.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="fromAccountId" type="account:AccountId" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The account from which to take the payment.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+	
+	<xs:complexType name="DelinquencyNoticeList" >
+		<xs:annotation>
+			<xs:documentation>
+				Details related to delinquency notices. This describes/details the actions taken
+				when the loan is in a delinquent state.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="delinquencyNotice" type="DelinquencyNotice" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Details related to each delinquency notice. It describes/details the actions taken
+						when the loan is in a delinquent state.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="DelinquencyNotice">
+		<xs:annotation>
+			<xs:documentation>
+				Details related to delinquency notices. It describes/details the actions taken
+				when the loan is in a delinquent state.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+      <xs:element name="delinquencyNoticeId" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Unique ID to identify the delinquency notice within the back end system.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+			<xs:element name="code" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Code to identify the type of delinquency notice.
+						FI's may have multiple delinquency notices; that's why they may need to identify by code.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="delinquencyNoticeDays" type="xs:integer" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Number of days before a delinquency notice is generated.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="delinquencyLockDays" type="xs:integer" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Number of days delinquent before line of credit or credit card is locked.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="description" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Description text for delinquency notices.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="InsuranceAddOnList">
+		<xs:annotation>
+			<xs:documentation>
+				Details related to insurance details added to the loan.
+				It is insurance directly related to the loan.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="insuranceAddOn" type="InsuranceAddOn" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Details relating to each insurance add on placed on the loan.
+						It is insurance directly related to the loan.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="InsuranceAddOn">
+		<xs:annotation>
+			<xs:documentation>
+				Details related to insurance details added to the loan.
+				It is insurance directly related to the loan.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:sequence>
+        <xs:element name="insuranceAddOnId" type="xs:string" minOccurs="0" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              Unique identifier for the insurance add-on.
+            </xs:documentation>
+          </xs:annotation>
+        </xs:element>
+        
+				<xs:element name="insuranceType" type="LoanInsuranceType" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Type of insurance to add on.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="otherInsuranceType" type="xs:string" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							If insurance type is Other, this is used to describe the FI-defined type.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="insuranceMaximum" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Maximum insurable loan balance.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="insuranceAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							The insurance amount.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="insuranceFeeAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Any applicable insurance fee amount.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="insuranceSubType" type="xs:string" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							The FI-defined code related to the insurance sub type.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="insuranceShortDescription" type="xs:string" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Short description that appears on the statement, e.g. config.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="insuranceDescription" type="xs:string" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Description that appears on records, e.g. this is config.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="insurancePostingConsolidationFlag" type="xs:boolean" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Insurance posting consolidation flag;
+							Indicates whether or not to post the Life and Disability Insurance Separately.
+							True = post as consolidated lump sum
+							False = post separately
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="primaryInsuredDateOfBirth" type="xs:date" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Insured's date of birth.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="secondInsuredDateOfBirth" type="xs:date" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Second Insured's date of birth.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+			</xs:sequence>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="LateChargeFee">
+		<xs:annotation>
+			<xs:documentation>
+				Late charge fee-related details.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="lateChargeFormulaCode" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Formula for calculating late charge, FI-defined.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="numberOfLateChargeGraceDays" type="xs:integer" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Number of grace days before accruing late charges.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="addLateChargeToStandardPayment" type="xs:boolean" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Defines whether or not to add the late charge to the standard payment.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="lateChargePercentageRate" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Late charge percentage rate.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="LoanAccountStatus">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Active" />
+			<xs:enumeration value="Closed" />
+			<xs:enumeration value="Dormant" />
+			<xs:enumeration value="Escheated" />
+			<xs:enumeration value="Incomplete" />
+			<xs:enumeration value="Locked" />
+			<xs:enumeration value="Matured" />
+			<xs:enumeration value="RenewPending" />
+			<xs:enumeration value="Restricted" />
+			<xs:enumeration value="Unfunded" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="LoanAccountStatusList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of loan account statuses that should have their associated loan accounts either returned or affected
+				by a read, update or delete request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="loanAccountStatus" type="LoanAccountStatus" minOccurs ="0" maxOccurs ="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Loan account status.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="LoanFeeList" >
+		<xs:annotation>
+			<xs:documentation>
+				Details related to loan fees.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="loanFee" type="LoanFee" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Details related to loan fees.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="LoanFee">
+		<xs:annotation>
+			<xs:documentation>
+				Details related to loan fees.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:sequence>
+        <xs:element name="loanFeeId" type="xs:string" minOccurs="0" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              Unique ID to identify the loan fee in the back end system.
+            </xs:documentation>
+          </xs:annotation>
+        </xs:element>
+				<xs:element name="lateChargeFee" type="LateChargeFee" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Late charge fee-related details.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="feeAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Flat fee that may be applied.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="includeEscrowInLateCharge" type="xs:boolean" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Defines whether or not to include the escrow amount in the late charge calculation.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="feeCode" type="xs:string" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							FI-defined code that identifies the fee in the core system.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="feeMin" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Minimum fee amount.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="feeMax" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Maximum fee amount.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="prePaidAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							The subset of the fee amount that relates to the prepaid amount of the fee.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="financedFeeAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Subset of the fee amount that is included in the principal.
+							Note: This is the payoff amount but really, not principal if you have the insurance pay off
+							a loan, but you still have to pay off the fee.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="unamortizedFees" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Total amount of fees to be amortized for the term of the loan.
+							It's called "Un" because on the system, this amount is used for
+							reducing as the fees are amoritized.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="feeDescription" type="xs:string" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							FI-defined description for the fee.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+			</xs:sequence>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="LoanInterestRateDetail">
+		<xs:annotation>
+			<xs:documentation>
+				Details related to the interest rate for the loan.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="originalEffectiveRate" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Original effective rate when the loan was opened.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="rateDiscountPercentage" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Percentage of interest rate discount being given.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="rateDiscountReasonCode" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Code-reason for giving the rate discount.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="relationshipRateDiscountPercentage" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Relationship-based pricing discount percentage: percentage of interest rate discount for satisfying
+            specific requirements, i.e. an employee is eligible for a certain discount rate percentage.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="relationshipRateDiscountReasonCode" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Reason for relationship-based pricing discount (i.e. multiple loans). This is FI-defined code
+            and it can also be a relationship group in order to represent a group, i.e. all Bose employees.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="annualPercentageRate" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Calculated annual percentage rate (APR).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="rate" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Interest rate that is used for calculations.
+						Most of the time you would only use rate AND APR when there is a split or variable rate.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="isSplitRate" type="xs:boolean" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Indicates if loan rates are split.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="splitRateCode" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Describes the interest rate type that is used in the interest calculation process.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="rateMaximum" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Ceiling interest rate indicating the highest interest rate allowed.
+            Note: revolving loans only, i.e. lines, credit cards.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="rateMinimum" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Floor rate indicating the lowest interest rate allowed. Note: revolving loans 
+            only, i.e. lines, credit cards.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="ratePercentageChange" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Percentage rate change allowed.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="margin" type="InterestRateMarginType" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Indicates type of margin: points or percentage.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="baseRateIndex" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Base rate used for calculations.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="rateMarginPercentage" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Amount added to the index to determine the interest rate.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="maximumFirstRateChangeIncrease" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Maximum first rate change increase.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="maximumFirstRateChangeDecrease" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Maximum first rate change decrease.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="maximumPercentageAdjustableRateChangeIncrease" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Maximum percentage adjustable rate change increase.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="maxPercentageAdjustableRateChangeDecrease" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Maximum percentage adjustable rate change decrease.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="maxAnnualRateChangeIncrease" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Maximum annual rate change increase.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="maxAnnualRateChangeDecrease" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Maximum annual rate change decrease.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="isRateMarginAboveIndex" type="xs:boolean" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Indicates if the rate is above or below the index (i.e. above or below prime).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="marginRiskRate" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Value that increases the margin rate.
+						If you have bad credit, this is the margin rate applied based on your credit. It
+						is used for risk-based pricing.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="scheduledRateChangeDate" type="xs:date" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Rate change date.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="periodicCapAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Maximum (cap) amount the interest rate can change during a given period.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="periodicCapStartRate" type="xs:decimal" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Starting interest rate for the Periodic Cap period.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="periodicCapStartDate" type="xs:date" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Starting date for the Periodic Cap period.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="periodicCapFrequency" type="PeriodicCapFrequencyType" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Defined period during which the Periodic Cap applies.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="periodicCapFrequencyValue" type="xs:integer" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Periodic Cap frequency value.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="splitRateBalance" type="common:Money" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Used to define the balance that will trigger a split rate.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="PaymentOption">
+		<xs:annotation>
+			<xs:documentation>
+				Details related to the loan payment options.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:sequence>
+				<xs:element name="calculationCode" type="xs:string" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Payment calculation type in the loan record, which is
+							used to tell the system how to calculate the loan payment.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="type" type="PaymentOptionType" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Generally a code for fixed or variable type loans, but also could be
+							a code indicating how the system will calculate/apply payments.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="calculationMethod" type="xs:string" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							FI-defined formula or method for calculating the payment. It's usually generated
+							from product defaults, so from configuration or from a product default middle-ware message.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="calculationPercentage" type="xs:decimal" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Payment calculation percentage conditional for variable payment lines of credit
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="paymentApplicationOrderCode" type="xs:string" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							FI-defined code that describes the order of applying loan payments, i.e. principal, interest, late fees, insurance.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="frequency" type="LoanPaymentFrequencyType" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Frequency of payments (weekly, bi-weekly, monthly, bi-monthly, quarterly, annually, semi-annually, one-time, etc.).
+							Can be chosen by the user or sent in the request or come from configuration.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="numberOfAnnualPayments" type="xs:integer" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Number of payments per year. Note: this is for loans that are weekly or bi-weekly.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="adjustmentMethod" type="xs:string" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							FI-defined method by which payments are adjusted, based on the payment frequency.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="isRoundPayment" type="xs:boolean" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Whether or not to round off the payment amount.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="paymentAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Includes P and I, fees, insurance, escrow, etc.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="dueDate" type="xs:date" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Due date of the payment.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="firstPaymentDueDate" type="xs:date" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							First payment date for a loan, which can be different
+							than the due date for the month (example: first of the month).
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="minimumPaymentAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Minimim payment amount which will
+							be required for certain loan types (LOC, CC).
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="latePaymentAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Calculated amount for loans with fixed monthly payment and fixed late fees.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="finalPaymentAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Last payment amount.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="maturityDate" type="xs:date" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							The maturity date of the loan.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="paymentDay" type="xs:integer" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Calendar day that the loan payment will be due, i.e. specific
+							day of the month requested for due dates (15th of the month for example).
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="paymentMethod" type="LoanPaymentMethodType" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							The chosen payment method, examples: automatic transfer, automatic debit, cash, counter,
+              check, bill pay, phone, debit card, electronic, payroll, coupon, etc.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="otherPaymentMethod" type="xs:string" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							When Other is chosen for the payment method, this field is used for the other value.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="couponCode" type="xs:string" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Code used for batch programs to generate a coupon book.
+							Conditional because it's only for loans with a payment method equal to Coupon.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+				<xs:element name="amountIncludingPrincipalAndInterest" type="common:Money" minOccurs="0" maxOccurs="1">
+					<xs:annotation>
+						<xs:documentation>
+							Payment amount including ONLY principal and interest.
+						</xs:documentation>
+					</xs:annotation>
+				</xs:element>
+			</xs:sequence>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="SkipPayment">
+		<xs:annotation>
+			<xs:documentation>
+				Details describing up front skip payment parameters, available in specific loan products.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="numberOfSkipPaymentsAllowed" type="xs:integer" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Number of loan payments allowed to be skipped.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="skipPaymentBeginDate" type="xs:date" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Date a borrower is allowed to begin skipping payments.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="monthToStartSkipPayments" type="MonthType" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Indicates the month that a loan payment will begin to be skipped;
+						Example: Sending the value of December will allow the user to skip the payment in December each year.
+						The number of skip payments allowed can also drive the number of months this will span.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="yearToSkipPayment" type="xs:integer" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Indicates the year that a loan payment will be skipped.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="isSkipRecurring" type="xs:boolean" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Indicates that the skip payment details are on a recurring basis.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+
+	<!-- Simple types - in alpha order -->
+	<xs:simpleType name="AutoPaymentFrequencyType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Bimonthly" />
+			<xs:enumeration value="Biweekly" />
+			<xs:enumeration value="Monthly" />
+			<xs:enumeration value="OneTime" />
+			<xs:enumeration value="Other" />
+			<xs:enumeration value="Weekly" />
+			<xs:enumeration value="Yearly" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="AutoPaymentOptionType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Balance" />
+			<xs:enumeration value="MinimumDue" />
+			<xs:enumeration value="Other" />
+			<xs:enumeration value="Principal" />
+			<xs:enumeration value="SetPayment" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="BalloonDueDateTermType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Months" />
+			<xs:enumeration value="Years" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="CollateralType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="MotorVehicle" />
+			<xs:enumeration value="MobileHome" />
+			<xs:enumeration value="PleasureBoat" />
+			<xs:enumeration value="Ship" />
+			<xs:enumeration value="Aircraft" />
+			<xs:enumeration value="Trailer" />
+			<xs:enumeration value="OtherTitled" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="EcoaGroupType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Individual" />
+			<xs:enumeration value="Joint" />
+			<xs:enumeration value="AuthorizedUser" />
+			<xs:enumeration value="CoSigner" />
+			<xs:enumeration value="Maker" />
+			<xs:enumeration value="CoMaker" />
+			<xs:enumeration value="Terminated" />
+			<xs:enumeration value="Undesignated" />
+			<xs:enumeration value="BusinessOrCommercial" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="InterestRateMarginType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Percentage" />
+			<xs:enumeration value="Points" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="LoanAccountCategory">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="AverageDailyBalanceLineOfCredit" />
+			<xs:enumeration value="ClosedEnd" />
+			<xs:enumeration value="CreditCard" />
+			<xs:enumeration value="Lease" />
+			<xs:enumeration value="LineOfCredit" />
+			<xs:enumeration value="LineOfCreditCombination" />
+			<xs:enumeration value="OpenEnd" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="LoanDecisionType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Approve" />
+			<xs:enumeration value="CounterOffer" />
+			<xs:enumeration value="Denied" />
+			<xs:enumeration value="Review" />
+			<xs:enumeration value="Withdrawn" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="LoanInsuranceType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="AccidentalDeathAndDismemberment" />
+			<xs:enumeration value="DebtCancellation" />
+			<xs:enumeration value="Disability" />
+			<xs:enumeration value="Gap">
+				<xs:annotation>
+					<xs:documentation>
+						Guaranteed auto protection.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Life" />
+			<xs:enumeration value="Other" />
+			<xs:enumeration value="PaymentProtection" />
+			<xs:enumeration value="Mbi">
+				<xs:annotation>
+					<xs:documentation>
+						Mechanical breakdown insurance.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="LoanInterestCalculationType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Actual360" />
+			<xs:enumeration value="Actual364" />
+			<xs:enumeration value="Daily365" />
+			<xs:enumeration value="Daily365Leap" />
+			<xs:enumeration value="DailyBilled360" />
+			<xs:enumeration value="Monthly360" />
+			<xs:enumeration value="Scheduled364" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="LoanPaymentFrequencyType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="AmortizedSchedule">
+				<xs:annotation>
+					<xs:documentation>
+            Used for corporate interface clients only.
+          </xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Annual" />
+			<xs:enumeration value="Bimonthly" />
+			<xs:enumeration value="Biweekly" />
+			<xs:enumeration value="BiweeklySkipFirst" />
+			<xs:enumeration value="BiweeklySkipLast" />
+			<xs:enumeration value="Immediate" />
+			<xs:enumeration value="Monthly" />
+			<xs:enumeration value="Quarterly" />
+			<xs:enumeration value="SemiAnnual" />
+			<xs:enumeration value="SemiMonthly" />
+			<xs:enumeration value="SinglePayment" />
+			<xs:enumeration value="Weekly" />
+			<xs:enumeration value="WeeklySkipFirst" />
+			<xs:enumeration value="WeeklySkipLast" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="LoanPaymentMethodType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="AutomaticDebit" />
+			<xs:enumeration value="AutomaticTransfer" />
+			<xs:enumeration value="BillPay" />
+			<xs:enumeration value="Cash" />
+			<xs:enumeration value="Check" />
+			<xs:enumeration value="Counter" />
+			<xs:enumeration value="Coupon" />
+			<xs:enumeration value="DebitCard" />
+			<xs:enumeration value="Distribution" />
+			<xs:enumeration value="DistributionAfterDue" />
+			<xs:enumeration value="Electronic" />
+			<xs:enumeration value="Other" />
+			<xs:enumeration value="Payroll" />
+			<xs:enumeration value="PayrollAfterDue" />
+			<xs:enumeration value="Phone" />
+			<xs:enumeration value="ScheduledAutomaticTransfer" />
+			<xs:enumeration value="ScheduledAutomaticTransferAfterDue" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="LoanTermType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Days" />
+			<xs:enumeration value="Months" />
+			<xs:enumeration value="Years" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="MonthType">
+		<xs:annotation>
+			<xs:documentation>
+				Type representing name of months.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="January" />
+			<xs:enumeration value="February" />
+			<xs:enumeration value="March" />
+			<xs:enumeration value="April" />
+			<xs:enumeration value="May" />
+			<xs:enumeration value="June" />
+			<xs:enumeration value="July" />
+			<xs:enumeration value="August" />
+			<xs:enumeration value="September" />
+			<xs:enumeration value="October" />
+			<xs:enumeration value="November" />
+			<xs:enumeration value="December" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="PaymentOptionType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Fixed" />
+			<xs:enumeration value="LevelPayment" />
+			<xs:enumeration value="LevelPrincipal" />
+			<xs:enumeration value="Variable" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="PeriodicCapFrequencyType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Annual" />
+			<xs:enumeration value="Quarterly" />
+			<xs:enumeration value="Monthly" />
+			<xs:enumeration value="Semi-Annual" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="PrepaymentPenaltyBasisType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Amount" />
+			<xs:enumeration value="PercentOfBalance" />
+			<xs:enumeration value="PercentOfOriginalAmount" />
+			<xs:enumeration value="PercentOfPrincipal" />
+			<xs:enumeration value="PercentOfUndisbursed" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="LoanPartyList">
+		<xs:annotation>
+			<xs:documentation>
+				A collection of party IDâs that uniquely identify each party associated to this loan
+				and additional fields on how the party relates to the loan.
+				This list is in addition to the relationship parties, if available.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element  name="loanParty" type="LoanParty" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						This includes each party ID and how it relates to the loan.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="LoanParty">
+		<xs:annotation>
+			<xs:documentation>
+				This includes each party ID and how it relates to the loan.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="loanPartyId" type="party:PartyId" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						This object is subset with additional fields of the party data.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="loanPartyRelationshipType" type="LoanPartyRelationshipType" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The party relationship type is the textual representation of what the
+						party record represents to this loan, such as primary, co-borrower,
+						beneficiary or some other type of relationship. This value
+						may be visible to the user and must be human-readable.  If the same
+						party exists at the relationship level, the account level
+						relationship type overrides the relationship.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="contactIdList" type="contact:ContactIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Collection of contacts for the party within this account.  Only contains the
+						contact ID for each contact.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="LoanPartyRelationshipType">
+		<xs:annotation>
+			<xs:documentation>
+				The party relationship type is the textual representation of what the
+				party record represents to this loan, such as primary, co-borrower,
+				beneficiary or some other type of relationship. This value
+				may be visible to the user and must be human-readable.  If the same
+				party exists at the relationship level, the account level
+				relationship type overrides the relationship.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:choice>
+			<xs:element name="borrower" type="Borrower" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Borrowers on the loan.
+					</xs:documentation >
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="agent" type="common:Agent" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Acts on behalf of the loan holder.
+					</xs:documentation >
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="payee" type="relationship:Payee" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Receives dividend or distribution checks from an account or relationship.
+					</xs:documentation >
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="guarantor" type="relationship:Guarantor" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Guarantees/carries liability for loan.
+					</xs:documentation >
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="collateralGrantor" type="relationship:CollateralGrantor" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Party who put up collateral for the loan but is not liable for the loan balance.
+					</xs:documentation >
+				</xs:annotation>
+			</xs:element>
+		</xs:choice>
+	</xs:complexType>
+
+	<xs:complexType name ="Borrower">
+		<xs:sequence>
+			<xs:element	name="qualifier" type="relationship:PrimaryJoint" minOccurs ="1" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Specifies if this is a primary (only one on account) or one or more joint borrowers (co-borrower).
+					</xs:documentation >
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element	name="authority" type ="common:Authority" minOccurs ="1" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Primary or joint holder has liability for the loan.	Only one primary party can exist on a loan.
+					</xs:documentation >
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+  <xs:complexType name="LoanAccountCategoryList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of loan account categories that should have their associated loans either returned or affected
+        by a read, update or delete request.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="loanCategory" type="LoanAccountCategory" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            A loan account category that should have its associated loans either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+<xs:simpleType name="NoteNumber">
+  <xs:restriction base="xs:string">
+    <xs:annotation>
+      <xs:documentation>
+        A unique number associated with a loan.  This number is not required.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:restriction>
+</xs:simpleType>
+
+  <xs:complexType name="CreditLimitIncreaseRequestList">
+    <xs:sequence>
+      <xs:element name="requestDate" type="xs:dateTime" minOccurs="0" >
+        <xs:annotation>
+          <xs:documentation>
+            The date on which the credit limit increase request was made.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="limitIncreaseDate" type="xs:dateTime" minOccurs="0" >
+        <xs:annotation>
+          <xs:documentation>
+            The date on which the credit limit was increased.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="newLimitRequest" type="xs:decimal" minOccurs="0" >
+        <xs:annotation>
+          <xs:documentation>
+            Amount of credit limit increase requested.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="memo" type="xs:string" minOccurs="0"   >
+        <xs:annotation>
+          <xs:documentation>
+            A general memo field.  This field can be used to provide details on why an increase was requested. 
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+    </xs:sequence>
+  </xs:complexType>
+  
+</xs:schema>

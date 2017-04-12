@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/AnswerList.xsd"
+	version="3.2.$Revision: 1000 $"
+	elementFormDefault="qualified"
+  xmlns="http://cufxstandards.com/v3/AnswerList.xsd"
+  xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:question="http://cufxstandards.com/v3/QuestionList.xsd"
+	xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+	>
+
+  <xs:import schemaLocation="QuestionList.xsd" namespace="http://cufxstandards.com/v3/QuestionList.xsd"/>
+  <xs:import schemaLocation="Party.xsd" namespace="http://cufxstandards.com/v3/Party.xsd"/>
+
+  <xs:element name="answerList" type="AnswerList" >
+    <xs:annotation>
+      <xs:documentation>
+        Top level element for answers to the identification resource.
+        List is provided in case there is more than one question asked.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+  <xs:complexType name="AnswerList">
+    <xs:sequence>
+      <xs:element name="answer" type="Answer" minOccurs="1" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Answer">
+    <xs:sequence>
+      <xs:element name="party" type="party:Party">
+        <xs:annotation>
+          <xs:documentation>
+            The original party data that was made in the original identification request.
+            This is submitted so that the service does not have to maintain state between
+            the time the questions were generated and the time that the answers were submitted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="questionId" type="xs:string"  minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            An identifier for the out-of-wallet question.
+            Must be unique within the list of questions.
+            May be a serial number or letter (1, 2, 3  or A, B, C), a GUID, or other identifier.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      
+      <xs:element name="choiceList" type="question:ChoiceList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The original questions that were presented to the user.
+            This is provided so that the service does not have to maintain state in case
+            choices are shuffled between identification requests.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element >
+
+      <xs:element name="answerChoice" type="question:Choice" minOccurs="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The answer choice that was selected by the user for the question.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+</xs:schema>

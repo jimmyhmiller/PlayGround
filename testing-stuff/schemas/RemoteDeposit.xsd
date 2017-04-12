@@ -1,0 +1,465 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/RemoteDeposit.xsd"
+	xmlns="http://cufxstandards.com/v3/RemoteDeposit.xsd"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+	xmlns:contact="http://cufxstandards.com/v3/Contact.xsd"
+	xmlns:artifact="http://cufxstandards.com/v3/Artifact.xsd"  
+	xmlns:transaction="http://cufxstandards.com/v3/Transaction.xsd"
+
+           
+	version="3.2.$Revision: 1000 $"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+ 	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Contact.xsd" schemaLocation="Contact.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Artifact.xsd" schemaLocation="Artifact.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Transaction.xsd" schemaLocation="Transaction.xsd" />
+
+
+	<xs:element name="remoteDepositList" type="RemoteDepositList">
+		<xs:annotation>
+			<xs:documentation>
+				Top level remote deposit request list collection element.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="RemoteDepositList">
+		<xs:sequence>
+			<xs:annotation>
+				<xs:documentation>
+					Collection of remote deposit request items.
+				</xs:documentation>
+			</xs:annotation>
+			<xs:element name="remoteDeposit" type="RemoteDeposit" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Details related to a remote deposit item.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="RemoteDeposit">
+		<xs:sequence>
+			<xs:annotation>
+				<xs:documentation>
+					The remote deposit request data element contains all the attributes to submit a remote deposit to a CUFX remote deposit
+					provider (such as Vertifi, BluePoint, etc.) for a decision on whether the deposit will be approved and eventually
+					made into the member's account.
+				</xs:documentation>
+			</xs:annotation>
+      <xs:element name="remoteDepositId" type="RemoteDepositId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A unique identifier identifying this remote deposit.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+			<xs:element name="clientReferenceId" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						A unique identifier created by the client system identifying this remote deposit
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="vendorReferenceId" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						A unique identifier created by the vendor for this remote deposit request instance
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="checkNumber" type="transaction:CheckNumber" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The number on the front of the item to be deposited
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>			
+			<xs:element name="routingTransitNumber" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Routing/transit number of the financial institution of the deposit item.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="micrCheckAccountNumber" type="account:MicrAccountNumber" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						MICR account number of the financial institution of the deposit item.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="amount" type="common:Money" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The amount of the deposit.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="cropped" type="xs:boolean" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						If set to true, it indicates that the image has already been cropped. If it's false, it indicates that the image
+						is not already cropped.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="frontImage" type="artifact:Artifact" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The front image of the check, on retrieval, the artifact may contain only the id depending on the filter.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="backImage" type="artifact:Artifact" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The back image of the check, on retrieval, the artifact may contain only the id depending on the filter.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="accountId" type="account:AccountId" minOccurs="1" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The ID of the linked account.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="status" type="RemoteDepositStatus" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The current status of the remote deposit.  This may be part of a session or after the session has ended.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="imageValidationIssueList" type="ImageValidationIssueList" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						If there were any image validation issues, they would be in this list.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="customData" type="common:CustomData"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Contact level name/data pairs list of fields that are not yet available in the general specification.
+						This should be used as a LAST RESORT as any customizations will not be supported by all data providers
+						or processed by all client applications. ANY use of this field must be reported to the architecture or
+						working group committee to ensure that fields are somehow handled in the future release of specifications.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+	
+	<xs:simpleType name ="RemoteDepositAction">
+		<xs:annotation>
+			<xs:documentation>
+				An enumeration of possible actions
+			</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base ="xs:string">
+			<xs:enumeration value ="CreateSession">
+				<xs:annotation>
+					<xs:documentation>
+						Create a new session for this remote deposit session, if the amounts are to be provided, this would be passed with this Action
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="SubmitImage">
+				<xs:annotation>
+					<xs:documentation>
+						Submit one or more of the images associated to the request
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="Commit">
+				<xs:annotation>
+					<xs:documentation>
+						The remote deposit request is currently under review, and is not currently approved.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+	
+	<xs:simpleType name ="RemoteDepositStatus">
+		<xs:annotation>
+			<xs:documentation>
+				An enumeration of possible statuses for a remote deposit capture request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base ="xs:string">
+			<xs:enumeration value ="ExceedsDepositLimit">
+				<xs:annotation>
+					<xs:documentation>
+						The user exceeded their deposit limit.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="Approved">
+				<xs:annotation>
+					<xs:documentation>
+						The remote deposit image request was approved.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="UnderReview">
+				<xs:annotation>
+					<xs:documentation>
+						The remote deposit request is currently under review, and is not currently approved.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="DeclinedEligibility">
+				<xs:annotation>
+					<xs:documentation>
+						The remote deposit request was declined because the user is currently restricted from using this service.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="DeclinedImageValidationIssue">
+				<xs:annotation>
+					<xs:documentation>
+						The remote deposit image request was declined because of image validation issues.  See the image validation
+						issues list attribute for a list of the specific issues.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="DuplicateItem">
+				<xs:annotation>
+					<xs:documentation>
+						This item has already been sumbitted to the target system.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="InvalidReferenceId">
+				<xs:annotation>
+					<xs:documentation>
+						An unknown reference id was provided
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="ImageValidationIssueList">
+		<xs:sequence>
+			<xs:annotation>
+				<xs:documentation>
+					Collection of image validation issues.
+				</xs:documentation>
+			</xs:annotation>
+			<xs:element name="imageValidationIssue" type="ImageValidationIssue" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Details related to an image validation issue.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name ="ImageValidationIssue">
+		<xs:annotation>
+			<xs:documentation>
+				An enumeration of possible image validation issues.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base ="xs:string">
+			<xs:enumeration value ="CARMismatchFailed">
+				<xs:annotation>
+					<xs:documentation>
+						CAR read OK, but the amount does not match the amount specified in the remote deposit request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="FoldedCorners">
+				<xs:annotation>
+					<xs:documentation>
+						The check image has folded corners.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="ExcessSkew">
+				<xs:annotation>
+					<xs:documentation>
+						Excess skew in the check image.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="TooDark">
+				<xs:annotation>
+					<xs:documentation>
+						Check image was too dark.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="TooLight">
+				<xs:annotation>
+					<xs:documentation>
+						Check image was too light.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="BelowMinSize">
+				<xs:annotation>
+					<xs:documentation>
+						The check image file size was below the minimize required size.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="AboveMaxSize">
+				<xs:annotation>
+					<xs:documentation>
+						The check image file size was above the maximum allowed size.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="UndersizedImage">
+				<xs:annotation>
+					<xs:documentation>
+						The check image height or width is too small.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="OversizedImage">
+				<xs:annotation>
+					<xs:documentation>
+						The check image height or width is too great.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="SpotNoise">
+				<xs:annotation>
+					<xs:documentation>
+						The check image noise was too great.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="DateUsability">
+				<xs:annotation>
+					<xs:documentation>
+						The check image date was not usable.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="PayeeUsability">
+				<xs:annotation>
+					<xs:documentation>
+						The check image payee was not usable.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="SignatureUsability">
+				<xs:annotation>
+					<xs:documentation>
+						The check image signature was not usable.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="PayorUsability">
+				<xs:annotation>
+					<xs:documentation>
+						The check image payor was not usable.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="MICRUsability">
+				<xs:annotation>
+					<xs:documentation>
+						The check image MICR was not usable.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="ImageFormat">
+				<xs:annotation>
+					<xs:documentation>
+						An unknown or unsupported image type was provided
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value ="EndorsementUsability">
+				<xs:annotation>
+					<xs:documentation>
+						The endorsement on the back of the item is not detected.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+  
+  <xs:simpleType name ="RemoteDepositId">
+    <xs:annotation>
+      <xs:documentation>
+        The RemoteDeposit ID is a persistent and unique identifier for the party not related to the accounts
+        they own but tied to that person or organization. It should be unique for all parties across the
+        institution and remain the same over the life of the relationship with the financial institution.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string" ></xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="RemoteDepositStatusList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of remote deposit statuses that should be returned or affected by a read, update or delete request.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="status" type="RemoteDepositStatus" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            The list of remote deposit statuses that should be returned or affected by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="RemoteDepositActionList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of actions that may be filtered to identify remote deposts to be affected by a read, update or delete request.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="action" type="RemoteDepositAction" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            The list of actions that may be filtered to identify remote deposts to be affected by a read, update or delete request.
+            Any single remote deposit will only have one valid action in progress at a given time.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="RemoteDepositIdList">
+    <xs:annotation>
+      <xs:documentation>
+        The list of remote reposit ID's that should be returned or affected by a read, update or delete request.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="remoteDepositId" type="RemoteDepositId" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            A RemoteDeposit ID that should have its associated remote deposits either returned or affected
+            by a read, update or delete request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  </xs:schema>
+
+

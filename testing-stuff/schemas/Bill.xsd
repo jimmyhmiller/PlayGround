@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema
+   targetNamespace="http://cufxstandards.com/v3/Bill.xsd"
+	version="3.2.$Revision: 1000 $"
+    xmlns="http://cufxstandards.com/v3/Bill.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+    xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+    xmlns:contact="http://cufxstandards.com/v3/Contact.xsd"
+    xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+    xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+    xmlns:billPayee="http://cufxstandards.com/v3/BillPayee.xsd"
+		xmlns:artifact="http://cufxstandards.com/v3/Artifact.xsd"
+   
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Contact.xsd" schemaLocation="Contact.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/BillPayee.xsd" schemaLocation="BillPayee.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Artifact.xsd" schemaLocation="Artifact.xsd" />
+
+
+  <xs:element name= "billList" type ="BillList">
+		<xs:annotation>
+			<xs:documentation>
+				The bill list is the collection of bills from different payees for a party/relation/member.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="BillList">
+		<xs:annotation>
+			<xs:documentation>
+				The bill list is the collection of bills from different payees for a party/relation/member.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="bill" type="Bill" minOccurs="0" maxOccurs="unbounded">
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="Bill">
+		<xs:sequence>
+			<xs:element name="billId" type="BillId" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						An ID that uniquely identifies the bill from payee.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="billImageArtifactId" type="artifact:ArtifactId" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The artifact id of the bill image. If it should be retreived from the artifact respository.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="eBillUri" type="xs:anyURI" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The eBill location of the bill image. If it is stored by a third party location.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="billFromPayeeId" type="billPayee:BillPayeeId" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						An ID that uniquely identifies the bill payee for the consumer.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="billFromPayeeGlobalId" type="billPayee:BillPayeeGlobalId" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The bill payee global ID is a persistent and unique identifier for the bill payee in bill pay system.
+						This bill payee global ID does not change for consumer to consumer.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="partyId" type="party:PartyId" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						ID of party related to payee.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="relationshipId" type="relationship:RelationshipId" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						ID of relationship related to payee.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="accountId" type="account:AccountId" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						ID of account related to payee.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="isEBill" type="xs:boolean" minOccurs="1" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						True if this bill has eBill attached.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="dueAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The amount of the current bill.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+      <xs:element name="earlyPaymentAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The payment amount of the current bill if paid by the early payment date.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+        
+			<xs:element name="minimumPaymentAmount" type="common:Money" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The minimum payment amount of the current bill.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="sentDateTime" type="xs:dateTime" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The Date bill was sent by payee.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ (2011-03-28T12:00Z)
+						or yyyy-mm-dd (2011-03-28) formats are supported. The time is assumed to be 00:00Z if
+						omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="dueDateTime" type="xs:dateTime" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The due date of the bill.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ (2011-03-28T12:00Z)
+						or yyyy-mm-dd (2011-03-28) formats are supported. The time is assumed to be 00:00Z if
+						omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="earlyPaymentDateTime" type="xs:dateTime" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The early payment date of the bill (if any).
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ (2011-03-28T12:00Z)
+						or yyyy-mm-dd (2011-03-28) formats are supported. The time is assumed to be 00:00Z if
+						omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+      
+			<xs:element name="lateFee" type="common:Money" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Fee if the bill is not paid on or before due date.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ (2011-03-28T12:00Z)
+						or yyyy-mm-dd (2011-03-28) formats are supported. The time is assumed to be 00:00Z if
+						omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="updatedDateTime" type="xs:dateTime" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The Date Updated is the date that the Bill Payee was last updated by the member.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ (2011-03-28T12:00Z)
+						or yyyy-mm-dd (2011-03-28) formats are supported. The time is assumed to be
+						00:00Z if omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="customData" type="common:CustomData"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Contact level name/data pairs list of fields that are not yet available in the general specification.
+						This should be used as a LAST RESORT as any customizations will not be supported by all data providers
+						or processed by all client applications. ANY use of this field must be reported to the architecture or
+						working group committee to ensure that fields are somehow handled in the future release of specifications.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>			
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="BillId">
+		<xs:restriction base="xs:string">
+			<xs:annotation>
+				<xs:documentation>
+					The bill ID is a persistent and unique identifier for the bill from payee.
+				</xs:documentation>
+			</xs:annotation>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="BillIdList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of bill Id's that should have their associated bills either returned
+				or affected by a read, update or delete request. 
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="billId" type="BillId" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						A bill id that should have its associated bill data either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+</xs:schema>

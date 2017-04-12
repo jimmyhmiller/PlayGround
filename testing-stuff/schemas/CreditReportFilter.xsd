@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema targetNamespace="http://cufxstandards.com/v3/CreditReportFilter.xsd"
+	xmlns="http://cufxstandards.com/v3/CreditReportFilter.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns:creditReport="http://cufxstandards.com/v3/CreditReport.xsd"
+  xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/CreditReport.xsd" schemaLocation="CreditReport.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+
+	<xs:element name="creditReportFilter" type="CreditReportFilter">
+		<xs:annotation>
+			<xs:documentation>
+				The list of filter options for services requesting to pull credit report(s) from storage.
+				This is different than a credit report request which pulls from the credit reporting agency.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="CreditReportFilter">
+		<xs:annotation>
+			<xs:documentation>
+				The list of filter options for services requesting credit report data from storage.  The options
+				can be used in combination or by themselves.  It is up to the data source to either return or
+				affect the data requested or return a standard error identifying why the request was rejected.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="creditReportIdList" type="creditReport:CreditReportIdList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of credit report ID's that should be returned or affected by a read or update request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="creditReportStartDate" type="xs:date" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Filter that is used to search credit reports retrieved from this date.
+						Start and end date filters work together.
+						Must be less than or equal to the end date if an end date is supplied.
+						If neither creditReportStartDate nor creditReportEndDate is provided, all applicable credit reports will be returned
+						based on other criteria.
+						The date/time should be ISO 8601 UTC format: yyyy-mm-dd (2011-03-28).
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="creditReportEndDate" type="xs:date" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Filter that is used to search credit reports retrieved to this date.
+						Start and end date filters work together.
+						Must be less than or equal to the end date if an end date is supplied.
+						If neither creditReportStartDate nor creditReportEndDate is provided, all applicable credit reports will be returned
+						based on other criteria.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="minCreditScore" type="xs:integer" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Filter that is used searching the credit reports based on minimum credit score.
+						min and max amount filters work together.
+						Must be less than or equal to the maxAmount if a max amount is supplied.
+						If neither minCreditScore nor maxCreditScore is provided, all applicable credit reports will be returned
+						based on other criteria.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="maxCreditScore" type="xs:integer" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Filter that is used searching the credit reports based on maximum credit score.
+						min and max amount filters work together.
+						Must be less than or equal to the maxAmount if a max amount is supplied.
+						If neither minCreditScore nor maxCreditScore is provided, all applicable credit reports will be returned
+						based on other criteria.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="reportType" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						For example, âExperian CreditProfileâ, âTransUnion EmploymentReportâ, as defined and supported by individual
+						service providers. Can request more than one report type to be returned for each applicant, if available.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="partyId" type="party:PartyId" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						If the party ID is known, then it can be supplied so that the data provider
+						can store the credit reporting data associated to the existing party.
+						The party ID is a persistent and unique identifier for the party, not related to the accounts
+						they own but tied to that person or business. It should be unique for all parties across the
+						institution and remain the same over the life of the relationship with the financial institution.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="taxId" type="party:TaxId" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Tax ID of the requested credit bureau report.  This is to enable processes to easily
+						make the connection between the requested report and the resulting credit bureau report.
+						The tax ID can be an Individual Social Security Number (SSN), Individual Tax Payer Number (TIN)
+						or the organizational Employer Identification Number (EIN).	Does NOT include dashes.
+						Typically stored in back end systems as 9 consecutive digits, i.e. 9-digit string with
+						no dashes and zero-filled.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+</xs:schema>

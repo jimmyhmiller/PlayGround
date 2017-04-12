@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/RegisteredDevice.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/RegisteredDevice.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+	xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+
+  <xs:element name= "registeredDeviceList" type ="RegisteredDeviceList">
+    <xs:annotation>
+      <xs:documentation>
+        The collection/array list contains all the devices to be created, read, updated or deleted.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="RegisteredDeviceList">
+    <xs:annotation>
+      <xs:documentation>
+        The collection/array list contains all the devices to be created, read, updated or deleted.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="registeredDevice" type="RegisteredDevice" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            The registered device to be created, read, updated or deleted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element >
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="RegisteredDevice">
+    <xs:annotation>
+      <xs:documentation>
+        The registered device to be created, read, updated or deleted.
+      </xs:documentation>
+    </xs:annotation>
+
+    <xs:sequence>
+
+      <xs:element name="deviceId" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The registered device identification string.  The application should ensure that
+            this is unique across all accounts.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="partyIdList" type="party:PartyIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Collection of key fields that point to a list of existing parties for which 
+            the device is registered.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="relationshipIdList" type="relationship:RelationshipIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Collection of key fields that point to a list of
+            existing relationships for which the registered device applies.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="accountIdList" type="account:AccountIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Collection of key fields that point to a list of
+            existing acounts for which the registered device applies.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="encryptedFlag" type="xs:boolean" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            If True, indicates that the device ID was encrypted.
+            Encryption method is agreed upon by application end point
+            providers.  Assume itâs NOT encrypted if this flag is not provided.
+            The message context will be used by the service to understand which 
+            client is calling the service to know which encryption algorithm to apply.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="isRegisteredFlag" type="xs:boolean" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            If True, indicates that the device ID is registered with the institution.
+            This will normally be True as the non-existence of the record means unregistered.
+            However, this gives the flexibility to store devices that have at some point
+            been registered but are now unregistered.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType  name="DeviceId">
+     <xs:annotation>
+      <xs:documentation>
+        The registered device identification string.  The application should ensure that
+        this is unique across all accounts.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string" ></xs:restriction>
+  </xs:simpleType>
+  
+  <xs:complexType name="RegisteredDeviceIdList">
+    <xs:annotation>
+      <xs:documentation>
+        List of device ID's used for filtering or referencing in other schema's for foreign key relationships.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="deviceId" type="DeviceId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The registered device identification string.  The application should ensure that
+            this is unique across all accounts.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+</xs:schema>

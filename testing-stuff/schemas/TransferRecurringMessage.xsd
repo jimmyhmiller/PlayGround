@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/TransferRecurringMessage.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/TransferRecurringMessage.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:mstns="http://cufxstandards.com/v3/TransferRecurringMessage.xsd"
+	xmlns:messageContext="http://cufxstandards.com/v3/MessageContext.xsd"
+	xmlns:transferFilter="http://cufxstandards.com/v3/TransferFilter.xsd"
+  xmlns:transferOccurrence="http://cufxstandards.com/v3/TransferOccurrence.xsd"
+  xmlns:transferRecurring="http://cufxstandards.com/v3/TransferRecurring.xsd"
+           
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/MessageContext.xsd" schemaLocation="MessageContext.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/TransferFilter.xsd" schemaLocation="TransferFilter.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/TransferRecurring.xsd" schemaLocation="TransferRecurring.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/TransferOccurrence.xsd" schemaLocation="TransferOccurrence.xsd" />
+
+  <xs:element name="transferRecurringMessage" type="TransferRecurringMessage">
+    <xs:annotation>
+      <xs:documentation>
+        All values that can be sent in a transfer recurring message.  Contains message context and transfer filter.
+        This is a wrapper used to more easily serialize the complete message.  All values are optional.  See
+        example specifications for usage.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="TransferRecurringMessage">
+    <xs:annotation>
+      <xs:documentation>
+        All values that can be sent in a transfer recurring message.  Contains message context and transfer filter.
+        This is a wrapper used to more easily serialize the complete message.  All values are optional.  See
+        example specifications for usage.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="messageContext" type="messageContext:MessageContext" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The message context contains information that is passed as part of each CUFX message call.  It
+            identifies who is sending the request in and enables the service provider to execute some level
+            of security or processing.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="transferFilter" type="transferFilter:TransferFilter" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Any filters applied to a read, update or delete transfer request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="transferRecurringList" type="transferRecurring:TransferRecurringList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            All of the recurring transfer data.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+</xs:schema>

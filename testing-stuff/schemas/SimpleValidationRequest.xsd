@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/SimpleValidationRequest.xsd"
+	version="3.2.$Revision: 1000 $"
+	elementFormDefault="qualified"
+	xmlns="http://cufxstandards.com/v3/SimpleValidationRequest.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+
+	xmlns:application="http://cufxstandards.com/v3/Application.xsd">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import schemaLocation="Application.xsd" namespace="http://cufxstandards.com/v3/Application.xsd" />
+
+  <xs:element name="simpleValidationRequestList" type="SimpleValidationRequestList">
+    <xs:annotation>
+      <xs:documentation>
+        Top level simple validation request list collection element.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+  
+  <xs:complexType name="SimpleValidationRequestList">
+    <xs:sequence>
+      <xs:annotation>
+        <xs:documentation>
+          Collection of simple validation requests to support serialization of requests.
+        </xs:documentation>
+      </xs:annotation>
+      <xs:element name="simpleValidationRequest" type="SimpleValidationRequest" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Top level element for simple validation request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+	<xs:complexType name="SimpleValidationRequest">
+    <xs:sequence>
+	     <xs:element name="validationType" type="xs:string" minOccurs="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Validation type specified by the service provider (Exs.: OFAC, CU Loss, etc.).
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="applicant" type="application:Applicant" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The applicant to be validated within the request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element >
+      <xs:element name="customData" type="common:CustomData"  minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Simple validation request level name/data pairs list of fields that are not yet available in the general
+            specification. This should be used as a LAST RESORT as any customizations will not be supported by all
+            data providers or processed by all client applications. ANY use of this field must be reported to the
+            architecture or working group committee to ensure that fields are somehow handled in the future
+            release of specifications.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+		
+	</xs:complexType>
+
+</xs:schema>

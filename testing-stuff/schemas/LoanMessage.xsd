@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/LoanMessage.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/LoanMessage.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:messageContext="http://cufxstandards.com/v3/MessageContext.xsd"
+  xmlns:loan="http://cufxstandards.com/v3/Loan.xsd"
+	xmlns:loanFilter="http://cufxstandards.com/v3/LoanFilter.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/MessageContext.xsd" schemaLocation="MessageContext.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Loan.xsd" schemaLocation="Loan.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/LoanFilter.xsd" schemaLocation="LoanFilter.xsd" />
+
+  <xs:element name="loanMessage" type="LoanMessage">
+    <xs:annotation>
+      <xs:documentation>
+        All values that can be sent in a loan message.  Contains message context, loan filter and a loan list.
+        This is a wrapper used to more easily serialize the complete message.  All values are optional.  See
+        example specifications for usage.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="LoanMessage">
+    <xs:annotation>
+      <xs:documentation>
+        All values that can be sent in a loan message.  Contains message context, loan filter and a loan list.
+        This is a wrapper used to more easily serialize the complete message.  All values are optional.  See
+        example specifications for usage.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="messageContext" type="messageContext:MessageContext" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The message context contains information that is passed as part of each CUFX message call.  It
+            identifies who is sending the request in and enables the service provider to execute some level
+            of security or processing.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="loanFilter" type="loanFilter:LoanFilter" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Any filters applied to a read, update or delete loan request.
+            Does not apply to a create message.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="loanList" type="loan:LoanList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            All the loan data.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence >
+  </xs:complexType >
+</xs:schema>
+
+
+

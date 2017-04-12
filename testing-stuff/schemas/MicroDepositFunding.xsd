@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/MicroDepositFunding.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/MicroDepositFunding.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+  xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+	xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+	
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+	
+	<xs:element name="microDepositFundingList" type="MicroDepositFundingList">
+    <xs:annotation>
+      <xs:documentation>
+        Top level microdeposit list collection element.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="MicroDepositFundingList">
+    <xs:sequence>
+      <xs:annotation>
+        <xs:documentation>
+          Collection of microdeposits data definition.
+        </xs:documentation>
+      </xs:annotation>
+      <xs:element name="microDepositFunding" type="MicroDepositFunding" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Details related to microdeposit account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:complexType name="MicroDepositFunding">
+		<xs:sequence>
+			<xs:annotation>
+				<xs:documentation>
+					A small deposit used to verify the validity of the account owner.  Typically during the ACH setup process.
+				</xs:documentation>
+			</xs:annotation>
+			
+			<xs:element name="microDepositFundingId" type="MicroDepositFundingId" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+            ID to track microdeposits.
+          </xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+      <xs:element name="relationshipId" type="relationship:RelationshipId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The relationship ID to which the microdeposit belongs.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+			
+			<xs:element name="partyId" type="party:PartyId" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Unique identifier for the party.  Typically either the relationship or the party is used
+						not both.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			
+      <xs:element name="sourceAccount" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The ID of the account or general ledger that is the source of the deposit for this microdeposit.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      		
+			<xs:element name="externalAccountID" type="xs:string" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+            External account that needs to be verified. Direct reference to the account structure was avoided in this instance
+						to avoid inclusion of numerous fields not needed for a microdeposit. 
+          </xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="externalRoutingNumber" type="xs:string" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Routing number for the external account. Direct reference to the account structure was avoided in this instance
+						to avoid inclusion of numerous fields not needed for a microdeposit.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			
+			<xs:element name="microDepositList" type="MicroDepositList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Microdeposit 0 - n.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="customData" type="common:CustomData" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Name/data pairs list of fields that are not yet available in the general specification.
+						This should be used as a LAST RESORT as any customizations will not be supported by all
+						data providers or processed by all client applications.  ANY use of this field must be
+						reported to the architecture or working group committee to ensure that fields are somehow
+						handled in the future release of specifications.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="MicroDepositFundingId">
+		<xs:restriction base="xs:string">
+			<xs:annotation>
+				<xs:documentation>
+					Unique id of the micro funding deposit. This id will have a relationship to multiple micro deposit ids as presented as part
+					of a single micro deposit transaction.
+				</xs:documentation>
+			</xs:annotation>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="MicroDepositFundingIdList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of micro funding deposit ids to be returned or affected by a read, update or delete request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="microDepositFundingId" type="MicroDepositFundingId" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						A micro funding deposit ID that should have its associated records either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="MicroDepositId">
+		<xs:restriction base="xs:string">
+			<xs:annotation>
+				<xs:documentation>
+					Unique id of the micro deposit.
+				</xs:documentation>
+			</xs:annotation>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="MicroDepositIdList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of micro deposit ids to be returned or affected by a read, update or delete request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="microDepositId" type="MicroDepositId" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						A micro deposit ID that should have its associated records either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="MicroDeposit">
+		<xs:annotation>
+			<xs:documentation>
+				Standard definition for money values to include both the value and the currency.
+				Currency defaults to USD (United States $) if not specified.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="microDepositId" type="MicroDepositId" minOccurs ="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Unique id of the micro deposit
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			
+			<xs:element name="microDepositAmount" type="common:Money" minOccurs ="1" maxOccurs="1" >
+				<xs:annotation>
+					<xs:documentation>
+						The amount and currency of the microdeposit.
+					</xs:documentation >
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="microDepositConfirmationCode" type="xs:string" minOccurs ="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Confirmation code for the microdeposit. As each microdeposit is processed independently a seperate response is possible 
+						for each occurence of the value and currency code pair.  
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="MicroDepositList">
+		<xs:annotation>
+			<xs:documentation>
+				A list of micro deposit.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="microDeposit" type="MicroDeposit" minOccurs="0" maxOccurs="unbounded">
+			</xs:element >
+		</xs:sequence>
+	</xs:complexType>
+
+
+</xs:schema>

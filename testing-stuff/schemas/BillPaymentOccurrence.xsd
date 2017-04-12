@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema
+   targetNamespace="http://cufxstandards.com/v3/BillPaymentOccurrence.xsd"
+	version="3.2.$Revision: 1000 $"
+  xmlns="http://cufxstandards.com/v3/BillPaymentOccurrence.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+  xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+  xmlns:billpayee="http://cufxstandards.com/v3/BillPayee.xsd"
+  xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+  xmlns:fundsTransferOccurrenceBase="http://cufxstandards.com/v3/FundsTransferOccurrenceBase.xsd"
+  xmlns:bill="http://cufxstandards.com/v3/Bill.xsd"
+  xmlns:transaction="http://cufxstandards.com/v3/Transaction.xsd"
+   
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/BillPayee.xsd" schemaLocation="BillPayee.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/FundsTransferOccurrenceBase.xsd" schemaLocation="FundsTransferOccurrenceBase.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Bill.xsd" schemaLocation="Bill.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Transaction.xsd" schemaLocation="Transaction.xsd" />
+
+	<xs:element name="billPaymentOccurrenceList" type ="BillPaymentOccurrenceList">
+		<xs:annotation>
+			<xs:documentation>
+				The bill payment collection/array contains all the bills, for instance, that the credential set is
+				authorized to access at the Institution based on applied filters.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="BillPaymentOccurrenceList">
+		<xs:annotation>
+			<xs:documentation>
+				The bill payment collection/array contains all the bills, for instance, that the credential set is
+				authorized to access at the Institution based on applied filters
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="billPaymentOccurrence" type="BillPaymentOccurrence" minOccurs="0" maxOccurs="unbounded">
+			</xs:element >
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="BillPaymentOccurrence">
+		<xs:complexContent>
+			<xs:extension base="fundsTransferOccurrenceBase:FundsTransferOccurrenceBase" >
+				<xs:sequence>
+					<xs:element name="billPayeeId" type="billpayee:BillPayeeId"   minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								The ID of the payee.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="billId" type="bill:BillId"   minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								The ID of the bill that party, relationship or account is paying. Example, the invoice number of a bill.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+          <xs:element name="expectedDebitDateTime" type="xs:dateTime" minOccurs="0" maxOccurs ="1">
+            <xs:annotation>
+              <xs:documentation>
+                The expected debit date of bill payment.
+                The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+                (2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+                supported.  The time is assumed to be 00:00Z if omitted.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>  
+					<xs:element name="paymentClearedDateTime" type="xs:dateTime" minOccurs="0" maxOccurs ="1">
+						<xs:annotation>
+							<xs:documentation>
+								The date that the bill payment or check was received and processed.
+								The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+								(2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+								supported.  The time is assumed to be 00:00Z if omitted.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>  
+					<xs:element name="isStopRequested" type="xs:boolean" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								True if the payment has had a stop payment requested; false if a stop payment has not been requested.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="checkStoppedDate" type="xs:dateTime" minOccurs="0" maxOccurs ="1">
+						<xs:annotation>
+							<xs:documentation>
+								The date that the bill payment was stopped.
+								The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+								(2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+								supported.  The time is assumed to be 00:00Z if omitted.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>     
+					<xs:element name="nsfCount" type="xs:integer" minOccurs="0" maxOccurs ="1">
+						<xs:annotation>
+							<xs:documentation>
+								The number of times that the bill payment has failed to process due to insufficient funds.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element> 
+					<xs:element name="checkNumber" type="transaction:CheckNumber" minOccurs="0" maxOccurs ="1">
+						<xs:annotation>
+							<xs:documentation>
+								The number of the bill payment check.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>     
+				</xs:sequence>
+			</xs:extension>
+		</xs:complexContent>
+	</xs:complexType>
+</xs:schema>

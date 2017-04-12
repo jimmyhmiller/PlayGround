@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/PermissionListFilter.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/PermissionListFilter.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+	xmlns:permissionList="http://cufxstandards.com/v3/PermissionList.xsd"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+	xmlns:accessProfile="http://cufxstandards.com/v3/AccessProfile.xsd"
+	xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+	xmlns:card="http://cufxstandards.com/v3/Card.xsd"
+	xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+  xmlns:credentialGroup="http://cufxstandards.com/v3/CredentialGroup.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/PermissionList.xsd" schemaLocation="PermissionList.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/AccessProfile.xsd" schemaLocation="AccessProfile.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Card.xsd" schemaLocation="Card.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/CredentialGroup.xsd" schemaLocation="CredentialGroup.xsd" />
+
+  <xs:element name="permissionListFilter" type="PermissionListFilter">
+    <xs:annotation>
+      <xs:documentation>
+        The list of filter options for services requesting permission list data.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="PermissionListFilter">
+    <xs:sequence>
+      <xs:element name="actors" minOccurs="0" maxOccurs="unbounded" type="accessProfile:Actor">
+        <xs:annotation>
+          <xs:documentation>
+            The users, parties, or other authenticated entities to search for.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="actionList" type="permissionList:ExtendedAction" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Actions to search for.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="resources" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The accounts, users, or other securable assets to search for.
+          </xs:documentation>
+        </xs:annotation>
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="accountIdList" type="account:AccountIdList" minOccurs="0" maxOccurs="1">
+              <xs:annotation>
+                <xs:documentation>
+                  Resource accounts to search for.
+                </xs:documentation>
+              </xs:annotation>
+            </xs:element>
+            <xs:element name="fiUserIdList" type="credentialGroup:FiUserIdList" minOccurs="0" maxOccurs="1">
+              <xs:annotation>
+                <xs:documentation>
+                  Resource users to search for.
+                </xs:documentation>
+              </xs:annotation>
+            </xs:element>
+            <xs:element name="cardIdList" type="card:CardIdList" minOccurs="0" maxOccurs="1">
+              <xs:annotation>
+                <xs:documentation>
+                  Resource cards to search for.
+                </xs:documentation>
+              </xs:annotation>
+            </xs:element>
+            <xs:element name="relationshipIdList" type="relationship:RelationshipIdList" minOccurs="0" maxOccurs="1">
+              <xs:annotation>
+                <xs:documentation>
+                  Resource relationships to search for.
+                </xs:documentation>
+              </xs:annotation>
+            </xs:element>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+</xs:schema>

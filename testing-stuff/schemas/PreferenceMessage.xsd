@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/PreferenceMessage.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/PreferenceMessage.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:messageContext="http://cufxstandards.com/v3/MessageContext.xsd"
+  xmlns:preference="http://cufxstandards.com/v3/Preference.xsd"
+	xmlns:preferenceFilter="http://cufxstandards.com/v3/PreferenceFilter.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/MessageContext.xsd" schemaLocation="MessageContext.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Preference.xsd" schemaLocation="Preference.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/PreferenceFilter.xsd" schemaLocation="PreferenceFilter.xsd" />
+
+  <xs:element name="preferenceMessage" type="PreferenceMessage">
+    <xs:annotation>
+      <xs:documentation>
+        All values that can be sent in a preference message.  Contains message context, preference filter and a preference 
+        list.  This is a wrapper used to more easily serialize the complete message.  All values are optional.  See
+        example specifications for usage.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="PreferenceMessage">
+    <xs:annotation>
+      <xs:documentation>
+        All values that can be sent in a preference message.  Contains message context, preference filter and a preference
+        list.  This is a wrapper used to more easily serialize the complete message.  All values are optional.  See
+        example specifications for usage.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="messageContext" type="messageContext:MessageContext" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The message context contains information that is passed as part of each CUFX message call.  It
+            identifies who is sending the request in and enables the service provider to execute some level
+            of security or processing.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="preferenceFilter" type="preferenceFilter:PreferenceFilter" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Any filters applied to a read, update or delete preference request.
+            Does not apply to a create message.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="preferenceList" type="preference:PreferenceList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            All the preference data.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence >
+  </xs:complexType >
+</xs:schema>
+

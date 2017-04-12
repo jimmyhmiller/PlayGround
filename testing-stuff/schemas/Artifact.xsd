@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema 
+  targetNamespace="http://cufxstandards.com/v3/Artifact.xsd"
+  version="3.2.$Revision: 1000 $"
+  xmlns="http://cufxstandards.com/v3/Artifact.xsd"
+  xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+  xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  
+  elementFormDefault="qualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+
+  <xs:element name= "artifactList" type ="ArtifactList">
+    <xs:annotation>
+      <xs:documentation>
+        The artifacts collection/array contains all the artifacts, for instance, that the credential set is
+        authorized to access at the Institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="ArtifactList">
+    <xs:annotation>
+      <xs:documentation>
+        The artifacts collection/array contains all the artifacts, for instance, that the credential set is
+        authorized to access at the Institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="artifact" type="Artifact" minOccurs="0" maxOccurs="unbounded">
+      </xs:element >
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:complexType name="Artifact" >
+    <xs:annotation>
+      <xs:documentation>
+        An artifact is a binary representation of an image, document, etc. that needs to be stored
+        in a back end system for later retrieval.
+      </xs:documentation>
+    </xs:annotation>
+
+    <xs:sequence>
+      <xs:element name="artifactId" type="ArtifactId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A unique number used to identify a specific artifact within the repository.
+            Some artifact systems do not have a concept of a unique key but a concept of a combined key to access
+            values in the back end system.
+          </xs:documentation>
+        </xs:annotation>        
+      </xs:element>
+      <xs:element name="artifactType" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The MIME type of the artifact.  See RFC 2046 for valid MIME type.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="externalId" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            An identifier or reference value typically used by the repository consumer.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="artifact" type="xs:base64Binary" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            This is the binary object containing the digital data to be stored in the repository.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="artifactName" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A human-readable name of the artifact.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="artifactDescription" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A human-readable text describing the contents of the artifact.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="artifactOwner" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A human-readable string describing the owner of the artifact.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="artifactCreationDate" type="xs:dateTime" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The date and time at which an artifact was created.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="artifactModifiedDate" type="xs:dateTime" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The date and time at which an artifact was modified.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="artifactArchivedDate" type="xs:dateTime" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The date and time at which an artifact was archived.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="artifactDeletedDate" type="xs:dateTime" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The date and time at which an artifact was deleted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="artifactCompressionType" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The type of compression used to reduce the size of the artifact for transport over
+            the wire (e.g âzipâ, âtarâ, âgzipâ, ârarâ, ânoneâ etc.).  If this field is blank or 
+            null, then it is assumed that the artifact is not in a compressed state.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="artifactArchived" type="xs:boolean" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A flag used to determine if the artifact has been archived or not.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="customData" type="common:CustomData"  minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Artifact level name/data pairs list of fields that are not yet available in the general specification.
+            This should be used as a LAST RESORT as any customizations will not be supported by all data providers
+            or processed by all client applications. ANY use of this field must be reported to the architecture or
+            working group committee to ensure that fields are somehow handled in the future release of specifications.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+ 
+  </xs:complexType>
+
+  <xs:complexType name ="ArtifactId">
+    <xs:annotation>
+      <xs:documentation>
+        A unique value (or values) used to identify one and only one artifact within the repository.
+        Some artifact systems do not have a concept of a unique key but a concept of a combined key to access
+        values in the back end system.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:choice>
+      <xs:element name="artifactUniqueId" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            A unique value (or values) used to identify one and only one artifact within the repository.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="artifactIdKeyValueList" type="common:CustomData" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Some artifact systems do not have a concept of a unique key but a concept of a combined key to access
+            values in the back end system.  Instead of having to combine and then strip the key apart in the back end,
+            this defines a list of name value pairs to uniquely identify an artifact in the repository.
+            For example: type CheckImage, accountNumber 1234, checkNumber 123, datetime 12/1/2014 12:10 PM, amount 35.00
+            If this key value is used, it should be documented in customData area of configuration services for full definition.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:choice>
+  </xs:complexType>
+
+  <xs:complexType name ="ArtifactIdList">
+    <xs:annotation>
+      <xs:documentation>
+        List of artifact ID's that can be used by other objects to
+        point to each artifact in a list.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="artifactId" type="ArtifactId" minOccurs="0" maxOccurs="unbounded"
+				nillable="true">
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+</xs:schema>

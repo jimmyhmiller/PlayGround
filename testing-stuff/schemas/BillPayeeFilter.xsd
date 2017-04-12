@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/BillPayeeFilter.xsd"
+  version="3.2.$Revision: 1000 $"
+  xmlns="http://cufxstandards.com/v3/BillPayeeFilter.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns:billPayee="http://cufxstandards.com/v3/BillPayee.xsd"
+	xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+	xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+           
+  elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/BillPayee.xsd" schemaLocation="BillPayee.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+
+
+	<xs:element name="billPayeeFilter" type="BillPayeeFilter">
+		<xs:annotation>
+			<xs:documentation>
+				The list of filter options for services requesting billPayee data.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="BillPayeeFilter">
+		<xs:annotation>
+			<xs:documentation>
+				The list of filter options for services requesting billPayee data. The options can be used in
+				combination or by themselves. It is up to the data source to either return or affect the
+				data requested or return a standard error identifying why the request was rejected.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="billPayeeGlobalIdList" type="billPayee:BillPayeeGlobalIdList" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of BillPayee ID's that should have their associated billPayees either returned or affected
+						by a read, update or delete billPayee request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			
+			<xs:element name="partyIdList" type="party:PartyIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of party ID's that should be returned or affected by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="relationshipIdList" type="relationship:RelationshipIdList" minOccurs ="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of relationship ID's that should have their associated bill payees either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="accountIdList" type="account:AccountIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of account ID's that should have their associated payees either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>		
+			
+			<xs:element name="payeeName" type="xs:string"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						If a person, the first and last name of the person. If a business or trust, will include the business or trust name.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="isElectronic" type="xs:boolean" minOccurs="1" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						True for electronic processing. False for sending a paper check.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="userDefinedName" type="xs:string"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The user-defined name for payee.  Could be a nickname.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="payeeCategory" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						A member defined category that can be used for reporting purposes.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="payeeStatusList" type="billPayee:PayeeStatusList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of bill payee statuses that should have their associated bill payee records either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+		</xs:sequence>
+	</xs:complexType>
+</xs:schema>

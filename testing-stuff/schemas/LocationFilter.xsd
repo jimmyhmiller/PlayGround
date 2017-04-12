@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<xs:schema targetNamespace="http://cufxstandards.com/v3/LocationFilter.xsd"
+	xmlns="http://cufxstandards.com/v3/LocationFilter.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+ 	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+
+	<xs:element name="locationFilter" type="LocationFilter">
+		<xs:annotation>
+			<xs:documentation>
+				Instance of a location filter.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="LocationFilter">
+		<xs:sequence>
+			<xs:annotation>
+				<xs:documentation>
+					A location filter is used to query for locations near an address, for a given type, etc.
+				</xs:documentation>
+			</xs:annotation>
+			<xs:element name="locationId" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						A unique identifier for the location.  Use this for trying to retrieve a single location.
+					</xs:documentation>
+				</xs:annotation>	
+			</xs:element>
+			<xs:element name="type" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The type of location (e.g. ATM, branch).
+					</xs:documentation>
+				</xs:annotation>
+				<xs:simpleType>
+					<xs:restriction base="xs:string">
+						<xs:enumeration value="ATM"></xs:enumeration>
+						<xs:enumeration value="SharedATM"></xs:enumeration>
+						<xs:enumeration value="Branch"></xs:enumeration>
+						<xs:enumeration value="SharedBranch"></xs:enumeration>
+						<xs:enumeration value="Kiosk"></xs:enumeration>
+						<xs:enumeration value="Other"></xs:enumeration>
+					</xs:restriction>
+				</xs:simpleType>
+			</xs:element>
+			<xs:element name="searchFromAddress" type="common:Address" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The address to search for nearby locations.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="depositTaking" type="xs:boolean" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Whether or not to include only deposit-taking locations in the results.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="maxNumberOfResults" type="xs:integer" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Maximum number of results to return.
+					</xs:documentation>
+				</xs:annotation>				
+			</xs:element>
+			<xs:element name="maxDistance" type="common:Distance" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Maximum distance (e.g. 25 miles) to search for locations from the searchFromAddress.
+					</xs:documentation>
+				</xs:annotation>				
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+</xs:schema>

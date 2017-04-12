@@ -1,0 +1,590 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema
+  targetNamespace="http://cufxstandards.com/v3/Account.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/Account.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:meta="http://cufxstandards.com/v3/Meta.xsd"
+  xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+  xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+  xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+  xmlns:contact="http://cufxstandards.com/v3/Contact.xsd"
+  xmlns:feeSchedule="http://cufxstandards.com/v3/FeeSchedule.xsd"
+	xmlns:transaction="http://cufxstandards.com/v3/Transaction.xsd"
+	
+  elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Meta.xsd" schemaLocation="Meta.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/CredentialGroup.xsd" schemaLocation="CredentialGroup.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Contact.xsd" schemaLocation="Contact.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/FeeSchedule.xsd" schemaLocation="FeeSchedule.xsd" />
+	<xs:import namespace="http://cufxstandards.com/v3/Transaction.xsd" schemaLocation="Transaction.xsd" />
+
+	<xs:element name= "accountList" type ="AccountList">
+		<xs:annotation>
+			<xs:documentation>
+				The accounts collection/array contains all the accounts, for instance, that the credential set is
+				authorized to access at the Institution based on applied filters.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="AccountList">
+		<xs:annotation>
+			<xs:documentation>
+				The accounts collection/array contains all the accounts, for instance, that the credential set is
+				authorized to access at the Institution based on applied filters.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="account" type="Account" minOccurs="0" maxOccurs="unbounded">
+			</xs:element >
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="Account">
+		<xs:sequence>
+			<xs:element name="accountId" type="AccountId" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+            The account ID is a persistent and unique identifier for the account.
+            It must be unique for all users across the institution and remain the same over the life of the account.
+            It may contain a prefix to define the Account Type for consumption, such as SV-1234 or IL-1234.
+          </xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="idType" type="IdType" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Used when requesting and receiving reserved account numbers, before the account record is created.
+						Reserving account numbers is an optional additional step that is typically done to produce documentation
+						marked with the account number that must be completed and signed before the account record is created.
+						The reserved number is then provided when creating the account.
+						The account ID should be presumed actual if this field is absent.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="description" type="xs:string"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The account description is the textual representation of the account.
+						This value is visible to the user and must be human-readable.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="type" type="AccountType"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The account type is the textual representation of the kind of account.
+						This value is visible to the user and must be human-readable.
+						Note: CDâs and MONEY MARKETS can be denoted as INVESTMENT.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="subType" type="xs:string"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The account sub type identifies the specific account type
+						that the back end system will recognize.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="openDate" type="xs:date"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The date that the account was opened.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="closeDate" type="xs:date"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The date that the account was closed.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="accountEscheatDate" type="xs:date"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The date that Escheatment was applied to the account.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="accountEscheatAmount" type="common:Money"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The amount that was transfered as a result of Escheatment.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="chargeOffDate" type="xs:date"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The date that the account was charged off.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="chargeOffAmount" type="common:Money"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The amount that was charged off.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			
+			<xs:element name="accountNickName" type="xs:string"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Description by the party or user that overrides the default description.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="micrAccountNumber" type="MicrAccountNumber"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The account number portion of a draft or line of credit MICR line.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="branch" type="xs:string"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Name or number identifying which branch owns the account.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="actualBalance" type="common:Money"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Negative, zero or positive amount.
+						If this is a loan, any balance owed to the financial institution will show as a positive amount.
+						If this is a deposit product, if the product is overdrawn it will be a negative amount.
+						Positive is assumed if the sign does not appear in the data.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="availableBalance" type="common:Money"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Negative, zero or positive amount.
+						If this is a loan, any balance owed to the financial institution will show as a positive amount.
+						If this is a deposit product, if the product is overdrawn it will be a negative amount.
+						Positive is assumed if the sign does not appear in the data.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="minimumBalance" type="common:Money" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The minimum balance that an account may have.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="routingNumber" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Routing number for the account.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="externalAccountBankAddress" type="common:Address" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+            To Address of the bank used for wire transfer.
+          </xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="externalAccountSWIFTCode" type="xs:string" minOccurs ="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+            SWIFTCode for wire transfer.
+          </xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+      <xs:element name="externalAccountIBANCode" type="xs:string" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            IBAN of external institution, used for wire transfers.  This replaces the micrAccountNumber
+            for certain financial institutions in foreign nations, and no routing or SWIFT code is
+            necessary when an IBAN (and potentially bank code, below) is provided to identify the account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="externalAccountBankCode" type="xs:string" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Bank code, required (in addition to other identifiers) for institutions in certain foreign nations,
+            used for wire transfers.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+			<xs:element name="externalAccountFlag" type="xs:boolean" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						True for an external account, false for an internal account.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="externalAccountVerified" type="xs:boolean" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Default is false.  When user confirms microdeposit, this becomes true.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="externalTransferFrom" type="xs:boolean"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						True when transfers are allowed from external account.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="externalTransferTo" type="xs:boolean"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						True when transfers are allowed to external account.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="transferFrom" type="xs:boolean" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						True when transfers are allowed from this account.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="transferTo" type="xs:boolean" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						True when transfers are allowed to this account.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="rateType" type="RateType" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Whether the rate type is fixed or variable based on some index.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="sourceCode" type="xs:string" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						FI defined code that identifies the source of the application that created
+						the account such as customer request, cross sale, counter offer, promo, etc.
+					</xs:documentation >
+				</xs:annotation >
+			</xs:element >
+
+			<xs:element name="partyIdList" type="party:PartyIdList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						A collection of party IDâs that uniquely identify each party associated to this account.
+						To determine the ownership level of each party on the account,
+						the party list in the associated product (loan, deposit) will contain the relationship details.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="relationshipId" type="relationship:RelationshipId" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The relationship ID that the account belongs to.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			
+			<xs:element name="accountNoteList" type="common:NoteList" minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The list of notes on the account.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="customData" type="common:CustomData"  minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						Account level name/data pairs list of fields that are not yet available in the general specification.
+						This should be used as a LAST RESORT as any customizations will not be supported by all data providers
+						or processed by all client applications. ANY use of this field must be reported to the architecture or
+						working group committee to ensure that fields are somehow handled in the future release of specifications.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+
+			<xs:element name="meta" type="meta:Meta" minOccurs="1"	maxOccurs="1" nillable="true">
+				<xs:annotation>
+					<xs:documentation>
+						For each account type, optional meta information MAY be provided with these tags depending
+						upon the account type returned.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			
+			<xs:element name="transactionList" type="transaction:TransactionList">
+				<xs:annotation>
+					<xs:documentation>
+						If there's a start date where provided or required, the transaction list collection/array
+            should remain empty if no transactions were posted during the provided date period.
+						In this case, the Data Provider should still return all other account information.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="AccountId">
+		<xs:restriction base="xs:string">
+			<xs:annotation>
+				<xs:documentation>
+					The account ID is a persistent and unique identifier for the account.
+					It must be unique for all users across the institution and remain the same over the life of the account.
+				</xs:documentation>
+			</xs:annotation>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="AccountIdList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of account ID's that should have their associated accounts either returned or affected
+				by a read, update or delete request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="accountId" type="AccountId" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						An account ID that should have its associated accounts either returned or affected
+						by a read, update or delete request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="IdType">
+		<xs:annotation>
+			<xs:documentation>
+				Whether the ID is actual, or simply reserved.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Reserved"/>
+			<xs:enumeration value="Actual"/>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="RateType">
+		<xs:annotation>
+			<xs:documentation>
+				Whether the rate type is fixed or variable based on some index.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Fixed" />
+			<xs:enumeration value="Variable" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:simpleType name="AccountType">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Checking">
+				<xs:annotation>
+					<xs:documentation>
+						Checking account, i.e. checks can be written against the account.
+						Money market accounts can be included here or in money markets.  It's up to the institution.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Savings">
+				<xs:annotation>
+					<xs:documentation>
+						Savings and club accounts.  This can optionally include CD's, but it's up to the institution.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Loan">
+				<xs:annotation>
+					<xs:documentation>
+						Auto loans, etc. Loans that are NOT lines of credit or credit cards.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="CreditCard">
+				<xs:annotation>
+					<xs:documentation>
+						Loan behind the credit card.  Note the actual card information in the card object.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="LineOfCredit">
+				<xs:annotation>
+					<xs:documentation>
+						Loan that is a line of credit but NOT a credit card.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Mortgage">
+				<xs:annotation>
+					<xs:documentation>
+						Loan that is a line of credit but NOT a credit card.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="Investment">
+				<xs:annotation>
+					<xs:documentation>
+						Investment accounts such as brokerage and this can optionally include CD's and/or
+            money markets, but it's up to the institution.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+			<xs:enumeration value="PrePaidCard">
+				<xs:annotation>
+					<xs:documentation>
+						This account is a special type of checking account connected to a pre-paid card.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="AccountTypeList">
+		<xs:sequence>
+			<xs:element name="accountType" type="AccountType" minOccurs="0" maxOccurs ="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Collection of account types to return in a filter request.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="TotalToDateList">
+		<xs:sequence>
+			<xs:element name="totalToDate" type="TotalToDate" minOccurs="0" maxOccurs="unbounded" nillable="true" >
+				<xs:annotation>
+					<xs:documentation>
+						A list of aggregate totals of type TotalsToDate, i.e. YTD Dividend, MTD Interest.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="TotalToDate">
+		<xs:annotation>
+			<xs:documentation>
+        An aggregation of total amount of money based on a start and end date/time frequency.
+      </xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="id" type="xs:string" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						Unique identifier for a total to date aggregation.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="type" type="TotalToDateType" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+            Type of totals aggregation for a fixed period of time.
+          </xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="totalAmount" type="common:Money" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The sum amount of money for the totals to date.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="frequencyStartDateTime" type="xs:dateTime" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The start date/time for the frequency of the aggregate amount of TotalsToDate, i.e. 20XX-01-01.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+						(2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+						supported.  The time is assumed to be 00:00Z if omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+			<xs:element name="frequencyEndDateTime" type="xs:dateTime" minOccurs="0" maxOccurs ="1">
+				<xs:annotation>
+					<xs:documentation>
+						The end date/time for the frequency of the aggregate amount of TotalsToDate, i.e. 20XX-12-31.
+						The date/time should be ISO 8601 UTC format.  yyyy-mm-ddThh:mmZ
+						(2011-03-28T12:00Z) or yyyy-mm-dd (2011-03-28) formats are
+						supported.  The time is assumed to be 00:00Z if omitted.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:simpleType name="TotalToDateType">
+		<xs:annotation>
+			<xs:documentation>
+        Type of totals aggregation for a fixed period of time.
+      </xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Interest"></xs:enumeration>
+			<xs:enumeration value="Dividend"></xs:enumeration>
+			<xs:enumeration value="Witholding"></xs:enumeration>
+			<xs:enumeration value="Fee"></xs:enumeration>
+			<xs:enumeration value="Insurance"></xs:enumeration>
+			<xs:enumeration value="Refund"></xs:enumeration>
+			<xs:enumeration value="Other"></xs:enumeration>
+		</xs:restriction>
+	</xs:simpleType>
+
+  <xs:simpleType name="MicrAccountNumber">
+    <xs:restriction base="xs:string">
+      <xs:annotation>
+        <xs:documentation>
+          The account ID is a persistent and unique identifier for the account.
+          It must be unique for all users across the institution and remain the same over the life of the account.
+        </xs:documentation>
+      </xs:annotation>
+    </xs:restriction>
+  </xs:simpleType>
+
+
+</xs:schema>

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema  targetNamespace="http://cufxstandards.com/v3/EligibilityRequirementFilter.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/EligibilityRequirementFilter.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+  xmlns:eligibility="http://cufxstandards.com/v3/EligibilityRequirement.xsd"
+	
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/EligibilityRequirement.xsd" schemaLocation="EligibilityRequirement.xsd" />
+
+  <xs:element name="eligibilityRequirementFilter" type="EligibilityRequirementFilter">
+    <xs:annotation>
+      <xs:documentation>
+        The list of filter options for requesting possible eligibility requirements for creating
+        a relationship with a financial institution.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="EligibilityRequirementFilter">
+    <xs:annotation>
+      <xs:documentation>
+        The list of filter options for requesting possible eligibility requirements for creating
+        a relationship with a financial institution.  The options can be used in combination or
+        by themselves.  It is up to the data source to either return or affect the data requested
+        or return a standard error identifying why the request was rejected.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="eligibilityRequirementIdList" type="eligibility:EligibilityRequirementIdList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The list of eligibility requirement ID's that should be returned by a read request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="affinityBrandList" type="eligibility:AffinityBrandList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            List of the affinity brands to include when filtering the elibility requirement list.
+            If no affinity bands are listed, then all eligibility requirements are listed.
+            If an affinity brand is not included on a specific eligibility requirement, then it 
+            will be returned regardless of what is in this list.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence >
+  </xs:complexType >
+</xs:schema>

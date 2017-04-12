@@ -1,0 +1,411 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema
+  targetNamespace="http://cufxstandards.com/v3/Deposit.xsd"
+  version="3.2.$Revision: 1000 $"
+  xmlns="http://cufxstandards.com/v3/Deposit.xsd"
+  xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+  xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+  xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+  xmlns:contact="http://cufxstandards.com/v3/Contact.xsd"
+  xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+ 
+  elementFormDefault="qualified"
+  attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Contact.xsd" schemaLocation="Contact.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+
+  <xs:element name="depositList" type="DepositList">
+    <xs:annotation>
+      <xs:documentation>
+        Top level deposit list collection element.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="DepositList">
+    <xs:sequence>
+      <xs:annotation>
+        <xs:documentation>
+          Data definition of a collection of deposits.
+        </xs:documentation>
+      </xs:annotation>
+      <xs:element name="deposit" type="Deposit" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Details relating to a deposit account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:element name="deposit" type="Deposit">
+    <xs:annotation>
+      <xs:documentation>
+        Top level element for the details relating to a deposit account.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+    
+  <xs:complexType name="Deposit">
+    <xs:annotation>
+      <xs:documentation>
+        Details relating to a deposit account.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:complexContent>
+      <xs:extension base="account:Account">
+        <xs:sequence>
+          <xs:element name="depositPartyList" type="DepositPartyList" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                A collection of parties that includes each party associated to this deposit.
+                Note that this is a specialized subset of fields for party which identifies how the party is related.
+                The details of the party can be pulled from the party object using the party ID.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          
+          <xs:element name="bumpEffectiveDate" type="xs:date" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                Date on which the bump rate becomes effective.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="bumpExpirationDate" type="xs:date" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                Date on which the bump rate expires.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="bumpRate" type="xs:decimal" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                The percentage to add to the normal rate during dividend calculations.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="dividendPostCode" type="DividendPostCodeType" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                Defines how the dividends earned will be posted.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="dividendRate" type="xs:decimal" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                The percentage rate used to calculate dividends for this account. 
+                The dividend type must be set to allow for a custom rate.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="dividendTransferAccountId" type="account:AccountId" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                Unique identifier of the account to post dividends to when the "Transfer" dividend post code is selected.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="dividendType" type="xs:string" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                Name or number identifying the type of dividend calculation performed for this account.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="irsCode" type="xs:string" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                Defines IRS reporting requirements on this account.  Used to identify special requirements such as IRA or HSA.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="maturityPostCode" type="MaturityPostCodeType" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                Defines how the account balance should be handled upon maturity.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="maturityTransferAccountId" type="account:AccountId" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                Unique identifier of the account to transfer the balance to when the "Transfer" maturity post code is selected.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="minimumDeposit" type="common:Money" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                The minimum amount that can be deposited to the account in a single transaction.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="minimumWithdrawal" type="common:Money" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                The minimum amount that can be withdrawn from the account in a single transaction.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="overdraftTolerance" type="common:Money" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                Maximum amount for overdrafts before the overdraft priority list is used to pull from other accounts.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>
+					<xs:element name="depositAccountStatus" type="DepositAccountStatus" minOccurs="0" maxOccurs="1">
+						<xs:annotation>
+							<xs:documentation>
+								Status of the Deposit Account.
+							</xs:documentation>
+						</xs:annotation>
+					</xs:element>
+					<xs:element name="depositAccountSubStatus" type="xs:string" minOccurs="0" maxOccurs="1">
+            <xs:annotation>
+              <xs:documentation>
+                For use to support additional deposit acount statuses and sub status not present in enumerations.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:element>				
+        </xs:sequence>
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+  
+  <xs:simpleType name="DividendPostCodeType">
+    <xs:annotation>
+      <xs:documentation>
+        Provides types for posting dividends earned on the account.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="ToAccount">
+        <xs:annotation>
+          <xs:documentation>
+            Dividends earned should be posted to the account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ByCheck">
+        <xs:annotation>
+          <xs:documentation>
+            Dividends earned should be sent by check to the party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="Transfer">
+        <xs:annotation>
+          <xs:documentation>
+            Dividends earned should be transferred to another account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="Forfeit">
+        <xs:annotation>
+          <xs:documentation>
+            Dividends earned should not be posted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+	<xs:simpleType name="DepositAccountStatus">
+		<xs:restriction base="xs:string">
+			<xs:enumeration value="Active" />
+			<xs:enumeration value="Closed" />
+			<xs:enumeration value="Dormant" />
+			<xs:enumeration value="Escheated" />
+			<xs:enumeration value="Incomplete" />
+			<xs:enumeration value="Locked" />
+			<xs:enumeration value="Matured" />
+			<xs:enumeration value="RenewPending" />
+			<xs:enumeration value="Restricted" />
+			<xs:enumeration value="Unfunded" />
+		</xs:restriction>
+	</xs:simpleType>
+
+	<xs:complexType name="DepositAccountStatusList">
+		<xs:annotation>
+			<xs:documentation>
+				The list of deposit account statuses that should have their associated deposit accounts either returned or affected
+				by a read, update or delete request.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="depositAccountStatus" type="DepositAccountStatus" minOccurs ="0" maxOccurs ="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Deposit account status.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+  
+  <xs:simpleType name="MaturityPostCodeType">
+    <xs:annotation>
+      <xs:documentation>
+        Provides types for posting the account balance upon maturity.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Renew">
+        <xs:annotation>
+          <xs:documentation>
+            Account renews upon maturity.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ByCheck">
+        <xs:annotation>
+          <xs:documentation>
+            Account balance should be sent by check to the party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="Transfer">
+        <xs:annotation>
+          <xs:documentation>
+            Account balance should be transferred to another account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="Suspend">
+        <xs:annotation>
+          <xs:documentation>
+            Funds should remain in the account until transferred manually.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+
+  <xs:complexType name="DepositPartyList">
+    <xs:annotation>
+      <xs:documentation>
+        A collection of party IDâs that uniquely identify each party associated to this deposit
+        and additional fields on how the party relates to the deposit.
+        This list is in addition to the relationship parties if available.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="depositParty" type="DepositParty" minOccurs ="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            This object is subset with additional fields of the party data.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="DepositParty">
+    <xs:annotation>
+      <xs:documentation>
+        This object points to the party and how it relates to the deposit.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="depositPartyId" type="party:PartyId"  minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Unique identifier for the party.  Must be a valid party ID.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="depositPartyRelationshipType" type="DepositPartyRelationshipType">
+        <xs:annotation>
+          <xs:documentation>
+            Level of ownership that the party has over the account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="ssnOverride" type="xs:boolean" minOccurs="0" maxOccurs="1" default ="false">
+        <xs:annotation>
+          <xs:documentation>
+            The partyâs SSN should be used rather the primaryâs SSN when reporting to the IRS.
+            Only used if party relationship type is NOT PRIMARY.  Only one of these can appear
+            on an account if applicable.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="contactIdList" type="contact:ContactIdList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Collection of contacts for the party within this account.  Only contains the
+            contact ID for each contact.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="DepositPartyRelationshipType">
+    <xs:annotation>
+      <xs:documentation>
+        The party relationship type is the textual representation of what the
+        party record represents to this loan, such as primary, co-borrower,
+        beneficiary or some other type of relationship. This value
+        may be visible to the user and must be human-readable.  If the same
+        party exists at the relationship level, the account level
+        relationship type overrides the relationship.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:choice>
+      <xs:element name="holder" type="relationship:Holder" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Owner of the account.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="beneficiary" type="relationship:Beneficiary" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Receiver of funds in certain circumstances based on product type.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="agent" type="common:Agent" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Acts on behalf of the Deposit holder.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="guarantor" type="relationship:Guarantor" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Guarantees/carries liability for deposit.  For deposit accounts, guarantees any negative account balances.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="safeDepositBoxUser" type="relationship:SafeDepositBoxUser" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Party who has access to the safe deposit box attached to a deposit account.
+          </xs:documentation >
+        </xs:annotation>
+      </xs:element>
+    </xs:choice>
+  </xs:complexType>
+</xs:schema>

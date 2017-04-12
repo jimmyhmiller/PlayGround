@@ -1,0 +1,175 @@
+CUFX Version 3.2 Schemas
+Initial Publication January 24th, 2014
+
+Status :  Release for Comment 		
+Status Date: May 11th, 2016 
+  
+For questions, comments or issues please respond to email: info@cufxstandards.com
+
+Please provide the following information:
+
+Responding Organization:   
+Contact Name:
+Contact Phone number:  	  
+Contact Email address:
+Response Date: 
+Responding Organization tracking reference (if applicable): 
+Name of Specification or XSD member:  
+Issue or Observation:
+Your expectation or recommendation to resolve:
+
+Release notes
+01/24/2014 
+
+Schemas released for comment.
+
+01/28/2014 
+
+Updates applied for BillPayee, BillPayeeFilter, BillPaymentFilter, BillPaymentMessage, BillPaymentOccurence, BillPaymentRecurring.
+
+05/09/2014
+
+The following xsds were removed & consolidated 
+BillPaymentMessage 			>> 	BillPaymentOccurrenceMessage or 	BillPaymentReoccurringMessage
+RemoteDepositPostRequest     	>>  	RemoteDeposit
+RemoteDepositPostRequestMessage	>> 	RemoteDepositMessage
+RemoteDepositPostResponse		>>	RemoteDeposit
+RemoteDepositRequest			>>	RemoteDeposit 
+RemoteDepositRequestMessage		>>	RemoteDepositMessage
+RemoteDepositResponse			>>	RemoteDeposit
+New:
+RemoteDeposit
+RemoteDepositFilter
+RemoteDepositMessage
+
+11/06/2014
+
+Added elements to wire transfer for international handling. Moved elements to common and adjusted references for greater consistency. 
+
+Account.xsd - Added externalAccountIBANCode and externalAccountBankCode, Corrected Address reference to use Common.xsd instead of Contact.xsd
+
+Common.xsd - Moved isoCountryCodeType from Contact to Common to match address reference move.   Moved Address Complex type from Contact to Common, and updated address reference in Contact.
+Added exchangeRate to Money and PersonName.
+
+Loan.xsd - Removed minimumBalance from Loan xsd, field is carried into loan from account.xsd extension and was duplicated.
+
+Location.xsd - Corrected Address reference from contact.xsd to common.xsd
+
+LocationFilter.xsd - Corrected Address reference from contact to common and removed Contact reference as no longer needed.
+
+Transaction.xsd - Updated merchantCategoryCode from integer to string to prevent loss of significant leading zeros
+
+Party.xsd - Corrected Address reference to use Common.xsd instead of Contact.xsd
+
+Wire.xsd - Added Common and Contact reference for contact:Address and common: Person name,  Added elements:  disclosuresConsented, beneficiaryName, beneficiaryAddress; 
+Corrected address reference to use common, removed Contact reference as no longer needed.
+
+WireFilter.xsd - Added account.xsd reference, external IBAN, Bank code, account and routing for filtering.
+
+07/17/2015 
+
+Attention. Release 3.1 is a breaking change release. There are a small number of renamed type definitions and structural changes. These were made to resolve duplicate type definitions and circular reference conditions. 
+
+All objects advanced to version 3.1
+
+AccessProfile  - Richer Transaction filter.
+
+AccessProfileMessage - New XSD
+Account -  Added noteList to account object, referenced from Common.
+
+AccountFilter - AccountFilter - added element includeNotesFlag
+
+Application - Updated description for loan and deposit in ProductDetail and Added min/max to productAppliedFor
+
+BillpaymentFilter  - Removed BillPaymentOccurrence.xsd and BillPaymentRecurring.xsd unneeded references.
+
+Deposit  - Agent description in Deposit talks about a loan. Description Corrected. Add DepositStatus - string enumeration add substatus - string. Updated Agent type to reference from definition in common xsd. Added depositAccountStatus with enumerations, and depositAccountSubStatus.  Added DepositAccountStatusList 
+
+Deposit Filter - Added depositAccountStatusList
+
+Deposit funding - Added enumeration 'DebitCard' to SourceOfFunds type. Corrected credit and debit card enumerations removing the space.
+
+FundsTransferCommonBase - New XSD to contain common elements between occurrence and reccuring base. 
+
+FundsTransferFilterBase - Realigned references to use FundsTransferCommonBase to resolve circular references.
+
+FundsTransferOccurrenceBase - Moved BatchId, BatchIdList, OccurrenceStatus and OccurrenceStatisList into FundsTransferCommonBase to resolve circular references.
+Moved common elements to fundsTransferCommonBase to resolve circular references.
+
+FundsTransferRecurringBase - Moved reference for recurringStatus to FundsTransferCommonBase. Moved common elements to fundsTransferCommonBase to resolve circular references.
+
+Loan - add LoanStatus and substatus elements.  Enumerate Active, closed. Substatus - string. Updated agent to use common.xsd definition. added LoanAccountStatus, loanAccountSubStatus, and LoanAccountStatusList
+
+LoanFilter - add LoanStatus, added includeNotesFlag to match changes. Update to include accountFilter as an extension base all elements were removed as duplicate save loanCategoryList.
+Added loanAccountStatusList
+
+MessageContext - Updated user field description.
+
+NotesFilter - NEW XSD.
+
+NotesMessage - NEW XSD
+
+Party - Added noteList to Party object.
+
+Party Association.  - Removed Agent object and agentQualifier types from Relationship & PartyAssociation to Common
+Changed Authority reference in loan to use Common.
+
+PartyFilter - added element includeNotesFlag.
+
+ProductServiceRquest - ProductServiceRequest.xsd – renamed type=”Status” to  type=”ProductServiceStatus”.
+ 
+ProductServiceRquestFilter - ProductServiceRequestFilter.xsd – renamed type=”StatusList” to  type=”ProductServiceStatusList” 
+
+RegisteredDeviceFilter - Removed incorrect registereddevice type definition and corrected RegisteredDeviceFilter sequence.
+
+Relationship - Add notes. Updated documentation description. Added RelationshipStatus and RelationshipStatusList.  NoteList inhereted from account.
+
+Relationshipfilter - Added includeNotesFlag, relationshipStatusList
+
+RelationshipMessage - New XSD
+
+RemoteDeposit.xsd  - RemoteDeposit.xsd – renamed type=”Status” to  type=”RemoteDepositStatus”, Type Action renamed RemoteDepositAction, Type ActionList renamed RemotDepositActionList.
+
+RemoteDepositFilter.xsd  - RemoteDepositFilter.xsd – renamed type=”StatusList” to  type=”RemoteDepositStatusList”, Renamed ActionList to RemoteDepositActionList"
+
+SimpleValidationRequest - Corrected minor documentation spelling error
+ 
+SystemStatus - New XSD
+
+SystemStatusFilter  - Updated documentation 'transaction' to 'status'
+ 
+SystemStatusMessage - Respell misspellings of "occurrence".
+
+Transaction - added TransactionStatus type and TransactionStatusList.  Updated status within transaction to reference TransactionStatus type. Added type for TransactionCategoryList, TransactionSourceList.
+
+TransactionFilter - New XSD 
+
+TransactionMessage - New XSD
+
+TransferOccurrence - Add toCard and fromCard elements.
+
+TransferRecurring.xsd  - TransferRecurring.xsd – made schema reference name to upper case.  Switched from schemaLocation="fundsTransferRecurringBase.xsd”  to  schemaLocation="FundsTransferRecurringBase.xsd”
+
+05/11/2016
+ 
+Account.xsd - Added chargeOffAmount,chargeOffDate, accountEscheatDate, accountEscheatAmount. 
+
+loan.xsd - Updated noteList element to unique name accountNoteList, loanNoteList
+
+Application.xsd - Added applicationDate.
+
+ApplicationFilter.xsd - Added applicationStartDateTime, applicationEndDateTime
+
+Loan.xsd - updated description originationDate to include 'funded', added funded date. Added lastPaymentDate, 
+lastPaymentAmount. 
+
+Meta.xsd / transaction.xsd - Swapped description of tranID and tranType; removed minBalance from checkSaveMeta as it's already defined in base Account.
+
+Party.xsd - Added  deathDate, ethnicity, and race,
+
+Relationship.xsd added dateRelationshipEnded 	
+
+Transaction.xsd - Added transactionFeeList, Removed unused namespace references.
+
+
+

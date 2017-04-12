@@ -1,0 +1,353 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema targetNamespace="http://cufxstandards.com/v3/ProductOffering.xsd"
+	version="3.2.$Revision: 1000 $"
+	elementFormDefault="qualified"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns="http://cufxstandards.com/v3/ProductOffering.xsd"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+	xmlns:meta="http://cufxstandards.com/v3/Meta.xsd"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+
+  <xs:element name= "productOfferingList" type ="ProductOfferingList">
+    <xs:annotation>
+      <xs:documentation>
+        The product offering collection/array contains all the possible product types for an instance that the credential set is
+        authorized to access at the institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="ProductOfferingList">
+    <xs:annotation>
+      <xs:documentation>
+        The product offering collection/array contains all the possible product types for an instance that the credential set is
+        authorized to access at the institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="productOffering" type="ProductOffering" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Collection of fields that define a specific product offering at the institution level.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element >
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="ProductOffering">
+    <xs:sequence>
+      <xs:element name="productId" type="ProductId" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Unique identifier for each product offering.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="productType" type="account:AccountType" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Defines a general category for the product types.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="productSubType" type="ProductSubType" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Product sub type identifies how the product will be identified in the back end system.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="systemProductKeys" type="common:CustomData"  minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Product level name/data pairs that identify the product type in the back end system when
+            something beyond product ID, product type and product sub type is required to identify the
+            product to the product creation process.
+            This typically would only apply for card based products, but the concept may work well for other products.
+            For example, for one card processor, the systemBankIdentifier, principalBankIdentifier and agentBankIdentifier
+            are each four digit values that define a card program on the card platform. They are
+            hierarchical - System down to Agent. Settings are defined at each level that determine the behavior of a
+            card program. Another card processor, uses bin, another processor uses bin + planId. The bin
+            is six digits and the planId is three. In-house processors typically just use the six digit bin.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="description" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Description of the product, i.e. Visa Classic, MasterCard Gold, Electronic Checking, New Auto, etc.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="pointsRewardsProgram" type="xs:boolean" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            If true, this product offering is part of a points rewards program.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="interestRateList" type="InterestRateList" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            For each product type, provide the list of available Interest Rates that might apply to the product.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="brand" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The company that sponsors the card (i.e. Visa, MasterCard, American Express, etc.).
+            Only applies to card-based products.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="customData" type="common:CustomData"  minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Product offering level name/data pairs list of fields that are not yet available in the general specification.
+            This should be used as a LAST RESORT as any customizations will not be supported by all data providers
+            or processed by all client applications. ANY use of this field must be reported to the architecture or
+            working group committee to ensure that fields are somehow handled in the future release of specifications.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="InterestRateList">
+    <xs:annotation>
+      <xs:documentation>
+        The interest rate list collection/array contains all the possible interest rates for a product offering.
+        This can be used for tiered pricing, risk pricing or effective date pricing.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="interestRate" type="InterestRate" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Collection of fields that define an interest rate for a specific product offering at the institution level.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element >
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="InterestRate">
+    <xs:annotation>
+      <xs:documentation>
+        Defines the interest rate fields for a product offering at the institution level.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="interestRateId" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Unique identifier for the interest rate.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="interestPointsRewardsProgram" type="xs:boolean" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Indicates whether this interest rate is only paid if the product is part of a points rewards program.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="introductoryRate" type="xs:boolean" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Indicates whether this is an introductory/promotional rate for the product offering.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="balanceConsolidationRate" type="xs:boolean" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Indicates whether this is a balance consolidation rate for the product offering.
+            Applicable to loans and lines of credit.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="riskRate" type="xs:boolean" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Indicates whether this is a risk-based rate for the product offering.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="riskRateClassificationMinimum" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            If this is a risk-based rate for the product offering, 
+            this is the risk classification minimum requirement to acquire or maintain this rate.
+            For example: C Paper
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="riskRateClassificationMaximum" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            If this is a risk-based rate for the product offering,
+            this is the risk classification maximum requirement to acquire or maintain this rate.
+            For example: A Paper.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="interestRateDescription" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Description for the interest rate.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="interestRateCriteria" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            This is free form description of the criteria as to when the interest rate applies.
+            This is not used for processing, but as additional documentation beyond the interest
+            rate description field.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="minimumBalance" type="common:Money" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            If specified, the product has a minimum balance requirement. This would be the minimum balance acceptable for the
+            product.  Fees are typically assessed if the balance drops below the minimum balance.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="maximumBalance" type="common:Money" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            If specified, the product has a maximum balance requirement. This would be the maximum balance acceptable for the
+            product.  Fees are typically assessed if the maximum balance is exceeded.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="term" type="xs:duration" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The term needed to qualify for rate, using ISO 8601 duration format: P3M is three months, P90D is ninety days.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="effectiveDateTime" type="xs:dateTime" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            <xs:annotation>
+              <xs:documentation>
+                The date/time that the interest rate becomes effective.
+                If this value is not specified or is in the past, then the interest rate is currently effective,
+                unless the expiration date/time has also passed.
+                If this value is in the future, then the interest rate is not effective.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="expirationDateTime" type="xs:dateTime" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            <xs:annotation>
+              <xs:documentation>
+                The date/time that the interest rate becomes ineffective.
+                If this value is not specified or is in the future, then the interest rate is currently effective,
+                unless the effective date/time is also in the future.
+                If this value is in the past, then the interest rate is not effective.
+              </xs:documentation>
+            </xs:annotation>
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="interestRate" type="xs:decimal" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Interest rate charged for a loan product or earned by a deposit or investment product.
+            Determines the amount charged each time period based on the period.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="ProductTypeList">
+    <xs:annotation>
+      <xs:documentation>
+        Product type filter for making a request. If the list is nil then that indicates
+        that no filters should be applied for product type.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="productType" type="account:AccountType" minOccurs="0" maxOccurs="unbounded" >
+        <xs:annotation>
+          <xs:documentation>
+            Defines a general category for the product type to filter on.  If none are provided, then
+            all should be returned.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:complexType name="ProductSubTypeList">
+    <xs:annotation>
+      <xs:documentation>
+        Product sub type filter used for making a request. If the list is nil then that indicates
+        that no filters should be applied for product sub type.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="productSubType" type="ProductSubType" minOccurs="0" maxOccurs="unbounded" nillable="true">
+        <xs:annotation>
+          <xs:documentation>
+            Product sub type identifies how the product will be identified in the back end system.
+            If none are provided, then all should be returned.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="ProductIdList">
+    <xs:annotation>
+      <xs:documentation>
+        Product sub type filter for making a request.  If the list is nil then that indicates
+        that no filters should be applied for product sub type.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="productId" type="ProductId" minOccurs="0" maxOccurs="unbounded" nillable="true">
+        <xs:annotation>
+          <xs:documentation>
+            Product ID is a unique identifier for the product.  
+            If none are provided, then no filters should be applied by product ID.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="ProductId">
+    <xs:annotation>
+      <xs:documentation>
+        Product ID is a unique identifier for the product.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base ="xs:string" />
+  </xs:simpleType>
+  
+  <xs:simpleType name="ProductSubType">
+    <xs:annotation>
+      <xs:documentation>
+        Product sub type identifies how the product will be identified in the back end system.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base ="xs:string" />
+  </xs:simpleType>
+</xs:schema>

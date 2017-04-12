@@ -1,0 +1,377 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema targetNamespace="http://cufxstandards.com/v3/Application.xsd"
+  version="3.2.$Revision: 1000 $"
+  xmlns="http://cufxstandards.com/v3/Application.xsd"
+  xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+  xmlns:credit="http://cufxstandards.com/v3/CreditReport.xsd"
+  xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+  xmlns:productOffering="http://cufxstandards.com/v3/ProductOffering.xsd"
+  xmlns:loan="http://cufxstandards.com/v3/Loan.xsd"
+  xmlns:deposit="http://cufxstandards.com/v3/Deposit.xsd"
+  xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+  xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+  elementFormDefault="qualified" >
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/CreditReport.xsd" schemaLocation="CreditReport.xsd" />
+  <xs:import namespace ="http://cufxstandards.com/v3/ProductOffering.xsd" schemaLocation ="ProductOffering.xsd" />
+  <xs:import namespace ="http://cufxstandards.com/v3/Loan.xsd" schemaLocation ="Loan.xsd" />
+  <xs:import namespace ="http://cufxstandards.com/v3/Deposit.xsd" schemaLocation ="Deposit.xsd" />
+  <xs:import namespace ="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation ="Relationship.xsd" />
+  <xs:import namespace ="http://cufxstandards.com/v3/Account.xsd" schemaLocation ="Account.xsd" />
+
+  <xs:element name="applicationList" type="ApplicationList">
+    <xs:annotation>
+      <xs:documentation>
+        Top level application list collection element.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="ApplicationList">
+    <xs:sequence>
+      <xs:annotation>
+        <xs:documentation>
+          Collection of applications data definition.
+        </xs:documentation>
+      </xs:annotation>
+      <xs:element name="application" type="Application" minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            An application contains the details of a consumer who is becoming a customer of a financial
+            institution (if they are not already). It also includes the details of the products requested.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Application">
+    <xs:annotation>
+      <xs:documentation>
+			  An application contains the details of a consumer who is becoming a customer of a financial 
+        institution (if they are not already). It also includes the details of the products requested.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="applicationId" type="ApplicationId" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Unique identifier for the application in the back end system.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+			<xs:element name="applicationDate" type="xs:date"   minOccurs="0" maxOccurs="1">
+				<xs:annotation>
+					<xs:documentation>
+						The creation date of the application.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+      <xs:element name="applicationStatus" type="ApplicationStatus" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Status of the application in the approval process.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name ="productAppliedForList" type="ProductAppliedForList">
+        <xs:annotation>
+          <xs:documentation>
+            Products applied for and their requested amounts, quoted rates, etc.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="applicantList" type="ApplicantList" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            List of applicants for the products.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="finalCreditBureauScore" type="xs:string" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Credit score that was used to approve the application.  This is typically calculated
+            using a variety of methods at each financial institution based on the credit report data
+            for the primary, the joint or a combination of both for primary and joint credit statistics.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="ApplicantList">
+    <xs:annotation>
+      <xs:documentation>
+        List of applicants for the product.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="applicant" type="Applicant" minOccurs ="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Collection of fields to describe an applicant for the product.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Applicant">
+    <xs:annotation>
+      <xs:documentation>
+        Collection of fields to describe an applicant for the product.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="applicantId" type="xs:string" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Unique identifier for the applicant.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="role" minOccurs="1" maxOccurs="1">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="Primary"></xs:enumeration>
+            <xs:enumeration value="Secondary"></xs:enumeration>
+            <xs:enumeration value="AuthorizedUser"></xs:enumeration>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="creditReportList" type="credit:CreditReportList" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Details relating credit scores used in determining loan approval.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="relationshipId" type="relationship:RelationshipId">
+        <xs:annotation>
+          <xs:documentation>
+            Key fields that point to an existing relationship that product(s) should
+            be added to in the event that they are booked.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="partyId" type="party:PartyId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Key fields that point to an existing party applying for a product.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name ="party" type ="party:Party"  minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Use if this application is for a new Party that does not yet exist on the back end systems.
+            Contains a list of contacts for how the party would like to be contacted.
+            There may be a very limited subset of party data available as this is an application for a new
+            party and the amount of information provided for the applicant may be minimal.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="ProductAppliedForList">
+    <xs:annotation>
+      <xs:documentation>
+        Products applied for and their requested amounts, quoted rates, etc.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="productAppliedFor" type="ProductAppliedFor"  minOccurs="0" maxOccurs="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Product applied for and its requested amount, quoted rate, etc.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="ProductAppliedFor">
+    <xs:annotation>
+      <xs:documentation>
+        Product applied for and its requested amount, quoted rate, etc.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="productAppliedForId" type="xs:string" minOccurs ="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Unique identifier for the product request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="productType" type="account:AccountType"  minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The product type is the textual representation of the kind of account.
+            This value is visible to the user and must be human-readable.
+            Note: CD's and MONEY MARKETS can be denoted as INVESTMENT.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="productSubType" type="xs:string"   minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The product sub type identifies the specific product type
+            that the back end system will recognize.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="productApplicationStatus" type="ApplicationStatus">
+        <xs:annotation>
+          <xs:documentation>
+            Individual status within the application of the product itself.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="productDetail" type="ProductDetail" minOccurs ="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Product detail is a structure pointing to fields based on the product type.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:complexType name="ProductDetail">
+    <xs:annotation>
+      <xs:documentation>
+        Product detail is a structure pointing to fields based on the product type.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:choice>
+      <xs:element name="loan" type="loan:Loan">
+        <xs:annotation>
+          <xs:documentation>
+            Details of the loan product (credit card, mortgage, auto, etc.) applied for.
+            Will contain the ids of the products created in the response. 
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="deposit" type="deposit:Deposit">
+        <xs:annotation>
+          <xs:documentation>
+            Details of the deposit product applied for.  
+						Will contain the ids of the products created in the response. 
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:choice>
+  </xs:complexType>
+
+  <xs:simpleType name="ApplicationStatus">
+    <xs:annotation>
+      <xs:documentation>
+        Status of the application to indicate how the application is progressing from a workflow standpoint.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base ="xs:string">
+      <xs:enumeration value ="New">
+        <xs:annotation>
+          <xs:documentation>
+            The application is new and has not been handled by internal teams or systems.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value ="PreApproved">
+        <xs:annotation>
+          <xs:documentation>
+            Similar to New, but the financial institution has proactively pre-approved the products for potential
+            applicants; the applicants have not yet responded to the offer.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value ="Assigned">
+        <xs:annotation>
+          <xs:documentation>
+            The application has been allocated to a resource to get back to the applicants.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value ="InDiscussion">
+        <xs:annotation>
+          <xs:documentation>
+            The internal resource has contacted the applicants and is negotiating with the party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value ="Approved">
+        <xs:annotation>
+          <xs:documentation>
+            The financial institution has approved the application and is waiting for commitment from the applicants.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value ="Declined">
+        <xs:annotation>
+          <xs:documentation>
+            The financial institution has declined the application.  If the changes are not made to the
+            to the application, this application workflow is complete.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value ="Converting">
+        <xs:annotation>
+          <xs:documentation>
+            The applicants have accepted the conditions of the application and committed to the offer.
+            The associated products are being booked into the back end systems.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value ="Booked">
+        <xs:annotation>
+          <xs:documentation>
+            The associated products are booked in the back end systems.
+            The process is complete for the application.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value ="Lost">
+        <xs:annotation>
+          <xs:documentation>
+            The applicants have rejected the conditions of the application and are not interested
+            in further proposals and the process is complete for the application.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="ApplicationIdList">
+    <xs:annotation>
+      <xs:documentation>
+        Collection of applicaton ID's used for filtering on read, update or delete application service
+        requests.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="applicationId" type="ApplicationId" minOccurs ="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Filter for the unique identifier for the application in the back end system.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence >
+  </xs:complexType >
+
+
+  <xs:simpleType name="ApplicationId">
+    <xs:annotation>
+      <xs:documentation>
+        Unique identifier for the application in the back end system.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string" />
+  </xs:simpleType>
+</xs:schema>

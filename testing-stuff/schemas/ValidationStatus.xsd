@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/ValidationStatus.xsd"
+	version="3.2.$Revision: 1000 $"
+	elementFormDefault="qualified"
+	xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+	xmlns="http://cufxstandards.com/v3/ValidationStatus.xsd">
+
+  <xs:element name="validationStatus" type="ValidationStatus">
+    <xs:annotation>
+      <xs:documentation>
+        Top level element for validation status.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+  
+	<xs:simpleType name = "ValidationStatus">
+    <xs:annotation>
+      <xs:documentation>
+        An enumeration defining possible results of a simple validation.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base = "xs:string">
+    	<xs:enumeration value = "Pass">
+       		<xs:annotation>
+       			<xs:documentation>
+       				The applicant is valid.
+       	 		</xs:documentation>
+       		</xs:annotation>
+      	</xs:enumeration>
+      <xs:enumeration value = "Fail">
+       		<xs:annotation>
+       			<xs:documentation>
+       				The applicant is not valid.
+       	 		</xs:documentation>
+       		</xs:annotation>
+      	</xs:enumeration>
+      <xs:enumeration value = "Indeterminate">
+       		<xs:annotation>
+       			<xs:documentation>
+       				It could not be determined if the applicant is valid or not.
+       	 		</xs:documentation>
+       		</xs:annotation>
+      	</xs:enumeration>
+      <xs:enumeration value = "Error">
+       		<xs:annotation>
+       			<xs:documentation>
+       				There was an error in the validation process.
+       	 		</xs:documentation>
+       		</xs:annotation>
+      	</xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+</xs:schema>

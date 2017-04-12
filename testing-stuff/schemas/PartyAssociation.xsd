@@ -1,0 +1,563 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/PartyAssociation.xsd"
+	version="3.2.$Revision: 1000 $"	
+	xmlns="http://cufxstandards.com/v3/PartyAssociation.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+	xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+
+  <xs:element name= "partyAssociationList" type ="PartyAssociationList">
+    <xs:annotation>
+      <xs:documentation>
+        The party association list collection/array contains all the party associations, for instance,
+        that the credential set is authorized to access at the Institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="PartyAssociationList">
+    <xs:annotation>
+      <xs:documentation>
+        The party association list collection/array contains all the party associations, for instance,
+        that the credential set is authorized to access at the Institution based on applied filters.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="partyAssociation" type="PartyAssociation" minOccurs="0" maxOccurs="unbounded">
+      </xs:element >
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="PartyAssociation">
+    <xs:annotation>
+      <xs:documentation>
+        The party association object defines all the fields necessary to define an association between an individual
+        organization, trust or estate.  This allows the financial institution to better serve the clients 
+        because it better understands how each party relates with another.  This also helps in identifying
+        risks associated with their clients such as the liability of a partnership in an organization.
+        The party association ID uniquely identifies the party association within the financial institution.
+      </xs:documentation>
+    </xs:annotation>
+    
+    <xs:sequence>
+      <xs:element name="partyAssociationId" type="PartyAssociationId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The party association ID is a persistent and unique identifier for the party association. 
+            It should be unique for all parties across the institution and remain the same over
+            the life of the relationship with the financial institution.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="parentPartyId" type="party:PartyId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The parent party ID is the first party in the relationship.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="childPartyId" type="party:PartyId" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The child party ID is the second party in the relationship.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="partyAssociationType" type="PartyAssociationType" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The party association type identifies how the parent party relates to the child party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="customData" type="common:CustomData"  minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Party association level name/data pairs list of fields that are not yet available in the general 
+            specification. This should be used as a LAST RESORT as any customizations will not be supported
+            by all data providers or processed by all client applications. ANY use of this field must be 
+            reported to the architecture or working group committee to ensure that fields are somehow handled 
+            in the future release of specifications.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name ="PartyAssociationType">
+    <xs:annotation>
+      <xs:documentation>
+        The party association type identifies how the parent party relates to the child party.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="partner" type="Partner">
+        <xs:annotation>
+          <xs:documentation>
+            Individual (parent) is a partner in a business (child).
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="officerManager" type="OfficerManager">
+        <xs:annotation>
+          <xs:documentation>
+            Individual (parent) is an officer or a manager of an organization (child).
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="agent" type="common:Agent">
+        <xs:annotation>
+          <xs:documentation>
+            Individual (parent) is an agent of another individual (child).  Acts on behalf of the other individual.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="nextOfKin" type="NextOfKin">
+        <xs:annotation>
+          <xs:documentation>
+            Individual (parent) is the next of kin of another individual (child). 
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="trustor" type="Trustor">
+        <xs:annotation>
+          <xs:documentation>
+            Individual provides funds to the associated trust.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Partner">
+    <xs:annotation>
+      <xs:documentation>
+        Individual (parent) is a partner in a business (child).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="qualifier" type="PartnerQualifer" minOccurs ="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Partner type.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="PartnerQualifer">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="GeneralPartner">
+        <xs:annotation>
+          <xs:documentation>
+            Owners of a partnership who have unlimited liability.
+            Read more: http://www.investopedia.com/terms/g/generalpartner.asp#ixzz2792brLlG
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="LimitedPartner">
+        <xs:annotation>
+          <xs:documentation>
+            Owners of a partnership who have limited liability.
+            Read more: http://legal-dictionary.thefreedictionary.com/limited%20partnership
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="OfficerManager">
+    <xs:annotation>
+      <xs:documentation>
+        Individual (parent) is an officer or a manager of an organization (child).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="qualifier" type="OfficerManagerQualifer" minOccurs ="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Partner type.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="OfficerManagerQualifer">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="BoardOfDirectors">
+        <xs:annotation>
+          <xs:documentation>
+            On Board of Directors of an organization.  Excludes CEO.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      
+      <xs:enumeration value="CxO">
+        <xs:annotation>
+          <xs:documentation>
+            C level manager of an organization.  Excludes CFO.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="FinancialOfficer">
+        <xs:annotation>
+          <xs:documentation>
+            CFO or Finance Director at an organization.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      
+      <xs:enumeration value="President">
+        <xs:annotation>
+          <xs:documentation>
+            President of an organization.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="SoleProprietor">
+        <xs:annotation>
+          <xs:documentation>
+            Sold proprietor of an organization.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="VicePresident">
+        <xs:annotation>
+          <xs:documentation>
+            Vice President of an organization.  Excludes CFO/Finance Director.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="ExecutiveDirector">
+        <xs:annotation>
+          <xs:documentation>
+            Executive Director of an organization.  Excludes CFO/Finance Director.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="Director">
+        <xs:annotation>
+          <xs:documentation>
+            Director of an organization.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="Manager">
+        <xs:annotation>
+          <xs:documentation>
+            Manager of an organization.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="Treasurer">
+        <xs:annotation>
+          <xs:documentation>
+            Treasurer at an organization.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value="Secretary">
+        <xs:annotation>
+          <xs:documentation>
+            Secretary at an organization.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      
+      <xs:enumeration value="OtherManager">
+        <xs:annotation>
+          <xs:documentation>
+            Manager level not listed in other categories at an organization.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      
+      <xs:enumeration value="NonManager">
+        <xs:annotation>
+          <xs:documentation>
+            Not a manager at an organization.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="NextOfKin">
+    <xs:annotation>
+      <xs:documentation>
+        Individual (parent) is the next of kin of another individual (child).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="qualifier" type="NextOfKinQualifer" minOccurs ="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Partner type.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="NextOfKinQualifer">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value ="NotSpecified">
+        <xs:annotation>
+          <xs:documentation>
+            Party is the next of kin of another party but the relationship isn't specified.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="Parent">
+        <xs:annotation>
+          <xs:documentation>
+            Party is parent of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="Spouse" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is spouse of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="FirstCousin" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is first cousin of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="Child" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is child of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="Sibling" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is sibling of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="GrandChild" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is grandchild of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="GreatGrandchild" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is great grandchild of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="NieceNephew" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is niece or nephew of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="AuntUncle" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is aunt or uncle of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="GreatGrandparent" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is great grandparent of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="GreatNieceNephew" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is great niece or great nephew of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="GreatAuntUncle" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is great aunt or great uncle of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="GreatGreatGrandparent" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is great-great grandparent of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="GreatGreatGrandChild" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is great-great grandchild of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="FirstCousinOnceRemoved" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is first cousin once removed of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="GreatGrandAuntUncle" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is great grand aunt or great grand uncle of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="GreatGreatGreatGrandChild" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is great-great-great grandchild of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="GreatGreatGreatGrandParent" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is great-great-great grandparent of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="FirstCousinTwiceRemoved" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is first cousin twice removed of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="SecondCousin" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is second cousin of another party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+      <xs:enumeration value ="Other" >
+        <xs:annotation>
+          <xs:documentation>
+            Party is related to another party but the option is not listed. 
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration >
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="Trustor">
+    <xs:annotation>
+      <xs:documentation>
+        Individual provides funds to the associated trust.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="qualifier" type="TrustorQualifer" minOccurs ="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Partner type.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="TrustorQualifer">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="ProvidesFunds">
+        <xs:annotation>
+          <xs:documentation>
+            Individual provides funds to the associated trust.
+           </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="PartyAssociationId">
+    <xs:restriction base="xs:string">
+      <xs:annotation>
+        <xs:documentation>
+          The party association ID is a persistent and unique identifier for the party association.
+          It should be unique for all parties across the institution and remain the same over the
+          life of the relationship with the financial institution.
+        </xs:documentation>
+      </xs:annotation>
+    </xs:restriction>
+  </xs:simpleType>
+  
+  <xs:complexType name="PartyAssociationIdList">
+    <xs:annotation>
+      <xs:documentation>
+        The party association ID list contains an ID list for filtering the party association list services. 
+      </xs:documentation>
+    </xs:annotation>
+
+    <xs:sequence>
+      <xs:element name="partyAssociationId" type="PartyAssociationId" minOccurs="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            The unique identifier to be filtered on.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="PartyAssociationTypeList">
+    <xs:annotation>
+      <xs:documentation>
+        The party association type list contains an ID list for filtering the party association list services.
+      </xs:documentation>
+    </xs:annotation>
+
+    <xs:sequence>
+      <xs:element name="partyAssociationType" type="PartyAssociationType" minOccurs="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+             The party association type identifies how the parent party relates to the child party.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+</xs:schema>

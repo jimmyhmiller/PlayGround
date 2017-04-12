@@ -1,0 +1,546 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/Error.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/Error.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:element name ="errorList" type ="ErrorList">
+    <xs:annotation>
+      <xs:documentation>
+        The error collection/array contains all the errors returned when
+        a service point was called.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="ErrorList">
+    <xs:annotation>
+      <xs:documentation>
+        The error collection/array contains all the errors returned when
+        a service point was called.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="error" type="Error" minOccurs="0" maxOccurs="unbounded"
+				nillable="true">
+        <xs:annotation>
+          <xs:documentation>
+            A collection of fields that represents an individual error that occurred when a
+            service point was called.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+
+  <xs:complexType name="Error" >
+    <xs:annotation>
+      <xs:documentation>
+        A collection of fields that represents an individual error that occurred when a
+        service point was called.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="code" type="Code" minOccurs="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Standard CUFX code returned by the service point.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="type" type="Type" minOccurs="1" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            CUFX error type.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="subCode" type="xs:integer" minOccurs="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            Non-standard error code that was in the back end system.  This may be
+            helpful in understanding why a particular error occurred.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="message" type="xs:string" minOccurs="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The message that can be displayed to an end user.  This message
+            may be discarded if the client has a message that is more appropriate
+            based on the scenario of when the error occurred.
+            This message may be in a different language depending upon the
+            language parameter at the header level in the service call.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="substitutionList" type="SubstitutionList" minOccurs ="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            Optional list to send data to the end point about which fields may be in
+            error and/or which values may be out-of-range.  The error message can be
+            scanned for potential substitution ID's (for example '%1', '%2') and replaced
+            with the value from the substitution list.  This is useful for when an end
+            point wants to support multiple languages or wants all of the message to be
+            reconfigured for better consumption.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="Code">
+    <xs:annotation>
+      <xs:documentation>
+        Standard CUFX code returned by the service point.
+        The documentation contains the standard message to return.
+        When '%s' is in the message, it should be replaced with additional
+        details relative to the message content.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:integer">
+      <xs:enumeration value ="300">
+        <xs:annotation>
+          <xs:documentation>
+            No data in request.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+       <xs:enumeration value ="302">
+        <xs:annotation>
+          <xs:documentation>
+            No matching records were found.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="400">
+        <xs:annotation>
+          <xs:documentation>
+            Bad request.  Data in the request was invalid.
+            This error code should only be used if there is not a more detailed
+            error listed below that matches the situation.  Any use of this error
+            code should be communicated to the CUFX team so that the condition
+            can be covered in future versions of the error object.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="401">
+        <xs:annotation>
+          <xs:documentation>
+            Login Invalid.  The user token or credentials were invalid.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="402">
+        <xs:annotation>
+          <xs:documentation>
+            Session token expired. The provided session token was expired or otherwise invalid.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="403">
+        <xs:annotation>
+          <xs:documentation>
+            User token expired. The provided user token expired.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="409">
+        <xs:annotation>
+          <xs:documentation>
+            Conflict.  The entity submitted for creation already exists.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="411">
+        <xs:annotation>
+          <xs:documentation>
+            Incomplete request.  The request omitted the following required fields: '%s'
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="412">
+        <xs:annotation>
+          <xs:documentation>
+            Previous request required.  A '%s' request must be made before this one, and was not.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="413">
+        <xs:annotation>
+          <xs:documentation>
+            Value out of acceptable range.  The value â%sâ is not supported for the field â%sâ by this
+            service. Valid values must be between â%sâ and â%sâ.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="415">
+        <xs:annotation>
+          <xs:documentation>
+            Unsupported value.  The value â%sâ is not supported for the field â%sâ by this service. Valid
+            values include '%s'.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="422">
+        <xs:annotation>
+          <xs:documentation>
+            Unprocessable entity.  The request contained the following references to entities that could not be found: '%s'.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="423">
+        <xs:annotation>
+          <xs:documentation>
+            Account locked.  The login was valid but the account was disabled, locked or otherwise inaccessible.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="424">
+        <xs:annotation>
+          <xs:documentation>
+            MFA login failed.  The MFA login information provided was incorrect.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="425">
+        <xs:annotation>
+          <xs:documentation>
+            MAC invalid.  The MAC was invalid or missing.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="426">
+        <xs:annotation>
+          <xs:documentation>
+            Encryption error.  The provided encrypted data could not be decrypted.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="429">
+        <xs:annotation>
+          <xs:documentation>
+            Too many requests.  The user has sent too many requests in a given amount of time.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="430">
+        <xs:annotation>
+          <xs:documentation>
+            Invalid language.  The requested language '%s' is not supported.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="431">
+        <xs:annotation>
+          <xs:documentation>
+            Invalid email format.  The format of the email was invalid.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="432">
+        <xs:annotation>
+          <xs:documentation>
+            Invalid phone format.  The format of the phone was invalid.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="433">
+        <xs:annotation>
+          <xs:documentation>
+            Invalid data source ID.  The data source ID was not recognized.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="434">
+        <xs:annotation>
+          <xs:documentation>
+            Invalid FI ID.  The financial institution ID was not recognized.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="435">
+        <xs:annotation>
+          <xs:documentation>
+            Unable to parse request. Invalid JSON/XML.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="436">
+        <xs:annotation>
+          <xs:documentation>
+            Access denied.  Access to resource requested was denied.	subCode may contain additional details.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="437">
+        <xs:annotation>
+          <xs:documentation>
+            Artifact not found.	The artifact ID could not be found in the repository.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="438">
+        <xs:annotation>
+          <xs:documentation>
+            Update to field not allowed.	The repository does not allow updates to '%s'.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="439">
+        <xs:annotation>
+          <xs:documentation>
+            Artifact could not be decompressed.	 artifactCompressionType did not result in a successful 
+            decompression of the artifact.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+
+      <xs:enumeration value ="440">
+        <xs:annotation>
+          <xs:documentation>
+            MIME type not supported. 	Repository rejected the MIME type.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="441">
+        <xs:annotation>
+          <xs:documentation>
+            Artifact has been archived.	The artifact with the given artifact ID has been archived out of the repository.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="442">
+        <xs:annotation>
+          <xs:documentation>
+            Artifact too large.	The artifact was rejected because the artifact has exceeded the size limit.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="443">
+        <xs:annotation>
+          <xs:documentation>
+            Artifact too small.	The artifact was rejected because the artifact is smaller than its minimum size limit.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="444">
+        <xs:annotation>
+          <xs:documentation>
+            Artifact rejected. 	The repository has rejected the artifact. See the sub error codes for the specific reason.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="445">
+        <xs:annotation>
+          <xs:documentation>
+            Invalid data length in field '%s'.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="475">
+        <xs:annotation>
+          <xs:documentation>
+            Invalid format.  The format of the request is not supported.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="476">
+        <xs:annotation>
+          <xs:documentation>
+            Invalid encironment.  The environment specified in MessageContext is disallowed by the system as configured.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+
+      <xs:enumeration value ="497">
+        <xs:annotation>
+          <xs:documentation>
+            Transaction dates are out of order.  The transaction end date is before the transaction start date
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="498">
+        <xs:annotation>
+          <xs:documentation>
+            Transaction date range too wide.  Date range is too wide for the data source to handle.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="499">
+        <xs:annotation>
+          <xs:documentation>
+            General Error.  Review subCode for more information.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="503">
+        <xs:annotation>
+          <xs:documentation>
+            Service is temporarily unavailable.  Try again later.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+    </xs:restriction>
+  </xs:simpleType>
+
+
+
+  <xs:simpleType name="Type">
+    <xs:annotation>
+      <xs:documentation>
+        Standard CUFX error type returned by the service point which indicates the
+        level/category of the error.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:integer">
+      <xs:enumeration value ="100">
+        <xs:annotation>
+          <xs:documentation>
+            Informational â Some kind of information warning that should not stop processing.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="200">
+        <xs:annotation>
+          <xs:documentation>
+            ValidationException â Data values were out of range based on acceptable values.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="300">
+        <xs:annotation>
+          <xs:documentation>
+            DataRequestError â The data request was not well-formed.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="310">
+        <xs:annotation>
+          <xs:documentation>
+            UnsupportedError â The request is not supported by the server implementation.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="320">
+        <xs:annotation>
+          <xs:documentation>
+            PermissionError â The client lacks the necessary security permission to access the object or operation.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="400">
+        <xs:annotation>
+          <xs:documentation>
+            SystemNonFatalError â temporary system error occured such as a temporary system outage, etc.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      <xs:enumeration value ="500">
+        <xs:annotation>
+          <xs:documentation>
+            SystemFatalError â critical system error occurred such as full system outage, etc.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+
+      
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="SubstitutionList">
+    <xs:sequence>
+      <xs:element name="substitution" type="Substitution" minOccurs ="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            Optional substitution to send data to the end point about which fields may be in
+            error and/or which values may be out-of-range.  The error message can be
+            scanned for potential substitution ID's (for example '%1', '%2') and replaced
+            with the value from the substitution list.  This is useful for when an end
+            point wants to support multiple languages or wants all of the message to be
+            reconfigured for better consumption.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Substitution">
+    <xs:sequence>
+      <xs:element name="id" type="xs:string" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            ID of the substitution as it appears in the error message.
+            For example, %1, %2, etc.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+
+      <xs:element name="value" type="xs:string" minOccurs ="0" maxOccurs ="1">
+        <xs:annotation>
+          <xs:documentation>
+            The data that should be placed in the error message wherever the
+            substitution ID shows up in the error message.  This would most 
+            likely be a field name, field value, etc.
+            This is done to allow the rest of the error message to be translated
+            by the consuming end point, if the message was not translated by the
+            core.  It's up to the end points to determine which end point will
+            translate if it's supported.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+</xs:schema>

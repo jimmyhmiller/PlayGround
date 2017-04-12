@@ -1,0 +1,388 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/PermissionList.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/PermissionList.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+	xmlns:accessProfile="http://cufxstandards.com/v3/AccessProfile.xsd"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+	xmlns:party="http://cufxstandards.com/v3/Party.xsd"
+	xmlns:card="http://cufxstandards.com/v3/Card.xsd"
+	xmlns:relationship="http://cufxstandards.com/v3/Relationship.xsd"
+  xmlns:credentialGroup="http://cufxstandards.com/v3/CredentialGroup.xsd"
+  xmlns:productoffering="http://cufxstandards.com/v3/ProductOffering.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/AccessProfile.xsd" schemaLocation="AccessProfile.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Party.xsd" schemaLocation="Party.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Card.xsd" schemaLocation="Card.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Relationship.xsd" schemaLocation="Relationship.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/CredentialGroup.xsd" schemaLocation="CredentialGroup.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/ProductOffering.xsd" schemaLocation="ProductOffering.xsd" />
+
+  <xs:element name="permissionList" type ="PermissionList">
+    <xs:annotation>
+      <xs:documentation>
+        This is a list of actions that the user is permitted to perform.
+        Any permissions not explicitly in the list should be assumed as not permitted.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="PermissionList">
+      <xs:sequence>
+        <xs:element name="permission" type="Permission" minOccurs="0" maxOccurs="unbounded">
+          <xs:annotation>
+            <xs:documentation>
+              An action the actor is permitted to perform.
+            </xs:documentation>
+          </xs:annotation>
+        </xs:element>
+      </xs:sequence>
+    </xs:complexType>
+ 
+
+  <xs:complexType name="Permission">
+    <xs:sequence>
+      <xs:element name="actor" minOccurs="0" maxOccurs="1" type="accessProfile:Actor">
+        <xs:annotation>
+          <xs:documentation>
+            The user, party, or other authenticated entity that will be permitted to perform the action.
+            If the permission model has been implemented, it will take precedent over the relationships defined in account 
+            schemas.  The configuration service will define if the permision model has been implemented. 
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="action" type="ExtendedAction" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The feature that the user is permitted to use.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="resource" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>
+            The account, user, or other securable asset that the action applies to.
+          </xs:documentation>
+        </xs:annotation>
+        <xs:complexType>
+          <xs:choice minOccurs="0" maxOccurs="1">
+            <xs:element name="accountId" type="account:AccountId">
+              <xs:annotation>
+                <xs:documentation>
+                  The account to which the permitted action applies.
+                </xs:documentation>
+              </xs:annotation>
+            </xs:element>
+            <xs:element name="fiUserId" type="credentialGroup:FiUserId">
+              <xs:annotation>
+                <xs:documentation>
+                  The user to which the permitted action applies.
+                </xs:documentation>
+              </xs:annotation>
+            </xs:element>
+            <xs:element name="cardId" type="card:CardId">
+              <xs:annotation>
+                <xs:documentation>
+                  The card to which the permitted action applies.
+                </xs:documentation>
+              </xs:annotation>
+            </xs:element>
+            <xs:element name="relationshipId" type="relationship:RelationshipId">
+              <xs:annotation>
+                <xs:documentation>
+                  The relationship to which the permitted action applies.
+                </xs:documentation>
+              </xs:annotation>
+            </xs:element>
+            <xs:element name="productId" type="productoffering:ProductId">
+              <xs:annotation>
+                <xs:documentation>
+                  The product ID associated with the permission.
+                </xs:documentation>
+              </xs:annotation>
+            </xs:element>            
+          </xs:choice>  
+          
+        </xs:complexType>
+        
+      </xs:element>
+      <xs:element name="maxLimits" type="MaxLimits">
+        <xs:annotation>
+          <xs:documentation>
+            Limits encompassing daily, weekly, and monthly maximums for this action specific to this resource, if specified.
+            If no resource is given, these limits are institution-wide for the principal.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:simpleType name="ExtendedAction">
+    <xs:annotation>
+      <xs:documentation>
+        The feature that the user is permitted to use, or prevented from using, and is extensible using the "x:" prefix.
+        CUFX-compatible client may ignore unrecognized extended actions.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:union memberTypes="Action EnumerationExtension"/>
+  </xs:simpleType>
+  
+  <xs:simpleType name="EnumerationExtension">
+    <xs:annotation>
+      <xs:documentation>
+        A string value that must contain a "custom:" prefix.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="custom:\w+"/>
+    </xs:restriction>
+  </xs:simpleType>
+  
+  <xs:simpleType name="Action">
+    <xs:restriction base="xs:string">
+      <xs:annotation>
+        <xs:documentation>
+          The feature that the user is permitted to use.
+        </xs:documentation>
+      </xs:annotation>
+      <xs:enumeration value="AgreeToTerms">
+        <xs:annotation>
+          <xs:documentation>
+            Legally allowed to agree to electronic terms and conditions for an account or relationship.
+            Requires account or relationship resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="CategorizeTransactions">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to select the category of a transaction for later reporting.
+            Requires account resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="CreateUser">
+        <xs:annotation>
+          <xs:documentation>
+            Allows configuring new a user account credential.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="CreateAccount">
+        <xs:annotation>
+          <xs:documentation>
+            Allows configuring new an account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>      
+      <xs:enumeration value="ModifyResourceAccess">
+        <xs:annotation>
+          <xs:documentation>
+            Allows to grant or revoke actor access to a resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="AddExternalAccount">
+        <xs:annotation>
+          <xs:documentation>
+            Allows adding persistant access to an account from an external financial institution.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ManageAccountDetail">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to change an account's nickname or other user-customizable properties.
+            Requires account resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ManageContactInfo">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to update address, email, phone, or other contact info.
+            Requires user or party resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ManageCredential">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to change password, or other user credential details.
+            Requires user resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ManagePreference">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to modify user preferences and details for a business.
+            Requires user or relationship resource.
+            Also includes ability to create, alter, or delete notifications relating to account activity, account balance,
+            suspicious log-on behavior, or other automated signalling supported by the system.
+            Requires resources as supported by the alert system.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ManageScheduledTransfers">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to modify existing automatic transactions.
+            Requires account resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ManageUser">
+        <xs:annotation>
+          <xs:documentation>
+            Allows changing, disabling, enabling, or purging a user entirely.
+            Requires user resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="OrderChecks">
+        <xs:annotation>
+          <xs:documentation>
+            Allows ordering checks.
+            Requires account resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="PayBills">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to use the bill payment system.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ProcessPayroll">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to process a configured payroll.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="RemoteDeposit">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to perform a remote deposit capture into an account.
+            Requires account resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="SendSecureMessage">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to send or reply to a communication within an online banking's secure messaging system.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="SendWire">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to send a wire transfer from an account.
+            Requires account resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="StopPayment">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to request a stop payment on an account's transactions.
+            Requires account resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="TransferDestinationAccount">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to transfer funds to an account.
+            Requires account resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="TransferSourceAccount">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to transfer funds from an account.
+            Requires account resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ViewAccountBalance">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to read account balance.
+            Requires account resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ViewAccountDetail">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to read account data such as rate, open date, maturity date, regulation D counters, 
+            regulation E status, and more.
+            Requires account resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ViewTransactions">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to read transactions on an account.
+            Requires account resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ViewSecureMessages">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to read a communication within an online banking's secure messaging system.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="ViewStatements">
+        <xs:annotation>
+          <xs:documentation>
+            Allowed to read or download account statements.
+            Requires account or relationship resource.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="PermissionMaximums">
+    <xs:annotation>
+      <xs:documentation>
+        Maximum limits for actions and resources. 
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element type="common:Money" name="maxAmount"/>
+      <xs:element type="xs:integer" name="maxNumber"/>
+      <xs:element type="common:Money" name="rollingAmount"/>
+      <xs:element type="xs:integer" name="rollingNumber"/>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:complexType name="MaxLimits">
+    <xs:annotation>
+      <xs:documentation>
+        Limits encompassing daily, weekly, and monthly maximums for a given action and resource.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="dailyMax" type="PermissionMaximums" minOccurs="1" maxOccurs="1"/>
+      <xs:element name="weeklyMax" type="PermissionMaximums" minOccurs="1" maxOccurs="1"/>
+      <xs:element name="monthlyMax" type="PermissionMaximums" minOccurs="1" maxOccurs="1"/>
+    </xs:sequence>
+  </xs:complexType>
+</xs:schema>

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema id="TransferRecurring"
+    targetNamespace="http://cufxstandards.com/v3/TransferRecurring.xsd"
+    version="3.2.$Revision: 1000 $"
+    xmlns="http://cufxstandards.com/v3/TransferRecurring.xsd"
+    xmlns:mstns="http://cufxstandards.com/v3/TransferRecurring.xsd"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:fundsTransferRecurringBase="http://cufxstandards.com/v3/FundsTransferRecurringBase.xsd"
+           
+    elementFormDefault="qualified"
+    attributeFormDefault="unqualified">
+
+	<xs:import namespace="http://cufxstandards.com/v3/FundsTransferRecurringBase.xsd" schemaLocation="FundsTransferRecurringBase.xsd" />
+	<xs:element name="transferRecurringList" type="TransferRecurringList">
+		<xs:annotation>
+			<xs:documentation>
+				List of recurring transfers returned from a data pull that was based on applied filters.
+			</xs:documentation>
+		</xs:annotation>
+	</xs:element>
+
+	<xs:complexType name="TransferRecurringList">
+		<xs:annotation>
+			<xs:documentation>
+				List of recurring transfers returned from a data pull that was based on applied filters.
+			</xs:documentation>
+		</xs:annotation>
+		<xs:sequence>
+			<xs:element name="transferRecurring" type="TransferRecurring" minOccurs="0" maxOccurs="unbounded">
+				<xs:annotation>
+					<xs:documentation>
+						Details related to a specific recurring transfer.
+					</xs:documentation>
+				</xs:annotation>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="TransferRecurring" >
+		<xs:complexContent>
+			<xs:annotation>
+				<xs:documentation>
+					Single recurring transfer.
+				</xs:documentation>
+			</xs:annotation>
+			<xs:extension base="fundsTransferRecurringBase:FundsTransferRecurringBase">
+			</xs:extension>
+		</xs:complexContent>
+	</xs:complexType>
+</xs:schema>

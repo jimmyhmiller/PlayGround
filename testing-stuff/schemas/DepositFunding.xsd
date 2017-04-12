@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema
+	targetNamespace="http://cufxstandards.com/v3/DepositFunding.xsd"
+	version="3.2.$Revision: 1000 $"
+	xmlns="http://cufxstandards.com/v3/DepositFunding.xsd"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:common="http://cufxstandards.com/v3/Common.xsd"
+	xmlns:account="http://cufxstandards.com/v3/Account.xsd"
+
+	elementFormDefault="qualified"
+	attributeFormDefault="unqualified">
+	
+  <xs:import namespace="http://cufxstandards.com/v3/Common.xsd" schemaLocation="Common.xsd" />
+  <xs:import namespace="http://cufxstandards.com/v3/Account.xsd" schemaLocation="Account.xsd" />
+
+  <xs:element name="depositFundingList" type="DepositFundingList"> 
+    <xs:annotation>
+      <xs:documentation>
+        List of accounts with the accounts to which they transfer.  This is used for filtering
+        when reading data.
+      </xs:documentation>
+    </xs:annotation>
+  </xs:element>
+
+  <xs:complexType name="DepositFundingList">
+    <xs:sequence>
+      <xs:element name="depositFunding" type="DepositFunding" minOccurs ="0" maxOccurs ="unbounded">
+        <xs:annotation>
+          <xs:documentation>
+            The details required to fund a deposit account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:complexType name="DepositFunding">
+    <xs:sequence>
+      <xs:element name="targetAccountId" type="account:AccountId">
+        <xs:annotation>
+          <xs:documentation>
+            The account ID is a persistent and unique identifier for the account. It must be unique
+            for all users across the institution and remain the same over the life of the account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="fundingSourceId" type="account:AccountId">
+        <xs:annotation>
+          <xs:documentation>
+            Identifies an account ID or a GL number/code to use as the source for funding.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="sourceOfFunds" type="SourceOfFunds" minOccurs="0">
+        <xs:annotation>
+          <xs:documentation>
+            Identifies the source of the funds.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="fundingAmount" type="common:Money">
+        <xs:annotation>
+          <xs:documentation>
+            The amount of money to be transferred from the source account or GL to the target account.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="holdAmount" type="common:Money" minOccurs="0">
+        <xs:annotation>
+          <xs:documentation>
+            The amount of money to be held.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="holdExpirationDate" type="xs:date" minOccurs="0">
+        <xs:annotation>
+          <xs:documentation>
+            The date on which the hold will expire.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:simpleType name="SourceOfFunds">
+    <xs:annotation>
+      <xs:documentation>
+        Identifies the source of the funds.
+      </xs:documentation>
+    </xs:annotation>
+  	<xs:restriction base="xs:string">
+  		<xs:enumeration value="Cash"/>
+  		<xs:enumeration value="Check"/>
+  		<xs:enumeration value="Transfer"/>
+  		<xs:enumeration value="ACH"/>
+  		<xs:enumeration value="None"/>
+  		<xs:enumeration value="CreditCard"/>
+			<xs:enumeration value="DebitCard"/>
+  		<xs:enumeration value="Wire"/>
+  	</xs:restriction>
+  </xs:simpleType>
+ 
+</xs:schema>
