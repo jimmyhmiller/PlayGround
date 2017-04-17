@@ -1,3 +1,8 @@
+(* implementation of http://ropas.snu.ac.kr/lib/dock/Wac.ps *)
+(* Type Inference for Objects with Instance Variables and Inheritance *)
+(* Useful http://www.cs.cornell.edu/courses/cs312/2005sp/lectures/lec22.asp *)
+
+
 type tree = 
       Var of string * int
     | Const of string
@@ -7,6 +12,9 @@ type tree =
     | Record of tree
     | Extension of (string * tree) list * tree
     | Empty
+
+
+
 
 let tvar s = Var(s, 0)
 
@@ -242,7 +250,7 @@ let x = (Const "bool");;
 (* uni ident x;; *)
 
 let q = apply ident x;;
-print_string (tree_to_string q)
+(* print_string (tree_to_string q) *)
 
 
 let test3 () = let (n1, n2) = make2 () in
@@ -251,6 +259,30 @@ let test3 () = let (n1, n2) = make2 () in
 
 
 (* test3 () *)
+
+type expr =
+    True
+  | False
+  | Num of int
+  | If of expr * expr * expr
+
+let rec tinfer e = match e with
+    | True -> (Const "bool")
+    | False -> (Const "bool")
+    | Num(i) -> (Const "int")
+    | If(e1, e2, e3) ->
+        let t1 = tinfer(e1) in
+        let t2 = tinfer(e2) in
+        let t3 = tinfer(e3)
+      in
+        uni t1 (Const "bool");
+        uni t2 t3;
+        t2;;
+
+
+print_string (tree_to_string (tinfer (If (True, (Num 2), (Num 1)))))
+
+
 
 
 
