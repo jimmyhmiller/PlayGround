@@ -2,6 +2,9 @@
 (* Type Inference for Objects with Instance Variables and Inheritance *)
 (* Useful http://www.cs.cornell.edu/courses/cs312/2005sp/lectures/lec22.asp *)
 
+(* Read *)
+(* https://www.cs.cmu.edu/~aldrich/courses/819/row.pdf *)
+
 
 type tree = 
       Var of string * int
@@ -114,7 +117,7 @@ let rec tree_to_string t = match t with
 
 let rec member x coll = match coll with
     | [] -> false
-    | (y :: l) -> if x == y then true else member x l;;
+    | (y :: l) -> if x = y then true else member x l;;
 
 let rec untranslate = 
     let rec loop n seen = 
@@ -242,6 +245,16 @@ let uni t1 t2 =
     let (n1, a) = translate t1 [] in
     let (n2, a) = translate t2 a in
         (unify1 n1 n2);;
+        (* printn n1;; *)
+
+
+let uni' t1 t2 = 
+    let (n1, a) = translate t1 [] in
+    let (n2, a) = translate t2 [] in
+        (unify1 n1 n2);
+        (* printn n1; *)
+        untranslate n1;;
+
 
 
 let apply f x = match f with
@@ -276,8 +289,11 @@ type expr =
 
 exception CombineNonExtension of unit
 
-let combineExtension e1 e2 = match (e1, e2) with
+let rec combineExtension e1 e2 = match (e1, e2) with
     | (Extension(xs, xVar), Extension(ys, yVar)) -> Extension(xs, Extension(ys, yVar))
+    | (Extension(xs, xVar), Absent) -> Extension(xs, (combineExtension xVar Absent))
+    | (Var(_,_), Absent) -> Absent
+    | (Absent, Absent) -> Absent
     | x -> raise (CombineNonExtension ());;
 
 
@@ -293,8 +309,7 @@ let rec tinfer e = match e with
         let t3 = tinfer(e3)
       in
         uni t1 (Const "bool");
-        uni t2 t3;
-        t2
+        uni' t2 t3;  (* Diff fields *)
     | Empty -> Record Absent
     | Method(s, e) -> 
         let t1 = tinfer e
@@ -306,14 +321,15 @@ let rec tinfer e = match e with
         | (m :: ms) ->
             let methodType = tinfer m in
             let methodTypes = List.map tinfer ms in
-            let extension = List.fold_left combineExtension methodType methodTypes
+            let extension = List.fold_left combineExtension methodType methodTypes in
+            let finalExtension = combineExtension extension Absent
           in
-           Record extension;;
+           Record finalExtension;;
 
-let aObject = Object([Method("a", True)]) in
-let bObject = Object([Method("b", True)]) in
 
-    print_string (tree_to_string (tinfer bObject));;
+let aObject = Object([Method("a", True); Method("b", True)]) in
+let bObject = Object([Method("a", True); Method("b", False)]) in
+    print_string (tree_to_string (tinfer (If(True, aObject, bObject))));;
 
 
 
