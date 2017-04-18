@@ -15,7 +15,6 @@ type tree =
 
 
 
-
 let tvar s = Var(s, 0)
 
 let rec mapappend l = match l with
@@ -50,6 +49,11 @@ let link n = match n with
 let gen_num : unit -> int = 
     let count = ref 0 in
     fun x -> (count := !count + 1; !count);;
+
+let gen_var x = 
+    let num = gen_num ()
+  in
+    tvar (x ^ string_of_int num)
 
 let rec find n = if !(link n) = NullNode then n else find (!(link n));;
 
@@ -227,7 +231,7 @@ let test2 () =
 
 let make2 () = 
     let (n1, a) = translate (Record (Extension([("a", Present(Const "bool"))], tvar "r1"))) [] in
-    let (n2, a) = translate (Record (Extension([("a", Present(Const "int"))], tvar "r2"))) []
+    let (n2, a) = translate (Record (Extension([("b", Present(Const "bool"))], tvar "r2"))) a
 in (n1, n2);;
 
 
@@ -265,6 +269,19 @@ type expr =
   | False
   | Num of int
   | If of expr * expr * expr
+  | Empty
+  | Method of string * expr
+  | Object of expr list
+
+
+exception CombineNonExtension of unit
+
+let combineExtension e1 e2 = match (e1, e2) with
+    | (Extension(xs, xVar), Extension(ys, yVar)) -> Extension(xs, Extension(ys, yVar))
+    | x -> raise (CombineNonExtension ());;
+
+
+exception InvalidEmptyObject of unit
 
 let rec tinfer e = match e with
     | True -> (Const "bool")
@@ -277,10 +294,26 @@ let rec tinfer e = match e with
       in
         uni t1 (Const "bool");
         uni t2 t3;
-        t2;;
+        t2
+    | Empty -> Record Absent
+    | Method(s, e) -> 
+        let t1 = tinfer e
+      in
+        Extension([(s, Present(t1))], (tvar s))
 
+    | Object(methods) -> match methods with
+        | [] -> raise (InvalidEmptyObject ())
+        | (m :: ms) ->
+            let methodType = tinfer m in
+            let methodTypes = List.map tinfer ms in
+            let extension = List.fold_left combineExtension methodType methodTypes
+          in
+           Record extension;;
 
-print_string (tree_to_string (tinfer (If (True, (Num 2), (Num 1)))))
+let aObject = Object([Method("a", True)]) in
+let bObject = Object([Method("b", True)]) in
+
+    print_string (tree_to_string (tinfer bObject));;
 
 
 
