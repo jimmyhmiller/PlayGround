@@ -10,4 +10,10 @@
                  [graphql-clj "0.1.18"]
                  [org.clojure/test.check "0.9.0"]
                  [juxt/dirwatch "0.2.3"]
-                 [funcool/promesa "1.8.0"]])
+                 [funcool/promesa "1.8.0"]
+                 [org.clojure/core.match "0.3.0-alpha4"]
+                 [camel-snake-kebab "0.4.0"]
+                 [com.stripe/stripe-java "4.7.0"]
+                 [org.clojure/java.data "0.1.1"]
+                 [clj-http "3.5.0"]
+                 [cheshire "5.7.1"]])

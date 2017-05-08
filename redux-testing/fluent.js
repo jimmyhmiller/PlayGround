@@ -4,26 +4,43 @@ const zaphod = require('zaphod/compat');
 const { update } = zaphod;
 const { mapValues } = require('lodash');
 const lodashColl = require('lodash/fp/collection');
-const __ = require('lodash');
 
 var unwrapped = Symbol('unwrapped');
 
 const identity = x => x
 
-
 const fluentCompose = (combinators, f=identity) => {
   if (typeof(f) !== 'function') {
     return f;
   }
-  const innerFunc = (...args) => f(...args);
 
-  Object.keys(combinators).forEach(k => {
-    const unWrappedFunc = combinators[k][unwrapped] || combinators[k];
-    innerFunc[k] = (...args) => fluentCompose(combinators, unWrappedFunc(innerFunc)(...args))
-    innerFunc[k][unwrapped] = unWrappedFunc;
-  })
-  return innerFunc;
-}
+  const innerFunc = (...args) => f(...args);
+  const methods = mapValues(combinators, g => 
+    (...args) => fluentCompose(combinators, g(innerFunc)(...args)))
+
+  return Object.assign(innerFunc, methods);
+ }
+
+const threadFirstPrime = f => g => (...args) => x => f(g(x), ...args);
+
+
+const wadd = (getSum) => x => i => getSum(i) + x
+const compose = f => g => f(g());
+
+const add = compose((sum=0) => n => () => sum + n)
+const addPrime = (sum, n) => console.log('test', sum, n) || sum + n;
+
+
+const adder = fluentCompose({ wadd, add, addPrime: threadFirstPrime(addPrime)  })
+
+console.log(adder.add(2).add(3).add(3)())
+
+
+const addSomeStuff = adder(adder)
+  .add(3)
+  .add(2)
+  .addPrime(3)
+
 
 const coFuncPrime = (f) => {
   const innerFunc = (x) => f(x);
@@ -51,7 +68,7 @@ const wrap = f => comb => x => comb(f)(x)
 // (Int -> Int -> Int) -> (a -> b) -> a -> b
 const c = f => g => x => f(g(x))
 
-const wadd = (getSum) => x => i => getSum(i) + x;
+// const wadd = (getSum) => x => i => getSum(i) + x;
 const cadd = c((sum) => x => sum + x)
 
 // console.log(
@@ -66,23 +83,6 @@ wrap((i) => i % 2 === 0)(or)(false)(2)
 // console.log(
 //   wrap(wrap(identity)(wadd)(3))(wadd)(1)(4)
 // )
-
-const threadFirstPrime = f => g => (...args) => x => f(g(x), ...args);
-
-const compose = f => g => f(g());
-
-
-const add = compose((sum=0) => n => () => sum + n)
-const addPrime = (sum, n) => sum + n;
-
-
-const adder = fluentCompose({ add, addPrime: threadFirstPrime(addPrime)  })
-
-
-// const addSomeStuff = adder
-//   .add(3)
-//   .add(2)
-//   .addPrime(3)
 
 
 // console.log(
@@ -206,23 +206,13 @@ const threadLast = f => next => (...args) => {
 }
 
 
-const threadFirstAll = (obj) => mapValues(obj, threadFirst);
-const threadLastAll = (obj) => mapValues(obj, threadLast);
+const fluentFirst = (obj) => mapValues(obj, threadFirst);
+const fluentLast = (obj) => mapValues(obj, threadLast);
 
 
 const value = next => coll => next(coll);
 const withValue = next => init => coll => next(init)
 
-const makefluent = (fluentModifier, f) => obj =>
-  fluentCompose({
-    ...fluentModifier(obj),
-    value,
-    withValue,
-  }, f)
-
-
-const fluentFirst = makefluent(threadFirstAll)
-const fluentLast = makefluent(threadLastAll);
 
 const transform = fluentFirst(zaphod)
 const _ = fluentLast(lodashColl)
@@ -232,6 +222,10 @@ const fullTransform = fluentCompose({
   ..._,
   ...transform,
 })
+
+console.log(
+  fullTransform.set(0, 2).set(1, 3).map(x => x + 2)([])
+)
 
 
 const randomArray = (length, max) => [...new Array(length)]
@@ -291,18 +285,7 @@ const nullable = Maybe
 //    .filter(x => x % 2 === 0)
 
 
-// console.log(workflow([1,2,3,4,5])) // [2, 4, 6]
-
-const transformer =
-  transform
-    .set('x', 2)
-    .set('y', 3)
-    .set('q', {})
-    .setIn(['q', 'a'], 3)
-    .updateIn(['q', 'a'], x => x + 1)
-
-// console.log(transformer({}))
-// // { x: 2, y: 3, q: { a: 4 } }
+// console.log(workflow([1,2,3,4,5])) // [2, 4, 6]}
 
 // console.log(update({settings: {}}, 'settings', transformer))
 // //{ settings: { x: 2, y: 3, q: { a: 4 } } }
@@ -339,13 +322,13 @@ const run = next => (state, action) => {
 
 const reducer = fluentCompose({ initialState, reduce, run }, baseReducer)
 
-// console.log(
-//   reducer
-//   .initialState(0)
-//   .reduce('INCREMENT', x => x + 1)
-//   .reduce('DECREMENT', x => x - 1)
-//   (0, increment())
-// )
+console.log(
+  reducer
+  .initialState(0)
+  .reduce('INCREMENT', x => x + 1)
+  .reduce('DECREMENT', x => x - 1)
+  (0, increment())
+)
 
 
 

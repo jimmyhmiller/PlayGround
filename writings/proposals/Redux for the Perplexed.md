@@ -1,0 +1,7 @@
+Redux for the Perplexed
+
+[Redux](https://github.com/reactjs/redux) has risen to be the de facto standard for building large applications using React. Unfortunately its popularity has led to a bandwagon effect of people using Redux without understanding it. In this talk we will discuss the why we might want to use Redux, how we can use it, and finally discuss the benefits it brings us.
+
+We will begin with a basic React app and discuss a problem that occurs almost immediately when beginning with React, where to store state. First we will investigate some resolutions to this problems using just vanilla React. Unfortunately, as our application grows, these refactorings become more and more burdensome and a better solution is needed. Redux was made to fill this hole.
+
+Having motivated Redux, we will explore its three fundamental concepts: reducers, actions, and the store. We will modify our existing application to take advantage of these features, alleviating the pains we felt before and giving our code a strong organizing principle. Finally, we will show what this refactor enabled; using libraries from the redux ecosystem, we will be able to quickly add undo/redo to our existing code, persist our state to local storage, inspect our program with a time travel debugger, and create truly great bug reports with full playback of user actions.
