@@ -4,29 +4,105 @@ const zaphod = require('zaphod/compat');
 const { update } = zaphod;
 const { mapValues } = require('lodash');
 const lodashColl = require('lodash/fp/collection');
-
-
+const __ = require('lodash');
 
 var unwrapped = Symbol('unwrapped');
 
 const identity = x => x
 
-const fluentCompose = (combinators, f=identity) => {
-  const wrapperFunction = (g) => {
-    if (typeof(g) !== 'function') {
-      return g;
-    }
-    const innerFunc=(...args) => g(...args);
 
-    Object.keys(combinators).forEach(k => {
-      const unWrappedFunc = combinators[k][unwrapped] || combinators[k];
-      innerFunc[k] = (...args) => wrapperFunction(unWrappedFunc(innerFunc)(...args))
-      innerFunc[k][unwrapped] = unWrappedFunc;
-    })
-    return innerFunc;
+const fluentCompose = (combinators, f=identity) => {
+  if (typeof(f) !== 'function') {
+    return f;
   }
-  return wrapperFunction(f);
+  const innerFunc = (...args) => f(...args);
+
+  Object.keys(combinators).forEach(k => {
+    const unWrappedFunc = combinators[k][unwrapped] || combinators[k];
+    innerFunc[k] = (...args) => fluentCompose(combinators, unWrappedFunc(innerFunc)(...args))
+    innerFunc[k][unwrapped] = unWrappedFunc;
+  })
+  return innerFunc;
 }
+
+const coFuncPrime = (f) => {
+  const innerFunc = (x) => f(x);
+}
+
+const composePrime = (f, g) => (...args) => f(g(...args))
+
+const coFunc = (name, f=identity) => {
+  const innerFunc = (...args) => f(...args);
+  innerFunc[name] = g => coFunc(name, composePrime(g, f))
+  return innerFunc;
+}
+
+console.log(
+  coFunc('map')
+    .map(x => x + 2)
+    .map(x => x + 3)
+    (0)
+)
+
+// wrap :: (a -> b) -> ((a -> b) -> b -> a -> b) -> a -> b
+const wrap = f => comb => x => comb(f)(x)
+
+
+// (Int -> Int -> Int) -> (a -> b) -> a -> b
+const c = f => g => x => f(g(x))
+
+const wadd = (getSum) => x => i => getSum(i) + x;
+const cadd = c((sum) => x => sum + x)
+
+// console.log(
+//   wrap(identity)(cadd)(2)(0)
+// )
+
+const or = (even) => x => i => even(i) || x
+
+// (Int -> Bool) -> Bool -> Int -> Bool
+wrap((i) => i % 2 === 0)(or)(false)(2)
+
+// console.log(
+//   wrap(wrap(identity)(wadd)(3))(wadd)(1)(4)
+// )
+
+const threadFirstPrime = f => g => (...args) => x => f(g(x), ...args);
+
+const compose = f => g => f(g());
+
+
+const add = compose((sum=0) => n => () => sum + n)
+const addPrime = (sum, n) => sum + n;
+
+
+const adder = fluentCompose({ add, addPrime: threadFirstPrime(addPrime)  })
+
+
+// const addSomeStuff = adder
+//   .add(3)
+//   .add(2)
+//   .addPrime(3)
+
+
+// console.log(
+//   addSomeStuff(3)
+// )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 let State = statefn => ({
@@ -71,7 +147,7 @@ let freshN = State.get()
 
 
 const mapState = next => (f) => state => {
-  console.log('map', next(state))
+  // console.log('map', next(state))
   const [value, newState] = next(state);
   return [f(value), newState];
 }
@@ -92,8 +168,8 @@ const runState = next => x => {
   return value;
 }
 
-const fresher = (next) => () =>
-  next.flatMap(_ => 
+const fresher = (state) => () =>
+  state.flatMap(_ => 
     St.get()
       .flatMap(n => St.put(n+1).then(St.pure(n))))
 
@@ -158,13 +234,36 @@ const fullTransform = fluentCompose({
 })
 
 
+const randomArray = (length, max) => [...new Array(length)]
+    .map(() => Math.round(Math.random() * max));
 
-console.log(
-  fullTransform
+const coll = randomArray(1000, 1000);
+
+const transformNums = fullTransform
     .filter(x => x % 2 === 0)
     .map(x => x + 2)
+    .map(x => x + 2)
     .set(0, 2)
-    ([3, 1])) // [2]
+
+const doTransformFluent = (coll) => () => transformNums(coll)
+
+
+
+const doTransform = (coll) => () =>
+  zaphod.set(lodashColl.map(x => x + 2, lodashColl.map(x => x + 2, lodashColl.filter(x => x % 2 === 0, coll))), 0, 2)
+
+// const timeFunction = (f, name) => trials => {
+//   console.time(name)
+//   for (let i = 0; i < trials; i++) {
+//     f();
+//   }
+//   console.timeEnd(name);
+// }
+
+// timeFunction(doTransform(coll), 'not fluent')(100000)
+
+// timeFunction(doTransformFluent(coll), 'fluent')(100000)
+
 
 const map = next => 
   (f) => coll => {
@@ -184,15 +283,15 @@ const nullable = Maybe
   .map(x => x * 3)
 
 
-console.log(nullable(0)) // 6
-console.log(nullable(null)) // null
+// console.log(nullable(0)) // 6
+// console.log(nullable(null)) // null
 
-const workflow =
-  _.map(x => x + 1)
-   .filter(x => x % 2 === 0)
+// const workflow =
+//   _.map(x => x + 1)
+//    .filter(x => x % 2 === 0)
 
 
-console.log(workflow([1,2,3,4,5])) // [2, 4, 6]
+// console.log(workflow([1,2,3,4,5])) // [2, 4, 6]
 
 const transformer =
   transform
@@ -202,11 +301,11 @@ const transformer =
     .setIn(['q', 'a'], 3)
     .updateIn(['q', 'a'], x => x + 1)
 
-console.log(transformer({}))
-// { x: 2, y: 3, q: { a: 4 } }
+// console.log(transformer({}))
+// // { x: 2, y: 3, q: { a: 4 } }
 
-console.log(update({settings: {}}, 'settings', transformer))
-//{ settings: { x: 2, y: 3, q: { a: 4 } } }
+// console.log(update({settings: {}}, 'settings', transformer))
+// //{ settings: { x: 2, y: 3, q: { a: 4 } } }
 
 
 
@@ -240,13 +339,13 @@ const run = next => (state, action) => {
 
 const reducer = fluentCompose({ initialState, reduce, run }, baseReducer)
 
-console.log(
-  reducer
-  .initialState(0)
-  .reduce('INCREMENT', x => x + 1)
-  .reduce('DECREMENT', x => x - 1)
-  (0, increment())
-)
+// console.log(
+//   reducer
+//   .initialState(0)
+//   .reduce('INCREMENT', x => x + 1)
+//   .reduce('DECREMENT', x => x - 1)
+//   (0, increment())
+// )
 
 
 
