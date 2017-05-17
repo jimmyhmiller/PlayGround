@@ -16,4 +16,6 @@
                  [com.stripe/stripe-java "4.7.0"]
                  [org.clojure/java.data "0.1.1"]
                  [clj-http "3.5.0"]
-                 [cheshire "5.7.1"]])
+                 [cheshire "5.7.1"]
+                 [speculate "0.3.0-SNAPSHOT"]
+                 [clj-time "0.13.0"]])
