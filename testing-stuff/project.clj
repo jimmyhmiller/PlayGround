@@ -3,9 +3,9 @@
   :url "http://example.com/FIXME"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
+  :plugins [[lein-environ "1.1.0"]]
   :repositories {"xero" "https://raw.github.com/XeroAPI/Xero-Java/mvn-repo/"}
-  :dependencies [[org.clojure/clojure "1.5.1"]
-                 [org.clojure/math.numeric-tower "0.0.2"]
+  :dependencies [[org.clojure/math.numeric-tower "0.0.2"]
                  [org.clojure/clojure "1.9.0-alpha11"]
                  [org.clojure/core.async "0.2.385"]
                  [graphql-clj "0.1.18"]
@@ -20,4 +20,7 @@
                  [cheshire "5.7.1"]
                  [speculate "0.3.0-SNAPSHOT"]
                  [clj-time "0.13.0"]
-                 [com.xero/xero-java-sdk "0.4.2"]])
+                 [com.xero/xero-java-sdk "0.4.2"]
+                 [clj-webdriver "0.7.2"]
+                 [org.seleniumhq.selenium/selenium-java "3.4.0"]
+                 [environ "1.1.0"]])

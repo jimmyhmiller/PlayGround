@@ -4,7 +4,9 @@
             [clj-time.format :as f]
             [clj-time.predicates :as pr]
             [clojure.java.shell :as sh]
-            [clojure.string :refer [index-of]])
+            [clojure.string :refer [index-of]]
+            [clj-webdriver.taxi :as br]
+            [environ.core :refer [env]])
   (:import [com.xero.api 
             Config 
             JsonConfig 
@@ -12,6 +14,28 @@
             OAuthAuthorizeToken 
             OAuthAccessToken
             XeroClient]))
+
+
+
+(System/setProperty "webdriver.chrome.driver", "/Users/jimmymiller/Downloads/chromedriver")
+
+
+(br/set-driver! {:browser :chrome})
+
+(br/to "https://simple.com")
+
+(br/click "a[href*='signin']")
+
+(br/quick-fill-submit {"#login_username" (:simple-user env)
+                       "#login_password" (:simple-pass env)})
+
+(br/submit "form")
+
+
+(defn take-picture-transaction [transaction-id]
+  (br/to (str "https://bank.simple.com/transactions/" transaction-id))
+  (Thread/sleep 1000)
+  (br/take-screenshot :file (str "/Users/jimmymiller/Desktop/transactions/" transaction-id ".png")))
 
 
 (def config (JsonConfig/getInstance))
@@ -85,8 +109,6 @@
 (defn coffee? [transaction]
   (#{"Sp Vardagen Com" "Soho Cafe & Gallery"} (:description transaction)))
 
-(coffee? (nth weekday-transactions 0))
-
 
 (def lunch-transactions
   (->> weekday-transactions
@@ -96,4 +118,11 @@
 (def coffee-transactions
   (->> weekday-transactions
        (filter coffee?)))
+
+(first coffee-transactions)
+
+(->> coffee-transactions
+     (map :uuid)
+     (take 10)
+     (map take-picture-transaction))
 
