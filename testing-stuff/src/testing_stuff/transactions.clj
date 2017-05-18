@@ -2,10 +2,56 @@
   (:require [clojure.edn :as edn]
             [clj-time.core :as t]
             [clj-time.format :as f]
-            [clj-time.predicates :as pr]))
+            [clj-time.predicates :as pr]
+            [clojure.java.shell :as sh]
+            [clojure.string :refer [index-of]])
+  (:import [com.xero.api 
+            Config 
+            JsonConfig 
+            OAuthRequestToken 
+            OAuthAuthorizeToken 
+            OAuthAccessToken
+            XeroClient]))
 
 
-(f/show-formatters)
+(def config (JsonConfig/getInstance))
+
+(def request-token (OAuthRequestToken. config))
+(.execute request-token)
+(def token-info (.getAll request-token))
+(def temp-token (get token-info "tempToken"))
+(def temp-token-secret (get token-info "tempTokenSecret"))
+(def auth-token (OAuthAuthorizeToken. config (.getTempToken request-token)))
+(clojure.java.browse/browse-url (.getAuthUrl auth-token))
+(def notification-response 
+  (:err (sh/sh "terminal-notifier" "-message" "Insert Access Code" "-reply" "Access Code")))
+(def access-code (subs notification-response (inc (index-of notification-response "@"))))
+
+(def access-token (OAuthAccessToken. config))
+
+(.execute (.build access-token access-code temp-token temp-token-secret))
+
+(.isSuccess access-token)
+(def token (.getAll access-token))
+
+(def client (XeroClient.))
+(.setOAuthToken client (get token "token") (get token "tokenSecret"))
+
+(def receipts (.getReceipts client))
+
+(def expenseClaims (.getExpenseClaims client))
+
+(map (comp bean) expenseClaims)
+
+(map (comp bean) receipts)
+
+(def attachments (.getAttachments client "Receipts" "a333443d-ad32-4a14-a338-3ee77dcaa34c"))
+
+(map (comp bean) attachments)
+
+
+
+
 
 (defn fix-date [date]
   (clojure.string/replace date " " "T"))

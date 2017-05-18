@@ -3,6 +3,7 @@
   :url "http://example.com/FIXME"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
+  :repositories {"xero" "https://raw.github.com/XeroAPI/Xero-Java/mvn-repo/"}
   :dependencies [[org.clojure/clojure "1.5.1"]
                  [org.clojure/math.numeric-tower "0.0.2"]
                  [org.clojure/clojure "1.9.0-alpha11"]
@@ -18,4 +19,5 @@
                  [clj-http "3.5.0"]
                  [cheshire "5.7.1"]
                  [speculate "0.3.0-SNAPSHOT"]
-                 [clj-time "0.13.0"]])
+                 [clj-time "0.13.0"]
+                 [com.xero/xero-java-sdk "0.4.2"]])
