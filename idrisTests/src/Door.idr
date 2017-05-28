@@ -10,6 +10,10 @@
                (a -> DoorCmd b state2 state3) ->
                DoorCmd b state1 state3
 
+
+
+
+
   doorProg : DoorCmd () DoorClosed DoorClosed
   doorProg = do Knock
                 Open

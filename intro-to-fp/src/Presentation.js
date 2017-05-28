@@ -258,6 +258,9 @@ export default () =>
       subtextSize={2} />
 
     <Headline
+      text="FP embraces immutability" />
+
+    <Headline
       text="Other sorts of bugs?" />
 
     <Code
@@ -310,8 +313,64 @@ export default () =>
         color="blue"
         text="Eliminate All the Bugs!!!" />
 
+      <Headline
+        text="FP embraces purity" />
 
-      <Headline text="Positive" />
+      <Headline 
+        text="Positive" />
+
+      <Headline 
+        text="Expressivity" />
+
+      <Headline
+        text="Expressing our problem in code" />
+
+      <Headline
+        text="Kitchen Sink Approach"
+        subtext="AKA the ruby approach" />
+
+      <Headline
+        text="Data Oriented Programming" />
+
+      <Code
+        title="Data Oriented Programming"
+        lang="clojure"
+        source={`
+          ; html
+          [:a {:href "#"} "Click Here"]
+
+          ; sql
+          (select user
+            (with address)
+            (fields :firstName :lastName :address.state)
+            (where {:email "korma@sqlkorma.com"}))
+        `}
+      />
+
+      <Code
+        title="Data Oriented Programming"
+        lang="haskell"
+        source={`
+          moveTo :: Vector -> Ai ()
+          moveTo position = do
+            arrived <- isAt position
+            unless arrived $ do
+              angle <- angleTo position
+              rotateTowards angle
+              accelerate
+              moveTo position
+        `}
+      />
+
+      <Headline
+        text="Data is immutable" />
+
+      <Headline
+        text="Data requires purity" />
+
+
+
+
 
 
     <BlankSlide />
