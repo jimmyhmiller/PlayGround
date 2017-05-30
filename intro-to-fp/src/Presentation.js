@@ -368,6 +368,12 @@ export default () =>
       <Headline
         text="Data requires purity" />
 
+      <Headline
+        color="blue"
+        text="Datomic"
+        subtext="Data Oriented Taken Seriously"
+        subtextColor="red" />
+
 
 
 

@@ -12,17 +12,8 @@
                          :string string?))))
 
 
-(s/def :html/elem 
-  (s/cat :tag :html/tag :attr :html/attr :body (s/? :html/elem)))
-
-(s/def :html/tag keyword?)
-
-(s/def :html/attr (s/map-of keyword? string?))
-
-
-(s/exercise :html/element 3)
-
-
+(binding [s/*recursion-limit* 5]
+  (s/exercise :html/element 3))
 
 
 
@@ -38,30 +29,34 @@
 
 
 (s/def ::description string?)
-(s/def ::given (s/? (s/cat
-                     :given-kw #{'given}
-                     :bindings ::bindings
-                     :and (s/* (s/cat
-                                :and-kw #{'and}
-                                :bindings ::bindings)))))
-
-
-(s/def ::when (s/cat
-               :when-kw #{'when}
-               :bindings ::bindings))
-
-
-(s/def ::then (s/cat
-               :then-kw #{'then}
-               :variable symbol?
-               :should-key #{'should-be}
-               :pred (constantly true)))
-
-(s/def ::and (s/* (s/cat
+(s/def ::given 
+  (s/? (s/cat
+        :given-kw #{'given}
+        :bindings ::bindings
+        :and (s/* (s/cat
                    :and-kw #{'and}
-                   :variable symbol?
-                   :should-key #{'should-be}
-                   :pred (constantly true))))
+                   :bindings ::bindings)))))
+
+
+(s/def ::when 
+  (s/cat
+   :when-kw #{'when}
+   :bindings ::bindings))
+
+
+(s/def ::then 
+  (s/cat
+   :then-kw #{'then}
+   :variable symbol?
+   :should-key #{'should-be}
+   :pred (constantly true)))
+
+(s/def ::and 
+  (s/* (s/cat
+        :and-kw #{'and}
+        :variable symbol?
+        :should-key #{'should-be}
+        :pred (constantly true))))
 
 (s/def ::scenario
   (s/cat
@@ -74,7 +69,7 @@
 
 
 
-;; (defGenMethod scenario [desc]
+;; (def-gen-method scenario [desc]
 ;;   (? (:given context) (* :and contexts))
 ;;   (:when event)
 ;;   (cat (:then expr) (:should-be val))
@@ -85,9 +80,6 @@
     :ret any?)
 
 
-(defmacro scenario [& args]
-  (let [info (s/conform ::scenario args)]
-    (run-scenario info)))
 
 
 (defn run-scenario [scenario]
@@ -105,30 +97,112 @@
         rest-case (map (fn [x] [(:variable x) (:pred x)]) (:and scenario))
         cases (concat [first-case] rest-case)
         equals (map (fn [[var val]] `(= ~var ~val)) cases)]
-     `(let ~bindings (assert (and ~@equals)))))
+    `(let ~bindings (assert (and ~@equals)))))
 
 
+(defmacro scenario [& args]
+  (let [info (s/conform ::scenario args)]
+    (run-scenario info)))
 
 
 
 (s/valid? ::given '(given [x 3] and [y 4]))
 (s/valid? ::given '(given [x 3]))
 
-
 (scenario "1 + 2 = 3"
           given [x 1]
           and [y 2]
           when [x (+ x y)]
-          then x should-be 3)
+          then x should-be 3
+          and y should-be 2)
 
 
-(s/conform ::scenario
+
+
+(s/def :js/function
+  (s/cat
+   :declartion #{'function}
+   :name (s/? symbol?)
+   :args (s/coll-of symbol?)
+   :body (s/coll-of any?)))
+
+
+(s/conform :js/function '(function hello (a, b, c) (
+   (+ 2 2)
+)))
+
+
+(s/valid? ::scenario
           '("1 + 2 = 3"
-          :given [x 1]
-          :and [y 2]
-          :when [x (+ x y)]
-          :then x :should-be 3
-          :and y :should-be 1))
+            given [x 1]
+            and [y 2]
+            when [x (+ x y)]
+            then x should-be 3
+            and y should-be 1))
 
 
 
+(s/def :simple-arith/expr
+  (s/cat 
+   :left (s/or :number number? :expr (s/+ :simple-arith/expr))
+   :op #{'+ '- '* '/}
+   :right (s/or :number number? :expr (s/+ :simple-arith/expr))))
+
+(s/valid? :simple-arith/expr '(1 + (1 + 1)))
+
+
+
+(s/def :arith/expr :arith/add-sub)
+
+(s/def :arith/add-sub
+  (s/or
+   :mul-div :arith/mul-div
+   :add :arith/add
+   :sub :arith/sub))
+
+(s/def :arith/add 
+  (s/cat
+   :left :arith/add-sub
+   :op #{'+}
+   :right :arith/mul-div))
+
+(s/def :arith/sub
+  (s/cat
+   :left :arith/add-sub
+   :op #{'-}
+   :right :arith/mul-div))
+
+(s/def :arith/mul-div
+  (s/or
+   :term :arith/term
+   :mul :arith/mul
+   :div :arith/div))
+
+(s/def :arith/mul
+  (s/cat
+   :left :arith/mul-div
+   :op #{'*}
+   :right :arith/term))
+
+(s/def :arith/div
+  (s/cat
+   :left :arith/mul-div
+   :op #{'/}
+   :right :arith/term))
+
+(s/def :arith/term
+  (s/or
+   :number number?))
+
+
+(s/unform :arith/expr
+          [:sub
+           {:left [:mul-div [:term [:number 1]]],
+            :op -,
+            :right [:mul {:left [:term [:number 1]], :op *, :right [:number 1]}]}])
+
+
+(s/explain :arith/expr '(1 + (1 - 1)))
+
+(binding [s/*recursion-limit* 10]
+  (s/exercise :arith/add 1))
