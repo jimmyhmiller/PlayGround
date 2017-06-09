@@ -6,7 +6,9 @@
             [clojure.java.shell :as sh]
             [clojure.string :refer [index-of]]
             [clj-webdriver.taxi :as br]
-            [environ.core :refer [env]])
+            [cheshire.core :refer [parse-stream]]
+            [environ.core :refer [env]]
+            [clojure.string :as string])
   (:import [com.xero.api 
             Config 
             JsonConfig 
@@ -16,20 +18,19 @@
             XeroClient]))
 
 
+(def meals "6380 - Meals and Entertainment")
+(def image-prefix "/Users/jimmymiller/Desktop/transactions/")
 
 (System/setProperty "webdriver.chrome.driver", "/Users/jimmymiller/Downloads/chromedriver")
 
 
 (br/set-driver! {:browser :chrome})
 
-(br/to "https://simple.com")
-
-(br/click "a[href*='signin']")
-
-(br/quick-fill-submit {"#login_username" (:simple-user env)
-                       "#login_password" (:simple-pass env)})
-
-(br/submit "form")
+(defn login-to-simple []
+  (br/to "https://signin.simple.com/")
+  (br/quick-fill-submit {"#login_username" (:simple-user env)
+                         "#login_password" (:simple-pass env)})
+  (br/submit "form"))
 
 
 (defn take-picture-transaction [transaction-id]
@@ -38,41 +39,49 @@
   (br/take-screenshot :file (str "/Users/jimmymiller/Desktop/transactions/" transaction-id ".png")))
 
 
-(def config (JsonConfig/getInstance))
 
-(def request-token (OAuthRequestToken. config))
-(.execute request-token)
-(def token-info (.getAll request-token))
-(def temp-token (get token-info "tempToken"))
-(def temp-token-secret (get token-info "tempTokenSecret"))
-(def auth-token (OAuthAuthorizeToken. config (.getTempToken request-token)))
-(clojure.java.browse/browse-url (.getAuthUrl auth-token))
-(def notification-response 
-  (:err (sh/sh "terminal-notifier" "-message" "Insert Access Code" "-reply" "Access Code")))
-(def access-code (subs notification-response (inc (index-of notification-response "@"))))
 
-(def access-token (OAuthAccessToken. config))
+(defn login-to-xero []
+  (br/to "https://login.xero.com/")
+  (br/quick-fill-submit {"#email" (:xero-user env)
+                         "#password" (:xero-pass env)})
+  (br/submit "form"))
 
-(.execute (.build access-token access-code temp-token temp-token-secret))
 
-(.isSuccess access-token)
-(def token (.getAll access-token))
+(defn make-field-id 
+  ([invoice-id prefix]
+   (make-field-id invoice-id prefix nil))
+  ([invoice-id prefix suffix]
+   (str "#" prefix "_" (string/replace invoice-id "-" "") (if suffix (str "_" suffix) ""))))
 
-(def client (XeroClient.))
-(.setOAuthToken client (get token "token") (get token "tokenSecret"))
 
-(def receipts (.getReceipts client))
+(defn add-receipt [{:keys [company-name date description category amount image]}]
+  (println [company-name date description category amount image])
+  (br/to "https://go.xero.com/Expenses/EditReceipt.aspx")
+  (let [field-id (br/value (br/element "#NewInvoiceID"))
+        other-id (br/value (br/element ".xoLineItemIDs"))]
+    (br/clear (make-field-id other-id "UnitAmount"))
+    (br/quick-fill-submit {(make-field-id field-id "PaidToName" "value") company-name
+                           (make-field-id field-id "InvoiceDate") date
+                           (make-field-id other-id "Description") description
+                           (make-field-id other-id "Account" "value") category
+                           (make-field-id other-id "UnitAmount") amount})
+    (br/click "#ext-gen20")
+    (br/input-text "input[type='file']" image)
+    (br/click "body")
+    (Thread/sleep 1000)
+    (br/click "#ext-gen33")
+    (Thread/sleep 1000)))
 
-(def expenseClaims (.getExpenseClaims client))
 
-(map (comp bean) expenseClaims)
 
-(map (comp bean) receipts)
 
-(def attachments (.getAttachments client "Receipts" "a333443d-ad32-4a14-a338-3ee77dcaa34c"))
 
-(map (comp bean) attachments)
 
+
+(comment 
+  (login-to-xero)
+  (add-receipt "Vardagan" "12/31/1991" "coffee" meals "4.52" "/Users/jimmymiller/Desktop/transactions/1b51f7c2-2887-30e3-9774-2b9cc4f65269.png"))
 
 
 
@@ -91,20 +100,26 @@
   (fn [transaction]
     (-> transaction :times :when_recorded_local f)))
 
+
+(defn get-transactions []
+  (-> "/Users/jimmymiller/Desktop/transactions.json"
+      (clojure.java.io/reader)
+      (parse-stream true)
+      :transactions))
+
 (def weekday-transactions
-  (->> "/Users/jimmymiller/Desktop/transactions.edn"
-       slurp
-       edn/read-string
-       :transactions
+  (->> (get-transactions)
        (map #(update-in % [:times :when_recorded_local] (comp parse-date fix-date)))
        (filter weekday?)
        (filter #(t/after? (-> % :times :when_recorded_local) (t/date-time 2017 3 14)))))
+
+
 
 (defn lunch-time? [date]
   (< 11 (t/hour date) 14))
 
 (defn restaurant? [transaction]
-  (some #(= (:name %) "Restaurants") (:categories transaction)))
+  (some #(#{"Restaurants" "Fast Food"} (:name %)) (:categories transaction)))
 
 (defn coffee? [transaction]
   (#{"Sp Vardagen Com" "Soho Cafe & Gallery"} (:description transaction)))
@@ -113,16 +128,48 @@
 (def lunch-transactions
   (->> weekday-transactions
        (filter (lift-date lunch-time?))
-       (filter restaurant?)))
+       (filter restaurant?)
+       (filter #(< 70000 (-> % :amounts :amount) 200000))))
+
+(def date-formatter (f/formatter "MM/dd/yyyy"))
 
 (def coffee-transactions
   (->> weekday-transactions
        (filter coffee?)))
 
-(first coffee-transactions)
+(defn amount->string [amount]
+  (str (float (/ amount 10000))))
 
+(defn extract-info [type transaction]
+  {:amount (amount->string (-> transaction :amounts :amount))
+   :date (f/unparse date-formatter (-> transaction :times :when_recorded_local))
+   :company-name (-> transaction :description)
+   :id (-> transaction :uuid)
+   :category meals
+   :description type
+   :image (str image-prefix (:uuid transaction) ".png")})
+
+(login-to-xero)
+(->> coffee-transactions
+     (map (partial extract-info "coffee"))
+     (map add-receipt))
+
+
+
+
+(login-to-simple)
 (->> coffee-transactions
      (map :uuid)
-     (take 10)
      (map take-picture-transaction))
+
+
+(->> lunch-transactions
+     (map :uuid)
+     (map take-picture-transaction))
+
+
+(->> lunch-transactions
+     (map (partial extract-info "lunch"))
+     (map (comp read-string :amount))
+     (reduce +))
 

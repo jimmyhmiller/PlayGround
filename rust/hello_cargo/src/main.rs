@@ -13,6 +13,7 @@ fn euler73() {
 
 
 fn main() {
+    euler::check_bouncy();
     println!("{:?}", 2);
     
 }

@@ -27,9 +27,9 @@ pub fn farey(n: usize) -> Vec<(usize, usize)> {
 pub fn list_of_primes(n: usize) -> Vec<usize> {
     let mut sieve = vec![true; n/2];
     let sqrt = (n as f64).sqrt() as usize;
-    for i in (3..sqrt + 1).step_by(2) {
+    for i in (3..sqrt + 1).into_iter().step_by(2) {
         if sieve[i/2] == true {
-            for j in (i*i/2..n/2).step_by(i) {
+            for j in (i*i/2..n/2).into_iter().step_by(i) {
                 sieve[j] = false;
             }
         }

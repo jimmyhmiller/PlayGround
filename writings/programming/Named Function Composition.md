@@ -31,9 +31,9 @@ This is where `fluent-compose` comes in. Let's look at an example.
 
 ```javascript
 import * as zaphod, { update } from 'zaphod/compat';
-import { threadFirst } from 'fluent-compose';
+import { threadFirst, fluentCompose } from 'fluent-compose';
 
-const transform = threadFirst(zaphod);
+const transform = fluentCompose(threadFirst(zaphod));
 
 const transformer = transform
     .update('count', inc)
@@ -57,7 +57,7 @@ import * as lodashFpCollection from 'lodash/fp/collection';
 import { threadFirst, threadLast, fluentCompose } from 'fluent-compose';
 
 const zaphodTransform = threadFirst(zaphod);
-const lodashTransform = u(lodashFpCollection);
+const lodashTransform = threadLast(lodashFpCollection);
 
 const transform = fluentCompose({
   ...zaphodTransform,

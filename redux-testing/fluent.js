@@ -2,24 +2,15 @@
 
 const zaphod = require('zaphod/compat');
 const { update } = zaphod;
-const { mapValues } = require('lodash');
 const lodashColl = require('lodash/fp/collection');
+const { fluentCompose, threadFirst, threadLast, identity } = require('./re-fluent');
 
-var unwrapped = Symbol('unwrapped');
 
-const identity = x => x
 
-const fluentCompose = (combinators, f=identity) => {
-  if (typeof(f) !== 'function') {
-    return f;
-  }
 
-  const innerFunc = (...args) => f(...args);
-  const methods = mapValues(combinators, g => 
-    (...args) => fluentCompose(combinators, g(innerFunc)(...args)))
 
-  return Object.assign(innerFunc, methods);
- }
+
+
 
 const threadFirstPrime = f => g => (...args) => x => f(g(x), ...args);
 
@@ -197,25 +188,14 @@ St
   .run(1)
 ) // 4
 
-const threadFirst = f => next => (...args) => {
-  return coll => f(next(coll), ...args);
-}
-
-const threadLast = f => next => (...args) => {
-   return coll => f(...args, next(coll))
-}
-
-
-const fluentFirst = (obj) => mapValues(obj, threadFirst);
-const fluentLast = (obj) => mapValues(obj, threadLast);
 
 
 const value = next => coll => next(coll);
 const withValue = next => init => coll => next(init)
 
 
-const transform = fluentFirst(zaphod)
-const _ = fluentLast(lodashColl)
+const transform = threadFirst(zaphod)
+const _ = threadLast(lodashColl)
 
 
 const fullTransform = fluentCompose({
@@ -223,7 +203,7 @@ const fullTransform = fluentCompose({
   ...transform,
 })
 
-console.log(
+console.log('full',
   fullTransform.set(0, 2).set(1, 3).map(x => x + 2)([])
 )
 
@@ -246,17 +226,17 @@ const doTransformFluent = (coll) => () => transformNums(coll)
 const doTransform = (coll) => () =>
   zaphod.set(lodashColl.map(x => x + 2, lodashColl.map(x => x + 2, lodashColl.filter(x => x % 2 === 0, coll))), 0, 2)
 
-// const timeFunction = (f, name) => trials => {
-//   console.time(name)
-//   for (let i = 0; i < trials; i++) {
-//     f();
-//   }
-//   console.timeEnd(name);
-// }
+const timeFunction = (f, name) => trials => {
+  console.time(name)
+  for (let i = 0; i < trials; i++) {
+    f();
+  }
+  console.timeEnd(name);
+}
 
-// timeFunction(doTransform(coll), 'not fluent')(100000)
+timeFunction(doTransform(coll), 'not fluent')(100000)
 
-// timeFunction(doTransformFluent(coll), 'fluent')(100000)
+timeFunction(doTransformFluent(coll), 'fluent')(100000)
 
 
 const map = next => 
