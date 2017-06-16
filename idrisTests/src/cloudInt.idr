@@ -10,21 +10,21 @@ data CloudType : Type -> Type where
 
 
 
-instance Default (CloudType Int) where
+Default (CloudType Int) where
     default = CInt False 0 0
     
-instance Default (CloudType String) where
+Default (CloudType String) where
     default = CString Bottom ""
 
-class Cloud (c : Type -> Type) where
+interface Cloud (c : Type -> Type) where
   init : c a
   get : c a -> a
   set : a -> c a -> c a
   fork : c a -> (c a, c a)
   join : c a -> c a -> c a
 
-instance Cloud CloudType where
-    init = ?test2
+Cloud CloudType where
+    init = ?test
     get (CInt r b d) = b + d
     set n (CInt x y z) = CInt True n 0
     fork (CInt r b d) = (CInt r d b, CInt False (b + d) 0)

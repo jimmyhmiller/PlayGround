@@ -4,7 +4,9 @@
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :plugins [[lein-environ "1.1.0"]]
-  :repositories {"xero" "https://raw.github.com/XeroAPI/Xero-Java/mvn-repo/"}
+  :repositories {"xero" "https://raw.github.com/XeroAPI/Xero-Java/mvn-repo/"
+                 "my.datomic.com" {:url "https://my.datomic.com/repo"
+                                   :creds :gpg}}
   :dependencies [[org.clojure/math.numeric-tower "0.0.2"]
                  [org.clojure/clojure "1.9.0-alpha11"]
                  [org.clojure/core.async "0.2.385"]
@@ -23,4 +25,5 @@
                  [com.xero/xero-java-sdk "0.4.2"]
                  [clj-webdriver "0.7.2"]
                  [org.seleniumhq.selenium/selenium-java "3.4.0"]
-                 [environ "1.1.0"]])
+                 [environ "1.1.0"]
+                 [com.datomic/datomic-pro "0.9.5561.50"]])

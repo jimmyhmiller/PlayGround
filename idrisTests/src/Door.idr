@@ -12,10 +12,7 @@
 
 
 
-
-
   doorProg : DoorCmd () DoorClosed DoorClosed
   doorProg = do Knock
                 Open
-                Knock
                 Close
