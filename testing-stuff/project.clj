@@ -26,4 +26,5 @@
                  [clj-webdriver "0.7.2"]
                  [org.seleniumhq.selenium/selenium-java "3.4.0"]
                  [environ "1.1.0"]
-                 [com.datomic/datomic-pro "0.9.5561.50"]])
+                 [com.datomic/datomic-pro "0.9.5561.50"]
+                 [com.faunadb/faunadb-java "1.0.0"]])
