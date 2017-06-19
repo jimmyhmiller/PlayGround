@@ -17,19 +17,24 @@
       (.build)))
 
 
-(.get (.query admin-client (Language/CreateDatabase (Language/Obj "name" (Language/Value "test-db3")))))
+(-> admin-client
+    (.query 
+     (Language/CreateDatabase 
+      (Language/Obj {"name" "test-db3"})))
+    .get)
 
 
 
 
 
-(def key (.get 
-          (.query admin-client 
-                  (Language/CreateKey 
-                   (Language/Obj 
-                    "database" (Language/Database (Language/Value "test-db3")) 
-                    "role" (Language/Value "server")))) 
-          1 TimeUnit/SECONDS))
+(def key 
+  (-> admin-client
+      (.query
+       (Language/CreateKey
+        (Language/Obj
+         "database" (Language/Database (Language/Value "test-db3"))
+         "role" (Language/Value "server"))))
+      (.get 1 TimeUnit/SECONDS)))
 
 (def client-secret 
   (.get key (.to (Field/at (into-array String ["secret"]))
@@ -48,10 +53,12 @@
                    {:data 
                     {:title "test"}}]}
 
-(.get (.query client 
-              (Language/Create (Language/Class (Language/Value "posts")) 
-                               (Language/Obj {"data"
-                                              (Language/Obj {"title" "Test"})}))))
+(-> client
+    (.query
+     (Language/Create (Language/Class (Language/Value "posts"))
+                      (Language/Obj {"data"
+                                     (Language/Obj {"title" "Test"})})))
+    .get)
 
 
 
@@ -62,4 +69,6 @@
 
 
 
-(.get (.query client (Language/Get (Language/Ref "classes/posts/169428247593878021"))))
+(-> client
+    (.query (Language/Get (Language/Ref "classes/posts/169428247593878021")))
+    .get)
