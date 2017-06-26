@@ -76,7 +76,7 @@ class Dark extends React.Component {
   render() {
     const { children, ...rest } = this.props;
     return (
-      <Slide bgColor="base03" {...rest}>
+      <Slide bgColor="base3" {...rest}>
         {children}
       </Slide>
     )
@@ -128,8 +128,8 @@ const Code = withSlide(({ source, lang, title, printWidth }) => {
   )
 })
  
-const Point = ({ text, textSize=50 }) => 
-  <ListItem textSize={textSize} textColor="base2">
+const Point = ({ text, textSize=60 }) => 
+  <ListItem textSize={textSize} textColor="base02">
     {text}
   </ListItem>
 
@@ -314,9 +314,9 @@ export default () =>
         <div style={{paddingTop: 80}}>
           <Text textColor="blue" textSize={60} textAlign="left">Jimmy Miller</Text>
           <Points noSlide styleContainer={{paddingTop: 10}}>
-            <Point textSize={40} text="Self Taught" />
-            <Point textSize={40} text="Lead Developer - Trabian" />
-            <Point textSize={40} text="FP Nerd" />
+            <Point textSize={50} text="Self Taught" />
+            <Point textSize={50} text="Lead Developer - Trabian" />
+            <Point textSize={50} text="FP Nerd" />
           </Points>
         </div>
       }
@@ -338,6 +338,7 @@ export default () =>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
+        theme="light"
         code={code(`
           class Counter extends Component {
 
@@ -372,6 +373,7 @@ export default () =>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
+        theme="light"
         code={code(`
         const Body = () => 
           <div>
@@ -397,6 +399,7 @@ export default () =>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
+        theme="light"
         code={code(`
           const Counter = ({ color, count, onClick }) =>
             <ColorButton color={color} onClick={onClick}>
@@ -414,6 +417,7 @@ export default () =>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
+        theme="light"
         code={code(`
           class Body extends Component {
             state = {
@@ -577,6 +581,7 @@ export default () =>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
+        theme="light"
         code={code(`
 
         const Body = () => 
@@ -599,6 +604,7 @@ export default () =>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
+        theme="light"
         code={code(`
 
           const BasicCounter = ({ color, count, onClick }) =>
@@ -659,6 +665,7 @@ export default () =>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
+        theme="light"
         code={code(`
 
           const getState = (state) => ({ state })
@@ -699,6 +706,7 @@ export default () =>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
+        theme="light"
         code={code(`
 
         // import undoable from 'redux-existing-undo';
@@ -730,6 +738,7 @@ export default () =>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
+        theme="light"
         code={code(`
 
         const Body = () => 
@@ -754,6 +763,7 @@ export default () =>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
+        theme="light"
         code={code(`
 
         // import { persistStore, autoRehydrate } from 'redux-persist'
@@ -782,6 +792,7 @@ export default () =>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
+        theme="light"
         code={code(`
 
         // import {storeEnhancer} from 'redux-bug-reporter'

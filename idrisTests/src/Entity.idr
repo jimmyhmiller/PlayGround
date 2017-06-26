@@ -29,10 +29,17 @@ cata f = f . map (cata f) . (unfix f)
 
 
 length : MyList a -> Int
-length = cata $ \x => case x of
-                            Empty => 0
-                            (Cons _ n) => n + 1
-  
+length = cata (\x => 
+  case x of
+    Empty => 0
+    (Cons _ n) => n + 1)
+    
+
+sum : MyList Int -> Int
+sum = cata (\x =>
+  case x of
+        Empty => 0
+        (Cons a b) => a + b)
 
 record ProfF a where
   constructor MkProfF
@@ -42,10 +49,21 @@ record ProfF a where
 
 
 
+record Identity a where
+  constructor Id
+  runIdentity : Lazy a
 
 
+Stream : Type -> Type
+Stream = Cofree Identity
 
 
+Functor (Main.Stream) where 
+  map func (MkCoFree x (Id runIdentity)) = MkCoFree (func x) ?test
+
+ 
+s : Main.Stream Int
+s = MkCoFree 1 (Id s)
 
 
 Prof : Type
