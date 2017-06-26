@@ -13,13 +13,11 @@ import {
   ListItem,
   List,
   Slide,
-  Spectacle,
   Text,
   ComponentPlayground,
 } from "@jimmyhmiller/spectacle";
 
 import preloader from "@jimmyhmiller/spectacle/lib/utils/preloader";
-import Playground from "component-playground";
 import { format } from 'prettier';
 import {combineReducers} from 'redux'
 import undoable from 'redux-existing-undo';
@@ -86,27 +84,15 @@ class Dark extends React.Component {
 }
 
 // Spectacle needs a ref
-class WhiteSlide extends React.Component {
-  render() {
-    const { children, ...rest } = this.props;
-    return (
-      <Slide bgColor="base03" {...rest}>
-        {children}
-      </Slide>
-    )
-  }
-}
-
-// Spectacle needs a ref
 const withSlide = Comp => class WithSlide extends React.Component {
   render() {
-    const { noSlide=false, slide: Slide = Dark, ...props } = this.props;
+    const { noSlide=false, maxWidth="80%", slide: Slide = Dark, ...props } = this.props;
     
     if (noSlide) {
       return <Comp {...props} />
     }
     return (
-      <Slide>
+      <Slide maxWidth={maxWidth}>
         <Comp {...props} />
       </Slide>
     )
@@ -133,11 +119,11 @@ const BlankSlide = withSlide(() => {
   return <span />;
 })
 
-const Code = withSlide(({ source, lang, title }) => {
+const Code = withSlide(({ source, lang, title, printWidth }) => {
   return (
     <div>
       <Headline noSlide textAlign="left" text={title} />
-      <CodePane textSize={20} source={code(source)} lang={lang} />
+      <CodePane textSize={20} source={code(source, printWidth)} lang={lang} />
     </div>
   )
 })
@@ -155,8 +141,6 @@ const Points = withSlide(({ children, title, size, styleContainer }) =>
     </List>
   </div>
 )
-
-const ImageSlide = withSlide(Image);
 
 const Subtitle = ({ color="blue", size=5, text, ...props }) =>
   <Heading textColor={color} size={size} {...props}>
@@ -181,7 +165,7 @@ const Headline = withSlide(({ color="magenta", size=2, text, subtext, subtextSiz
 
 const TwoColumn = withSlide(({ left, right, title }) =>
   <div>
-    <Layout>
+    <Layout> 
       <Fill>
         <Headline color="cyan" size={4} textAlign="center" noSlide text={title} />
         {left}
@@ -340,6 +324,9 @@ export default () =>
 
     <Headline
       text="Redux"
+      size={2}
+      caps={false}
+      subtextSize={3}
       subtext="for the perplexed" />
 
     <Headline
@@ -547,7 +534,7 @@ export default () =>
       title="Reducer"
       lang="javascript"
       source={`
-        const init = { blue: 0, red: 0 }
+        const init = { blue: 0, red: 0, green: 0, purple: 0 }
 
         const colorReducer = (state=init, action) => {
           switch (action.type) {
@@ -561,6 +548,7 @@ export default () =>
           }
         }
       `}
+      printWidth={65}
     />
 
     <Code
@@ -578,7 +566,7 @@ export default () =>
           console.log(store.getState())
         )
 
-        store.dispatch(increment())
+        store.dispatch(increment({ color: 'blue'}))
         // 1
       `}
     />
@@ -586,14 +574,6 @@ export default () =>
     <Headline
       color="cyan"
       text="Redux is decoupled from React" />
-
-    <Points title="What Redux Offers">
-      <Point text="Single Source of Truth" />
-      <Point text="Isolated Business Logic" />
-      <Point text="Immutable Update Model" />
-      <Point text="Middleware" />
-      <Point text="Ecosystem" />
-    </Points>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
@@ -659,9 +639,9 @@ export default () =>
       title="Map State To Props"
       lang="javascript"
       source={`
-        const mapStateToProps = (state, props) => ({
-          something: state[props.thing]
-        })
+      const mapStateToProps = (state, { color }) => ({
+        count: state.count[color]
+      })
       `}
     />
 
@@ -670,10 +650,11 @@ export default () =>
       title="map Dispatch To Props"
       lang="javascript"
       source={`
-        const mapDispatchToProps = (dispatch, props) => ({
-          someAction: () => dispatch(action(props.thing))
-        })
+        const mapDispatchToProps = (dispatch, { color }) => ({
+          onClick: () => dispatch(increment({ color }))
+        });
       `}
+      printWidth={55}
     />
 
     <Slide bgColor="base03" maxWidth={2000}>
@@ -707,6 +688,14 @@ export default () =>
         scope={{React, Provider, createStore, colorReducer, store, ColorButton, connect, increment, Counter: ConnectedCounter }}
       />
     </Slide>
+
+    <Points title="What Redux Offers">
+      <Point text="Single Source of Truth" />
+      <Point text="Isolated Business Logic" />
+      <Point text="Immutable Update Model" />
+      <Point text="Middleware" />
+      <Point text="Ecosystem" />
+    </Points>
 
     <Slide bgColor="base03" maxWidth={2000}>
       <ComponentPlayground
@@ -820,6 +809,58 @@ export default () =>
         scope={{React, Counter: ConnectedCounter, Provider, createStore, colorReducer, combineReducers, persistStore, autoRehydrate, storeEnhancer, ReduxBugReporter, submitFn }}
       />
     </Slide>
+
+    <Points title="Rich Ecosystem">
+      <Point text="Redux-Thunk" />
+      <Point text="Redux-Saga" />
+      <Point text="Normalizr" />
+      <Point text="Redux-Form" />
+    </Points>
+
+
+    <Headline
+      color="blue"
+      text="How does Redux give us all this?" />
+
+    <Headline
+      color="cyan"
+      text="Functional Programming" />
+
+    <Points title="Problems">
+      <Point text="Boilerplate" />
+      <Point text="Strange Conventions" />
+      <Point text="Bending Javascript" />
+    </Points>
+
+    <Code
+      lang="javascript"
+      source={`
+        function updateVeryNestedField(state, action) {
+          return {
+            ...state,
+            first : {
+              ...state.first,
+              second : {
+                ...state.first.second,
+                [action.someId] : {
+                  ...state.first.second[action.someId],
+                  fourth : action.someValue
+                }
+              }
+            }
+          }
+        }
+      `}
+    />
+
+    <Headline text="A new Path forward" />
+
+    <Points title="Try a New Language">
+      <Point text="Elm" />
+      <Point text="ClojureScript" />
+      <Point text="ReasonML" />
+    </Points>
+
 
 
     <BlankSlide />
