@@ -24,6 +24,7 @@ const images = {
   haxl: require("./images/haxl.jpg"),
   propositions: require("./images/propositions.jpg"),
   wadler: require("./images/wadler.jpg"),
+  fault: require("./images/fault.png"),
 };
 
 preloader(images);
@@ -130,18 +131,19 @@ const Subtitle = ({ color="blue", size=5, text, ...props }) =>
     {text}
   </Heading>
 
-const Headline = withSlide(({ color="magenta", size=2, text, subtext, subtextSize, textAlign="center", caps=true }) =>
+const Headline = withSlide(({ color="magenta", size=2, text, subtext, subtextSize, textAlign="center", caps=true, subtextColor, image }) =>
   <div>
-    <Heading 
+    <Heading
       textAlign={textAlign}
       size={size} 
-      caps={caps} 
-      lineHeight={1} 
+      caps={caps}
+      lineHeight={1}
       textColor={color}
     >
       {text}
     </Heading>
-    {subtext && <Subtitle text={subtext} textAlign={textAlign} size={subtextSize} />}
+    {subtext && <Subtitle color={subtextColor} text={subtext} textAlign={textAlign} size={subtextSize} />}
+    {image && <Image style={{paddingTop: 20}} height="70vh" src={image} />}
   </div>
 )
 
@@ -244,7 +246,138 @@ export default () =>
 
     <Headline
       color="green"
-      text="Mutation causes bugs " />
+      text="Mutation causes bugs" />
+
+    <Headline
+      color="blue"
+      text="Conjecture:"
+      size={1}
+      textAlign="left"
+      subtext="All Heisenbugs are caused by mutation"
+      subtextColor="green"
+      subtextSize={2} />
+
+    <Headline
+      text="FP embraces immutability" />
+
+    <Headline
+      text="Other sorts of bugs?" />
+
+    <Code
+      title="No Nulls"
+      lang="haskell"
+      source={`
+        data Maybe a = Nothing | Just a
+      `}
+    />
+
+    <Points title="No Runtime Exceptions">
+      <Point text="Written in Elm" />
+      <Point text="50,000 lines of code" />
+      <Point text="Production for 2 years" />
+      <Point text="Zero runtime exceptions" />
+    </Points>
+
+    <Code
+      title="Guarantee State Transitions"
+      lang="haskell"
+      source={`
+        data Door = DoorOpen | DoorClosed
+
+        data DoorCmd : Type -> Door -> Door -> Type where
+             Open : DoorCmd () DoorClosed DoorOpen
+             Close : DoorCmd () DoorOpen DoorClosed 
+             Knock : DoorCmd () DoorClosed DoorClosed 
+
+             ...
+      `}
+    />
+
+    <Code
+      title="Guarantee State Transitions"
+      lang="haskell"
+      source={`
+        doorProg : DoorCmd () DoorClosed DoorClosed
+        doorProg = do Knock
+                      Open
+                      Knock -- Doesn't compile
+                      Close
+        `}
+      />
+
+      <Headline
+          text="Bugs Across Services"
+          image={images.fault} />
+
+      <Headline
+        color="blue"
+        text="Eliminate All the Bugs!!!" />
+
+      <Headline
+        text="FP embraces purity" />
+
+      <Headline 
+        text="Positive" />
+
+      <Headline 
+        text="Expressivity" />
+
+      <Headline
+        text="Expressing our problem in code" />
+
+      <Headline
+        text="Kitchen Sink Approach"
+        subtext="AKA the ruby approach" />
+
+      <Headline
+        text="Data Oriented Programming" />
+
+      <Code
+        title="Data Oriented Programming"
+        lang="clojure"
+        source={`
+          ; html
+          [:a {:href "#"} "Click Here"]
+
+          ; sql
+          (select user
+            (with address)
+            (fields :firstName :lastName :address.state)
+            (where {:email "korma@sqlkorma.com"}))
+        `}
+      />
+
+      <Code
+        title="Data Oriented Programming"
+        lang="haskell"
+        source={`
+          moveTo :: Vector -> Ai ()
+          moveTo position = do
+            arrived <- isAt position
+            unless arrived $ do
+              angle <- angleTo position
+              rotateTowards angle
+              accelerate
+              moveTo position
+        `}
+      />
+
+      <Headline
+        text="Data is immutable" />
+
+      <Headline
+        text="Data requires purity" />
+
+      <Headline
+        color="blue"
+        text="Datomic"
+        subtext="Data Oriented Taken Seriously"
+        subtextColor="red" />
+
+
+
+
+
 
     <BlankSlide />
 

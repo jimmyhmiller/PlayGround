@@ -10,10 +10,13 @@ data Type = Increment | Decrement deriving (Show)
 data Action a b = Action a b deriving (Show)
 
 
-data Angle = Angle Int
-data Tank = Tank Vec
-data Vec = Vec Int
-data Entity = Entity Int
+data Angle = Angle Int deriving (Show)
+data Tank = Tank Vec deriving (Show)
+data Vec = Vec Int deriving (Show)
+data Entity = Entity Int deriving (Show)
+
+instance Show (a -> b) where
+  show f = "f"
 
 data Move a
     = Accelerate a
@@ -25,7 +28,7 @@ data Move a
     | AngleTo Vec (Angle -> a)
     | IsAt Vec (Bool -> a)
     | IsFacing Angle (Bool -> a)
-    | Me (Entity -> a) deriving (Functor)
+    | Me (Entity -> a) deriving (Functor, Show)
 
 type Ai a = Free Move a
 

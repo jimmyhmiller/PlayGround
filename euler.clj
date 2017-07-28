@@ -8,7 +8,7 @@
 
 (defn primes [n]
   (let [sieve (boolean-array n true)]
-    (doseq [p (range 3 (int (Math/sqrt n)) 2)]
+    (doseq [p (range 3 (int (Math/ceil (Math/sqrt n))) 2)]
       (when (aget sieve p)
         (doseq [i (range (* p p) n (* p 2))]
           (aset sieve i false))))

@@ -57,11 +57,11 @@ satisfies p = do
 
 
 optional : Parser a -> Parser (Maybe a)
-optional p = do { x <- p; return (Just x) } <|> return Nothing
+optional p = do { x <- p; pure (Just x) } <|> pure Nothing
 
 mutual
   zeroOrMore : Parser a -> Lazy (Parser (List a))
-  zeroOrMore p = oneOrMore p <+> return []
+  zeroOrMore p = oneOrMore p <+> pure []
 
   oneOrMore : Parser a -> Lazy (Parser (List a))
   oneOrMore p = [x::xs | x <- p, xs <- zeroOrMore p]
@@ -152,7 +152,7 @@ threewords = do
   word2 <- word
   spaces
   word3 <- word
-  return [word1, word2, word3]
+  pure [word1, word2, word3]
   
   
 infixl 3 <||>
@@ -164,6 +164,7 @@ infixl 3 <||>
 
 symbol : Parser String
 symbol = word
+
 
 data Expr = Symbol String | Num String | Sexpr Expr (List Expr)
 
@@ -179,7 +180,7 @@ mutual
     frst <- parseExpr
     rest <- sepBy spaces1 parseExpr
     char ')'
-    return $ Sexpr frst rest
+    pure $ Sexpr frst rest
   
   parseSymbol : Parser Expr
   parseSymbol = map Symbol (symbol <|> stringify (toListChar $ char '+'))
@@ -212,7 +213,12 @@ indention k = concat $ replicate k "  "
 
 
  
-data JsExpr = JsNum String | JsSymbol String | JsFunction JsExpr (List JsExpr) (List JsExpr) JsExpr | JsApplication JsExpr (List JsExpr) | JsBinOp JsExpr JsExpr JsExpr
+data JsExpr 
+  = JsNum String 
+  | JsSymbol String 
+  | JsFunction JsExpr (List JsExpr) (List JsExpr) JsExpr 
+  | JsApplication JsExpr (List JsExpr) 
+  | JsBinOp JsExpr JsExpr JsExpr
 
 
 
@@ -264,11 +270,11 @@ double = compile """
 
 printCompile : Either String (Maybe String) -> IO ()
 printCompile (Left l) = putStr' l
-printCompile (Right Nothing) = return ()
+printCompile (Right Nothing) = pure ()
 printCompile (Right (Just x)) = putStr' x
 
 printCompile' : Maybe String -> IO ()
-printCompile' Nothing = return ()
+printCompile' Nothing = pure ()
 printCompile' (Just x) = putStr' x
 
 

@@ -1,6 +1,7 @@
 (ns graph.core
   (:use rhizome.viz)
-  (:use rhizome.dot))
+  (:use rhizome.dot)
+  (:require [fsmviz.core :as fsmviz]))
 
 
 (defn conj-cat [coll elem]
@@ -39,38 +40,38 @@
 
 
 
-;; (def g
-;;   (-> {}
-;;       (--> :CounterRelease [:Released-at-Counter :Exception])
-;;       (--> :Exception [:Ship-to-State])
-;;       (--> :Inventory [:Exception :Reassign :Ship-to-Seller])
-;;       (--> :Pre-Receipt [:Validate])
-;;       (--> :Reassign [:Exception :Ship-to-Buyer :CounterRelease])
-;;       (--> :Ship-to-Buyer [:Shipped-to-Buyer :Exception])
-;;       (--> :Ship-to-Seller [:Shipped-to-Seller :Exception])
-;;       (--> :Unmatched [:Validate])
-;;       (--> :Validate [:Inventory :Exception])
-;;       (--> :Verify [:Unmatched :Validate])
-;;       (--> :Shipped-to-State [:Validate])
-;;       (--> :Ship-to-State [:Shipped-to-State :Exception])
-;;       (--> :Shipped-to-Buyer [:Archive])
-;;       (--> :Shipped-to-Seller [:Archive])
-;;       (--> :Released-at-Counter [:Archive])))
-
-
-
-(def g 
+(def g
   (-> {}
-      (--> :if1 [:end :take-stuff])
-      (--> :take-stuff [:call-get :call-take])
-      (--> :call-get [:if1])
-      (--> :call-take [:if1])))
+      (--> :CounterRelease [:Released-at-Counter :Exception])
+      (--> :Exception [:Ship-to-State])
+      (--> :Inventory [:Exception :Reassign :Ship-to-Seller])
+      (--> :Pre-Receipt [:Validate])
+      (--> :Reassign [:Exception :Ship-to-Buyer :CounterRelease])
+      (--> :Ship-to-Buyer [:Shipped-to-Buyer :Exception])
+      (--> :Ship-to-Seller [:Shipped-to-Seller :Exception])
+      (--> :Unmatched [:Validate])
+      (--> :Validate [:Inventory :Exception])
+      (--> :Verify [:Unmatched :Validate])
+      (--> :Shipped-to-State [:Validate])
+      (--> :Ship-to-State [:Shipped-to-State :Exception])
+      (--> :Shipped-to-Buyer [:Archive])
+      (--> :Shipped-to-Seller [:Archive])
+      (--> :Released-at-Counter [:Archive])))
 
-(save-image
- (graph->image (keys g) g
-               :node->descriptor (fn [n] {:label (name n) :shape "plaintext"})
-               :options {:layout "dot"})
- "graph2.png")
+(spit "fsm.dot" (fsmviz/generate-image g "example-map"))
+
+(comment (def g 
+           (-> {}
+               (--> :if1 [:end :take-stuff])
+               (--> :take-stuff [:call-get :call-take])
+               (--> :call-get [:if1])
+               (--> :call-take [:if1]))))
+
+(comment (save-image
+          (graph->image (keys g) g
+                        :node->descriptor (fn [n] {:label (name n) :shape "plaintext"})
+                        :options {:layout "dot"})
+          "graph2.png"))
 
 (view-graph (keys g) g
             :node->descriptor (fn [n] {:label (name n)})
