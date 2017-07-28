@@ -66,7 +66,7 @@ const transform = fluentCompose({
 
 const transformer = transform
   .map(x => x + 2)
-  .filter(x => x % 2)
+  .filter(x => x % 2 === 2)
   .set(0, 3)
 
 transformer([1,2,3,4]) // [3, 6]
