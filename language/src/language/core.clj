@@ -47,7 +47,7 @@
    <value> = string | num
    string = \" #'.+' \"
    num = #'[0-9]+'
-   <expression> = symbol | method-invocation | constructor | value
+   <expression> = symbol | method-invocation | constructor | value | self
    variable = <'let'> symbol <'='> expression
    constructor = class-name invoke-args
    invoke-args = <'('> (expression <','?> expression*)* <')'>
@@ -60,7 +60,6 @@
    self = 'self'
    <valid-chars> = !'let' !'self' #'[^0-9\\(\\), \\s\\.:\\\"\\'][^\\(\\), \\s\\.:\\\"\\']*'
    symbol = valid-chars"
-
    :auto-whitespace :standard))
 
 (def trans
@@ -101,8 +100,7 @@
 (defn javascript-parse [string]
   (->> (parser string)
        (insta/transform
-        {
-         :class-name str
+        {:class-name str
          :constructor (fn [c args] (str c "(" args ")"))
          :invoke-args (fn [& args] (clojure.string/join "," args))
          :args (fn [& args] (str "(" (clojure.string/join "," args) ")"))
@@ -123,13 +121,19 @@
 
 
 
-(javascript-parse
+(defn print-js [js] 
+  (doseq [e js]
+    (println e)))
+
+
+(print-js
+ (javascript-parse
   "class Point(x, y) {
                     x: () => x
-                    y: () => self.y
+                    y: () => y
                 }
                 let x = Point(1,2)
-                x.x()")
+                x.x()"))
 
 
 
@@ -150,6 +154,11 @@
                 }
                 let x = Point(1,2)
                 x.x"))
+
+((Point 1 2) :x)
+
+
+
 
 
 (standard-parse "class Point(x, y) {
@@ -189,7 +198,4 @@
     empty: () => s.empty()
     insert: (i) => Insert(self, i)
     union: (s) => Union(self, s)
-}")
-
-
-)
+}"))

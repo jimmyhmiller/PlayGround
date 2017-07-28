@@ -374,6 +374,17 @@ export default () =>
         subtext="Data Oriented Taken Seriously"
         subtextColor="red" />
 
+      <Headline
+        text="Tooling" />
+
+      <Headline
+        color="blue"
+        text="Truly Live Programming" />
+
+      <Headline
+        color="green"
+        text="Type Driven Development" />
+
 
 
 

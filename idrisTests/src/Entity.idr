@@ -49,22 +49,6 @@ record ProfF a where
 
 
 
-record Identity a where
-  constructor Id
-  runIdentity : Lazy a
-
-
-Stream : Type -> Type
-Stream = Cofree Identity
-
-
-Functor (Main.Stream) where 
-  map func (MkCoFree x (Id runIdentity)) = MkCoFree (func x) ?test
-
- 
-s : Main.Stream Int
-s = MkCoFree 1 (Id s)
-
 
 Prof : Type
 Prof = Fix ProfF

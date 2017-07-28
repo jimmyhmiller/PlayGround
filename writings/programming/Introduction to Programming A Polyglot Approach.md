@@ -2,7 +2,7 @@
 
 Nearly every "Introduction to Programming" book picks a single language to use throughout. In fact, it seems not so much a deliberate choice, but more as an assumption about what consititutes an introductory text. Throwing too many different things at a beginner can often confuse them; it can lead to too many errors. Perhaps these authors are right, perhaps a single language is best, but our hope for this book, is that they are indeed wrong. 
 
-It is our contention that confining a beginner to one language robs them first of the beauty and variety the programming world offers, and secondly risks biasing their formative thoughts, preventing them from learning and enjoying a different approach to programming than the one they were first taught. Programming lives above any particular paradigm the partisans of the programming world peddle as *THE RIGHT WAY*. But far from proclaiming all paradigms equal, this book hopes to present the reader with many distict styles, showing both their strengths and weaknesses.
+It is our contention that confining a beginner to one language robs them first of the beauty and variety the programming world offers, and secondly risks biasing their formative thoughts, preventing them from learning and enjoying a different approach to programming than the one they were first taught. Programming lives above any particular paradigm the partisans of the programming world peddle as *THE RIGHT WAY*. But far from proclaiming all paradigms equal, this book hopes to present the reader with many distinct styles, showing both their strengths and weaknesses.
 
 This endevor cannot help but create its own bias. The choice of languages in this book is itself a form of bias, as is the order and manner in which they are presented. Ridding this work of bias is not the goal, but rather to help the reader form their own bias, by allowing the reader the opportunity to think in different ways, to test different theories, and to be pushed intellectually. 
 
@@ -16,7 +16,7 @@ The primary aim of this book is to do what the title says, to introduce people t
 
 [^1]: We have no false pretensions that this book is be anywhere near as good as SICP.
 
-SICP is not just a book that doesn't cover these sorts of practical manners for its readers, but it also a book of great depth. Many readers have remarked on the books depth and difficulty and we believe the same may be said for the following. This book is not an intended as an easy introduction. Programming certainly can be easy but it requires taken on a certain mindset and practicing particular intellectual virtues. Good programs are created by labor rather than luck. While many today see programming as an easy profession to make lots of money, we see it as a learned skill and a way of thinking.
+SICP is not just a book that doesn't cover these sorts of practical manners for its readers, but it also a book of great depth. Many readers have remarked on the books depth and difficulty and we believe the same may be said for the following. This book is not an intended as an easy introduction. Programming certainly can be easy but it requires taking on a certain mindset and practicing particular intellectual virtues. Good programs are created by labor rather than luck. While many today see programming as an easy profession to make lots of money, we see it as a learned skill and a way of thinking.
 
 ### Experienced Developers
 
@@ -38,11 +38,45 @@ This book is deliberately fast-paced. Often reading a programming text feels lik
 
 To put it more exactly, this book is meant to be read without sitting at a computer or a pen and paper. Read the book quickly, pause and think at moments that matter, but for the most part just keep reading. This book is paced so that it may be armchair reading; something to get your mind going.
 
-## Plan of Study
+## Finding an Order
 
 Choosing the order in which to tackle these languages has been rather difficult. There was some temptation early on to simply ignore that issue and create the first "Choose Your Own Adventure" introduction to programming. But better minds pervailed. The order in which a book proceeds uniquely shapes the text, so extra care was taken in organizing these chapters.
 
 We begin and end with LISP. LISP is the perfect language to begin our journey in programming because of its inherent simplicity. Throughout the book we shift to different languages, each language offering its own unique perspective on the task of programming and yet, we will often return to LISP. LISP gives us to flexibility to reimplement these features, allow us a way to quickly see through what appear to be magical features in a language.
 
+Along the way we will encounter various paradigms of programming as well as many different languages. There will be some obvious omissions in this book that people may find strange. Many languages that are popular or influential will be left out. These omissions stem from two different forces that must be balanced in this book. FIrst, this book is limited in scope, we simply cannot cover all that the programming world offers. More importantly, not all languages are interesting, even good ones. There are plenty of fantastic languages that offer very little by way of interesting content for new developers. 
 
+## Short Comings
 
+Finally one strange feature this book posesses is a complete lack of low level languages (C, assymbly, etc). This may seem to be a fatal flaw of the book. There is much to be said for understanding how computers work in their lowest levels. There are large groups that lament the lack of understand that new developers have of the internal workings of computers and this book is just contributing to that problem.
+
+If anyone levys these criticisms against this book, we accept them. We see nothing wrong with learning C, but it doesn't quite fit with our goal. Programming is theory building; theories are defined not by the mechanical movements of their parts, but by abstractions which unify various ideas. Take Darwin's *Theory of Natural Selection*, stated in terms of purely mechanical parts, the theory is just physicals. Instead, Darwin operates at a higher level, talking about populations, adaptations, species (or lack thereof), and many other terms that operate above the level of mechanical functioning. 
+
+While all programs are reducable to the functionings of our computers, thinking of them in these terms is limiting. We believe that the end of programming, the goal at which it aims, is to continue to operate at a higher and higher level. The languages we have chosen are those which allow us to build these levels. Languages that offer the programmer a way to abstract and express concepts succinctly.
+
+To the extent that we delve into "low level" details, they will be of a mathematical and relational nature rather than mechanical ones. Programming is no more about machines than astronomy is about telescopes. Comptuers are the tools on which our programs run. Our programs continue to live beyond the machine of any given machine and thus should be thought about separate from them.
+
+# Chapter 1
+
+Despite the place that computers hold in society, programming is barely understood outside of those who practice it. Telling someone you program for a living will almost immediately cut off all possible conversation. The average person does not even know how to ask questions about what programmers do. (Sofware Devlopers is the more common term, but we will just continue to use programmers.) As far as anyone from the outside is concerned, we are "computer people". We must know a lot about computers or something. 
+
+What is known about programming as a profession is generally inaccurate. Often people believe that programming "languages" are just like natural languages. In fact, some schools have even considered allow programming as a subsitute for taking a foreign language. It is our view that this cannot be further from there truth.
+
+It isn't uncommon to use terms borrowed from natural  language to talk about programming. In fact, in this book we will do that. For example, we will talk about verbs and nouns to refer to different aspects of programming languages. But despite this superficial level of similarity, deep differences exist.
+
+Natural languages have been grown organically, causing them to be riddled with ambiguity, inconsistency, and irregularity. Yet, it is these "ugly" elements of the language that allow for some of its most beautiful expressions. Works of literature play with this ambiguity, poetry pushes our language to its bounds inviting the reader to follow along, to read between the lines, to find the double meanings in the text. Stories are told, puns are made, symbolism abounds.
+
+This aesthetic taste of natural language does not hold for programming languages. Good and beautiful programming languages are not those riddled with ambiquity. They aren't those whose meaning is indeterminate, whose syntax allows multiple means. Instead the beautiful of a programming language comes from its simplicity and consistency.[^2]
+
+[^2]: These decidedly subjective aethestic judgement may seem out of place in a "science" and yet the sciences, broadly understood, are riddled with them.  [[Maybe more]]
+
+##  Overcoming Familiarity
+
+Accepting that programs are not natural language can help us overcome the bias which is brought about by familiarity. Often programming languages will reorder elements or use symbols that may be unfamiliar. These choices are often not arbitrary. They allow the language as a whole to have a deeper sense of unity. Rather than run away from them, we should seek to understand them.
+
+We shall see exactly this now as we explore our first language, scheme. Scheme is a language that belongs to the LISP family. The common feature all lisps have is their particular syntax marked by its use of parenthesis. Here we see our first program.
+
+```scheme
+(+ 2 2)
+```
+Here is a rather simple program. It adds 2 to 2. This will seem strange. Why write this with the "+" first and why do we need these parenthesis?  The answer isn't immediately obvious, and yet as well leave scheme to vist other languages with a more "natural" syntax, we will see the incredibly power this simple syntax transformation offers us.

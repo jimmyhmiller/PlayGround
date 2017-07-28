@@ -39,7 +39,7 @@
             (dom/div nil
                      (dom/textarea #js {:onChange (fn [e] (om/update! app [:text] (.. e -target -value))) :style textarea-style :value (:text app)})
                      (dom/textarea #js {:onChange (fn [e] (om/update! app [:grammar] (.. e -target -value)))  :style textarea-style :value (:grammar app)})
-                     (dom/div nil (dom/button #js {:onClick (fn [e] (om/update! app [:parsed-text] (parse (:grammar app) (:text app))))} "parse"))
+                     (dom/div nil (dom/button #js {:onClick (fn [e] (om/update! app [:parsed-text] (parse (:grammar app) (:text app) )))} "parse"))
                      (dom/div nil (dom/pre nil
                                            (with-out-str
                                              (pprint/pprint

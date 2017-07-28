@@ -18,7 +18,7 @@ import {
 } from "@jimmyhmiller/spectacle";
 
 import preloader from "@jimmyhmiller/spectacle/lib/utils/preloader";
-import { format } from 'prettier';
+import { format } from 'prettier-standalone';
 import {combineReducers} from 'redux'
 import undoable from 'redux-existing-undo';
 import { ActionCreators } from 'redux-existing-undo';

@@ -27,4 +27,6 @@
                  [org.seleniumhq.selenium/selenium-java "3.4.0"]
                  [environ "1.1.0"]
                  [com.datomic/datomic-pro "0.9.5561.50"]
-                 [com.faunadb/faunadb-java "1.0.0"]])
+                 [com.faunadb/faunadb-java "1.0.0"]
+                 [cloth "0.3.1"]
+                 [aleph "0.4.3"]])
