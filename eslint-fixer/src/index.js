@@ -191,7 +191,7 @@ const main = () => {
     .then(files => Promise.all(files.map(processErrors.bind(null, args))))
     .catch(e => console.error(e))
     .then(stopSpinner)
-    .then(() => console.log('No errors found.'))
+    .then(() => console.log('No violations found.'))
 }
 
 main();
