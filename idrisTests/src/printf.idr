@@ -12,11 +12,11 @@ formatToType (CString x) = String -> formatToType x
 formatToType (COther c x) = formatToType x
 formatToType CEnd = String
 
-formatToFormatType : (f : Format) -> String -> formatToType f
-formatToFormatType (CInt y) s = (\i => formatToFormatType y (s ++ show i))
-formatToFormatType (CString y) s = (\s' => formatToFormatType y (s ++ s'))
-formatToFormatType (COther c y) s = formatToFormatType y (s ++ singleton c) 
-formatToFormatType CEnd s = s
+formatToFormatType : (f : Format) -> (acc : String) -> formatToType f
+formatToFormatType (CInt y) acc = (\i => formatToFormatType y (acc ++ show i))
+formatToFormatType (CString y) acc = (\s' => formatToFormatType y (acc ++ s'))
+formatToFormatType (COther c y) acc = formatToFormatType y (acc ++ singleton c) 
+formatToFormatType CEnd acc = acc
 
 printf : (s : String) -> formatToType (charsToFormat (unpack s))
 printf s = formatToFormatType (charsToFormat (unpack s)) ""

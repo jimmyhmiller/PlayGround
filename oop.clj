@@ -18,15 +18,15 @@
 
 (defn dispatcher [obj message & args]
   (cond
-   (= message :methods)
-   (keys obj)
-   (= message :extend)
-   (partial dispatcher (merge obj (first args)))
-   (clojure.test/function? obj)
-   (apply obj (cons message args))
-   :else
-   (apply (obj message)
-          (cons (partial dispatcher obj) args))))
+    (= message :methods)
+    (keys obj)
+    (= message :extend)
+    (partial dispatcher (merge obj (first args)))
+    (clojure.test/function? obj)
+    (apply obj (cons message args))
+    :else
+    (apply (obj message)
+           (cons (partial dispatcher obj) args))))
 
 (defmacro defclass
   ([fn-name body]
@@ -78,6 +78,7 @@
                                         (obj-> v
                                                (:interp e)
                                                (:bind (fn [b] (Unit (a :add b)))))))))})
+
 (defclass Wrong
   {:show (fn [self] "<wrong>")})
 

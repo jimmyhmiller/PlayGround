@@ -1,6 +1,8 @@
 package io.github.jimmyhmiller;
 
 
+import javafx.util.Pair;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.BiFunction;
@@ -40,8 +42,14 @@ public interface Sequence<T> {
         }
     }
 
+
     default <U> Sequence<U> map(Function<T, U> f) {
         return this.reduce((Sequence<U>) this.empty(), (uSequence, t) -> uSequence.cons(f.apply(t)));
+    }
+
+    default <U> Sequence<U> mapWithIndex(BiFunction<T, Integer, U> f) {
+        return this.reduce(new Pair<>(0, (Sequence<U>) this.empty()),
+                (pair, t) -> new Pair<>(pair.getKey() + 1, pair.getValue().cons(f.apply(t, pair.getKey())))).getValue();
     }
 
     default Sequence<T> filter(Predicate<T> pred) {

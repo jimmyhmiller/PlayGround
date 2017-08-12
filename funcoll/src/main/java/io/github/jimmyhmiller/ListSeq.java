@@ -24,7 +24,6 @@ public class ListSeq<T> implements Sequence<T> {
         return new ListSeq<>(list);
     }
 
-
     @Override
     public T first() {
         return list.get(0);

@@ -1,7 +1,29 @@
 package io.github.jimmyhmiller;
 
+import java.util.List;
+import java.util.stream.Collectors;
+
 public class Main {
+
+
+    private static List<Character> toChars(String str) {
+        return str.chars().mapToObj(e -> (char) e).collect(Collectors.toList());
+    }
+
+
     public static void main(String[] args) {
+
+        String str = "test";
+
+        Sequence<Character> chars = new ListSeq<>(toChars(str));
+
+        System.out.println(chars.mapWithIndex((c, i) -> {
+            System.out.print(i);
+            System.out.print(c);
+            System.out.println();
+            return c;
+        }));
+
         Sequence<Integer> list = ListSeq.range(5);
         System.out.println(
             list

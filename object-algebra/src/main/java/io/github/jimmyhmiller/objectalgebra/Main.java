@@ -17,6 +17,10 @@ public class Main<T> {
     public static <A> A build(Function<Collection<Converter<A>>, Converter<A>> creator, Collection<Converter<A>> c) {
         return creator.apply(c).convert();
     }
+    public static <A> A eval(JsonObject<A> jo, Converter<A> conv) {
+        jo.add("test", conv);
+    }
+
 
 
     public static void main(String[] args) {
@@ -30,6 +34,7 @@ public class Main<T> {
 
         Builder<List<String>> builder = c("test", "test");
 
+
         Builder b = c(
                 "test1",
                     c("test", "test"),
@@ -38,7 +43,10 @@ public class Main<T> {
         );
 
         Map<String, List<String>> s = build(b, map);
-        JsonValue j = build(c("test", "test"), json);
+        JsonValue j = build(b, json);
+
+        System.out.println(j.toString());
+
 
         System.out.println(
                 OptionalMonad.pure(2).map(x -> x+2)
