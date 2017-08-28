@@ -67,7 +67,7 @@
 (def output-num (.numLabels record-reader))
 (def test-output-num (.numLabels record-reader))
 
-(def batch-size 10)
+(def batch-size 5)
 (def label-index 1)
 
 (def data-iter 
@@ -82,10 +82,10 @@
 
 
 
-(def iterations 10)
+(def iterations 5)
 
 (def model 
-  (-> (doto (GoogLeNet. output-num seed iterations)
+  (-> (doto (LeNet. output-num seed iterations)
         (.setInputShape (into-array (map int-array [[3 244 244]]))))
       (.init)))
 
@@ -101,10 +101,10 @@
 
 (.attach ui-server stats-storage)
 
-(comment
+(comment)
 
-  (while (.hasNext data-iter)
-    (.fit model (.next data-iter))))
+(while (.hasNext data-iter)
+  (.fit model (.next data-iter)))
 
 
 

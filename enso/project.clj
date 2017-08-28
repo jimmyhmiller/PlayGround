@@ -4,7 +4,7 @@
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.8.0"]
-                 [com.1stleg/jnativehook "2.0.3"]
+                 [com.1stleg/jnativehook "2.1.0"]
                  [seesaw "1.4.4"]]
   :source-paths      ["src/clojure"]
   :java-source-paths ["src/java"]
