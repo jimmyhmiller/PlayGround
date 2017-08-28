@@ -1,3 +1,6 @@
+-- https://pdfs.semanticscholar.org/e291/5b546b9039a8cf8f28e0b814f6502630239f.pdf
+
+
 infixr 5 !!
 infixr 5 ??
 
@@ -31,3 +34,13 @@ pig s t = (es : s) -> General s t (t es)
 fusc : pig Nat (\ x => Nat)
 fusc Z = (!!) 0
 fusc (S n) = call n >>= (\f => call f >>= (\ff => (!!) (S ff)))
+
+
+fusc' : pig Nat (\ x => Nat)
+fusc' Z = (!!) 0
+fusc' (S n) = do 
+  f <- call n
+  ff <- call f
+  (!!) (S ff) 
+
+

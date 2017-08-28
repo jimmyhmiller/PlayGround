@@ -12,12 +12,12 @@ const spinner = ora('Checking for eslint violations');
 const prompt = promptSync({ sigint: true });
 
 const helpText = `
-Eslint Fixer - a fast way to fix eslint errors
+Eslint Fixit - a fast way to fix eslint errors
 
 Usage:
-  eslint-fixer [--args=<ESLINT_ARGS>] <path>
-  eslint-fixer -h | --help
-  eslint-fixer --version
+  eslint-fixit [--args=<ESLINT_ARGS>] <path>
+  eslint-fixit -h | --help
+  eslint-fixit --version
 
 Options:
   <path>        Path to run eslint
@@ -41,7 +41,7 @@ const filloutEditorTemplate = (str, { file, line, column }) => {
 }
 
 const editFile = ({ file, line, column }) => {
-  const editorTemplate = process.env.ESLINT_FIXER_EDITOR || 'nano +%line,%column %file';
+  const editorTemplate = process.env.ESLINT_FIXIT_EDITOR || 'nano +%line,%column %file';
   const command = filloutEditorTemplate(editorTemplate, { file, line, column }).split(" ");
   const editor = command[0];
   const args = command.slice(1);
