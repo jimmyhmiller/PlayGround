@@ -13,8 +13,6 @@
    240 480})
 
 
-(def service (atom {:up? true}))
-
 (defrecord Delay [data expiration-date delay]
   Comparable
   (compareTo [this other-delay]
@@ -33,15 +31,31 @@
 (defn delay-more [data]
   (delay-by (.data data) (get delays (.delay data)) seconds))
 
+
+
+(def service (atom {:up? true}))
+
+(defn take-service-down []
+  (swap! service assoc :up? false))
+
+(defn hot-fix []
+  (swap! service assoc :up? true))
+
+
+
 (def successful-messages (atom []))
 (add-watch successful-messages :success (fn [k r os ns] (println (last ns))))
+
+(defn add-success-message [message]
+  (swap! successful-messages conj message))
+
+
 
 (def fail-messages (atom []))
 (defn add-fail-message [message]
   (swap! fail-messages conj message))
 
-(defn add-success-message [message]
-  (swap! successful-messages conj message))
+
 
 (defn accept-message [q]
   (let [message (.take q)
@@ -53,14 +67,6 @@
       :else (add-fail-message (:n (.data message))))
     (recur q)))
 
-
-
-(defn take-service-down []
-  (swap! service assoc :up? false))
-
-(defn hot-fix []
-  (swap! service assoc :up? true))
-
 (comment
   (hot-fix)
   (take-service-down)
@@ -70,7 +76,9 @@
 (def worker1 (future (accept-message q)))
 (def worker2 (future (accept-message q)))
 
-(future-cancel worker1)
+(comment
+  (future-cancel worker1)
+  (future-cancel worker2))
 
 
 (defn message [n] (no-delay {:n n}))
