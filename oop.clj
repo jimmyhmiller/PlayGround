@@ -393,9 +393,7 @@
        (:map (Mapper :isZero))
        :show)
 
-(obj-> (Just (Succ Zero))
-       (:map (Mapper :isZero))
-       :show)
+
 
 
 (defclass Num [a]
@@ -439,6 +437,7 @@
 
 
 
+
 (obj-> Zero
        :isZero
        :show)
@@ -449,6 +448,10 @@
        (:if {:true true
              :false false}))
 
+
+(obj-> (Just (Succ Zero))
+       (:map (Mapper :isZero))
+       :show)
 
 (defclass FromNum [a]
   (if (zero? a)

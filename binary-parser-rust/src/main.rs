@@ -19,7 +19,7 @@ fn seek_to_first_tag(rdr: &mut BufReader<File>) -> () {
 
 
 fn seek_to_next_tag(rdr: &mut BufReader<File>) -> u64 {
-	rdr.consume(4); // read_exact?
+	rdr.seek(SeekFrom::Current(4)).unwrap() // read_exact?
 	let length = rdr.read_u32::<BigEndian>().unwrap();
 
 	rdr.seek(SeekFrom::Current(length as i64)).unwrap();
