@@ -6,7 +6,7 @@
 (def things (atom []))
 
 (defn get-used-heap []
-  (-> (jmx/mbean "java.lang:type=Memory") 
+  (-> (jmx/mbean "java.lang:type=Memory")
       :HeapMemoryUsage 
       :used))
 
