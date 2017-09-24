@@ -1,7 +1,6 @@
 (ns prime-multiplication.core
   (:require [clojure.string :as string]
-            [clojure.pprint :refer [cl-format]]
-            [clojure.core.reducers :as r]))
+            [clojure.pprint :refer [cl-format]]))
 
 (defn prime-divisors? [n primes]
   (boolean (some #(zero? (mod n %)) primes)))
@@ -42,22 +41,19 @@
        string/join))
 
 (defn parse-int [n]
-  #?(:clj (Integer/parseInt n)
-     :cljs (js/parseInt n)))
+  (Integer/parseInt n))
 
-(defn -main
-  [& [upper-bound]]
-  (let [n (parse-int (or upper-bound "10"))
-        all-numbers (cons 1 (take n primes))
+(defn make-table [n]
+  (let [all-numbers (cons 1 (take n primes))
         spacing (calculate-spacing (last all-numbers))
-        mapper #?(:clj pmap :cljs map)
         formatter (memoize (partial format-element spacing))]
     (->> all-numbers
          multiples
          (partition (inc n))
-         (mapper (partial format-row formatter))
-         (string/join "\n")
-         println))
-  #?(:clj (shutdown-agents)))
+         (pmap (partial format-row formatter))
+         (string/join "\n"))))
 
-
+(defn -main
+  [& [upper-bound]]
+  (println (make-table (parse-int (or upper-bound "10"))))
+  (shutdown-agents))

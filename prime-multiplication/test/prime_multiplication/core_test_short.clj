@@ -1,5 +1,4 @@
-
-(ns prime-multiplication.core-test
+(ns prime-multiplication.core-test-short
   (:require [clojure.test :refer :all]
             [clojure.spec.test.alpha :as stest]
             [prime-multiplication.core :as core]
@@ -8,4 +7,5 @@
 
 (deftest specs
   (utils/check-specs 
-   (stest/enumerate-namespace `prime-multiplication.core)))
+   (stest/enumerate-namespace `prime-multiplication.core)
+   {:clojure.spec.test.check/opts {:num-tests 50}}))

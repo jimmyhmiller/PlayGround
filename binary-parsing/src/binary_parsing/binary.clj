@@ -1,9 +1,13 @@
-(import '[java.nio.channels FileChannel]
-        '[java.nio.file StandardOpenOption]
-        '[java.nio.file FileSystems]
-        '[java.nio.file Paths]
-        '[java.nio.file OpenOption]
-        '[java.nio ByteBuffer])
+(ns binary-parsing.binary
+  (:import [java.nio.channels FileChannel]
+          [java.nio.file StandardOpenOption]
+          [java.nio.file FileSystems]
+          [java.nio.file Paths]
+          [java.nio.file OpenOption]
+          [java.nio ByteBuffer])
+  (:require [codax.core :as c]))
+
+(def db (c/open-database "demo.db"))
 
 (def file (Paths/get (java.net.URI. "file:///Users/jimmy.miller/Desktop/largedump.hprof")))
 
