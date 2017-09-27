@@ -51,7 +51,13 @@ First thing I do with any project is google to find prior approachs to a problem
 
 I find this strange, because for my program (and as far as I can tell theirs too), prime number generation is not the bottle neck. Because of the nature of multiplication tables, we are going to be dealing with formatting and printing n^2 values. Finding n primes will always take less time than this n^2 operation. (I also tested this to ensure that this was the case.)
 
-Given that, I focused my attention on speeding up formatting the rows and values for printing.
+Given that, I focused my attention on speeding up formatting the rows and values for printing. Clojure's rich standard library really came in handy here. A significant speed up came from switching `map` to `pmap`. As the numbers get larger, the overhead of spinning up so many threads decreases, but I even saw speed ups for lower values despite the overhead. The second boost in speed came from using `memoize`. Memoize, in this case trades memory usuage for speed. Because all values in a multiplication table are repeated twice, this gave a nearly 2x speedup.
+
+### Limitations
+
+Because of the n^2 nature of multiplication tables, this solution gets incredibly slow as n grows. The speedups that were added did speed things up (around 7 times faster from my rough calculations), but the computations are still incredibly expensive. Perhaps there is a way to get rid of this overhead, but since you actually do have to produce n^2 elements, I didn't see a way to. 
+
+Because of this computational complexity, in my generative tests, I capped the numbers to max sure they stay below `Integer/MAX_VALUE`. I could have changed these to longs or bigints, but I don't think anyone would realistically run this program with such large numbers. (If they would, they are).
 
 
 

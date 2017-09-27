@@ -7,8 +7,7 @@
                  [org.clojure/spec.alpha "0.1.123"]
                  [org.clojure/test.check "0.10.0-alpha2"]
                  [orchestra "2017.08.13"]
-                 [expound "0.3.0"]
-                 [plumula/mimolette "0.2.1"]]
+                 [expound "0.3.0"]]
   :main ^:skip-aot prime-multiplication.core
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all}})

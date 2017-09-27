@@ -13,6 +13,13 @@
     :else (not (prime-divisors? n previous-primes))))
 
 (def primes
+  "Loosely based off:
+   https://github.com/stuarthalloway/programming-clojure/blob/master/src/examples/primes.clj
+
+   The wheel is much more clever than my solution, I mainly looked
+   at this version to make sure I was getting my lazy-seq right.
+   After getting the basic structure though, I wrote the rest
+   from scratch (hence how inelegent it is compared to that version)"
   (concat 
    [2 3 5 7]
    (lazy-seq
@@ -32,7 +39,14 @@
     (string/join (repeat n " "))
     (cl-format nil (str "~" n "' d") val)))
 
-(defn calculate-spacing [n]
+(defn calculate-spacing
+  "Calculates spacing for all elements given n. This may not
+   be obvious how it works, but if you think about it,
+   the largest number we will have is n^2. This finds
+   the length of that number and makes sure it will
+   have at least one space next to it. Without this, numbers
+   might clump together."
+  [n]
   (+ 1 (count (str (* n n)))))
 
 (defn format-row [formatter row]
