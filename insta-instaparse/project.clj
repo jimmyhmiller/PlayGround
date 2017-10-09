@@ -82,7 +82,8 @@
              ;;
              ;; :open-file-command "myfile-opener"
 
-             :server-logfile "log/figwheel.log"}
+             :server-logfile "log/figwheel.log"
+             :server-port 3450}
 
   :doo {:build "test"}
 
