@@ -22,10 +22,11 @@
 (enable-console-print!)
 
 (defonce app-state (atom {:text "aaaabbbb"
-                          :grammar "S = AB*
-                          AB = A B
-                          A = 'a'+
-                          B = 'b'+"}))
+                          :grammar 
+"S = AB*
+AB = A B
+A = 'a'+
+B = 'b'+"}))
 
 
 (def textarea-style

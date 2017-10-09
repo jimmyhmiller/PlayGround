@@ -8,5 +8,6 @@
                  [gloss "0.2.6"]
                  [nio "1.0.3"]
                  [org.clojure/core.async "0.3.443"]
-                 [manifold "0.1.6"]]
+                 [manifold "0.1.6"]
+                 [codax "1.0.0-SNAPSHOT"]]
   :jvm-opts ["-Xmx10G"])
