@@ -51,9 +51,12 @@
 
 
 
+
 (def fail-messages (atom []))
 (defn add-fail-message [message]
   (swap! fail-messages conj message))
+
+
 
 
 
@@ -83,6 +86,6 @@
 
 (defn message [n] (no-delay {:n n}))
 
-(doseq [n (range 100)]
+(doseq [n (range 10)]
   (.put q (message n)))
 
