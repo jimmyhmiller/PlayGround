@@ -1,8 +1,8 @@
 ;; This buffer is for text that is not saved, and for Lisp evaluation.
 ;; To create a file, visit it with C-x C-f and enter text in its buffer.
 
-(def num-dice 5)
-(def num-players 7)
+(def num-players 5)
+(def num-dice 7)
 
 
 (defn roll []
@@ -21,7 +21,6 @@
   (frequencies 
    (for [i (range n)]
      (goal (players num-players num-dice)))))
-
 
 (defn first-goal [rolls]
   (some #(clojure.set/subset? #{5 6} %) rolls))

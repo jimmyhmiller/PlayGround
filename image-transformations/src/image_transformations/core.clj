@@ -48,20 +48,17 @@
         avg (find-average reduced-image)]
     (calculate-hash reduced-image avg)))
 
-
 ; https://stackoverflow.com/questions/13063594/how-to-filter-a-directory-listing-with-a-regular-expression-in-clojure
 (defn regex-file-seq
   [re dir]
   (filter #(re-find re (.getPath %)) (file-seq dir)))
 
 (defn -main [& args]
-  (let [mapper (if (= (first args) "--cheat-codes-enabled") pmap map)]
-    (println
-     (->> "/Users/jimmyhmiller/Desktop/other_test_images/"
-          clojure.java.io/file
-          (regex-file-seq #".*\.jpg")
-          (mapper phash)
-          last)))
+  (->> "/Users/jimmy.miller/Desktop/images/test" 
+       clojure.java.io/file
+       (regex-file-seq #".*\.jpg")
+       (pmap phash)
+       last)
   (shutdown-agents))
 
 (comment
@@ -69,17 +66,3 @@
    (map bit-xor
         (phash "/Users/jimmyhmiller/Downloads/example2.jpg")
         (phash "/Users/jimmyhmiller/Downloads/example4.jpg"))))
-
-
-
-;(type (phash "/Users/jimmyhmiller/Downloads/example.jpg"))
-
-;(type 2r101)
-
-
-; 227f7f7f776b2a
-; 227f7f7f776b2a
-; 9786141850157202551
-; 9459666061280689191
-
-
