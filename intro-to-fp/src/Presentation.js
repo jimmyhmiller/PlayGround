@@ -242,7 +242,17 @@ export default () =>
       text="I tried to click the button but nothing is working - Bob" />
 
     <Headline
-      text="Who changed this value to that!?!" />
+      color="magenta"
+      textAlign="left"
+      text="How can this NOT work?" />
+
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="How did this ever work?!?" />
+
+    <Headline
+      text="Who changed this value to that!?!?!?!" />
 
     <Headline
       color="green"
@@ -256,6 +266,10 @@ export default () =>
       subtext="All Heisenbugs are caused by mutation"
       subtextColor="green"
       subtextSize={2} />
+
+    <Headline
+      color="green"
+      text="{Example Omitted}" />
 
     <Headline
       text="FP embraces immutability" />
