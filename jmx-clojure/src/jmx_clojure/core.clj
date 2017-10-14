@@ -4,7 +4,8 @@
             [incanter.core :as inc-core]
             [incanter.charts :as charts]
             [incanter.datasets :as datasets]
-            [dorothy.core :as dot])
+            [dorothy.core :as dot]
+            [jmx-clojure.live-charts :refer [make-live-chart]])
   (:import [org.jfree.chart ChartPanel JFreeChart])
   (:import [javax.swing JComponent JLabel JPanel JFrame]))
 
@@ -50,26 +51,22 @@
                      .getMillis)
                 (range 100)))
 
-(def data (atom []))
-
-(swap! data conj {:x (rand 100) :y (rand 1000)})
-
-(defn redraw [time]
-  (while true
-    (Thread/sleep time)
-    (.setChart panel ^JFreeChart (make-chart))))
+(def data (atom [30 50]))
 
 
-(def redrawer (future (redraw 250)))
+(reset! data [50 30])
 
-(future-cancel redrawer)
-
-
-(defn make-chart []
-  (charts/scatter-plot :x :y :data (inc-core/->Dataset [:x :y] @data)))
+(swap! data (fn [[x y]] [(dec x) (inc y)]))
 
 
-(.repaint ^JComponent panel)
+(defn make-chart [data]
+  (-> (charts/bar-chart [:thing1 :thing2] @data)
+      (charts/set-y-range 0 120)))
+
+(def live (make-live-chart (partial make-chart data)))
+
+
+
 
 
 (defn- createFrame [title]
@@ -84,13 +81,6 @@
     (do (.add g com)
         (.pack f))
     f))
-
-
-(display panel "thing")
-
-(def panel (ChartPanel. ^JFreeChart (make-chart)))
-
-
 
 
 
@@ -109,13 +99,12 @@
      (map #(.toString %))
      (map (fn [name] [name (jmx/mbean name)])))
 
-(dotimes [n 1000000]
-  (swap! things conj {:x (rand)}))
 
-(live/show (live/time-chart [get-used-heap]))
+
+
 
 (reset! things [])
 
-(jmx/invoke "java.lang:type=Memory" :gc)
+
 
 

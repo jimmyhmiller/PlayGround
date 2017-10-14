@@ -185,7 +185,6 @@ export default () =>
           <Text textColor="blue" textSize={60} textAlign="left">Jimmy Miller</Text>
           <Points noSlide styleContainer={{paddingTop: 10}}>
             <Point textSize={40} text="Self Taught" /> 
-            <Point textSize={40} text="Lead Developer - Trabian" /> 
             <Point textSize={40} text="FP Nerd" />
           </Points>
         </div>
@@ -287,8 +286,8 @@ export default () =>
 
     <Points title="No Runtime Exceptions">
       <Point text="Written in Elm" />
-      <Point text="50,000 lines of code" />
-      <Point text="Production for 2 years" />
+      <Point text="50,000+ lines of code" />
+      <Point text="Production for 2+ years" />
       <Point text="Zero runtime exceptions" />
     </Points>
 
@@ -326,9 +325,6 @@ export default () =>
       <Headline
         color="blue"
         text="Eliminate All the Bugs!!!" />
-
-      <Headline
-        text="FP embraces purity" />
 
       <Headline 
         text="Positive" />
@@ -376,17 +372,58 @@ export default () =>
         `}
       />
 
-      <Headline
-        text="Data is immutable" />
+      <Code
+        title="N+1 Fetches"
+        lang="haskell"
+        source={`
+          getAllUsernames :: IO [Name]
+          getAllUsernames = do
+            userIds <- getAllUserIds
+            for userIds $ \\userId -> do
+              getUsernameById userId
+        `}
+      />
 
-      <Headline
-        text="Data requires purity" />
+      <Code
+        title="N+1 Fetches"
+        lang="haskell"
+        source={`
+          getAllUsernames :: Haxl [Name]
+          getAllUsernames = do
+            userIds <- getAllUserIds
+            for userIds $ \\userId -> do
+              getUsernameById userId
+        `}
+      />
 
-      <Headline
-        color="blue"
-        text="Datomic"
-        subtext="Data Oriented Taken Seriously"
-        subtextColor="red" />
+      <Code
+        title="Data Structures"
+        lang="haskell"
+        source={`
+          data List a = Nil | Cons a (List a)
+          data NEList a = NEList a (List a)
+          data Tree a = Leaf a | Node (Tree a) a (Tree a)
+          data Either a b = Left a | Right b
+        `}
+      />
+
+      <Code
+        title="Data Types"
+        lang="haskell"
+        source={`
+          data Player 
+            = Wizard Staff 
+            | Warrior Sword
+            | Ranger Bow
+
+          data Sword = LongSword | ShortSword
+          data Staff = IceStaff | FireStaff
+          data Bow = LongBow | CrossBow
+
+          myPlayer :: Player
+          myPlayer = Warrior LongSword
+        `}
+      />
 
       <Headline
         text="Tooling" />
@@ -399,10 +436,15 @@ export default () =>
         color="green"
         text="Type Driven Development" />
 
+      <Headline
+        text="Theory meets practice" />
 
-
-
-
+      <Points title="Future Directions">
+        <Point text="Any Language" />
+        <Point text="Academic or Practical" />
+        <Point text="Lightning Talks" />
+        <Point text="Help" />
+      </Points>
 
     <BlankSlide />
 

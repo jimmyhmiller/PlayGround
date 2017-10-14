@@ -37,6 +37,7 @@ append : Vect n a -> Vect m a -> Vect (n + m) a
 
 
 
+
 ---------
 
 factorial : Nat -> Nat
@@ -60,14 +61,18 @@ factorial5 = Refl
 
 
 
+
+
+
 ---------
+total
 complex : Nat -> Nat
 complex Z = Z
 complex (S k) = case (S k) of
                   two => complex k + 2 + (complex k) + 1
                   five => (complex k + 3 * 3) * complex k
                   seven => complex k + 2
-                  ten => 2 + complex k * (complex (k + 2 * 7))
+                  ten => 2 + complex k * (complex k + 2 * 7)
                   n => complex k * complex k + complex k
 
 
