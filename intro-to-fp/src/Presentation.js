@@ -437,7 +437,11 @@ export default () =>
         text="Type Driven Development" />
 
       <Headline
-        text="Theory meets practice" />
+        text="A way forward" />
+
+      <Headline
+        color="blue"
+        text="out of the tarpit" />
 
       <Points title="Future Directions">
         <Point text="Any Language" />
