@@ -100,7 +100,7 @@
      (map (fn [name] [name (jmx/mbean name)])))
 
 
-
+(live/show (live/time-chart [get-used-heap]))
 
 
 (reset! things [])
