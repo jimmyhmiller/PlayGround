@@ -193,7 +193,7 @@ export default () =>
 
     <Points title="What I won't do">
       <Point text="Give a definition of FP" />
-      <Point text="Comprehsive Overview" />
+      <Point text="Comprehensive Overview" />
       <Point text="Trash talk OOP" />
     </Points>
 
