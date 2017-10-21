@@ -6,10 +6,16 @@ data Vect : Nat -> Type -> Type where
 
 
 
+
+
+
 -- append [1,2] [3, 4]
 -- [1, 2, 3, 4] 
 
 append : Vect n a -> Vect m a -> Vect (n + m) a
+append [] y = y
+append (x :: z) y = x :: append z y
+
 
 
 
@@ -48,7 +54,8 @@ factorial (S k) = (S k) * factorial k
 factorial5 : factorial 5 = 120
 factorial5 = Refl
 
-
+factorial1 : factorial 1 = 1
+factorial1 = Refl
 
 
 
@@ -65,6 +72,7 @@ factorial5 = Refl
 
 
 ---------
+
 total
 complex : Nat -> Nat
 complex Z = Z

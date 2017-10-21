@@ -10,9 +10,10 @@
 (defn fizzbuzz? [n] (divisible? n 15))
 
 
+(fizzbuzz? 13)
 
 
-(for [i (range 100)]
+(for [i (range 1 101)]
   (cond 
     (fizzbuzz? i) "fizzbuzz"
     (fizz? i) "fizz"
@@ -34,8 +35,19 @@
 
 (s/def ::player-type #{:wizard :fighter :ranger})
 (s/def ::weapon #{:bow :staff :sword})
-(s/def ::name (s/and string? #(>= (count %) 3)))
+(s/def ::name (s/and string? #(> (count %) 3)))
 (s/def ::player (s/keys :req [::player-type ::weapon ::name]))
+
+
+(defn cool? [name]
+  (if (= name "Jimmy") true false))
+
+(cool? "Ryan")
+
+(s/valid? ::name "")
+
+
+(s/exercise ::player 10)
 
 
 (s/fdef player-description
@@ -74,3 +86,18 @@
 (reset! things [])
 
 (jmx/invoke "java.lang:type=Memory" :gc)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
