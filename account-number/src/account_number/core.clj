@@ -1,10 +1,11 @@
 (ns account-number.core
-  (:require [clojure.string :as string]))
+  (:require [clojure.string :as string]
+            [cuerdas.core :refer [<<-]]))
 
 (def reference-digits
-  " _     _  _     _  _  _  _  _ 
-  | |  | _| _||_||_ |_   ||_||_|
-  |_|  ||_  _|  | _||_|  ||_| _|")
+  (<<- " _     _  _     _  _  _  _  _ 
+        | |  | _| _||_||_ |_   ||_||_|
+        |_|  ||_  _|  | _||_|  ||_| _|"))
 
 (defn get-ascii-digit [rows x]
   (for [y (range 0 3)
