@@ -7,9 +7,12 @@ A program made to parse account numbers from a file. See [Code Kata](http://codi
 
 In order to run the program you need to choose a scenario (corresponding to the sections in the Kata). If a file is not supplied, the default file for that scenario will be chosen.
 
-    lein run scenario-1 [file]
-    lein run scenario-2 [file]
-    lein run scenario-3 [file]
+```bash
+lein run scenario-1 [file]
+lein run scenario-2 [file]
+lein run scenario-3 [file]
+```
+
 ## Code Structure Overview
 
 The core functionality of the app lies fittingly enough in `account-number.core`. Core includes all the methods that are needed to parse the ascii file, validate it, and produce error messages.
