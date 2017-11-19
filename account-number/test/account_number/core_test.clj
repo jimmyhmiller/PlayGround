@@ -1,8 +1,10 @@
 (ns account-number.core-test
   (:require [clojure.test :refer :all]
             [account-number.main :as main]
+            [account-number.core :as core]
             [clojure.java.io :as io]
-            [cuerdas.core :refer [<<-]]))
+            [cuerdas.core :refer [<<-]])
+  (:import [java.lang AssertionError]))
 
 
 (def scenario-1-cases (slurp (io/resource "scenario-1-test.txt")))
@@ -36,3 +38,15 @@
 (deftest scenario-3
   (testing "Properly parse scenario-3"
     (is (= scenario-3-answers (main/scenario-3 scenario-3-cases)))))
+
+
+(deftest hamming-distance
+  (testing "Hamming tests work"
+    (is (thrown? AssertionError (core/hamming-distance [1 2] [1])))
+    (is (thrown? AssertionError (core/hamming-distance [1 2] [1 2 3])))
+    (is (= 0 (core/hamming-distance [] [])))
+    (is (= 0 (core/hamming-distance [1] [1])))
+    (is (= 1 (core/hamming-distance [1 2] [1 1])))
+    (is (= 1 (core/hamming-distance [1 2 2 2] [1 1 1 1])))))
+
+

@@ -1,7 +1,6 @@
 (ns account-number.core
   (:require [clojure.string :as string]
             [cuerdas.core :refer [<<-]]))
-
 (def reference-digits
   (<<- " _     _  _     _  _  _  _  _ 
         | |  | _| _||_||_ |_   ||_||_|
@@ -78,3 +77,40 @@
       (map (fnil identity "?") n)
       (string/join n)
       (str n error-message))))
+
+(defn hamming-distance [segment1 segment2]
+  {:pre [(= (count segment1) (count segment2))]}
+  (->> (map vector segment1 segment2)
+       (filter (fn [[x y]] (not= x y)))
+       count))
+
+(defn find-possible-digits [segment]
+  (filter #(= (hamming-distance segment %) 1) int->seven-segment))
+
+(defn find-replacements [account-number]
+  (->> (map find-possible-digits account-number)
+       (map-indexed (fn [index replacements] (map vector (repeat index) replacements)))
+       (mapcat identity)))
+
+(defn try-possibility [account-number [index value]]
+  (assoc account-number index value))
+
+
+
+
+(defn generate-possible-account-numbers [account-number]
+  (let [replacements (find-replacements account-number)]
+    (->> (map (partial try-possibility account-number) replacements)
+         (map seven-segment->account-number)
+         (cons (seven-segment->account-number account-number))
+         (filter valid-account-number?))))
+
+(map #(map seven-segment->int %) (map #(find-possible-digits (int->seven-segment %)) (range 10)))
+
+
+(valid-account-number? [4 9  0 6 7 1 8 5])
+
+(->> [4 9 0 0 6 7 7 1 5]
+     (map int->seven-segment)
+     (into [])
+     find-replacements)
