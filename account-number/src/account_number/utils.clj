@@ -70,8 +70,62 @@
                   [20 invalid-account-generator]
                   [10 ill-formed-account-generator]]))
 
-(comment
-  (->> (gen/sample valid-account-generator 500)
-       (string/join "\n")
-       (main/scenario-1)))
+(defn progress 
+  ([n]
+   (fn [rf]
+     (let [count (atom 0)]
+       (fn 
+         ([] (rf))
+         ([result] (rf result))
+         ([result input]
+          (swap! count inc)
+          (when (zero? (mod @count n))
+            (println @count))
+          (rf result input))))))
+  ([n coll]
+   (progress n coll 0))
+  ([n coll i]
+   (lazy-seq
+    (when-let [s (seq coll)]
+      (when (zero? (mod i n))
+        (println i))
+      (cons (first s) (progress n (rest s) (inc i)))))))
+
+
+
+(defn digits
+  ([n]
+   (digits n '()))
+  ([n coll]
+    (if (<= n 0)
+      coll
+      (recur (quot n 10) (cons (mod n 10) coll)))))
+
+
+(defn calc-check [numbers]
+  (->> (range 1 9)
+       (map * (rest  (reverse numbers)))
+       (reduce +)))
+
+(digits 100000000)
+
+(def all-account-numbers
+  (time
+   (doall 
+    (->> (range 300000000 1000000000)
+         (take 100001)
+         (map digits)
+         (progress 1000)
+         (filter #(zero? (core/check-sum %)))
+         (map calc-check)))))
+
+(comment)
+(->> (gen/sample valid-account-generator 100000)
+     (string/join "\n")
+     core/split-into-rows
+     (map core/rows->seven-segment)
+     (map (partial into []))
+     (map core/generate-possible-account-numbers)
+     (filter #(> (count %) 1)))
+
 

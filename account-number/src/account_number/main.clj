@@ -42,3 +42,5 @@
    (if-let [{:keys [scenario]} (scenarios command)]
      (println (scenario (slurp file)))
      (println "Please enter a valid scenario [scenario-1 scenario-2 scenario-3]"))))
+
+(-main "scenario-3")
