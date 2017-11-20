@@ -47,6 +47,29 @@
   (is (= '([["a" "b" "c"] ["a" "b" "c"] ["a" "b" "c"]]) 
          (core/split-into-rows "abc\nabc\nabc"))))
 
+(def zero-ascii 
+  (first 
+   (core/split-into-rows
+    (<<- " _ 
+          | |
+          |_|"))))
+
+(def zero-ascii-flattened '(" " "_" " " 
+                            "|" " " "|"
+                            "|" "_" "|"))
+
+(def eight-zero-ascii 
+  (first 
+   (core/split-into-rows
+    (<<- " _  _ 
+          |_|| |
+          |_||_|"))))
+
+(deftest get-ascii-digit
+  (is (= zero-ascii-flattened (core/get-ascii-digit zero-ascii 0)))
+  (is (= zero-ascii-flattened (core/get-ascii-digit eight-zero-ascii 1))))
+
+
 (deftest hamming-distance
   (is (thrown? AssertionError (core/hamming-distance [1 2] [1])))
   (is (thrown? AssertionError (core/hamming-distance [1 2] [1 2 3])))
