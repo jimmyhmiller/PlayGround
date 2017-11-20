@@ -6,6 +6,22 @@
         | |  | _| _||_||_ |_   ||_||_|
         |_|  ||_  _|  | _||_|  ||_| _|"))
 
+(defn split-each-row
+  "split-each-row is a helper function
+   that takes a collection of strings
+   and splits them per character. This
+   allows us to break up the digits into
+   spaces, pipes, and underscores."
+  [row]
+  (->> row
+       (map #(string/split % #""))
+       (into [])))
+
+(defn split-into-rows [contents]
+  (->> (string/split contents #"\n")
+       (partition 3)
+       (map split-each-row)))
+
 (defn get-ascii-digit [rows x]
   (for [y (range 0 3)
         x (range (* x 3) (+ (* x 3) 3))]
@@ -24,16 +40,6 @@
   (->> (range (/ (count (first rows)) 3))
        (map (partial get-ascii-digit rows))
        (map to-seven-segment)))
-
-(defn split-each-row [row]
-  (->> row
-       (map #(string/split % #""))
-       (into [])))
-
-(defn split-into-rows [contents]
-  (->> (string/split contents #"\n")
-       (partition 3)
-       (map split-each-row)))
 
 (def valid-seven-segments
   (->> reference-digits

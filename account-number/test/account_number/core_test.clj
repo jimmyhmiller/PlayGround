@@ -6,7 +6,6 @@
             [cuerdas.core :refer [<<-]])
   (:import [java.lang AssertionError]))
 
-
 (def scenario-1-cases (slurp (io/resource "scenario-1-test.txt")))
 
 (def scenario-1-answers
@@ -31,22 +30,24 @@
         664371495 ERR"))
 
 (deftest scenario-1
-  (testing "Properly parse scenario-1"
-    (is (= scenario-1-answers (main/scenario-1 scenario-1-cases)))))
-
+  (is (= scenario-1-answers (main/scenario-1 scenario-1-cases))))
 
 (deftest scenario-3
-  (testing "Properly parse scenario-3"
-    (is (= scenario-3-answers (main/scenario-3 scenario-3-cases)))))
+  (is (= scenario-3-answers (main/scenario-3 scenario-3-cases))))
 
+(deftest split-each-row
+  (is (= [] (core/split-each-row [])))
+  (is (= [["a" "s" "d" "f"] ["a" "s" "d" "f"]]
+         (core/split-each-row ["asdf" "asdf"])))
+  (is (= [[" " "_" " " "|"] ["|" " " "_" "|"]]
+         (core/split-each-row [" _ |" "| _|"]))))
 
 (deftest hamming-distance
-  (testing "Hamming tests work"
-    (is (thrown? AssertionError (core/hamming-distance [1 2] [1])))
-    (is (thrown? AssertionError (core/hamming-distance [1 2] [1 2 3])))
-    (is (= 0 (core/hamming-distance [] [])))
-    (is (= 0 (core/hamming-distance [1] [1])))
-    (is (= 1 (core/hamming-distance [1 2] [1 1])))
-    (is (= 1 (core/hamming-distance [1 2 2 2] [1 1 1 1])))))
+  (is (thrown? AssertionError (core/hamming-distance [1 2] [1])))
+  (is (thrown? AssertionError (core/hamming-distance [1 2] [1 2 3])))
+  (is (= 0 (core/hamming-distance [] [])))
+  (is (= 0 (core/hamming-distance [1] [1])))
+  (is (= 1 (core/hamming-distance [1 2] [1 1])))
+  (is (= 3 (core/hamming-distance [1 2 2 2] [1 1 1 1]))))
 
 
