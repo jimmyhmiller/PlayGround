@@ -35,17 +35,23 @@
        (partition 3)
        (map split-each-row)))
 
-(def int->seven-segment 
+(def valid-seven-segments
   (->> reference-digits
        split-into-rows
        (map rows->seven-segment)
        first
        (into [])))
 
-(def seven-segment->int 
+(defn int->seven-segment [n]
+  (get valid-seven-segments n))
+
+(def seven-segment-to-int-map
   (->> (range)
-       (map vector int->seven-segment)
+       (map vector valid-seven-segments)
        (into {})))
+
+(defn seven-segment->int [segment]
+ (get seven-segment-to-int-map segment))
 
 (defn seven-segment->account-number [coll]
   (mapv seven-segment->int coll))
@@ -84,12 +90,14 @@
        (filter (fn [[x y]] (not= x y)))
        count))
 
-(defn find-possible-digits [segment]
-  (filter #(= (hamming-distance segment %) 1) int->seven-segment))
+(defn find-possible-digits [index segment]
+  (->> valid-seven-segments
+       (filter #(= (hamming-distance segment %) 1))
+       (map seven-segment->int)
+       (map vector (repeat index))))
 
 (defn find-replacements [account-number]
-  (->> (map find-possible-digits account-number)
-       (map-indexed (fn [index replacements] (map vector (repeat index) replacements)))
+  (->> (map-indexed find-possible-digits account-number)
        (mapcat identity)))
 
 (defn try-possibility [account-number [index value]]
@@ -97,20 +105,8 @@
 
 
 
-
-(defn generate-possible-account-numbers [account-number]
-  (let [replacements (find-replacements account-number)]
+(defn generate-possible-account-numbers [account-number-segments]
+  (let [account-number (seven-segment->account-number account-number-segments)
+        replacements (find-replacements account-number-segments)]
     (->> (map (partial try-possibility account-number) replacements)
-         (map seven-segment->account-number)
-         (cons (seven-segment->account-number account-number))
          (filter valid-account-number?))))
-
-(map #(map seven-segment->int %) (map #(find-possible-digits (int->seven-segment %)) (range 10)))
-
-
-(valid-account-number? [4 9  0 6 7 1 8 5])
-
-(->> [4 9 0 0 6 7 7 1 5]
-     (map int->seven-segment)
-     (into [])
-     find-replacements)

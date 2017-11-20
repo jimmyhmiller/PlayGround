@@ -71,6 +71,5 @@
         :args (s/cat :numbers ::possible-account-number)
         :ret string?)
 
-
 (comment
-  (st/unstrument))
+  (st/instrument))
