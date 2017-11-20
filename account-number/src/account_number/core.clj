@@ -27,7 +27,12 @@
        (partition 3)
        (map split-each-row)))
 
-(defn get-ascii-digit [rows x]
+(defn get-ascii-digit 
+  "Takes a 2d vector and an int 
+   returns a flattened 3x3 collection.
+   Allows you to pull out all the segments
+   of a particular digit."
+  [rows x]
   (for [y (range 0 3)
         x (range (* x 3) (+ (* x 3) 3))]
     (get-in rows [y x])))
