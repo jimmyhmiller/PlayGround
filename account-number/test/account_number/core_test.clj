@@ -42,6 +42,11 @@
   (is (= [[" " "_" " " "|"] ["|" " " "_" "|"]]
          (core/split-each-row [" _ |" "| _|"]))))
 
+(deftest split-into-rows
+  (is (= [] (core/split-into-rows "")))
+  (is (= '([["a" "b" "c"] ["a" "b" "c"] ["a" "b" "c"]]) 
+         (core/split-into-rows "abc\nabc\nabc"))))
+
 (deftest hamming-distance
   (is (thrown? AssertionError (core/hamming-distance [1 2] [1])))
   (is (thrown? AssertionError (core/hamming-distance [1 2] [1 2 3])))
