@@ -17,7 +17,12 @@
        (map #(string/split % #""))
        (into [])))
 
-(defn split-into-rows [contents]
+(defn split-into-rows
+  "split-into-rows converts a string
+   into a list of 2d vectors allowing
+   random access in order to pull out
+   the digits"
+  [contents]
   (->> (string/split contents #"\n")
        (partition 3)
        (map split-each-row)))
