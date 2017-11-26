@@ -40,7 +40,7 @@
 (defn remove-unnecessary-segments
   "The ascii art of this program is
    converted to seven segment displays.
-   the first and third characters of any
+   The first and third characters of any
    digit will always be spaces. So we
    remove them giving us only the seven
    segments."
@@ -125,8 +125,6 @@
 
 (defn try-possibility [account-number [index value]]
   (assoc account-number index value))
-
-
 
 (defn generate-possible-account-numbers [account-number-segments]
   (let [account-number (seven-segment->account-number account-number-segments)
