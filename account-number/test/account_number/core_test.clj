@@ -54,11 +54,17 @@
           | |
           |_|"))))
 
-(def zero-ascii-flattened '(" " "_" " " 
-                            "|" " " "|"
-                            "|" "_" "|"))
+(def zero-ascii-flattened
+  '(" " "_" " "
+    "|" " " "|"
+    "|" "_" "|"))
 
-(def eight-zero-ascii 
+(def zero-ascii-flattened-unnecessary-removed
+  '(    "_"
+    "|" " " "|"
+    "|" "_" "|"))
+
+(def eight-zero-ascii
   (first 
    (core/split-into-rows
     (<<- " _  _ 
@@ -68,6 +74,10 @@
 (deftest get-ascii-digit
   (is (= zero-ascii-flattened (core/get-ascii-digit zero-ascii 0)))
   (is (= zero-ascii-flattened (core/get-ascii-digit eight-zero-ascii 1))))
+
+(deftest remove-unnecessary-segments
+  (is (= zero-ascii-flattened-unnecessary-removed
+         (core/remove-unnecessary-segments zero-ascii-flattened))))
 
 
 (deftest hamming-distance
