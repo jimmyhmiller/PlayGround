@@ -90,8 +90,11 @@
        (map vector valid-seven-segments)
        (into {})))
 
-(defn seven-segment->int [segment]
- (get seven-segment-to-int-map segment))
+(defn seven-segment->int
+  "Given a seven segment display you can
+   get the corresponding integer."
+  [segment]
+  (get seven-segment-to-int-map segment))
 
 (defn seven-segment->account-number [coll]
   (mapv seven-segment->int coll))

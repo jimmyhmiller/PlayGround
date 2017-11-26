@@ -96,6 +96,20 @@
           [true true false true true true true]]
          (core/rows->seven-segment eight-zero-ascii))))
 
+(deftest int->seven-segment
+  (is (= (repeat 7 true)
+         (core/int->seven-segment 8)))
+  (is (= [true true false true true true true]
+         (core/int->seven-segment 0)))
+  (is (= 10 (->> (range 10)
+                 (map core/int->seven-segment)
+                 (filter (complement nil?))
+                 count))))
+
+(deftest seven-segment->int
+  (is (= 8 (core/seven-segment->int (repeat 7 true))))
+  (is (= 0 (core/seven-segment->int [true true false true true true true]))))
+
 (deftest hamming-distance
   (is (thrown? AssertionError (core/hamming-distance [1 2] [1])))
   (is (thrown? AssertionError (core/hamming-distance [1 2] [1 2 3])))
