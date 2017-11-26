@@ -79,6 +79,15 @@
   (is (= zero-ascii-flattened-unnecessary-removed
          (core/remove-unnecessary-segments zero-ascii-flattened))))
 
+(deftest to-seven-segment
+  (is (= (repeat 7 true)
+         (core/to-seven-segment (repeat 9 "|"))))
+  (is (= (repeat 7 false)
+         (core/to-seven-segment (repeat 9 " "))))
+  (is (= [true true false false true true false]
+         (core/to-seven-segment [" " "|" "" "|" " " " " "_" "_" " "])))
+  (is (= [true true false true true true true]
+         (core/to-seven-segment zero-ascii-flattened))))
 
 (deftest hamming-distance
   (is (thrown? AssertionError (core/hamming-distance [1 2] [1])))
