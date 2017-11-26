@@ -68,7 +68,8 @@
        (map to-seven-segment)))
 
 (def valid-seven-segments
-  ""
+  "A list of seven segment displays for
+   all the valid digits."
   (->> reference-digits
        split-into-rows
        (map rows->seven-segment)
