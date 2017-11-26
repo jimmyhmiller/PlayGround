@@ -76,7 +76,11 @@
        first
        (into [])))
 
-(defn int->seven-segment [n]
+(defn int->seven-segment
+  "Using valid-seven-segments this function
+   allows you to convert from an int to
+   a seven-segment display."
+  [n]
   (get valid-seven-segments n))
 
 (def seven-segment-to-int-map
