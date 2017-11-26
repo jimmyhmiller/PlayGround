@@ -1,7 +1,13 @@
 (ns phone-number.data
   (:require [clojure.java.io :as io]
-            [clojure.data.csv :as csv]
-            [libphonenumber.core :as libphone]))
+            [clojure.data.csv :as csv])
+  (:import [com.google.i18n.phonenumbers 
+            PhoneNumberUtil
+            PhoneNumberUtil$PhoneNumberFormat]))
+
+
+(def e164-format PhoneNumberUtil$PhoneNumberFormat/E164)
+(def phone-util (PhoneNumberUtil/getInstance))
 
 (def headers [:number :context :name])
 
@@ -19,10 +25,9 @@
          doall)))
 
 (defn ->e164 [number]
-  (-> number
-       (libphone/parse-phone "US")
-       second
-       :e164))
+  (try 
+    (.format phone-util (.parse phone-util number "US") e164-format)
+    (catch Exception e nil)))
 
 (defn valid-e164? [e164]
   (= (count e164) 12))
@@ -30,7 +35,7 @@
 (defn get-cleaned-data [file]
   (->> file
        (read-csv-file)
-       (map #(update-in % [:number] ->e164))
+       (pmap #(update-in % [:number] ->e164))
        (group-by #(select-keys % [:number :context]))
        (filter #(= (count (second %)) 1))
        (mapcat second)
@@ -38,9 +43,7 @@
        (into {})))
 
 (defn valid-number-format? [{:keys [number]}]
-  (->> number
-       ->e164
-       valid-e164?))
+  (valid-e164? (->e164 number)))
 
 (defn duplicate-context? [phone-numbers {:keys [number context]}]
   (let [e164 (->e164 number)
@@ -48,7 +51,7 @@
         contexts (set (map :context current-entries))]
     (contains? contexts context)))
 
-(defn update-if-not-duplicate! [phone-numbers {:keys [number] :as entry}]
+(defn update-if-not-duplicate [phone-numbers {:keys [number] :as entry}]
   (if (not (duplicate-context? phone-numbers entry))
     (update-in phone-numbers [(->e164 number)] conj entry)
     phone-numbers))
