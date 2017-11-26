@@ -89,6 +89,13 @@
   (is (= [true true false true true true true]
          (core/to-seven-segment zero-ascii-flattened))))
 
+(deftest rows->seven-segment
+  (is (= [[true true false true true true true]]
+         (core/rows->seven-segment zero-ascii)))
+  (is (= [[true true true true true true true]
+          [true true false true true true true]]
+         (core/rows->seven-segment eight-zero-ascii))))
+
 (deftest hamming-distance
   (is (thrown? AssertionError (core/hamming-distance [1 2] [1])))
   (is (thrown? AssertionError (core/hamming-distance [1 2] [1 2 3])))
