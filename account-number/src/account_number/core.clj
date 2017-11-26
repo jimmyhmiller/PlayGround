@@ -84,6 +84,8 @@
   (get valid-seven-segments n))
 
 (def seven-segment-to-int-map
+  "This is the opposite mapping compared to
+   valid-seven-segments."
   (->> (range)
        (map vector valid-seven-segments)
        (into {})))
