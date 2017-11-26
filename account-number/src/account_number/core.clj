@@ -47,25 +47,28 @@
   [[_ a _ & rest]]
   (into [a] rest))
 
-(defn to-seven-segment [ascii-digit]
+(defn to-seven-segment 
   "A seven segment display is represented 
    as a vector of booleans.
    Each segment in a seven segment display is
    either on or off. In this case anything that
    isn't a space is considered on (true)."
+  [ascii-digit]
   (->> ascii-digit
        remove-unnecessary-segments
        (map #(not= " " %))
        (into [])))
 
-(defn rows->seven-segment [rows]
+(defn rows->seven-segment
   "Converts each row of ascii digits
    into seven segment displays."
+  [rows]
   (->> (range (/ (count (first rows)) 3))
        (map (partial get-ascii-digit rows))
        (map to-seven-segment)))
 
 (def valid-seven-segments
+  ""
   (->> reference-digits
        split-into-rows
        (map rows->seven-segment)
