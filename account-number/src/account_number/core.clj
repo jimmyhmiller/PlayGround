@@ -37,7 +37,14 @@
         x (range (* x 3) (+ (* x 3) 3))]
     (get-in rows [y x])))
 
-(defn remove-unnecessary-segments [[_ a _ & rest]]
+(defn remove-unnecessary-segments
+  "The ascii art of this program is
+   converted to seven segment displays.
+   the first and third characters of any
+   digit will always be spaces. So we
+   remove them giving us only the seven
+   segments."
+  [[_ a _ & rest]]
   (into [a] rest))
 
 (defn to-seven-segment [ascii-digit]
