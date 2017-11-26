@@ -24,13 +24,13 @@ lein test
 
 Everyone has their own favorite way to test http servers. I could possibly give them all. So I will show you two examples using my favorite to [httpie](https://httpie.org/).
 
-####Request - query for number
+#### Request - query for number
 
 ```bash
 http ":3000/query?number=13196891881"
 ```
 
-#####Reponse
+##### Reponse
 
 ```http
 HTTP/1.1 200 OK
@@ -48,7 +48,7 @@ Server: Jetty(7.6.13.v20130916)
 ]
 ```
 
-####Request - insert number
+#### Request - insert number
 
 ```bash
 http post ":3000/number" number="+13196891881" name="testasdf" context="sasdfasdfsadfs"
