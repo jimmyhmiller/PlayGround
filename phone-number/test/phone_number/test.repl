@@ -1,0 +1,67 @@
+(require '[cognitect.transcriptor :as xr :refer (check!)]
+         '[clojure.spec.alpha :as s]
+         '[phone-number.routes :refer [create-app]]
+         '[ring.util.io :refer [string-input-stream]]
+         '[clojure.data.json :as json]
+         '[orchestra.spec.test :as st])
+
+
+(st/instrument)
+
+(def phone-numbers
+  (atom {"+15555555555" 
+         [{:context "test"
+           :number "+15555555555"
+           :name "Jimmy"}]}))
+
+(def app (create-app phone-numbers))
+
+(comment "404 for number that doesn't exist")
+(app {:uri "/query"
+        :request-method :get
+        :params {:number "+13196821881"}})
+(check! #(= (:status %) 404))
+
+(comment "400 for invalid number")
+(app {:uri "/query"
+        :request-method :get
+        :params {:number "+131968881"}})
+(check! #(= (:status %) 400))
+
+(comment "200 for number that is found")
+(app {:uri "/query"
+        :request-method :get
+        :params {:number (ffirst @phone-numbers)}})
+(check! #(= (:status %) 200))
+
+
+(defn add-number 
+  ([]
+   (add-number {}))
+  ([overrides]
+   (app {:uri "/number"
+         :request-method :post
+         :headers {"content-type" "application/json" "accept" "application/json"} 
+         :body (string-input-stream 
+                (json/write-str 
+                 (merge {:number "+13196891881", 
+                         :context "context"
+                         :name "test"}
+                        overrides)))})))
+
+(comment "Adding a new number should return 201")
+(add-number)
+(check! #(= (:status %) 201))
+
+(comment "Adding the same number in the same context shoudl 409")
+(add-number)
+(check! #(= (:status %) 409))
+
+(comment "Same number different context should 201")
+(add-number {:context "new-context"})
+(check! #(= (:status %) 201))
+
+(comment "Invalid number should 400")
+(add-number {:number "asdfsdaf"})
+(check! #(= (:status %) 400))
+
