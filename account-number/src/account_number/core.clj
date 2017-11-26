@@ -48,6 +48,11 @@
   (into [a] rest))
 
 (defn to-seven-segment [ascii-digit]
+  "A seven segment display is represented 
+   as a vector of booleans.
+   Each segment in a seven segment display is
+   either on or off. In this case anything that
+   isn't a space is considered on (true)."
   (->> ascii-digit
        remove-unnecessary-segments
        (map #(not= " " %))
