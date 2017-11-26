@@ -59,6 +59,8 @@
        (into [])))
 
 (defn rows->seven-segment [rows]
+  "Converts each row of ascii digits
+   into seven segment displays."
   (->> (range (/ (count (first rows)) 3))
        (map (partial get-ascii-digit rows))
        (map to-seven-segment)))
