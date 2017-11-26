@@ -107,8 +107,6 @@
        (map * (rest  (reverse numbers)))
        (reduce +)))
 
-(digits 100000000)
-
 (def all-account-numbers
   (time
    (doall 
@@ -119,13 +117,13 @@
          (filter #(zero? (core/check-sum %)))
          (map calc-check)))))
 
-(comment)
-(->> (gen/sample valid-account-generator 100000)
-     (string/join "\n")
-     core/split-into-rows
-     (map core/rows->seven-segment)
-     (map (partial into []))
-     (map core/generate-possible-account-numbers)
-     (filter #(> (count %) 1)))
+(comment
+  (->> (gen/sample valid-account-generator 100000)
+       (string/join "\n")
+       core/split-into-rows
+       (map core/rows->seven-segment)
+       (map (partial into []))
+       (map core/generate-possible-account-numbers)
+       (filter #(> (count %) 1))))
 
 
