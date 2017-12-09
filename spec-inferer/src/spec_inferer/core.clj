@@ -8,14 +8,10 @@
             [com.rpl.specter :as specter]
             [clojure.walk :refer [postwalk]]))
 
-
-
 (def db (codax/open-database "demo-databases"))
-
 
 (defn gen-spec-name []
   (keyword "inferred-spec" (str (gensym "spec"))))
-
 
 ; https://stackoverflow.com/a/35290636
 (defn- pretty-demunge
@@ -32,10 +28,9 @@
 
 (defn dirty-stats [stats]
   (postwalk (fn [k]
-              (if (and (string? k) (clojure.string/includes? "fn/") )
-                (resolve (symbol (pretty-demunge (subs k 3))))
+              (if (and (string? k) (clojure.string/includes? k "fn/") )
+                @(resolve (symbol (pretty-demunge (subs k 3))))
                 k)) stats))
-
 
 (defn new-stats [db endpoint data]
   (let [spec-name (gen-spec-name)]
@@ -55,7 +50,7 @@
     (set-stats db endpoint new-stats)))
 
 (defn get-specs [stats]
-  (sp/summarize-stats (:stats stats) (:spec stats)))
+  (sp/summarize-stats (dirty-stats (:stats stats)) (:spec stats)))
 
 (defn create-specs! [specs]
   (eval specs)) ; Should I worry about this eval?
@@ -67,8 +62,10 @@
 
 (sp/summarize-stats (stats/collect [{:a 2} {:a 3}]) :test)
 
+(dirty-stats (get-stats db "/test"))
+
 (new-stats db "/test" [{:a 2} {:a 3}])
-(summarize-stats (get-stats db "/test"))
+(get-specs (get-stats db "/test"))
 
 (update-stats db "/test" {:a 2 :b 3})
 
