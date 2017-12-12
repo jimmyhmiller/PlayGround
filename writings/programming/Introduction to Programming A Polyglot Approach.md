@@ -30,11 +30,11 @@ Self taught developers will hopefully find this book particularly useful. In cra
 
 Often books recommend following some strict plan of study. This often means a recommendation to take notes, reread sections, and to fully complete all exercises. We view that sort of reading as not quite in the spirit of the book. This book aims not to be a textbook, but a spring board for ideas. Don't feel the need to do percisely what the book says, experiment and play. Copying a program line for line is not the goal, but rather taking the program, changing it to see its outcome. Or even better, looking at a program and trying to rewrite it in a completely different style or fashion.
 
-We hope to model this style throughout the book. In fact, the majority of programs in this book you will see multiple times in various languages. This means if you do not fully understand a certian program, you need not fret, hopefully another language will make it more clear.
+We hope to model this style throughout the book. In fact, the majority of programs in this book you will see multiple times in various languages. This means if you do not fully understand a certain program, you need not fret, hopefully another language will make it more clear.
 
 ### Pace
 
-This book is deliberately fast-paced. Often reading a programming text feels like reading math. The style of exposition requires the read to sit and concentrate on each of the details at hand. While these experiences can be educational and sometimes even cathartic, we hope not to duplicate this feeling in this book. Instead, we model this book after works in the tradition of Analytic Philosophy. Analytic Philosophy is marked by its clearity, exactness, depth, and dry humor. Most importantly though, while Analytic Philosophy might not be a best selling novel, it is imminently readable and often a joy to work through.
+This book is deliberately fast-paced. Often reading a programming text feels like reading math. The style of exposition requires the reader to sit and concentrate on each of the details at hand. While these experiences can be educational and sometimes even cathartic, we hope not to duplicate this feeling in this book. Instead, we model this book after works in the tradition of Analytic Philosophy. Analytic Philosophy is marked by its clearity, exactness, depth, and dry humor. Most importantly though, while Analytic Philosophy might not be a best selling novel, it is imminently readable and often a joy to work through.
 
 To put it more exactly, this book is meant to be read without sitting at a computer or a pen and paper. Read the book quickly, pause and think at moments that matter, but for the most part just keep reading. This book is paced so that it may be armchair reading; something to get your mind going.
 
@@ -44,29 +44,29 @@ Choosing the order in which to tackle these languages has been rather difficult.
 
 We begin and end with LISP. LISP is the perfect language to begin our journey in programming because of its inherent simplicity. Throughout the book we shift to different languages, each language offering its own unique perspective on the task of programming and yet, we will often return to LISP. LISP gives us to flexibility to reimplement these features, allow us a way to quickly see through what appear to be magical features in a language.
 
-Along the way we will encounter various paradigms of programming as well as many different languages. There will be some obvious omissions in this book that people may find strange. Many languages that are popular or influential will be left out. These omissions stem from two different forces that must be balanced in this book. FIrst, this book is limited in scope, we simply cannot cover all that the programming world offers. More importantly, not all languages are interesting, even good ones. There are plenty of fantastic languages that offer very little by way of interesting content for new developers. 
+Along the way we will encounter various paradigms of programming as well as many different languages. There will be some obvious omissions in this book that people may find strange. Many languages that are popular or influential will be left out. These omissions stem from two different forces that must be balanced in this book. First, this book is limited in scope, we simply cannot cover all that the programming world offers. More importantly, not all languages are interesting, even good ones. There are plenty of fantastic languages that offer very little by way of interesting content for new developers. 
 
 ## Short Comings
 
 Finally one strange feature this book posesses is a complete lack of low level languages (C, assymbly, etc). This may seem to be a fatal flaw of the book. There is much to be said for understanding how computers work in their lowest levels. There are large groups that lament the lack of understand that new developers have of the internal workings of computers and this book is just contributing to that problem.
 
-If anyone levys these criticisms against this book, we accept them. We see nothing wrong with learning C, but it doesn't quite fit with our goal. Programming is theory building; theories are defined not by the mechanical movements of their parts, but by abstractions which unify various ideas. Take Darwin's *Theory of Natural Selection*, stated in terms of purely mechanical parts, the theory is just physicals. Instead, Darwin operates at a higher level, talking about populations, adaptations, species (or lack thereof), and many other terms that operate above the level of mechanical functioning. 
+If anyone levys these criticisms against this book, we accept them. We see nothing wrong with learning C, but it doesn't quite fit with our goal. Programming is theory building; theories are defined not by the mechanical movements of their parts, but by abstractions which unify various ideas. Take Darwin's *Theory of Natural Selection*, stated in terms of purely mechanical parts, the theory is just physics. Instead, Darwin operates at a higher level, talking about populations, adaptations, species (or lack thereof), and many other terms that operate above the level of mechanical functioning. 
 
 While all programs are reducable to the functionings of our computers, thinking of them in these terms is limiting. We believe that the end of programming, the goal at which it aims, is to continue to operate at a higher and higher level. The languages we have chosen are those which allow us to build these levels. Languages that offer the programmer a way to abstract and express concepts succinctly.
 
-To the extent that we delve into "low level" details, they will be of a mathematical and relational nature rather than mechanical ones. Programming is no more about machines than astronomy is about telescopes. Comptuers are the tools on which our programs run. Our programs continue to live beyond the machine of any given machine and thus should be thought about separate from them.
+To the extent that we delve into "low level" details, they will be of a mathematical and relational nature rather than mechanical ones. Programming is no more about machines than astronomy is about telescopes. Computers are the tools on which our programs run. Our programs continue to live beyond the life of any given machine and thus should be thought about separate from them.
 
 # Chapter 1
 
-Despite the place that computers hold in society, programming is barely understood outside of those who practice it. Telling someone you program for a living will almost immediately cut off all possible conversation. The average person does not even know how to ask questions about what programmers do. (Sofware Devlopers is the more common term, but we will just continue to use programmers.) As far as anyone from the outside is concerned, we are "computer people". We must know a lot about computers or something. 
+Despite the place that computers hold in society, programming is barely understood outside of those who practice it. Telling someone you program for a living will almost immediately cut off all possible conversation. The average person does not even know how to ask questions about what programmers do. (Sofware Devloper/Engineer is the more common term, but we will just continue to use programmers.) As far as anyone from the outside is concerned, we are "computer people". We must know a lot about computers or something. 
 
-What is known about programming as a profession is generally inaccurate. Often people believe that programming "languages" are just like natural languages. In fact, some schools have even considered allow programming as a subsitute for taking a foreign language. It is our view that this cannot be further from there truth.
+What is known about programming as a profession is generally inaccurate. Often people believe that programming "languages" are just like natural languages. In fact, some schools have even considered allow programming as a substitute for taking a foreign language. It is our view that this cannot be further from the truth.
 
 It isn't uncommon to use terms borrowed from natural  language to talk about programming. In fact, in this book we will do that. For example, we will talk about verbs and nouns to refer to different aspects of programming languages. But despite this superficial level of similarity, deep differences exist.
 
 Natural languages have been grown organically, causing them to be riddled with ambiguity, inconsistency, and irregularity. Yet, it is these "ugly" elements of the language that allow for some of its most beautiful expressions. Works of literature play with this ambiguity, poetry pushes our language to its bounds inviting the reader to follow along, to read between the lines, to find the double meanings in the text. Stories are told, puns are made, symbolism abounds.
 
-This aesthetic taste of natural language does not hold for programming languages. Good and beautiful programming languages are not those riddled with ambiquity. They aren't those whose meaning is indeterminate, whose syntax allows multiple means. Instead the beautiful of a programming language comes from its simplicity and consistency.[^2]
+This aesthetic taste of natural language does not hold for programming languages. Good and beautiful programming languages are not those riddled with ambiquity. They aren't those whose meaning is indeterminate, whose syntax allows multiple interpretations. Instead the beautiful of a programming language comes from its simplicity and consistency.[^2]
 
 [^2]: These decidedly subjective aethestic judgement may seem out of place in a "science" and yet the sciences, broadly understood, are riddled with them.  [[Maybe more]]
 
@@ -79,4 +79,64 @@ We shall see exactly this now as we explore our first language, scheme. Scheme i
 ```scheme
 (+ 2 2)
 ```
-Here is a rather simple program. It adds 2 to 2. This will seem strange. Why write this with the "+" first and why do we need these parenthesis?  The answer isn't immediately obvious, and yet as well leave scheme to vist other languages with a more "natural" syntax, we will see the incredibly power this simple syntax transformation offers us.
+Here is a rather simple program. It adds 2 to 2. This will seem strange. Why write this with the `+` first? Why do we need these parenthesis?  The answer isn't immediately obvious, and yet as well leave scheme to visit other languages with a more "natural" syntax, we will see the incredible power this simple syntax transformation offers us.
+
+Speaking more abstractly, in LISP all our verbs come before our nouns. To add two numbers, we state the action (in this case `+`) that we want to perform and then we talk about what it is we want to add. When thought in these terms the order isn't nearly as strange. In English, I might say that I "hit the ball". This is a very followed by a noun. What makes the above example feel strange is not it difference from English, but from the mathematical notation we have learned.
+
+Arithemetical statements typically employ what are called "infix" operators. That is, our operator (+) goes between or inside of our operation. To add numbers we write `2 + 2` with `+` in between our numbers. In contrast LISP uses prefix notation, the operator comes before the numbers. Some languages we will encounter later will use postfix notation `+ 2 2`. This use of prefix notation with parenthesis gives LISP some fairly nice properties. Unlike infix notation, prefix notation scales to many different items being operated on, and it has an ordering defined by sytax rather than convention.
+
+```clojure
+(+ 2 2 2 2 2 2 2 2 2)
+(+ 2 (* 3 (+ 2 3)))
+```
+
+It is incredibly easy in lisp to add many numbers together. And while the second statement will certainly be a bit hard to read with those that aren't used to reading LISP code, its order is of no question. In order to evaluate the expression as a whole, the inner most parenthesis must be evaluated first. 
+
+## From Prefix to Practice
+
+Perhaps most remarkably, we have learned the hardest part of schemes syntax. It is this seemingly small choice of parenthesizing prefix based operators that has kept any LISP from becoming a popular language. Much ink has been spilled complaining about LISPs famous parenthesis. Many, in fact, have attempted ot make the parenthesis disappear from all LISPs. Yet, it is these parenthesis that offer LISPs their secret super power. 
+
+Unfortunately, it is much to early in our programming journey to explore that super power. So instead, we will take closer look at Scheme's way of speaking, exploring its various types of nouns, some of its fundamental statements, and then how to build up our own verbs. First, let's look at the various types of nouns we will deal with in Scheme.
+
+```scheme
+; integers
+1
+-2
+432
+
+; floats
+2.3
+4.3451
+3.14159
+
+;booleans
+#t
+#f
+
+; strings
+"Hello World"
+"a"
+"things"
+
+; symbols
+hello
+x
++
+
+; nil
+nil
+
+; lists
+
+(1 2 3)
+(cons 2 nil)
+("string" 2 cons 2.3)
+```
+
+These are the nouns Scheme provides for us to write our programs. As well continue learning more and more languages, we will see similar features. In fact, in most languages, these elements are only different in very minor ways. This is one of those features that makes programming languages so different from natural language. A book like this one but written for natural language, would simply be impossible. There is no way to learn so many natural languages at once, because they all differ in so many ways. But, once we have learned one programming language, the next becomes much easier.
+
+In sticking with our arm-chair reading philosophy, we won't dive into these nouns in detail at the moment, instead we will take them as they appear in our programs. I would like to call out just a couple things to ensure this list is readable. Any line that starts with a `;` is a comment. It is often useful in our programs to leave comments about our intent or to mark things off. Once comments are cleared up, the other strange thing in our list of nouns are the "booleans". If you already know what booleans are, then the `#t` and `#f` are easy to figure out, but this is an introduction. Unfortunately, this is one ugly area of Scheme, `#t` stands for true, while `#f` stands for false. Every language has its ugly parts and we are certainly not done with finding them in Scheme.
+
+### The Building Blocks
+
+Now that we've explored our nouns, lets look at how to use these nouns to accomplish tasks. You see, nouns by themselves can't do much, at least in Scheme. We need to connect up our nouns, pass them to things that will take our nouns and return us new nouns. 
