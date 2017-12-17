@@ -1,0 +1,5 @@
+# Exploring the Foundations of Programming
+
+All of our languages come with a certain set of tools to accomplish our tasks. These usually consist of various types like, booleans, integers, floats, lists, etc… It isn't often that we think about, "What exactly is a boolean?" and if we do, our answer usually has something to do with the machine. In this talk, we will take a different tact, exploring the foundations of our languages by recreating all of these features from scratch.
+
+In this talk, we will reconstruct a ton of this built-in types ourselves. We will explore making lists from scratch, making our own number system, constructing our own booleans, and our own if statements. While abstract in nature, the talk will consist largely of live coding, building up these various elements from scratch. This exploration of programming's foundations will cause you to look at programs in a different light. Finally, we will talk about the wider impact these foundations have on the rest of computing.

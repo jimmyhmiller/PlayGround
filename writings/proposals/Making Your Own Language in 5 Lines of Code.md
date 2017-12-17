@@ -1,0 +1,5 @@
+# Making Your Own Language in 5 Lines of Code
+
+Creating your own language can certainly seem a daunting task. Books devoted to building languages can near a 1000 pages in length. In this talk, we will see that getting starting with creating our own programming languages doesn't need to be difficult. Not only will we implement our own Turing complete language in 5 lines of code, we will look at different design choices we can make in a language and how these different features can quickly be added to our language.
+
+In order to create a minimal 5 line programming language, we must first explore making our own interpreters. We will see that interpreters offer us a great way to play with language features. Once we've built up our first interpreter together, we will start stripping it down and cleaning up the code. Slowly we will find minimal interpreter, 5 lines of code that instill in it the essence of programming. After this, we will look at more fully featured languages to truly see the flexibility this approach offers.
