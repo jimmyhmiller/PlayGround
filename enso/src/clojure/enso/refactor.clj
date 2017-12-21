@@ -9,10 +9,11 @@
             [seesaw.graphics :as g]
             [clojure.string :as string]
             [clojure.java.shell :refer [sh]]
-            [seesaw.core :refer [label frame]]
+            [seesaw.core :refer [label frame show! pack!]]
             [seesaw.border :refer [empty-border]]
             [seesaw.font :refer [font]]
             [seesaw.color :refer [color]]))
+
 
 (defn create-help-label [text]
   (label
@@ -89,4 +90,8 @@
   (GlobalScreen/setEventDispatcher (voidDispatchService))
   (GlobalScreen/registerNativeHook)
   (GlobalScreen/addNativeKeyListener (myGlobalKeyListener show hide)))
+
+(command 
+ (start-key-logger (fn [code text] (println "show " code text))
+                   (fn [code text] (println "hide " code text))))
 
