@@ -21,9 +21,6 @@
   (let [suggestors (-> @state :suggestors command)]
     (mapcat (fn [{:keys [suggestor]}] (suggestor text)) suggestors)))
 
-(def command :open)
-(def suggestion (first (get-suggestions :open "test")))
-
 (defn get-executor [command {:keys [type]}]
   (->> @state :executors command type :executor))
 
