@@ -9,7 +9,7 @@
             [seesaw.graphics :as g]
             [clojure.string :as string]
             [clojure.java.shell :refer [sh]]
-            [seesaw.core :refer [label frame show! pack!]]
+            [seesaw.core :refer [label frame show! pack! hide! vertical-panel]]
             [seesaw.border :refer [empty-border]]
             [seesaw.font :refer [font]]
             [seesaw.color :refer [color]]))
@@ -50,11 +50,15 @@
     (generic-label (last match) :white font-size)))
 
 (defn draw-window []
-  (doto (frame :undecorated? true)
+  (doto (frame :undecorated? true 
+               :content (vertical-panel 
+                         :background (color 0 0 0 0) 
+                         :items [(create-help-label standard-help-text)]))
     (.setOpacity (float 0.85))
     (.setLocation 0 20)
     (.setAlwaysOnTop true)
     (.setBackground (color 0 0 0 0))))
+
 
 (defn capture-keys [event]
   (doto (.getDeclaredField NativeInputEvent "reserved")
@@ -91,7 +95,14 @@
   (GlobalScreen/registerNativeHook)
   (GlobalScreen/addNativeKeyListener (myGlobalKeyListener show hide)))
 
-(command 
- (start-key-logger (fn [code text] (println "show " code text))
-                   (fn [code text] (println "hide " code text))))
+
+(defn -main []
+  (let [window (draw-window)]
+    (start-key-logger 
+     (fn [code text] (when (= code 53) (-> window pack! show!)))
+     (fn [code text] (when (= code 53) (-> window hide!))))))
+
+
+(comment
+  (-main))
 

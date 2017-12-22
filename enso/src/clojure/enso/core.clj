@@ -30,7 +30,7 @@
              (when (not= old-state new-state)
                (println "changed" new-state))))
 
-(def l (label
+(def help-label (label
         :text "Welcome to Enso! Enter a command, or type \"help\" for assistance."
         :background "#ABC26B"
         :minimum-size [275 :by 100]
@@ -144,7 +144,7 @@
     (.setAlignmentX Component/LEFT_ALIGNMENT)))
 
 (defn default-labels [state]
-  (let [labels [l]
+  (let [labels [help-label]
         new-suggestions (suggestions (:command-text state))
         suggestion-labels (map-indexed (fn [i sugg] (suggestion->label (:command-text state) (= i 0) sugg)) new-suggestions)
         input (if (zero? (count suggestion-labels)) [input-label] [])
