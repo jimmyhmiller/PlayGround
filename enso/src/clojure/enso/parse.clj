@@ -1,18 +1,20 @@
-;; This buffer is for Clojure experiments and evaluation.
-;; Press C-j to evaluate the last expression.
-
-(require '[clojure.string :as string])
+(ns enso.parse
+  (:require [clojure.string :as string]
+            [clojure.zip :as z]))
 
 
 
 ; This parser only handles single argument commands.
 
-
 (def answers 
   [[["op"
      {:name :open :args [:target]} 
      nil] 
-    [:line [:match "op"] [:unmatch "en"] [:arg "target"]]]
+    [:line [:match "op"] [:unmatch "en"] [:arg " target"]]]
+   [["open "
+     {:name :open :args [:target]} 
+     nil] 
+    [:line [:match "open"] [:arg " target"]]]
    [["open f" 
      {:name :open :args [:target]} 
      {:type :application :target "Firefox"}]
@@ -25,9 +27,9 @@
      [:unmatch " mozilla "] 
      [:match "f"] 
      [:unmatch "irefox"]]]
-   [["open firefox" 
+   [["open o" 
      {:name :open :args [:target]} 
-     {:type :application :target "firefox"}]
+     {:type :application :target "other things"}]
     [:line 
      [:match "open "]
      [:match "firefox"]]]])
@@ -38,18 +40,23 @@
 (defn subtract-text [text command-name]
   (subs command-name (count text)))
 
-(defn parse-no-space [text {command-name :name args :args}]
-  [:line 
-   [:match text] 
-   [:unmatch (subtract-text text (name command-name))]
-   [:arg (name (first args))]])
 
-(defn index-bounds [text word]
-  (let [index (string/index-of text word)] 
+
+(defn index-bounds [text word from]
+  (let [index (string/index-of text word from)] 
     [index (+ index (count word))]))
 
+(defn keep-track-of-index [text [indexes start] word]
+  (let [new-start (+ start (count word))]
+    [(cons (index-bounds text word start) indexes)
+     new-start]))
+
 (defn find-word-locations [text words]
-  (mapcat (partial index-bounds text) words))
+  (->> words
+       (reduce (partial keep-track-of-index text) ['() 0])
+       (first)
+       (reverse)
+       (flatten)))
 
 (defn add-text-ends [text locations]
   (distinct (conj (into [] (cons 0 locations)) (count text))))
@@ -63,16 +70,6 @@
 (defn sanitize-text [text]
   (string/lower-case (name text)))
 
-(defn parse-with-space [text {command-name :name args :args} suggestion]
-  (let [arg (first args)
-        suggestion (str (sanitize-text command-name) " " 
-                        (sanitize-text (arg suggestion)))]
-    (->> (string/split text #" ")
-         (find-word-locations suggestion)
-         (add-text-ends suggestion)
-         (split-string-at suggestion)
-         (map vector (cycle [:match :unmatch]))
-         (into [:line]))))
 
 (defn combine-elements [current sibling]
   (if (= (second sibling) " ")
@@ -80,7 +77,8 @@
     current))
 
 (defn remove-empty [loc]
-  (if (= (second (z/node loc)) " ")
+  (if (or (= (second (z/node loc)) " ")
+          (= (second (z/node loc)) ""))
     (z/remove loc)
     loc))
 
@@ -97,11 +95,34 @@
             remove-empty
             recur)))))
 
+(defn parse-with-space [text {command-name :name args :args} suggestion]
+  (let [arg (first args)
+        suggestion (str (sanitize-text command-name) " " 
+                        (sanitize-text (arg suggestion)))]
+    (->> (string/split text #" ")
+         (find-word-locations suggestion)
+         (add-text-ends suggestion)
+         (split-string-at suggestion)
+         (map vector (cycle [:match :unmatch]))
+         (into [:line])
+         (normalize))))
+
+(defn parse-no-space [text {command-name :name args :args}]
+  (normalize 
+   [:line 
+    [:match text] 
+    [:unmatch (subtract-text text (name command-name))]
+    [:arg (str " " (name (or (first args) "")))]]))
+
 (defn parse [text command suggestion]
-  (normalize
-   (cond
-     (no-space? text) (parse-no-space text command)
-     :else (parse-with-space text command suggestion))))
+  (let [cleaned-text (string/trim text)]
+    (cond 
+      (empty? text) []
+      (no-space? cleaned-text) (parse-no-space cleaned-text command)
+      (empty? suggestion) [:line [:match text]]
+      :else (parse-with-space cleaned-text command suggestion))))
+
+
 
 
 (defn run-scenario [[[text command suggestion]]]

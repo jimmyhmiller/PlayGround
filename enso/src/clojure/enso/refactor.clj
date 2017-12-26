@@ -10,17 +10,27 @@
             [clojure.string :as string]
             [clojure.java.shell :refer [sh]]
             [seesaw.core :refer 
-             [label frame show! pack! hide! vertical-panel horizontal-panel]]
+             [label
+              frame 
+              show! 
+              pack! 
+              hide! 
+              vertical-panel 
+              horizontal-panel 
+              repaint!]]
             [seesaw.border :refer [empty-border]]
             [seesaw.font :refer [font]]
             [seesaw.color :refer [color]]
-            [enso.commands :as commands]))
+            [enso.commands :as commands]
+            [enso.parse :as parse]))
+
+(def ^:const green  "#ABC26B")
 
 
 (defn create-help-label [text]
   (label
    :text text
-   :background "#ABC26B"
+   :background green
    :minimum-size [275 :by 100]
    :foreground :white
    :font "Gentium Plus-32"
@@ -109,13 +119,40 @@
 
 (add-watch state :show
            (fn [key atom old-state new-state]
-             (if (:active new-state)
-               (-> window pack! show!)
-               (-> window hide!))))
+             (cond 
+               (and (:active new-state) 
+                    (not (:active old-state))) (-> window pack! show!)
+               (and (not (:active new-state))
+                    (:active old-state)) (-> window hide!))))
+
+(remove-watch state :update)
 
 (add-watch state :commands
            (fn [key atom old-state new-state]
-             (println (commands/get-commands (:command-text new-state)))))
+             (let [text (:command-text new-state)
+                   command (first (commands/get-commands text))
+                   suggestion (first (commands/get-suggestions command text))]
+               (println text)
+               (println (parse/parse text command suggestion)))))
+
+
+
+(defmulti render-parsed first)
+
+(defmethod render-parsed :line [[_ & children]]
+  (horizontal-panel
+   :background :black
+   :border (empty-border :thickness 5)
+   :items (map render-parsed children)))
+
+(defmethod render-parsed :match [[_ value]]
+  (generic-label value :white 64))
+
+(defmethod render-parsed :unmatch [[_ value]]
+  (generic-label value green 64))
+
+(defmethod render-parsed :arg [[_ value]]
+  (generic-label value :grey 64))
 
 
 (defn command->label [{command-name :name
@@ -123,7 +160,7 @@
   (horizontal-panel 
    :background :black
    :border (empty-border :thickness 5)
-   :items (cons (generic-label (name command-name) "#ABC26B" 64)
+   :items (cons (generic-label (name command-name) green 64)
                 (map #(generic-label (str " " (name %)) :gray 64) args))))
 
 (defn left-align [c]
@@ -131,11 +168,13 @@
     (.setAlignmentX Component/LEFT_ALIGNMENT)))
 
 (defn command-labels [text]
-  (let [commands (commands/get-commands text)]
+  (let [commands (commands/get-commands-with-suggestions text)]
     (vertical-panel
      :background :black
      :items (->> commands
-                 (map command->label)
+                 (map (fn [[command suggestion]] 
+                        (parse/parse text command suggestion)))
+                 (map render-parsed)
                  (cons help-label)
                  (map left-align)))))
 
@@ -165,10 +204,13 @@
 (defn set-active [bool]
   (swap! state assoc :active bool))
 
+
+
 (defn show [code text event]
   (when (:active @state)
     (capture-keys event)
-    (update-command code text))
+    (update-command code text)
+    (-> window pack! repaint!))
   (when (= code 53)
     (capture-keys event)
     (set-active true)))
@@ -176,6 +218,9 @@
 (defn hide [code text event] 
   (when (= code 53)
     (set-active false)
+    (apply commands/execute-command 
+                        (first (commands/get-commands-with-suggestions 
+                                (:command-text @state))))
     (clear-command)))
 
 (def myGlobalKeyListener
