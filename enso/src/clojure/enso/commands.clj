@@ -1,5 +1,6 @@
 (ns enso.commands
-  (:require [clojure.string :as string]))
+  (:require [clojure.string :as string]
+            [clojure.java.shell :refer [sh]]))
 
 (def state (atom {:commands (set [])
                   :suggestors {}
@@ -24,12 +25,25 @@
       '()
       (filter #(string/starts-with? (name (:name %)) command) (:commands @state)))))
 
-(defn get-suggestions [command text]
-  (let [suggestors (-> @state :suggestors command)]
-    (mapcat (fn [{:keys [suggestor]}] (suggestor text)) suggestors)))
+(defn get-suggestions [{command-name :name :or {command-name nil}} text]
+  (if (or (nil? command-name) (empty? text))
+    '()
+    (let [suggestors (-> @state :suggestors command-name)]
+      (mapcat (fn [{:keys [suggestor]}] (suggestor text)) suggestors))))
 
-(defn get-executor [command {:keys [type]}]
-  (->> @state :executors command type :executor))
+
+(defn get-commands-with-suggestions [text]
+  (let [commands (get-commands text)
+        args (apply str (rest (string/split text #" ")))
+        suggestions (map #(get-suggestions % args) commands)]
+    (mapcat (fn [command suggestions] 
+              (map vector (repeat command) 
+                   (if (empty? suggestions) '(nil) suggestions))) 
+         commands suggestions)))
+
+
+(defn get-executor [{command-name :name} {:keys [type] :or {type :default}}]
+  (->> @state :executors command-name type :executor))
 
 (defn execute-command [command suggestion]
   ((get-executor command suggestion) suggestion))
@@ -41,17 +55,43 @@
 (register-command 
  {:name :help})
 
-(register-suggestor
- {:command :open
-  :suggestor (fn [text] [{:type :application
-                           :target (str text " thing")}])})
+(def applications
+  (.listFiles (clojure.java.io/file "/Applications")))
+
+(def open-suggestions
+  (->> applications
+       (map #(.getName %))
+       (filter #(string/ends-with? % ".app"))
+       (map #(string/replace-first % #"\.[^.]+$" ""))
+       (concat ["terminal"])
+       (map string/lower-case)
+       sort))
+
+
+(defn build-suggestion-open [suggestion]
+  {:type :application
+   :target suggestion})
+
+(defn open-suggestor [text] 
+  (if (empty? text)
+    []
+    (->> open-suggestions
+         (filter #(string/includes? % text))
+         (map build-suggestion-open)
+         (take 5))))
+
+(open-suggestor "fi")
 
 (register-suggestor
  {:command :open
-  :suggestor (fn [text] [{:type :application
-                           :target (str text " other thing")}])})
+  :suggestor open-suggestor})
 
 (register-executor
  {:command :open
   :type :application
-  :executor (fn [suggestion] (println "Opening " suggestion))})
+  :executor (fn [{:keys [target]}] (sh "open" "-a" target))})
+
+(register-executor
+ {:command :help
+  :type :default
+  :executor (fn [suggestion] (println "No help to give"))})
