@@ -9,10 +9,12 @@
             [seesaw.graphics :as g]
             [clojure.string :as string]
             [clojure.java.shell :refer [sh]]
-            [seesaw.core :refer [label frame show! pack! hide! vertical-panel]]
+            [seesaw.core :refer 
+             [label frame show! pack! hide! vertical-panel horizontal-panel]]
             [seesaw.border :refer [empty-border]]
             [seesaw.font :refer [font]]
-            [seesaw.color :refer [color]]))
+            [seesaw.color :refer [color]]
+            [enso.commands :as commands]))
 
 
 (defn create-help-label [text]
@@ -31,6 +33,7 @@
   (label
    :background "#000"
    :foreground "#fff"
+   :font "Gentium Plus-64"
    :border (empty-border :thickness 5)
    :visible? false))
 
@@ -50,10 +53,7 @@
     (generic-label (last match) :white font-size)))
 
 (defn draw-window []
-  (doto (frame :undecorated? true 
-               :content (vertical-panel 
-                         :background (color 0 0 0 0) 
-                         :items [(create-help-label standard-help-text)]))
+  (doto (frame :undecorated? true)
     (.setOpacity (float 0.85))
     (.setLocation 0 20)
     (.setAlwaysOnTop true)
@@ -67,7 +67,7 @@
 
 (defn handle-key-press [event callback]
   (callback (.getRawCode event)
-            (NativeKeyEvent/getKeyText (.getKeyCode event))))
+            (NativeKeyEvent/getKeyText (.getKeyCode event)) event))
 
 (defn voidDispatchService []
   (let [running (atom true)]
@@ -82,7 +82,103 @@
       (awaitTermination [timeout unit] true)
       (execute [r] (.run r)))))
 
-(defn myGlobalKeyListener [show hide]
+(defn start-key-logger [listener]
+  (GlobalScreen/setEventDispatcher (voidDispatchService))
+  (GlobalScreen/registerNativeHook)
+  (GlobalScreen/removeNativeKeyListener listener)
+  (GlobalScreen/addNativeKeyListener listener))
+
+
+;;;;;;;;;;;;;;;;; MAIN
+
+
+
+(def state (atom {:active false
+                  :command-text ""}))
+(def input-label (create-input-label))
+(def help-label (create-help-label standard-help-text))
+(def window (draw-window))
+
+(bind/bind state
+           (bind/transform :command-text) 
+           (bind/property input-label :text))
+
+(bind/bind state 
+           (bind/transform #(not (empty? (% :command-text)))) 
+           (bind/property input-label :visible?))
+
+(add-watch state :show
+           (fn [key atom old-state new-state]
+             (if (:active new-state)
+               (-> window pack! show!)
+               (-> window hide!))))
+
+(add-watch state :commands
+           (fn [key atom old-state new-state]
+             (println (commands/get-commands (:command-text new-state)))))
+
+
+(defn command->label [{command-name :name
+                       args :args}]
+  (horizontal-panel 
+   :background :black
+   :border (empty-border :thickness 5)
+   :items (cons (generic-label (name command-name) "#ABC26B" 64)
+                (map #(generic-label (str " " (name %)) :gray 64) args))))
+
+(defn left-align [c]
+  (doto c
+    (.setAlignmentX Component/LEFT_ALIGNMENT)))
+
+(defn command-labels [text]
+  (let [commands (commands/get-commands text)]
+    (vertical-panel
+     :background :black
+     :items (->> commands
+                 (map command->label)
+                 (cons help-label)
+                 (map left-align)))))
+
+(bind/bind state
+           (bind/transform #(command-labels (:command-text %)))
+           (bind/property window :content))
+
+(defn change-text [command-text key-text]
+  (string/lower-case (str command-text key-text)))
+
+(defn valid-character? [text]
+  (Character/isUpperCase (first (seq (char-array text)))))
+
+(defn determine-command-update [command code text]
+  (cond
+    (= code 49) (change-text command " ")
+    (= code 51) (apply str (butlast command))
+    (valid-character? text) (change-text command text)
+    :else command))
+
+(defn update-command [code text]
+  (swap! state update :command-text determine-command-update code text))
+
+(defn clear-command []
+  (swap! state assoc :command-text ""))
+
+(defn set-active [bool]
+  (swap! state assoc :active bool))
+
+(defn show [code text event]
+  (when (:active @state)
+    (capture-keys event)
+    (update-command code text))
+  (when (= code 53)
+    (capture-keys event)
+    (set-active true)))
+
+(defn hide [code text event] 
+  (when (= code 53)
+    (set-active false)
+    (clear-command)))
+
+(def myGlobalKeyListener
   (reify
     NativeKeyListener
     (nativeKeyTyped [this event] #(%))
@@ -90,17 +186,10 @@
     (nativeKeyReleased [this event]
                        (handle-key-press event hide))))
 
-(defn start-key-logger [show hide]
-  (GlobalScreen/setEventDispatcher (voidDispatchService))
-  (GlobalScreen/registerNativeHook)
-  (GlobalScreen/addNativeKeyListener (myGlobalKeyListener show hide)))
 
 
 (defn -main []
-  (let [window (draw-window)]
-    (start-key-logger 
-     (fn [code text] (when (= code 53) (-> window pack! show!)))
-     (fn [code text] (when (= code 53) (-> window hide!))))))
+  (start-key-logger myGlobalKeyListener))
 
 
 (comment

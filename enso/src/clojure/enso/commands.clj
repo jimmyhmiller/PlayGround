@@ -1,4 +1,5 @@
-(ns enso.commands)
+(ns enso.commands
+  (:require [clojure.string :as string]))
 
 (def state (atom {:commands (set [])
                   :suggestors {}
@@ -16,6 +17,12 @@
   (swap! state assoc-in
          [:executors (:command executor) (:type executor)] 
          executor))
+
+(defn get-commands [text]
+  (let [command (first (string/split text #" "))]
+    (if (empty? text)
+      '()
+      (filter #(string/starts-with? (name (:name %)) command) (:commands @state)))))
 
 (defn get-suggestions [command text]
   (let [suggestors (-> @state :suggestors command)]
@@ -37,12 +44,12 @@
 (register-suggestor
  {:command :open
   :suggestor (fn [text] [{:type :application
-                           :text (str text " thing")}])})
+                           :target (str text " thing")}])})
 
 (register-suggestor
  {:command :open
   :suggestor (fn [text] [{:type :application
-                           :text (str text " other thing")}])})
+                           :target (str text " other thing")}])})
 
 (register-executor
  {:command :open
