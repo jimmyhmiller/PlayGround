@@ -17,7 +17,8 @@
               hide! 
               vertical-panel 
               horizontal-panel 
-              repaint!]]
+              repaint!
+              replace!]]
             [seesaw.border :refer [empty-border]]
             [seesaw.font :refer [font]]
             [seesaw.color :refer [color]]
@@ -33,6 +34,8 @@
    :background green
    :minimum-size [275 :by 100]
    :foreground :white
+   :h-text-position :left
+   :halign :left
    :v-text-position :top
    :valign :top
    :font "Gentium Plus-32"
@@ -43,6 +46,8 @@
 
 (defn create-input-label []
   (label
+   :halign :left
+    :h-text-position :left
    :background "#000"
    :foreground "#fff"
    :font "Gentium Plus-64"
@@ -52,6 +57,8 @@
 (defn generic-label
   ([text color font-size font-style]
    (label
+    :halign :left
+    :h-text-position :left
     :text text
     :background "#000"
     :foreground color
@@ -65,7 +72,7 @@
     (generic-label (last match) :white font-size)))
 
 (defn draw-window []
-  (doto (frame :undecorated? true)
+  (doto (frame :undecorated? true :size [1000 :by 1000])
     (.setOpacity (float 0.85))
     (.setLocation 0 20)
     (.setAlwaysOnTop true)
@@ -103,23 +110,18 @@
 
 ;;;;;;;;;;;;;;;;; MAIN
 
-(defn top-align [c]
-  (doto c
-    (.setAlignmentY Component/TOP_ALIGNMENT)))
 
 (def state (atom {:active false
                   :command-text ""}))
-(def input-label (create-input-label))
-(def help-label (top-align (create-help-label standard-help-text)))
+
+
+(def help-label (create-help-label standard-help-text))
 (def window (draw-window))
 
-(bind/bind state
-           (bind/transform :command-text) 
-           (bind/property input-label :text))
 
-(bind/bind state 
-           (bind/transform #(not (empty? (% :command-text)))) 
-           (bind/property input-label :visible?))
+
+(.putClientProperty (.getRootPane window) "Window.shadow" Boolean/FALSE)
+
 
 (add-watch state :show
            (fn [key atom old-state new-state]
@@ -136,6 +138,7 @@
                    suggestion (first (commands/get-suggestions command text))]
                (println text)
                (println (parse/parse text command suggestion)))))
+
 
 
 
@@ -159,47 +162,22 @@
 (defmethod render-parsed :default [_] nil)
 
 
-(defn command->label [{command-name :name
-                       args :args}]
-  (horizontal-panel 
-   :background :black
-   :border (empty-border :thickness 5)
-   :items (cons (generic-label (name command-name) green 64)
-                (map #(generic-label (str " " (name %)) :gray 64) args))))
-
 (defn left-align [c]
   (doto c
     (.setAlignmentX Component/LEFT_ALIGNMENT)))
 
 
-
-
-(def text "")
-(def commands (commands/get-commands-with-suggestions text))
-
-(->> commands
-     (map (fn [[command suggestion]] 
-            (parse/parse text command suggestion)))
-     (map render-parsed)
-     (cons help-label))
-
-(defn log [x]
-  (println x)
-  x)
-
 (defn command-labels [text]
   (let [commands (commands/get-commands-with-suggestions text)]
-    (top-align 
-     (vertical-panel
-      :background :black
-      :items (->> commands
-                  (map (fn [[command suggestion]] 
-                         (parse/parse text command suggestion)))
-                  (map render-parsed)
-                  (cons help-label)
-                  (filter identity)
-                  (map left-align)
-                  log)))))
+    (vertical-panel
+     :background (color 0 0 0 0)
+     :items (->> commands
+                 (map (fn [[command suggestion]] 
+                        (parse/parse text command suggestion)))
+                 (map render-parsed)
+                 (cons help-label)
+                 (filter identity)
+                 (map left-align)))))
 
 (bind/bind state
            (bind/transform #(command-labels (:command-text %)))
@@ -227,13 +205,11 @@
 (defn set-active [bool]
   (swap! state assoc :active bool))
 
-
-
 (defn show [code text event]
   (when (:active @state)
     (capture-keys event)
     (update-command code text)
-    (-> window pack! repaint!))
+    (-> window pack!))
   (when (= code 53)
     (capture-keys event)
     (set-active true)))
