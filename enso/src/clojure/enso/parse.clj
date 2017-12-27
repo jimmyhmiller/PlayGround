@@ -27,9 +27,9 @@
      [:unmatch " mozilla "] 
      [:match "f"] 
      [:unmatch "irefox"]]]
-   [["open o" 
+   [["open firefox" 
      {:name :open :args [:target]} 
-     {:type :application :target "other things"}]
+     {:type :application :target "firefox"}]
     [:line 
      [:match "open "]
      [:match "firefox"]]]])
@@ -118,6 +118,7 @@
   (let [cleaned-text (string/trim text)]
     (cond 
       (empty? text) []
+      (nil? command) [:line [:match text]]
       (no-space? cleaned-text) (parse-no-space cleaned-text command)
       (empty? suggestion) [:line [:match text]]
       :else (parse-with-space cleaned-text command suggestion))))

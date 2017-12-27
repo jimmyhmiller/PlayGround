@@ -31,22 +31,34 @@
     (let [suggestors (-> @state :suggestors command-name)]
       (mapcat (fn [{:keys [suggestor]}] (suggestor text)) suggestors))))
 
+(def text "asdf")
+(def commands (get-commands text))
+(def args (apply str (rest (string/split text #" "))))
+(def suggestions (map #(get-suggestions % args) commands))
+
+(get-commands-with-suggestions "asdf")
 
 (defn get-commands-with-suggestions [text]
   (let [commands (get-commands text)
         args (apply str (rest (string/split text #" ")))
-        suggestions (map #(get-suggestions % args) commands)]
-    (mapcat (fn [command suggestions] 
-              (map vector (repeat command) 
-                   (if (empty? suggestions) '(nil) suggestions))) 
-         commands suggestions)))
+        suggestions (map #(get-suggestions % args) commands)
+        result (mapcat (fn [command suggestions] 
+                  (map vector (repeat command) 
+                       (if (empty? suggestions) '(nil) suggestions))) 
+                       commands suggestions)]
+    (if (empty? result)
+      '([nil nil])
+      result)))
+
+
 
 
 (defn get-executor [{command-name :name} {:keys [type] :or {type :default}}]
   (->> @state :executors command-name type :executor))
 
 (defn execute-command [command suggestion]
-  ((get-executor command suggestion) suggestion))
+  (when (not (nil? command))
+    ((get-executor command suggestion) suggestion)))
 
 (register-command 
  {:name :open
@@ -57,6 +69,7 @@
 
 (def applications
   (.listFiles (clojure.java.io/file "/Applications")))
+
 
 (def open-suggestions
   (->> applications
@@ -77,10 +90,10 @@
     []
     (->> open-suggestions
          (filter #(string/includes? % text))
+         (sort-by #(string/index-of % text))
          (map build-suggestion-open)
          (take 5))))
 
-(open-suggestor "fi")
 
 (register-suggestor
  {:command :open

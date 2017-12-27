@@ -33,6 +33,8 @@
    :background green
    :minimum-size [275 :by 100]
    :foreground :white
+   :v-text-position :top
+   :valign :top
    :font "Gentium Plus-32"
    :border (empty-border :thickness 5)))
 
@@ -101,12 +103,14 @@
 
 ;;;;;;;;;;;;;;;;; MAIN
 
-
+(defn top-align [c]
+  (doto c
+    (.setAlignmentY Component/TOP_ALIGNMENT)))
 
 (def state (atom {:active false
                   :command-text ""}))
 (def input-label (create-input-label))
-(def help-label (create-help-label standard-help-text))
+(def help-label (top-align (create-help-label standard-help-text)))
 (def window (draw-window))
 
 (bind/bind state
@@ -124,8 +128,6 @@
                     (not (:active old-state))) (-> window pack! show!)
                (and (not (:active new-state))
                     (:active old-state)) (-> window hide!))))
-
-(remove-watch state :update)
 
 (add-watch state :commands
            (fn [key atom old-state new-state]
@@ -154,6 +156,8 @@
 (defmethod render-parsed :arg [[_ value]]
   (generic-label value :grey 64))
 
+(defmethod render-parsed :default [_] nil)
+
 
 (defn command->label [{command-name :name
                        args :args}]
@@ -167,16 +171,35 @@
   (doto c
     (.setAlignmentX Component/LEFT_ALIGNMENT)))
 
+
+
+
+(def text "")
+(def commands (commands/get-commands-with-suggestions text))
+
+(->> commands
+     (map (fn [[command suggestion]] 
+            (parse/parse text command suggestion)))
+     (map render-parsed)
+     (cons help-label))
+
+(defn log [x]
+  (println x)
+  x)
+
 (defn command-labels [text]
   (let [commands (commands/get-commands-with-suggestions text)]
-    (vertical-panel
-     :background :black
-     :items (->> commands
-                 (map (fn [[command suggestion]] 
-                        (parse/parse text command suggestion)))
-                 (map render-parsed)
-                 (cons help-label)
-                 (map left-align)))))
+    (top-align 
+     (vertical-panel
+      :background :black
+      :items (->> commands
+                  (map (fn [[command suggestion]] 
+                         (parse/parse text command suggestion)))
+                  (map render-parsed)
+                  (cons help-label)
+                  (filter identity)
+                  (map left-align)
+                  log)))))
 
 (bind/bind state
            (bind/transform #(command-labels (:command-text %)))
