@@ -18,7 +18,10 @@
               vertical-panel 
               horizontal-panel 
               repaint!
-              replace!]]
+              replace!
+              invoke-now
+              invoke-soon
+              select]]
             [seesaw.border :refer [empty-border]]
             [seesaw.font :refer [font]]
             [seesaw.color :refer [color]]
@@ -44,15 +47,16 @@
 (def standard-help-text 
   "Welcome to Enso! Enter a command, or type \"help\" for assistance.")
 
+
+
 (defn create-input-label []
   (label
    :halign :left
-    :h-text-position :left
+   :h-text-position :left
    :background "#000"
    :foreground "#fff"
    :font "Gentium Plus-64"
-   :border (empty-border :thickness 5)
-   :visible? false))
+   :border (empty-border :thickness 5)))
 
 (defn generic-label
   ([text color font-size font-style]
@@ -71,9 +75,9 @@
     (generic-label match "#ABC26B" font-size #{:italic})
     (generic-label (last match) :white font-size)))
 
-(defn draw-window []
-  (doto (frame :undecorated? true :size [1000 :by 1000])
-    (.setOpacity (float 0.85))
+(defn draw-window [content]
+  (doto (frame :undecorated? true :size [1000 :by 1000] :content content)
+    (.setOpacity (float 0.0))
     (.setLocation 0 20)
     (.setAlwaysOnTop true)
     (.setBackground (color 0 0 0 0))))
@@ -115,9 +119,23 @@
                   :command-text ""}))
 
 
-(def help-label (create-help-label standard-help-text))
-(def window (draw-window))
 
+
+(def help-label (create-help-label standard-help-text))
+(def input-container (left-align (horizontal-panel)))
+(def command-containers 
+  (doall (for [i (range 10)]
+           (left-align (horizontal-panel)))))
+
+(def container 
+  (->> command-containers
+       (concat [help-label input-container])
+       (into [])
+       (vertical-panel :items)
+       (left-align)))
+
+(def window (draw-window container))
+(show! window)
 
 
 (.putClientProperty (.getRootPane window) "Window.shadow" Boolean/FALSE)
@@ -127,9 +145,9 @@
            (fn [key atom old-state new-state]
              (cond 
                (and (:active new-state) 
-                    (not (:active old-state))) (-> window pack! show!)
+                    (not (:active old-state))) (-> window (.setOpacity (float 0.85)))
                (and (not (:active new-state))
-                    (:active old-state)) (-> window hide!))))
+                    (:active old-state)) (-> window (.setOpacity (float 0.0))))))
 
 (add-watch state :commands
            (fn [key atom old-state new-state]
@@ -141,47 +159,74 @@
 
 
 
+(def type->style 
+  {:selected {:highlight :white
+              :base enso.refactor/green
+              :arg :gray
+              :size 64}
+   :not-selected {:highlight "#c8d79e"
+                  :base enso.refactor/green
+                  :arg :gray
+                  :size 32}})
 
-(defmulti render-parsed first)
+(defn generic-label-for-type [text type prop]
+  (let [styles (type->style type)]
+    (generic-label text (prop styles) (:size styles))))
 
-(defmethod render-parsed :line [[_ & children]]
-  (horizontal-panel
-   :background :black
-   :border (empty-border :thickness 5)
-   :items (map render-parsed children)))
 
-(defmethod render-parsed :match [[_ value]]
-  (generic-label value :white 64))
 
-(defmethod render-parsed :unmatch [[_ value]]
-  (generic-label value green 64))
+(defmulti render-parsed-command (fn [parsed type] (first parsed)))
 
-(defmethod render-parsed :arg [[_ value]]
-  (generic-label value :grey 64))
+(defmethod render-parsed-command :line [[_ & children] type]
+  (map #(render-parsed-command % type) children))
 
-(defmethod render-parsed :default [_] nil)
+(defmethod render-parsed-command :match [[_ value] type]
+  (generic-label-for-type value type :highlight))
+
+(defmethod render-parsed-command :unmatch [[_ value] type]
+  (generic-label-for-type value type :base))
+
+(defmethod render-parsed-command :arg [[_ value] type]
+  (generic-label-for-type value type :arg))
+
+(defmethod render-parsed-command :default [_ _] nil)
 
 
 (defn left-align [c]
   (doto c
     (.setAlignmentX Component/LEFT_ALIGNMENT)))
 
+(defn top-match-label [text]
+  (println "top" text)
+  (let [commands (commands/get-commands-with-suggestions text)
+        [command suggestion] (first commands)]
+    (render-parsed-command (parse/parse text command suggestion) :selected)))
 
-(defn command-labels [text]
-  (let [commands (commands/get-commands-with-suggestions text)]
-    (vertical-panel
-     :background (color 0 0 0 0)
-     :items (->> commands
-                 (map (fn [[command suggestion]] 
-                        (parse/parse text command suggestion)))
-                 (map render-parsed)
-                 (cons help-label)
-                 (filter identity)
-                 (map left-align)))))
+(defn other-match-labels [text]
+  (let [commands (rest (commands/get-commands-with-suggestions text))]
+    (->> commands
+         (map (fn [[command suggestion]]
+            (parse/parse text command suggestion)))
+         (map #(render-parsed-command % :not-selected))
+         (into []))))
 
-(bind/bind state
-           (bind/transform #(command-labels (:command-text %)))
-           (bind/property window :content))
+
+
+
+(def bound 
+  (bind/bind state
+             (bind/transform #(top-match-label (:command-text %)))
+             (bind/property input-container :items)
+             (bind/notify-now)))
+
+
+(def bindings 
+  (doall (for [i (range 10)]
+           (bind/bind state
+                      (bind/transform #(get (other-match-labels (:command-text %)) i []))
+                      (bind/property (nth command-containers i) :items)))))
+
+
 
 (defn change-text [command-text key-text]
   (string/lower-case (str command-text key-text)))
@@ -197,19 +242,18 @@
     :else command))
 
 (defn update-command [code text]
-  (swap! state update :command-text determine-command-update code text))
+  (invoke-soon (swap! state update :command-text determine-command-update code text)))
 
 (defn clear-command []
-  (swap! state assoc :command-text ""))
+  (invoke-now (swap! state assoc :command-text "")))
 
 (defn set-active [bool]
-  (swap! state assoc :active bool))
+  (invoke-soon (swap! state assoc :active bool)))
 
 (defn show [code text event]
   (when (:active @state)
     (capture-keys event)
-    (update-command code text)
-    (-> window pack!))
+    (update-command code text))
   (when (= code 53)
     (capture-keys event)
     (set-active true)))
@@ -226,9 +270,7 @@
   (reify
     NativeKeyListener
     (nativeKeyTyped [this event] #(%))
-    (nativeKeyPressed [this event] (handle-key-press event show))
-    (nativeKeyReleased [this event]
-                       (handle-key-press event hide))))
+    (nativeKeyPressed [this event] (handle-key-press event show))))
 
 
 
