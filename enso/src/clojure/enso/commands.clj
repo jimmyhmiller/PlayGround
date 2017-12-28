@@ -84,7 +84,7 @@
          (filter #(string/includes? % text))
          (sort-by #(string/index-of % text))
          (map build-suggestion-open)
-         (take 5))))
+         (take 10))))
 
 
 (register-suggestor
