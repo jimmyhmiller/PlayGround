@@ -114,12 +114,13 @@
 
 ;;;;;;;;;;;;;;;;; MAIN
 
+(defn left-align [c]
+  (doto c
+    (.setAlignmentX Component/LEFT_ALIGNMENT)))
+
 
 (def state (atom {:active false
                   :command-text ""}))
-
-
-
 
 (def help-label (create-help-label standard-help-text))
 (def input-container (left-align (horizontal-panel)))
@@ -137,9 +138,7 @@
 (def window (draw-window container))
 (show! window)
 
-
 (.putClientProperty (.getRootPane window) "Window.shadow" Boolean/FALSE)
-
 
 (add-watch state :show
            (fn [key atom old-state new-state]
@@ -192,12 +191,8 @@
 (defmethod render-parsed-command :default [_ _] nil)
 
 
-(defn left-align [c]
-  (doto c
-    (.setAlignmentX Component/LEFT_ALIGNMENT)))
 
 (defn top-match-label [text]
-  (println "top" text)
   (let [commands (commands/get-commands-with-suggestions text)
         [command suggestion] (first commands)]
     (render-parsed-command (parse/parse text command suggestion) :selected)))
@@ -250,6 +245,7 @@
 (defn set-active [bool]
   (invoke-soon (swap! state assoc :active bool)))
 
+
 (defn show [code text event]
   (when (:active @state)
     (capture-keys event)
@@ -258,7 +254,7 @@
     (capture-keys event)
     (set-active true)))
 
-(defn hide [code text event] 
+(defn hide [code text event]
   (when (= code 53)
     (set-active false)
     (apply commands/execute-command 
@@ -270,7 +266,8 @@
   (reify
     NativeKeyListener
     (nativeKeyTyped [this event] #(%))
-    (nativeKeyPressed [this event] (handle-key-press event show))))
+    (nativeKeyPressed [this event] (handle-key-press event show))
+    (nativeKeyReleased [this event] (handle-key-press event hide))))
 
 
 
@@ -280,4 +277,3 @@
 
 (comment
   (-main))
-
