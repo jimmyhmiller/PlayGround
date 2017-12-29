@@ -2,45 +2,13 @@
   (:require [clojure.string :as string]
             [clojure.zip :as z]))
 
-
-
 ; This parser only handles single argument commands.
-
-(def answers 
-  [[["op"
-     {:name :open :args [:target]} 
-     nil] 
-    [:line [:match "op"] [:unmatch "en"] [:arg " target"]]]
-   [["open "
-     {:name :open :args [:target]} 
-     nil] 
-    [:line [:match "open"] [:arg " target"]]]
-   [["open f" 
-     {:name :open :args [:target]} 
-     {:type :application :target "Firefox"}]
-    [:line [:match "open "][:match "f"] [:unmatch "irefox"]]]
-   [["open f" 
-     {:name :open :args [:target]} 
-     {:type :application :target "Mozilla Firefox"}]
-    [:line 
-     [:match "open"] 
-     [:unmatch " mozilla "] 
-     [:match "f"] 
-     [:unmatch "irefox"]]]
-   [["open firefox" 
-     {:name :open :args [:target]} 
-     {:type :application :target "firefox"}]
-    [:line 
-     [:match "open "]
-     [:match "firefox"]]]])
 
 (defn no-space? [text]
   (not (string/includes? text " ")))
 
 (defn subtract-text [text command-name]
   (subs command-name (count text)))
-
-
 
 (defn index-bounds [text word from]
   (let [index (string/index-of text word from)] 
@@ -69,7 +37,6 @@
 
 (defn sanitize-text [text]
   (string/lower-case (name text)))
-
 
 (defn combine-elements [current sibling]
   (if (= (second sibling) " ")
@@ -123,16 +90,3 @@
       (empty? suggestion) [:line [:match text]]
       :else (parse-with-space cleaned-text command suggestion))))
 
-
-
-
-(defn run-scenario [[[text command suggestion]]]
-  (parse text command suggestion))
-
-(defn check-answer [[_ answer :as scenario]]
-  (= (run-scenario scenario) answer))
-
-
-
-(map run-scenario answers)
-(map check-answer answers)
