@@ -1,6 +1,7 @@
 (ns enso.logic
   (:require [clojure.string :as string]
-            [seesaw.core :refer [invoke-now]])
+            [seesaw.core :refer [invoke-now]]
+            [enso.commands :as commands])
   (:import java.util.concurrent.AbstractExecutorService
            [org.jnativehook GlobalScreen NativeInputEvent]
            org.jnativehook.keyboard.NativeKeyEvent))
@@ -67,4 +68,7 @@
 (defn on-release [state code text event]
   (when (= code 53)
     (set-active state false)
+    (apply commands/execute-command 
+           (first (commands/get-commands-with-suggestions                                
+                   (:command-text @state))))
     (clear-command state)))

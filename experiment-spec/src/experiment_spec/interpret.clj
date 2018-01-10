@@ -30,7 +30,6 @@
    (swap! env assoc x {:val arg :meta meta})
    env))
 
-
 (defn add-vars [env names vals]
   (reduce 
    (fn [env [name val]] 
@@ -54,6 +53,105 @@
 
 (defn macro-expansion [expr env]
   (clojure.walk/postwalk (partial expand-form env) expr))
+
+
+(defn macro-pure? [env n]
+  (and (symbol? n)
+       (-> env n :meta :macro)))
+
+(defn expand-form-pure [env expr]
+  (match [expr]
+         ('unquote x) (first (eval-expr-pure x env))
+         :else expr))
+
+(defn macro-expansion-pure [expr env]
+  (clojure.walk/postwalk (partial expand-form-pure env) expr))
+
+
+(defn get-var-pure [env sym]
+  (get-in env [sym :val]))
+
+(defn add-var-pure
+  ([env x arg]
+   (add-var-pure env x arg {}))
+  ([env x arg meta]
+   (assoc env x {:val arg :meta meta})))
+
+
+(defn add-vars-pure [env names vals]
+  (reduce 
+   (fn [env [name val]] 
+     (add-var-pure env name val))
+   env 
+   (map vector names vals)))
+
+
+(defn eval-expr-pure [expr env]
+  (match [expr]
+         [n number?]           [n env]
+         [n symbol?]           [(get-var-pure env n) env]
+         [n nil?]              [nil env]
+         [n boolean?]          [n env]
+         ('quote x)            [x env]
+         ('if pred t f)        [(if (first (eval-expr-pure pred env))
+                                  (first (eval-expr-pure t env))
+                                  (first (eval-expr-pure f env))) env]
+         ('def name x)         (let [[val _] (eval-expr-pure x env)]
+                                 [val (add-var-pure env name val)])
+         ('do & exprs)         (reduce (fn [[_ env] expr]                                       
+                                      (eval-expr-pure expr env)) 
+                                    [nil env] exprs)
+         ('defmacro name
+          [& names] body)     [name (add-var-pure 
+                                     env name 
+                                     (fn [& vals]
+                                       (first 
+                                        (eval-expr-pure
+                                         (macro-expansion-pure 
+                                          body
+                                          (add-vars-pure env names vals)) env)))
+                                     {:macro true})]
+         ('fn [& names] body) [(fn [& vals] 
+                                 (first 
+                                  (eval-expr-pure 
+                                   body 
+                                   (add-vars-pure env names vals)))) env]
+         (f & args)           (if (macro-pure? env f)
+                                (eval-expr-pure 
+                                 (apply (first (eval-expr-pure f env)) args) env)
+                                [(apply (first (eval-expr-pure f env)) 
+                                         (map #(first (eval-expr-pure % env)) args)) env]) env))
+
+(defn env-pure 
+  ([] (env-pure {}))
+  ([extend] (merge {'+ + '= = '* * '- - 'println println 'inc inc} extend)))
+
+
+(def core-library
+  '(do
+     (defmacro defn [name args body] 
+       (quote (def (unquote name) (fn (unquote args) (unquote body)))))))
+
+
+(eval-expr-pure 
+ '(do 
+    (defn f [x y] (+ x y))
+    (f 1 2)) 
+ (last (eval-expr-pure core-library (env-pure))))
+
+(def f (:val (get (second ) 'f)))
+
+
+(f 1 2)
+
+(eval-expr-pure '(if false 2 3) {})
+
+((first (eval-expr-pure '(fn [x] x) {})) 2)
+
+(eval-expr-pure '(do 
+                   (def x 3)
+                   (def y 2)
+                   y) {})
 
 
 (defn eval-expr [expr env]
@@ -98,11 +196,19 @@
      (defn f [x y] (+ x y))
      (f 2 3)) my-env)
     
+(defn eval-expr [expr env]
+  (match [expr]
+         [n symbol?]     (env n)
+         ('fn [x] body)  (fn [arg] (eval-expr body (assoc env x arg)))
+         (f arg)         ((eval-expr f env) (eval-expr arg env))))
 
-(comment
-  (defn eval-expr [expr env]
-    (match [expr]
-           [n number?]     n
-           [n symbol?]     (get-var env n)
-           ('fn [x] body)  (fn [arg] (eval-expr body (add-var env x arg)))
-           (f arg)         ((eval-expr f env) (eval-expr arg env)))))
+(eval-expr '(fn [x] (fn [x] x)) {})
+
+
+(comment)
+(defn eval-expr [expr env]
+  (match [expr]
+         [n number?]     n
+         [n symbol?]     (get-var env n)
+         ('fn [x] body)  (fn [arg] (eval-expr body (add-var env x arg)))
+         (f arg)         ((eval-expr f env) (eval-expr arg env))))
