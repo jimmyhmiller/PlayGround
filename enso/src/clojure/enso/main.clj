@@ -34,6 +34,12 @@
     (nativeKeyReleased [this event] 
       (logic/handle-key-press state event logic/on-release))))
 
+
+
+
+
+
+
 (defn -main []
   (logic/start-key-logger myGlobalKeyListener))
 
