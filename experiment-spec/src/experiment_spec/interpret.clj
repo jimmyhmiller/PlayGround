@@ -59,6 +59,8 @@
   (and (symbol? n)
        (-> env n :meta :macro)))
 
+(def eval-expr-pure)
+
 (defn expand-form-pure [env expr]
   (match [expr]
          ('unquote x) (first (eval-expr-pure x env))
@@ -124,7 +126,10 @@
 
 (defn env-pure 
   ([] (env-pure {}))
-  ([extend] (merge {'+ + '= = '* * '- - 'println println 'inc inc} extend)))
+  ([extend] (add-vars-pure 
+             extend 
+             ['+ '= '* '- 'println 'inc] 
+             [+ = * - println inc])))
 
 
 (def core-library
@@ -133,25 +138,12 @@
        (quote (def (unquote name) (fn (unquote args) (unquote body)))))))
 
 
-(eval-expr-pure 
+(eval-expr-pure
  '(do 
     (defn f [x y] (+ x y))
     (f 1 2)) 
  (last (eval-expr-pure core-library (env-pure))))
 
-(def f (:val (get (second ) 'f)))
-
-
-(f 1 2)
-
-(eval-expr-pure '(if false 2 3) {})
-
-((first (eval-expr-pure '(fn [x] x) {})) 2)
-
-(eval-expr-pure '(do 
-                   (def x 3)
-                   (def y 2)
-                   y) {})
 
 
 (defn eval-expr [expr env]
