@@ -2,7 +2,7 @@
   (:require [clojure.string :as string]
             [account-number.main :as main]
             [account-number.core :as core]
-            [clojure.spec.alpha :as s]
+            [clojure.spec.alpha :as spec]
             [clojure.test.check.generators :as gen])
   (:use [account-number.spec]))
 

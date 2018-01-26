@@ -38,7 +38,7 @@
               `(~'fn [~f] (~'fn [~z]
                           ~(apply-n f n z))))))
 
-(church-numerals 10)
+(church-numerals 2)
 
 (def ZERO? `(~'fn [n#]
              ((n# (~'fn [_#] ~FALSE)) ~TRUE)))
