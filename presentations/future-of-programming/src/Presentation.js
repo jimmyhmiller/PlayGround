@@ -202,39 +202,68 @@ export default () =>
       color="green"
       text="The Sorry State of Programming" />
 
+    <Points title="Problems">
+      <Point text="Our programs are full of bugs" />
+      <Point text="Artifical boundries between machines" />
+      <Point text="It takes way too much code to accomplish anything" />
+    </Points>
+
     <Headline 
       color="blue"
       text="Getting out of the Tarpit" />
-    
-    <Points title="Tarpit #1">
-      <Point text="Our programs are bug filled" />
-      <Point text="Our programs are full of assumptions" />
-      <Point text="Our programs don't give us guarantees" />
+
+    <Points title="Difficulties in moving forward">
+      <Point text="We are fickle" />
+      <Point text="We are afraid to learn" />
+      <Point text="We are obsessed with easiness" />
     </Points>
+
+    <Headline
+      text="Idris" />
+
+    <Headline
+      text="What if types were first class?" />
+
+    <Headline
+      color="green"
+      text="What if our programs were proofs?" />
+
+    <Points title="How to get here?">
+      <Point text="Get rid of OOP" />
+      <Point text="Be rigorous" />
+      <Point text="Consider our assumptions" />
+      <Point text="Learn some math" />
+    </Points>
+
+    <Points title="Get a taste today">
+      <Point text="Type Driven Development" />
+      <Point text="Write some Haskell" />
+    </Points>
+
+    <Headline
+      text="Unison" />
+
+    <Headline
+      text="What if other machines were first class?" />
+
+    <Headline
+      color="blue"
+      text="What if our code was immutable?" />
 
     <Code
-      title="Spot the bug"
-      lang="javascript"
+      title="Hello Unison"
+      lang="haskell"
       source={`
-        function fact(n) {
-          if (n === 0) {
-            return 1;
-          } else {
-            return n * fact(n - 1);
-          }
-        }
-        `}
+        -- alice : Node, bob : Node
+
+        do Remote
+          x = factorial 6
+          Remote.transfer alice
+          y = foo x -- happens on 'alice' node
+          Remote.transfer bob
+          pure (bar x y) -- happens on 'bob' node
+      `} 
     />
-
-    <Points title="How do we prevent this bug?">
-      <Point text="Exceptions?" />
-      <Point text="Maybe/Optional?" />
-      <Point text="Be Better?" />
-    </Points>
-
-    <Headline 
-      text="Idris Demo" />
-
 
     <BlankSlide />
 
