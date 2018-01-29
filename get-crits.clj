@@ -22,16 +22,17 @@
     name
     (str name punct)))
 
-(defn get-entry-info [line]
+(defn get-entry-info [category line]
   (let [[_ name punct description] 
         (re-find #"^[0-9]+\. (.*?)\s*([.,\/#!$%?\^&\*;:{}=\-_`~()]+)\s*(.*?)$" line)]
     {:name (determine-punctuation name punct)
-     :description description}))
+     :description description
+     :category category}))
 
 (defn get-entries [category]
   (->> category
        (drop 1)
-       (map get-entry-info)))
+       (map (partial get-entry-info category))))
 
 (defn get-category-info [category]
   (let [name (get-category-name category)
