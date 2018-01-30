@@ -27,37 +27,6 @@
 
 
 
-(comment
- (def g
-  {:unmatched [:validate :exception]
-   :validate [:exception :inventory]
-   :exception [:validate :shipToState]
-   :inventory [:exception :validate :reassign]
-   :reassign [:exception :shipToBuyer]
-   :shipToState [:validate]
-   :shipToBuyer [:archive]
-   :archive []}))
-
-
-
-(def g
-  (-> {}
-      (--> :CounterRelease [:Released-at-Counter :Exception])
-      (--> :Exception [:Ship-to-State])
-      (--> :Inventory [:Exception :Reassign :Ship-to-Seller])
-      (--> :Pre-Receipt [:Validate])
-      (--> :Reassign [:Exception :Ship-to-Buyer :CounterRelease])
-      (--> :Ship-to-Buyer [:Shipped-to-Buyer :Exception])
-      (--> :Ship-to-Seller [:Shipped-to-Seller :Exception])
-      (--> :Unmatched [:Validate])
-      (--> :Validate [:Inventory :Exception])
-      (--> :Verify [:Unmatched :Validate])
-      (--> :Shipped-to-State [:Validate])
-      (--> :Ship-to-State [:Shipped-to-State :Exception])
-      (--> :Shipped-to-Buyer [:Archive])
-      (--> :Shipped-to-Seller [:Archive])
-      (--> :Released-at-Counter [:Archive])))
-
 (spit "fsm.dot" (fsmviz/generate-image g "example-map"))
 
 (comment (def g 
