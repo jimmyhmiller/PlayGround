@@ -22,21 +22,21 @@
     name
     (str name punct)))
 
-(defn get-entry-info [category line]
+(defn get-entry-info [category-name line]
   (let [[_ name punct description] 
         (re-find #"^[0-9]+\. (.*?)\s*([.,\/#!$%?\^&\*;:{}=\-_`~()]+)\s*(.*?)$" line)]
     {:name (determine-punctuation name punct)
-     :description description
-     :category category}))
+     :type category-name
+     :description description}))
 
-(defn get-entries [category]
+(defn get-entries [category-name category]
   (->> category
        (drop 1)
-       (map (partial get-entry-info category))))
+       (map (partial get-entry-info category-name))))
 
 (defn get-category-info [category]
   (let [name (get-category-name category)
-        entries (get-entries category)]
+        entries (get-entries name category)]
     {name entries}))
 
 (defn get-major-sections [categories]
@@ -57,3 +57,4 @@
 (def file-location "/Users/jimmy/Downloads/criticalhits.txt")
 
 (main file-location)
+
