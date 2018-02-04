@@ -102,8 +102,8 @@
 
 (defn compile [expr]
   (match [expr]
-         [_ (partial = true)] TRUE
-         [_ (partial = false)] FALSE
+         [_ true?] TRUE
+         [_ false?] FALSE
          [_ symbol?] expr
          [_ number?] (church-numerals expr)
          ('if cond t f) (compile `(~cond (~'fn [] ~t) (~'fn [] ~f)))
@@ -125,12 +125,11 @@
          (f exp1 exp2) (compile `((~f ~exp1) ~exp2))))
 
 (def fib 
-  (compile '(letrec
-             [fib (fn [n] 
-                    (if (= n 0)
-                      1
-                      (* n (fib (- n 1)))))]
-             (fib 5))))
+  (compile '(let [x 2]
+              (* x (+ x (- 2 (+ x 3)))))))
+
+(defn lambda->num [lambda]
+  ((lambda inc) 0))
 
 (((eval fib) inc) 0)
 

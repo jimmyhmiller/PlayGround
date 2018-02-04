@@ -1,5 +1,9 @@
-(require '[experiment-spec.match :refer 
+(require '[experiment-spec.match :refer
            [match make-helper eval-many]])
+
+
+
+(require '[experiment-spec.compiler :refer [compile lambda->num]])
 
 (refer-clojure :exclude [eval])
 
@@ -29,7 +33,7 @@
    [var symbol?] (lookup env var)
    ('clj thing) (resolve thing)
    ('def var val) (add-global var (eval val env))
-   ('let var va body) (eval body 
+   ('let [var val] body) (eval body 
                                 (add-var env var (eval val env)))
    ('if pred t f) (if (eval pred env)
                     (eval t env)
@@ -54,6 +58,13 @@
  (def / ((clj comp) (clj float) (clj /)))
  (def + (clj +))
  (def - (clj -))
+ (def > (clj >))
+ (def = (clj =))
  ;end------std-lib----
+ (println "hello world"))
 
- (println (- (/ 10 20) (+ 3 4))))
+
+
+(lambda->num (eval (compile (let [x 2] (+ x 2))) {}))
+
+(lambda->num (eval (compile '(let [x 2] (* x (+ 2 (* x 10))))) {}))
