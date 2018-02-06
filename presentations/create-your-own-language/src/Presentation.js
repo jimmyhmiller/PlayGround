@@ -248,9 +248,15 @@ export default () =>
     <Headline 
       text="Incidental Complexity" />
 
-    <Headline 
-      color="green"
-      text="What if our code was data?" />
+    <Headline
+      color="blue"
+      text="Why does this matter?" />
+
+    <Points title="Take Aways">
+      <Point text="Our languages are too complicated" />
+      <Point text="We ignore the foundations" />
+      <Point text="Programming is beautiful" />
+    </Points>
 
     <BlankSlide />
 
