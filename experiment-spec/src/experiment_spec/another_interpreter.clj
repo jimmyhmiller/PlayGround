@@ -8,7 +8,7 @@
   (match [expr]
          [n number?] n
          [b boolean?] b
-         ('+ x y) (+ (zzevals x) (eval y))))
+         ('+ x y) (+ (eval x) (eval y))))
 
 
 (eval '(+ 2 (+ 2 2)))
