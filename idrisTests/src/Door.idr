@@ -1,18 +1,17 @@
-  data DoorState = DoorOpen | DoorClosed
+data Door = Opened | Closed
 
-  data DoorCmd : Type -> DoorState -> DoorState -> Type where
-       Open : DoorCmd () DoorClosed DoorOpen
-       Close : DoorCmd () DoorOpen DoorClosed
-       Knock : DoorCmd () DoorClosed DoorClosed
+data DoorCmd : Type -> Door -> Door-> Type where
+     Open : DoorCmd () Closed Opened
+     Close : DoorCmd () Opened Closed
+     Knock : DoorCmd () Closed Closed
 
-       Pure : ty -> DoorCmd ty state state
-       (>>=) : DoorCmd a state1 state2 ->
-               (a -> DoorCmd b state2 state3) ->
-               DoorCmd b state1 state3
+     Pure : a -> DoorCmd a state state
+     (>>=) : DoorCmd a state1 state2 -> 
+       (a -> DoorCmd b state2 state3) -> 
+       DoorCmd b state1 state3
 
 
-
-  doorProg : DoorCmd () DoorClosed DoorClosed
-  doorProg = do Knock
-                Open
-                Close
+doorProg : DoorCmd () Closed Closed
+doorProg = do Knock
+              Open
+              Close
