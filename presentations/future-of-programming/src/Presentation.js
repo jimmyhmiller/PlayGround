@@ -163,7 +163,7 @@ const Presentation = ({ children }) =>
   </Spectacle>
 
 
-export default () =>
+export default () => (
   <Presentation>
     <Headline 
       size={2} 
@@ -265,6 +265,25 @@ export default () =>
       `} 
     />
 
+    <Headline
+      text="Eve" />
+    
+    <Headline
+      color="blue"
+      size={4}
+      text="What if we were immediately connected to our creations?" />
+
+    <Headline
+      text="What if our code was distributed by default?" />
+
+    <Headline
+      color="green"
+      text="What if it otook an order of magnitude less code?" />
+
+    <Headline
+      text="What if anyone could program?" />
+
     <BlankSlide />
 
   </Presentation>
+)

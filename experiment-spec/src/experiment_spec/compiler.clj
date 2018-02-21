@@ -120,19 +120,26 @@
          ('letrec [f lam] body) (compile`(~'let [~f (~Y (~'fn [~f] ~lam))] ~body))
          (fn [] exp) `(~'fn [_#] ~(compile exp))
          (fn [v] exp) `(~'fn [~v] ~(compile exp))
+         (fn [v y] exp) `(~'fn [~v] (~'fn [~y] ~(compile exp)))
          (f) (compile `(~(compile f) ~VOID))
          (f exp) `(~(compile f) ~(compile exp))
          (f exp1 exp2) (compile `((~f ~exp1) ~exp2))))
 
-(def fib 
-  (compile '(let [x 2]
-              (* x (+ x (- 2 (+ x 3)))))))
+(def fact
+  (compile '(letrec [fact (fn [n]
+                            (if (= n 0)
+                              1
+                              (* n (fact (- n 1)))))]
+                    (fact 10))))
 
 (defn lambda->num [lambda]
   ((lambda inc) 0))
 
-(((eval fib) inc) 0)
+(((eval fact) inc) 0)
 
-
-
+(defn ->js [expr]
+  (match [expr]
+         [s symbol?] (name s)
+         ('fn [x] body) (str "function (" (->js x) ") { return " (->js body) " }")
+         (f x) (str (->js f) "(" (->js x) ")")))
 
