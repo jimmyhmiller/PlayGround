@@ -13,17 +13,11 @@ syntax if = function (ctx) {
   let _else = ctx.next();
   let falseBlock = ctx.contextify(ctx.next().value)
 
-  let falseCase;
-  let falseBody = falseBlock.next()
-  console.log(isKeyword( falseBody), unwrap(falseBody).value)
-  if (isKeyword(falseBody) && unwrap(falseBody).value === 'if') {
-    falseCase = falseBody.expand('expr').value;
-  } else if (isKeyword(falseBody) && unwrap(falseBody).value === 'return') {
-    falseCase =falseBlock.expand('expr').value;
-  }
+  let _return = falseBlock.next()
+  let falseValue = falseBlock.next().value
   
 
-  return #`IF(${pred}, () => ${trueCase}, () => ${falseCase})()`;
+  return #`IF(${pred}, () => ${trueCase}, () => ${falseValue})()`;
 }
 
 TRUE = (t, f) => t;
@@ -35,11 +29,7 @@ function thing () {
     if (TRUE) {
         return 3;
     } else {
-       return if (FALSE) {
-            return 3;
-        } else {
-            return 2;
-        }
+      return 2;
     }
 }
 
