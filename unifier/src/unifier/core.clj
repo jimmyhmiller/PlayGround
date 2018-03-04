@@ -43,9 +43,6 @@
     var-map
     nil))
 
-(defn lookup [var var-map]
-  (walk-var-binding var var-map))
-
 (defn unify-many 
   ([] {})
   ([x y & xys]
@@ -61,7 +58,7 @@
 
 (defmethod substitute clojure.lang.Symbol [x var-map]
   (if (logic-variable? x)
-    (let [var (lookup x var-map)]
+    (let [var (walk-var-binding x var-map)]
       (if (logic-variable? var)
         ::failed
         var))
@@ -78,9 +75,6 @@
     (if (some #(= % ::failed) (flatten subbed))
       ::failed
       (into {} (map (partial into []) subbed)))))
-
-(into {} '((:age 26)))
-
 
 (defmethod substitute :default [x var-map]
   x)
@@ -103,6 +97,26 @@
 
 (defn query [facts select qs]
   (set (map #(substitute select %) (process-query qs facts))))
+
+(defn match-1 [coll m v]
+  (if-let [map (unify m coll {})]
+    (substitute v map)
+    ::failed))
+
+(defn match* [coll m v & mvs]
+  (if (empty? mvs)
+    (match-1 coll m v)
+    (let [potential-match (match-1 coll m v)]
+      (if (= potential-match ::failed)
+        (apply match* (cons coll mvs))
+        potential-match))))
+
+(defmacro match [coll m v & mvs]
+  (let [quoted-mvs (map (fn [x] `(quote ~x)) mvs)]
+    `(match* ~coll (quote ~m) (quote ~v) ~@quoted-mvs)))
+
+(match [1 2 3]
+       [?x ?y ?z] {:x ?x :y ?y :z ?z})
 
 (def facts
   [[1 :age 26]
@@ -130,3 +144,6 @@
 (query facts 
        {:name '?name}
        query3)
+
+
+

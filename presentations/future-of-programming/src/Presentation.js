@@ -278,7 +278,7 @@ export default () => (
 
     <Headline
       color="green"
-      text="What if it otook an order of magnitude less code?" />
+      text="What if it took an order of magnitude less code?" />
 
     <Headline
       text="What if anyone could program?" />
