@@ -20,6 +20,7 @@ import preloader from "@jimmyhmiller/spectacle/lib/utils/preloader";
 
 const images = {
   me: require("./images/me.jpg"),
+  victor: require("./images/victor.jpg"),
 };
 
 preloader(images);
@@ -69,13 +70,13 @@ class Dark extends React.Component {
 // Spectacle needs a ref
 const withSlide = Comp => class WithSlide extends React.Component {
   render() {
-    const { noSlide=false, slide: Slide = Dark, ...props } = this.props;
+    const { noSlide=false, slide: Slide = Dark, maxWidth, ...props } = this.props;
     
     if (noSlide) {
       return <Comp {...props} />
     }
     return (
-      <Slide>
+      <Slide maxWidth={maxWidth}>
         <Comp {...props} />
       </Slide>
     )
@@ -155,6 +156,17 @@ const TwoColumn = withSlide(({ left, right, title }) =>
   </div>
 )
 
+const ImageWithTitle = withSlide(({ title, image, color, size, height }) => 
+  <div>
+    <Headline 
+      noSlide
+      size={size}
+      color={color}
+      text={title} />
+    <Image height={height} src={image} />
+  </div> 
+)
+
 const Presentation = ({ children }) => 
   <Spectacle theme={theme}>
     <Deck controls={false} style={{display: 'none'}} transition={["slide"]} transitionDuration={0} progress="none">
@@ -208,16 +220,6 @@ export default () => (
       <Point text="It takes way too much code to accomplish anything" />
     </Points>
 
-    <Headline 
-      color="blue"
-      text="Getting out of the Tarpit" />
-
-    <Points title="Difficulties in moving forward">
-      <Point text="We are fickle" />
-      <Point text="We are afraid to learn" />
-      <Point text="We are obsessed with easiness" />
-    </Points>
-
     <Headline
       text="Idris" />
 
@@ -227,6 +229,113 @@ export default () => (
     <Headline
       color="green"
       text="What if our programs were proofs?" />
+
+    <Headline
+      color="blue"
+      text="What if all assumptions were code?" />
+
+    <Code
+      title="Idris"
+      lang="haskell"
+      source={`
+        -- terrible function
+        first : List Int -> Int
+        first [] = error "Can't take first of empty list"
+        first (x :: xs) = x
+      `} 
+    />
+
+    <Code
+      title="Idris"
+      lang="haskell"
+      source={`
+        -- better function
+        first : List Int -> Maybe Int
+        first [] = Nothing
+        first (x :: xs) = Just x
+      `} 
+    />
+
+    <Code
+      title="Idris"
+      lang="haskell"
+      source={`
+        -- even better function
+        first : Vect (S n) Int -> Int
+        first (x :: xs) = x
+      `} 
+    />
+
+    <Code
+      title="Idris"
+      lang="haskell"
+      source={`
+        -- terrible function
+        indexOf : (n : Int) -> 
+                  (coll : List Int) -> Int
+
+        indexOf 1 [0,2,1] => 2
+        indexOf 3 [0,2,1] => runtime error || -1?
+      `} 
+    />
+
+    <Code
+      title="Idris"
+      lang="haskell"
+      source={`
+        -- better function
+        indexOf : (n : Int) -> 
+                  (coll : List Int) -> Maybe Int
+
+        indexOf 1 [0,2,1] => Just 2
+        indexOf 3 [0,2,1] => Nothing
+      `} 
+    />
+
+    <Code
+      title="Idris"
+      lang="haskell"
+      source={`
+        -- even better function
+        indexOf : (n : Int) -> 
+                  (coll : List Int) -> 
+                  {auto prf : Elem n coll} -> Nat
+
+        indexOf 1 [0,2,1] => 2
+        indexOf 3 [0,2,1] => compile-time error
+      `} 
+    />
+
+    <Code
+      title="Guarantee State Transitions"
+      lang="haskell"
+      source={`
+        data Door = Opened | Closed
+
+        data DoorCmd : Type -> Door -> Door -> Type where
+             Open : DoorCmd () Closed Opened
+             Close : DoorCmd () Opened Closed 
+             Knock : DoorCmd () Closed Closed 
+
+             ...
+      `}
+    />
+
+    <Code
+      title="Guarantee State Transitions"
+      lang="haskell"
+      source={`
+        doorProg : DoorCmd () Closed Closed
+        doorProg = do Knock
+                      Open
+                      Knock -- Doesn't compile
+                      Close
+        `}
+    />
+
+    <Headline
+      color="blue"
+      text="Code that writes itself" />
 
     <Points title="How to get here?">
       <Point text="Get rid of OOP" />
@@ -265,6 +374,47 @@ export default () => (
       `} 
     />
 
+
+    <Code
+      title="Hello Unison"
+      lang="haskell"
+      source={`
+        -- alice : Node, bob : Node
+
+        do Remote
+          x = 643fd234 6
+          Remote.transfer alice
+          y = 543gf433 x -- happens on 'alice' node
+          Remote.transfer bob
+          pure (223bn456 x y) -- happens on 'bob' node
+      `} 
+    />
+
+    <Code
+      title="Nodes are Data"
+      lang="haskell"
+      source={`
+        alias KeyValue k v = Index Node (Index k v)
+        alias ServiceDiscovery = KeyValue Name [Node]
+        alias DistributedQueue v = KeyValue Topic Queue
+      `}
+    />
+
+    <Points title="Services are libraries">
+      <Point text="Kafka as a library" />
+      <Point text="Redis as a library" />
+      <Point text="Postgres as a library" />
+      <Point text="etc..." />
+    </Points>
+
+    <Headline
+      color="blue"
+      text="Serialization is gone" />
+
+    <Headline
+      color="green"
+      text="Microservice are no longer needed" />
+
     <Headline
       text="Eve" />
     
@@ -278,10 +428,24 @@ export default () => (
 
     <Headline
       color="green"
-      text="What if it took an order of magnitude less code?" />
+      text="What if everything required an order of magnitude less code?" />
 
     <Headline
       text="What if anyone could program?" />
+
+    <ImageWithTitle
+      height={500}
+      size={2}
+      title="Bret Victor"
+      image={images.victor} />
+
+
+
+    <Points title="Difficulties in moving forward">
+      <Point text="We are fickle" />
+      <Point text="We are afraid to learn" />
+      <Point text="We are obsessed with easiness" />
+    </Points>
 
     <BlankSlide />
 
