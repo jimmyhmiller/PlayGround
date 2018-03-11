@@ -439,8 +439,6 @@ export default () => (
       title="Bret Victor"
       image={images.victor} />
 
-
-
     <Points title="Difficulties in moving forward">
       <Point text="We are fickle" />
       <Point text="We are afraid to learn" />

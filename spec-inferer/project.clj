@@ -7,4 +7,6 @@
                  [spec-provider "0.4.9"]
                  [metosin/spec-tools "0.4.0"]
                  [codax "1.0.3-SNAPSHOT"]
-                 [com.rpl/specter "1.0.3"]])
+                 [com.rpl/specter "1.0.3"]
+                 [cheshire "5.8.0"]
+                 [org.clojure/test.check "0.9.0"]])

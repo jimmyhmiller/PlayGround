@@ -1,6 +1,7 @@
 (ns blocking-queue.core
   (:require [clj-time.core :refer [from-now minutes now seconds]]
-            [clj-time.coerce :refer [to-long]])
+            [clj-time.coerce :refer [to-long]]
+            [clojure.pprint :as pprint])
   (:import [java.util.concurrent Delayed TimeUnit DelayQueue]
            [java.lang Comparable]
            [java.util Date]))
@@ -41,31 +42,28 @@
 (defn hot-fix []
   (swap! service assoc :up? true))
 
-
-
 (def successful-messages (atom []))
-(add-watch successful-messages :success (fn [k r os ns] (println (last ns))))
+
+(add-watch successful-messages :success 
+           (fn [k r os ns] (locking *out*
+                             (pprint/pprint (last ns)))))
 
 (defn add-success-message [message]
   (swap! successful-messages conj message))
 
 
-
-
 (def fail-messages (atom []))
+
 (defn add-fail-message [message]
   (swap! fail-messages conj message))
-
-
-
 
 
 (defn accept-message [q]
   (let [message (.take q)
         can-delay (get delays (.delay message) false)]
     (Thread/sleep 1000)
-    (cond 
-      (:up? @service) (add-success-message (:n (.data message)))
+    (cond
+      (:up? @service) (add-success-message message)
       can-delay (.put q (delay-more message))
       :else (add-fail-message (:n (.data message))))
     (recur q)))
