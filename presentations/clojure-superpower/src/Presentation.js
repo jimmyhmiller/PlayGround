@@ -215,18 +215,75 @@ export default () =>
 
     <Headline 
       color="green"
-      size={4}
+      size={1}
       text="We are obsessed with ease" />
-    
-    <Points title="Example Headlines">
-      <Point text="How to build a blog in 15 minutes with Rails" />
-      <Point text="Learn X in Y" />
-      <Point text="React and Redux are a joke right?" />
-    </Points>
 
     <Headline
       color="blue"
       text="Focus on ease causes productivity decrease" />
+
+    <Headline
+      text="Productivity in the Long Term Matters" />
+
+    <Headline
+      color="cyan"
+      text="Only Simplicity Scales" />
+
+    <Points title="Clojure - The Highlights" size={4}>
+      <Point text="Immutable" />
+      <Point text="Functional" />
+      <Point text="Practical" />
+      <Point text="Hosted" />
+    </Points>
+
+    <Code
+      title="Intro To Clojure"
+      lang="clojure"
+      source={`
+        1 ; Integer
+        1.0 ; Double
+        true ; Boolean
+        "thing" ; String
+        :name ; Keyword
+        x ; Symbol
+      `} />
+
+
+    <Code
+      title="Intro To Clojure"
+      lang="clojure"
+        source={`
+        [1 2 3] ; Vector
+        (1 2 3) ; List
+        {:a 3 :b "adf"} ; Map
+        #{1 2 3} ; Set
+      `} />
+
+    <Code
+      title="Code is Data"
+      lang="clojure"
+      source={`
+        (defn add [x y]
+          (+ x y))
+
+        (add 3 5)
+      `} />
+
+    <Code
+      title="Code is Data"
+      lang="clojure"
+      source={`
+        (->>
+         (for
+           [x (range 100 1000)
+            y (range 100 1000)
+              :while (< y x)]
+           (* x y))
+         (filter palindrome?)
+         (apply max))
+
+      `} />
+
 
 
     <BlankSlide />
