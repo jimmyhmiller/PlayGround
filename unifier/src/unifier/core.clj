@@ -61,7 +61,7 @@
     (let [var (walk-var-binding x var-map)]
       (if (logic-variable? var)
         ::failed
-        var))
+        (substitute var var-map)))
     x))
 
 (defmethod substitute clojure.lang.Sequential [x var-map]
@@ -114,6 +114,15 @@
 (defmacro match [coll m v & mvs]
   (let [quoted-mvs (map (fn [x] `(quote ~x)) mvs)]
     `(match* ~coll (quote ~m) (quote ~v) ~@quoted-mvs)))
+
+(defn gen-var []
+  (symbol (str "?" (gensym))))
+
+(substitute '?z
+            (unify-many 
+             '?x 'a
+             '?b 'b
+             '?z '[?x -> ?b]))
 
 (match [1 2 3]
        [?x ?y ?z] {:x ?x :y ?y :z ?z})

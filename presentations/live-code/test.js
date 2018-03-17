@@ -36,7 +36,7 @@ try {
 
 	
 
-	const { head, emptyList, prepend, tail, isEmpty, map, filter, list, not, myExample, myFunc, zero, one, inc, dec, toNum, add, sub, fromNum, mult, nth, countDown, length, isTrue, showAll } = require('./list.js')
+	const { head, emptyList, prepend, tail, isEmpty, map, filter, list, not, myExample, myFunc, zero, one, inc, dec, toNum, add, sub, fromNum, mult, nth, countDown, length, isTrue, last, showAll } = require('./list3.js')
 
 
 	
@@ -63,7 +63,6 @@ try {
 			if (!showAll && e && e.message && e.message.endsWith("is not a function")) {
 				return;
 			}
-			console.log('got here')
 			console.log(`${highlight(test)} ${red("❌")}`)
 			if ( !(e instanceof assert.AssertionError)) {
 				console.log(e.message)
@@ -88,6 +87,7 @@ try {
 	  "head(tail(prepend(1, prepend(2, emptyList())))) === 2",
 	  "isTrue(isEmpty(emptyList()))",
 	  "isTrue(not(isEmpty(prepend(1, emptyList()))))",
+  	  "last(prepend(1, prepend(2, emptyList()))) === 2",
 	  "toNum(zero) === 0",
 	  "toNum(one) === 1",
 	  "toNum(inc(one)) === 2",
@@ -96,6 +96,7 @@ try {
 	  "toNum(add(fromNum(2), fromNum(2))) === 4",
 	  "toNum(sub(fromNum(2), fromNum(2))) === 0",
 	  "toNum(mult(fromNum(3), fromNum(2))) === 6",
+	  "toNum(last(countDown(fromNum(5)))) === 0",
 	  "toNum(nth(countDown(fromNum(5)), fromNum(5))) === 0",
   	  "toNum(length(countDown(fromNum(100)))) === 101",
 	]
@@ -108,7 +109,7 @@ try {
 			console.log("")
 			myTests.forEach(runTest)
 
-			const contents = fs.readFileSync('list.js', 'utf8');
+			const contents = fs.readFileSync('list3.js', 'utf8');
 			printDivider()
 			console.log(bold(underline("OUTPUT")))
 			console.log("")

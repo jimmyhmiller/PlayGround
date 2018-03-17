@@ -21,6 +21,17 @@ import preloader from "@jimmyhmiller/spectacle/lib/utils/preloader";
 const images = {
   me: require("./images/me.jpg"),
   victor: require("./images/victor.jpg"),
+  chris: require("./images/chris.jpg"),
+  lighttable: require("./images/lighttable.png"),
+  eve1: require("./images/eve1.png"),
+  eve2: require("./images/eve2.png"),
+  eve3: require("./images/eve3.png"),
+  eve4: require("./images/eve4.png"),
+  eve5: require("./images/eve5.gif"),
+  eve6: require("./images/eve6.png"),
+  eve7: require("./images/eve7.png"),
+  eve8: require("./images/eve8.png"),
+  eve9: require("./images/eve9.png"),
 };
 
 preloader(images);
@@ -396,7 +407,7 @@ export default () => (
       source={`
         alias KeyValue k v = Index Node (Index k v)
         alias ServiceDiscovery = KeyValue Name [Node]
-        alias DistributedQueue v = KeyValue Topic Queue
+        alias DistributedQueue = KeyValue Topic Queue
       `}
     />
 
@@ -419,25 +430,91 @@ export default () => (
       text="Eve" />
     
     <Headline
+      textAlign="left"
       color="blue"
-      size={4}
       text="What if we were immediately connected to our creations?" />
 
     <Headline
+      textAlign="left"
+      color="cyan"
+      text="What if the order of our code didn't matter?" />
+
+    <Headline
+      textAlign="left"
       text="What if our code was distributed by default?" />
 
     <Headline
+      textAlign="left"
       color="green"
       text="What if everything required an order of magnitude less code?" />
 
     <Headline
+      textAlign="left"
       text="What if anyone could program?" />
+
+    <Headline
+      color="blue"
+      text="The Journey" />
 
     <ImageWithTitle
       height={500}
       size={2}
       title="Bret Victor"
       image={images.victor} />
+
+    <ImageWithTitle
+      height={500}
+      size={2}
+      title="Chris Granger"
+      image={images.chris} />
+
+    <ImageWithTitle
+      color="blue"
+      height={500}
+      size={2}
+      title="Light Table"
+      image={images.lighttable} />
+
+    <Points title="Light Table">
+      <Point text="Existing Languages" />
+      <Point text="Live Programming" />
+      <Point text="Highly Extensible" />
+    </Points>
+
+    <Headline
+      text="Not Far Enough" />
+
+    <Headline
+      color="blue"
+      text="What is Eve?" />
+
+    <ImageSlide src={images.eve1} />
+    <ImageSlide src={images.eve2} />
+    <ImageSlide src={images.eve3} />
+    <ImageSlide src={images.eve4} />
+    <ImageSlide src={images.eve5} />
+    <ImageSlide src={images.eve6} />
+    <ImageSlide src={images.eve7} />
+    <ImageSlide src={images.eve8} />
+    <ImageSlide src={images.eve9} />
+
+
+    <Points title="Eve - The Highlights">
+      <Point text="Logic Programming Language" />
+      <Point text="No Data Types" />
+      <Point text="No Scope" />
+      <Point text="Based on Extensive Research" />
+    </Points>
+
+    <Points title="Dedalus">
+      <Point text="Based on Datalog - a relation query language" />
+      <Point text="Reimplemented hadoop in 1000 lines of code" />
+      <Point text="Prove Consistency" />
+      <Point text="Answer why and why not questions" />
+    </Points>
+
+    <Headline
+      text="Eve is Dead" />
 
     <Points title="Difficulties in moving forward">
       <Point text="We are fickle" />

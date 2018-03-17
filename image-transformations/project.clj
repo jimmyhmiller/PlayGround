@@ -6,5 +6,5 @@
   :dependencies [[org.clojure/clojure "1.8.0"]
                  [com.github.wendykierp/JTransforms "3.1"]
                  [net.mikera/imagez "0.12.0"]]
-  :main "image-transformations.core"
+  :main image-transformations.core
   :jvm-opts ["-Xmx16g"])
