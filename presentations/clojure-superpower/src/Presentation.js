@@ -69,13 +69,13 @@ class Dark extends React.Component {
 // Spectacle needs a ref
 const withSlide = Comp => class WithSlide extends React.Component {
   render() {
-    const { noSlide=false, slide: Slide = Dark, ...props } = this.props;
+    const { noSlide=false, slide: Slide = Dark, maxWidth, ...props } = this.props;
     
     if (noSlide) {
       return <Comp {...props} />
     }
     return (
-      <Slide>
+      <Slide maxWidth={maxWidth}>
         <Comp {...props} />
       </Slide>
     )
@@ -95,12 +95,13 @@ const BlankSlide = withSlide(() => {
   return <span />;
 })
 
-const Code = withSlide(({ source, lang, title }) => {
+const Code = withSlide(({ source, lang, title, textSize, headlineSize }) => {
   const spaces = detectIndent(source);
   return (
     <div>
-      <Headline noSlide textAlign="left" text={title} />
-      <CodePane textSize={20} source={removeIndent(spaces, source)} lang={lang} />
+      <Headline size={headlineSize} noSlide textAlign="left" text={title} />
+      <CodePane textSize={textSize || 20} 
+      source={removeIndent(spaces, source)} lang={lang} />
     </div>
   )
 })
@@ -246,8 +247,8 @@ export default () =>
         "thing" ; String
         :name ; Keyword
         x ; Symbol
-      `} />
-
+      `}
+    />
 
     <Code
       title="Intro To Clojure"
@@ -257,7 +258,8 @@ export default () =>
         (1 2 3) ; List
         {:a 3 :b "adf"} ; Map
         #{1 2 3} ; Set
-      `} />
+      `}
+    />
 
     <Code
       title="Code is Data"
@@ -267,7 +269,8 @@ export default () =>
           (+ x y))
 
         (add 3 5)
-      `} />
+      `}
+    />
 
     <Code
       title="Code is Data"
@@ -281,8 +284,189 @@ export default () =>
            (* x y))
          (filter palindrome?)
          (apply max))
+      `}
+    />
 
-      `} />
+    <Points title="Clojure - Value Proposition" size={4}>
+      <Point text="Live Programming" />
+      <Point text="Concurrent Programming" />
+      <Point text="Scalable Dynamic Programming" />
+      <Point text="Expressive Programming" />
+    </Points>
+
+    <Headline text="Live Programming" />
+    {
+    // Intial example
+    // Exponential Backoff
+    // IOS and Android
+    // Server?
+    }
+
+    <Headline text="Concurrent Programming" />
+
+    <Points title="Concurrent Programming">
+      <Point text="Immutability Makes Concurrency Trivial" />
+      <Point text="No Locks" />
+      <Point text="Single Threaded Concurrency (even in browser)" />
+      <Point text="Actually Practical" />
+    </Points>
+
+    {
+    // PHash
+    // 10000 processes
+    }
+
+    <Headline text="Scalable Dynamic Programming" />
+
+    <Points title="Clojure Spec">
+      <Point text="Contract/Validation System" />
+      <Point text="Generate Examples" />
+      <Point text="Specs for Functions" />
+      <Point text="Tests for Free" />
+    </Points>
+    {
+    // Simple Example
+    // Generate Examples
+    // Generate example fn calls
+    // Auto gen tests
+    }
+
+    <Headline text="Expressive Programming" />
+
+    <Points title="Code that Writes Code">
+      <Point text="Implement Features as Library" />
+      <Point text="Express the Problem Your Way" />
+      <Point text="No More Waiting Years" />
+    </Points>
+
+    <Code
+      lang="javascript"
+      title="Async Await"
+      source={`
+        async function getUserAndAddress(id) {
+          const user = await getUser(id);
+          const address = await getAddress(user);
+          return merge(user, address);
+        }
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Async Let"
+      source={`
+        (defn getUserAndAddress [id]
+          (async-let [user (getUser id)
+                      address (getAddress user)]
+            (merge user address)))
+      `}
+    />
+
+    <Code
+      maxWidth={1100}
+      lang="clojure"
+      title="Async Await"
+      source={`
+        (defmacro async-let
+          [bindings & body]
+          (->> (reverse (partition 2 bindings))
+               (reduce (fn [acc [l r]]
+                         \`(bind (promise ~r) (fn [~l] ~acc)))               
+                       \`(promise (do ~@body)))))
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Pattern Matching"
+      source={`
+        (require '[clojure.core.match :refer [match]])
+
+        (doseq [n (range 1 101)]
+          (println
+            (match [(mod n 3) (mod n 5)]
+              [0 0] "FizzBuzz"
+              [0 _] "Fizz"
+              [_ 0] "Buzz"
+              :else n)))
+      `}
+    />
+
+    <Code
+      lang="go"
+      title="CSP"
+      source={`
+        func search() {
+            c := make(chan Result)
+            go func() { c <- First(query, Web1, Web2) } ()
+            go func() { c <- First(query, Image1, Image2) } ()
+            go func() { c <- First(query, Video1, Video2) } ()
+            timeout := time.After(80 * time.Millisecond)
+            for i := 0; i < 3; i++ {
+                select {
+                case result := <-c:
+                    results = append(results, result)
+                case <-timeout:
+                    return results
+                }
+            }
+            return results
+        }
+      `}
+    />
+
+    <Code
+      maxWidth={1200}
+      lang="clojure"
+      title="CSP"
+      source={`
+        (defn search [query]
+          (let [c (chan)
+                t (timeout 80)]
+            (go (>! c (<! (fastest query web1 web2))))
+            (go (>! c (<! (fastest query image1 image2))))
+            (go (>! c (<! (fastest query video1 video2))))
+            (go (loop [i 0 ret []]
+                  (if (= i 3)
+                    ret
+                    (recur (inc i) (conj ret (alt! [c t] ([v] v)))))))))
+      `}
+    />
+
+    <Points title="Other Features" size={4}>
+      <Point text="Static Types" />
+      <Point text="Logic Programming" />
+      <Point text="Sql as Data Structures" />
+      <Point text="Destructuring" />
+      <Point text="Elm Style Error Messages" />
+      <Point text="Algebraic Data Types" />
+    </Points>
+
+
+    <Points title="Where Does Clojure Shine?" size={4}>
+      <Point text="Systems That Deal With Data" />
+      <Point text="Complex Business Logic" />
+      <Point text="User Interfaces" />
+      <Point text="Third Party Library Interop" />
+      <Point text="Rapid Development" />
+    </Points>
+
+    <Points title="Companies Using Clojure in Prod" size={4}>
+      <Point text="Facebook" />
+      <Point text="Netflix" />
+      <Point text="Apple" />
+      <Point text="Amazon" />
+      <Point text="Walmart" />
+    </Points>
+
+    <Points title="Learning Clojure" size={4}>
+      <Point text="Clojure for the Brave and True" />
+      <Point text="Joy of Clojure" />
+      <Point text="SICP" />
+    </Points>
+
+
+
 
 
 
