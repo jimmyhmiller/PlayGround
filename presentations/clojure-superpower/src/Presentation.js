@@ -12,7 +12,7 @@ import {
   List,
   Slide,
   Spectacle,
-  Text
+  Text,
 } from "@jimmyhmiller/spectacle";
 
 
@@ -164,23 +164,6 @@ const Presentation = ({ children }) =>
   </Spectacle>
 
 
-// # Interpreter
-
-// 1. Numbers
-// 2. Booleans
-// 3. Strings
-// 4. Addition
-// 5. Zero?
-// 6. If
-// 7. Let
-// 8. Function Application
-// 9. Function Declaration
-// 10. Globals
-// 11. Hello World
-// 12. Interop
-// 13. Call-by-need
-
-
 export default () =>
   <Presentation>
     <Headline 
@@ -296,7 +279,7 @@ export default () =>
 
     <Headline text="Live Programming" />
     {
-    // Intial example
+    // Initial example
     // Exponential Backoff
     // IOS and Android
     // Server?
@@ -318,12 +301,26 @@ export default () =>
 
     <Headline text="Scalable Dynamic Programming" />
 
+    <Points title="Rich Immutable Datastrutures">
+      <Point text="List, Vectors, Maps, Sets, etc." />
+      <Point text="100+ functions for operating on them" />
+      <Point text="Records to define types" />
+    </Points>
+
+
+    <Points title="Clojure Protocols">
+      <Point text="Similar to Interfaces" />
+      <Point text="Everything in the language is built on it" />
+      <Point text="Provides means for first class extension" />
+    </Points>
+
     <Points title="Clojure Spec">
       <Point text="Contract/Validation System" />
       <Point text="Generate Examples" />
       <Point text="Specs for Functions" />
       <Point text="Tests for Free" />
     </Points>
+
     {
     // Simple Example
     // Generate Examples
@@ -420,6 +417,8 @@ export default () =>
       lang="clojure"
       title="CSP"
       source={`
+        (use 'core.async)
+
         (defn search [query]
           (let [c (chan)
                 t (timeout 80)]

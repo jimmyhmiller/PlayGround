@@ -36,7 +36,7 @@ try {
 
 	
 
-	const { head, emptyList, prepend, tail, isEmpty, map, filter, list, not, myExample, myFunc, zero, one, inc, dec, toNum, add, sub, fromNum, mult, nth, countDown, length, isTrue, last, showAll } = require('./list3.js')
+	const { head, emptyList, prepend, tail, isEmpty, map, filter, list, not, myExample, myFunc, zero, one, inc, dec, toNum, add, sub, fromNum, mult, nth, countDown, length, isTrue, last, showAll } = require('./list5.js')
 
 
 	
@@ -50,12 +50,7 @@ try {
 
 	const runTest = (test) => {
 		try {
-			const value = eval(`${test}`);
-			if (typeof value === "function") {
-				assert(value(true, false))
-			} else {
-				assert(value)
-			}
+			const value = eval(`assert(${test})`);
 			console.log(`${highlight(test)} ${green("✔")}`)
 		}
 		catch (e) {
@@ -109,7 +104,7 @@ try {
 			console.log("")
 			myTests.forEach(runTest)
 
-			const contents = fs.readFileSync('list3.js', 'utf8');
+			const contents = fs.readFileSync('list5.js', 'utf8');
 			printDivider()
 			console.log(bold(underline("OUTPUT")))
 			console.log("")

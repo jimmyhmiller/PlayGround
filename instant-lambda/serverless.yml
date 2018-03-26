@@ -1,0 +1,16 @@
+service: instant-lambda
+
+provider:
+  name: aws
+  runtime: nodejs4.3
+
+functions:
+  echo:
+    cljs: instant-lambda.core/echo
+    events:
+      - http:
+          path: echo
+          method: post
+
+plugins:
+  - serverless-cljs-plugin

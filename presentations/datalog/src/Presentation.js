@@ -337,7 +337,7 @@ export default () =>
         (q '{:find [?name]
              :in [$]
              :where [[?e :person/name ?name]]}
-           (as-of db yesterday)
+           (as-of db yesterday))
       `}
     />
 
@@ -350,7 +350,7 @@ export default () =>
         (q '{:find [?name]
              :in [$]
              :where [[?e :person/name ?name]]}
-           (history db)
+           (history db))
       `}
     />
 
@@ -362,7 +362,7 @@ export default () =>
         (q '{:find [?name]
              :in [$]
              :where [[?e :person/name ?name]]}
-           (with db changes)
+           (with db changes))
       `}
     />
 
