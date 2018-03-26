@@ -235,13 +235,16 @@ export default () => (
       text="Idris" />
 
     <Headline
+      textAlign="left"
       text="What if types were first class?" />
 
     <Headline
+      textAlign="left"
       color="green"
       text="What if our programs were proofs?" />
 
     <Headline
+      textAlign="left"
       color="blue"
       text="What if all assumptions were code?" />
 
@@ -364,9 +367,11 @@ export default () => (
       text="Unison" />
 
     <Headline
+      textAlign="left"
       text="What if other machines were first class?" />
 
     <Headline
+      textAlign="left"
       color="blue"
       text="What if our code was immutable?" />
 
@@ -424,7 +429,7 @@ export default () => (
 
     <Headline
       color="green"
-      text="Microservice are no longer needed" />
+      text="Microservices are no longer needed" />
 
     <Headline
       text="Eve" />
