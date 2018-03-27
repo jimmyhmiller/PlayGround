@@ -223,7 +223,7 @@ export default () =>
     </Points>
 
     <Points title="Logics">
-      <Point text="Intuitionistic Logic = Programming" />
+      <Point text="Intuitionistic Logic = Regular Programming" />
       <Point text="Modal Logic = Distributed Programming" />
       <Point text="Temporal Logic = Reactive Programming" />
       <Point text="Linear Logic = Memory Safe Programming" />
