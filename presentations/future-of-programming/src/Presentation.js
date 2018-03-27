@@ -524,7 +524,7 @@ export default () => (
     <Points title="Difficulties in moving forward">
       <Point text="We are fickle" />
       <Point text="We are afraid to learn" />
-      <Point text="We are obsessed with easiness" />
+      <Point text="We are obsessed with ease" />
     </Points>
 
     <BlankSlide />
