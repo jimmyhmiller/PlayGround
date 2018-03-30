@@ -5,9 +5,8 @@
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :plugins [[lein-environ "1.1.0"]]
   :dependencies [[org.clojure/math.numeric-tower "0.0.2"]
-                 [org.clojure/clojure "1.9.0-alpha11"]
-                 [org.clojure/spec.alpha "0.1.123"]
-                 [org.clojure/core.async "0.2.385"]
+                 [org.clojure/clojure "1.9.0"]
+                 [org.clojure/core.async "0.4.474"]
                  [graphql-clj "0.1.18"]
                  [org.clojure/test.check "0.9.0"]
                  [juxt/dirwatch "0.2.3"]
@@ -26,4 +25,5 @@
                  [com.faunadb/faunadb-java "1.0.0"]
                  [aleph "0.4.3"]
                  [fsmviz "0.1.2"]
-                 [vvvvalvalval/scope-capture "0.1.4"]])
+                 [vvvvalvalval/scope-capture "0.1.4"]
+                 [expound "0.5.0"]])
