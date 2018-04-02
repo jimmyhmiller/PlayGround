@@ -15,6 +15,7 @@ import {
   Text,
 } from "@jimmyhmiller/spectacle";
 
+import CodeSlide from 'spectacle-code-slide';
 
 import preloader from "@jimmyhmiller/spectacle/lib/utils/preloader";
 
@@ -86,10 +87,18 @@ const detectIndent = source =>
   source ? / +/.exec(source)[0].length : 0;
 
 const removeIndent = (indent, source) =>
-  source.split("\n")
+  removeFirst(source.split("\n"))
         .map(s => s.substring(indent, s.length))
         .join("\n")
 
+const removeFirst = (arr) => {
+  arr.shift();
+  return arr;
+}
+
+const autoRemove = (source) => {
+  return removeIndent(detectIndent(source), source)
+}
 
 const BlankSlide = withSlide(() => {
   return <span />;
@@ -271,21 +280,76 @@ export default () =>
     />
 
     <Points title="Clojure - Value Proposition" size={4}>
-      <Point text="Live Programming" />
       <Point text="Concurrent Programming" />
       <Point text="Scalable Dynamic Programming" />
       <Point text="Expressive Programming" />
+      <Point text="Live Programming" />
     </Points>
 
-    <Headline text="Live Programming" />
-    {
-    // Initial example
-    // Exponential Backoff
-    // IOS and Android
-    // Server?
-    }
-
     <Headline text="Concurrent Programming" />
+    
+
+    <Code
+      lang="clojure"
+      title="Clojure Concurrency"
+      source={`
+        (defn long-blocking-operation [x]
+          (Thread/sleep 10000))
+
+        (long-blocking-operation 1)
+        ; blocks for 10 seconds
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Concurrency"
+      source={`
+        (future (long-blocking-operation))
+        ; returns instantly
+      `}
+    />
+
+
+    <Code
+      lang="clojure"
+      title="Concurrency"
+      source={`
+        (deref (future (long-blocking-operation)))
+        ; waits until complete
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Concurrency"
+      source={`
+        (deref (future (long-blocking-operation)) 1000 0)
+        ; blocks for 1 sec then returns 0
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Concurrency"
+      source={`
+        (time (count (map wait-100ms (range 100))))
+
+        "Elapsed time: 10260.159812 msecs"
+        100
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Concurrency"
+      source={`
+        (time (count (pmap wait-100ms (range 100))))
+
+        "Elapsed time: 413.617127 msecs"
+        100
+      `}
+    />
 
     <Points title="Concurrent Programming">
       <Point text="Immutability Makes Concurrency Trivial" />
@@ -307,12 +371,142 @@ export default () =>
       <Point text="Records to define types" />
     </Points>
 
+    <Code
+      lang="clojure"
+      title="Collections"
+      source={`
+        {:a :b} ; map
+        [:a :b] ; vector
+        (:a :b) ; list
+        #{:a :b} ; set
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Collection Functions"
+      source={`
+        (->> (range 100)
+             (filter even?)
+             (map (fn [x] (+ x 2)))
+             (reduce +))
+        ; 2550
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Collection Functions"
+      source={`
+        (->> (repeatedly #(rand-int 5))
+             (take 100)
+             (frequencies))
+
+        ; {1 19, 4 21, 2 20, 3 17, 0 23}
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Collection Functions"
+      source={`
+        (def users 
+          [{:id 1 :name "foo"} 
+           {:id 2 :name "bar"} 
+           {:id 3 :name "baz"}])
+
+        (->> users
+            (juxt :id identity)
+            (into {}))
+
+        ;  {1 {:name "foo", :id 1}, 
+        ;   2 {:name "bar", :id 2}, 
+        ;   3 {:name "baz", :id 3}}
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Records"
+      source={`
+        (defrecord Person [first-name last-name])
+
+        (defrecord Address [street city state zip])
+      `}
+    />
+
 
     <Points title="Clojure Protocols">
       <Point text="Similar to Interfaces" />
       <Point text="Everything in the language is built on it" />
       <Point text="Provides means for first class extension" />
     </Points>
+
+
+    <Code
+      lang="clojure"
+      title="Protocols"
+      source={`
+        (defprotocol Speak
+          (speak [this]))
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Protocols"
+      source={`
+        (defrecord Bird []
+          Speak
+          (speak [this] "tweet"))
+
+        (defrecord Dog []
+          Speak
+          (speak [this] "bark"))
+
+        (speak (Bird.)) ; tweet
+        (speak (Dog.)) ; bark
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Protocols"
+      source={`
+        (defprotocol ToJson
+          (toJson [this]))
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        (extend-protocol ToJson
+          java.lang.Number
+          (toJson [this] (JsonPrimitive. this))
+          
+          java.lang.String
+          (toJson [this] (JsonPrimitive. this))
+          
+          java.lang.Boolean
+          (toJson [this] (JsonPrimitive. this))
+          
+          clojure.lang.IPersistentVector
+          (toJson [this] 
+              (reduce (fn [arr x]
+                        (doto arr (.add (toJson x))))
+                      (JsonArray.) this))
+
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`       
+        (str (toJson [1 2 "1234" true]))
+        ; "[1,2,\\"1234\\",true]"
+      `}
+    />
 
     <Points title="Clojure Spec">
       <Point text="Contract/Validation System" />
@@ -431,6 +625,15 @@ export default () =>
                     (recur (inc i) (conj ret (alt! [c t] ([v] v)))))))))
       `}
     />
+
+    <Headline text="Live Programming" />
+    {
+    // Initial example
+    // Exponential Backoff
+    // IOS and Android
+    // Server?
+    }
+
 
     <Points title="Other Features" size={4}>
       <Point text="Static Types" />
