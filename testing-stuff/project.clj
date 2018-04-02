@@ -17,6 +17,8 @@
                  [org.clojure/java.data "0.1.1"]
                  [clj-http "3.5.0"]
                  [cheshire "5.7.1"]
+                 [javax.json/javax.json-api "1.1.2"]
+                 [com.google.code.gson/gson "2.8.2"]
                  [speculate "0.3.0-SNAPSHOT"]
                  [clj-time "0.13.0"]
                  [clj-webdriver "0.7.2"]
@@ -26,4 +28,5 @@
                  [aleph "0.4.3"]
                  [fsmviz "0.1.2"]
                  [vvvvalvalval/scope-capture "0.1.4"]
-                 [expound "0.5.0"]])
+                 [expound "0.5.0"]
+                 [com.clojure-goes-fast/clj-java-decompiler "0.1.0"]])
