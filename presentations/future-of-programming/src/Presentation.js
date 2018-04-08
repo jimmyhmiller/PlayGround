@@ -512,13 +512,15 @@ export default () => (
     </Points>
 
     <Points title="Dedalus">
-      <Point text="Based on Datalog - a relation query language" />
+      <Point text="Based on Datalog - a relational query language" />
       <Point text="Reimplemented hadoop in 1000 lines of code" />
       <Point text="Prove Consistency" />
       <Point text="Answer why and why not questions" />
     </Points>
 
+
     <Headline
+      size={1}
       text="Eve is Dead" />
 
     <Points title="Difficulties in moving forward">
@@ -526,6 +528,10 @@ export default () => (
       <Point text="We are afraid to learn" />
       <Point text="We are obsessed with ease" />
     </Points>
+
+    <Headline
+      color="blue"
+      text="We are just at the beginning" />
 
     <BlankSlide />
 

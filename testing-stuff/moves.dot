@@ -1,0 +1,16 @@
+0: digraph {
+1: rankdir=LR;
+2: start->action2 [label=":attack",style=null,constraint=true,dir=null];
+3: start->action2 [label=":move",style=null,constraint=true,dir=null];
+4: start->finish [label=":full-withdrawal",style=null,constraint=true,dir=null];
+5: action2->finish [label=":attack",style=null,constraint=true,dir=null];
+6: action2->finish [label=":move",style=null,constraint=true,dir=null];
+7: action2->action3 [label=":free-action",style=null,constraint=true,dir=null];
+8: action3->finish [label=":move",style=null,constraint=true,dir=null];
+9: action3->start [label=":restart",style=null,constraint=true,dir=null];
+10: start [shape=circle,label="",style=filled,fillcolor="#000000", height=0.25,width=0.25
+11:           ];
+12: finish [shape=doublecircle,label="finish",style=null,fillcolor="null", height=null,width=null
+13:           ];
+14: 
+15: }
