@@ -52,9 +52,11 @@
                           value# :sc.ep/value
                           {cs-id# :sc.cs/id 
                            expr# :sc.cs/expr} :sc.ep/code-site}]
-                      (deliver p# {:error (find-code-with-errors [e-id# cs-id#] expr#)
-                                   :value value#
-                                   :cause (when error# (:cause (Throwable->map error#)))}))}
+                      (deliver p#
+                               {:error (find-code-with-errors [e-id# cs-id#] expr#)
+                                :value value#
+                                :cause (when error# (:cause (Throwable->map error#)))
+                                :meta-info 1}))}
                    ~expr)
        (catch Exception e#))
      (deref p#)))

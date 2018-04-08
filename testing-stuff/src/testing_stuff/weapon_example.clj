@@ -6,84 +6,6 @@
             [clojure.core.async :as async]))
 
 
-(defn long-blocking-operation [x]
-  (Thread/sleep 10000))
-
-(deref (future (long-blocking-operation 1)) 1000 0)
-
-(->> (repeatedly #(rand-int 5))
-     (take 100)
-     (frequencies))
-
-(defprotocol Speak
-  (speak [this]))
-
-(defrecord Bird []
-  Speak
-  (speak [this] "tweet"))
-
-(defrecord Dog []
-  Speak
-  (speak [this] "bark"))
-
-(speak (Bird.)) ; tweet
-(speak (Dog.)) ; bark
-
-
-
-
-(import '(com.google.gson Gson JsonPrimitive JsonObject JsonArray))
-
-(defprotocol ToJson
-  (toJson [this]))
-
-(extend-protocol ToJson
-  java.lang.Number
-  (toJson [this] (JsonPrimitive. this))
-  
-  java.lang.String
-  (toJson [this] (JsonPrimitive. this))
-  
-  java.lang.Boolean
-  (toJson [this] (JsonPrimitive. this))
-  
-  clojure.lang.IPersistentVector
-  (toJson [this] 
-    (reduce (fn [arr x]
-              (doto arr (.add (toJson x))))
-            (JsonArray.) this))
-  
-  clojure.lang.IPersistentMap
-  (toJson [this] 
-    (let [obj (JsonObject.)]
-      (doseq [[key value] this]
-        (.add obj (name key) (toJson value)))
-      obj)))
-
-
-(str (toJson [1 2 "1234" true]))
-
-
-(toJson "asdf")
-
-(use '[clojure.pprint :only [print-table]])
-
-(require '[clojure.reflect :as r])
-
-
-(require '[clj-java-decompiler.core :refer [decompile]])
-
-(->> (range 100)
-     (filter even?)
-     (map (fn [x] (+ x 2)))
-     (reduce +))
-
-
-(defn wait-100ms [x]
-  (Thread/sleep 100)
-  x)
-
-(time (count (pmap wait-100ms (range 100))))
 
 
 
@@ -93,16 +15,20 @@
 (s/def ::weapon #{:sword :bow :staff})
 (s/def ::class #{:wizard :ranger :rogue})
 (s/def ::name (s/and string? not-empty))
+(s/def ::strength (s/int-in 0 10))
 
 (s/def ::player 
   (s/keys :req [::class 
                 ::weapon 
-                ::name]))
+                ::name
+                ::strength]))
 
 (s/fdef describe-weapon
         :args (s/cat :player ::player)
         :ret string?)
 
+
+(s/exercise-fn `describe-weapon)
 
 (defn describe-weapon [{:keys [::weapon ::class]}]
   (match [weapon class]
@@ -111,6 +37,23 @@
          [w c] (str "That's a nice " 
                     (name w) " for a " 
                     (name c))))
+
+(s/fdef attack
+        :args (s/cat :weapon (s/keys :req [::weapon]))
+        :ret string?)
+
+(defmulti attack ::weapon)
+
+(defmethod attack :sword [_]
+  "Swing the sword!")
+
+(defmethod attack :staff [_]
+  "This is a magical staff")
+
+(defmethod attack :bow [_]
+  "Hits from far way")
+
+(attack {::weapon :sword})
 
 (defn fetch-player [id]
   (Thread/sleep 100)

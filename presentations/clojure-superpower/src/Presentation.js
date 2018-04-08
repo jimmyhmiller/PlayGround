@@ -104,8 +104,8 @@ const BlankSlide = withSlide(() => {
   return <span />;
 })
 
-const Code = withSlide(({ source, lang, title, textSize, headlineSize }) => {
-  const spaces = detectIndent(source);
+const Code = withSlide(({ source, lang, title, textSize, headlineSize, indent }) => {
+  const spaces = indent || detectIndent(source);
   return (
     <div>
       <Headline size={headlineSize} noSlide textAlign="left" text={title} />
@@ -206,50 +206,81 @@ export default () =>
       text="Clojure"
       subtext="A Programming Superpower" />
 
+
     <Headline 
-      color="green"
-      size={1}
-      text="We are obsessed with ease" />
+      size={2} 
+      caps={false}
+      subtextSize={2}
+      textAlign="left"
+      text="Clojure"
+      subtext="A Computational Lens" />
 
-    <Headline
-      color="blue"
-      text="Focus on ease causes productivity decrease" />
-
-    <Headline
-      text="Productivity in the Long Term Matters" />
-
-    <Headline
-      color="cyan"
-      text="Only Simplicity Scales" />
-
-    <Points title="Clojure - The Highlights" size={4}>
-      <Point text="Immutable" />
-      <Point text="Functional" />
-      <Point text="Practical" />
-      <Point text="Hosted" />
+    <Points title="How Clojure Changed My Perspective" size={4}>
+      <Point text="On Programming" />
+      <Point text="On OOP" />
+      <Point text="On Static Typing" />
+      <Point text="On Dynamic Typing" />
     </Points>
 
-    <Code
-      title="Intro To Clojure"
-      lang="clojure"
+
+
+    <Headline 
+      size={1}
+      textAlign="left"
+      color="yellow"
+      text="On Programming" />
+
+    <Headline 
+      color="green"
+      size={2}
+      caps={false}
+      textAlign="left"
+      text="Syntax isn't THAT important" />
+
+      <Code
+      title="Syntax Wars"
+      lang="javascript"
       source={`
-        1 ; Integer
-        1.0 ; Double
-        true ; Boolean
-        "thing" ; String
-        :name ; Keyword
-        x ; Symbol
+        public class Thing 
+        {
+
+        }
+
+        public class Thing {
+
+        }
       `}
     />
 
+    <Points title="Syntax Wars" size={4}>
+      <Point text="Significant Whitespace" />
+      <Point text="Semicolons" />
+      <Point text="Trailing Commas" />
+      <Point text="Lining up args" />
+    </Points>
+
+    <Headline
+      color="blue"
+      text="Syntax Doesn't need to be beautiful" />
+
+    <Headline
+      text="Clojure doesn't have beautiful syntax" />
+
+    <Headline
+      text="Clojure's syntax is the best" />
+
     <Code
-      title="Intro To Clojure"
+      title="Datatypes"
       lang="clojure"
-        source={`
-        [1 2 3] ; Vector
-        (1 2 3) ; List
-        {:a 3 :b "adf"} ; Map
-        #{1 2 3} ; Set
+      source={`
+        1 ; numbers
+        "jimmy" ; string
+        :thing ; keyword
+        x ; symbol
+        true ; boolean
+        (1 2 3) ; list
+        [1 2 3] ; vector
+        {:a 1 :b 3} ; map
       `}
     />
 
@@ -257,10 +288,12 @@ export default () =>
       title="Code is Data"
       lang="clojure"
       source={`
+        (def x 2)
+
         (defn add [x y]
           (+ x y))
 
-        (add 3 5)
+        (add 2 3) ; 5
       `}
     />
 
@@ -279,91 +312,143 @@ export default () =>
       `}
     />
 
-    <Points title="Clojure - Value Proposition" size={4}>
-      <Point text="Concurrent Programming" />
-      <Point text="Scalable Dynamic Programming" />
-      <Point text="Expressive Programming" />
-      <Point text="Live Programming" />
+
+    <Code
+      title="Code is Data"
+      lang="clojure"
+      indent={2}
+      source={`
+        Verb     Nouns     
+         │      ┌─────┐    
+         │      │     │    
+         ▼      ▼     ▼    
+       (def     x     2)   
+       ▲               ▲   
+       └───────────────┘   
+             List          
+      `}
+    />
+
+    <Headline 
+      color="green"
+      size={2}
+      textAlign="left"
+      text="Clojure has no syntax wars" />
+
+    <Headline 
+      color="blue"
+      size={2}
+      textAlign="left"
+      text="Languages don't need a lot of features" />
+
+    <Headline
+      text="Language features are bad" />
+
+    <Headline
+      size={2}
+      subtextSize={2}
+      textAlign="left"
+      text="ES6/ES7/ESNEXT are wonderful"
+      subtext="AND A DISASTER" />
+
+    <Headline
+      textAlign="left"
+      color="green"
+      text="Our languages are stagnant" />
+
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="We shouldn't have to wait a decade" />
+
+    <Headline
+      textAlign="left"
+      text="Clojure enables first class extension" />
+
+
+    <Code
+      lang="javascript"
+      title="Async Await"
+      source={`
+        async function getUserAndAddress(id) {
+          const user = await getUser(id);
+          const address = await getAddress(user);
+          return merge(user, address);
+        }
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      title="Async Let"
+      source={`
+        (defn getUserAndAddress [id]
+          (async-let [user (getUser id)
+                      address (getAddress user)]
+            (merge user address)))
+      `}
+    />
+
+
+    <Code
+      maxWidth={1100}
+      lang="clojure"
+      title="Async Await"
+      source={`
+        (defmacro async-let
+          [bindings & body]
+          (->> (reverse (partition 2 bindings))
+               (reduce (fn [acc [l r]]
+                         \`(bind (promise ~r) (fn [~l] ~acc)))               
+                       \`(promise (do ~@body)))))
+      `}
+    />
+
+
+    <Points title="Other Features" size={4}>
+      <Point text="Destructuring" /> 
+      <Point text="Pattern Matching" /> 
+      <Point text="Logic Programming" />
+      <Point text="Elm Style Error Messages" />
+      <Point text="CSP à la go-lang" />
+      <Point text="Static Types" />
+      <Point text="Algebraic Data Types" />
     </Points>
 
-    <Headline text="Concurrent Programming" />
-    
+    <Headline
+      size={1}
+      color="yellow"
+      textAlign="left"
+      text="On OOP" />
 
-    <Code
-      lang="clojure"
-      title="Clojure Concurrency"
-      source={`
-        (defn long-blocking-operation [x]
-          (Thread/sleep 10000))
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Disclaimer - Nuance is Lost" />
 
-        (long-blocking-operation 1)
-        ; blocks for 10 seconds
-      `}
-    />
+    <Headline
+      textAlign="left"
+      text="OOP Failed to Deliver" />
 
-    <Code
-      lang="clojure"
-      title="Concurrency"
-      source={`
-        (future (long-blocking-operation))
-        ; returns instantly
-      `}
-    />
-
-
-    <Code
-      lang="clojure"
-      title="Concurrency"
-      source={`
-        (deref (future (long-blocking-operation)))
-        ; waits until complete
-      `}
-    />
-
-    <Code
-      lang="clojure"
-      title="Concurrency"
-      source={`
-        (deref (future (long-blocking-operation)) 1000 0)
-        ; blocks for 1 sec then returns 0
-      `}
-    />
-
-    <Code
-      lang="clojure"
-      title="Concurrency"
-      source={`
-        (time (count (map wait-100ms (range 100))))
-
-        "Elapsed time: 10260.159812 msecs"
-        100
-      `}
-    />
-
-    <Code
-      lang="clojure"
-      title="Concurrency"
-      source={`
-        (time (count (pmap wait-100ms (range 100))))
-
-        "Elapsed time: 413.617127 msecs"
-        100
-      `}
-    />
-
-    <Points title="Concurrent Programming">
-      <Point text="Immutability Makes Concurrency Trivial" />
-      <Point text="No Locks" />
-      <Point text="Single Threaded Concurrency (even in browser)" />
-      <Point text="Actually Practical" />
+    <Points title="OOP promises" size={4}>
+      <Point text="Code Reusablity" />
+      <Point text="Easier Reasoning" />
+      <Point text="Scalable" />
+      <Point text="Reduces Coupling" />
     </Points>
 
-    {
-    // PHash
-    // 10000 processes
-    }
+    <Points title="OOP Realities" size={4}>
+      <Point text="Classes are Concretions" />
+      <Point text="Encapsulation Obscures" />
+      <Point text="Boilerplate Explodes" />
+      <Point text="Code Becomes Fragile" />
+    </Points>
 
-    <Headline text="Scalable Dynamic Programming" />
+    <Points title="Functional Alternative" size={4}>
+      <Point text="Pure Functions" />
+      <Point text="Immutable Data" />
+      <Point text="Composablity" />
+    </Points>
 
     <Points title="Rich Immutable Datastrutures">
       <Point text="List, Vectors, Maps, Sets, etc." />
@@ -416,7 +501,7 @@ export default () =>
            {:id 3 :name "baz"}])
 
         (->> users
-            (juxt :id identity)
+            (map (juxt :id identity))
             (into {}))
 
         ;  {1 {:name "foo", :id 1}, 
@@ -425,15 +510,70 @@ export default () =>
       `}
     />
 
+
     <Code
       lang="clojure"
-      title="Records"
+      title="Concurrency for Free"
       source={`
-        (defrecord Person [first-name last-name])
+        (time (count (map wait-100ms (range 100))))
 
-        (defrecord Address [street city state zip])
+        "Elapsed time: 10260.159812 msecs"
+        100
       `}
     />
+
+    <Code
+      lang="clojure"
+      title="Concurrency for Free"
+      source={`
+        (time (count (pmap wait-100ms (range 100))))
+
+        "Elapsed time: 413.617127 msecs"
+        100
+      `}
+    />
+
+    <Headline
+      size={1}
+      textAlign="left"
+      color="yellow"
+      text="On Static Typing" />
+
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Disclaimer: Static Types are Great" />
+
+    <Headline
+      color="green"
+      textAlign="left"
+      text="Not as needed in a Functional Language" />
+
+    <Headline
+      textAlign="left"
+      text="Limit Expressiveness" />
+
+    <Headline
+      textAlign="left"
+      text="Clojure Spec as an Alternative" />
+
+
+    <Headline
+      size={1}
+      textAlign="left"
+      color="yellow"
+      text="On Dynamic Typing" />
+
+
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Dynamic Languages Lack Structure" />
+
+    <Headline
+      color="green"
+      textAlign="left"
+      text="Dynamic Languages Lack Abstraction" />
 
 
     <Points title="Clojure Protocols">
@@ -508,141 +648,33 @@ export default () =>
       `}
     />
 
-    <Points title="Clojure Spec">
-      <Point text="Contract/Validation System" />
-      <Point text="Generate Examples" />
-      <Point text="Specs for Functions" />
-      <Point text="Tests for Free" />
-    </Points>
-
-    {
-    // Simple Example
-    // Generate Examples
-    // Generate example fn calls
-    // Auto gen tests
-    }
-
-    <Headline text="Expressive Programming" />
-
-    <Points title="Code that Writes Code">
-      <Point text="Implement Features as Library" />
-      <Point text="Express the Problem Your Way" />
-      <Point text="No More Waiting Years" />
-    </Points>
-
-    <Code
-      lang="javascript"
-      title="Async Await"
-      source={`
-        async function getUserAndAddress(id) {
-          const user = await getUser(id);
-          const address = await getAddress(user);
-          return merge(user, address);
-        }
-      `}
-    />
 
     <Code
       lang="clojure"
-      title="Async Let"
+      title="Multi Methods"
       source={`
-        (defn getUserAndAddress [id]
-          (async-let [user (getUser id)
-                      address (getAddress user)]
-            (merge user address)))
+        (defmulti area :shape)
+
+        (defmethod area :circle [{:keys [:radius]}]
+          (* Math/PI (Math/pow radius 2)))
+
+        (defmethod area :square [{:keys [:side]}]
+          (* side side))
+
+        (area {:shape :circle
+               :radius 2}) ; 12.566370614359172
+
+        (area {:shape :square
+               :side 5}) ; 25
       `}
     />
 
-    <Code
-      maxWidth={1100}
-      lang="clojure"
-      title="Async Await"
-      source={`
-        (defmacro async-let
-          [bindings & body]
-          (->> (reverse (partition 2 bindings))
-               (reduce (fn [acc [l r]]
-                         \`(bind (promise ~r) (fn [~l] ~acc)))               
-                       \`(promise (do ~@body)))))
-      `}
-    />
 
-    <Code
-      lang="clojure"
-      title="Pattern Matching"
-      source={`
-        (require '[clojure.core.match :refer [match]])
+    <Headline
+      color="green"
+      textAlign="left"
+      text="Live Coding" />
 
-        (doseq [n (range 1 101)]
-          (println
-            (match [(mod n 3) (mod n 5)]
-              [0 0] "FizzBuzz"
-              [0 _] "Fizz"
-              [_ 0] "Buzz"
-              :else n)))
-      `}
-    />
-
-    <Code
-      lang="go"
-      title="CSP"
-      source={`
-        func search() {
-            c := make(chan Result)
-            go func() { c <- First(query, Web1, Web2) } ()
-            go func() { c <- First(query, Image1, Image2) } ()
-            go func() { c <- First(query, Video1, Video2) } ()
-            timeout := time.After(80 * time.Millisecond)
-            for i := 0; i < 3; i++ {
-                select {
-                case result := <-c:
-                    results = append(results, result)
-                case <-timeout:
-                    return results
-                }
-            }
-            return results
-        }
-      `}
-    />
-
-    <Code
-      maxWidth={1200}
-      lang="clojure"
-      title="CSP"
-      source={`
-        (use 'core.async)
-
-        (defn search [query]
-          (let [c (chan)
-                t (timeout 80)]
-            (go (>! c (<! (fastest query web1 web2))))
-            (go (>! c (<! (fastest query image1 image2))))
-            (go (>! c (<! (fastest query video1 video2))))
-            (go (loop [i 0 ret []]
-                  (if (= i 3)
-                    ret
-                    (recur (inc i) (conj ret (alt! [c t] ([v] v)))))))))
-      `}
-    />
-
-    <Headline text="Live Programming" />
-    {
-    // Initial example
-    // Exponential Backoff
-    // IOS and Android
-    // Server?
-    }
-
-
-    <Points title="Other Features" size={4}>
-      <Point text="Static Types" />
-      <Point text="Logic Programming" />
-      <Point text="Sql as Data Structures" />
-      <Point text="Destructuring" />
-      <Point text="Elm Style Error Messages" />
-      <Point text="Algebraic Data Types" />
-    </Points>
 
 
     <Points title="Where Does Clojure Shine?" size={4}>

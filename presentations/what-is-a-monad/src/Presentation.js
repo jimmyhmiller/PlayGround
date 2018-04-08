@@ -230,8 +230,8 @@ export default () =>
           (selector) => selector(elem, list, false);
 
         const head = (list) => list((elem, list) => elem);
-
-        const tail = (list) => list((elem, list) => list);
+ƒ
+        const tail = (list) => list((elem, rest) => rest);
 
         const isEmpty = (list) => 
           list((elem, list, empty) => empty);
@@ -266,7 +266,7 @@ export default () =>
         for (i in coll1) {
           for (j in coll2) {
             for (k in coll3) {
-              list.append(i + j +k)
+              list.append(i + j + k)
             }
           }
         }

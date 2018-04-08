@@ -29,4 +29,8 @@
                  [fsmviz "0.1.2"]
                  [vvvvalvalval/scope-capture "0.1.4"]
                  [expound "0.5.0"]
-                 [com.clojure-goes-fast/clj-java-decompiler "0.1.0"]])
+                 [com.clojure-goes-fast/clj-java-decompiler "0.1.0"]
+                 [walmartlabs/datascope "0.1.1"]
+                 [com.zensols.gui/tabres "0.0.7"]
+                 [fsmviz "0.1.3"]
+                 [rhizome "0.2.9"]])
