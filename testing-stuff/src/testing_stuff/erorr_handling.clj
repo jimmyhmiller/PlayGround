@@ -1,6 +1,7 @@
 (ns testing-stuff.erorr-handling
   (:require [sc.api]
-            [clojure.walk :as walk]))
+            [clojure.walk :as walk]
+            [clojure.string :as string]))
 
 
 
@@ -42,7 +43,7 @@
                       (println arg))}
                    (+ 2 2))
 
-(defmacro find-error-expr [expr]
+(defmacro find-error-expr [expr name]
   `(let [p# (promise)]
      (try
        (sc.api/spy {:sc/spy-ep-pre-eval-logger identity
@@ -56,7 +57,8 @@
                                {:error (find-code-with-errors [e-id# cs-id#] expr#)
                                 :value value#
                                 :cause (when error# (:cause (Throwable->map error#)))
-                                :meta-info 1}))}
+                                :meta-info (meta (find-code-with-errors [e-id# cs-id#] expr#))
+                                :function (meta (var ~name))}))}
                    ~expr)
        (catch Exception e#))
      (deref p#)))
@@ -67,16 +69,55 @@
 
 (defmacro defn-debug [name args & body]
   `(defn ~name ~args
-    (find-error-expr ~@body)))
+    (find-error-expr ~@body ~name)))
 
-
-
-
-
-
+(meta (var complicated-math))
 
 (defn-debug complicated-math [x y z]
   (+ 2 3 (/ x 2) (/ x y (/ 2 z) 
                     (/ z x) (+ x y) (+ 2 (* x y)))))
 
 (complicated-math 1 3 0)
+
+(defn format-line [[line text]]
+  (if line
+    (str line "| " text)
+    (str "   " text)))
+
+(defn insert-at [n val vec]
+  (let [[before after] (split-at n vec)]
+    (concat before [val] after)))
+
+
+
+(defn point-to-form [column length]
+  [nil (string/join (concat (repeat column " ") (repeat length "^")))])
+
+(point-to-form 2 2)
+
+
+(defn code-frame [text line column length]
+  (let [lines 
+        (into [] (-> text
+                      (string/split #"\n")))
+        numbered-lines
+        (->> (range (- line 1) (+ line 4))
+             (map (fn [i] [i (get lines i)]))
+             (into []))
+        offset (- line (count numbered-lines))]
+    (str
+     (->> numbered-lines
+              (insert-at 4 (point-to-form column length))
+              
+              (map format-line)
+              (string/join "\n")))))
+
+(def current-file
+  (slurp "/Users/jimmy/Documents/Code/PlayGround/testing-stuff/src/testing_stuff/erorr_handling.clj"))
+
+(str "We found the following code caused a \"Divide by zero\" error"
+     "\n"
+     "\n"
+     (code-frame 
+      current-file 77 21 (count "(/ 2 z)")))
+

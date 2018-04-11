@@ -5,6 +5,7 @@
 * Redux Saga
 * Lisp Interpreter
 * Lambda Compiler
+* Unifier
 * Pattern Matcher
 * Object System
 * Type Inference

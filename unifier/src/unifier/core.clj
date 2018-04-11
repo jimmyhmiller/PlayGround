@@ -33,6 +33,9 @@
 (defmethod unify-terms [clojure.lang.Sequential clojure.lang.Sequential] [x y var-map]
   (reduce (fn [map [x' y']] (unify x' y' map)) var-map (map vector x y)))
 
+(defmethod unify-terms [clojure.lang.IPersistentMap clojure.lang.IPersistentMap] [x y var-map]
+  (unify-terms (seq x) (seq y) var-map))
+
 (defmethod unify-terms [java.lang.Number java.lang.Number] [x y var-map]
   (if (= x y)
     var-map
@@ -42,6 +45,8 @@
   (if (= x y)
     var-map
     nil))
+
+
 
 (defn unify-many 
   ([] {})
@@ -124,8 +129,7 @@
              '?b 'b
              '?z '[?x -> ?b]))
 
-(match [1 2 3]
-       [?x ?y ?z] {:x ?x :y ?y :z ?z})
+
 
 (def facts
   [[1 :age 26]
@@ -151,8 +155,8 @@
 
 
 (query facts 
-       {:name '?name}
-       query3)
+       '[?name1 ?name2]
+       query2)
 
 
 

@@ -21,7 +21,6 @@
    ::name "jimmy"
    ::class :warrior})
 
-
 (defn fetch-player [id]
   (Thread/sleep 100)
   (ffirst (s/exercise ::player 1)))
