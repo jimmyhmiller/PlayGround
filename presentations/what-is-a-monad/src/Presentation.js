@@ -213,10 +213,10 @@ export default () =>
 
     <Points title="Singly Linked List">
       <Point text="Supports head, tail, prepend, emptyList, isEmpty" />
-      <Point text="head(prepend(x, coll)) == x"  />
-      <Point text="tail(prepend(x, coll)) == coll" />
-      <Point text="isEmpty(emptyList) == true" />
-      <Point text="isEmpty(prepend(x, xs)) == false" />
+      <Point text="head(prepend(x, coll)) ≡ x"  />
+      <Point text="tail(prepend(x, coll)) ≡ coll" />
+      <Point text="isEmpty(emptyList )≡ true" />
+      <Point text="isEmpty(prepend(x, xs)) ≡ false" />
     </Points>
 
     <Code
@@ -282,7 +282,7 @@ export default () =>
           i <- coll1
           j <- coll2
           k <- coll3
-          return (i + j + k)
+          pure (i + j + k)
       `}
     />
 
@@ -309,7 +309,7 @@ export default () =>
           x <- promise1
           y <- promise2
           z <- promise3
-          return (x + y + z)
+          pure (x + y + z)
       `}
     />
 
@@ -335,7 +335,7 @@ export default () =>
           x <- foo
           y <- bar
           z <- baz
-          return (x + y + z)
+          pure (x + y + z)
       `}
     />
 
@@ -372,7 +372,7 @@ export default () =>
           foo <- getFoo
           bar <- getBar
           baz <- getBaz
-          return (foo + bar + baz)
+          pure (foo + bar + baz)
       `}
     />
 
@@ -563,7 +563,7 @@ export default () =>
         source={`
           interface Functor f => Applicative f where
             pure : a -> f a
-            ap : f (a -> b) -> f a -> f b
+            <*> : f (a -> b) -> f a -> f b
         `}
       />
 
@@ -571,15 +571,90 @@ export default () =>
         lang="haskell"
         source={`
           interface Applicative f => Monad f where
-            bind : f a -> (a -> f b) -> f b
+            (>>=) : f a -> (a -> f b) -> f b
         `}
       />
 
+      <Code
+        lang="haskell"
+        source={`
+          -- Functor Laws
+          map id x ≡ id
+          map (g . f) ≡ map g . map f
+
+          -- Applicative laws
+          pure id <*> v ≡ v                            
+          pure f <*> pure x ≡ pure (f x)               
+          u <*> pure y ≡ pure ($ y) <*> u              
+          pure (.) <*> u <*> v <*> w ≡ u <*> (v <*> w)
+
+          -- Monad Laws
+          (pure v) >>= f ≡ f v
+          m >>= pure ≡ m
+          (m >>= f) >>= g ≡ m >>= ( \\x -> (f x >>= g) )
+ 
+       `}
+      />
+
+    <Points title="Singly Linked List">
+      <Point text="Supports head, tail, prepend, emptyList, isEmpty" />
+      <Point text="head(prepend(x, coll)) ≡ x"  />
+      <Point text="tail(prepend(x, coll)) ≡ coll" />
+      <Point text="isEmpty(emptyList )≡ true" />
+      <Point text="isEmpty(prepend(x, xs)) ≡ false" />
+    </Points>
+
+    <Points title="A Monad">
+      <Point text="Supports map, pure, <*>, and >>=" />
+      <Point text="map id ≡ id" />
+      <Point text="map (g . f) ≡ map g . map f" />
+      <Point text="pure id <*> v ≡ v" />
+      <Point text="etc..." />
+    </Points>
+
+    <Headline
+      color="cyan"
+      textAlign="left"
+      text="Still not satisfying" />
 
 
+    <Headline
+      color="green"
+      textAlign="left"
+      text="Still one other way to define things" />
 
 
+    <Points title="A Linked list">
+      <Point text="An ordered collection" />
+      <Point text="Allows you to efficiently get first element" />
+      <Point text="Allows access to the rest of elements in collection" />
+      <Point text="Last element can be accessed in linear time." />
+    </Points>
 
+    <Points title="A Monad">
+      <Point text="..." />
+      <Point text="..." />
+      <Point text="..." />
+      <Point text="..." />
+    </Points>
+
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Monads have many purposes" />
+
+
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Let's Build Some" />
+
+
+    <Points title="Useful analogies">
+      <Point text="Box" />
+      <Point text="Railroad" />
+      <Point text="Computational Context" />
+    </Points>
 
 
 
