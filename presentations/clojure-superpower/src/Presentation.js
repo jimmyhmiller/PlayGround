@@ -669,13 +669,25 @@ export default () =>
       `}
     />
 
-
+  <Headline
+      color="blue"
+      textAlign="left"
+      text="All this is great but..." />
+ 
     <Headline
       color="green"
       textAlign="left"
       text="Live Coding" />
-
-
+  
+    <Points title="What I couldn't show" size={4}>
+      <Point text="Live Coding the Web" />
+      <Point text="Live Coding IOS and Android" />
+      <Point text="Live Coding Remote" />
+      <Point text="More Concurrency" />
+      <Point text="Generative Testing" />
+      <Point text="Time Traveling Database" />
+      <Point text="A Whole Lot More" />
+    </Points>
 
     <Points title="Where Does Clojure Shine?" size={4}>
       <Point text="Systems That Deal With Data" />

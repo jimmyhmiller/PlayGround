@@ -8,6 +8,7 @@ import Effect.File
 %hide Prelude.List.(++)
 
 
+%default total
 
 data Parser a = Parse (String -> List (a, String))
 
@@ -148,9 +149,9 @@ fullParse (Parse f) s = case f s of
 threewords : Parser (List String)
 threewords = do
   word1 <- word
-  spaces
+  spaces1
   word2 <- word
-  spaces
+  spaces1
   word3 <- word
   pure [word1, word2, word3]
   
@@ -262,11 +263,10 @@ double : Maybe String
 double = compile """
 (defn double (x) 
   (+ x x))
-(double 2)
-(defn identity (x)
-  x)
+
 (identity 3)
 """
+
 
 printCompile : Either String (Maybe String) -> IO ()
 printCompile (Left l) = putStr' l
