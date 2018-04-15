@@ -1,0 +1,19 @@
+# Notes on Abstraction
+
+I haven't really enjoyed talks I've heard from programmers about abstraction. It seems there is a lot of confusion and I'd love to try and examine it myself. I think having an account of abstraction would certainly be useful, though I worry there is no one account. I do think that what we call abstract is at least 2 or 3 different things, but perhaps we can pull these apart. To help me think about what abstract is, I will first talk about what it is not.
+
+##Cheng Lou's Proposal
+
+[Cheng Lou's talk](https://www.youtube.com/watch?v=mVVNJKv9esE&t=912s) on abstraction contrasts "abstract" with "useful". Something that is more abstract is less useful in the sense that that we can't "take it off the shelf" and use it. We must build on the abstraction in order to suit our concrete use case. Here abstract corresponds with "power". It isn't really clear what power here is supposed to be. It is actually defined in the talk in a seemingly circular way. But it seems from the rest of the talk that power has to do with having fewer constraints. Or to put it in a different way, a more abstract thing, supports gives you more space to cover more concrete use cases. 
+
+I don't think the talk is very clear, I have tried listening to it around 4 times now to try it get a more complete picture, but still the details confuse me. I think perhaps his most clear example is the discussion of build systems. He constrasts a declarative DSL build system with one that lets you just use functions. The declarative DSL would be considered less abstract, because it is more specialized, more constrained. The building system allowing you to use your own functions would be more abstract because it is more powerful, less constrained. The latter build system will cover more cases, but require more work to cover a particular concrete use case.
+
+So it would seem from the discussion in the talk that if something is more powerful, it is more abstract. Now their are two ways to take such a claim, as a technical definition or as a way to capture our intuitions. Let's explore the latter first. Let's compare two concepts in programming and decide which is more abstract than the other. For some elements, this may be rather difficult, but in general, it seems given the theory above which should be able to compare many elements. The two I'd like to compare are monads and functions.
+
+It would seem that on our intuitions, most people would agree that monads are more abstract than functions. In fact, it seems that *maybe* Cheng Lou agrees with this as well. In the talk he mentions Monads as one example of things that are "way too powerful". He calls Monads "too general to be popular". He even suggests we can see this by reasoning using his trees of abstractions. In a slide not presented in the talk he shows monads at the very top of a tree of abstraction.
+
+So it seems that Cheng Lou agrees with our intuition that monads are more abstract than functions, but yet, monads are clearly less powerful than functions. There are all sorts of things that may be expressed with functions that cannot be expressed by monads. In fact, monads just are functions constrained. So the definition above fails to capture our intuition properly. Likewise, if meant as a technical definition, it does not seem to be followed consistently, because it ought to conclude that monads are less abstract than functions.
+
+## Zach Tellman's Proposal
+
+I need to read elements of Clojure to actually understand this suggestion. I am not clear at all what the suggestion is supposed to be other than that it involves models, interfaces, and environments. It involves ignoring some details.
