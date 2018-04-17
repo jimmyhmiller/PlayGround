@@ -17,3 +17,8 @@ So it seems that Cheng Lou agrees with our intuition that monads are more abstra
 ## Zach Tellman's Proposal
 
 I need to read elements of Clojure to actually understand this suggestion. I am not clear at all what the suggestion is supposed to be other than that it involves models, interfaces, and environments. It involves ignoring some details.
+
+## Ways in which we talk about Abstraction
+
+We talk about something being abstract vs concrete. This to be borrowed from philosophical talk of abstract objects. We also talk about things being more or less abstract. This does not have connection with the philosophical terms. This may be based more on abstraction in art. A series of paintings may be more abstract, that is less representational. We talk about "abstracting over" some detail or other. We discuss ideas "in the abstract". We talk about "good abstractions" and "leaky abstractions". We discuss the "cost of a particular abstraction". We say that some things are "too abstract" or that something looks like "premature abstraction". We talk about data abstractions as well as abstract data types. We have abstract base classes. 
+

@@ -36,7 +36,7 @@ try {
 
 	
 
-	const { head, emptyList, prepend, tail, isEmpty, map, filter, list, not, myExample, myFunc, zero, one, inc, dec, toNum, add, sub, fromNum, mult, nth, countDown, length, isTrue, last, showAll } = require('./list5.js')
+	const { head, emptyList, prepend, tail, isEmpty, map, filter, list, not, myExample, myFunc, zero, one, inc, dec, toNum, add, sub, fromNum, mult, nth, countDown, length, isTrue, last, showAll } = require('./list6.js')
 
 
 	
@@ -104,7 +104,7 @@ try {
 			console.log("")
 			myTests.forEach(runTest)
 
-			const contents = fs.readFileSync('list5.js', 'utf8');
+			const contents = fs.readFileSync('list6.js', 'utf8');
 			printDivider()
 			console.log(bold(underline("OUTPUT")))
 			console.log("")
