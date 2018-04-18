@@ -1,6 +1,5 @@
 import Data.Vect
 
-
-append : Vect n a -> Vect m a -> Vect (n + m) a 
+append : Vect n Int -> Vect m Int -> Vect (n + m) Int
 append [] ys = ys
 append (x :: xs) ys = x :: append xs ys
