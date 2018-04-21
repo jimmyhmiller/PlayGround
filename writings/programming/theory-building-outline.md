@@ -4,13 +4,13 @@ Peter Naur's essay "Programming as Theory Building" is an exploration into the e
 
 This essay is an attempt to explicate Naur's notion of "Programming as Theory Building" in order to clear up misunderstanding. We will begin by reviewing common themes in the secondary liturature. In general the reception of Naur's essay was positive and yet, even in works favorably disposed towards it, major criticism are livied which belie a misunderstanding of the theory itself. Insufficent focus has been put on Naur's philosophical underpinnings. 
 
-Naur's essay has also attracted a host of industry focused commentators, mainly those in the XP and Agile circles. While industry use of Naur's concept should definitely be encouraged, the essays seems to largely be used in order to bolster the already held beliefs of these authors. After having explained further Naur's philosophical background, we confront these applications, showing in what ways they are misunderstandings. Finally the paper presents novel applications , which  are not only more faithful to Naur's work, but also pay proper attention to its philosphical underpinnings.
+Naur's essay has also attracted a host of industry focused commentators, mainly those in the XP and Agile circles. While industry use of Naur's concept should definitely be encouraged, it seems to largely be used in order to bolster the already held beliefs of these authors. After having explained further Naur's philosophical background, we confront these applications, showing in what ways they are misunderstandings. Finally the paper presents novel applications , which  are not only more faithful to Naur's work, but also pay proper attention to its philosphical underpinnings.
 
 ## Common Objections
 
 The secondary literature is riddled with positive mentions of the overall thrust of Naur's essay, yet few if any authors take it upon themselves to expand on Naur's notions. Instead, commentators immediately either weaken Naur's thesis by removing some of its more bold statements, or believe that Naur, while insightful, was ultimately aiming at the wrong target. 
 
-#### Communicating Theory
+#### Communicating Theory - (Needs rewritten)
 
 The primary target of weakening might be called the "Incommunicablity of Theory". Naur makes a number of bold statements concerning the limits of communicating a theory that has been built by a programmer. 
 
@@ -24,7 +24,7 @@ The primary target of weakening might be called the "Incommunicablity of Theory"
 
 Because of this strong claim, it may be tempting to think that Naur isn't exactly being clear with this claim. Perhaps the second quote is all Naur was getting out; maybe we need more than rules to express the theory, we also need metaphors and all the beauty natural language offers. But Naur makes certain he is not misunderstood, by continually repeating this claim throughout the essay.
 
-Given its counter-intuitive nature, it isn't surprising that people seek to weaken this thesis. Unfortunately it isn't clear how one could abandon this claim without also abandoning Naur's larger project. The incommunicability of theory is a necessary consequence of Naur's notion of theory. After exploring the philosophical background Naur cites and assumes, we shall return to this claim.
+Given its counter-intuitive nature, it isn't surprising that people seek to weaken this thesis. Unfortunately it isn't clear how one could abandon this claim without also abandoning Naur's larger project. The incommunicability of theory is a necessary consequence of Naur's notion of theory.
 
 #### Social Aspects of Programming
 
@@ -62,7 +62,7 @@ To put this in more technical terms, being able to "tell what one’s theory or 
 
 ####Knowing How and Knowing That
 
-While not the originator of the idea, Ryle offers a spirited defense of the distinction between knowing how and knowing that. Roughing speaking to "know how", is to have the ability to perform an action. Whereas "knowing that" is to justifiably believe a true fact. In *The Concept of Mind*, Ryle intends to defend two claims concerning these types of knowledge. First, "knowing how" and "knowing that" are not reducible, they are two distinct forms of knowing. Secondly, "knowing how" does require prior instances of "knowing that".  This second claim we will not explore further, but in order to understand Ryle's notion of theory, we must explore more Ryle's separation of these two forms of knowing.
+While not the originator of the idea, Ryle offers a spirited defense of the distinction between knowing how and knowing that. Roughing speaking to "know how", is to have the ability to perform an action. Whereas "knowing that" is to justifiably believe a true fact. In *The Concept of Mind*, Ryle intends to defend two claims concerning these types of knowledge. First, "knowing how" and "knowing that" are not reducible, they are two distinct forms of knowing. Secondly, "knowing how" doesn't require prior instances of "knowing that".  This second claim we will not explore further, but in order to understand Ryle's notion of theory, we must explore more Ryle's separation of these two forms of knowing.
 
 The quintessential example used in philosophy when discussing this topic is that of a juggler. We are led to imagine a skilled juggler, who with ease can juggle various objects in various amounts. His hands rise and fall in perfect time with the objects. This is a perfect example of "knowing how", our juggler has a certain intuitive understand of the objects he is manipulating. He knows how high to throw an object, how quickly to move his hands to catch them as they fall; his knowledge is made evident by his performance. 
 
@@ -70,7 +70,7 @@ There are some who suggest "knowing how" is just a species of "knowing that". In
 
 > To be a Newtonian was not just to say what Newton had said, but also to say and do what Newton would have said and done. Having a theory is being prepared to make a variety of moves, only some of which are teachings; and to teach something to someone, oneself or another, is, in its turn, to prepare him for a variety of tasks, only some of which will be further teachings.
 
-Here we can see Ryle's insistence that theories require a sort of "knowing how". We are to be "prepared to make a variety of moves". Having a theory requires the ability to know how to weld this theory. It requires being able to put the theory into practice, to use it for its particular ends. This is not merely to sit in an arm chair and draw conclusions from it, but to know our theory so well, we know how to teach it, how to answer queries about it, how to relate it to other things, how to modify it in the face of new evidence. Each different type of theory has its own use that for which it must be employed.
+Here we can see Ryle's insistence that theories require a sort of "knowing how". We are to be "prepared to make a variety of moves". Having a theory requires the ability to know how to wield this theory. It requires being able to put the theory into practice, to use it for its particular ends. This is not merely to sit in an arm chair and draw conclusions from it, but to know our theory so well, we know how to teach it, how to answer queries about it, how to relate it to other things, how to modify it in the face of new evidence. Each different type of theory has its own use that for which it must be employed.
 
 > Sherlock Holmes’ theories were primarily intended to be applied in the apprehension and conviction of criminals, the thwarting of planned crimes and the exculpation of innocent suspects….His theories were applied, if further deductions were actually made from them, and if criminals were arrested and suspects released in accordance with them.
 
@@ -80,9 +80,9 @@ Naur's citation of Popper is used as support for Ryle's notion of theory. Explor
 
 #### Demarcation
 
-Popper's primary work rests squarely in the field of philosophy of science. For those unfamiliar with the discipline, philosophy of science approaches science from a meta position asking questions like how is scientific knowledge possible, how might we metaphyiscally interpret our scientific discoveries, and what properly counts as science. It is this last question that Popper was most concerned with. There are tons of things that masquarade as science, things that today may be called pseudo-science. Sometimes the line to draw can be rather obvious, very few people today believe that Astrology or Alchemy ought to be considered sciences, but mere agreement doesn't provide us a criteria. It would seem that what is and isn't science should fall to popular opinion. 
+Popper's primary work rests squarely in the field of philosophy of science. For those unfamiliar with the discipline, philosophy of science approaches science from a meta position asking questions like how is scientific knowledge possible, how might we metaphyiscally interpret our scientific discoveries, and what properly counts as science. It is this last question that Popper was most concerned with. There are tons of things that masquarade as science, things that today may be called pseudo-science. Sometimes the line to draw can be rather obvious, very few people today believe that Astrology or Alchemy ought to be considered sciences, but mere agreement doesn't provide us a criteria. It would seem that what is and isn't science shouldn't fall to popular opinion. 
 
-Popper believed that a definite criteria for what was science and what was not was critically important. Scientific progress depended on our ability to distinguish these to make a demarcation criteria. If not our time and effort would be wasted on unscientific investigation. Popper proposed a criteria known as Falsification. A theory is scientific just in the case that it makes predictions that could be shown to not occur. In other words, if our theory predicts that A will occur in circumstance C, we can falsify our theory by creating circumstance C and if does not occur, our theory is false.
+Popper believed that a definite criteria for what was science and what was not was critically important. Scientific progress depended on our ability to distinguish these to make a demarcation criteria. If not our time and effort would be wasted on unscientific investigation. Popper proposed a criteria known as Falsification. A theory is scientific just in the case that it makes predictions that could be shown to not occur. In other words, if our theory predicts that A will occur in circumstance C, we can falsify our theory by creating circumstance C and if A does not occur, our theory is false.
 
 Popper motivation for this criteria came from a few different places. First, verificationism had remained a dominant view in Popper's time. The basic idea behind verificationism is that we must be able to verify any statements that we make. Unfortunately as Popper pointed out, we cannot verify empirical generalizations. Just because a ball has fallen when dropped 1000 times before, does not mean it will in the future. Secondly and more controversially, Popper saw Freudian psychology as unscientific. Freudian psychology appeared to have an answer for everything. No matter the circumstance, a Freudian could give an explanation. There was no way in practice to show that Freudian psychology was wrong.
 
@@ -106,7 +106,41 @@ For Kuhn, these paradigm shifts were the chief mechanism by which scientific pro
 
 ### Theory as "Knowledge How"
 
+With this philosophical background laid out, it becomes much easier to see what Naur might mean by statements like:
+
+> A main claim of the Theory Building View of programming is that an essential part of any program, the theory of it, is something that could not be conceivably be expressed, but is inextricably bound to human beings.
+
+Having a theory is to know how to do something. If a programmer has a theory about a program, he will know how to make changes to that program, we will be able to answer questions about that program, he will be able to explain parts of the program to others. But none of these presentations or applications of the theory of the program is the theory itself.  Donald Knuth criticizes Naur by suggestion that with literate programming we can in fact communicate the theory of a a program. But given Ryles notion of  theory, this can be seen to be a category mistake. Documentation no matter how comprehensive is just a presentation of the theory the programmer has.
+
+Given that a theory is a "knowing how" and not a "knowing that", it is hard to understand the criticisms of this aspect of Naur's position. Is the disagreement about whether knowing how is reducible to knowing that? It doesn't seem to be that. Is the disagreement a matter of not seeing programming as a processing of theory building? This does not seem to be where the disagreement lies either as most authors are very positive about this fact. It seems instead this disagreement comes from a misunderstanding of what a theory is for Naur. If that is the case, it seems hard to take this as a serious critique.
+
 ### Social Theory Building in Naur
+
+The social critique of Naur seems to claim that Naur has ignored something that is essential to software construction, namely the social aspects of it. By failing to attend to these, Naur has come to incorrect conclusions. These criticisms allege that rather than an individual theory, we must come to a "shared theory" about the software we are creating. Further, we must also recognize that more than just programmers are involved in the software construction process.
+
+What are we to make of the notion of a shared theory? How can there be a shared theory given that a theory is a kind of "knowing how"? Let's take jugglers as an example. One way you might supposed that jugglers could share a kind of "knowing how" would simply be that they have the same abilities. Two jugglers that can each juggle three balls using the same technique may be said to "share" knowledge. Is this is what is meant by a "shared theory"? Well, given the variety of people that are supposed to be part of this "software construction" process that can't be the case. The project manager and programmer do not share the same skillset.
+
+Another way jugglers might "share" in their "knowing how" is to juggle together. But we must supposed in order to for this case not to reduce to the first that the jugglers are doing different things, perhaps the one is throwing high and the other is throwing low. Is this is what would be meant by a "shared theory"? If so it hardly seems to disagree with Naur. Nothing in Naur claimed their couldn't be colaboration between different people. In the jugglers case there is still an incommunicable element, a "knowing how" that isn't reducible to rules and if this is equivilant to the "software construction" case, then Naur's contention remains.
+
+### Locating the Disagreement
+
+It is actually quite difficult to locate the realy disagreement that is happening with these criticisms. Take for example this passage:
+
+> At this point Naur's approach proves unsatisfac-tory. After all, the need to build a theory in software projects and to reflect upon it arises not least because of the necessity of reaching a common understanding of the various requirements and different perspectives among the persons involved. Thus the specific implications of cooperation in software development for the process of theory building must be systematically taken into account as well.
+
+This passage is far from clear. What does he mean by "the need to build a theory"? If programming just is theory building, then there isn't a need for which the theory is built, the act of programming just is the act of building a theory. In other words, a theory would be built even if there were no "necessity of reaching a common understanding". Rather than trying to understand the passages criticizing Naur, let's look at the positive theory put forth in place of Naur's.
+
+>		Shared theory is, basically, communicated individual theory. The expertise required to determine and evaluate the use purpose of a software object can only be acquired in the course of a communicated, mutual learning process. This applies particularly where not only objective and economic considerations have to be taken into account, but also the individual and collective quality requirements of the users.
+
+It is incredibly confusing to see how this passage makes sense in light of understanding theory has a "knowing how". But if we read closer into other passages, we can see that this idea of theory is actually just given up or perhaps never understood to begin with.
+
+> Anticipations of purpose can be seen as conceptions, as ideas about essential features of objects for future use and of the activities which they mediate
+>
+> I view the establishment of a new anticipation of purpose as "theory building" about the use purposes of the future software objects.
+>
+> In participative software projects, 'theory' means a common and moreover a mutually mediated anticipation of purpose as a frame of reference for the cooperative work processes. 
+
+These difficult to understand passages suggest that a theory is a kind of "knowing that". Theory has to do with "ideas about essential features of objects for future use and of the activities which they mediate". So a theory is not a "knowing how". So is this a criticism of Naur? It is hard to see how it could be.
 
 ## Inappropriate Applications
 
