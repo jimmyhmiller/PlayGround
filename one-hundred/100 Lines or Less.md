@@ -20,3 +20,4 @@
 * Finite State Machine
 * Flask
 * Service Discovery
+* Queries
