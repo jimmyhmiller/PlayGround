@@ -1,0 +1,295 @@
+data Action = Increment | Decrement
+
+data Maybe = None | Just(a)
+
+data Person = Customer({ :id })
+            | Employee({ :id, :position })
+
+fn double (x) => {
+    x * 2
+}
+
+fn get-customer-id {
+    Customer({ id }) => Just(id)
+    Employee(_) => None
+}
+
+
+fn counter {
+    (state, Increment) => state + 1
+    (state, Decrement) => state - 1
+    (state, _) => state
+}
+
+protocol Fn {
+    fn invoke(f, args) {
+        """invoke passing in arg"""
+    }
+}
+
+implement Fn(Map) {
+    fn invoke(map, arg) {
+        get(arg, map)
+    }
+}
+
+val jimmy = {
+    :name "jimmy"
+    :address {
+        :address1 "12448 breaklines street"
+        :address2 "apt 305"
+        :city "carmel"
+        :state "Indiana"
+    }
+    :age 24
+}
+
+assoc(:name, "jimmy miller", jimmy)
+
+infix (a |> f) {
+    f(a)
+}
+
+protocol Async {
+    fn then(promise, f) {
+        """Chains promises"""
+    }
+}
+
+implement Async(Promise) {
+    fn then(promise, f) {
+        promise..then(f)
+    }
+}
+
+async get-user-info(userId) {
+    user <- get-user(userId)
+    comments <- get-comments(user)
+    assoc(:comments, comments, user)
+}
+
+fn get-user-info(userId) {
+    then(getUser(userId), user =>
+        then(getComments(user), comments =>
+            assoc(:comments, comments, user)))
+}
+
+jimmy
+|> assoc(:name, "jimmy miller")
+
+jimmy(:address, :address1)
+jimmy(:address)(:address1)
+
+map(fn(x) => x + 2, [1 2 3 4])
+
+protocol StateReducer {
+    fn reduce(state, action) {
+        """reduces over state"""
+    }
+}
+
+implement StateReducer(Action) {
+    fn reduce(state = 0, action) {
+        match(action) {
+            Increment -> state + 1
+            Decrement -> state - 1
+            otherwise -> state
+        }
+    }
+}
+
+fn Hello({:keys [name]}) {
+    <div>{name}</div>
+}
+
+protocol Seq {
+    fn cons(coll, elem) {
+        """constructs element"""
+    }
+    fn first(coll) {
+        """gets first element"""
+    }
+    fn rest(coll) {
+        """gets all but first element"""
+    }
+    fn isEmpty(coll) {
+        """tests if empty"""
+    }
+    fn empty() {
+        """constructs empty seq"""
+    }
+}
+
+implement Seq(JsArray) {
+    fn cons(coll, elem) {
+        val newColl = coll..slice()
+        newColl..unshift(elem)
+        newColl
+    }
+    fn empty() {
+        []
+    }
+    fn first(coll) {
+        coll(0)
+    }
+    fn rest(coll) {
+        val newColl = coll..slice()
+        newColl..shift(0)
+        newColl
+    }
+    fn isEmpty(coll) {
+        coll..length == 0
+    }
+}
+
+val variable-name = 3
+
+data DivideEror = DivideByZero
+
+fn div {
+    (numerator, 0) => throw DivideByZero
+    (numerator, divisor) => numerator / divisor
+}
+
+
+fn handle-div-zero(num) {
+    match (num `div` 0) {
+        n => n
+        DivideByZero => 0
+    }
+}
+
+fn double-even-numbers(n) {
+    pre {
+        assert(n % 2 == 0)
+    }
+    post(ret) {
+        assert(ret > n)
+    }
+    n * 2
+}
+
+addEm(a, b)
+addEm(a, b, c)
+
+addEm(1, 2, _) // fn
+addEm(1, _, 3) // fn
+addEm(a=1, b=2) // 3
+addEm(a=1, b=2, c=_) //fn
+addEm(1,2) // 3
+addEm(1) // Error
+addEm(a=1) // Error
+
+
+
+fn map(f, coll, ...?colls) {}
+map(+2)(1...10) // list
+
+
+fn map(f, coll, ...colls) {}
+map(+2)(1...10) // fn
+
+
+
+fn fib {
+    0 => 0
+    1 => 1
+    n => fib(n - 1) + fib(n - 2)
+}
+
+fn fib-lazy {
+    () => fib-lazy(0, 1)
+    (a, b) => cons(a, lazy-seq(fib(b, a + b)))
+}
+
+
+data Operation = And | Or | If | Iff
+
+data Statement = T
+               | F
+               | Neg(statement)
+               | Prop(string)
+               | Op(operation, statement, statement)
+
+
+
+fn or(p, q) => Op(Or, p, q)
+
+fn and(p, q) => Op(And, p, q)
+
+
+fn remove-t-and {
+    Op(And, T, q) => q
+    Op(And, p, T) => p
+    s => s
+}
+
+fn remove-f-or {
+    Op(Or, F, q) => q
+    Op(Or, p, F) => p
+    s => s
+}
+
+
+val reducer-store = atom({})
+
+fn reducer(path) => {
+    (f) => {
+        update!(reducer-store, path, f)
+        f
+    }
+}
+
+
+@reducer(:counter)
+fn reduce-counter {
+    (state, Increment) => state + 1
+    (state, Decrement) => state - 1
+}
+
+multi reducer {
+    (_, action) => constructor(action)
+}
+
+
+method reducer(Increment) {
+    (state, _) => state + 1
+}
+
+method reducer(Decrement) {
+    (state, _) => state - 1
+}
+
+method reducer() {
+    (_, _) => 0
+}
+
+
+
+<program> = data* | fn* | fn-application* | val* | infix-application* | program*
+data = <'data'> data-name <'='> data-body
+data-name = upper-name
+<upper-name> = #'[A-Z][a-zA-Z]*'
+<data-body> = constructor (<'|'> constructor)*
+constructor = constructor-name args | constructor-name | constructor-name keywords
+keywords = <'('> <'{'> (keyword <','?>)* <'}'> <')'>
+keys = <'('> <'{'> (arg <','?>)* <'}'> <')'>
+args = <'('> (arg <','?>)* <')'> | arg | literal
+fn-args = <'('> ((arg | deconstructor)  <','?>)* <')'> | arg | literal | deconstructor
+<constructor-name> = upper-name
+<arg> = identifier
+<keyword> = #':[A-Za-z]+'
+<identifier> = #'[A-Za-z\-_!]+'
+<literal> = #'[0-9]' | identifier | keyword
+<expr> = fn-application | literal | infix-application | lambda | val
+fn-application = identifier <'('> (expr <','?>)* <')'>
+infix-application = expr <' '> symbol <' '> expr
+<symbol> = #'[$-/:-?{-~!"^_`\[\]]'
+
+deconstructor = constructor-name | constructor-name args | constructor-name keys
+
+val = <'val'> identifier <'='> expr
+
+fn = <'fn'> identifier <'{'> fn-body <'}'> | <'fn'> identifier lambda
+fn-body = lambda+
+lambda = fn-args  <'=>'> expr | fn-args <'=>'> <'{'> expr+ <'}'>
