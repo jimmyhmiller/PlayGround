@@ -37,8 +37,6 @@
           :insert (fn [this i] (Insert this i))
           :union (fn [this s] s)}))
 
-
-
 (defn Insert [s n]
   (if (s :contains n)
     s
@@ -109,7 +107,7 @@
     (= unified :unify/failed)))
 
 (defn substitute-all [vars var-map]
-  (map (fn [var] (walk-var-binding var var-map)) vars))
+  (clojure.walk/postwalk (fn [var] (walk-var-binding var var-map)) vars))
 
 (defn match-1 [value pattern consequence]
   (let [var-map (unify-all {} value pattern)]
@@ -130,12 +128,13 @@
         '[?x ?y ?x] '[?x ?y]
         '[?x ?y ?z] '[?x ?y ?z])
 
+(substitute-all '[?x ['?x]] '{?x :string})
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
 (defn match-query [var-map facts q]
   (remove failed? (map #(unify-all var-map % q) facts)))
-
 
 (defn process-query
   ([qs facts]
@@ -155,11 +154,10 @@
 (defn query [facts select qs]
   (set (map #(substitute-all select %) (process-query qs facts))))
 
-
 (query
  [[1 :likes :pizza]
   [2 :likes :nachos]
-  [1  :things :stuff]
+  [1 :things :stuff]
   [2 :things :otherstuff]]
 
  '[?food ?stuff]
@@ -168,3 +166,81 @@
    [?e :things ?stuff]])
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; Not done at all but a start
+
+
+(defn gen-logic-var []
+  (gensym "?x"))
+
+(def infer-type)
+
+(defn gen-type-var []
+  (gen-logic-var))
+
+(defn infer-function [[_ [arg] body] type-env constraints]
+  (let [fn-logic-var (gen-logic-var)
+        arg-logic-var (gen-logic-var)
+        body-logic-var (gen-logic-var)
+        arg-type-var (gen-type-var)
+        updated-env (assoc type-env arg arg-logic-var)
+        constraints (unify constraints [arg-logic-var arg-type-var])
+        [body-type constraints] (infer-type body updated-env constraints)
+        constraints (unify constraints [body-logic-var body-type])
+        fn-type (list arg-logic-var '-> body-logic-var)]
+    [fn-type constraints]))
+
+(defn infer-type [expr type-env constraints]
+  (cond
+    (number? expr) [Integer constraints]
+    (string? expr) [String constraints]
+    (symbol? expr) [(walk-var-binding (get type-env expr) constraints) constraints]
+    (and (seq? expr)
+         (= (first expr) '+))
+    (let [[type-first-arg con1] (infer-type (second expr) type-env constraints)
+          [type-second-arg con2] (infer-type (nth expr 2) type-env con1)]
+      [Integer (-> con2
+                   (unify [type-first-arg Integer])
+                   (unify [type-second-arg Integer]))])
+    (and (seq? expr)
+         (= (first expr) 'fn)) (infer-function expr type-env constraints)))
+
+
+(defn type-var-maker
+  []
+  (let [state (atom {:var 97
+                     :vars {}})]
+    (fn [logic-var]
+      (if (contains? (:vars @state) logic-var)
+        (get (:vars @state) logic-var)
+        (let [new-var (symbol (str (char (:var @state))))]
+          (do
+            (swap! state update :seen conj logic-var)
+            (swap! state update :var inc)
+            (swap! state assoc-in [:vars logic-var] new-var))
+          new-var)))))
+
+(defn replace-var [maker t]
+  (if (seq? type) 
+    (map (partial replace-var maker) type)
+    (if (logic-variable? t)
+      (maker t)
+      t)))
+
+(defn replace-logic-vars
+  ([type]
+   (replace-logic-vars (type-var-maker) type))
+  ([maker type]
+   (clojure.walk/postwalk (partial replace-var maker) type)))
+
+(defn keep-substituting [var var-map]
+  (let [substitute (substitute-all var var-map)]
+    (if (= substitute var)
+      substitute
+      (keep-substituting substitute var-map))))
+
+(->> (infer-type '(fn [x] (fn [y] (+ x y))) {} {})
+     (apply keep-substituting)
+     replace-logic-vars)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
