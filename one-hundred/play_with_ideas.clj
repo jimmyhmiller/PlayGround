@@ -100,7 +100,6 @@
           (map vector vals
                (concat vars (repeat :unify/failed)))))
 
-
 (defn failed? [unified]
   (if (seqable? unified)
     (not (nil? (some #{:unify/failed} unified)))
