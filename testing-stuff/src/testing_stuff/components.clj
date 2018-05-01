@@ -1,5 +1,5 @@
 (ns testing-stuff.components
-  (:require  [clojure.spec :as s]))
+  (:require  [clojure.spec.alpha :as s]))
 
 
 
@@ -41,7 +41,7 @@
   [:div
    (->> form
         (map (fn [field] 
-               (render 
+               (render
                 (field comps)
                 (field fields) 
                 fields))))])
