@@ -126,7 +126,7 @@ Another way jugglers might "share" in their "knowing how" is to juggle together.
 
 It is actually quite difficult to locate the realy disagreement that is happening with these criticisms. Take for example this passage:
 
-> At this point Naur's approach proves unsatisfac-tory. After all, the need to build a theory in software projects and to reflect upon it arises not least because of the necessity of reaching a common understanding of the various requirements and different perspectives among the persons involved. Thus the specific implications of cooperation in software development for the process of theory building must be systematically taken into account as well.
+> At this point Naur's approach proves unsatisfactory. After all, the need to build a theory in software projects and to reflect upon it arises not least because of the necessity of reaching a common understanding of the various requirements and different perspectives among the persons involved. Thus the specific implications of cooperation in software development for the process of theory building must be systematically taken into account as well.
 
 This passage is far from clear. What does he mean by "the need to build a theory"? If programming just is theory building, then there isn't a need for which the theory is built, the act of programming just is the act of building a theory. In other words, a theory would be built even if there were no "necessity of reaching a common understanding". Rather than trying to understand the passages criticizing Naur, let's look at the positive theory put forth in place of Naur's.
 

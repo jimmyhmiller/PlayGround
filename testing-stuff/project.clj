@@ -33,4 +33,5 @@
                  [walmartlabs/datascope "0.1.1"]
                  [com.zensols.gui/tabres "0.0.7"]
                  [fsmviz "0.1.3"]
-                 [rhizome "0.2.9"]])
+                 [rhizome "0.2.9"]
+                 [org.clojure/tools.deps.alpha "0.5.425"]])
