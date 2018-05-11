@@ -101,7 +101,7 @@
                (concat vars (repeat :unify/failed)))))
 
 (defn failed? [unified]
-  (if (seqable? unified)
+  (if (instance? clojure.lang.ISeq unified)
     (not (nil? (some #{:unify/failed} unified)))
     (= unified :unify/failed)))
 
@@ -127,7 +127,7 @@
         '[?x ?y ?x] '[?x ?y]
         '[?x ?y ?z] '[?x ?y ?z])
 
-(substitute-all '[?x ['?x]] '{?x :string})
+(substitute-all '[?x [?x]] '{?x :string})
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -166,8 +166,6 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-; Not done at all but a start
-
 
 (defn gen-logic-var []
   (gensym "?x"))
@@ -204,10 +202,8 @@
     (and (seq? expr)
          (= (first expr) 'fn)) (infer-function expr type-env constraints)))
 
-
-(defn type-var-maker
-  []
-  (let [state (atom {:var 97
+(defn type-var-maker []
+  (let [state (atom {:var 97 ; \a
                      :vars {}})]
     (fn [logic-var]
       (if (contains? (:vars @state) logic-var)
@@ -238,8 +234,25 @@
       substitute
       (keep-substituting substitute var-map))))
 
-(->> (infer-type '(fn [x] (fn [y] (+ x y))) {} {})
+(->> (infer-type '(fn [x] (fn [y] (fn [z] (+ x (+ y z))))) {} {})
      (apply keep-substituting)
      replace-logic-vars)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+(defn constrain [var-map [x pred]]
+  (if (map? var-map)
+    (update-in var-map [:constraints x] conj pred)))
+
+(defn all-constraints [var-map var val]
+  ((apply every-pred (get-in var-map [:constraints var] var-map)) val))
+
+(-> {:constraints {}}
+    (constrain ['?x #(> % 6)])
+    (constrain ['?y #(< % 3)])
+    (all-constraints '?x 10))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
