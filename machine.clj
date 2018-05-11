@@ -91,16 +91,18 @@
 (defn stack-e [[state stack]]
   [state (cons :e stack)])
 
-(defn transition-c-single [machine input [state [head & tail]]]
-  (concat (map (fn [[s h]] [s (cons-e h tail)]) (get (get (get machine state) input) head))
-          (map (fn [[s h]] [s (cons-e h (cons-e head tail))]) (get (get (get machine state) input) :e))))
+(defn transition-c-single 
+  [machine input [state [head & tail]]]
+  (-> [[s h]]
+      (fn [s (cons-e h tail)])
+      (map (get (get (get machine state) input) head))
+      (concat
+       (map (fn [[s h]] [s (cons-e h (cons-e head tail))]) (get (get (get machine state) input) :e)))))
 
 (defn transition-c [machine input states]
    (into #{} (mapcat (partial transition-c-single machine input) states)))
 
 
-(print (transition-c) c-machine 1 [:q2 '(0 0 :$)])
-(transition-c c-machine :e [:q1 '(:e)])
 
 (transition-c c-machine :e (map stack-e [[:q1 '()] [:q3 '(0 0 0 :$)]]))
 (transition-c c-machine 1 [[:q2 '(0 0 :$)] [:q3 '(0 0 0 :$)]])
@@ -236,7 +238,10 @@
    (string->nfa "bc")))
  (string->list "xyab"))
 
-(start-automate-n (concat-nfa (single-letter-nfa "a") (single-letter-nfa "b")) (string->list "ab"))
+(start-automate-n 
+ (concat-nfa (single-letter-nfa "a") 
+             (single-letter-nfa "b")) 
+ (string->list "ab"))
 
 
 (start-automate-n e-machine [1 1])
