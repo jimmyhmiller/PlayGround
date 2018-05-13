@@ -1,24 +1,32 @@
 # 100 Lines or Less
 
-* Virtual Dom
+* Blockchain
+* Dependency Injector
+* Finite State Machine
+* Fizzbuzz No Booleans
+* Flask
+* Forth Interpreter/Compiler
+* Json Parser
+* Key Value Store
+* Lambda Compiler
+* Lisp Interpreter
+* Logic Normalizer
+* Markdown Parser
+* Multi-methods
+* Neural Network
+* Object System
+* Parser
+* Pattern Matcher
+* Promises
+* Purely Functional Data Structures
+* Queries
 * Redux
 * Redux Saga
-* Lisp Interpreter
-* Lambda Compiler
-* Unifier
-* Pattern Matcher
-* Object System
-* Type Inference
-* Neural Network
-* Parser
-* Type Safe Printf
-* Various Monads
-* Purely Functional Data Structures
-* Promises
-* Multi-methods
-* Logic Normalizer
-* Finite State Machine
-* Flask
+* Regex
 * Service Discovery
-* Queries
-* Fizzbuzz No Booleans
+* Testing Framework
+* Type Inference
+* Type Safe Printf
+* Unifier
+* Various Monads
+* Virtual Dom
