@@ -11,7 +11,8 @@
 
 (defn parser [grammar]
   (insta/parser grammar
-                :auto-whitespace :standard))
+                :auto-whitespace :standard
+                :partial true))
 
 
 (defn parse [grammar text]

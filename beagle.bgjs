@@ -1,19 +1,27 @@
-data Action = Increment | Decrement
+// What if => meant {} kind of like $ in haskell?
+// What if <symbol> <?name> <?(args)> {} was a special pattern?
 
-data Maybe = None | Just(a)
-
-data Person = Customer({ :id })
-            | Employee({ :id, :position })
-
-fn double (x) => {
-    x * 2
+data Action {
+    Increment
+    Decrement
 }
+
+data Maybe {
+    None
+    Just(a)
+}
+
+data Person {
+    Customer(:id)
+    Employee(:id, :position)
+}
+
+fn double(x) { x * 2 }
 
 fn get-customer-id {
-    Customer({ id }) => Just(id)
+    Customer(:id) => Just(id)
     Employee(_) => None
 }
-
 
 fn counter {
     (state, Increment) => state + 1
@@ -21,14 +29,17 @@ fn counter {
     (state, _) => state
 }
 
+fn div {
+    (numerator, 0) => throw DivideByZero
+    (numerator, divisor) => numerator / divisor
+}
+
 protocol Fn {
-    fn invoke(f, args) {
-        """invoke passing in arg"""
-    }
+    invoke(f, args)
 }
 
 implement Fn(Map) {
-    fn invoke(map, arg) {
+    invoke(map, arg) {
         get(arg, map)
     }
 }
@@ -51,13 +62,11 @@ infix (a |> f) {
 }
 
 protocol Async {
-    fn then(promise, f) {
-        """Chains promises"""
-    }
+    then(promise, f)
 }
 
 implement Async(Promise) {
-    fn then(promise, f) {
+    then(promise, f) {
         promise..then(f)
     }
 }
@@ -67,6 +76,7 @@ async get-user-info(userId) {
     comments <- get-comments(user)
     assoc(:comments, comments, user)
 }
+
 
 fn get-user-info(userId) {
     then(getUser(userId), user =>
@@ -82,62 +92,51 @@ jimmy(:address)(:address1)
 
 map(fn(x) => x + 2, [1 2 3 4])
 
+
 protocol StateReducer {
-    fn reduce(state, action) {
-        """reduces over state"""
-    }
+    reduce(state, action)
 }
 
 implement StateReducer(Action) {
     fn reduce(state = 0, action) {
         match(action) {
-            Increment -> state + 1
-            Decrement -> state - 1
-            otherwise -> state
+            Increment => state + 1
+            Decrement => state - 1
+            otherwise => state
         }
     }
 }
 
-fn Hello({:keys [name]}) {
+fn Hello({:name}) {
     <div>{name}</div>
 }
 
 protocol Seq {
-    fn cons(coll, elem) {
-        """constructs element"""
-    }
-    fn first(coll) {
-        """gets first element"""
-    }
-    fn rest(coll) {
-        """gets all but first element"""
-    }
-    fn isEmpty(coll) {
-        """tests if empty"""
-    }
-    fn empty() {
-        """constructs empty seq"""
-    }
+    cons(coll, elem)
+    first(coll)
+    rest(coll)
+    isEmpty(coll)
+    empty()
 }
 
 implement Seq(JsArray) {
-    fn cons(coll, elem) {
+    cons(coll, elem) {
         val newColl = coll..slice()
         newColl..unshift(elem)
         newColl
     }
-    fn empty() {
-        []
+    empty() {
+        JsArray()
     }
-    fn first(coll) {
+    first(coll) {
         coll(0)
     }
-    fn rest(coll) {
+    rest(coll) {
         val newColl = coll..slice()
         newColl..shift(0)
         newColl
     }
-    fn isEmpty(coll) {
+    isEmpty(coll) {
         coll..length == 0
     }
 }
@@ -169,6 +168,7 @@ fn double-even-numbers(n) {
     n * 2
 }
 
+// Example arities
 addEm(a, b)
 addEm(a, b, c)
 
@@ -181,14 +181,12 @@ addEm(1) // Error
 addEm(a=1) // Error
 
 
-
-fn map(f, coll, ...?colls) {}
+fn map(f, coll, ? ...colls) {}
 map(+2)(1...10) // list
 
 
 fn map(f, coll, ...colls) {}
 map(+2)(1...10) // fn
-
 
 
 fn fib {
@@ -197,32 +195,35 @@ fn fib {
     n => fib(n - 1) + fib(n - 2)
 }
 
+
 fn fib-lazy {
     () => fib-lazy(0, 1)
     (a, b) => cons(a, lazy-seq(fib(b, a + b)))
 }
 
 
-data Operation = And | Or | If | Iff
+// Should I consider making | whitespace? 
 
-data Statement = T
-               | F
-               | Neg(statement)
-               | Prop(string)
-               | Op(operation, statement, statement)
+data Operation {
+    And
+    Or
+    If
+    Iff
+}
 
+data Statement {
+    T
+    F
+    Neg(statement)
+    Prop(string)
+    Op(operation, statement, statement)
+}
 
 
 fn or(p, q) => Op(Or, p, q)
 
 fn and(p, q) => Op(And, p, q)
 
-
-fn remove-t-and {
-    Op(And, T, q) => q
-    Op(And, p, T) => p
-    s => s
-}
 
 fn remove-f-or {
     Op(Or, F, q) => q
@@ -233,15 +234,15 @@ fn remove-f-or {
 
 val reducer-store = atom({})
 
-fn reducer(path) => {
-    (f) => {
+fn reducer(path) {
+    fn (f) {
         update!(reducer-store, path, f)
         f
     }
 }
 
-
 @reducer(:counter)
+
 fn reduce-counter {
     (state, Increment) => state + 1
     (state, Decrement) => state - 1
@@ -250,7 +251,6 @@ fn reduce-counter {
 multi reducer {
     (_, action) => constructor(action)
 }
-
 
 method reducer(Increment) {
     (state, _) => state + 1
@@ -265,31 +265,37 @@ method reducer() {
 }
 
 
+<program> = expr | comment | program*
+comment = <'//'> #'.*'
+phrase = phrase-type phrase-name phrase-body |
+         phrase-type phrase-name phrase-args phrase-body |
+         phrase-type phrase-args phrase-body
+phrase-type = identifier
+phrase-name = identifier
+phrase-body = open-c expr* close-c
+phrase-args = <args>
 
-<program> = data* | fn* | fn-application* | val* | infix-application* | program*
-data = <'data'> data-name <'='> data-body
-data-name = upper-name
-<upper-name> = #'[A-Z][a-zA-Z]*'
-<data-body> = constructor (<'|'> constructor)*
-constructor = constructor-name args | constructor-name | constructor-name keywords
-keywords = <'('> <'{'> (keyword <','?>)* <'}'> <')'>
-keys = <'('> <'{'> (arg <','?>)* <'}'> <')'>
-args = <'('> (arg <','?>)* <')'> | arg | literal
-fn-args = <'('> ((arg | deconstructor)  <','?>)* <')'> | arg | literal | deconstructor
-<constructor-name> = upper-name
-<arg> = identifier
-<keyword> = #':[A-Za-z]+'
-<identifier> = #'[A-Za-z\-_!]+'
-<literal> = #'[0-9]' | identifier | keyword
-<expr> = fn-application | literal | infix-application | lambda | val
-fn-application = identifier <'('> (expr <','?>)* <')'>
-infix-application = expr <' '> symbol <' '> expr
+
+<expr> = fn-application | literal | infix-application | lambda | val | phrase
+fn-application = identifier open-p (expr <','?>)* close-p
+infix-application = expr <' '> symbol <' '> expr |
+                    expr <' '> <'`'> identifier  <'`'> <' '> expr
 <symbol> = #'[$-/:-?{-~!"^_`\[\]]'
-
-deconstructor = constructor-name | constructor-name args | constructor-name keys
+<keyword> = #':[A-Za-z]+'
+<identifier> = #'[A-Za-z\-_!?]+'
+<literal> = #'[0-9]' | identifier | keyword | string
+string = <'"'> #'[^"]*' <'"'>
+fn = <'fn'> identifier open-c fn-body close-c | <'fn'> identifier lambda
+fn-body = lambda+
+lambda = fn-args  <'=>'> expr | fn-args <'=>'> open-c expr+ close-c
+<arg> = identifier
+args = open-p (arg <','?>)* close-p | arg | literal
+fn-args = open-p ((arg | literal)  <','?>)* close-p | arg | literal
 
 val = <'val'> identifier <'='> expr
 
-fn = <'fn'> identifier <'{'> fn-body <'}'> | <'fn'> identifier lambda
-fn-body = lambda+
-lambda = fn-args  <'=>'> expr | fn-args <'=>'> <'{'> expr+ <'}'>
+
+<open-p> = <'('>
+<close-p> = <')'>
+<open-c> = <'{'>
+<close-c> = <'}'>
