@@ -75,13 +75,13 @@ class Dark extends React.Component {
 // Spectacle needs a ref
 export const withSlide = Comp => class WithSlide extends React.Component {
   render() {
-    const { noSlide=false, slide: Slide = Dark, maxWidth, ...props } = this.props;
+    const { noSlide=false, slide: Slide = Dark, maxWidth, maxHeight, ...props } = this.props;
     
     if (noSlide) {
       return <Comp {...props} />
     }
     return (
-      <Slide maxWidth={maxWidth}>
+      <Slide maxWidth={maxWidth} maxHeight={maxHeight || 800}>
         <Comp {...props} />
       </Slide>
     )
@@ -101,12 +101,12 @@ export const BlankSlide = withSlide(() => {
   return <span />;
 })
 
-export const Code = withSlide(({ source, lang, title, textSize, headlineSize }) => {
+export const Code = withSlide(({ source, color, lang, title, textSize, headlineSize }) => {
   const spaces = detectIndent(source);
   return (
     <div>
-      <Headline size={headlineSize} noSlide textAlign="left" text={title} />
-      <CodePane textSize={textSize || 20} 
+      <Headline color={color} size={headlineSize || 4} noSlide textAlign="left" text={title} />
+      <CodePane textSize={textSize || 30} 
       source={removeIndent(spaces, source)} lang={lang} />
     </div>
   )
