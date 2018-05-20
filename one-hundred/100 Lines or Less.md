@@ -39,8 +39,8 @@
 * Redux - Javascript
 * Parser - Haskell
 * Flask - Python
-* Java - Functional Seq Interface
-* Rust - Loc?
+* Functional Seq Interface - Java
+* Loc? - Rust
 
 
 
