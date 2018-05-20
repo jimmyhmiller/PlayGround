@@ -24,12 +24,10 @@ public class ListSeq<T> implements Sequence<T> {
         return new ListSeq<>(list);
     }
 
-    @Override
     public T first() {
         return list.get(0);
     }
 
-    @Override
     public Sequence<T> rest() {
         if (list.size() == 1) {
             return this.empty();
@@ -37,7 +35,6 @@ public class ListSeq<T> implements Sequence<T> {
         return new ListSeq<>(list.subList(1, list.size()));
     }
 
-    @Override
     public Sequence<T> cons(T elem) {
         List<T> temp = new ArrayList<>();
         list.forEach(temp::add);
@@ -45,17 +42,14 @@ public class ListSeq<T> implements Sequence<T> {
         return new ListSeq<>(temp);
     }
 
-    @Override
     public Sequence<T> empty() {
         return new ListSeq<>(new ArrayList<>());
     }
 
-    @Override
     public Boolean isEmpty() {
         return list.isEmpty();
     }
 
-    @Override
     public String toString() {
         return this.list.toString();
     }

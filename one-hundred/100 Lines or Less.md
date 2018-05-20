@@ -6,6 +6,7 @@
 * Fizzbuzz No Booleans
 * Flask
 * Forth Interpreter/Compiler
+* Functional Seq Interface
 * Json Parser
 * Key Value Store
 * Lambda Compiler
@@ -30,3 +31,17 @@
 * Unifier
 * Various Monads
 * Virtual Dom
+
+
+# First Videos
+
+* Lisp Interpreter - Clojure
+* Redux - Javascript
+* Parser - Haskell
+* Flask - Python
+* Java - Functional Seq Interface
+* Rust - Loc?
+
+
+
+

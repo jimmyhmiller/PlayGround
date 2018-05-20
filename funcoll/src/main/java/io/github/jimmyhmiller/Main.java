@@ -17,13 +17,6 @@ public class Main {
 
         Sequence<Character> chars = new ListSeq<>(toChars(str));
 
-        System.out.println(chars.mapWithIndex((c, i) -> {
-            System.out.print(i);
-            System.out.print(c);
-            System.out.println();
-            return c;
-        }));
-
         Sequence<Integer> list = ListSeq.range(5);
         System.out.println(
             list
@@ -33,6 +26,6 @@ public class Main {
         System.out.println(list.filter(i -> i%2 == 0));
         System.out.println(list.concat(ListSeq.range(5)));
         System.out.println(list.reduce(0, (Integer n, Integer i) -> n + 1));
-        System.out.println(list.map((Integer n) -> n + 1));
+        System.out.println(list.map((Integer n) -> n + 1).last());
     }
 }
