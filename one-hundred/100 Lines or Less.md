@@ -7,6 +7,7 @@
 * Flask
 * Forth Interpreter/Compiler
 * Functional Seq Interface
+* Instarest
 * Json Parser
 * Key Value Store
 * Lambda Compiler
@@ -19,8 +20,10 @@
 * Parser
 * Pattern Matcher
 * Promises
+* Protocols
 * Purely Functional Data Structures
 * Queries
+* QuickCheck
 * Redux
 * Redux Saga
 * Regex
@@ -39,9 +42,5 @@
 * Redux - Javascript
 * Parser - Haskell
 * Flask - Python
-* Functional Seq Interface - Java
-* Loc? - Rust
-
-
-
-
+* Dependency Injector - Java
+* Loc - Rust?
