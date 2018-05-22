@@ -50,6 +50,13 @@ export default () =>
       <Point text="Can't address fighting frameworks" />
     </Points>
 
+    <Points title="Disclaimers">
+      <Point text="Some of this code will be unfamiliar" />
+      <Point text="Some of the code will be longer" />
+      <Point text="Benefits aren't immediately obvious" />
+    </Points>
+
+
     <Headline
       color="yellow"
       textAlign="left"
@@ -167,6 +174,20 @@ export default () =>
       color="blue"
       lang="javascript"
       source={`
+        const calcStatus = (player) => {
+          return !(player.hasThing && player.myStuff) {
+        }
+
+        const calcSuperStatus = player => {
+          return (player.hasThing && player.myStuff) ||
+                  player.otherThing'
+        };
+      `} />
+
+    <Code
+      color="blue"
+      lang="javascript"
+      source={`
         const checkStatus = (player) => {
           return calcStatus(player) && calcSuperStatus(player);
         }
@@ -190,7 +211,6 @@ export default () =>
           }
         }
       `} />
-
 
     <Code
       maxWidth={1300}
@@ -479,7 +499,7 @@ export default () =>
             public Set<T> union(Set<T> t) {
                 return new UnionSet<>(this, t);
             }
-        }
+          }
       `} />
       
     <Code
