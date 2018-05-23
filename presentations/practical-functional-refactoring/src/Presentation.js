@@ -50,12 +50,16 @@ export default () =>
       <Point text="Can't address fighting frameworks" />
     </Points>
 
-    <Points title="Disclaimers">
-      <Point text="Some of this code will be unfamiliar" />
-      <Point text="Some of the code will be longer" />
-      <Point text="Benefits aren't immediately obvious" />
-    </Points>
 
+    <Headline
+      color="green"
+      textAlign="left"
+      text="Functional is not an end goal" />
+
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Our aim is to make our code better" />
 
     <Headline
       color="yellow"
