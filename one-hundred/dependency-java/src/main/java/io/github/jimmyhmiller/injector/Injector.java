@@ -16,7 +16,7 @@ public class Injector {
         return this;
     }
     public <T> Injector addSingleton(Class<T> clazz, T o) {
-        singletons.put(clazz, (Object)o);
+        singletons.put(clazz, o);
         return this;
     }
 
