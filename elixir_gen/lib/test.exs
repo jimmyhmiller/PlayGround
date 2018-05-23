@@ -1,3 +1,6 @@
+use ExUnitProperties
+
+
 IO.write [IO.ANSI.home, IO.ANSI.clear]; 
 
 
@@ -9,3 +12,11 @@ IO.inspect(
   |> Stream.filter(fn(x) -> rem(x,2) == 0 end) 
   |> Enum.take(20)
 )
+
+
+
+check all list <- list_of(integer()) do
+  length(list) == length(:lists.reverse(list))
+end
+
+
