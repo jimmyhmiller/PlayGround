@@ -62,6 +62,17 @@ export default () =>
       text="Our aim is to make our code better" />
 
     <Headline
+      color="red"
+      textAlign="left"
+      text="Failure to specify values causes conflict" />
+
+    <Points title="Values">
+      <Point text="Composability" />
+      <Point text="Debuggability" />
+      <Point text="Expressiveness" />
+    </Points>
+
+    <Headline
       color="yellow"
       textAlign="left"
       text="Widely Applicable Refactoring" />
@@ -184,7 +195,7 @@ export default () =>
 
         const calcSuperStatus = player => {
           return (player.hasThing && player.myStuff) ||
-                  player.otherThing'
+                  player.otherThing
         };
       `} />
 
@@ -387,24 +398,17 @@ export default () =>
         }
       `} />
 
-    <Code
-      maxWidth={1300}
-      color="yellow"
-      title="Partial Application"
-      lang="javascript"
-      source={`
-        public class DataFetcher
-        {
-          private Connection connection;
-          public DataFetcher(Connection connection) 
-          {
-            this.connection = connection;
-          } 
 
-          public getActiveUsers() {}
-          public getUserById(UUID id) {}
-        }
-      `} />
+
+
+
+
+
+
+
+
+
+    <BlankSlide />
 
     <Headline
       color="red"
@@ -568,6 +572,9 @@ export default () =>
    <BlankSlide />
 
 
+    <Headline
+      color="blue"
+      text="Extended Example" />
 
     <Code
       color="blue"
