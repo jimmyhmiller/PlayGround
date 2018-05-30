@@ -2,6 +2,7 @@
 
 * Blockchain
 * Dependency Injector
+* Editor
 * Finite State Machine
 * Fizzbuzz No Booleans
 * Flask
