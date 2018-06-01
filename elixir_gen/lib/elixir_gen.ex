@@ -13,6 +13,12 @@ end
 
 
 
+
+defprotocol Inspecting do
+    def inspect(self)
+end
+
+
 defmodule ElixirGen do
    use Application
 
