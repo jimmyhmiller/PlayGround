@@ -50,31 +50,12 @@ export default () =>
       text="Don't write tests"
       subtext="Generate them" />
 
+    <Points title="Unit Test Problems">
+      <Point text="Lots of code" />
+      <Point text="Don't test whole space" />
+      <Point text="Tend towards testing implementation details" />
+    </Points>
 
-    <Headline
-      text="Confession" />
-
-    <Headline
-      color="blue"
-      text="I hate unit tests" />
-
-    <Headline
-      textAlign="left"
-      text="They can be useful"
-      subtext="especially in dynamic languages" />
-
-    <Code
-      title="Testing reverse"
-      lang="elixir"
-      maxWidth={1300}
-      source={`
-        test "Reversing works properly" do 
-          assert reverse(Enum.to_list(1..5)) == Enum.to_list(5..1) 
-          assert reverse([]) == []
-          assert reverse([1]) == [1]
-          assert reverse(Enum.to_list(-10..10)) == Enum.to_list(10..-10)
-        end
-      `} />
 
 
 
