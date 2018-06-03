@@ -3,7 +3,15 @@ defmodule ElixirGenTest do
   use ExUnitProperties
   import ElixirGen
 
-  property "Reverse a reverse is doesn't change" do
+
+  test "Test Reverse" do
+    assert reverse([]) == []
+    assert reverse([1]) == [1]
+    assert reverse([1,2,3]) == [3,2,1]
+    assert reverse(0..10) == Enum.to_list 10..0
+  end
+
+  property "Reverse a reverse doesn't change" do
     check all list <- list_of(integer()) do
       assert reverse(reverse(list)) == list
     end
@@ -12,7 +20,8 @@ defmodule ElixirGenTest do
   property "Reverse append is append reverse" do
     check all list1 <- list_of(integer()),
               list2 <- list_of(integer()) do
-      assert reverse(list1 ++ list2) == reverse(list2) ++ reverse(list1)
+      assert reverse(list1 ++ list2) == 
+             reverse(list2) ++ reverse(list1)
     end
   end
 end

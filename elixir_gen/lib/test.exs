@@ -1,8 +1,7 @@
-use ExUnitProperties
+# use ExUnitProperties
 
 
 IO.write [IO.ANSI.home, IO.ANSI.clear]; 
-
 
 
 #StreamData.string(:alphanumeric) |> Enum.take(10) |> Enum.each(&IO.puts/1)
@@ -214,6 +213,62 @@ defmodule New do
 end
 
 
+
+defmodule Game do
+  def start_link() do
+    Agent.start_link(fn -> [] end)
+  end
+
+  def max_players(game) do
+      number_of_players(game) == 4
+  end
+
+  def add_player(game, player) do
+    unless max_players(game) do
+      Agent.cast(game, fn(players) -> players ++ [player] end)
+    end
+  end
+
+  def number_of_players(game) do
+    length(Agent.get(game, &(&1)))
+  end
+end
+
+{:ok, my_game} = Game.start_link()
+
+StreamData.bind(StreamData.constant(:add_player),
+    fn (action) ->
+        StreamData.map(StreamData.atom(:alphanumeric),
+            fn (name) -> [Game, action, name] end)
+    end)
+|> Enum.take(10)
+|> Enum.map(fn ([module, method, arg]) -> 
+        apply(module, method, [my_game, arg]) 
+    end)
+|> IO.inspect
+
+
+# Game.add_player(my_game, :test1)
+# Game.add_player(my_game, :test2)
+# Game.add_player(my_game, :test3)
+# Game.add_player(my_game, :test4)
+# Game.add_player(my_game, :test5)
+
+players = [:test1, :test2, :test3, :test4, :test5]
+
+
+
+
+
+
+Enum.each(players, fn name ->
+  Task.async(fn ->
+    Game.add_player(my_game, name)
+  end)
+end)
+
+:timer.sleep(1000)
+IO.inspect(Game.number_of_players(my_game))
 
 
 #check all list <- list_of(integer()) do
