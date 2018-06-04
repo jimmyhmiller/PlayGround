@@ -88,26 +88,35 @@ export const withSlide = Comp => class WithSlide extends React.Component {
   }
 }
 
+const removeFirst = (arr) => {
+  arr.shift();
+  return arr
+}
+
 export const detectIndent = source => 
   source ? / +/.exec(source)[0].length : 0;
 
 export const removeIndent = (indent, source) =>
-  source.split("\n")
+  removeFirst(source.split("\n"))
         .map(s => s.substring(indent, s.length))
         .join("\n")
 
+
+export const formatCode = (source) => {
+  const spaces = detectIndent(source);
+  return removeIndent(spaces, source)
+}
 
 export const BlankSlide = withSlide(() => {
   return <span />;
 })
 
 export const Code = withSlide(({ source, color, lang, title, textSize, headlineSize }) => {
-  const spaces = detectIndent(source);
   return (
     <div>
       <Headline color={color} size={headlineSize || 4} noSlide textAlign="left" text={title} />
       <CodePane textSize={textSize || 30} 
-      source={removeIndent(spaces, source)} lang={lang} />
+      source={formatCode(source)} lang={lang} />
     </div>
   )
 })

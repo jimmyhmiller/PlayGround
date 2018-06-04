@@ -11,7 +11,10 @@ import {
   BlankSlide,
   Image,
   Text,
+  formatCode,
 } from "./library";
+
+import CodeSlide from 'spectacle-code-slide';
 
 const images = {
   me: require("./images/me.jpg"),
@@ -105,6 +108,48 @@ export default () =>
           end
         end
       `} />
+
+
+    <Headline
+      color="yellow"
+      text="Demo" />
+
+    <Points title="Reaching Understanding">
+      <Point text="Breaking Down" />
+      <Point text="Removing Sugar" />
+      <Point text="Building up" />
+    </Points>
+
+    <Code
+      title="Property-Based Test Example"
+      lang="elixir"
+      source={`
+        property "Reverse a reverse doesn't change" do
+          check all list <- list_of(integer()) do
+            assert reverse(reverse(list)) == list
+          end
+        end
+      `} />
+
+    <Points title="Disecting Example">
+      <Point text="property" />
+      <Point text="check" />
+      <Point text="all" />
+      <Point text="list_of" />
+      <Point text="integer" />
+    </Points>
+
+    <Points title="Modules">
+      <Point text="StreamData" />
+      <Point text="ExUnitProperties" />
+    </Points>
+
+    <Headline
+      color="yellow"
+      text="Demo" />
+
+
+
 
 
     <BlankSlide />
