@@ -22,12 +22,11 @@
                    :form/values [{:form/value :form/new :form/label "New"}
                                  {:form/value :form/used :form/label "Used"}]}})
 
-(def new-form
+(def new-form 
   [[:layout/horizontal 
     [:form/first-name] 
     [:form/middle-name] 
-    [:form/last-name]]
-   [:form/amount]])
+    [:form/last-name]]])
 
 (def form
   [:form/new-used
@@ -42,25 +41,21 @@
    :form/another another-component})
 
 (defn app []
-  (render-form form fields comps))
+  (render-form new-form fields comps))
 
 
 (defn log [label x]
   (println label x)
   x)
 
-(set! *recursion-limit* 2)
-
-(s/exercise :form/component 4)
 
 
-(walk (partial log "inner") (partial log "outer") new-form)
 
-(app)
 
 (defn ^:export run []
   (r/render [app]
             (js/document.getElementById "app")))
 
 (run)
+
 
