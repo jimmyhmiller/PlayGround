@@ -1,5 +1,5 @@
 (ns testing-stuff.form
-  (:require [clojure.spec :as s]
+  (:require [clojure.spec.alpha :as s]
              [testing-stuff.components :refer [render-form]]))
 
 
@@ -18,8 +18,8 @@
 (defn another-component [{:keys [:form/label]} _] 
   [:div (str "Another: " label)])
 
-(def comps 
-  {:form/new-used [:form/radio {:size 2}]
+(def comps
+  {:form/new-used :form/radio
    :form/another another-component})
 
 

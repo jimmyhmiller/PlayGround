@@ -327,7 +327,7 @@ let rec tinfer e = match e with
            Record finalExtension;;
 
 
-let aObject = Object([Method("a", True); Method("b", True)]) in
+let aObject = Object([Method("a", True); Method("a", True)]) in
 let bObject = Object([Method("a", True); Method("b", False)]) in
     print_string (tree_to_string (tinfer (If(True, aObject, bObject))));;
 
