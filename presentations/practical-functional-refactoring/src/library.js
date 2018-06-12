@@ -81,20 +81,26 @@ export const withSlide = Comp => class WithSlide extends React.Component {
       return <Comp {...props} />
     }
     return (
-      <Slide maxWidth={maxWidth} maxHeight={maxHeight || 800}>
+      <Slide maxWidth={maxWidth || 1300} maxHeight={maxHeight || 800}>
         <Comp {...props} />
       </Slide>
     )
   }
 }
 
+const removeFirst = (arr) => {
+  arr.shift();
+  return arr;
+}
+
+
 export const detectIndent = source => 
   source ? / +/.exec(source)[0].length : 0;
 
 export const removeIndent = (indent, source) =>
-  source.split("\n")
-        .map(s => s.substring(indent, s.length))
-        .join("\n")
+  removeFirst(source.split("\n"))
+    .map(s => s.substring(indent, s.length))
+    .join("\n")
 
 
 export const BlankSlide = withSlide(() => {
