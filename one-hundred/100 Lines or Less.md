@@ -30,6 +30,7 @@
 * Regex
 * Service Discovery
 * Testing Framework
+* Turing machine
 * Type Inference
 * Type Safe Printf
 * Unifier
