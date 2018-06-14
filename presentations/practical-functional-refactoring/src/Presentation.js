@@ -50,7 +50,6 @@ export default () =>
       <Point text="Can't address fighting frameworks" />
     </Points>
 
-
     <Headline
       color="green"
       textAlign="left"
@@ -74,6 +73,11 @@ export default () =>
 
     <Headline
       color="yellow"
+      textAlign="left"
+      text="Fewer lines is not a measure of success" />
+
+    <Headline
+      color="green"
       textAlign="left"
       text="Widely Applicable Refactoring" />
 
@@ -202,6 +206,7 @@ export default () =>
     <Code
       color="blue"
       lang="javascript"
+      maxWidth={1300}
       source={`
         const checkStatus = (player) => {
           return calcStatus(player) && calcSuperStatus(player);
@@ -222,7 +227,7 @@ export default () =>
         const createAndSendMessages = (users) => {
           for (user of users) {
             const message = \`Hello \${user.name} thanks for \${user.action}.\`;
-            sms.send(info.number, message);
+            sms.send(message);
           }
         }
       `} />
@@ -264,7 +269,6 @@ export default () =>
         }
       `} />
 
-
     <Code
       maxWidth={1300}
       title="Extract Side Effects"
@@ -283,7 +287,6 @@ export default () =>
           assert isCorrect(sentMessages)
         }
       `} />
-
 
     <Headline
       color="green"
@@ -337,34 +340,40 @@ export default () =>
           .attack();
       `} />
 
-    <Headline
-      color="green"
-      textAlign="left"
-      text="Immutable Objects" />
 
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Eliminate Exceptions" />
 
     <Code
-      color="green"
-      title="Immutable Objects"
+      color="blue"
+      title="Eliminate Exceptions"
       lang="javascript"
       source={`
-        public class Person
-        {
-          public String Name { get; }
-          public int Age { get; }
-          public Person(String name, int age) 
-          {
-            this.Name = name;
-            this.Age = age;
-          } 
+        public Special {
+          public Integer attack() throws InvalidMove {
+            return 9001;
+          }
         }
+        ...
+        special.attack()
       `} />
 
-    <Points title="Best Practices?">
-      <Point text="Encapsulation is bad" />
-      <Point text="Data and behavior are different" />
-      <Point text="Avoid Inheritance" />
-    </Points>
+    <Code
+      color="blue"
+      title="Eliminate Exceptions"
+      lang="javascript"
+      source={`
+        public Special {
+          public Try<InvalidMove, Integer> attack() {
+            return Try.success(9001);
+          }
+        }
+        ...
+        special.attack().failed(regular::attack);
+      `} />
+
 
     <Code
       maxWidth={1300}
@@ -397,6 +406,276 @@ export default () =>
           public getUserById(UUID id) {}
         }
       `} />
+
+    <Headline
+      color="yellow"
+      size={4}
+      textAlign="left"
+      text="Going against the grain" />
+
+
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Dynamically Typed Languages" />
+
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Get rid of classes" />
+
+    <Points title="Class Downsides">
+      <Point text="Couple data and operations" />
+      <Point text="Don't compose" />
+      <Point text="Allows hidden state" />
+    </Points>
+
+    <Points title="Class Replacements">
+      <Point text="Functions" />
+      <Point text="Pure, raw data" />
+      <Point text="Single state store" />
+      <Point text="Higher order functions" />
+    </Points>
+
+    <Code
+      color="green"
+      title="Class Example"
+      lang="python"
+      source={`
+        class Player(object):
+            
+            def __init__(self, name, strength):
+                self.name = name
+                self.strength = strength
+            
+            def get_attack_damage(self):
+                return self.strength
+
+        p = Player("Gelabrous", 1)
+
+        print(p.get_attack_damage()) # 1
+      `} />
+
+
+    <Code
+      color="green"
+      title="Class Example"
+      lang="python"
+      source={`
+        class WeakenedPlayer(Player):
+            
+            def __init__(self, name, strength):
+               super().__init__(name, strength)
+            
+            def get_attack_damage(self):
+                return super().get_attack_damage() - 1
+
+        p = WeakenedPlayer("Gelabrous", 1)
+
+        print(p.get_attack_damage()) # 0
+      `} />
+
+    <Code
+      color="green"
+      title="Class Example"
+      lang="python"
+      source={`
+        class Player(object):
+            
+            def __init__(self, name, strength, weakened=false):
+                ...
+
+            def weaken(self):
+                self.weakened = true
+            
+            def get_attack_damage(self):
+                if self.weakened:
+                    return strength - 1
+                else:
+                    return strength
+
+      `} />
+
+    <Code
+      color="blue"
+      title="Function Example"
+      lang="python"
+      source={`
+        player = {
+          "name": "Gelabrous",
+          "strength": 1
+        }
+
+        def get_attack_damage(player):
+            return player["strength"]
+
+        print(get_attack_damage(player)) # 1
+      `} />
+
+    <Code
+      color="blue"
+      title="Function Example"
+      lang="python"
+      source={`
+        player = {
+          "name": "Gelabrous",
+          "strength": 1,
+          "weakened": true
+        }
+
+        def get_attack_damage(player):
+          if "weakened" in player:
+              return strength - 1
+          else:
+              return strength
+
+        print(get_attack_damage(player)) # 0
+      `} />
+
+
+    <Code
+      color="blue"
+      title="Function Example"
+      lang="python"
+      source={`
+        def apply_weakening(f):
+            def weakened(player):
+                if "weakened" in player:
+                    return f(player) - 1
+                return f(player)
+            return weakened
+
+        @apply_weakening
+        def get_attack_damage(player):
+            return player["strength"]
+
+        print(get_attack_damage(player)) # 0
+      `} />
+
+
+    <Code
+      color="blue"
+      title="Function Example"
+      lang="python"
+      source={`
+        def status_effect(property, f):
+            def apply_effect(g):
+                def effect(player):
+                    if property in player:
+                        return f(g(player))
+                    return f(player)
+                return effect
+            return apply_effect
+
+      `} />
+
+    <Code
+      color="blue"
+      title="Function Example"
+      lang="python"
+      source={`
+        @status_effect("weakened", lambda x: x - 1)
+        @status_effect("raging", lambda x: x * 2)
+        def get_attack_damage(player):
+            return player["strength"]
+
+        print(get_attack_damage(player)) # 1
+
+      `} />
+
+    <Points color="green" title="Interpret Data First">
+      <Point text="Separate what and how" />
+      <Point text="Avoid mocks" />
+      <Point text="Post-hoc validation" />
+    </Points>
+
+
+    <Code
+      color="green"
+      lang="javascript"
+      source={`
+        const loadUsers = (users) => {
+          const validUsers = []
+          for (user of users) {
+            const standardUser = {}
+            standardUser.name = user.first_name + user.last_name;
+            standardUser.dateAdded = user.date_added;
+            if (last5Days(standardUser.dateAdded)) {
+              validUsers.push(standardUser);
+            } else {
+              console.log(\`user was not valid $\{user}\`)
+            }
+
+          }
+          validUsers.each(sendToDb)
+        }
+      `} />
+
+    <Code
+      color="green"
+      lang="javascript"
+      source={`
+        {action: "logInvalid",
+         user: {}}
+
+        {action: "load",
+         user: {}}
+      `} />
+
+
+    <Code
+      color="green"
+      lang="javascript"
+      source={`
+        const determineAction = (user) => {
+          if (isValid(user)) {
+            return {action: "load", user: convertToStandard(user)};
+          }
+          return {action: "logInvalid", user: user};
+        }
+
+        const logInvalid = ({user}) => {
+          console.log(\`user was not valid $\{user}\`)
+        }
+
+        const loadUser = ({user}) => {
+          return sendToDb(user)
+        }
+      `} />
+
+
+    <Code
+      color="green"
+      lang="javascript"
+      source={`
+        const performAction = (performer) => (payload) => {
+          return performer[payload.type](payload)
+        }
+
+        const loadUsers = (users, actionPerformer) => {
+          return users.map(performAction(actionPerformer))
+        }
+      `} />
+
+    <Code
+      color="green"
+      lang="javascript"
+      source={`
+        const actionPerformer = {
+          logInvalid: logInvalid,
+          load: loadUser
+        }
+
+        const testActionPerformer = {
+          logInvalid: (x) => ["logged", x],
+          load: x => ["loaded", x],
+        }
+
+        loadUsers(users, actionPerformer)
+        loadUsers(users, testActionPerformer)
+
+      `} />
+
 
 
 
