@@ -125,7 +125,7 @@ export const Point = ({ text, textSize=50 }) =>
 
 export const Points = withSlide(({ children, color, title, size, styleContainer }) =>
   <div style={styleContainer}>
-    <Headline noSlide color={color} size={size} textAlign="left" text={title} />
+    <Headline noSlide color={color} size={size || 4} textAlign="left" text={title} />
     <List>
       {children}
     </List>
