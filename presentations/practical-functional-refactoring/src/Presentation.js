@@ -375,37 +375,6 @@ export default () =>
       `} />
 
 
-    <Code
-      maxWidth={1300}
-      color="yellow"
-      title="Partial Application"
-      lang="javascript"
-      source={`
-        public class DataFetcher
-        {
-          public static getActiveUsers(Connection connection) {}
-          public static getUserById(Connection connection, UUID id) {}
-         }
-      `} />
-
-    <Code
-      maxWidth={1300}
-      color="yellow"
-      title="Partial Application"
-      lang="javascript"
-      source={`
-        public class DataFetcher
-        {
-          private Connection connection;
-          public DataFetcher(Connection connection) 
-          {
-            this.connection = connection;
-          } 
-
-          public getActiveUsers() {}
-          public getUserById(UUID id) {}
-        }
-      `} />
 
     <Headline
       color="yellow"
@@ -676,6 +645,210 @@ export default () =>
 
       `} />
 
+    <Headline
+      size={4}
+      text="Boilerplate (and hacks) abound" />
+
+    <Code
+      title="Eliminate Loops"
+      lang="javascript"
+      source={`
+        function sumOfActiveScores(team) {
+          return team
+            .filter(player => player.active)
+            .flatMap(player => player.scores)
+            .filter(score => score !== null)
+            .reduce((total, score) => total + score, 0);
+        }
+      `} />
+
+    <Code
+      title="Immutable Updates"
+      lang="javascript"
+      source={`
+      function updateVeryNestedField(state, action) {
+        return {
+          ...state,
+          first: {
+            ...state.first,
+            second: {
+              ...state.first.second,
+              [action.someId]: {
+                ...state.first.second[action.someId],
+                fourth: action.someValue
+              }
+            }
+          }
+        }
+      }
+    `} />
+
+    <Code
+      title="Linked List"
+      lang="haskell"
+      source={`
+        data List a = Nil | Cons a (List a)
+      `} />
+
+
+    <Code
+      textSize={14}
+      title="Linked List"
+      lang="javascript"
+      source={`
+        interface List<T> {
+            public <R> R accept(Visitor<T,R> visitor);
+
+            public static interface Visitor<T,R> {
+                public R visitNil();
+                public R visitCons(T value, List<T> sublist);
+            }
+        }
+
+        final class Nil<T> implements List<T> {
+            public Nil() { }
+
+            public <R> R accept(Visitor<T,R> visitor) {
+                return visitor.visitNil();
+            }
+        }
+        final class Cons<T> implements List<T> {
+            public final T value;
+            public final List<T> sublist;
+
+            public Cons(T value, List<T> sublist) {
+                this.value = value;
+                this.sublist = sublist;
+            }
+
+            public <R> R accept(Visitor<T,R> visitor) {
+                return visitor.visitCons(value, sublist);
+            }
+        }
+      `} />
+
+    <Points title='New "OO" languages are very functional'>
+      <Point text="Kotlin" />
+      <Point text="Rust" />
+      <Point text="Swift" />
+    </Points>
+
+    <Code
+      title="C# Record types"
+      lang="javascript"
+      source={`
+        sealed abstract class List<T>;
+        sealed class Nil<T>() : List<T>;
+        sealed class Cons(T t, List<T> list) : List<T>;
+      `} />
+
+    <Code
+      title="C# Record types"
+      lang="javascript"
+      source={`
+        Expr Simplify(Expr e)
+        {
+          switch (e) {
+            case Mult(Const(0), _): return Const(0);
+            case Mult(_, Const(0)): return Const(0);
+            case Mult(Const(1), var x): return Simplify(x);
+            case Mult(var x, Const(1)): return Simplify(x);
+            case Mult(Const(var l), Const(var r)): return Const(l * r);
+            case Add(Const(0), var x): return Simplify(x);
+            case Add(var x, Const(0)): return Simplify(x);
+            case Add(Const(var l), Const(var r)): return Const(l + r);
+            case Neg(Const(var k)): return Const(-k);
+            default: return e;
+          }
+        }
+      `} />
+
+
+    <Code
+      title="Javascript Pipelines"
+      lang="javascript"
+      source={`
+        function sumOfActiveScores(team) {
+          return team
+            |> filter(player => player.active)
+            |> flatMap(player => player.scores)
+            |> filter(score => score !== null)
+            |> reduce((total, score) => total + score, 0);
+        }
+      `} />
+
+    <Code
+      title="Javascript Pipelines"
+      lang="javascript"
+      source={`
+        function sumOfActiveScores(team) {
+          return team
+            |> filter(player => player.active)
+            |> flatMap(player => player.scores)
+            |> filter(score => score !== null)
+            |> sum()
+        }
+      `} />
+
+    <Code
+      title="Javascript Expressions"
+      lang="javascript"
+      source={`
+        let x = do {
+          if (foo) { 
+            "Yay!"
+          } else {
+            "No :("
+          }
+        };
+      `} />
+
+
+    <Headline
+      text="Borrowed inspiration" />
+
+    <Code
+      maxWidth={1300}
+      color="yellow"
+      title="Partial Application"
+      lang="javascript"
+      source={`
+        public class DataFetcher
+        {
+          public static getActiveUsers(Connection connection) {}
+          public static getUserById(Connection connection, UUID id) {}
+         }
+      `} />
+
+    <Code
+      color="yellow"
+      title="Partial Application"
+      lang="javascript"
+      source={`
+        public class DataFetcher
+        {
+          private Connection connection;
+          public DataFetcher(Connection connection) 
+          {
+            this.connection = connection;
+          } 
+
+          public getActiveUsers() {}
+          public getUserById(UUID id) {}
+        }
+      `} />
+
+    <Code
+      title="Immutable Builder"
+      lang="javascript"
+      source={`
+        new User()
+            .Name("Jimmy")
+            .Hobby("Programming")
+            .Build();
+      `} />
+
+
 
 
 
@@ -689,10 +862,14 @@ export default () =>
 
     <BlankSlide />
 
+
+
     <Headline
       color="red"
       textAlign="left"
       text="Experiments" />
+
+
 
     <Code
       maxWidth={1300}
