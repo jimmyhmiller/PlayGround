@@ -32,6 +32,7 @@ const createStore = (reducer, initialState, enhancer) => {
         dispatch: (action) => {
             state = reducer(state, action)
             listeners.forEach(l => l());
+            return action
         },
     }
 }
