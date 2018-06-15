@@ -27,7 +27,9 @@
    (Math/sqrt (+ (square (- x2 x1)) 
                    (square (- y2 y1)))))
 (defn gauss [mean variance]
-  (+ mean (* variance (q/random-gaussian))))
+  (try
+    (+ mean (* variance (q/random-gaussian)))
+    (catch Exception e 0.5)))
 
 
 
@@ -50,7 +52,9 @@
 
 
 (defn odds [n]
-  (< (q/random 1) n))
+  (try
+    (< (q/random 1) n)
+    (catch Exception e false)))
 
 (defn subdivide-r [[p1 p2 p3]]
   (let [triangles
@@ -58,7 +62,7 @@
                          [[p1 p2] (let [r (random-point p1 p2)] [[r p2 p3] [r p1 p3]])]
                          [[p2 p3] (let [r (random-point p2 p3)] [[r p3 p1] [r p2 p1]])]
                          [[p1 p3] (let [r (random-point p1 p3)] [[r p3 p2] [r p1 p2]])]))]
-    triangles
+    ;triangles
     (cond
       (odds 0.05) (take 1 triangles)
       (odds 0.05) (drop 1 triangles)
@@ -94,21 +98,58 @@
    [[0 0] [0 (q/height)] [(q/width) 0]]])
 
 
+(defn height []
+  (try (q/height)
+       (catch Exception e 1000)))
+
+(defn width []
+  (try (q/width)
+       (catch Exception e 1000)))
+
 (defn initial-triangles' []
-  [[[0 (q/height)] [(q/width) (q/height)] [(q/width) (* 2 (/ (q/height) 3))]]
-   [[0 (* 1 (/ (q/height) 3))] 
-    [0 (* 2 (/ (q/height) 3))] 
-    [(q/width) (* 2 (/ (q/height) 3))]]
-   [[(q/width) 0] 
-    [0 (* 1 (/ (q/height) 3))] 
-    [(q/width) (* 1 (/ (q/height) 3))]]
-   [[(q/width) 0] 
-    [0 (* 1 (/ (q/height) 3))] 
-    [0 0]]])
+  [[[(width) 0] 
+    [0 (* 1 (/ (height) 3))] 
+    [0 0]] 
+   [[(width) 0] 
+    [0 (* 1 (/ (height) 3))] 
+    [(width) (* 1 (/ (height) 3))]] 
+   [[(width) (* 1 (/ (height) 3))] 
+    [(width) (* 2 (/ (height) 3))] 
+    [0 (* 1 (/ (height) 3))]]
+   [[0 (* 1 (/ (height) 3))] 
+    [0 (* 2 (/ (height) 3))] 
+    [(width) (* 2 (/ (height) 3))]]
+   [[0 (* 2 (/ (height) 3))] 
+    [0 (height)] 
+    [(width) (* 2 (/ (height) 3))]]
+   [[0 (height)]
+    [(width) (height)] 
+    [(width) (* 2 (/ (height) 3))]]])
+
+
+(defn power-2 [x]
+  (Math/pow 2 x))
+
+(defn triangles' []
+  (mapcat (fn [tri n] (take n (generate-triangles [tri] subdivide-r)))
+       (initial-triangles')
+       [(power-2 10) (power-2 10)
+        (power-2 12) (power-2 12)
+        (power-2 14) (power-2 14)]))
+
+
+
+(defn t1 [] [(nth 1 (initial-triangles'))])
+(defn t2 [] [(nth 2 (initial-triangles'))])
+(defn t3 [] [(nth 3 (initial-triangles'))])
+(defn t4 [] [(nth 4 (initial-triangles'))])
+(defn t5 [] [(nth 5 (initial-triangles'))])
+(defn t6 [] [(nth 6 (initial-triangles'))])
+
 
 
 (defn draw []
-  (let [triangles (take 20000 (generate-triangles (initial-triangles') subdivide-r))]
+  (let [triangles (take 1000 (generate-triangles (initial-triangles) subdivide-r))]
     (q/no-loop)
     ;(q/fill 49 9 96)
     (q/fill 0 0 100)
