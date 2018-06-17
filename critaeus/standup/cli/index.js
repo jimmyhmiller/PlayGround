@@ -7,6 +7,25 @@ const { table, getBorderCharacters } = require('table');
 const inquirer = require('inquirer')
 
 
+// s3-files
+// /<team>/<date>/statuses
+
+
+// GET  <team>/standup/summary
+// { "summary": [{"user": "Jimmy", "status": "Got stuck on tech debt."}]}
+// GET  <team>/standup/details
+// { "details": [{"user": "Jimmy", 
+//                 "status": "Got stuck on tech debt. Other things."}]}
+// GET  <team>/standup/history
+// { "history":
+//   [{"date": "12/31/2017".
+//     "statuses": [{"user": "Jimmy", 
+//                   "status": "Got stuck on tech debt. Other things."}]}]}
+// POST <team>/<name>
+// POST <team>/standup
+// {"status": "Here's my status"}
+// PUT  <team>/join
+// {"user": "Jimmy"}
 
 
 var tab = require('tabtab')({
