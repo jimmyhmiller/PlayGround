@@ -294,6 +294,11 @@ export default () =>
       text="Statically Typed Languages" />
 
     <Headline
+      color="blue"
+      textAlign="left"
+      text="Make illegal states unrespresentable" />
+
+    <Headline
       color="red"
       textAlign="left"
       text="Eliminate Null" />
@@ -312,6 +317,22 @@ export default () =>
         }
         ...
         myPlayer.getSpecialAttack().attack();
+      `} />
+
+    <Code
+      color="red"
+      title="Eliminate Null"
+      lang="javascript"
+      source={`
+        public Player {
+          Optional<Attack> special = Optional.empty();
+
+          public Optional<Attack> getSpecialAttack() {
+            return this.special;
+          }
+        }
+        ...
+        myPlayer.getSpecialAttack().attack() // Compile error
       `} />
 
     <Code
