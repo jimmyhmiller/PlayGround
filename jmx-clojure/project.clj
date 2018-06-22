@@ -8,5 +8,6 @@
                  [incanter "1.5.7"]
                  [clj-time "0.14.0"]
                  [live-chart "0.1.1"]
-                 [dorothy "0.0.6"]]
+                 [dorothy "0.0.6"]
+                 [org.clojure/test.check "0.9.0"]]
   :jvm-opts ["-XX:+UseG1GC"])

@@ -50,6 +50,13 @@
   [(* (/ 1 2) (+ x1 x2))
    (* (/ 1 2) (+ y1 y2))])
 
+(defn random 
+  ([x]
+   (q/random x))
+  ([x y]
+   (try 
+     (q/random x y)
+     (catch Exception e (+ x (rand-int (- (inc y) x)))))))
 
 (defn odds [n]
   (try
@@ -148,7 +155,63 @@
 
 
 
+(defn clear-canvas []
+  (q/fill 0 0 100)
+  (q/rect 0 0 (q/width) (q/height))
+  (q/no-loop))
+
+
+(defn r+- [x y]
+  (+ x (random (- y) y)))
+
+(range 0 1 10)
+
+(defn random-step-range [start stop step-low step-high]
+  (let [step (random step-low step-high)]
+    (cond 
+      (= start stop) '()
+      (>= (+ start step) stop) (list stop)
+      :else (cons start (random-step-range (+ start step) stop step-low step-high)))))
+
+(defn step-with-length [start stop low high]
+  (let [ranger (random-step-range start stop low high)]
+    (map (fn [x y] [x (- y x)]) ranger (rest ranger))))
+
+
+
+
 (defn draw []
+  (clear-canvas)
+  (q/stroke-weight 1)
+  (doseq [y (random-step-range 0 (height) 0 10)]
+    (doseq [[x length] (step-with-length 0 (width) 10 10)]
+      (q/curve (r+- x 10) (r+- y 10)
+               x y (+ x length) y
+               (r+- x 10) (r+- y 10)))))
+
+(defn draw3 [] 
+  (q/fill 0 0 100)
+  (q/rect 0 0 (q/width) (q/height))
+  (q/no-loop)
+  (q/no-fill)
+  (q/stroke-weight 0.5)
+  (q/stroke 0 0 0)
+  (doseq [x (range 0 (width) 5)
+          y (range 0 (height))]
+    (let [offset (random 0 3)]
+      (when (odds 0.1)
+        (q/line (+ x offset) 
+                (- y 10) 
+                (+ x offset)
+                y))))
+  (doseq [x (range 0 (width))
+          y (range 0 (height) 5)]
+    (let [offset (random 0 3)]
+      (when (odds 0.1)
+        (q/line (- x 10) (+ y offset) x (+ y offset))))))
+
+
+(defn draw1 []
   (let [triangles (take 1000 (generate-triangles (initial-triangles) subdivide-r))]
     (q/no-loop)
     ;(q/fill 49 9 96)
@@ -163,7 +226,7 @@
     (q/save "sketch.tif")))
 
 
-(defn draw' []
+(defn draw2 []
   (q/no-loop)
   (doseq [y (range 0 (q/height) 5)]
     (let [hue (rescale y 0 (q/height) 180 220)]
@@ -172,7 +235,7 @@
       (q/rect 0 y (q/width) 15)))
   (doseq [y (range -20 (q/height) 30)
           x (range -20 (q/width) 30)]
-    (let [hue (rescale (q/random y (+ y 200)) 0 (q/height) 30 200)
+    (let [hue (rescale (q/random y (+ y 200)) 0 (q/height) 30 220)
           size (q/random 0 50)
           to-draw (q/random 0 10)]
       (q/no-stroke)

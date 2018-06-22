@@ -5,6 +5,7 @@
             [incanter.charts :as charts]
             [incanter.datasets :as datasets]
             [dorothy.core :as dot]
+            [clojure.test.check.generators :as gen]
             [jmx-clojure.live-charts :refer [make-live-chart]])
   (:import [org.jfree.chart ChartPanel JFreeChart])
   (:import [javax.swing JComponent JLabel JPanel JFrame]))
@@ -93,11 +94,18 @@
       :HeapMemoryUsage 
       :used))
 
+
 (->> "*:*"
      jmx/mbean-names
      seq
      (map #(.toString %))
      (map (fn [name] [name (jmx/mbean name)])))
+
+
+(time (do (doall (pmap identity (gen/sample
+                                 (gen/map gen/keyword gen/keyword) 10))) 
+          nil))
+
 
 
 (live/show (live/time-chart [get-used-heap]))
@@ -107,4 +115,4 @@
 
 
 
-
+(System/gc)
