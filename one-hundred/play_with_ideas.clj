@@ -70,8 +70,7 @@
 
 
 (defn logic-variable? [x]
-  (and (symbol? x)
-       (string/starts-with? (name x) "?")))
+  (symbol? x))
 
 (defn walk-var-binding [var var-map]
   (if-let [val (get var-map var)]
@@ -85,27 +84,28 @@
     (assoc var-map var val)))
 
 (defn unify [var-map [x y]]
-  (if (map? var-map)
+  (when (map? var-map)
     (let [x' (walk-var-binding x var-map)
           y' (walk-var-binding y var-map)]
-      (cond 
+      (cond
         (= x' y') var-map 
         (logic-variable? x') (add-equivalence x' y' var-map)
         (logic-variable? y') (add-equivalence y' x' var-map)
-        :else :unify/failed))
-    var-map))
+        :else :unify/failed))))
 
 (defn unify-all [var-map vals vars]
-  (reduce unify var-map
-          (map vector vals
-               (concat vars (repeat :unify/failed)))))
+  (if (not (coll? vals))
+    (unify-all var-map [vals] vars)
+    (reduce unify var-map
+            (map vector vals
+                 (concat vars (repeat :unify/failed))))))
 
 (defn failed? [unified]
   (if (instance? clojure.lang.ISeq unified)
     (not (nil? (some #{:unify/failed} unified)))
     (= unified :unify/failed)))
 
-(defn substitute-all [vars var-map]
+(defn substitute-all [vars var-map] 
   (clojure.walk/postwalk (fn [var] (walk-var-binding var var-map)) vars))
 
 (defn match-1 [value pattern consequence]
@@ -115,19 +115,35 @@
       (substitute-all consequence var-map))))
 
 (defn match* [value pat con & patcons]
-  (if (empty? patcons)
-    (match-1 value pat con)
-    (let [potential-match (match-1 value pat con)]
-      (if (failed? potential-match)
-        (apply match* (cons value patcons))
-        potential-match))))
+  (cond
+    (= pat :otherwise) con
+    (empty? patcons) (match-1 value pat con)
+    :else (let [potential-match (match-1 value pat con)]
+            (if (failed? potential-match)
+              (apply match* (cons value patcons))
+              potential-match))))
+
+(defmacro match [value & args]
+  `(match* ~value ~@(map (fn [x] `(quote ~x)) args)))
+
+
+(defmacro defmatch [name & matches]
+  `(defn ~name [val#]
+    (match val# ~@matches)))
+
+(defmatch is-ok
+  [:ok val] true
+  [:error _] false
+  :otherwise 23)
+
+(is-ok [:error 2])
 
 (match* [1 2 1]
-        '[?x ?y] '[?x ?y]
-        '[?x ?y ?x] '[?x ?y]
-        '[?x ?y ?z] '[?x ?y ?z])
+        '[x y] '[x y]
+        '[x y x] '[x y]
+        '[x y z] '[x y z])
 
-(substitute-all '[?x [?x]] '{?x :string})
+(substitute-all '[x [x]] '{x :string})
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -159,10 +175,10 @@
   [1 :things :stuff]
   [2 :things :otherstuff]]
 
- '[?food ?stuff]
+ '[food stuff]
  
- '[[?e :likes ?food]
-   [?e :things ?stuff]])
+ '[[e :likes food]
+   [e :things stuff]])
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 

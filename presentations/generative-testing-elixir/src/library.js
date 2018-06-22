@@ -81,7 +81,7 @@ export const withSlide = Comp => class WithSlide extends React.Component {
       return <Comp {...props} />
     }
     return (
-      <Slide maxWidth={maxWidth} maxHeight={maxHeight || 800}>
+      <Slide maxWidth={maxWidth || 1300} maxHeight={maxHeight || 800}>
         <Comp {...props} />
       </Slide>
     )

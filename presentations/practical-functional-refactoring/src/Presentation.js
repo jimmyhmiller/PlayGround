@@ -194,7 +194,7 @@ export default () =>
       lang="javascript"
       source={`
         const calcStatus = (player) => {
-          return !(player.hasThing && player.myStuff) {
+          return !(player.hasThing && player.myStuff)
         }
 
         const calcSuperStatus = player => {
