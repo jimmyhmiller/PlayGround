@@ -100,6 +100,8 @@
             (map vector vals
                  (concat vars (repeat :unify/failed))))))
 
+(unify-all {} '[x y z] [1 2])
+
 (defn failed? [unified]
   (if (instance? clojure.lang.ISeq unified)
     (not (nil? (some #{:unify/failed} unified)))

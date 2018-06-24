@@ -1,3 +1,5 @@
+use ExUnitProperties
+
 defmodule Parallel do
   def pmap(collection, func) do
     collection
@@ -16,17 +18,10 @@ defmodule Simulator do
         method: method,
         args: args
       }) do
-    StreamData.bind(
-      StreamData.constant(method),
-      fn method ->
-        StreamData.map(
-          StreamData.tuple(args),
-          fn arg_tuple ->
-            {module, method, Tuple.to_list(arg_tuple)}
-          end
-        )
-      end
-    )
+    gen all method <- StreamData.constant(method),
+            arg <- StreamData.tuple(args) do
+      {module, method, Tuple.to_list(arg)}
+    end
   end
 
   def get_frequency(%{frequency: frequency}) do

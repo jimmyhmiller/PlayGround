@@ -56,10 +56,10 @@ export default () =>
     <Points title="Outline">
       <Point text="Unit Tests" />
       <Point text="Elixir's Property-Based Testing" />
-      <Point text="Examples and Potential Future" />
-      <Point text="Details and Other Communities" />
+      <Point text="Patterns for Properties" />
+      <Point text="Sketching some ideas" />
+      <Point text="The importance of the idea" />
     </Points>
-
 
     <Points title="What is a Unit Test">
       <Point text="Tests a (typically) small chunk of code" />
@@ -109,7 +109,6 @@ export default () =>
         end
       `} />
 
-
     <Headline
       color="yellow"
       text="Demo" />
@@ -147,6 +146,57 @@ export default () =>
     <Headline
       color="yellow"
       text="Demo" />
+
+    <Headline
+      color="green"
+      text="Patterns"
+      subtextSize={8}
+      subtext="Taken from Andrea Leopardi" />
+
+    <Code
+      headlineSize={2}
+      maxWidth={800}
+      title="Circular Test"
+      lang="elixir"
+      source={`
+        decode(encode(term)) == term
+      `} />
+
+    <Code
+      headlineSize={2}
+      maxWidth={800}
+      title="Oracle Code"
+      lang="elixir"
+      source={`
+        my_code() == oracle_code()
+      `} />
+
+    <Code
+      headlineSize={2}
+      maxWidth={800}
+      title="Smoke Test"
+      lang="elixir"
+      source={`
+        no_invalid_output(my_code())
+      `} />
+
+    <Code
+      headlineSize={2}
+      maxWidth={800}
+      title="Coversion code"
+      lang="elixir"
+      source={`
+        is_right_shape(convert(external_data))
+      `} />
+
+    <Headline
+      color="blue"
+      text="Possible Extensions" />
+
+    <Headline
+      text="Importance" />
+
+
 
 
 
