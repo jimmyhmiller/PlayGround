@@ -33,9 +33,13 @@
         :else :unify/failed))))
 
 (defn unify-all [env vars vals]
-  (reduce (fn [env [var val]] (unify env var val)) 
-          env
-          (map vector vars (concat vals (repeat :unify/failed)))))
+  (cond (not (coll? vals))
+        (unify-all env vars [vals])
+        (not (coll? vars)) (unify-all env [vars] vals)
+        :else
+        (reduce (fn [env [var val]] (unify env var val)) 
+                env
+                (map vector vars (concat vals (repeat :unify/failed))))))
 
 
 (defn substitute-all [env vars] 
@@ -46,9 +50,22 @@
 (defn match-1 [value pattern consequece]
   (substitute-all (unify-all {} pattern value) consequece))
 
+; consider take-until
+(defn match* [value pat con & patcons]
+  (cond
+    (= pat :otherwise) con
+    (empty? patcons) (match-1 value pat con)
+    :else (let [potential-match (match-1 value pat con)]
+            (if (failed? potential-match)
+              (apply match* (cons value patcons))
+              potential-match))))
+
+(defmacro match [value & args]
+  `(match* ~value ~@(map (fn [x] `(quote ~x)) args)))
 
 
-
+(match '(fn [x] x)
+       ('fn arg body) [arg body])
 
 (-> {}
     (unify 'x 'y)

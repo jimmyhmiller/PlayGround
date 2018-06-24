@@ -24,23 +24,6 @@ optional =
     skill: StreamData.integer(0..10)
   })
 
-{:gen, [context: Elixir, import: ExUnitProperties],
- [
-   {:all, [],
-    [
-      {:<-, [],
-       [{:req, [], Elixir}, {:required, [], Elixir}]},
-      {:<-, [],
-       [{:opt, [], Elixir}, {:optional, [], Elixir}]}
-    ]},
-   [
-     do:
-       {{:., [],
-         [{:__aliases__, [alias: false], [:Map]}, :merge]},
-        [], [{:req, [], Elixir}, {:opt, [], Elixir}]}
-   ]
- ]}
-
 StreamData.bind(required, fn req ->
   StreamData.map(optional, fn opt ->
     Map.merge(req, opt)
