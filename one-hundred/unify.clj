@@ -50,6 +50,15 @@
 (defn match-1 [value pattern consequece]
   (substitute-all (unify-all {} pattern value) consequece))
 
+
+
+(defn match** [value & patcons]
+  (drop-while (partial = :unify/failed)
+              (map (fn [[pattern consequence]] 
+                     (substitute-all (unify-all {} pattern value) consequence))
+                   (partition 2 patcons))))
+
+
 ; consider take-until
 (defn match* [value pat con & patcons]
   (cond
