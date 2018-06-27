@@ -14,6 +14,9 @@
 (defn add-var [env var val]
   (assoc env var val))
 
+(def unify-terms)
+(def unify)
+
 (defn unify [env x y] 
   (let [val-x (lookup env x)
         val-y (lookup env y)]
@@ -25,7 +28,7 @@
 (defmulti unify-terms (fn [env x y] [(type x) (type y)]))
 
 (defn reducer [env [x y]]
-  (if (= y :unify/failed)
+  (if (or (failed? x) (failed? y) (failed? env))
     :unify/failed
     (unify env x y)))
 
@@ -62,7 +65,34 @@
   `(defn ~name [value#]
      (match value# ~@patterns)))
 
-(match [1 2 3]
-       [x y z] {:x x
-                :y y
-                :z z})
+
+(defn match-clause [env facts query]
+  (->> facts
+       (map (partial unify env query))
+       (filter (complement failed?))))
+
+(match-clause {} facts '[e1 :age age])
+
+(defn process-query 
+  ([clauses facts]
+   (process-query [{}] clauses facts))
+  ([envs clauses facts]
+   (if (empty? clauses)
+     envs
+     (recur 
+      (mapcat (fn [env] (match-clause env facts (first clauses))) envs)
+      (rest clauses)
+      facts))))
+
+
+
+
+(def facts
+  [[1 :age 26]
+   [1 :name "jimmy"]
+   [2 :age 24]
+   [2 :name "steve"]])
+
+(def query1
+  '[[e1 :age 26]
+    [e1 :name name]])
