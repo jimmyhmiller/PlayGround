@@ -62,3 +62,7 @@
   `(defn ~name [value#]
      (match value# ~@patterns)))
 
+(match [1 2 3]
+       [x y z] {:x x
+                :y y
+                :z z})
