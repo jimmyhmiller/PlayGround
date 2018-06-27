@@ -142,7 +142,7 @@
 
 (match [1 2 1]
        [x y] [x y]
-       [x y x] '[x y]
+       [x y x] [x y]
        [x y z] [x y z])
 
 (substitute-all '[x [x]] '{x :string})

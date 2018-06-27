@@ -59,7 +59,7 @@ class Dark extends React.Component {
   render() {
     const { children, ...rest } = this.props;
     return (
-      <Slide bgColor="base03" {...rest}>
+      <Slide bgColor="base3" {...rest}>
         {children}
       </Slide>
     )
@@ -107,7 +107,7 @@ const Code = withSlide(({ source, lang, title, textSize, headlineSize }) => {
 })
  
 const Point = ({ text, textSize=50 }) => 
-  <ListItem textSize={textSize} textColor="base2">
+  <ListItem textSize={textSize} textColor="base02">
     {text}
   </ListItem>
 
