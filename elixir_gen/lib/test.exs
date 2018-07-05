@@ -1,8 +1,8 @@
 defmodule PlayerSpec do
   player_spec = %{
     req: %{
-      weapon: [:sword, :bow, :staff],
-      class: [:wizard, :ranger, :fighter],
+      weapon: [:sword, :bow, :staff, :gun],
+      class: [:wizard, :ranger, :fighter, :gunslinger],
       name: :string,
       strength: 0..10
     },

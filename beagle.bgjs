@@ -265,37 +265,37 @@ method reducer() {
 }
 
 
-<program> = expr | comment | program*
-comment = <'//'> #'.*'
-phrase = phrase-type phrase-name phrase-body |
-         phrase-type phrase-name phrase-args phrase-body |
-         phrase-type phrase-args phrase-body
-phrase-type = identifier
-phrase-name = identifier
-phrase-body = open-c expr* close-c
-phrase-args = <args>
+// <program> = expr | comment | program*
+// comment = <'//'> #'.*'
+// phrase = phrase-type phrase-name phrase-body |
+//          phrase-type phrase-name phrase-args phrase-body |
+//          phrase-type phrase-args phrase-body
+// phrase-type = identifier
+// phrase-name = identifier
+// phrase-body = open-c expr* close-c
+// phrase-args = <args>
 
 
-<expr> = fn-application | literal | infix-application | lambda | val | phrase
-fn-application = identifier open-p (expr <','?>)* close-p
-infix-application = expr <' '> symbol <' '> expr |
-                    expr <' '> <'`'> identifier  <'`'> <' '> expr
-<symbol> = #'[$-/:-?{-~!"^_`\[\]]'
-<keyword> = #':[A-Za-z]+'
-<identifier> = #'[A-Za-z\-_!?]+'
-<literal> = #'[0-9]' | identifier | keyword | string
-string = <'"'> #'[^"]*' <'"'>
-fn = <'fn'> identifier open-c fn-body close-c | <'fn'> identifier lambda
-fn-body = lambda+
-lambda = fn-args  <'=>'> expr | fn-args <'=>'> open-c expr+ close-c
-<arg> = identifier
-args = open-p (arg <','?>)* close-p | arg | literal
-fn-args = open-p ((arg | literal)  <','?>)* close-p | arg | literal
+// <expr> = fn-application | literal | infix-application | lambda | val | phrase
+// fn-application = identifier open-p (expr <','?>)* close-p
+// infix-application = expr <' '> symbol <' '> expr |
+//                     expr <' '> <'`'> identifier  <'`'> <' '> expr
+// <symbol> = #'[$-/:-?{-~!"^_`\[\]]'
+// <keyword> = #':[A-Za-z]+'
+// <identifier> = #'[A-Za-z\-_!?]+'
+// <literal> = #'[0-9]' | identifier | keyword | string
+// string = <'"'> #'[^"]*' <'"'>
+// fn = <'fn'> identifier open-c fn-body close-c | <'fn'> identifier lambda
+// fn-body = lambda+
+// lambda = fn-args  <'=>'> expr | fn-args <'=>'> open-c expr+ close-c
+// <arg> = identifier
+// args = open-p (arg <','?>)* close-p | arg | literal
+// fn-args = open-p ((arg | literal)  <','?>)* close-p | arg | literal
 
-val = <'val'> identifier <'='> expr
+// val = <'val'> identifier <'='> expr
 
 
-<open-p> = <'('>
-<close-p> = <')'>
-<open-c> = <'{'>
-<close-c> = <'}'>
+// <open-p> = <'('>
+// <close-p> = <')'>
+// <open-c> = <'{'>
+// <close-c> = <'}'>
