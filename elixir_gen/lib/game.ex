@@ -11,8 +11,6 @@ defmodule Game do
     Agent.update(game, fn players ->
       List.delete_at(players, 0)
     end)
-
-    :removed
   end
 
   def add_player(game, player) do
@@ -20,8 +18,6 @@ defmodule Game do
       Agent.update(game, fn players ->
         players ++ [player]
       end)
-
-      :added
     end
   end
 

@@ -1,0 +1,3 @@
+# Building a Pattern Matcher and Query Engine with Unification
+
+In this talk we will explore a notion called unification. Unification is not a topic that is discussed very often in the functional programming world,  but it underlies a number of different interesting functional features. In this talk we will build a simple unification algorithm and use it to power our own custom pattern matcher and a simple query engine. We will then discuss other uses of unification, ranging from its uses in compilers to using it as a way to build clear and concise business logic. 

@@ -81,7 +81,7 @@ export default () =>
 
     <Points title="Unit Test Problems">
       <Point text="Lots of code" />
-      <Point text="Don't test whole space" />
+      <Point text="Doesn't test the whole space" />
       <Point text="Tend towards testing implementation details" />
     </Points>
 
@@ -183,7 +183,7 @@ export default () =>
     <Code
       headlineSize={2}
       maxWidth={800}
-      title="Coversion code"
+      title="Conversion code"
       lang="elixir"
       source={`
         is_right_shape(convert(external_data))
