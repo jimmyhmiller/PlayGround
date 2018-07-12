@@ -42,7 +42,7 @@
     s
     (class
      {:isEmpty (fn [this] false)
-      :contains (fn [this i] (or (= i n) (s :contains i)))
+      :contains (fn [this i] (or (√= i n) (s :contains i)))
       :insert (fn [this i] (Insert this i))
       :union (fn [this s] (Union this s))})))
 

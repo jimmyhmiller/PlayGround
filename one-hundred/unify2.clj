@@ -14,6 +14,9 @@
 (defn add-var [env var val]
   (assoc env var val))
 
+(defn failed? [val]
+  (= val :unify/failed))
+
 (def unify-terms)
 (def unify)
 
@@ -45,8 +48,6 @@
     (clojure.walk/postwalk (partial lookup env) vars)
     env))
 
-(defn failed? [val]
-  (= val :unify/failed))
 
 (defn match-first [value patterns]
   (->> patterns
@@ -71,7 +72,6 @@
        (map (partial unify env query))
        (filter (complement failed?))))
 
-(match-clause {} facts '[e1 :age age])
 
 (defn process-query 
   ([clauses facts]
