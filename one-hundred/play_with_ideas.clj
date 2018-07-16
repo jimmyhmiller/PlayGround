@@ -42,7 +42,7 @@
     s
     (class
      {:isEmpty (fn [this] false)
-      :contains (fn [this i] (or (√= i n) (s :contains i)))
+      :contains (fn [this i] (or (= i n) (s :contains i)))
       :insert (fn [this i] (Insert this i))
       :union (fn [this s] (Union this s))})))
 
@@ -69,12 +69,12 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
-(defn logic-variable? [x]
+(defn variable? [x]
   (symbol? x))
 
 (defn walk-var-binding [var var-map]
   (if-let [val (get var-map var)]
-    (if (logic-variable? val)
+    (if (variable? val)
       (walk-var-binding val var-map)
       val)
     var))
@@ -89,8 +89,8 @@
           y' (walk-var-binding y var-map)]
       (cond
         (= x' y') var-map 
-        (logic-variable? x') (add-equivalence x' y' var-map)
-        (logic-variable? y') (add-equivalence y' x' var-map)
+        (variable? x') (add-equivalence x' y' var-map)
+        (variable? y') (add-equivalence y' x' var-map)
         :else :unify/failed))))
 
 (defn unify-all [var-map vals vars]
@@ -232,6 +232,12 @@
             (swap! state update :var inc)
             (swap! state assoc-in [:vars logic-var] new-var))
           new-var)))))
+
+
+(defn logic-variable? [x]
+  (and
+   (symbol? x)
+   (string/starts-with? (name x) "?")))
 
 (defn replace-var [maker t]
   (if (seq? type) 
