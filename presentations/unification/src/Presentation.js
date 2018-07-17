@@ -130,10 +130,12 @@ export default () =>
         (match true
                true false
                false true)
+        ; false
 
         (match :name
                :otherName :otherThing
                :name :thing)
+        ; :thing
       `} />
 
     <Code
@@ -318,7 +320,7 @@ export default () =>
     <Points title="Programming Languages">
       <Point text="Non-lexical lifetimes" />
       <Point text="Trait System" />
-      <Point text="Type Tnference" />
+      <Point text="Type Inference" />
       <Point text="Dependent types" />
     </Points>
 
