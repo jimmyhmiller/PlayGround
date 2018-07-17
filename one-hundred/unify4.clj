@@ -52,9 +52,11 @@
 (defn first-match [value patterns]
   (let [match-value (partial match-single value)]
     (->> patterns
-         (map (juxt (comp match-value key) val))
+         (map (juxt (comp match-value first) second))
          (drop-while (comp failed? first))
          first)))
+
+(first-match [1 2 3] '[[[x y z] [x y z]]])
 
 (defn substitute-all [env vars]
   (clojure.walk/postwalk (partial lookup env) vars))

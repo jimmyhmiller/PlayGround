@@ -1,6 +1,6 @@
 (ns rules.entities)
 
-(defrecord Player [cmb cmd improved-grapple position reach]) 
+(defrecord Player [name improved-grapple reach]) 
 
 (defrecord Grapple [grappler target]) 
 
