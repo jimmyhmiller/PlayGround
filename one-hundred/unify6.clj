@@ -1,6 +1,7 @@
-(ns unify5)
+(ns unify
+  (:import [clojure.lang Sequential]))
 
-(defn var? [x]
+(defn variable? [x]
   (symbol? x))
 
 (defn add-var [env var val]
@@ -9,9 +10,12 @@
 (defn lookup [env var]
   (if-let [val (get env var)]
     (if (var? val)
-      (recur env val)
+      (lookup env val)
       val)
     var))
+
+(defn failed? [x]
+  (= x :unify/failed))
 
 (def unify)
 (def unify-terms)
@@ -21,92 +25,87 @@
     (let [x-val (lookup env x)
           y-val (lookup env y)]
       (cond
-        (var? x-val) (add-var env x-val y-val)
-        (var? y-val) (add-var env y-val x-val)
+        (variable? x-val) (add-var env x-val y-val)
+        (variable? y-val) (add-var env y-val x-val) 
         :else (unify-terms env x-val y-val)))
     env))
 
-
-(defmulti unify-terms (fn [env x y] [(type x) (type y)]))
+(defmulti unify-terms 
+  (fn [env x y] [(type x) (type y)]))
 
 (defn reducer [env [x y]]
   (unify env x y))
 
-(defmethod unify-terms [clojure.lang.Sequential clojure.lang.Sequential] [env x y]
+(defmethod unify-terms [Sequential Sequential] 
+  [env x y]
   (if (= (count x) (count y))
     (reduce reducer env (map vector x y))
     :unify/failed))
 
 (defmethod unify-terms :default [env x y]
-  (if (= x y) 
+  (if (= x y)
     env
     :unify/failed))
 
-(defn failed? [x]
-  (= x :unify/failed))
 
 (defn matcher [value]
   (fn [pattern]
     (unify {} value pattern)))
 
-(defn first-match [value patterns] 
+(defn first-match [value patterns]
   (->> patterns
-       (map (juxt (comp (matcher value) first) second))
-       (drop-while (comp failed? first))
+       (map (juxt 
+             (comp (matcher value) first) 
+             second))
+       (filter (comp (complement failed?) first))
        first))
 
-(defn substitute [env expr]
+(defn substitute [[env expr]]
   (clojure.walk/postwalk (partial lookup env) expr))
 
-
 (defn match* [value patterns]
-  (let [[env consequence] (first-match value (partition 2 patterns))]
-    (substitute env consequence)))
-
-
+  (->> patterns
+       (partition 2)
+       (first-match value)
+       substitute))
 
 (defmacro match [value & patterns]
   `(eval (match* ~value (quote ~patterns))))
-
 
 (defmacro defmatch [name & patterns]
   `(defn ~name [& args#]
      (match args# ~@patterns)))
 
-(defmatch fib
+(defmatch fib 
   [0] 0
   [1] 1
   [n] (+ (fib (- n 1))
-          (fib (- n 2))))
+         (fib (- n 2))))
 
 
-(defn match-clause [env facts query]
-  (->> facts
-       (map (partial unify env query))
-       (filter (complement failed?))))
+(defn clause-matcher [facts query] 
+  (fn [env]
+    (->> facts
+         (map (partial unify env query))
+         (filter (complement failed?)))))
 
-(defn process-query
-  ([facts clauses]
-   (process-query [{}] facts clauses))
-  ([envs facts clauses]
-   (if (empty? clauses) 
-     envs
-     (recur
-      (mapcat (fn [env] (match-clause env facts (first clauses))) envs)
-      facts
-      (rest clauses)))))
+(defn all-matches [facts clause envs]
+  (mapcat (clause-matcher facts clause) envs))
 
-
+(defn process-query [facts clauses envs]
+  (if (empty? clauses)
+    envs
+    (recur facts
+           (rest clauses)
+           (all-matches facts (first clauses) envs))))
 
 (defn q* [{:keys [find where]} db]
-  (let [results (process-query db where)]
-    (map #(substitute % find) results)))
+  (let [results (process-query db where [{}])]
+    (map #(substitute [% find]) results)))
 
 
 (defmacro q [query db]
   `(q* (quote ~query) ~db))
-
-
 
 
 (def db
@@ -122,6 +121,5 @@
 
 
 
-
-
-
+(q {:find {:name name}
+    :where [[e :name name]]} db)
