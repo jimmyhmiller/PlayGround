@@ -396,7 +396,7 @@ export default () =>
       `} />
 
     <Points title="Not Theoretical">
-      <Point text="Healthfinch uses a rules engine" />
+      <Point text="healthfinch uses a rules engine" />
       <Point text="200+ rules around medications" />
       <Point text="Actively working on better tooling" />
       <Point text="Provides explanations of why and why not" />

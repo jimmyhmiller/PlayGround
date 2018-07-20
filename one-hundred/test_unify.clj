@@ -77,6 +77,8 @@
            (fib (- n 2))))
 
 
+  (fib 5)
+  (fib 10)
 
   (defmatch get-x
     [x] x
