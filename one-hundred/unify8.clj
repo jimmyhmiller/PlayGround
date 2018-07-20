@@ -50,6 +50,7 @@
 
 
 
+
 (defn matcher [value]
   (fn [pattern]
     (unify {} value pattern)))
@@ -72,6 +73,10 @@
 (defmacro defmatch [name & patterns]
   `(defn ~name [& args#]
      (match args# ~@patterns)))
+
+
+
+
 
 
 (defn match-clause [clause facts env]
