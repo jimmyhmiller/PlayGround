@@ -69,14 +69,12 @@ export default () =>
 
     <Code
       title="Unit Test Example"
-      lang="elixir"
+      lang="haskell"
       source={`
-        test "Test Reverse" do
-          assert reverse([]) == []
-          assert reverse([1]) == [1]
-          assert reverse([1,2,3]) == [3,2,1]
-          assert reverse(0..10) == Enum.to_list 10..0
-        end
+        reverse_twice_not_changed :: [Int] -> Bool
+        reverse_twice_not_changed xs = reverse (reverse (xs)) == xs
+
+        main = quickCheck reverse_twice_not_changed
       `} />
 
     <Points title="Unit Test Problems">
@@ -89,63 +87,15 @@ export default () =>
       title="Property-Based Test Example"
       lang="elixir"
       source={`
-        property "Reverse a reverse doesn't change" do
-          check all list <- list_of(integer()) do
-            assert reverse(reverse(list)) == list
-          end
-        end
+        reverse1
       `} />
 
     <Code
       title="Property-Based Test Example"
       lang="elixir"
       source={`
-        property "Reverse append is append reverse" do
-          check all list1 <- list_of(integer()),
-                    list2 <- list_of(integer()) do
-            assert reverse(list1 ++ list2) == 
-                   reverse(list2) ++ reverse(list1)
-          end
-        end
+        reverse2
       `} />
-
-    <Headline
-      color="yellow"
-      text="Demo" />
-
-    <Points title="Reaching Understanding">
-      <Point text="Breaking Down" />
-      <Point text="Removing Sugar" />
-      <Point text="Building up" />
-    </Points>
-
-    <Code
-      title="Property-Based Test Example"
-      lang="elixir"
-      source={`
-        property "Reverse a reverse doesn't change" do
-          check all list <- list_of(integer()) do
-            assert reverse(reverse(list)) == list
-          end
-        end
-      `} />
-
-    <Points title="Disecting Example">
-      <Point text="property" />
-      <Point text="check" />
-      <Point text="all" />
-      <Point text="list_of" />
-      <Point text="integer" />
-    </Points>
-
-    <Points title="Modules">
-      <Point text="StreamData" />
-      <Point text="ExUnitProperties" />
-    </Points>
-
-    <Headline
-      color="yellow"
-      text="Demo" />
 
     <Headline
       color="green"
@@ -191,7 +141,7 @@ export default () =>
 
     <Headline
       color="blue"
-      text="Possible Extensions" />
+      text="Extensions" />
 
     <Headline
       text="Importance" />
