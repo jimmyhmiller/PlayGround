@@ -1,0 +1,5 @@
+# Don't Write Tests, Generate Them
+
+In this talk we will explore property-based testing. With property-based testing, rather than the programmer providing example inputs and outputs (as is the case with unit tests), the program itself generates hundreds or potentially thousands of inputs and runs them through a series of tests. The programmer's job is to provide properties that must hold between the inputs and outputs. This may be as simple as "this function never throws an error" or it may involve complicated business or mathematical logic.
+
+Property-based testing came out of the haskell community, but rather than focus on one language, we will look at a number of language implementations. The focus will be on the concepts and how you might apply them to your day job. We will talk about practical patterns to bring property-based testing into your existing code base. But, believing that theory is practical and practice is theoritical, we will also dive in a bit to the implementation of these libraries, showing how functional programming creates the right environment for these solutions to flourish.
