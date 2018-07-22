@@ -46,6 +46,15 @@ export default () =>
       } 
     />
 
+    <Code
+      title="Unit Test Example"
+      lang="clojure"
+      source={`
+        (defn x [])
+        (prop/for-all [xs (gen/list gen/int)]
+                       (= (reverse (reverse xs)) xs))
+    `} />
+
     <Headline
       textAlign="left"
       subtextSize={2}

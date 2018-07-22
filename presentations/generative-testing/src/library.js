@@ -12,6 +12,9 @@ import {
   Spectacle,
   Text
 } from "@jimmyhmiller/spectacle";
+import pre from "@jimmyhmiller/spectacle/lib/utils/preloader";
+import createTheme from "@jimmyhmiller/spectacle/lib/themes/default";
+
 
 export {
   CodePane,
@@ -27,11 +30,11 @@ export {
   Text
 } from "@jimmyhmiller/spectacle";
 
-import pre from "@jimmyhmiller/spectacle/lib/utils/preloader";
+
 export const preloader = pre;
 
 // Import theme
-import createTheme from "@jimmyhmiller/spectacle/lib/themes/default";
+
 
 
 require("normalize.css");

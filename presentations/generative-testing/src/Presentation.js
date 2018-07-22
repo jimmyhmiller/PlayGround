@@ -53,29 +53,14 @@ export default () =>
       text="Don't write tests"
       subtext="Generate them" />
 
-    <Points title="Outline">
-      <Point text="Unit Tests" />
-      <Point text="Elixir's Property-Based Testing" />
-      <Point text="Patterns for Properties" />
-      <Point text="Sketching some ideas" />
-      <Point text="The importance of the idea" />
-    </Points>
-
     <Points title="What is a Unit Test">
       <Point text="Tests a (typically) small chunk of code" />
       <Point text="Programmer creates examples" />
       <Point text="Asserts output is as expected" />
     </Points>
 
-    <Code
-      title="Unit Test Example"
-      lang="haskell"
-      source={`
-        reverse_twice_not_changed :: [Int] -> Bool
-        reverse_twice_not_changed xs = reverse (reverse (xs)) == xs
 
-        main = quickCheck reverse_twice_not_changed
-      `} />
+
 
     <Points title="Unit Test Problems">
       <Point text="Lots of code" />
@@ -83,18 +68,41 @@ export default () =>
       <Point text="Tend towards testing implementation details" />
     </Points>
 
+
     <Code
       title="Property-Based Test Example"
-      lang="elixir"
+      lang="haskell"
       source={`
-        reverse1
+        reverse_twice_not_changed :: [Int] -> Bool
+        reverse_twice_not_changed xs = reverse (reverse xs) == xs
       `} />
 
     <Code
       title="Property-Based Test Example"
-      lang="elixir"
+      lang="javascript"
       source={`
-        reverse2
+        [Property]
+        public bool ReverseTwiceNotChanged(int[] xs)
+        {
+            return xs.Reverse().Reverse().SequenceEqual(xs);
+        }
+      `} />
+
+    <Code
+      title="Property-Based Test Example"
+      lang="javascript"
+      source={`
+        jsc.property("reverse twice not changed", "array int", (arr) => {
+          return _.isEqual(reverse(reverse(arr)), arr);
+        });
+      `} />
+
+    <Code
+      title="Property-Based Test Example"
+      lang="clojure"
+      source={`
+        (prop/for-all [xs (gen/list gen/int)]
+                      (= (reverse (reverse xs)) xs))
       `} />
 
     <Headline
