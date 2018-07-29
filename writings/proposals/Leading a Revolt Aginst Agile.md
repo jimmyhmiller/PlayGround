@@ -1,0 +1,7 @@
+# Leading a Revolt Against Agile
+
+Today, the software landscape is absolutely dominated by Agile. Companies now are very explicitly Agile. There are tons of consultancies that you pay to train your employees "to think in an Agile way". In fact, the take over of Agile has been so successful that its advocates have been able to frame the debate as one in which there are but two choice, Agile or Waterfall.
+
+In this talk I will be talking about my reasons for looking to lead a revolt against Agile. This is actually a rather difficult task. Agile is not an easy thing to pin down. Pointing to a particular "implementation" of Agile and enumerating its problems is not enough. Agile is an umbrella term covering a number of practices and allowing for different implementations of each. Because of this multiplicity, there are quite a few bad instances of Agile, but there actually quite a lot of fantastic Agile implementations.
+
+This talk will not focus on some particularly egregious example of Agile. This talk will not even claim that Agile doesn't or can't work. Instead, we will focus on Agile at a meta level. We will investigate Agile the idea, not a particular implementation. Borrowing heavily from the philosophy of science, we investigate the properties that Agile has to see how it measures up. We will then discuss the properties needed by a replacement for Agile and sketch a direction for research.

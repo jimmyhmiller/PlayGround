@@ -1,0 +1,4 @@
+# A Time Traveling Database
+
+We will explore a time traveling database Datomic. Datomic is a production ready NoSQL relational database unlike any other. Datomic's relational model allows for more powerful joins than SQL. Its schema system is both more flexible than traditional SQL schemas and more useful than a schema-less database system. Datomic's flexible indexing allows treating datomic as row-oriented, column-oriented, document-oriented, a key-value store, and a graph database. But most interesting, all of these features allow querying across time. With datomic you can get the database as it was "last tuesday at 3:23pm". You can get the database in the future, as if you had commited certain transactions. You can get the database across all times, seeing all the changes that have occured. We will explore these features and more showing how Datomic's unique design features gives us all this for free.
+
