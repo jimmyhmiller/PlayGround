@@ -8,3 +8,4 @@
 * Write your code three times
 * OOP from the ground up
 * Rules Engine as a way to organize code
+* Lessons learned from the history of programming
