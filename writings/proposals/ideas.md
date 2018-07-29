@@ -9,3 +9,4 @@
 * OOP from the ground up
 * Rules Engine as a way to organize code
 * Lessons learned from the history of programming
+* Distributed Systems Theory

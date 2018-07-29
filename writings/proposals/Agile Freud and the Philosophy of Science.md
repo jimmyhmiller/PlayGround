@@ -1,0 +1,5 @@
+# Agile, Freud, and the Philosophy of Science
+
+What could Agile and Freud possibly have in common? This talk will draw that connection by first diving into the work of Karl Popper in his *The Logic of Scientific Discovery*. Popper wanted to establish criteria for what counted as a scientific statement. Popper introduced the notion of falsification as a necessary property of all scientific statements. We then went on to draw out the implications of this criteria for popular theories of his day including Freudism.
+
+In this talk we explore together Popper's notion of falsification and see how the Freudism of Popper's day faired. Having given the necessary background, we will examine an extended notion of falsification that applies not just to scientific statements, but any of our ideas. Using this extended notion of falsification we will show the parallels between the Freudism of Popper's day and Agile today. Having found Agile wanting, we go on to sketch new approaches that could serve as replacements for the role Agile fills.
