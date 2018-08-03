@@ -6,8 +6,12 @@
             [clojure.pprint :as pprint]
             [clara.rules.engine :as eng]
             [clara.rules.compiler :as com]
-            [rules.entities :refer :all])
+            [rules.entities :refer :all]
+            [datascript.core :as d])
   (:import [rules.entities Player InRange Grapple]))
+
+
+(def conn (d/create-conn {}))
 
 (defn distance [x y]
   0)
@@ -18,10 +22,8 @@
 
 (defrule player-in-range
   [?p1 <- Player (= reach ?reach)]
-  [?p2 <- Player 
-   (not= nil (swap! state conj ?p1))
+  [?p2 <- Player
    (= ?distance (distance ?p1 ?p2))
-   
    (<= ?distance ?reach)]
   
   => (insert! (->InRange ?p1 ?p2)))
@@ -41,36 +43,10 @@
 
 (def state (atom []))
 
-@state
-
-(defn tracing-condition [fact-binding condition]
-  `(let [result# ~condition]
-     (swap! rules.core/state conj {:fact ~(symbol (name fact-binding))
-                                   :condition (quote ~condition)
-                                   :result ~condition})
-    result#))
 
 
 
-(defn trace-rule [{:keys [lhs] :as rule}]
-  (let [new-lhs (mapv #(update % :constraints
-                               (fn [constraints]
-                                 (concat constraints
-                                         (map (partial tracing-condition (:fact-binding %)) 
-                                              constraints)))) 
-                      lhs)]
-    (assoc rule :lhs new-lhs)))
 
-(tracing-condition '(<= ?distance ?reach))
-
-(map trace-rule
-     (com/load-rules 'rules.core))
-
-
-(defrecord TracingRule [sym]
-    com/IRuleSource
-    (load-rules [_]
-      (map trace-rule (com/load-rules sym))))
 
 
 (def p1 (->Player "Lorc" true 10))
@@ -78,9 +54,7 @@
 
 
 (def session
-  (-> (mk-session 'rules.core)
-      (inspect/with-full-logging)
-      (tracing/with-tracing)
+  (-> (mk-session 'rules.core) 
       (insert 
        (->Grapple p1 p2))
       (insert p1)
@@ -90,8 +64,6 @@
 (:rulebase
  (eng/components session))
 
-(tracing/get-trace session)
-
-(:unfiltered-rule-matches
+(:fact->explanations
  (inspect/inspect session))
 
