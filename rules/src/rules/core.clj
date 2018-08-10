@@ -11,7 +11,7 @@
   (:import [rules.entities Player InRange Grapple]))
 
 
-(def conn (d/create-conn {}))
+
 
 (defn distance [x y]
   0)
@@ -31,7 +31,7 @@
 
 
 (defrule provoke-attack-of-opportunity
-  [?inrange <- InRange (= x ?target) (= y ?grappler)]
+  [InRange (= x ?target) (= y ?grappler)]
   [?grap <- Grapple
    (= target ?target)
    (= grappler ?grappler)
@@ -48,9 +48,9 @@
 
 
 
-
-(def p1 (->Player "Lorc" true 10))
-(def p2 (->Player "Baron" true 5))
+(def p1 (->Player "Lorc" false 10))
+(def p2 (->Player "Baron" false 5))
+(def p3 (->Player "Unneeded" true 5))
 
 
 (def session
@@ -59,11 +59,41 @@
        (->Grapple p1 p2))
       (insert p1)
       (insert p2)
+      (insert p3)
       (fire-rules)))
 
-(:rulebase
+(:memory
  (eng/components session))
 
-(:fact->explanations
- (inspect/inspect session))
+
+(def fact-explanations
+  (into {} (:fact->explanations
+            (inspect/inspect session))))
+
+
+(defn get-children-facts [fact]
+  (when fact
+    (let [{{:keys [matches]} :explanation} fact]
+      (map :fact matches))))
+
+(defn build-tree [fact fact-explanations]
+  {:fact fact
+   :children (map build-tree 
+                  (mapcat get-children-facts (fact-explanations fact))
+                  (repeat fact-explanations))})
+
+(build-tree fact fact-explanations)
+
+
+(def fact (ffirst fact-explanations))
+
+
+(mapcat get-children-facts (fact-explanations attack))
+
+
+(com/load-rules 'rules.core)
+
+
+
+(keys (inspect/inspect session))
 

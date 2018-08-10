@@ -12,7 +12,7 @@
 
 (defn -main [main-ns]
   (let [handler
-        (ns-resolve 
+        (ns-resolve
          (doto (symbol main-ns)
            require)
          '-main)

@@ -59,7 +59,18 @@ export default () =>
       <Point text="Asserts output is as expected" />
     </Points>
 
-
+    <Code
+      title="Unit Test Example"
+      lang="elixir"
+      source={`
+        test "Test Reverse" do
+          assert reverse([]) == []
+          assert reverse([1]) == [1]
+          assert reverse([1,2,3]) == [3,2,1]
+          assert reverse(0..10) == Enum.to_list 10..0
+        end
+      `} />
+    
 
 
     <Points title="Unit Test Problems">

@@ -28,7 +28,7 @@ Given its counter-intuitive nature, it isn't surprising that people seek to weak
 
 #### Social Aspects of Programming
 
-The second criticism levied against the Theory Building View as presented by Naur, is not in what it includes, but what it excludes. As Naur's critics paint it, the Theory Building View takes entirely individualistic approach. Today, it is claimed, software isn't created by isolated individuals, but rather by teams. Software isn't even just created by "programmers", a whole host of people are included in the construction of software – project mangers, stakeholders, scrum masters, and even the customer. Naur's theory with its focus on the individual programmer misses much that is essential to modern day software development.
+The second criticism levied against the Theory Building View as presented by Naur, is not in what it includes, but what it excludes. As Naur's critics paint it, the Theory Building View takes an entirely individualistic approach. Today, it is claimed, software isn't created by isolated individuals, but rather by teams. Software isn't even just created by "programmers", instead, a whole host of people are included in the construction of software – project mangers, stakeholders, scrum masters, and even the customer. Naur's theory with its focus on the individual programmer misses much that is essential to modern day software development.
 
 While this criticism does not explicitly weaken any part of Naur's thesis, for many authors, once this social aspect is explored, it has the same consequences as the first criticism. How could a theory be incommunicable if it is necessarily built socially? Rather than a particular theory built by a programmer, a team of creative people must come to a "shared theory" (Anticipating Reality Construction). This "shared theory" involves people communicating their individual theories in order to build a common language they can use to talk about the problem at hand. We will show that these social criticisms face a dilemma, either they are reducible to the first criticism, or they fail to criticize Naur's thesis altogether.
 
@@ -110,7 +110,7 @@ With this philosophical background laid out, it becomes much easier to see what 
 
 > A main claim of the Theory Building View of programming is that an essential part of any program, the theory of it, is something that could not be conceivably be expressed, but is inextricably bound to human beings.
 
-Having a theory is to know how to do something. If a programmer has a theory about a program, he will know how to make changes to that program, we will be able to answer questions about that program, he will be able to explain parts of the program to others. But none of these presentations or applications of the theory of the program is the theory itself.  Donald Knuth criticizes Naur by suggestion that with literate programming we can in fact communicate the theory of a a program. But given Ryles notion of  theory, this can be seen to be a category mistake. Documentation no matter how comprehensive is just a presentation of the theory the programmer has.
+Having a theory is to know how to do something. If a programmer has a theory about a program, he will know how to make changes to that program, we will be able to answer questions about that program, he will be able to explain parts of the program to others. But none of these presentations or applications of the theory of the program is the theory itself.  Donald Knuth criticizes Naur by suggestion that with literate programming we can in fact communicate the theory of a a program. But given Ryles notion of  theory, this can be seen to be a category mistake. Documentation, no matter how comprehensive, is just a presentation of the theory the programmer has.
 
 Given that a theory is a "knowing how" and not a "knowing that", it is hard to understand the criticisms of this aspect of Naur's position. Is the disagreement about whether knowing how is reducible to knowing that? It doesn't seem to be that. Is the disagreement a matter of not seeing programming as a processing of theory building? This does not seem to be where the disagreement lies either as most authors are very positive about this fact. It seems instead this disagreement comes from a misunderstanding of what a theory is for Naur. If that is the case, it seems hard to take this as a serious critique.
 
@@ -124,7 +124,7 @@ Another way jugglers might "share" in their "knowing how" is to juggle together.
 
 ### Locating the Disagreement
 
-It is actually quite difficult to locate the realy disagreement that is happening with these criticisms. Take for example this passage:
+It is actually quite difficult to locate the real disagreement that is happening with these criticisms. Take for example this passage:
 
 > At this point Naur's approach proves unsatisfactory. After all, the need to build a theory in software projects and to reflect upon it arises not least because of the necessity of reaching a common understanding of the various requirements and different perspectives among the persons involved. Thus the specific implications of cooperation in software development for the process of theory building must be systematically taken into account as well.
 

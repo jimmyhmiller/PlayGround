@@ -1,4 +1,4 @@
-Getting out of the Rut - A Dive into Haskell
+# Getting out of the Rut - A Dive into Haskell
 
 As professional developers, it is easy to get stuck in a rut. The reality of our jobs force us to use the same technologies over and over again. Often times we find ourselves bored; gone is the challenge that hooked us on programming to begin with. This talk is aimed to confront that boredom, to take us out of our comfort zone, into a language that is vastly different from those we use in our day to day work.
 

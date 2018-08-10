@@ -1,4 +1,4 @@
-Redux for the Perplexed
+# Redux for the Perplexed
 
 [Redux](https://github.com/reactjs/redux) has risen to be the de facto standard for building large applications using React. Unfortunately its popularity has led to a bandwagon effect of people using Redux without understanding it. In this talk we will discuss the why we might want to use Redux, how we can use it, and finally discuss the benefits it brings us.
 

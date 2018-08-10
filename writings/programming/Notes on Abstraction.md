@@ -24,7 +24,7 @@ We talk about something being abstract vs concrete. We also talk about things be
 
 These are just some of the ways we use the words abstract and abstraction. This sort of flexibility and variety in our use of the concept suggests that an adequate theory of abstraction will be rather difficult. We must support judgements and higher order operations on our notion of abstraction. We must have some sort of ability to talk about the identity of a particular abstraction, we must have some notion of ordering or hierarchy. In fact, this variety suggests that there are perhaps multiple notions at play here. For example, is the abstraction of art the same notion as abstraction in computer science? In what ways might they be related?
 
-Of course, a definition of a difficult term like abstraction should just capture our intuitions, it should also help us clarify areas that may have been unclear. Hopefully this definition will allow us to weigh-in on areas where disagreement abounds. This is a tall order for a definition and is the sort of definition not normally given in software. Instead, a minimal technical definition is given, which has its uses, but is not illuminating in the way we desire.
+Of course, a definition of a difficult term like abstraction shouldn't just capture our intuitions, it should also help us clarify areas that may have been unclear. Hopefully this definition will allow us to weigh-in on areas where disagreement abounds. This is a tall order for a definition and is the sort of definition not normally given in software. Instead, a minimal technical definition is given, which has its uses, but is not illuminating in the way we desire.
 
 ## Fundamental Subjectivity
 

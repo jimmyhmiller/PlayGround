@@ -1,6 +1,6 @@
 # Let Your Code Write Itself
 
-This talk will be a dive into two technologies, Idris and Barliman, enabling developers to sketch some code and allow the computer to complete it for us. These two technologies take drastically different appraoches to this same talk and in this talk we will explore both, showing the benefits and tradeoffs both offer.
+This talk will be a dive into two technologies, Idris and Barliman, enabling developers to sketch some code and allow the computer to complete it for us. These two technologies take drastically different approaches to this same task. In this talk we will explore both, showing the benefits and tradeoffs both offer.
 
 First we will explore Idris, a dependently typed programming language. Rather than offer a tutorial of Idris, we will focus on its ability to write code for us. This will take the shape of a live coding session, show where Idris shines and where it falls short. Having explored Idris interactively, we will discuss the theory behind it. 
 
