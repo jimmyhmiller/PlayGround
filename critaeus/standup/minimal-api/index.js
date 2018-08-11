@@ -21,7 +21,6 @@ const readFromS3 = (bucket, key) => {
   .then(data => JSON.parse(data.Body.toString()))
 }
 
-
 const handleKeyNotFound = (e, cb) => {
   if (e.code === "NoSuchKey") {
     cb(400, {error: 'Status not found'})
