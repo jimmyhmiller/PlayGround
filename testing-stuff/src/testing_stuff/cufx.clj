@@ -1,5 +1,5 @@
 (ns testing-stuff.cufx
-  (:require [clojure.spec :as s]
+  (:require [clojure.spec.alpha :as s]
             [clojure.xml :as xml]
             [clojure.walk :as walk])
   (:import [java.io StringReader StringBufferInputStream])
