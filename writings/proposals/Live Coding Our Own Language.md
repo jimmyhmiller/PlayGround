@@ -1,0 +1,5 @@
+# Live Coding Our Own language
+
+Programming languages are very complex pieces of software. Books teaching people how to build languages are massive and contain advanced algorithms and low level programming. For this reason, we often view programming languages as these magical, unchanging things. In this talk, we will challenge that idea and show how together we can live program our own language.
+
+Our focus in this talk will be to get a working programming language in under 100 lines. We will do this together, starting from scratch and building our language in levels. We will begin with a very trivial language capable of only basic arithmetic and show how we can add-on to it. We will add support for strings, booleans, if statements,  functions, and more. In the end we will have an expressive language that with just a few lines more could express anything a modern language could. While not production ready, this language will teach us quite like about programming languages and hopefully demonstrate that it doesn't have to be difficult to make our own.
