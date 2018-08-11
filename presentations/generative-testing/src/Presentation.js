@@ -103,9 +103,9 @@ export default () =>
       title="Property-Based Test Example"
       lang="javascript"
       source={`
-        jsc.property("reverse twice not changed", "array int", (arr) => {
-          return _.isEqual(reverse(reverse(arr)), arr);
-        });
+        check(property(gen.array(gen.int), (xs) => {
+           return xs === reverse(reverse(xs))
+        }))
       `} />
 
     <Code
@@ -115,6 +115,20 @@ export default () =>
         (prop/for-all [xs (gen/list gen/int)]
                       (= (reverse (reverse xs)) xs))
       `} />
+
+    <Code
+      title="Property-Based Test Example"
+      lang="python"
+      source={`
+        @given(st.lists(st.integers()))
+        def test_reversing_twice_gives_same_list(xs):
+            assert xs == reverse(reverse(xs))
+      `} />
+
+
+    <Headline
+      color="yellow"
+      text="Demo"/>
 
     <Headline
       color="green"
