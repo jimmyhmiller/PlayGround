@@ -22,6 +22,19 @@ const images = {
 
 preloader(images);
 
+
+// What are unit tests
+// Example
+// Problems
+// What are property based tests
+// Example in lots of languages
+// Demo
+// Breaking down the parts (Haskell and Clojure)
+// Patterns
+// Taking it further
+// How
+// Why
+
 export default () =>
   <Presentation>
     <Headline
@@ -70,8 +83,6 @@ export default () =>
           assert reverse(0..10) == Enum.to_list 10..0
         end
       `} />
-    
-
 
     <Points title="Unit Test Problems">
       <Point text="Lots of code" />
@@ -79,6 +90,12 @@ export default () =>
       <Point text="Tend towards testing implementation details" />
     </Points>
 
+    <Points title="What is a Property-Based Test">
+      <Point text="Tests a (typically) small chunk of code" />
+      <Point text="Program creates examples" />
+      <Point text="Programmer provides properties" />
+      <Point text="Program finds minimal failure case" />
+    </Points>
 
     <Code
       title="Property-Based Test Example"
@@ -113,7 +130,7 @@ export default () =>
       lang="clojure"
       source={`
         (prop/for-all [xs (gen/list gen/int)]
-                      (= (reverse (reverse xs)) xs))
+          (= (reverse (reverse xs)) xs))
       `} />
 
     <Code
@@ -125,10 +142,27 @@ export default () =>
             assert xs == reverse(reverse(xs))
       `} />
 
-
     <Headline
       color="yellow"
-      text="Demo"/>
+      text="Demo" />
+
+    <Points title="Property-Based testing parts">
+      <Point text="A way to generate random values" />
+      <Point text="A way to specify properties" />
+      <Point text="A way to hook into testing framework." />
+    </Points>
+
+    <Points title="Static Generation">
+      <Point text="Generators specified by types" />
+      <Point text="Generation is implicit" />
+      <Point text="Shrinking is dependent on types" />
+    </Points>
+
+    <Points title="Dynamic Generation">
+      <Point text="Build your own generators" />
+      <Point text="Generation is explicit" />
+      <Point text="Shrinking is based on your generators" />
+    </Points>
 
     <Headline
       color="green"
