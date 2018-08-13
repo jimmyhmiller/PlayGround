@@ -49,18 +49,18 @@ s7 = Accept [(Zero, s7), (One, s6)]
 
 
 correctPattern :: [Binary] -> Bool
-correctPattern (One : One : xs) = correctPattern (One: xs)
+correctPattern (One : One : xs) = correctPattern (One : xs)
 correctPattern (Zero : Zero : xs) = correctPattern (Zero : xs)
-correctPattern (Zero : One : xs) = wrongPattern (One: xs)
-correctPattern (One : Zero : xs) = wrongPattern (Zero: xs)
+correctPattern (Zero : One : xs) = wrongPattern (One : xs)
+correctPattern (One : Zero : xs) = wrongPattern (Zero : xs)
 correctPattern _ = True
 
 
 wrongPattern :: [Binary] -> Bool
-wrongPattern (One : One : xs) = wrongPattern (One: xs)
+wrongPattern (One : One : xs) = wrongPattern (One : xs)
 wrongPattern (Zero : Zero : xs) = wrongPattern (Zero : xs)
-wrongPattern (Zero : One : xs) = correctPattern (One: xs)
-wrongPattern (One : Zero : xs) = correctPattern (Zero: xs)
+wrongPattern (Zero : One : xs) = correctPattern (One : xs)
+wrongPattern (One : Zero : xs) = correctPattern (Zero : xs)
 wrongPattern _ = False
 
 
