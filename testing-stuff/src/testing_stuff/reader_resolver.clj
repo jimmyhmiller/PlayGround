@@ -1,5 +1,4 @@
-(ns testing-stuff.reader-resolver
-  (:import (clojure.lang Compiler)))
+(ns testing-stuff.reader-resolver)
 
 (def aliases (atom {}))
 
