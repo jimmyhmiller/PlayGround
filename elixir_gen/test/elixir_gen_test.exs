@@ -12,15 +12,16 @@ defmodule ElixirGenTest do
 
   property "Reverse a reverse doesn't change" do
     check all list <- list_of(integer()) do
+      IO.inspect(list)
       assert reverse(reverse(list)) == list
     end
   end
 
-  property "Reverse append is append reverse" do
-    check all list1 <- list_of(integer()),
-              list2 <- list_of(integer()) do
-      assert reverse(list1 ++ list2) ==
-               reverse(list2) ++ reverse(list1)
-    end
-  end
+  # property "Reverse append is append reverse" do
+  #   check all list1 <- list_of(integer()),
+  #             list2 <- list_of(integer()) do
+  #     assert reverse(list1 ++ list2) ==
+  #              reverse(list2) ++ reverse(list1)
+  #   end
+  # end
 end

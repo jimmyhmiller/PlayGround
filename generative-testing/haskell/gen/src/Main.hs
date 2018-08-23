@@ -18,4 +18,4 @@ allSame xs = answer xs == xs
 
 main :: IO ()
 main = do
-    quickCheck allEven
+    quickCheck evenOrOdd

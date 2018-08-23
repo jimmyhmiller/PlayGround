@@ -18,16 +18,16 @@ defmodule SimulatorTest do
       }
     ]
 
-  property "Never more than 4 players" do
-    game_simulator =
-      Simulator.generator_from_description(
-        game_action_description()
-      )
+  # property "Never more than 4 players" do
+  #   game_simulator =
+  #     Simulator.generator_from_description(
+  #       game_action_description()
+  #     )
 
-    check all actions <- game_simulator do
-      {:ok, game} = Game.start_link()
-      Simulator.run_in_parallel(game, actions)
-      assert Game.number_of_players(game) <= 4
-    end
-  end
+  #   check all actions <- game_simulator do
+  #     {:ok, game} = Game.start_link()
+  #     Simulator.run_in_parallel(game, actions)
+  #     assert Game.number_of_players(game) <= 4
+  #   end
+  # end
 end
