@@ -66,6 +66,15 @@ export default () =>
       text="Don't write tests"
       subtext="Generate them" />
 
+    <Points title="Outline">
+      <Point text="Unit Tests" />
+      <Point text="Property-Based Testing" />
+      <Point text="Patterns for Properties" />
+      <Point text="Generating Data" />
+      <Point text="Taking this idea further" />
+      <Point text="The importance of the idea" />
+    </Points>
+
     <Points title="What is a Unit Test">
       <Point text="Tests a (typically) small chunk of code" />
       <Point text="Programmer creates examples" />
@@ -91,7 +100,6 @@ export default () =>
     </Points>
 
     <Points title="What is a Property-Based Test">
-      <Point text="Tests a (typically) small chunk of code" />
       <Point text="Program creates examples" />
       <Point text="Programmer provides properties" />
       <Point text="Program finds minimal failure case" />
@@ -147,22 +155,14 @@ export default () =>
       text="Demo" />
 
     <Points title="Property-Based testing parts">
-      <Point text="A way to generate random values" />
       <Point text="A way to specify properties" />
-      <Point text="A way to hook into testing framework." />
+      <Point text="A way to generate random values" />
     </Points>
 
-    <Points title="Static Generation">
-      <Point text="Generators specified by types" />
-      <Point text="Generation is implicit" />
-      <Point text="Shrinking is dependent on types" />
-    </Points>
-
-    <Points title="Dynamic Generation">
-      <Point text="Build your own generators" />
-      <Point text="Generation is explicit" />
-      <Point text="Shrinking is based on your generators" />
-    </Points>
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Properties are hard to think of" />
 
     <Headline
       color="green"
@@ -207,19 +207,239 @@ export default () =>
       `} />
 
     <Headline
-      color="blue"
-      text="Extensions" />
+      color="green"
+      text="Generating Data" />
+
+
+    <Points title="Static Generation">
+      <Point text="Generators specified by types" />
+      <Point text="Generation is implicit" />
+      <Point text="Shrinking is dependent on types" />
+    </Points>
+
+    <Points title="Dynamic Generation">
+      <Point text="Build your own generators" />
+      <Point text="Generation is explicit" />
+      <Point text="Shrinking is based on your generators" />
+    </Points>
+
+
+    <Code
+      title="Static Generation"
+      lang="haskell"
+      source={`
+        evenOrOdd :: Int -> Bool
+        evenOrOdd x = even x || odd x
+
+        main :: IO ()
+        main = quickCheck evenOrOdd
+
+        -- +++ OK, passed 100 tests.
+      `} />
+
+    <Code
+      title="Static Generation"
+      lang="haskell"
+      source={`
+        data Point = Point Int Int
+
+        -- incorrect (ex: Point 0 0)
+        posPoint :: Point -> Point
+        posPoint (Point x y) = Point (abs x) (abs y)
+
+        pointIsPos :: Point -> Bool
+        pointIsPos (Point x y) = isPos x && isPos y 
+
+        main :: IO ()
+        main = quickCheck (pointIsPos . posPoint)
+      `} />
+
+    <Code
+      title="Static Generation"
+      lang="haskell"
+      source={`
+        • No instance for (Arbitrary Point)
+            arising from a use of ‘quickCheck’
+        • In a stmt of a 'do' block: quickCheck (pointIsPos . posPoint)
+          In the expression: do quickCheck (pointIsPos . posPoint)
+          In an equation for ‘main’:
+              main = do quickCheck (pointIsPos . posPoint)
+           |
+        23 |     quickCheck (pointIsPos . posPoint)
+           |     ^
+      `} />
+
+    <Code
+      title="Static Generation"
+      lang="haskell"
+      source={`
+        instance Arbitrary Point where
+            arbitrary = do
+                x <- arbitrary
+                y <- arbitrary
+                return (Point x y)
+      `} />
+
+
+    <Code
+      title="Static Generation"
+      lang="rust"
+      source={`
+        struct Point {
+            x: i32,
+            y: i32
+        }
+
+        impl Arbitrary for Point {
+            fn arbitrary<G: Gen>(g: &mut G) -> Point {
+                let x : i32 = i32::arbitrary(g);
+                let y : i32 = i32::arbitrary(g);
+                Point { x, y } 
+            }
+        }
+
+      `} />
+
+
+    <Code
+      title="Static Generation"
+      lang="rust"
+      source={`
+          fn pos_point(point : Point) -> Point {
+              Point { 
+                  x: point.x.abs(),
+                  y: point.y.abs()
+              }
+          }
+
+          quickcheck! {
+              fn is_pos(point : Point) -> bool {
+                  point.x > 0 && point.y > 0
+              }
+          }
+
+      `} />
+
+    <Code
+      title="Dynamic Generation"
+      lang="elixir"
+      source={`
+        check all list1 <- list_of(integer()),
+                  list2 <- list_of(integer()) do
+          assert reverse(list1 ++ list2) ==
+                   reverse(list2) ++ reverse(list1)
+        end
+      `} />
+
+    <Code
+      title="Dynamic Generation"
+      lang="clojure"
+      source={`
+        (prop/for-all [list1 (gen/list gen/int)
+                       list2 (gen/list gen/int)]
+           (= (reverse (concat list1 list2))
+              (concat (reverse list2)
+                      (reverse list1))))
+      `} />
+
+      
+
+    <Code
+      textSize={24} 
+      title="A Little of Both"
+      lang="javascript"
+      source={`
+        @Theory 
+        public void testJson(@ForAll @From(JsonValueGenerator.class) JsonValue s1) {
+            ...
+        }
+      `} />
+
+    <Code
+      textSize={24}
+      title="A Little of Both"
+      lang="javascript"
+      source={`
+        public class JsonValueGenerator extends Generator<JsonValue> {
+
+            public JsonValue generate(SourceOfRandomness random, GenerationStatus status) {
+                Integer pickType = random.nextInt(0, 5);
+                if (pickType == 0) {
+                    return new JsonNumberGenerator().generate(random, status);
+                } else if (pickType == 1) {
+                    return new JsonStringGenerator().generate(random, status);
+                } else if (pickType == 2) {
+                    return new JsonBooleanGenerator().generate(random, status);
+                } else if (pickType == 3) {
+                    return new JsonObjectGenerator().generate(random, status);
+                } else if (pickType == 4) {
+                    return new JsonArrayGenerator().generate(random, status);
+                }
+                return JsonValue.NULL;
+            }
+        }
+      `} />
+
+    <Code
+      textSize={22}
+      title="A Little of Both"
+      lang="javascript"
+      source={`
+        public class DocTest
+        {
+            [TestInitialize]
+            public void Initialize()
+            {
+                Arb.Register<MyArbitraries>();          
+            }
+            [TestMethod]
+            public void QuickTest()
+            {
+                Prop.ForAll<Doc>(doc => doc.ToString() != "")
+                    .QuickCheckThrowOnFailure();
+            }
+            private class MyArbitraries
+            {
+                public static Arbitrary<Doc> Doc()
+                {
+                    return Gen.Sized(DocGenenerator.Generator).ToArbitrary();
+                }    
+            } 
+        }     
+      `} />
+
+    <Headline
+      textAlign="left"
+      color="yellow"
+      text="How Generation Works" />
+
+    <Headline
+      textAlign="left"
+      color="yellow"
+      text="Demo" />
+
+    <Code
+      textSize={24}
+      title="Api for Generators"
+      lang="haskell"
+      source={`
+        map :: (a -> b) -> Generator a -> Generator b
+        bind :: Generator a -> (a -> Generator b) -> Generator b
+        constant :: a -> Generator a
+      `} />
+
+    <Headline
+      textAlign="left"
+      color="yellow"
+      text="Generators are Monads" />
+
+    <Headline
+      textAlign="left"
+      color="green"
+      text="Taking this idea further" />
 
     <Headline
       text="Importance" />
-
-
-
-
-
-
-
-
 
     <BlankSlide />
 

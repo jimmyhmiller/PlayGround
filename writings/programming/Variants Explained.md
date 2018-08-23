@@ -64,7 +64,7 @@ In javascript, there aren't too many great solutions to this. One obvious one is
 
 ## Variants an Example
 
-The essence of our requirements is that we need to support different methods of login. Use may login this way *or* that way *or* someother way. We need a way to represent **or** in our data model. Variants allow us to do exactly that. Let's first look at a simple example of a variant.
+The essence of our requirements is that we need to support different methods of login. Users may login this way *or* that way *or* someother way. We need a way to represent **or** in our data model. Variants allow us to do exactly that. Let's first look at a simple example of a variant.
 
 ```haskell
 data Color = Green | Red | Blue
@@ -126,7 +126,7 @@ The definition above may seem a bit strange if this is your first time encounter
 
 ```javascript
 fn tryToGetUserId {
-	Something(user) => Something(getId(user))
+  Something(user) => Something(getId(user))
   Nothing => Nothing
 }
 ```
