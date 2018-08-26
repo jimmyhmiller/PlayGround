@@ -1,4 +1,4 @@
-# Protocols
+# Variants and Protocols
 
 In our last post we explored variants and the way in which they allow us to express choice. We saw that variants are much more powerful than enums because they allow you to pass values. Pattern matching on variants allows code to be explicit yet concise. However, there is still a way to make variants even more power, the ability to write functions that apply to multiple types of variants.
 
@@ -64,11 +64,11 @@ fn map {
 }
 ```
 
-This is the Identity variant. It has a completely trival map function. We take out the x and apply f to it and then wrap it back up. This may seem pointless (there are uses), but it does show yet another use of map.
+This is the Identity variant. It has a completely trivial map function. We take out the x and apply f to it and then wrap it back up. This may seem pointless (there are uses), but it does show yet another use of map.
 
 ## Unifying map
 
-Now that we've seen just some of the instances of how we could use map, it seems clear that just point this in separate modules will lead to ugly code. We will have to refer to map using fully qualified names (e.g. Maybe.map, Either.map), this makes our code verbose, but also limits its reusablity. As far as map is concerned, we shouldn't care if we have Maybe, Either, or Identity, as long as we have an implementation of map. In other words, we want map to be a polymorphic function.
+Now that we've seen just some of the instances of how we could use map, it seems clear that just point this in separate modules will lead to ugly code. We will have to refer to map using fully qualified names (e.g. Maybe.map, Either.map), this makes our code verbose, but also limits its reusability. As far as map is concerned, we shouldn't care if we have Maybe, Either, or Identity, as long as we have an implementation of map. In other words, we want map to be a polymorphic function.
 
 Protocols allow us to do exactly that, write functions which are polymorphic over a given datatype. When we pass a datatype to a function implemented as a protocol, it finds its type and dispatches to the proper function. Let's look at the Mapper protocol.
 
@@ -89,7 +89,7 @@ implement Mapper(Maybe) {
 const map = (f, x) => Mapper.map(x, f);
 ```
 
-Here is our first protocol, the Mapper protocol. Mapper is simple, in order to implement the Mapper protocol, you need to define map. One thing to note, however, is that our definition in the protocol does differ from our definitions before by one small detail, the arguments are flipped. Protocols require the type they are going to dispatch on to be the first argument. That is why we define a simple auxilary function that flips them back around.
+Here is our first protocol, the Mapper protocol. Mapper is simple, in order to implement the Mapper protocol, you need to define map. One thing to note, however, is that our definition in the protocol does differ from our definitions before by one small detail, the arguments are flipped. Protocols require the type they are going to dispatch on to be the first argument. That is why we define a simple auxiliary function that flips them back around.
 
 Now that we've made our protocol and defined an implementation for Maybe, we can use it on any maybe values.
 
