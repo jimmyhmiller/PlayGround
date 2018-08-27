@@ -26,7 +26,17 @@
 (defn add-record [file calories]
   (write-file file (conj (read-file file) (make-record (today) calories))))
 
+(defn total-today []
+  (->> file-path
+       read-file
+       (filter (comp #{(today)} :date))
+       (map :calories)
+       (reduce + 0)))
+
 (defn -main [calories]
-  (add-record file-path (Integer/parseInt calories))
-  (println "Record added"))
+  (if (= calories "today")
+    (println (total-today))
+    (do
+      (add-record file-path (Integer/parseInt calories))
+      (println "Record added"))))
 
