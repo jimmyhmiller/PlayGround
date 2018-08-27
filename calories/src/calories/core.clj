@@ -34,9 +34,9 @@
        (reduce + 0)))
 
 (defn -main [calories]
-  (if (= calories "today")
-    (println (total-today))
+  (if calories
     (do
       (add-record file-path (Integer/parseInt calories))
-      (println "Record added"))))
+      (println "Record added"))
+    (println (total-today))))
 
