@@ -33,10 +33,11 @@
        (map :calories)
        (reduce + 0)))
 
-(defn -main [calories]
-  (if calories
-    (do
-      (add-record file-path (Integer/parseInt calories))
-      (println "Record added"))
-    (println (total-today))))
+(defn -main [& args]
+  (let [calories (first args)]
+    (if calories
+      (do
+        (add-record file-path (Integer/parseInt calories))
+        (println (str "Added " calories " calories")))
+      (println (total-today)))))
 
