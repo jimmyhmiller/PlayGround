@@ -5,6 +5,8 @@
 
 (def file-path "/Users/jimmy/.calories.json")
 
+(def daily 1500)
+
 (defn write-file [file content]
   (spit file (json/generate-string content)))
 
@@ -33,11 +35,14 @@
        (map :calories)
        (reduce + 0)))
 
+(defn calories-left []
+  (- daily (total-today)))
+
 (defn -main [& args]
   (let [calories (first args)]
     (if calories
       (do
         (add-record file-path (Integer/parseInt calories))
-        (println (str "Added " calories " calories")))
+        (println (str "Added " calories " calories"))
+        (println (str (calories-left) " calories left")))
       (println (total-today)))))
-
