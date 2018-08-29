@@ -4,6 +4,8 @@
            (java.time.format DateTimeFormatter))
   (:gen-class))
 
+(set! *warn-on-reflection* true)
+
 
 (def ^:dynamic dry-run false)
 
@@ -15,7 +17,7 @@
 
 (defn write-file [file content]
   (if dry-run
-    (clojure.pprint/pprint content)
+    (println content)
     (spit file (json/generate-string content))))
 
 (defn read-file [file]
@@ -24,7 +26,7 @@
     (catch Exception e
       (write-file file []))))
 
-(defn format-date [local-date]
+(defn format-date [^LocalDate local-date]
   (.format
    local-date
    DateTimeFormatter/ISO_LOCAL_DATE))
