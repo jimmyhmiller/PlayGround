@@ -28,35 +28,10 @@ class App extends Component {
         }}
         data={{
           variables: [
-            {key: 'engineer', label: 'Individual'},
-            {key: 'pair', label: 'Pair'},
-            {key: 'few', label: 'A Few People'},
-            {key: 'everyone', label: 'Everyone'},
-            {key: 'management', label: 'Management'},
+
           ],
           sets: [
-            {
-              key: 'me',
-              label: 'My Scores',
-              values: {
-                engineer: 18,
-                pair: 11,
-                few: 18,
-                everyone: 3,
-                management: 41,
-              },
-            },
-            {
-              key: 'everyone',
-              label: 'Everyone',
-              values: {
-                engineer: 38,
-                pair: 21,
-                few: 42,
-                everyone: 7,
-                management: 15,
-              },
-            },
+            
           ],
         }}
       />
