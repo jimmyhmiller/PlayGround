@@ -10,17 +10,20 @@
 
 (println "Edits to this text should show up in your developer console.")
 
-;; define your app data so that it doesn't get over-written on reload
 
 
-(defonce app-state (atom
-                    {:title-text "You see a squirrel."
-                     :buttons {}
-                     :pup-points 0}))
+;; This was cool code, but not sure it makes sense for what I want to achieve
 
 
-(defn update-pup-points [f]
-  (swap! app-state update-in [:pup-points] f))
+(defonce app-state 
+  (atom
+   {:title-text "Day one of your new job as a software developer."
+    :buttons {}
+    :points 0}))
+
+
+(defn update-points [f]
+  (swap! app-state update-in [:points] f))
 
 (defn update-text [text]
   (swap! app-state assoc-in [:title-text] text))
@@ -36,16 +39,24 @@
          (fn [old-value]
            (merge old-value value))))
 
+(defn update-button [name key f]
+  (swap! app-state update-in [:buttons name key] f))
+
+(defn get-button [name]
+  (get-in @app-state [:buttons name]))
+
 (defn action-button [{:keys [id text enabled events percent]}]
   (let [color (if enabled "#000" "#aaa")
         gradient (str "linear-gradient(to left, #fff " (- 100 percent) "%, #ccc " (- 100 percent) "%)")]
     [:div {:style
            {:border (str "1px solid " color)
+            :margin-top 10
             :padding "7px 14px"
             :color color
             :background gradient
             :cursor (if enabled :pointer :arrow)}
            :id id
+           :key id
            :on-click #(when enabled (put! events %))}
      text]))
 
@@ -56,37 +67,59 @@
 
 (defn disable-button [button sleep]
   (let [finished (chan)
-        change 5
+        change 1
         time (/ sleep (/ 100 change))]
-    (go
-     (assoc-button button {:enabled false})
-     (loop [percent 100]
-       (when (not (neg? percent))
-         (<! (timeout time))
-         (assoc-button button {:percent percent})
-         (recur (- percent change))))
-     (assoc-button button {:enabled true})
-     (>! finished :finished))
-    finished))
+    (assoc-button button {:percent 100})
+    (let [{:keys [enabled]} (get-button button)]
+      (when enabled
+        (go
+          (assoc-button button {:enabled false}) 
+          (loop []
+            (let [{:keys [percent]} (get-button button)] 
+              (when (not (neg? percent))
+                (do
+                  (<! (timeout time))
+                  (update-button button :percent (fn [percent] (- percent change)))
+                  (recur)))))
+          (assoc-button button {:enabled true})
+          (>! finished :finished)))
+      finished)))
 
 
 (defn defbutton [config handler]
   (handler (register-button config)))
 
 (defbutton
-  {:id :bark
-   :text "Bark!"
+  {:id :code
+   :text "Code"
    :enabled true
    :percent 0}
   (fn [{:keys [id events]}]
     (go
-     (<! (timeout 3000))
-     (render id action-button)
-     (while true
-       (<! events)
-       (update-text "It ran away!")
-       (update-pup-points inc)
-       (<! (disable-button id 3000))))))
+      (<! (timeout 3000))
+      (render id action-button)
+      (while true
+        (<! events)
+        (update-text "Coding Feels Good")
+        (update-points inc)
+        (<! (disable-button id 3000))))))
+
+
+(defbutton
+  {:id :meeting
+   :text "Attend Meeting"
+   :enabled true
+   :percent 0}
+  (fn [{:keys [id events]}]
+    (go
+      (<! (timeout 3000))
+      (render id action-button)
+      (while true
+        (<! events)
+        (update-text "Lost your concentration")
+        (update-points inc)
+        (disable-button :code 10000)
+        (<! (disable-button id 6000))))))
 
 
 
@@ -105,10 +138,10 @@
           {:position :absolute
            :top 0
            :left 0}}
-    (str "Pup Points: " (:pup-points @app-state))]
+    (str "Points: " (:points @app-state))]
    [:div {:style {:display :flex}}
     [:h3 (:title-text @app-state)]]
-   [:div (for [[k config] (filter (fn [[_ v]] (contains? v :render)) (:buttons @app-state))]
+   [:div  (for [[k config] (filter (fn [[_ v]] (contains? v :render)) (:buttons @app-state))]
            ((:render config) config))]])
 
 
