@@ -4,6 +4,8 @@
             [nd4clj.matrix :as imp]))
 
 
+;; http://gigasquidsoftware.com/blog/2013/12/02/neural-networks-in-clojure-with-core-dot-matrix/
+
 (corm/set-current-implementation :nd4j)
 
 (def learning-rate 0.2)
