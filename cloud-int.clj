@@ -2,6 +2,7 @@
 ;; immediately with the results shown on the
 ;; right.
 
+;; https://blog.acolyer.org/2015/08/11/cloud-types-for-eventual-consistency/
 
 (def init-int
   [false 0 0])
