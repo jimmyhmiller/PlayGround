@@ -1,3 +1,8 @@
+# MOVED
+[New Repo](https://github.com/jimmyhmiller/one-hundred-lines-or-less)
+
+
+
 # 100 Lines or Less
 
 * Blockchain
