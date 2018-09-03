@@ -1,0 +1,39 @@
+{
+  "name": "electron-create-react-app-boilerplate",
+  "version": "0.1.0",
+  "private": true,
+  "author": "didaquis",
+  "dependencies": {
+    "react": "^16.2.0",
+    "react-dom": "^16.2.0",
+    "react-electron-web-view": "^2.0.1",
+    "react-scripts": "1.1.1"
+  },
+  "devDependencies": {
+    "electron": "^2.0.8",
+    "electron-builder": "^20.2.0",
+    "foreman": "^2.0.0"
+  },
+  "scripts": {
+    "dev": "nf start",
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test --env=jsdom",
+    "eject": "react-scripts eject",
+    "electron": "electron .",
+    "ebuild": "npm run build && node_modules/.bin/build"
+  },
+  "description": "React Electron App",
+  "homepage": "./",
+  "main": "electron/main.js",
+  "build": {
+    "extends": null,
+    "productName": "React Electron App",
+    "appId": "com.example.app",
+    "electronVersion": "1.8.2",
+    "files": [
+      "build/**/*",
+      "electron/*"
+    ]
+  }
+}
