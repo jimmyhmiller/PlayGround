@@ -1,0 +1,5 @@
+# Coding Critique Thoughts
+
+What would a the practice of code criticism look like? I don't mean code review, I mean something more akin to art or literary criticism. I also don't mean using code as a lense to talk about societal issues. Baxandall's Forth Bridge might be a good jumping off point. While Baxandall is focusing on art history, this sort of explanation of an artifact most certainly plays a part in the discussion of critique of code. Talking about purpose, influence, and design are certainly possible areas for inquiry. 
+
+I'd also like to draw influence from a formal visual analysis. From my small understanding this is a way of approaching art where all that is done is description of its elements. This is just a part of an art historical discussion, but being able to breakdown a piece of art is important for ultimately placing it in a large context. What does the equivilant process look like in code?
