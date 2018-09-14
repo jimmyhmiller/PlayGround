@@ -3,12 +3,16 @@ use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::rect::Point as SdlPoint;
 use sdl2::render::Canvas;
+use sdl2::EventPump;
 use std::collections::HashSet;
 use std::ops::Add;
 
 use sdl2::video::Window;
 
 extern crate sdl2;
+extern crate wolf;
+
+use wolf::world_map::get_world_map;
 
 // code borrowed from https://lodev.org/cgtutor/raycasting.html
 
@@ -18,16 +22,16 @@ fn clear_canvas(canvas: &mut Canvas<Window>) {
     canvas.clear();
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 struct Point {
     x: f64,
     y: f64,
 }
 
-impl Add for Point {
+impl<'a> Add for &'a Point {
     type Output = Point;
 
-    fn add(self, other: Point) -> Point {
+    fn add(self, other: &Point) -> Point {
         Point {
             x: self.x + other.x,
             y: self.y + other.y,
@@ -40,6 +44,7 @@ type Facing = Point;
 type Position = Point;
 type PositionDelta = Point;
 
+#[derive(Debug, PartialEq, Clone)]
 struct Player {
     facing: Facing,
     position: Position,
@@ -55,98 +60,64 @@ fn rotate_point(point: &Point, rotation_speed: f64) -> Point {
     }
 }
 
-fn rotate_player(player: &mut Player, dir: f64) -> () {
-    player.facing = rotate_point(&player.facing, dir * player.rotation_speed);
-    player.camera = rotate_point(&player.camera, dir * player.rotation_speed);
+fn rotate_player(player: &Player, dir: f64) -> Player {
+    let mut new_player = player.clone();
+    new_player.facing = rotate_point(&player.facing, dir * player.rotation_speed);
+    new_player.camera = rotate_point(&player.camera, dir * player.rotation_speed);
+    new_player
 }
 
-fn move_position(world: &Vec<Vec<usize>>, position: Position, delta: PositionDelta) -> Point {
-    if world[(position.x + delta.x) as usize][(position.y + delta.y) as usize] == 0 {
-        position + delta
+const EMPTY_DELTA: PositionDelta = PositionDelta { x: 0.0, y: 0.0 };
+
+// I'm really not sure if this way of doing things is better
+fn move_position(world: &Vec<Vec<usize>>, player: &Player, delta: &PositionDelta) -> Player {
+    let mut new_player = player.clone();
+    if world[(player.position.x + delta.x) as usize][(player.position.y + delta.y) as usize] == 0 {
+        new_player.position = &new_player.position + delta;
     } else {
-        position
+        new_player.position = &new_player.position + &EMPTY_DELTA;
     }
+    new_player
 }
 
 fn darken_color(color: Color) -> Color {
     Color::RGB(color.r / 2, color.g / 2, color.b / 2)
 }
 
+fn handle_key_presses(
+    event_pump: &EventPump,
+    player: &Player,
+    world_map: &Vec<Vec<usize>>,
+) -> Player {
+    let keys: HashSet<Keycode> = event_pump
+        .keyboard_state()
+        .pressed_scancodes()
+        .filter_map(Keycode::from_scancode)
+        .collect();
+
+    if keys.contains(&Keycode::Right) {
+        rotate_player(player, -1.0)
+    } else if keys.contains(&Keycode::Left) {
+        rotate_player(player, 1.0)
+    } else if keys.contains(&Keycode::Up) {
+        let delta = PositionDelta {
+            x: player.facing.x * player.move_speed,
+            y: player.facing.y * player.move_speed,
+        };
+        move_position(&world_map, &player, &delta)
+    } else if keys.contains(&Keycode::Down) {
+        let delta = PositionDelta {
+            x: -player.facing.x * player.move_speed,
+            y: -player.facing.y * player.move_speed,
+        };
+        move_position(&world_map, &player, &delta)
+    } else {
+        player.clone()
+    }
+}
+
 fn main() {
-    let world_map = vec![
-        vec![
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 0, 0, 0, 0, 3, 0, 3, 0, 3, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 2, 2, 0, 2, 2, 0, 0, 0, 0, 3, 0, 3, 0, 3, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 4, 4, 4, 4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 4, 0, 4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 4, 0, 0, 0, 0, 5, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 4, 0, 4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 4, 0, 4, 4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 4, 4, 4, 4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ],
-        vec![
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        ],
-    ];
+    let world_map = get_world_map();
 
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
@@ -156,7 +127,7 @@ fn main() {
 
     let window = video_subsystem
         .window("Example", map_width as u32, map_height as u32)
-        // .fullscreen()
+        .fullscreen()
         .build()
         .unwrap();
 
@@ -201,35 +172,7 @@ fn main() {
             }
         }
 
-        let keys: HashSet<Keycode> = event_pump
-            .keyboard_state()
-            .pressed_scancodes()
-            .filter_map(Keycode::from_scancode)
-            .collect();
-
-        if keys.contains(&Keycode::Right) {
-            rotate_player(&mut player, -1.0);
-        }
-
-        if keys.contains(&Keycode::Left) {
-            rotate_player(&mut player, 1.0);
-        }
-
-        if keys.contains(&Keycode::Up) {
-            let delta = PositionDelta {
-                x: player.facing.x * player.move_speed,
-                y: player.facing.y * player.move_speed,
-            };
-            player.position = move_position(&world_map, player.position, delta);
-        }
-
-        if keys.contains(&Keycode::Down) {
-            let delta = PositionDelta {
-                x: -player.facing.x * player.move_speed,
-                y: -player.facing.y * player.move_speed,
-            };
-            player.position = move_position(&world_map, player.position, delta);
-        }
+        player = handle_key_presses(&event_pump, &player, &world_map);
 
         clear_canvas(&mut canvas);
 
