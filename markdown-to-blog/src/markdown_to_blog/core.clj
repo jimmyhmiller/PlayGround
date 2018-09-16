@@ -5,7 +5,7 @@
 
 
 (def markdown
-  (slurp "/Users/jimmy/Documents/Code/PlayGround/writings/programming/Variants and Protocols.md"))
+  (slurp "/Users/jimmy/Documents/Code/PlayGround/writings/programming/Beautiful Code Through Simplicity.md"))
 
 
 (defmulti transform
@@ -14,10 +14,10 @@
 
 (defn heading [size [_ _ content]] 
   [:Heading {:text content
-             :size 1}])
+             :size size}])
 
-(defmethod transform :h1 [tag]
-  (heading 1 tag))
+(defmethod transform :h1 [[_ _ content]]
+  [:Title {:text content}])
 
 (defmethod transform :h2 [tag]
   (heading 2 tag))
@@ -34,10 +34,16 @@
 (defmethod transform :h5 [tag]
   (heading 6 tag))
 
+
+(defn indent-lines [code]
+  (->> (string/split code #"\n")
+       (string/join "\n    ")
+       (str "    ")))
+
 (defmethod transform :pre [[_ _ [tag attr source] :as content]]
   (if (not= tag :code)
     (throw (ex-info "Pre without code" content))
-    [(keyword (string/capitalize (:class attr))) {} (str "{`" source "`}")]))
+    [(keyword (string/capitalize (:class attr))) {} (str "\n  {`\n" (indent-lines source) "\n  `}\n")]))
 
 (defmethod transform :code [[_ attr body :as content]]
   (if (not (contains? attr :class))
@@ -59,6 +65,8 @@
    (mark/component)
    (clojure.walk/postwalk transform)
    (hiccup/html)))
+
+(convert-md markdown)
 
 (comment
   (add-watch (var convert-md)
