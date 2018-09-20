@@ -87,32 +87,35 @@ fn darken_color(color: Color) -> Color {
 fn handle_key_presses(
     event_pump: &EventPump,
     player: &Player,
+    players: &mut Vec<Player>,
     world_map: &Vec<Vec<usize>>,
-) -> Player {
+) -> (bool, Player) {
     let keys: HashSet<Keycode> = event_pump
         .keyboard_state()
         .pressed_scancodes()
         .filter_map(Keycode::from_scancode)
         .collect();
 
-    if keys.contains(&Keycode::Right) {
-        rotate_player(player, -1.0)
+    if keys.contains(&Keycode::B) {
+        (true, players.pop().unwrap())
+    } else if keys.contains(&Keycode::Right) {
+        (false, rotate_player(player, -1.0))
     } else if keys.contains(&Keycode::Left) {
-        rotate_player(player, 1.0)
+        (false, rotate_player(player, 1.0))
     } else if keys.contains(&Keycode::Up) {
         let delta = PositionDelta {
             x: player.facing.x * player.move_speed,
             y: player.facing.y * player.move_speed,
         };
-        move_position(&world_map, &player, &delta)
+        (false, move_position(&world_map, &player, &delta))
     } else if keys.contains(&Keycode::Down) {
         let delta = PositionDelta {
             x: -player.facing.x * player.move_speed,
             y: -player.facing.y * player.move_speed,
         };
-        move_position(&world_map, &player, &delta)
+        (false, move_position(&world_map, &player, &delta))
     } else {
-        player.clone()
+        (false, player.clone())
     }
 }
 
@@ -150,6 +153,8 @@ fn main() {
     let mut time = timer.ticks();
     let mut old_time;
 
+    let mut players: Vec<Player> = vec![];
+
     while running {
         old_time = time;
         time = timer.ticks();
@@ -172,7 +177,13 @@ fn main() {
             }
         }
 
-        player = handle_key_presses(&event_pump, &player, &world_map);
+        let (rewind, new_player) =
+            handle_key_presses(&event_pump, &player, &mut players, &world_map);
+        if !rewind && new_player != player {
+            players.push(new_player.clone());
+        }
+
+        player = new_player;
 
         clear_canvas(&mut canvas);
 
