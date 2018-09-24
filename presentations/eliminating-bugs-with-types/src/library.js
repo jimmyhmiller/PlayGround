@@ -145,7 +145,7 @@ export const Subtitle = ({ color="blue", caps, size=5, text, ...props }) =>
     {text}
   </Heading>
 
-export const Headline = withSlide(({ color="magenta", size=2, text, subtext, subtextSize, subtextCaps, textAlign="center", caps=true }) =>
+export const Headline = withSlide(({ color="magenta", size=2, text, subtext, subtextSize, subtextCaps, textAlign="left", caps=true }) =>
   <div>
     <Heading 
       textAlign={textAlign}

@@ -28,9 +28,7 @@ export default () =>
       textAlign="left"
       subtextSize={4}
       subtextCaps={true}
-      text="Functional Architecture"
-      subtext="Some Promising Approaches" />
-
+      text="Eliminating Bugs with Types" />
 
     <TwoColumn
       title="About Me"
@@ -51,18 +49,25 @@ export default () =>
       textAlign="left"
       subtextSize={4}
       subtextCaps={true}
-      text="Functional Architecture"
-      subtext="Some Promising Approaches" />
-
-    <Points title="Caveats">
-      <Point text="Speculative Talk" />
-      <Point text="Architecture Doesn't live in a Vacuum" />
-      <Point text="One Size Doesn't Fit All" />
-    </Points>
+      text="Eliminating Bugs with Types" />
 
     <Headline
       color="blue"
-      text="What is Architecture?" />
+      text="Types Have gotten a bad name" />
+
+
+    <Points title="Problem With Types">
+      <Point text="Verbosity" />
+      <Point text="Inheritence" />
+      <Point text="Subtyping" />
+    </Points>
+
+
+    <Points title="Uses of Types">
+      <Point text="Catching Mistakes" />
+      <Point text="Making Programs Faster" />
+      <Point text="Enforcing Invariants" />
+    </Points>
 
     <Code
       title="Example"
