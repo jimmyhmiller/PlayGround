@@ -28,19 +28,19 @@ This code says that compose is a function that takes two functions f and g. Comp
 Our compose function has a limitation, it can only compose two functions, but it seems like we should be able to chain compositions together to get more than two things composed as follows:
 
 ```javascript
-compose(h, compose(g,f));
+compose(h, compose(g, f));
 ```
 
 This seems correct enough but couldn't we also do the following?
 
 ```javascript
-compose(compose(h,g), f);
+compose(compose(h, g), f);
 ```
 
 Are these different? How can we tell? Well, we could try a few examples.
 
 ```javascript
-compose(add2, compose(add4,add3))(2) 
+compose(add2, compose(add4, add3))(2) 
 // 11
 compose(compose(add2, add4), add3)(2)
 // 11
@@ -57,7 +57,7 @@ const compose2 = (g, f) => (x) => g(f(x));
 const compose = (...fns) => fns.reduce(compose2);
 ```
 
-First we renamed our old compose function. We use an es2015 feature here, rest parameter syntax. It just says take the rest of the arguments and pack them into an array for us.  Now we can simply compose as follows:
+First we renamed our old compose function.  Here the `...` just says take the rest of the arguments and pack them into an array for us.  Now we can simply compose as follows:
 
 ```javascript
 compose(add2, add4, add3)(2);
@@ -78,7 +78,7 @@ var enabled = true;
 var f = function (x) {
 	if (enabled) {
 		enabled = false;
-		return x+2;
+		return x + 2;
 	}
 	else {
 		return x;
@@ -94,7 +94,7 @@ Here "functions" in javascript do something that algebraic functions certainly c
 
 Calling these side-effecting functions not "functions" is not great terminologically. Javascript is going to call them functions whether they have side effects or not. So while it may be true in the mathematics sense, it doesn't hold in javascript land. So instead let's refer to functions in the algebraic sense as *pure functions* and side effecting functions as *impure functions*.
 
-Pure functions are the perfect example of decomplected code. Pure functions do one thing, transform input. Impure functions are complecting a la carte. Inside an impure function we can change anything, we can return different results depending on the time of the day, in fact, we can return nothing. These side effects weave together the notion of an effect with the computation that needs to be done.
+Pure functions are the perfect example of decomplected code. Pure functions do one thing, transform input. Impure functions are complecting a la carte. Inside an impure function we can change anything, we can return different results depending on the time of the day, and even return nothing. These side effects weave together the notion of an effect with the computation that needs to be done.
 
 ### But My Programs Need to do Something
 
