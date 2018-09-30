@@ -55,24 +55,26 @@ export default () =>
       color="blue"
       text="Types Have gotten a bad name" />
 
-
     <Points title="Problem With Types">
       <Point text="Verbosity" />
       <Point text="Inheritence" />
       <Point text="Subtyping" />
     </Points>
 
-
     <Points title="Uses of Types">
       <Point text="Catching Mistakes" />
-      <Point text="Making Programs Faster" />
+      <Point text="Making Programs Run Faster" />
       <Point text="Enforcing Invariants" />
     </Points>
 
     <Code
       title="Example"
-      lang="clojure"
+      lang="elm"
       source={`
+        type alias Survey = 
+        { quesions : List String
+        , answers : List (Maybe String)
+        }
       `} />
 
    
