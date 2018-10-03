@@ -17,8 +17,6 @@
   (fixed-point (partial insta/transform transformer) x))
 
 
-
-
 (defn parse [grammar text]
   (->> ((parser grammar) text)
        (keep-transforming
@@ -37,7 +35,7 @@
                                                               :type (name value)}]]))
          :parameterized-constructor (fn [parent [type & args]] 
                                       [:val type 
-                                       [:lambda [:fn-args args]
+                                       [:lambda (into [:fn-args] args)
                                         [:obj (apply merge {:type (name type)
                                                             :parent (name parent)}
                                                      (map vector (map name args) args))]]])
@@ -45,11 +43,13 @@
          :fn (fn [{:keys [name args body]}] [:val name [:lambda [:fn-args args] body]])
          :identifier symbol
          :args (fn [& args] args)
-         :number identity
+         :number identity 
          :infix-application (fn [left op right] (str left " " op " " right)) 
          :keyword (fn [s] (str "'" s "'"))})))
 
 
+
+((parser grammar) text)
 
 
 (add-watch #'parse :pprint 
