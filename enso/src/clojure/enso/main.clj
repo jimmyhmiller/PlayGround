@@ -6,6 +6,8 @@
 (def state (atom {:active false
                   :command-text ""}))
 
+
+(remove-watch state :debug)
 (add-watch state :debug
            (fn [key _ old-state new-state]
              (println new-state)))
@@ -28,15 +30,11 @@
 (def myGlobalKeyListener
   (reify
     NativeKeyListener
-    (nativeKeyTyped [this event] #(%))
-    (nativeKeyPressed [this event]
+    (nativeKeyTyped [this event] (logic/handle-key-press state event logic/on-typed))
+    (nativeKeyPressed [this event] 
       (logic/handle-key-press state event logic/on-press))
     (nativeKeyReleased [this event] 
       (logic/handle-key-press state event logic/on-release))))
-
-
-
-
 
 
 

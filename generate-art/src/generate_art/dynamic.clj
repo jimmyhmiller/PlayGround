@@ -45,6 +45,16 @@
      (+ (* (/ num denom) y1) (* (/ diff denom) y2))]))
 
 
+(defn random-point' [[x1 y1] [x2 y2]]
+  (let [n (gauss 0.5 0.1)] 
+    [(+ (* n x1) (* (- 1 n) x2))
+     (+ (* n  y1) (* (- 1 n) y2))])
+  #_(let [denom 4
+        num (q/random 1 4)
+        diff (- denom num)]
+    [(+ (* (/ num denom) x1) (* (/ diff denom) x2))
+     (+ (* (/ num denom) y1) (* (/ diff denom) y2))]))
+
 
 (defn midpoint [[x1 y1] [x2 y2]] 
   [(* (/ 1 2) (+ x1 x2))
@@ -71,9 +81,17 @@
                          [[p1 p3] (let [r (random-point p1 p3)] [[r p3 p2] [r p1 p2]])]))]
     ;triangles
     (cond
-      (odds 0.05) (take 1 triangles)
-      (odds 0.05) (drop 1 triangles)
+      (odds 0.005) (take 1 triangles)
+      (odds 0.005) (drop 1 triangles)
       :else triangles)))
+
+(defn subdivide-r-lossless [[p1 p2 p3]]
+  (let [triangles
+        (second (max-key (comp distance first) 
+                         [[p1 p2] (let [r (random-point' p1 p2)] [[r p2 p3] [r p1 p3]])]
+                         [[p2 p3] (let [r (random-point' p2 p3)] [[r p3 p1] [r p2 p1]])]
+                         [[p1 p3] (let [r (random-point' p1 p3)] [[r p3 p2] [r p1 p2]])]))]
+    triangles))
 
 
 
@@ -87,8 +105,6 @@
 (defn tri [[[x1 y1] [x2 y2] [x3 y3]]]
   (q/triangle x1 y1 x2 y2 x3 y3))
 
-
-(subdivide [[0 0] [0 1000] [1000 0]])
 
 
 (defn generate-triangles 
@@ -137,12 +153,15 @@
 (defn power-2 [x]
   (Math/pow 2 x))
 
-(defn triangles' []
-  (mapcat (fn [tri n] (take n (generate-triangles [tri] subdivide-r)))
+(defn power-10 [x]
+  (Math/pow 10 x))
+
+(defn triangles []
+  (mapcat (fn [tri n] (take n (generate-triangles [tri] subdivide-r-lossless)))
        (initial-triangles')
-       [(power-2 10) (power-2 10)
-        (power-2 12) (power-2 12)
-        (power-2 14) (power-2 14)]))
+       [(power-10 2) (power-10 4)
+        (power-10 6) (power-10 8)
+        (power-10 10) (power-10 12)]))
 
 
 
@@ -180,7 +199,7 @@
 
 
 
-(defn draw []
+(defn draw4 []
   (clear-canvas)
   (q/stroke-weight 1)
   (doseq [y (random-step-range 0 (height) 0 10)]
@@ -189,7 +208,7 @@
                x y (+ x length) y
                (r+- x 10) (r+- y 10)))))
 
-(defn draw3 [] 
+(defn draw5 [] 
   (q/fill 0 0 100)
   (q/rect 0 0 (q/width) (q/height))
   (q/no-loop)
@@ -211,22 +230,22 @@
         (q/line (- x 10) (+ y offset) x (+ y offset))))))
 
 
-(defn draw1 []
-  (let [triangles (take 1000 (generate-triangles (initial-triangles) subdivide-r))]
+(defn draw []
+  (let [tris (triangles)]
     (q/no-loop)
     ;(q/fill 49 9 96)
     (q/fill 0 0 100)
     (q/rect 0 0 (q/width) (q/height))
     (q/no-fill)
     (q/stroke-weight 0.5)
-    (q/stroke 0 0 0) 
+    (q/stroke 0 0 0)
     
-    (doseq [t triangles]
+    (doseq [t tris]
       (tri t))
     (q/save "sketch.tif")))
 
 
-(defn draw2 []
+(defn draw3 []
   (q/no-loop)
   (doseq [y (range 0 (q/height) 5)]
     (let [hue (rescale y 0 (q/height) 180 220)]
