@@ -42,7 +42,7 @@ export default () =>
             <Point textSize={40} text="FP Nerd" />
           </Points>
         </div>
-      } 
+      }
     />
 
     <Headline
@@ -67,17 +67,171 @@ export default () =>
       <Point text="Enforcing Invariants" />
     </Points>
 
+    <Points title="Two Views of Types">
+      <Point text="Types for modeling our problem" />
+      <Point text="Types for fewer implementations" />
+    </Points>
+
     <Code
       title="Example"
       lang="elm"
       source={`
-        type alias Survey = 
-        { quesions : List String
-        , answers : List (Maybe String)
-        }
+        type alias Model =
+            { questions : List String
+            , answers : List (Maybe String)
+            }
       `} />
 
-   
+    <Code
+      title="Example"
+      lang="elm"
+      source={`
+        init : Model
+        init =
+            Model [ "What is this?" ] [ Just "Something" ]
+      `} />
+
+    <Code
+      title="Example"
+      lang="elm"
+      source={`
+        init : Model
+        init =
+            Model [ "What is this?" ] []
+      `} />
+
+    <Code
+      title="Example"
+      lang="elm"
+      source={`
+        type alias Model =
+            List
+                { question : String
+                , answer : Maybe String
+                }
+      `} />
+
+    <Code
+      title="Example"
+      lang="elm"
+      source={`
+        init : Model
+        init =
+            [ { question = "What is this?", answer = Just "Something" } ]
+      `} />
+
+    <Code
+      title="Example"
+      lang="elm"
+      source={`
+        init : Model
+        init =
+            []
+      `} />
+
+    <Code
+      title="Example"
+      lang="elm"
+      source={`
+        type NonEmptyList a
+            = NonEmpty a (List a)
+
+        type alias Model =
+            NonEmptyList
+                { question : String
+                , answer : Maybe String
+                }
+      `} />
+
+    <Code
+      title="Example"
+      lang="elm"
+      source={`
+        init : Model
+        init =
+          NonEmpty { question = "What is this?", answer = Just "Something" } []
+      `} />
+
+    <Headline
+      textAlign="left"
+      text="Illegal States are unrepresentable" />
+
+    <Code
+      title="Example"
+      lang="elm"
+      source={`
+        type alias SurveyQuestion =
+            { question : String, answer : Maybe String }
+
+        type alias Model =
+            { questions : NonEmptyList SurveyQuestion, currentQuestion : Int }
+
+      `} />
+
+    <Code
+      title="Example"
+      lang="elm"
+      source={`
+        init : Model
+        init =
+            { questions =
+                NonEmpty { question = "What is this?", 
+                           answer = Just "Something" } []
+            , currentQuestion = 0
+            }
+      `} />
+
+    <Code
+      title="Example"
+      lang="elm"
+      source={`
+        init : Model
+        init =
+            { questions =
+                NonEmpty { question = "What is this?", 
+                           answer = Just "Something" } []
+            , currentQuestion = 1
+            }
+      `} />
+
+
+    <Code
+      title="Example"
+      lang="elm"
+      source={`
+        type ZipperList a
+            = Zipper
+                { left : List a
+                , focus : a
+                , right : List a
+                }
+
+        type alias Model =
+            { questions : ZipperList SurveyQuestion }
+      `} />
+
+
+    <Code
+      title="Example"
+      lang="elm"
+      source={`
+        init : Model
+        init =
+            { questions =
+                Zipper
+                    { left = [ { question = "What is this?", 
+                                 answer = Just "Something" } ]
+                    , focus = { question = "Second Question", 
+                                answer = Just "Second Answer" }
+                    , right = []
+                    }
+            }
+      `} />
+
+      <Headline
+        textAlign="left"
+        text="Illegal States are unrepresentable" />
+
 
     <BlankSlide />
 
