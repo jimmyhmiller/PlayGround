@@ -64,16 +64,103 @@ export default () =>
     <Points title="Uses of Types">
       <Point text="Catching Mistakes" />
       <Point text="Making Programs Run Faster" />
-      <Point text="Enforcing Invariants" />
+      <Point text="Expressing Intent" />
     </Points>
 
-    <Points title="Two Views of Types">
-      <Point text="Types for modeling our problem" />
-      <Point text="Types for fewer implementations" />
-    </Points>
+    <Headline
+      size={4}
+      subtextSize={5}
+      caps={false}
+      text="Programs must be written for people"
+      subtext="and only incidentally for machines" />
+
+    <Headline
+      text="Types are meant to communicate" />
 
     <Code
-      title="Example"
+      title="Communicating with types"
+      lang="java"
+      source={`
+        public String greet(String name);
+      `} />
+
+    <Code
+      title="Communicating with types"
+      lang="java"
+      source={`
+        public interface Iterator<E> {
+          boolean hasNext();
+          E next();
+          void remove();
+        }
+      `} />
+
+    <Code
+      title="Not Communicating with types"
+      lang="java"
+      textSize={20}
+      source={`
+        public interface Functor<F extends K1, Mu extends Functor.Mu> extends Kind1<F, Mu> {
+            static <F extends K1, Mu extends Functor.Mu> Functor<F, Mu> unbox(final App<Mu, F> proofBox) {
+                return (Functor<F, Mu>) proofBox;
+            }
+
+            interface Mu extends Kind1.Mu {}
+
+            <T, R> App<F, R> map(final Function<? super T, ? extends R> func, final App<F, T> ts);
+        }
+      `} />
+
+    <Code
+      title="Communicating with types"
+      lang="haskell"
+      source={`
+        interface Functor (f : Type -> Type) where
+            map : (a -> b) -> f a -> f b
+      `} />
+
+    <Headline
+      size={2}
+      text="Types should communicate what is possible and what isn't" />
+
+    <Code
+      title="Which tells us more"
+      lang="haskell"
+      source={`
+        thing1 : String -> String
+        thing2 : a -> a
+
+        otherThing1 : List a -> List a
+        otherThing2 : Vect n a -> Vect n a
+      `} />
+
+    <Code
+      title="Which tells us more"
+      lang="java"
+      source={`
+        // java
+        class User {
+          String getName() {...}
+        }
+
+        // elm
+        type alias User = { name: String }
+      `} />
+
+    <Headline
+      size={4}
+      color="blue"
+      text="Your types should guide people to the right answer" />
+
+    <Headline
+      size={4}
+      subtextSize={6}
+      color="green"
+      text="Example - Survey Application"
+      subtext="In debted to Richard Feldman for the example" />
+
+    <Code
+      title="Defining a data model"
       lang="elm"
       source={`
         type alias Model =
@@ -83,7 +170,7 @@ export default () =>
       `} />
 
     <Code
-      title="Example"
+      title="Example Survey"
       lang="elm"
       source={`
         init : Model
@@ -92,7 +179,7 @@ export default () =>
       `} />
 
     <Code
-      title="Example"
+      title="What if our list lengths don't match?"
       lang="elm"
       source={`
         init : Model
@@ -101,7 +188,7 @@ export default () =>
       `} />
 
     <Code
-      title="Example"
+      title="A better data model"
       lang="elm"
       source={`
         type alias Model =
@@ -112,7 +199,7 @@ export default () =>
       `} />
 
     <Code
-      title="Example"
+      title="Same Survey State"
       lang="elm"
       source={`
         init : Model
@@ -121,16 +208,15 @@ export default () =>
       `} />
 
     <Code
-      title="Example"
+      title="Can we have no questions in a survey?"
       lang="elm"
       source={`
         init : Model
-        init =
-            []
+        init = []
       `} />
 
     <Code
-      title="Example"
+      title="Defining our own datatype"
       lang="elm"
       source={`
         type NonEmptyList a
@@ -144,7 +230,7 @@ export default () =>
       `} />
 
     <Code
-      title="Example"
+      title="Always one question"
       lang="elm"
       source={`
         init : Model
@@ -157,7 +243,7 @@ export default () =>
       text="Illegal States are unrepresentable" />
 
     <Code
-      title="Example"
+      title="How do keep track of current question?"
       lang="elm"
       source={`
         type alias SurveyQuestion =
@@ -169,7 +255,7 @@ export default () =>
       `} />
 
     <Code
-      title="Example"
+      title="First Question Selected"
       lang="elm"
       source={`
         init : Model
@@ -182,7 +268,7 @@ export default () =>
       `} />
 
     <Code
-      title="Example"
+      title="What if current is greater than length?"
       lang="elm"
       source={`
         init : Model
@@ -196,7 +282,7 @@ export default () =>
 
 
     <Code
-      title="Example"
+      title="Making a better datatype"
       lang="elm"
       source={`
         type ZipperList a
@@ -212,7 +298,7 @@ export default () =>
 
 
     <Code
-      title="Example"
+      title="Multiple questions, always one selected"
       lang="elm"
       source={`
         init : Model

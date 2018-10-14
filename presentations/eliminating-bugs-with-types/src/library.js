@@ -117,7 +117,7 @@ export const BlankSlide = withSlide(() => {
 export const Code = withSlide(({ source, color, lang, title, textSize, headlineSize }) => {
   return (
     <div>
-      <Headline color={color} size={headlineSize || 4} noSlide textAlign="left" text={title} />
+      <Headline color={color} size={headlineSize || 5} noSlide textAlign="left" text={title} />
       <CodePane textSize={textSize || 30} 
       source={formatCode(source)} lang={lang} />
     </div>
