@@ -6,6 +6,7 @@ use sdl2::render::Canvas;
 use sdl2::EventPump;
 use std::collections::HashSet;
 use std::ops::Add;
+use std::ops::Mul;
 
 use sdl2::video::Window;
 
@@ -23,15 +24,15 @@ fn clear_canvas(canvas: &mut Canvas<Window>) {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-struct Point {
-    x: f64,
-    y: f64,
+struct Point<T> {
+    x: T,
+    y: T,
 }
 
-impl<'a> Add for &'a Point {
-    type Output = Point;
+impl<T: Add<Output = T>> Add for Point<T> {
+    type Output = Point<T>;
 
-    fn add(self, other: &Point) -> Point {
+    fn add(self, other: Point<T>) -> Point<T> {
         Point {
             x: self.x + other.x,
             y: self.y + other.y,
@@ -39,10 +40,32 @@ impl<'a> Add for &'a Point {
     }
 }
 
-type Camera = Point;
-type Facing = Point;
-type Position = Point;
-type PositionDelta = Point;
+impl<T: Mul<Output = T>> Mul for Point<T> {
+    type Output = Point<T>;
+
+    fn mul(self, other: Point<T>) -> Point<T> {
+        Point {
+            x: self.x * other.x,
+            y: self.y * other.y,
+        }
+    }
+}
+
+impl Mul<f64> for Point<f64> {
+    type Output = Point<f64>;
+
+    fn mul(self, other: f64) -> Point<f64> {
+        Point {
+            x: self.x * other,
+            y: self.y * other,
+        }
+    }
+}
+
+type Camera = Point<f64>;
+type Facing = Point<f64>;
+type Position = Point<f64>;
+type PositionDelta = Point<f64>;
 
 #[derive(Debug, PartialEq, Clone)]
 struct Player {
@@ -53,7 +76,7 @@ struct Player {
     move_speed: f64,
 }
 
-fn rotate_point(point: &Point, rotation_speed: f64) -> Point {
+fn rotate_point(point: &Point<f64>, rotation_speed: f64) -> Point<f64> {
     Point {
         x: point.x * rotation_speed.cos() - point.y * rotation_speed.sin(),
         y: point.x * rotation_speed.sin() + point.y * rotation_speed.cos(),
@@ -70,12 +93,12 @@ fn rotate_player(player: &Player, dir: f64) -> Player {
 const EMPTY_DELTA: PositionDelta = PositionDelta { x: 0.0, y: 0.0 };
 
 // I'm really not sure if this way of doing things is better
-fn move_position(world: &Vec<Vec<usize>>, player: &Player, delta: &PositionDelta) -> Player {
+fn move_position(world: &Vec<Vec<usize>>, player: &Player, delta: PositionDelta) -> Player {
     let mut new_player = player.clone();
     if world[(player.position.x + delta.x) as usize][(player.position.y + delta.y) as usize] == 0 {
-        new_player.position = &new_player.position + delta;
+        new_player.position = new_player.position + delta;
     } else {
-        new_player.position = &new_player.position + &EMPTY_DELTA;
+        new_player.position = new_player.position + EMPTY_DELTA;
     }
     new_player
 }
@@ -107,13 +130,13 @@ fn handle_key_presses(
             x: player.facing.x * player.move_speed,
             y: player.facing.y * player.move_speed,
         };
-        (false, move_position(&world_map, &player, &delta))
+        (false, move_position(&world_map, &player, delta))
     } else if keys.contains(&Keycode::Down) {
         let delta = PositionDelta {
             x: -player.facing.x * player.move_speed,
             y: -player.facing.y * player.move_speed,
         };
-        (false, move_position(&world_map, &player, &delta))
+        (false, move_position(&world_map, &player, delta))
     } else {
         (false, player.clone())
     }
@@ -135,10 +158,7 @@ fn main() {
         .unwrap();
 
     // Let's create a Canvas which we will use to draw in our Window
-    let mut canvas: Canvas<Window> = window.into_canvas()
-        .present_vsync() //< this means the screen cannot
-        // render faster than your display rate (usually 60Hz or 144Hz)
-        .build().unwrap();
+    let mut canvas: Canvas<Window> = window.into_canvas().present_vsync().build().unwrap();
     let mut event_pump = sdl_context.event_pump().unwrap();
     let mut running = true;
 
@@ -179,6 +199,7 @@ fn main() {
 
         let (rewind, new_player) =
             handle_key_presses(&event_pump, &player, &mut players, &world_map);
+
         if !rewind && new_player != player {
             players.push(new_player.clone());
         }
@@ -188,72 +209,72 @@ fn main() {
         clear_canvas(&mut canvas);
 
         for x in 0..map_width {
-            let camera_x = 2.0 * (x as f64) / (map_width as f64) - 1.0; //x-coordinate in player.camera space
-            let ray_player_facing_x = player.facing.x + player.camera.x * camera_x;
-            let ray_player_facing_y = player.facing.y + player.camera.y * camera_x;
+            let camera_x = 2.0 * (x as f64) / (map_width as f64) - 1.0; // x-coordinate in player.camera space
 
-            //which box of the map we're in
-            let mut map_x: i32 = player.position.x as i32;
-            let mut map_y: i32 = player.position.y as i32;
+            let ray_player_facing = player.facing.clone() + player.camera.clone() * camera_x;
 
-            //length of ray from current position to next x or y-side
-            let mut side_dist_x: f64;
-            let mut side_dist_y: f64;
+            let mut map = Point {
+                x: player.position.x as i32,
+                y: player.position.y as i32,
+            };
 
-            //length of ray from one x or y-side to next x or y-side
-            let delta_dist_x = (1.0 / ray_player_facing_x).abs();
-            let delta_dist_y = (1.0 / ray_player_facing_y).abs();
+            let mut side_dist = Point { x: 0.0, y: 0.0 };
+
+            let delta_dist = Point {
+                x: (1.0 / ray_player_facing.x).abs(),
+                y: (1.0 / ray_player_facing.y).abs(),
+            };
+
             let mut perp_wall_dist: f64;
 
-            //what direction to step in x or y-direction (either +1 or -1)
-            let step_x: i32;
-            let step_y: i32;
+            // what direction to step in x or y-direction (either +1 or -1)
+            let mut step = Point { x: 0, y: 0 };
 
-            let mut hit = 0; //was there a wall hit?
-            let mut side: i32 = 1; //was a NS or a EW wall hit?
+            let mut hit = 0; // was there a wall hit?
+            let mut side: i32 = 1; // was a NS or a EW wall hit?
 
-            if ray_player_facing_x < 0.0 {
-                step_x = -1;
-                side_dist_x = (player.position.x - (map_x as f64)) * delta_dist_x;
+            if ray_player_facing.x < 0.0 {
+                step.x = -1;
+                side_dist.x = (player.position.x - (map.x as f64)) * delta_dist.x;
             } else {
-                step_x = 1;
-                side_dist_x = (map_x as f64 + 1.0 - player.position.x) * delta_dist_x;
+                step.x = 1;
+                side_dist.x = (map.x as f64 + 1.0 - player.position.x) * delta_dist.x;
             }
-            if ray_player_facing_y < 0.0 {
-                step_y = -1;
-                side_dist_y = (player.position.y - map_y as f64) * delta_dist_y;
+            if ray_player_facing.y < 0.0 {
+                step.y = -1;
+                side_dist.y = (player.position.y - map.y as f64) * delta_dist.y;
             } else {
-                step_y = 1;
-                side_dist_y = (map_y as f64 + 1.0 - player.position.y) * delta_dist_y;
+                step.y = 1;
+                side_dist.y = (map.y as f64 + 1.0 - player.position.y) * delta_dist.y;
             }
 
             while hit == 0 {
-                //jump to next map square, OR in x-direction, OR in y-direction
-                if side_dist_x < side_dist_y {
-                    side_dist_x += delta_dist_x;
-                    map_x += step_x as i32;
+                // jump to next map square, OR in x-direction, OR in y-direction
+                if side_dist.x < side_dist.y {
+                    side_dist.x += delta_dist.x;
+                    map.x += step.x as i32;
                     side = 0;
                 } else {
-                    side_dist_y += delta_dist_y;
-                    map_y += step_y as i32;
+                    side_dist.y += delta_dist.y;
+                    map.y += step.y as i32;
                     side = 1;
                 }
-                //Check if ray has hit a wall
-                if world_map[map_x as usize][map_y as usize] > 0 {
+                // Check if ray has hit a wall
+                if world_map[map.x as usize][map.y as usize] > 0 {
                     hit = 1;
                 }
             }
             if side == 0 {
-                perp_wall_dist = (map_x as f64 - player.position.x + (1.0 - step_x as f64) / 2.0)
-                    / ray_player_facing_x;
+                perp_wall_dist = (map.x as f64 - player.position.x + (1.0 - step.x as f64) / 2.0)
+                    / ray_player_facing.x;
             } else {
-                perp_wall_dist = (map_y as f64 - player.position.y + (1.0 - step_y as f64) / 2.0)
-                    / ray_player_facing_y;
+                perp_wall_dist = (map.y as f64 - player.position.y + (1.0 - step.y as f64) / 2.0)
+                    / ray_player_facing.y;
             }
-            //Calculate height of line to draw on screen
+            // Calculate height of line to draw on screen
             let line_height = map_height as f64 / perp_wall_dist;
 
-            //calculate lowest and highest pixel to fill in current stripe
+            // calculate lowest and highest pixel to fill in current stripe
             let mut draw_start = -line_height / 2.0 + map_height as f64 / 2.0;
             if draw_start < 0.0 {
                 draw_start = 0.0;
@@ -263,7 +284,7 @@ fn main() {
                 draw_end = map_height as f64 - 1.0;
             }
 
-            let mut color = match world_map[map_x as usize][map_y as usize] {
+            let mut color = match world_map[map.x as usize][map.y as usize] {
                 1 => Color::RGB(255, 0, 0),
                 2 => Color::RGB(0, 255, 0),
                 3 => Color::RGB(0, 0, 255),
