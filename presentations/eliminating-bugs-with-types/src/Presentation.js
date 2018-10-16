@@ -52,6 +52,10 @@ export default () =>
       text="Eliminating Bugs with Types" />
 
     <Headline
+      color="green"
+      text="Not a talk on advanced type hackery" />
+
+    <Headline
       color="blue"
       text="Types Have gotten a bad name" />
 
@@ -67,85 +71,23 @@ export default () =>
       <Point text="Expressing Intent" />
     </Points>
 
+    <Points title="Bugs In Prod">
+      <Point text="Almost never simple type errors" />
+      <Point text="Always around edge cases" />
+      <Point text="Usually introduced late" />
+      <Point text="Often introduced by others" />
+    </Points>
+
+    <Headline
+      color="cyan"
+      text="Bugs Happen when Intent isn't clear" />
+
     <Headline
       size={4}
       subtextSize={5}
       caps={false}
       text="Programs must be written for people"
       subtext="and only incidentally for machines" />
-
-    <Headline
-      text="Types are meant to communicate" />
-
-    <Code
-      title="Communicating with types"
-      lang="java"
-      source={`
-        public String greet(String name);
-      `} />
-
-    <Code
-      title="Communicating with types"
-      lang="java"
-      source={`
-        public interface Iterator<E> {
-          boolean hasNext();
-          E next();
-          void remove();
-        }
-      `} />
-
-    <Code
-      title="Not Communicating with types"
-      lang="java"
-      textSize={20}
-      source={`
-        public interface Functor<F extends K1, Mu extends Functor.Mu> extends Kind1<F, Mu> {
-            static <F extends K1, Mu extends Functor.Mu> Functor<F, Mu> unbox(final App<Mu, F> proofBox) {
-                return (Functor<F, Mu>) proofBox;
-            }
-
-            interface Mu extends Kind1.Mu {}
-
-            <T, R> App<F, R> map(final Function<? super T, ? extends R> func, final App<F, T> ts);
-        }
-      `} />
-
-    <Code
-      title="Communicating with types"
-      lang="haskell"
-      source={`
-        interface Functor (f : Type -> Type) where
-            map : (a -> b) -> f a -> f b
-      `} />
-
-    <Headline
-      size={2}
-      text="Types should communicate what is possible and what isn't" />
-
-    <Code
-      title="Which tells us more"
-      lang="haskell"
-      source={`
-        thing1 : String -> String
-        thing2 : a -> a
-
-        otherThing1 : List a -> List a
-        otherThing2 : Vect n a -> Vect n a
-      `} />
-
-    <Code
-      title="Which tells us more"
-      lang="java"
-      source={`
-        // java
-        class User {
-          String getName() {...}
-        }
-
-        // elm
-        type alias User = { name: String }
-      `} />
 
     <Headline
       size={4}
@@ -156,8 +98,7 @@ export default () =>
       size={4}
       subtextSize={6}
       color="green"
-      text="Example - Survey Application"
-      subtext="In debted to Richard Feldman for the example" />
+      text="Example - Survey Application" />
 
     <Code
       title="Defining a data model"
@@ -235,7 +176,8 @@ export default () =>
       source={`
         init : Model
         init =
-          NonEmpty { question = "What is this?", answer = Just "Something" } []
+          NonEmpty { question = "What is this?"
+                   , answer = Just "Something" } []
       `} />
 
     <Headline
@@ -250,7 +192,8 @@ export default () =>
             { question : String, answer : Maybe String }
 
         type alias Model =
-            { questions : NonEmptyList SurveyQuestion, currentQuestion : Int }
+            { questions : NonEmptyList SurveyQuestion
+            , currentQuestion : Int }
 
       `} />
 
@@ -261,8 +204,8 @@ export default () =>
         init : Model
         init =
             { questions =
-                NonEmpty { question = "What is this?", 
-                           answer = Just "Something" } []
+                NonEmpty { question = "What is this?" 
+                         , answer = Just "Something" } []
             , currentQuestion = 0
             }
       `} />
@@ -274,8 +217,8 @@ export default () =>
         init : Model
         init =
             { questions =
-                NonEmpty { question = "What is this?", 
-                           answer = Just "Something" } []
+                NonEmpty { question = "What is this?"
+                         , answer = Just "Something" } []
             , currentQuestion = 1
             }
       `} />
@@ -305,18 +248,215 @@ export default () =>
         init =
             { questions =
                 Zipper
-                    { left = [ { question = "What is this?", 
-                                 answer = Just "Something" } ]
-                    , focus = { question = "Second Question", 
-                                answer = Just "Second Answer" }
+                    { left = [ { question = "What is this?" 
+                               , answer = Just "Something" } ]
+                    , focus = { question = "Second Question"
+                              , answer = Just "Second Answer" }
                     , right = []
                     }
             }
       `} />
 
-      <Headline
-        textAlign="left"
-        text="Illegal States are unrepresentable" />
+    <Headline
+      textAlign="left"
+      text="Illegal States are unrepresentable" />
+
+    <Headline
+      size={4}
+      subtextSize={6}
+      color="green"
+      text="Example - User Data Model" />
+
+    <Code
+      title="User Data Model"
+      lang="elm"
+      source={`
+        type alias UserLogin =
+            { username: String
+            , password: String
+            }
+            
+        type alias ThirdPartyLogin =
+            { apiToken: String
+            , email: String
+            }
+            
+        type alias User =
+            { name: String
+            , userLogin: Maybe UserLogin
+            , thirdPartyLogin: Maybe ThirdPartyLogin
+            }
+      `} />
+
+    <Code
+      title="Illegal State"
+      lang="elm"
+      source={`
+        user =
+            User
+                { name = "Jimmy"
+                , userLogin = Nothing
+                , thirdPartyLogin = Nothing
+                }
+
+      `} />
+
+    <Code
+      title="User Data Model Alternative 1"
+      lang="elm"
+      source={`
+        type alias UserLogin =
+            { name: String
+            , username: String
+            , password: String
+            }
+            
+        type alias ThirdPartyLogin =
+            { name: String
+            , apiToken: String
+            , email: String
+            }
+            
+        type User
+            = LoginWithUser UserLogin
+            | LoginThirdParty ThirdPartyLogin
+            | LoginBoth UserLogin ThirdPartyLogin
+      `} />
+
+    <Code
+      title="User Data Model Alternative 2"
+      lang="elm"
+      source={`
+        type alias UserLogin =
+            { username : String
+            , password : String
+            }
+
+        type alias ThirdPartyLogin =
+            { apiToken : String
+            , email : String
+            }
+
+        type Login
+            = User UserLogin
+            | ThirdParty ThirdPartyLogin
+            | Both UserLogin ThirdPartyLogin
+
+        type alias User = { name : String, login : Login }
+      `} />
+
+    <Code
+      title="These"
+      lang="elm"
+      source={`
+        type These a b
+            = This a
+            | That b
+            | These a b
+
+        x : These String Int
+        x = This "String"
+
+        y : These String Int
+        y = That 2
+
+        z : These String Int
+        z = These "String" 2
+      `} />
+
+    <Code
+      title="User Data Model Alternative 3"
+      lang="elm"
+      source={`
+        type alias UserLogin =
+            { username : String
+            , password : String
+            }
+
+        type alias ThirdPartyLogin =
+            { apiToken : String
+            , email : String
+            }
+
+        type alias User =
+            { name : String
+            , login : These UserLogin ThirdPartyLogin
+            }
+      `} />
+
+    <Code
+      title="Reusable Functions"
+      lang="elm"
+      source={`
+        getUniqueId : These UserLogin ThirdPartyLogin -> String
+        getUniqueId = these .username .email (\\u _ -> u.username)
+      `} />
+
+
+    <Headline
+      color="blue"
+      size={4}
+      text="Types of our functions communicate" />
+
+    <Code
+      title="Uninteresting types"
+      lang="java"
+      source={`
+        public String greet(String name);
+      `} />
+
+    <Code
+      title="Uninteresting types"
+      lang="java"
+      source={`
+        public String asdf(String zxcv);
+      `} />
+
+    <Code
+      title="Kinda Communicating with types"
+      lang="java"
+      source={`
+        public interface Thing<E> {
+          boolean stuff();
+          E do();
+          void go();
+        }
+      `} />
+
+    <Code
+      title="Kinda Communicating with types"
+      lang="java"
+      source={`
+        public interface Iterator<E> {
+          boolean hasNext();
+          E next();
+          void remove();
+        }
+      `} />
+
+    <Code
+      title="Not Communicating with types"
+      lang="java"
+      textSize={20}
+      source={`
+        public interface Functor<F extends K1, Mu extends Functor.Mu> extends Kind1<F, Mu> {
+            static <F extends K1, Mu extends Functor.Mu> Functor<F, Mu> unbox(final App<Mu, F> proofBox) {
+                return (Functor<F, Mu>) proofBox;
+            }
+
+            interface Mu extends Kind1.Mu {}
+
+            <T, R> App<F, R> map(final Function<? super T, ? extends R> func, final App<F, T> ts);
+        }
+      `} />
+
+    <Code
+      title="Communicating with types"
+      lang="haskell"
+      source={`
+        interface Functor (f : Type -> Type) where
+            map : (a -> b) -> f a -> f b
+      `} />
 
 
     <BlankSlide />
