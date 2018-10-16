@@ -26,9 +26,8 @@ export default () =>
   <Presentation>
     <Headline
       textAlign="left"
-      subtextSize={4}
-      subtextCaps={true}
-      text="Eliminating Bugs with Types" />
+      size={4}
+      text="Using Types to Make (many) Bugs Impossible" />
 
     <TwoColumn
       title="About Me"
@@ -47,9 +46,8 @@ export default () =>
 
     <Headline
       textAlign="left"
-      subtextSize={4}
-      subtextCaps={true}
-      text="Eliminating Bugs with Types" />
+      size={4}
+      text="Using Types to Make (many) Bugs Impossible" />
 
     <Headline
       color="green"
@@ -396,7 +394,7 @@ export default () =>
     <Headline
       color="blue"
       size={4}
-      text="Types of our functions communicate" />
+      text="The Types of our functions communicate intent" />
 
     <Code
       title="Uninteresting types"
@@ -458,6 +456,68 @@ export default () =>
             map : (a -> b) -> f a -> f b
       `} />
 
+    <Headline
+      size={5}
+      caps={false}
+      subtextSize={5}
+      text="The less our program tells us about our types"
+      subtext="The more it tells us about our code" />
+
+    <Code
+      title="Communicating with types"
+      lang="haskell"
+      source={`
+        f : String -> String
+      `} />
+
+    <Code
+      title="Communicating with types"
+      lang="haskell"
+      source={`
+        f : a -> a
+      `} />
+
+    <Code
+      title="Communicating with types"
+      lang="haskell"
+      source={`
+        f : List Char -> List Char -> List Char
+      `} />
+
+    <Code
+      title="Communicating with types"
+      lang="haskell"
+      source={`
+        f : List a -> List a -> List a
+      `} />
+
+    <Code
+      title="Communicating with types"
+      lang="haskell"
+      source={`
+        f : Semigroup a => a -> a -> a
+      `} />
+
+    <Headline
+      text="Using generic types makes more programs impossible" />
+
+    <Headline
+      color="green"
+      text="Types fundamentally limit" />
+
+    <Headline
+      color="cyan"
+      text="The set of all sets that don't contain themselves" />
+
+    <Headline
+      text="Russell Proposed types in 1902" />
+
+    <Headline
+      size={5}
+      caps={false}
+      subtextSize={5}
+      text="In order to use types to make bugs impossible"
+      subtext="Use types to make programs impossible" />
 
     <BlankSlide />
 
