@@ -124,7 +124,7 @@ export const Code = withSlide(({ source, color, lang, title, textSize, headlineS
   )
 })
  
-export const Point = ({ text, textSize=50 }) => 
+export const Point = ({ text, textSize=70 }) => 
   <ListItem textSize={textSize} textColor="base2">
     {text}
   </ListItem>
