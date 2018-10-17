@@ -59,7 +59,7 @@ export default () =>
 
     <Points title="Problem With Types">
       <Point text="Verbosity" />
-      <Point text="Inheritence" />
+      <Point text="Inheritance" />
       <Point text="Subtyping" />
     </Points>
 
