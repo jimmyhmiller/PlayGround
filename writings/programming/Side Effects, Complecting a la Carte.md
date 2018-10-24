@@ -1,4 +1,4 @@
-#Side Effects, Complecting a la Carte
+# Side Effects, Complecting a la Carte
 
 There are many concepts we learn as we continue our adventure in programming languages. Objects, polymorphism, inheritance, and a whole host of others. Often these concepts are taught with the goal of making our code simpler, yet more often than not, they makes our code more complex, in other words, they [complect](beautiful-code.html) them. In these post we dive into where most of the inessential complexity of our programs come from, side effects.
 
@@ -98,7 +98,7 @@ Pure functions are the perfect example of decomplected code. Pure functions do o
 
 ### But My Programs Need to do Something
 
-Side-effects (in Javascript) are of course necessary. Our programs must communicate with the outside world in some way. But unconstrained side-effects can incredibly complicate our code. Mixing our data transformations with side-effects causes to lose the ability to reason about our code accurately. Mutating variables causes us to have to keep track of more and more state as variables change. In fact, it is my conjecture that a large majority of hard to trace bugs come from some variable somewhere being changed to some value we did not expect.
+Side-effects (in Javascript) are of course necessary. Our programs must communicate with the outside world in some way. But unconstrained side-effects can incredibly complicate our code. Mixing our data transformations with side-effects causes us to lose the ability to reason about our code accurately. Mutating variables causes us to have to keep track of more and more state as variables change. In fact, it is my conjecture that a large majority of hard to trace bugs come from some variable somewhere being changed to some value we did not expect.
 
 ## Conclusion
 So how do we constrain side-effects? That deserves a whole post or three on that very topic but for now we can keep it simple. First, always strive to write pure functions. Secondly, avoid mutation if at all possible. Finally move all side effects to the edges of your programs. Future posts will explore these topics showing how constraining our side-effects eliminates whole classes of bugs commonly encountered in programming and leads to simpler code.
