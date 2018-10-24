@@ -10,4 +10,6 @@
 * Datatypes a la Carte
 * Final Tagless
 * The Downsides of Card Driven Development
-* 
+* Fully Functional Microservices
+* Concurrency for Free (Haxl)
+* Introduction to Logic Programming
