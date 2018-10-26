@@ -1,5 +1,3 @@
-"use strict";
-
 
 let Y = (f) =>
     (x => x(x))(x => 
@@ -32,27 +30,26 @@ console.log(fib(Y(fib))(5))
 
 
 
-let fresh = n => [n, n+1];
+// let fresh = n => [n, n+1];
 
-let f = function*() {
-    let x = yield(fresh);
-    let y = yield(fresh);
-    yield(s => [[x,y], s]);
-}
+// let f = function*() {
+//     let x = yield(fresh);
+//     let y = yield(fresh);
+//     yield(s => [[x,y], s]);
+// }
 
 
-function runGenState(s, gen) {
-    gen = gen();
-    while (true) {
-        let fn = gen.next();
-        if (fn.done) {
-            return s[1];
-        }
-        s = fn.value(s);
-        gen.next(s[0]); 
-    }
-}
-
+// function runGenState(s, gen) {
+//     gen = gen();
+//     while (true) {
+//         let fn = gen.next();
+//         if (fn.done) {
+//             return s[1];
+//         }
+//         s = fn.value(s);
+//         gen.next(s[0]); 
+//     }
+// }
 
 
 let State = statefn => ({
@@ -95,13 +92,13 @@ let fresh = State(n => [n,n+1]);
 let freshN = State.get()
     .flatMap(n => State.put(n+1).then(State.pure(n)))
 
-// console.log(
-//   fresh.flatMap(function (a) {
-//     return fresh.flatMap(function (b) {
-//         return fresh.flatMap(function (c) {
-//             return State.pure([a,b,c]);
-//         });
-//     });
-// })
-//     .run(10)
-// )
+console.log(
+    fresh.flatMap(function (a) {
+        return fresh.flatMap(function (b) {
+            return fresh.flatMap(function (c) {
+                return State.pure([a,b,c]);
+            });
+        });
+    })
+    .run(10)
+)
