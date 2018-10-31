@@ -15,9 +15,6 @@ data Tank = Tank Vec deriving (Show)
 data Vec = Vec Int deriving (Show)
 data Entity = Entity Int deriving (Show)
 
-instance Show (a -> b) where
-  show f = "f"
-
 data Move a
     = Accelerate a
     | RotateLeft (Maybe Angle) a
@@ -28,7 +25,45 @@ data Move a
     | AngleTo Vec (Angle -> a)
     | IsAt Vec (Bool -> a)
     | IsFacing Angle (Bool -> a)
-    | Me (Entity -> a) deriving (Functor, Show)
+    | Me (Entity -> a) deriving (Functor)
+
+interpret :: Ai () -> IO String
+interpret prog = case prog of
+    Free (Accelerate a) -> do
+      result <- interpret a
+      return $ "(Accelerate) -> " ++ result
+    Free (RotateLeft a b) -> do
+      result <- interpret b
+      return $ "(RotateLeft " ++ show a ++ ") -> " ++ result
+    Free (RotateRight a b) -> do
+      result <- interpret b
+      return $ "(RotateRight " ++ show a ++ ") -> " ++ result
+    Free (Delay a) -> do
+      result <- interpret a
+      return $ "(Delay) -> " ++ result
+    Free (Fire a) -> do
+      result <- interpret a
+      return $ "(Fire) -> " ++ result
+    Free (FindNearestTank f) -> do
+      result <- interpret (f (Tank (Vec 1)))
+      return $ "(FindNearestTank) -> " ++ result
+    Free (AngleTo pos f) -> do
+      result <- interpret (f (Angle 2)) 
+      return $ "(AngleTo" ++ (show pos) ++ ") -> " ++ result
+    Free (IsAt pos f) -> do
+      putStr "Is at: "
+      input <- getLine
+      result <- interpret (f (input == "True"))
+      return $ "(IsAt " ++ (show pos) ++ ") -> " ++ result
+    Free (IsFacing a f) -> do
+      input <- getLine
+      result <- interpret (f (input == "True"))
+      return $ "(IsFacing " ++ show a ++ ") -> " ++ result
+    Free (Me f) -> do
+      result <- interpret (f $ Entity 1)
+      return $ "(Me  ->" ++ result
+    (Pure r) -> return ""
+
 
 type Ai a = Free Move a
 
@@ -58,9 +93,7 @@ isAt pos = liftF $ IsAt pos id
 isFacing a = IsFacing a id
 me = Me id
 
-
-
-loop ai = ai >> loop ai
+-- loop ai = ai >> loop ai
 when b = b whenM
 -- unless b = b unlessM
 
@@ -70,7 +103,11 @@ aimAtTank (Tank pos) = do
   rotateTowards angle
   return ()
 
-rotateTowards angle = return ()
+rotateTowards :: Angle -> Ai ()
+rotateTowards (Angle x) = if even x then 
+    liftF $ RotateRight (Just (Angle x)) ()
+  else 
+    liftF $ RotateLeft (Just (Angle x)) ()
 
 
 position :: Tank -> Vec
@@ -85,8 +122,6 @@ moveTo pos = do
     accelerate
     moveTo pos
 
-
-
 searchAndDestroy :: Ai ()
 searchAndDestroy = do
   tank <- findNearestTank
@@ -96,4 +131,6 @@ searchAndDestroy = do
 
 
 main :: IO ()
-main = putStr "hello"
+main = do 
+  result <- interpret (moveTo (Vec 1))
+  putStr result
