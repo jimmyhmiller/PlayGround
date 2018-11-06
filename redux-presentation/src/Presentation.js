@@ -76,7 +76,7 @@ class Dark extends React.Component {
   render() {
     const { children, ...rest } = this.props;
     return (
-      <Slide bgColor="base3" {...rest}>
+      <Slide bgColor="base03" {...rest}>
         {children}
       </Slide>
     )
@@ -122,14 +122,14 @@ const BlankSlide = withSlide(() => {
 const Code = withSlide(({ source, lang, title, printWidth }) => {
   return (
     <div>
-      <Headline noSlide textAlign="left" text={title} />
+      <Headline noSlide text={title} />
       <CodePane textSize={20} source={code(source, printWidth)} lang={lang} />
     </div>
   )
 })
  
 const Point = ({ text, textSize=60 }) => 
-  <ListItem textSize={textSize} textColor="base02">
+  <ListItem textSize={textSize} textColor="base2">
     {text}
   </ListItem>
 
@@ -147,7 +147,7 @@ const Subtitle = ({ color="blue", size=5, text, ...props }) =>
     {text}
   </Heading>
 
-const Headline = withSlide(({ color="magenta", size=2, text, subtext, subtextSize, textAlign="center", caps=true, subtextColor, image }) =>
+const Headline = withSlide(({ color="magenta", size=2, text, subtext, subtextSize, textAlign="left", caps=true, subtextColor, image }) =>
   <div>
     <Heading
       textAlign={textAlign}
