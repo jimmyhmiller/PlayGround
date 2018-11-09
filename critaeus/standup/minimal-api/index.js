@@ -34,6 +34,18 @@ const createDirectory = (filePath) => {
   })
 }
 
+const objectExists = (filePath) => {
+  return new Promise((resolve, reject) => {
+    client.info(`~~/stor/${filePath}`, function (err, data) {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(data)
+      }
+    });
+  })
+}
+
 const getObject = (filePath) => {
   return new Promise((resolve, reject) => {
     client.get(`~~/stor/${filePath}`, function (err, stream) {
@@ -44,6 +56,29 @@ const getObject = (filePath) => {
         streamToPromise(stream)
           .then(data => resolve(JSON.parse(data.toString())))
       }
+    });
+  })
+}
+
+const listDirectory = (filePath) => {
+  return new Promise((resolve, reject) => {
+    const stuff = [];
+    client.ls(`~~/stor/${filePath}`, function (err, res) {
+      if (err) {
+        reject(err);
+      } else {
+       res.on('object', function (obj) {
+         stuff.push(obj);
+       });
+
+       res.on('directory', function (dir) {
+         stuff.push(dir);
+       });
+
+       res.once('end', function () {
+         resolve(stuff);
+       });
+     }
     });
   })
 }
@@ -82,7 +117,6 @@ const handleKeyNotFound = (e, cb) => {
 
 const getDatesStatus = async (req, res) => {
   try {
-    console.log("here")
     const { team, user, date } = req.params;
     const data = await getObject(`standup/${team}/${date}/${user}.json`)
     send(res, 200, data)
@@ -103,6 +137,38 @@ const postDatesStatus = async (req, res) => {
   }
 }
 
+const userExists = async (req, res) => {
+  try {
+    const { user } = req.params;
+    const exists = await objectExists(`user/${user}`);
+    send(res, 200, exists)
+  } catch (e) {
+    send(res, 404)
+  }
+}
+
+const createUser = async (req, res) => {
+  try {
+    const body = await json(req)
+    const { user } = req.params;
+    const exists = await putObject(`user/${user}`, body);
+    send(res, 200, exists)
+  } catch (e) {
+    send(res, 404)
+  }
+}
+
+const listStatuses = async (req, res) => {
+  try {
+    const { team, date } = req.params;
+    const exists = await listDirectory(`standup/${team}/${date}/`);
+    send(res, 200, exists)
+  } catch (e) {
+    console.log(e)
+    send(res, 404)
+  }
+}
+
 const notfound = (req, res) => send(res, 404, {message: 'Not found'})
 
 // default of router includes dots, which is dangerous
@@ -110,8 +176,14 @@ const urlPatternOpts = {
   segmentValueCharset: "a-zA-Z0-9-"
 }
 
+// getting all the parts
+// need to sit down and think about the whole
+
 module.exports = router(
   get(new UrlPattern('/standup/:team/:date/:user', urlPatternOpts), getDatesStatus),
+  get(new UrlPattern('/standup/:team/:date', urlPatternOpts), listStatuses),
+  get(new UrlPattern('/user/:user', urlPatternOpts), userExists),
+  post(new UrlPattern('/user/:user', urlPatternOpts), createUser),
   post(new UrlPattern('/standup/:team/:date/:user', urlPatternOpts), postDatesStatus),
   get("/*", notfound),
 )
