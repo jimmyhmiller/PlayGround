@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "name": "nodejs",
+  "builds": [
+    { "src": "about.js", "use": "@now/node" },
+    { "src": "home.js", "use": "@now/node" }
+  ],
+  "routes": [
+    { "src": "/home", "dest": "home.js" },
+    { "src": "/api", "dest": "my-api.js" }
+  ]
+}
