@@ -1,0 +1,49 @@
+name:                free-fun
+version:             0.1.0.0
+github:              "jimmyhmiller/free-fun"
+license:             BSD3
+author:              "Jimmy Miller"
+maintainer:          "jimmyhmiller@gmail.com"
+copyright:           "Jimmy Miller"
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            fun
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/jimmyhmiller/free-fun#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+
+library:
+  source-dirs: src
+
+executables:
+  free-fun-exe:
+    main:                Main.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - free-fun
+    - free
+
+tests:
+  free-fun-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - free-fun
