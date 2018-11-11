@@ -11,13 +11,13 @@ var fs = require('fs');
 var manta = require('manta');
 
 var client = manta.createClient({
-    sign: manta.privateKeySigner({
-        key: process.env.MANTA_KEY,
-        keyId: process.env.MANTA_KEY_ID,
-        user: process.env.MANTA_USER
-    }),
-    user: process.env.MANTA_USER,
-    url: process.env.MANTA_URL
+  sign: manta.privateKeySigner({
+      key: process.env.MANTA_KEY,
+      keyId: process.env.MANTA_KEY_ID,
+      user: process.env.MANTA_USER
+  }),
+  user: process.env.MANTA_USER,
+  url: process.env.MANTA_URL
 });
 console.log('manta ready: %s', client.toString());
 
@@ -88,13 +88,18 @@ const putObject = (filePath, data) => {
   var opts = {
       md5: crypto.createHash('md5').update(json).digest('base64'),
       size: Buffer.byteLength(json),
-      type: 'application/json'
+      type: 'application/json',
+      copies: 1
   };
+
   var stream = new MemoryStream();
-  return createDirectory(filePath)
-    .then(_ => {
+  // return createDirectory(filePath)
+  //   .then(_ => {
+  //     console.log("")
       return new Promise((resolve, reject) => {
+        console.time("putObject")
         client.put(`~~/stor/${filePath}`, stream, opts, function (err) {
+           console.timeEnd("putObject")
           if (err) {
             reject(err)
           } else {
@@ -103,7 +108,7 @@ const putObject = (filePath, data) => {
         });
         stream.end(json);
       })
-    })
+    // })
 }
 
 const handleKeyNotFound = (e, cb) => {
