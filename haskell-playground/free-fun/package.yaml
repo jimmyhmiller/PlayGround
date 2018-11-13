@@ -24,6 +24,11 @@ dependencies:
 
 library:
   source-dirs: src
+  dependencies:
+  - free
+  - containers
+  - mtl
+  - transformers
 
 executables:
   free-fun-exe:
@@ -35,7 +40,6 @@ executables:
     - -with-rtsopts=-N
     dependencies:
     - free-fun
-    - free
 
 tests:
   free-fun-test:
