@@ -1,11 +1,10 @@
-# Advanced Functional Studies
+# Basic Functional Studies
 
-In the previous post we observed some rules on how to get the most out of our functions. In this post we will do exactly that, get the most out of them. But rather than diving straight in to these advance techniques, we are going to come up with them ourselves. There is no better way to learn a concept than to arrive at it through simple steps. To see how we ourselves could have come up with these advanced techniques.
+In the previous post we observed some rules on how to get the most out of our functions. In this post we will do exactly that, get the most out of them. But rather than diving straight in to these techniques, we are going to come up with them ourselves. There is no better way to learn a concept than to arrive at it through simple steps. To see how we ourselves could have come up with these techniques.
 
 ## Map, Getting Rid of 50% of For Loops
 
 Let's imagine we need to add `2` to every single item in a list. How would we write this code? Perhaps something like this.
-​	
 ```javascript
 function add2ToList (list) {
 	let temp = [];
@@ -33,7 +32,7 @@ function addNToList (n, list) {
 addNToList(n, [1,2,3])
 ```
 
-Alright problem solved. I can now add 3 or any number for that matter. Let's try a different problem. I want I have a list of string and I want to concatenate something onto the front of them. Here's what that function might look like.
+Alright, problem solved. I can now add 3 or any number for that matter. Let's try a different problem. I want I have a list of string and I want to concatenate something onto the front of them. Here's what that function might look like.
 
 ```Javascript
 function concatFrontList (s, list) {
@@ -47,7 +46,6 @@ concatFrontList("hello, ", ["jimmy"])
 ```
 
 Again, this certainly works, but doesn't it look remarkably similar to our addNToList? In fact, the name and one line are the only thing that changed. If we decide instead of concatenating we want to replace, or substring or any other operation we will have to write another function that is remarkable similar to this. Couldn't we write a function that abstracts over this?
-​	
 ```javascript
 const map = function (f, list) {
 	let temp = [];
@@ -82,7 +80,7 @@ Map is that function. Map is a fairly interesting function, because one of its a
 
 ## Partial application
 
-Higher order functions allow us to abstract over behavior, not just data. We can extract out the essence of a certain transformation and allow the particulars to be passed in a function. But we still don't have the full reusability we would like to. You'll notice that we had to define two functions, add3 and add2 which basically do the same thing, lets see if generalizing this to addN does anything for us.
+Higher order functions allow us to abstract over behavior, not just data. We can extract out the essence of a certain transformation and allow the particulars to be passed in a function. But we still don't have the full reusability we would like to. You'll notice that we had to define two functions, add3 and add2 which basically do the same thing, let's see if generalizing this to addN does anything for us.
 
 ```javascript
 const addN = function (n, x) {
@@ -115,7 +113,7 @@ map(addN(2), [1,2,3]);
 map(addN(3), [1,2,3]);
 ```
 
-There we go, no more extra function definitions. AddN is a function that returns a function. That way we can use it directly in our map call. But there is something that isn't very nice about this. First of all, it would be much messier if we had a function that took three arguments. Do we make it so they pass in two arguments and then finally the third? Do we make them pass one at a time? But really what isn't great here is the fact that what our addN is really supposed to do is obscured by the fact that we have to make it return a function. What if we could have our first addN definition but some how make it return a function? We can using a method called partial application.
+There we go, no more extra function definitions. AddN is a function that returns a function. That way we can use it directly in our map call. But there is something that isn't very nice about this. First of all, it would be much messier if we had a function that took three arguments. Do we make it so they pass in two arguments and then finally the third? Do we make them pass one at a time? But really what isn't great here is the fact that what our addN is really supposed to do is obscured by the fact that we have to make it return a function. What if we could have our first addN definition but somehow make it return a function? We can using a method called partial application.
 
 ```javascript
 const add = function (a, b) {
@@ -145,7 +143,7 @@ const add2 = add.bind(null, 2);
 const add2Then3 = add2.bind(null, 3)
 ```
 
-Not very pretty if you ask me. This also creates some weird cases, what will I get back if I call "add2(1)"? Undefined. Since I only passed in one argument instead of the two remaining arguments "c" is undefined and thus the whole thing is. What I'd really love is to be able to pass in as many or as few arguments as I'd like and get back a function that takes the rest of them. This idea is called currying.
+Not very pretty if you ask me. This also creates some weird cases, what will I get back if I call "add2(1)"? Since I only passed in one argument instead of the two remaining arguments "c" is undefined and thus the whole thing is. What I'd really love is to be able to pass in as many or as few arguments as I'd like and get back a function that takes the rest of them. This idea is called currying.
 
 ```javascript
 add(2)(3)(4)
@@ -167,8 +165,7 @@ let add = function (a,b,c) {
 add = _.curry(add);
 ```
 
-Now our function is curried! How is this useful you might ask, let me leave you with one more example. It is a simple modification of our map function before. All that I've done is switch the order of the the arguments, but once we do we can see just how powerful higher order functions combined with currying can be. 
-​	
+Now our function is curried! How is this useful? Let me leave you with one more example. 
 ```javascript
 let map = function (fn, list) {
 	let temp = [];
@@ -187,7 +184,8 @@ mapAdd2([3,4,5])
 // [5,6,7]
 ```
 
+Here we took our map function and curried it. Now with our curried add we can combine the two, giving us a new function, something that maps and adds two. With currying, our functions can serve as readily combinable building blocks, allowing us to easily define high level features.
 
-# Conclusion
+## Conclusion
 
-Higher Order Functions allow us to extract the essence of a function out. We can get great reuse of our functions and work a higher abstraction. Currying allows us to take general functions and slowly add specificity. At every step, we are in control of what our functions do, what arguments they are applied to, and just how resuable they are. Advance function techniques make our code cleaner and simpler; functions can be reused across many use cases. While these techniques come with a learning curve, they ultimately reduce the surface area of, decomplect, and simplify our code.
+Higher Order Functions allow us to extract the essence of a function out. We can get great reuse of our functions and work a higher abstraction. Currying allows us to take general functions and slowly add specificity. At every step, we are in control of what our functions do, what arguments they are applied to, and just how reusable they are. The basic functional techniques make our code cleaner and simpler. While these techniques come with a learning curve, they ultimately reduce the surface area of, decomplect, and simplify our code.

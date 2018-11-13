@@ -78,6 +78,6 @@ Splitting out our impure functions certainly makes our code more predictable, bu
 
 This allows a few advantages. Firstly, testing is "all the rage", and our pure core allows us to much more easily test things. Pure functions don't depend on services. They don't depend on external resources. They only need what is passed to them, data. So testing doesn't involve 17 layers of mocks, but rather plain data. Secondly, our pure core is portable. If we decide to move our core out into a separate library, this change will be easy. Since each function depends on nothing outside of itself, transporting these functions is easy. Finally a pure core keeps our code neatly organize; when following the flow of our code we know precisely how things will happen, data will come in, transformations will happen, and data will come out.
 
-# Conclusion
+## Conclusion
 
 Pure functions are the first necessary step to unlocked the true potential of functions. In the next post we will explore more advanced uses of functions.  We will explore higher order functions, partially applied functions, and currying.

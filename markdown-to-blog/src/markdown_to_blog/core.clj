@@ -5,7 +5,7 @@
 
 
 (def markdown
-  (slurp "/Users/jimmy/Documents/Code/PlayGround/writings/programming/Side Effects, Complecting a la Carte.md"))
+  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/Basic Functional Studies.md"))
 
 
 (defmulti transform

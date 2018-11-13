@@ -1,6 +1,6 @@
 # Named Function Composition
 
-I've just released a little library on npm called `fluent-compose`. I've had some mixed feelings about my creation, I know that it will be met with some skepticism, in fact, had I seen this library from someone else, I would have dismissed it. And yet, I think I've stumbled onto a fairly decent idea. By decent idea, I mean a hack. But before we dive into this hack, let's look at the situation that gave rise to it.
+Some time ago I release a little library on NPM called`fluent-compose`. I've had some mixed feelings about my creation. I know that no one has, or will use it and if they looked at it would probably dismiss it. In fact, if I hadn't written it, I would do the same. And yet, I think I've stumbled onto a fairly decent idea. By decent idea, I mean a hack. But before we dive into this hack, let's look at the situation that gave rise to it.
 
 There is this fantastic, little known library called [Zaphod](https://zaphod.surge.sh/). The idea behind Zaphod is to mirror Clojure's immutable data API. This makes it incredibly simple to do immutable updates on plain javascript objects.
 
@@ -10,7 +10,7 @@ const state = { count: 0 };
 update(state, 'count', inc) // { count : 1}
 ```
 
-The way I've written the code above is actually not the default way Zaphod works. I imported the `compat` part of zaphod. By default, the functions are exposed to take advantage of the function bind operator `::`.
+The way I've written the code above is actually not the default way Zaphod works. I imported the `compat` part of zaphod. By default, the functions are exposed to take advantage of the function bind operator `::`. 
 
 ```javascript
 import { update, inc, dec } from 'zaphod';
@@ -23,7 +23,7 @@ state
 // {count: 1, otherCount: -1}
 ```
 
-This is actually some really neat functionality. It allows you to chain your operators together. We can build pipelines by continuing to bind. Unfortunately, we don't get function bind syntax for free. Function bind is still a stage 0 proposal. This means there is a very good possibility it will never make it into javascript. So there is definitely risk involved in its use. It also means, that `create-react-app` does not have support for it. 
+This is actually some really neat functionality. It allows you to chain your operators together. We can build pipelines by continuing to bind. Unfortunately, we don't get function bind syntax for free. Function bind is still a stage 0 proposal. This means there is a very good possibility it will never make it into javascript. In fact, after a few years of sitting at stage 0, it is bascially considered dead. There is quite a lot of risk involved in using it and more conservatice configurations like `create-react-app` wouldn't use it.
 
 But function bind syntax also has flaws even if it were accepted into the language. Function bind syntax abuses `this` the most misunderstood keyword in all of javascript. The functions you write with function binding in mind, must use `this`, they can't be normal functions. Of course, you can wrap up those functions, but if we need to wrap functions up, why not wrap them in a way that doesn't require function bind?
 
@@ -47,7 +47,7 @@ update({ counters: {count: 0, otherCount: 0}}, 'counters', transformer)
 // {counters: {count: 1, otherCount: -1, anotherCounter: 2}}
 ```
 
-Here we see the `threadFirst` function in use. This allows us to take a collection of functions, in this case `zaphod`, and wrap them up into a fluent interface. But what does this fluent interface do? It is just function composition. At the end, we get a function back. We can now use this function to pass our data through the pipeline. Since, what we get back is just a function, we can also pass this function around. We can see its use on line 14 as just a normal function that lets us perform a series of transformations on data.
+Here we see the `threadFirst` function in use. This allows us to take a collection of functions, in this case `zaphod`, and wrap them up into a fluent interface. But what does this fluent interface do? It is just function composition. After calling it, we get a function back. We can now use this function to pass our data through the pipeline. Since, what we get back is just a function, we can also pass this function around. We can see its use on line 14 as just a normal function that lets us perform a series of transformations on data.
 
 This is a fairly simple use of `fluent-compose`, let's take it one step further.
 
@@ -74,7 +74,7 @@ transformer([1,2,3,4]) // [3, 6]
 
 Here we can see a combination of two totally separate libraries. In fact, I even used `lodash/fp` because rather than taking its primary argument first, it takes it last. Yet, we were still able to compose these libraries in a simple, yet flexible way. 
 
-And yet, `fluent-compose` holds still more power. This time, we will be using some of the lower level features of `fluent-compose`, explaining them here would be beyond the scope of this posts, so I've omitted some implementations, but you can find the full source [here]().
+Yet, `fluent-compose` holds still more power. This time, we will be using some of the lower level features of `fluent-compose`, explaining them here would be beyond the scope of this posts, so I've omitted some implementations, but you can find the full source [here]().
 
 ```javascript
 import { fluentCompose } from 'fluent-compose';
@@ -134,7 +134,7 @@ Above we see how we could accomplish similar things in Haskell and Clojure. Almo
 
 ### Still interesting
 
-At the same time, this method has some interesting features all on its own. What we have done is allow our functions to have special ways in which they compose. Each function can determine for itself special compostion points. At each point along the way, we keep these composition properties, allowing us to compose further. Each of these composition methods have a named, hence "named function composition". 
+At the same time, this method has some interesting features all on its own. What we have done is allow our functions to have special ways in which they compose. Each function can determine for itself special compostion points. At each point along the way, we keep these composition properties, allowing us to compose further. Each of these composition methods have a name, hence "named function composition". 
 
 ### Future Steps
 
