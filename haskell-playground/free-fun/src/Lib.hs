@@ -7,7 +7,7 @@ module Lib
 
 import Control.Monad.Free (Free, liftF, foldFree, hoistFree)
 import Data.Map.Strict as Map (Map, lookup, (!), fromList, insert, elems)
-import Control.Monad.State.Lazy as State (MonadState, gets, modify, runState, forM, liftM, runStateT)
+import Control.Monad.State.Lazy as State (MonadState, State, gets, modify, runState, forM, liftM, runStateT)
 import Prelude hiding (id, log)
 import Data.List (minimumBy)
 import Data.Ord (comparing)
@@ -39,7 +39,7 @@ attack strength e = liftF $ Attack strength e ()
 
 type TestEntities = Map Int Entity
 
-testInterpreter :: MonadState TestEntities m => Int -> MoveF next -> m next
+testInterpreter :: Int -> MoveF next -> State TestEntities next
 testInterpreter me (GetEnemies f) = do
   Just m <- gets (Map.lookup me)
   e <- gets (filter (/= m) . Map.elems)
@@ -108,7 +108,7 @@ scenario1 = Map.fromList [(2, Entity { id = 2, hp = 2, strength = 50, location =
                           (4, Entity { id = 4, hp = 2, strength = 50, location = (0, 10)}),
                           (5, Entity { id = 5, hp = 2, strength = 50, location = (0, 20)})]
 
-interpreter :: (MonadState TestEntities m) => Move a -> m a
+interpreter ::  Move a -> State TestEntities a
 interpreter = foldFree $ testInterpreter 2
 
 x = runState (interpreter attackAll) scenario1
