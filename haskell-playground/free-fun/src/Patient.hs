@@ -1,18 +1,25 @@
-{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveFunctor    #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RankNTypes       #-}
 
 module Patient where
-import Control.Monad.Free (Free, liftF, foldFree, hoistFree)
-import Data.Time.LocalTime (ZonedTime, zonedTimeToUTC, getCurrentTimeZone, utcToZonedTime, getZonedTime)
-import Data.Time.Clock (diffUTCTime, nominalDay, NominalDiffTime, addUTCTime)
-import Data.Map.Strict as Map (Map, lookup, (!), fromList, insert, elems)
-import Control.Monad.State.Lazy as State (MonadState, State, gets, modify, runState, forM, liftM, runStateT)
-import Data.Time.Format (parseTimeM, defaultTimeLocale)
-import Data.Maybe (fromJust)
-import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.Trans (lift)
-import Control.Monad.Loops (whileM)
+import           Control.Monad.Free       (Free, foldFree, hoistFree, liftF)
+import           Control.Monad.IO.Class   (MonadIO, liftIO)
+import           Control.Monad.Loops      (whileM)
+import           Control.Monad.State.Lazy as State (MonadState, State, forM,
+                                                    gets, liftM, modify,
+                                                    runState, runStateT)
+import           Control.Monad.Trans      (lift)
+import           Data.Map.Strict          as Map (Map, elems, fromList, insert,
+                                                  lookup, (!))
+import           Data.Maybe               (fromJust)
+import           Data.Time.Clock          (NominalDiffTime, addUTCTime,
+                                           diffUTCTime, nominalDay)
+import           Data.Time.Format         (defaultTimeLocale, parseTimeM)
+import           Data.Time.LocalTime      (ZonedTime, getCurrentTimeZone,
+                                           getZonedTime, utcToZonedTime,
+                                           zonedTimeToUTC)
+import           Text.Pretty.Simple       (pPrint)
 
 data Patient = Patient {
   patientId :: Int
@@ -25,7 +32,7 @@ instance Prompt Patient where
     return $ Patient { patientId = read patientId :: Int}
 
 data Medication = Medication {
-  medicationId :: Int,
+  medicationId   :: Int,
   nextRefillDate :: ZonedTime
 } deriving Show
 
@@ -43,7 +50,7 @@ instance Prompt Medication where
 
 data OfficeVisit = OfficeVisit {
   officeVisitId :: Int,
-  visitDate :: ZonedTime
+  visitDate     :: ZonedTime
 } deriving Show
 
 instance Prompt OfficeVisit where
@@ -60,7 +67,7 @@ instance Prompt OfficeVisit where
 
 data Configuration = Configuration {
   daysToSchedule :: NominalDiffTime,
-  daysToRefill :: NominalDiffTime
+  daysToRefill   :: NominalDiffTime
 } deriving Show
 
 instance Prompt Configuration where
@@ -93,6 +100,14 @@ data ClinicalF next
 
 type Clinical = Free ClinicalF
 
+actionName :: ClinicalF next -> String
+actionName (GetPatient _)                   = "GetPatient"
+actionName (GetOrganizationConfiguration _) = "GetOrganizationConfiguration"
+actionName (GetMedications _ _)             = "GetMedications"
+actionName (GetOfficeVisits _ _)            = "GetOfficeVisits"
+actionName (GetEffectiveMoment _)           = "GetEffectiveMoment"
+actionName (RecommendMedications _ _)       = "RecommendMedications"
+actionName (RecommendOfficeVisits _ _)      = "RecommendOfficeVisits"
 
 getPatient :: Clinical Patient
 getPatient = liftF $ GetPatient id
@@ -114,45 +129,6 @@ recommendOfficeVisits visits = liftF $ RecommendOfficeVisits visits ()
 
 getEffectiveMoment :: Clinical EffectiveMoment
 getEffectiveMoment = liftF $ GetEffectiveMoment id
-
-withinXDaysFromNow :: NominalDiffTime -> ZonedTime -> ZonedTime -> Bool
-withinXDaysFromNow days date1 date2 = dayDiff <= days where
-  d1 = zonedTimeToUTC date1
-  d2 = zonedTimeToUTC date2
-  dayDiff = diffUTCTime d2 d1 / nominalDay
-
-withinXDaysAgo :: NominalDiffTime -> ZonedTime -> ZonedTime -> Bool
-withinXDaysAgo days date1 date2 = dayDiff >= days where
-  d1 = zonedTimeToUTC date1
-  d2 = zonedTimeToUTC date2
-  dayDiff = diffUTCTime d2 d1 / nominalDay
-
-runningOut :: [Medication] -> Clinical [Medication]
-runningOut meds = do
-  EffectiveMoment effectiveMoment <- getEffectiveMoment
-  Configuration { daysToRefill = daysToRefill } <- getOrganizationConfiguration
-  return $ filter (withinXDaysFromNow daysToRefill effectiveMoment . nextRefillDate) meds
-
-overdueVisits :: [OfficeVisit] -> Clinical [OfficeVisit]
-overdueVisits visits = do
-  EffectiveMoment effectiveMoment <- getEffectiveMoment
-  Configuration { daysToSchedule = daysToSchedule } <- getOrganizationConfiguration
-  return $ filter (not . withinXDaysAgo daysToSchedule effectiveMoment . visitDate) visits
-
-getMedRecommendations :: Clinical ()
-getMedRecommendations = do
-  patient <- getPatient
-  medications <- getMedications patient
-  refills  <- runningOut medications
-  recommendMedications refills
-
-
-getOfficeRecommendations :: Clinical ()
-getOfficeRecommendations = do
-  patient <- getPatient
-  officeVisits <- getOfficeVisits patient
-  appointments <- overdueVisits officeVisits
-  recommendOfficeVisits appointments
 
 testInterpreter :: (MonadState TestEntities m) => ClinicalF next -> m next
 testInterpreter (GetPatient f) = do
@@ -183,6 +159,16 @@ testInterpreter (RecommendOfficeVisits visits next) = do
 getZonedDate :: String -> ZonedTime
 getZonedDate date = fromJust $ parseTimeM True defaultTimeLocale "%Y-%-m-%-d" date
 
+data TestEntities = TestEntities {
+  currentPatient            :: Patient,
+  organizationConfiguration :: Configuration,
+  patientMedication         :: Map Int [Medication],
+  patientOfficeVisits       :: Map Int [OfficeVisit],
+  medRecommendations        :: [Medication],
+  visitRecommendations      :: [OfficeVisit],
+  effectiveMoment           :: EffectiveMoment
+} deriving Show
+
 med1 = Medication {
   medicationId = 1,
   nextRefillDate = getZonedDate "2018-06-03"
@@ -192,17 +178,6 @@ visit1 = OfficeVisit {
   officeVisitId = 3,
   visitDate = getZonedDate "2018-06-03"
 }
-
-
-data TestEntities = TestEntities {
-  currentPatient :: Patient,
-  organizationConfiguration :: Configuration,
-  patientMedication :: Map Int [Medication],
-  patientOfficeVisits :: Map Int [OfficeVisit],
-  medRecommendations :: [Medication],
-  visitRecommendations :: [OfficeVisit],
-  effectiveMoment :: EffectiveMoment
-} deriving Show
 
 scenario1 = TestEntities {
   currentPatient = Patient { patientId = 1 },
@@ -224,10 +199,10 @@ consoleInterpreter (GetEffectiveMoment f) = liftIO $ f <$> prompt
 consoleInterpreter (GetMedications patient f) = liftIO $ f <$> prompt
 consoleInterpreter (GetOfficeVisits patient f) = liftIO $ f <$> prompt
 consoleInterpreter (RecommendMedications meds next) = do
-  liftIO $ print meds
+  liftIO $ pPrint meds
   return next
 consoleInterpreter (RecommendOfficeVisits visits next) = do
-  liftIO $ print visits
+  liftIO $ pPrint visits
   return next
 
 instance Prompt Int where
@@ -253,9 +228,50 @@ instance Prompt a => Prompt [a] where
       ps <- prompt
       return $ p : ps
 
+
+
+withinXDaysFromNow :: NominalDiffTime -> ZonedTime -> ZonedTime -> Bool
+withinXDaysFromNow days date1 date2 = dayDiff <= days where
+  d1 = zonedTimeToUTC date1
+  d2 = zonedTimeToUTC date2
+  dayDiff = diffUTCTime d2 d1 / nominalDay
+
+withinXDaysAgo :: NominalDiffTime -> ZonedTime -> ZonedTime -> Bool
+withinXDaysAgo days date1 date2 = dayDiff >= days where
+  d1 = zonedTimeToUTC date1
+  d2 = zonedTimeToUTC date2
+  dayDiff = diffUTCTime d2 d1 / nominalDay
+
+runningOut :: [Medication] -> Clinical [Medication]
+runningOut meds = do
+  EffectiveMoment effectiveMoment <- getEffectiveMoment
+  Configuration { daysToRefill = daysToRefill } <- getOrganizationConfiguration
+  return $ filter (withinXDaysFromNow daysToRefill effectiveMoment . nextRefillDate) meds
+
+overdueVisits :: [OfficeVisit] -> Clinical [OfficeVisit]
+overdueVisits visits = do
+  EffectiveMoment effectiveMoment <- getEffectiveMoment
+  Configuration { daysToSchedule = daysToSchedule } <- getOrganizationConfiguration
+  return $ filter (not . withinXDaysAgo daysToSchedule effectiveMoment . visitDate) visits
+
+getMedRecommendations :: Clinical ()
+getMedRecommendations = do
+  patient <- getPatient
+  medications <- getMedications patient
+  refills <- runningOut medications
+  recommendMedications refills
+
+getOfficeRecommendations :: Clinical ()
+getOfficeRecommendations = do
+  patient <- getPatient
+  officeVisits <- getOfficeVisits patient
+  appointments <- overdueVisits officeVisits
+  recommendOfficeVisits appointments
+
 chooseInterpreter :: (MonadIO m, MonadState TestEntities m) => (ClinicalF next -> m next) -> (ClinicalF next -> m next) -> ClinicalF next -> m next
 chooseInterpreter interpret1 interpret2 action = do
-  liftIO $ putStr "do you want to overide? (y/n)"
+  liftIO $ putStrLn ("About to preform " ++ actionName action)
+  liftIO $ putStr "do you want to overide? (y/n) "
   override <- liftIO getLine
   if override == "y" then
     interpret2 action
@@ -267,9 +283,8 @@ runProgram = foldFree
 
 main :: IO ()
 main = do
-  -- x <- prompt :: IO [Int]
-  -- putStr $ show x
-  -- result <- runProgram consoleInterpreter getMedRecommendations
-  result <- runStateT (runProgram (chooseInterpreter testInterpreter consoleInterpreter) getMedRecommendations) scenario1
-  putStr $ show result
+  result <- runStateT (runProgram (chooseInterpreter testInterpreter consoleInterpreter)
+                                  (getMedRecommendations >> getOfficeRecommendations))
+                       scenario1
+  pPrint result
   return ()
