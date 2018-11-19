@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Patient where
 import Control.Monad.Free (Free, liftF, foldFree, hoistFree)
@@ -11,32 +12,82 @@ import Data.Time.Format (parseTimeM, defaultTimeLocale)
 import Data.Maybe (fromJust)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans (lift)
+import Control.Monad.Loops (whileM)
 
 data Patient = Patient {
   patientId :: Int
 } deriving Show
+
+instance Prompt Patient where
+  prompt = do
+    liftIO $ putStr "Enter Patient Id: "
+    patientId <- liftIO getLine
+    return $ Patient { patientId = read patientId :: Int}
 
 data Medication = Medication {
   medicationId :: Int,
   nextRefillDate :: ZonedTime
 } deriving Show
 
+instance Prompt Medication where
+  prompt = do
+    liftIO $ putStr "Enter Medication Id: "
+    medId <- liftIO getLine
+    liftIO $ putStr "Enter Next Refill Date: "
+    refillDate <- liftIO getLine
+    return $ Medication {
+      medicationId = read medId :: Int,
+      nextRefillDate = getZonedDate refillDate
+    }
+
+
 data OfficeVisit = OfficeVisit {
   officeVisitId :: Int,
   visitDate :: ZonedTime
 } deriving Show
+
+instance Prompt OfficeVisit where
+  prompt = do
+    liftIO $ putStr "Enter OfficeVisit Id: "
+    officeId <- liftIO getLine
+    liftIO $ putStr "Enter Visit Date: "
+    visit <- liftIO getLine
+    return $ OfficeVisit {
+      officeVisitId = read officeId :: Int,
+      visitDate = getZonedDate visit
+    }
+
 
 data Configuration = Configuration {
   daysToSchedule :: NominalDiffTime,
   daysToRefill :: NominalDiffTime
 } deriving Show
 
+instance Prompt Configuration where
+  prompt = do
+    liftIO $ putStr "Enter Days To Schedule: "
+    toSchedule <- liftIO getLine
+    liftIO $ putStr "Enter Days To Refill: "
+    toRefill <- liftIO getLine
+    return Configuration {
+      daysToSchedule = fromInteger (read toSchedule :: Integer),
+      daysToRefill = fromInteger (read toRefill :: Integer)
+    }
+
+newtype EffectiveMoment = EffectiveMoment ZonedTime deriving Show
+
+instance Prompt EffectiveMoment where
+  prompt = do
+    liftIO $ putStr "Enter Effective Moment: "
+    moment <- liftIO getLine
+    return $ EffectiveMoment (getZonedDate moment)
+
 data ClinicalF next
   = GetPatient (Patient -> next)
   | GetOrganizationConfiguration (Configuration -> next)
   | GetMedications Patient ([Medication] -> next)
   | GetOfficeVisits Patient ([OfficeVisit] -> next)
-  | GetEffectiveMoment (ZonedTime -> next)
+  | GetEffectiveMoment (EffectiveMoment -> next)
   | RecommendMedications [Medication] next
   | RecommendOfficeVisits [OfficeVisit] next deriving Functor
 
@@ -61,7 +112,7 @@ recommendMedications meds = liftF $ RecommendMedications meds ()
 recommendOfficeVisits :: [OfficeVisit] -> Clinical ()
 recommendOfficeVisits visits = liftF $ RecommendOfficeVisits visits ()
 
-getEffectiveMoment :: Clinical ZonedTime
+getEffectiveMoment :: Clinical EffectiveMoment
 getEffectiveMoment = liftF $ GetEffectiveMoment id
 
 withinXDaysFromNow :: NominalDiffTime -> ZonedTime -> ZonedTime -> Bool
@@ -78,38 +129,30 @@ withinXDaysAgo days date1 date2 = dayDiff >= days where
 
 runningOut :: [Medication] -> Clinical [Medication]
 runningOut meds = do
-  effectiveMoment <- getEffectiveMoment
+  EffectiveMoment effectiveMoment <- getEffectiveMoment
   Configuration { daysToRefill = daysToRefill } <- getOrganizationConfiguration
   return $ filter (withinXDaysFromNow daysToRefill effectiveMoment . nextRefillDate) meds
 
 overdueVisits :: [OfficeVisit] -> Clinical [OfficeVisit]
 overdueVisits visits = do
-  effectiveMoment <- getEffectiveMoment
+  EffectiveMoment effectiveMoment <- getEffectiveMoment
   Configuration { daysToSchedule = daysToSchedule } <- getOrganizationConfiguration
   return $ filter (not . withinXDaysAgo daysToSchedule effectiveMoment . visitDate) visits
 
-getPatientRecommendations :: Clinical ()
-getPatientRecommendations = do
-    patient <- getPatient
-
-    medications <- getMedications patient
-    refills  <- runningOut medications
-    recommendMedications refills
-
-    officeVisits <- getOfficeVisits patient
-    appointments <- overdueVisits officeVisits
-    recommendOfficeVisits appointments
+getMedRecommendations :: Clinical ()
+getMedRecommendations = do
+  patient <- getPatient
+  medications <- getMedications patient
+  refills  <- runningOut medications
+  recommendMedications refills
 
 
-data TestEntities = TestEntities {
-  currentPatient :: Patient,
-  organizationConfiguration :: Configuration,
-  patientMedication :: Map Int [Medication],
-  patientOfficeVisits :: Map Int [OfficeVisit],
-  medRecommendations :: [Medication],
-  visitRecommendations :: [OfficeVisit],
-  effectiveMoment :: ZonedTime
-} deriving Show
+getOfficeRecommendations :: Clinical ()
+getOfficeRecommendations = do
+  patient <- getPatient
+  officeVisits <- getOfficeVisits patient
+  appointments <- overdueVisits officeVisits
+  recommendOfficeVisits appointments
 
 testInterpreter :: (MonadState TestEntities m) => ClinicalF next -> m next
 testInterpreter (GetPatient f) = do
@@ -150,6 +193,17 @@ visit1 = OfficeVisit {
   visitDate = getZonedDate "2018-06-03"
 }
 
+
+data TestEntities = TestEntities {
+  currentPatient :: Patient,
+  organizationConfiguration :: Configuration,
+  patientMedication :: Map Int [Medication],
+  patientOfficeVisits :: Map Int [OfficeVisit],
+  medRecommendations :: [Medication],
+  visitRecommendations :: [OfficeVisit],
+  effectiveMoment :: EffectiveMoment
+} deriving Show
+
 scenario1 = TestEntities {
   currentPatient = Patient { patientId = 1 },
   organizationConfiguration = Configuration { daysToSchedule = -90, daysToRefill = 5 },
@@ -157,27 +211,65 @@ scenario1 = TestEntities {
   patientOfficeVisits = Map.fromList [(1, [visit1])],
   medRecommendations = [],
   visitRecommendations = [],
-  effectiveMoment = getZonedDate "2018-06-03"
+  effectiveMoment = EffectiveMoment $ getZonedDate "2018-06-03"
 }
 
-overriderInterpreter :: (MonadIO m) => (ClinicalF next -> m next) -> ClinicalF next -> m next
-overriderInterpreter interpreter (GetPatient f) = do
-  liftIO $ putStr "Enter Patient Id: "
-  patientId <- liftIO $ getLine
-  let patient = Patient { patientId = read patientId :: Int}
-  return $ f patient
-overriderInterpreter interpreter x =
-  interpreter x
+class Prompt a where
+  prompt :: IO a
 
-q :: (MonadIO m, MonadState TestEntities m) => ClinicalF next -> m next
-q = overriderInterpreter testInterpreter
+consoleInterpreter :: (MonadIO m) => ClinicalF next -> m next
+consoleInterpreter (GetPatient f) = liftIO $ f <$> prompt
+consoleInterpreter (GetOrganizationConfiguration f) = liftIO $ f <$> prompt
+consoleInterpreter (GetEffectiveMoment f) = liftIO $ f <$> prompt
+consoleInterpreter (GetMedications patient f) = liftIO $ f <$> prompt
+consoleInterpreter (GetOfficeVisits patient f) = liftIO $ f <$> prompt
+consoleInterpreter (RecommendMedications meds next) = do
+  liftIO $ print meds
+  return next
+consoleInterpreter (RecommendOfficeVisits visits next) = do
+  liftIO $ print visits
+  return next
 
-z :: (MonadIO m, MonadState TestEntities m) => m ()
-z = foldFree q getPatientRecommendations
+instance Prompt Int where
+  prompt = do
+    putStr "Give me a number: "
+    line <- getLine
+    return (read line :: Int)
 
+
+askIfFinished :: IO Bool
+askIfFinished = do
+  putStr "Are you finished (y/n): "
+  finished <- getLine
+  return $ finished == "y"
+
+instance Prompt a => Prompt [a] where
+  prompt = do
+    p <- prompt
+    finished <- askIfFinished
+    if finished then
+      return [p]
+    else do
+      ps <- prompt
+      return $ p : ps
+
+chooseInterpreter :: (MonadIO m, MonadState TestEntities m) => (ClinicalF next -> m next) -> (ClinicalF next -> m next) -> ClinicalF next -> m next
+chooseInterpreter interpret1 interpret2 action = do
+  liftIO $ putStr "do you want to overide? (y/n)"
+  override <- liftIO getLine
+  if override == "y" then
+    interpret2 action
+  else
+    interpret1 action
+
+runProgram :: (Monad m) => (forall x. f x -> m x) -> Free f a -> m a
+runProgram = foldFree
 
 main :: IO ()
 main = do
-  result <- runStateT (foldFree (overriderInterpreter testInterpreter) getPatientRecommendations) scenario1
+  -- x <- prompt :: IO [Int]
+  -- putStr $ show x
+  -- result <- runProgram consoleInterpreter getMedRecommendations
+  result <- runStateT (runProgram (chooseInterpreter testInterpreter consoleInterpreter) getMedRecommendations) scenario1
   putStr $ show result
   return ()
