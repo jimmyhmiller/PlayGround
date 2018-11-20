@@ -1,9 +1,11 @@
 {-# LANGUAGE DeriveFunctor    #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE NamedFieldPuns   #-}
 {-# LANGUAGE RankNTypes       #-}
 
 module Patient where
-import           Control.Monad.Free       (Free, foldFree, hoistFree, liftF)
+import           Control.Monad.Free       (Free (Free, Pure), foldFree,
+                                           hoistFree, liftF, retract)
 import           Control.Monad.IO.Class   (MonadIO, liftIO)
 import           Control.Monad.Loops      (whileM)
 import           Control.Monad.State.Lazy as State (MonadState, State, forM,
@@ -20,6 +22,8 @@ import           Data.Time.LocalTime      (ZonedTime, getCurrentTimeZone,
                                            getZonedTime, utcToZonedTime,
                                            zonedTimeToUTC)
 import           Text.Pretty.Simple       (pPrint)
+
+import           System.CPUTime           (getCPUTime)
 
 data Patient = Patient {
   patientId :: Int
@@ -228,8 +232,6 @@ instance Prompt a => Prompt [a] where
       ps <- prompt
       return $ p : ps
 
-
-
 withinXDaysFromNow :: NominalDiffTime -> ZonedTime -> ZonedTime -> Bool
 withinXDaysFromNow days date1 date2 = dayDiff <= days where
   d1 = zonedTimeToUTC date1
@@ -245,13 +247,14 @@ withinXDaysAgo days date1 date2 = dayDiff >= days where
 runningOut :: [Medication] -> Clinical [Medication]
 runningOut meds = do
   EffectiveMoment effectiveMoment <- getEffectiveMoment
-  Configuration { daysToRefill = daysToRefill } <- getOrganizationConfiguration
-  return $ filter (withinXDaysFromNow daysToRefill effectiveMoment . nextRefillDate) meds
+  Configuration { daysToRefill } <- getOrganizationConfiguration
+  return $ filter (withinXDaysFromNow daysToRefill effectiveMoment
+                   . nextRefillDate) meds
 
 overdueVisits :: [OfficeVisit] -> Clinical [OfficeVisit]
 overdueVisits visits = do
   EffectiveMoment effectiveMoment <- getEffectiveMoment
-  Configuration { daysToSchedule = daysToSchedule } <- getOrganizationConfiguration
+  Configuration { daysToSchedule } <- getOrganizationConfiguration
   return $ filter (not . withinXDaysAgo daysToSchedule effectiveMoment . visitDate) visits
 
 getMedRecommendations :: Clinical ()
@@ -280,6 +283,7 @@ chooseInterpreter interpret1 interpret2 action = do
 
 runProgram :: (Monad m) => (forall x. f x -> m x) -> Free f a -> m a
 runProgram = foldFree
+
 
 main :: IO ()
 main = do
