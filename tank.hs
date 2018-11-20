@@ -56,12 +56,6 @@ angleTo pos = liftF $ AngleTo pos id
 isAt :: Vec -> Ai Bool
 isAt pos = liftF $ IsAt pos id
 
-aimAtTank :: Tank -> Ai ()
-aimAtTank (Tank pos) = do
-  angle <- angleTo pos
-  rotateTowards angle
-  return ()
-
 rotateTowards :: Angle -> Ai ()
 rotateTowards (Angle x) = if even x then 
     liftF $ RotateRight (Just (Angle x)) ()
