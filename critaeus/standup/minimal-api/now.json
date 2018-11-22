@@ -1,9 +1,12 @@
 {
-    "public": true,
-    "dotenv": true,
-    "regions": ["iad"],
-    "type": "docker",
-    "features": {
-        "cloud": "v2"
+  "version": 2,
+  "builds": [
+    { "src": "src/api/*.js", "use": "@now/node" }
+  ],
+  "routes": [
+    { 
+      "src": "/standup/(?<team>[a-zA-Z0-9-]*)/(?<date>[a-zA-Z0-9-]*)", 
+      "dest": "/src/api/viewTeamStatus.js?team=$team&date=$date" 
     }
+  ]
 }
