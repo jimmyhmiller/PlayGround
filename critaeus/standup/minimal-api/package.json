@@ -1,22 +1,18 @@
 {
   "name": "minimal-api",
   "version": "1.0.0",
-  "main": "./index.js",
   "license": "MIT",
   "dependencies": {
+    "@jimmyhmiller/manta": "5.2.1",
     "dotenv": "^6.1.0",
-    "manta": "^5.2.1",
     "memorystream": "^0.3.1",
     "micro": "^9.3.2",
-    "microrouter": "^3.1.3",
-    "sanitize-filename": "^1.6.1",
     "stream-to-promise": "^2.2.0"
   },
   "scripts": {
     "start": "micro",
     "dev": "micro-dev"
   },
-  "bin": "./main.js",
   "devDependencies": {
     "micro-dev": "^3.0.0"
   }
