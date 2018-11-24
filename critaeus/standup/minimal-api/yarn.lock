@@ -2,11 +2,12 @@
 # yarn lockfile v1
 
 
-"@jimmyhmiller/manta@5.2.1":
-  version "5.2.1"
-  resolved "https://registry.yarnpkg.com/@jimmyhmiller/manta/-/manta-5.2.1.tgz#7c3bd574df1153a644c8e9cf992650d9fa1b8378"
-  integrity sha512-u7NeY/eITDK4J1Y9SwmdxVPbMnr5V4+PEQaYLLVMaBCJq44MEXdb515Dm47xPogDnlEykjL6ZqOfZ0Sln1vMrA==
+"@jimmyhmiller/manta@5.2.4":
+  version "5.2.4"
+  resolved "https://registry.yarnpkg.com/@jimmyhmiller/manta/-/manta-5.2.4.tgz#49bd92012f664282773b2e64372b3068b05c82e9"
+  integrity sha512-J+s2HIX4VdMF65lcva64Oe7WZsRsfXJk4W/LN2hxCAGZhQg/EmakUtgxg6HPOAARmo4tPxHUckJU64v+QMVNSg==
   dependencies:
+    "@jimmyhmiller/smartdc-auth" "2.5.7"
     assert-plus "^1.0.0"
     backoff "~2.3.0"
     bunyan "^1.8.1"
@@ -25,13 +26,27 @@
     readable-stream "~1.1.9"
     restify-clients "~1.6.0"
     showdown "~1.4.2"
-    smartdc-auth "^2.4.1"
     strsplit "1.0.0"
     tar "~2.2.1"
     uuid "~2.0.2"
     vasync "^1.6.4"
     verror "^1.6.1"
     watershed "^0.3.1"
+
+"@jimmyhmiller/smartdc-auth@2.5.7":
+  version "2.5.7"
+  resolved "https://registry.yarnpkg.com/@jimmyhmiller/smartdc-auth/-/smartdc-auth-2.5.7.tgz#2eb656a9beb518e7dd530e7f23a78e6f770d9f84"
+  integrity sha512-sfWx4my1eWJ7qVsuDMTaaf/Iv6ptzlP9FVhl4mToJz453deskKIysReHmzeKLSNZmDSEqAfxDDPhpDXc2hOcwQ==
+  dependencies:
+    assert-plus "^1.0.0"
+    bunyan "1.8.12"
+    clone "0.1.5"
+    dashdash "1.10.1"
+    http-signature "^1.0.2"
+    once "1.3.0"
+    sshpk "^1.8.3"
+    sshpk-agent "^1.3.0"
+    vasync "1.6.4"
 
 abbrev@1:
   version "1.1.1"
@@ -709,11 +724,6 @@ extglob@^2.0.4:
     snapdragon "^0.8.1"
     to-regex "^3.0.1"
 
-extsprintf@1.0.0:
-  version "1.0.0"
-  resolved "https://registry.yarnpkg.com/extsprintf/-/extsprintf-1.0.0.tgz#4d58b815ace5bebfc4ebf03cf98b0a7604a99b86"
-  integrity sha1-TVi4Fazlvr/E6/A8+YsKdgSpm4Y=
-
 extsprintf@1.2.0:
   version "1.2.0"
   resolved "https://registry.yarnpkg.com/extsprintf/-/extsprintf-1.2.0.tgz#5ad946c22f5b32ba7f8cd7426711c6e8a3fc2529"
@@ -1163,11 +1173,6 @@ jsome@2.5.0:
     json-stringify-safe "^5.0.1"
     yargs "^11.0.0"
 
-json-schema@0.2.2:
-  version "0.2.2"
-  resolved "https://registry.yarnpkg.com/json-schema/-/json-schema-0.2.2.tgz#50354f19f603917c695f70b85afa77c3b0f23506"
-  integrity sha1-UDVPGfYDkXxpX3C4Wvp3w7DyNQY=
-
 json-schema@0.2.3:
   version "0.2.3"
   resolved "https://registry.yarnpkg.com/json-schema/-/json-schema-0.2.3.tgz#b480c892e59a2f05954ce727bd3f2a4e882f9e13"
@@ -1177,15 +1182,6 @@ json-stringify-safe@^5.0.1:
   version "5.0.1"
   resolved "https://registry.yarnpkg.com/json-stringify-safe/-/json-stringify-safe-5.0.1.tgz#1296a2d58fd45f19a0f6ce01d65701e2c735b6eb"
   integrity sha1-Epai1Y/UXxmg9s4B1lcB4sc1tus=
-
-jsprim@0.3.0:
-  version "0.3.0"
-  resolved "https://registry.yarnpkg.com/jsprim/-/jsprim-0.3.0.tgz#cd13466ea2480dbd8396a570d47d31dda476f8b1"
-  integrity sha1-zRNGbqJIDb2DlqVw1H0x3aR2+LE=
-  dependencies:
-    extsprintf "1.0.0"
-    json-schema "0.2.2"
-    verror "1.3.3"
 
 jsprim@^1.2.2, jsprim@^1.3.0:
   version "1.4.1"
@@ -1274,36 +1270,6 @@ lstream@~0.0.4:
   integrity sha1-1jd2TqM6kpvQDzTSojwiVtDV+1s=
   dependencies:
     readable-stream ">= 1.0.2"
-
-"manta@https://github.com/jimmyhmiller/node-manta.git":
-  version "5.2.1"
-  resolved "https://github.com/jimmyhmiller/node-manta.git#851b20a9171e6ca9fd5a1239ded5e346e8d93f36"
-  dependencies:
-    assert-plus "^1.0.0"
-    backoff "~2.3.0"
-    bunyan "^1.8.1"
-    clone "~0.1.11"
-    cmdln "4.1.2"
-    dashdash "1.14.1"
-    extsprintf "^1.3.0"
-    hogan.js "~2.0.0"
-    jsprim "^1.3.0"
-    lomstream "^1.1.0"
-    lstream "~0.0.4"
-    mime "~1.2.11"
-    moment "^2.22.2"
-    once "~1.4.0"
-    progbar "^1.2.1"
-    readable-stream "~1.1.9"
-    restify-clients "~1.6.0"
-    showdown "~1.4.2"
-    smartdc-auth "^2.4.1"
-    strsplit "1.0.0"
-    tar "~2.2.1"
-    uuid "~2.0.2"
-    vasync "^1.6.4"
-    verror "^1.6.1"
-    watershed "^0.3.1"
 
 map-cache@^0.2.2:
   version "0.2.2"
@@ -2016,21 +1982,6 @@ signal-exit@^3.0.0:
   resolved "https://registry.yarnpkg.com/signal-exit/-/signal-exit-3.0.2.tgz#b5fdc08f1287ea1178628e415e25132b73646c6d"
   integrity sha1-tf3AjxKH6hF4Yo5BXiUTK3NkbG0=
 
-smartdc-auth@^2.4.1:
-  version "2.5.7"
-  resolved "https://registry.yarnpkg.com/smartdc-auth/-/smartdc-auth-2.5.7.tgz#42d45710e791deb92df91326c8eed1bd5a842cb6"
-  integrity sha1-QtRXEOeR3rkt+RMmyO7RvVqELLY=
-  dependencies:
-    assert-plus "^1.0.0"
-    bunyan "1.8.12"
-    clone "0.1.5"
-    dashdash "1.10.1"
-    http-signature "^1.0.2"
-    once "1.3.0"
-    sshpk "^1.8.3"
-    sshpk-agent "^1.3.0"
-    vasync "1.4.3"
-
 snapdragon-node@^2.0.1:
   version "2.1.1"
   resolved "https://registry.yarnpkg.com/snapdragon-node/-/snapdragon-node-2.1.1.tgz#6c175f86ff14bdb0724563e8f3c1b021a286853b"
@@ -2357,27 +2308,12 @@ uuid@~2.0.2:
   resolved "https://registry.yarnpkg.com/uuid/-/uuid-2.0.3.tgz#67e2e863797215530dff318e5bf9dcebfd47b21a"
   integrity sha1-Z+LoY3lyFVMN/zGOW/nc6/1Hsho=
 
-vasync@1.4.3:
-  version "1.4.3"
-  resolved "https://registry.yarnpkg.com/vasync/-/vasync-1.4.3.tgz#c86d52e2b71613d29eedf159f3135dbe749cee37"
-  integrity sha1-yG1S4rcWE9Ke7fFZ8xNdvnSc7jc=
-  dependencies:
-    jsprim "0.3.0"
-    verror "1.1.0"
-
-vasync@^1.6.4:
+vasync@1.6.4, vasync@^1.6.4:
   version "1.6.4"
   resolved "https://registry.yarnpkg.com/vasync/-/vasync-1.6.4.tgz#dfe93616ad0e7ae801b332a9d88bfc5cdc8e1d1f"
   integrity sha1-3+k2Fq0OeugBszKp2Iv8XNyOHR8=
   dependencies:
     verror "1.6.0"
-
-verror@1.1.0:
-  version "1.1.0"
-  resolved "https://registry.yarnpkg.com/verror/-/verror-1.1.0.tgz#2a4b4eb14a207051e75a6f94ee51315bf173a1b0"
-  integrity sha1-KktOsUogcFHnWm+U7lExW/FzobA=
-  dependencies:
-    extsprintf "1.0.0"
 
 verror@1.10.0, verror@^1.10.0, verror@^1.6.0, verror@^1.6.1:
   version "1.10.0"
@@ -2387,13 +2323,6 @@ verror@1.10.0, verror@^1.10.0, verror@^1.6.0, verror@^1.6.1:
     assert-plus "^1.0.0"
     core-util-is "1.0.2"
     extsprintf "^1.2.0"
-
-verror@1.3.3:
-  version "1.3.3"
-  resolved "https://registry.yarnpkg.com/verror/-/verror-1.3.3.tgz#8a6a4ac3a8c774b6f687fece49bdffd78552e2cd"
-  integrity sha1-impKw6jHdLb2h/7OSb3/14VS4s0=
-  dependencies:
-    extsprintf "1.0.0"
 
 verror@1.6.0:
   version "1.6.0"
