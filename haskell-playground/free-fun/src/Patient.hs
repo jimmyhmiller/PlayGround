@@ -51,24 +51,6 @@ instance Prompt Medication where
       nextRefillDate = getZonedDate refillDate
     }
 
-
-data OfficeVisit = OfficeVisit {
-  officeVisitId :: Int,
-  visitDate     :: ZonedTime
-} deriving Show
-
-instance Prompt OfficeVisit where
-  prompt = do
-    liftIO $ putStr "Enter OfficeVisit Id: "
-    officeId <- liftIO getLine
-    liftIO $ putStr "Enter Visit Date: "
-    visit <- liftIO getLine
-    return $ OfficeVisit {
-      officeVisitId = read officeId :: Int,
-      visitDate = getZonedDate visit
-    }
-
-
 data Configuration = Configuration {
   daysToSchedule :: NominalDiffTime,
   daysToRefill   :: NominalDiffTime
@@ -97,10 +79,8 @@ data ClinicalF next
   = GetPatient (Patient -> next)
   | GetOrganizationConfiguration (Configuration -> next)
   | GetMedications Patient ([Medication] -> next)
-  | GetOfficeVisits Patient ([OfficeVisit] -> next)
   | GetEffectiveMoment (EffectiveMoment -> next)
-  | RecommendMedications [Medication] next
-  | RecommendOfficeVisits [OfficeVisit] next deriving Functor
+  | RecommendMedications [Medication] next deriving Functor
 
 type Clinical = Free ClinicalF
 
@@ -108,10 +88,8 @@ actionName :: ClinicalF next -> String
 actionName (GetPatient _)                   = "GetPatient"
 actionName (GetOrganizationConfiguration _) = "GetOrganizationConfiguration"
 actionName (GetMedications _ _)             = "GetMedications"
-actionName (GetOfficeVisits _ _)            = "GetOfficeVisits"
 actionName (GetEffectiveMoment _)           = "GetEffectiveMoment"
 actionName (RecommendMedications _ _)       = "RecommendMedications"
-actionName (RecommendOfficeVisits _ _)      = "RecommendOfficeVisits"
 
 getPatient :: Clinical Patient
 getPatient = liftF $ GetPatient id
@@ -122,14 +100,8 @@ getOrganizationConfiguration = liftF $ GetOrganizationConfiguration id
 getMedications :: Patient -> Clinical [Medication]
 getMedications patient = liftF $ GetMedications patient id
 
-getOfficeVisits :: Patient -> Clinical [OfficeVisit]
-getOfficeVisits patient = liftF $ GetOfficeVisits patient id
-
 recommendMedications :: [Medication] -> Clinical ()
 recommendMedications meds = liftF $ RecommendMedications meds ()
-
-recommendOfficeVisits :: [OfficeVisit] -> Clinical ()
-recommendOfficeVisits visits = liftF $ RecommendOfficeVisits visits ()
 
 getEffectiveMoment :: Clinical EffectiveMoment
 getEffectiveMoment = liftF $ GetEffectiveMoment id
@@ -144,19 +116,12 @@ testInterpreter (GetOrganizationConfiguration f) = do
 testInterpreter (GetMedications patient f) = do
   (Just meds) <- gets (Map.lookup (patientId patient) . patientMedication)
   return $ f meds
-testInterpreter (GetOfficeVisits patient f) = do
-  (Just visits) <- gets (Map.lookup (patientId patient) . patientOfficeVisits)
-  return $ f visits
 testInterpreter (GetEffectiveMoment f) = do
   moment <- gets effectiveMoment
   return $ f moment
 testInterpreter (RecommendMedications meds next) = do
   recs <- gets medRecommendations
   modify $ \x -> (x {medRecommendations = recs ++ meds})
-  return next
-testInterpreter (RecommendOfficeVisits visits next) = do
-  recs <- gets visitRecommendations
-  modify $ \x -> (x {visitRecommendations = recs ++ visits})
   return next
 
 
@@ -167,9 +132,7 @@ data TestEntities = TestEntities {
   currentPatient            :: Patient,
   organizationConfiguration :: Configuration,
   patientMedication         :: Map Int [Medication],
-  patientOfficeVisits       :: Map Int [OfficeVisit],
   medRecommendations        :: [Medication],
-  visitRecommendations      :: [OfficeVisit],
   effectiveMoment           :: EffectiveMoment
 } deriving Show
 
@@ -178,18 +141,11 @@ med1 = Medication {
   nextRefillDate = getZonedDate "2018-06-03"
 }
 
-visit1 = OfficeVisit {
-  officeVisitId = 3,
-  visitDate = getZonedDate "2018-06-03"
-}
-
 scenario1 = TestEntities {
   currentPatient = Patient { patientId = 1 },
   organizationConfiguration = Configuration { daysToSchedule = -90, daysToRefill = 5 },
   patientMedication = Map.fromList [(1, [med1])],
-  patientOfficeVisits = Map.fromList [(1, [visit1])],
   medRecommendations = [],
-  visitRecommendations = [],
   effectiveMoment = EffectiveMoment $ getZonedDate "2018-06-03"
 }
 
@@ -201,12 +157,8 @@ consoleInterpreter (GetPatient f) = liftIO $ f <$> prompt
 consoleInterpreter (GetOrganizationConfiguration f) = liftIO $ f <$> prompt
 consoleInterpreter (GetEffectiveMoment f) = liftIO $ f <$> prompt
 consoleInterpreter (GetMedications patient f) = liftIO $ f <$> prompt
-consoleInterpreter (GetOfficeVisits patient f) = liftIO $ f <$> prompt
 consoleInterpreter (RecommendMedications meds next) = do
   liftIO $ pPrint meds
-  return next
-consoleInterpreter (RecommendOfficeVisits visits next) = do
-  liftIO $ pPrint visits
   return next
 
 instance Prompt Int where
@@ -238,12 +190,6 @@ withinXDaysFromNow days date1 date2 = dayDiff <= days where
   d2 = zonedTimeToUTC date2
   dayDiff = diffUTCTime d2 d1 / nominalDay
 
-withinXDaysAgo :: NominalDiffTime -> ZonedTime -> ZonedTime -> Bool
-withinXDaysAgo days date1 date2 = dayDiff >= days where
-  d1 = zonedTimeToUTC date1
-  d2 = zonedTimeToUTC date2
-  dayDiff = diffUTCTime d2 d1 / nominalDay
-
 runningOut :: [Medication] -> Clinical [Medication]
 runningOut meds = do
   EffectiveMoment effectiveMoment <- getEffectiveMoment
@@ -251,25 +197,12 @@ runningOut meds = do
   return $ filter (withinXDaysFromNow daysToRefill effectiveMoment
                    . nextRefillDate) meds
 
-overdueVisits :: [OfficeVisit] -> Clinical [OfficeVisit]
-overdueVisits visits = do
-  EffectiveMoment effectiveMoment <- getEffectiveMoment
-  Configuration { daysToSchedule } <- getOrganizationConfiguration
-  return $ filter (not . withinXDaysAgo daysToSchedule effectiveMoment . visitDate) visits
-
 getMedRecommendations :: Clinical ()
 getMedRecommendations = do
   patient <- getPatient
   medications <- getMedications patient
   refills <- runningOut medications
   recommendMedications refills
-
-getOfficeRecommendations :: Clinical ()
-getOfficeRecommendations = do
-  patient <- getPatient
-  officeVisits <- getOfficeVisits patient
-  appointments <- overdueVisits officeVisits
-  recommendOfficeVisits appointments
 
 chooseInterpreter :: (MonadIO m, MonadState TestEntities m) => (ClinicalF next -> m next) -> (ClinicalF next -> m next) -> ClinicalF next -> m next
 chooseInterpreter interpret1 interpret2 action = do
@@ -288,7 +221,7 @@ runProgram = foldFree
 main :: IO ()
 main = do
   result <- runStateT (runProgram (chooseInterpreter testInterpreter consoleInterpreter)
-                                  (getMedRecommendations >> getOfficeRecommendations))
+                                  getMedRecommendations)
                        scenario1
   pPrint result
   return ()
