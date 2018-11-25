@@ -193,6 +193,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Requests as Data"
       source={`
         type Url = String
         type Body = String
@@ -248,6 +249,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Recursive Data Type"
       source={`
         data Http
           = Get Url Http
@@ -264,6 +266,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Recursive Data Type"
       source={`
         data Http
           = Get Url Http
@@ -280,6 +283,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Interpret Single Level"
       source={`
         fetch :: Http -> IO ()
         fetch (Get url _)       = putStrLn $ "Get " ++ url
@@ -290,6 +294,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Run in order"
       source={`
         run :: (Http -> IO ()) -> Http -> IO ()
         run f h@(Get _ next)    = f h >> run f next
@@ -303,6 +308,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title='Abstracting "next"'
       source={`
         data HttpF next
           = Get Url next
@@ -319,6 +325,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Gaining Generic Functionality"
       source={`
         instance Functor HttpF where
           fmap f (Get url next)       = Get url $ f next
@@ -385,6 +392,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Folding over program"
       source={`
         foldFix :: Functor f => (f a -> a) -> Fix f -> a
         foldFix f (Fix t) = f (fmap (foldFix f) t)
@@ -400,6 +408,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Eliminating Done"
       source={`
         data HttpF next
           = Get Url next
@@ -408,6 +417,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Free Monad"
       source={`
         data Free f r
           = Free (f (Free f r))
@@ -416,6 +426,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Free Monad"
       source={`
         instance (Functor f) => Monad (Free f) where
           return = Pure
@@ -425,6 +436,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Transforming Interpreter"
       source={`
         fetch :: HttpF a -> IO a
         fetch (Get url next) = do
@@ -438,6 +450,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Helper Functions"
       source={`
         liftF :: Functor f => f r -> Free f r
         liftF x = Free (fmap Pure x)
@@ -451,6 +464,7 @@ export default () =>
 
     <Code
       lang="haskell"
+      title="Folding Free"
       source={`
         foldFree :: Monad m => (forall x . f x -> m x) -> Free f a -> m a
         foldFree _ (Pure a)  = return a
@@ -467,7 +481,7 @@ export default () =>
 
     <Code
       lang="haskell"
-      title="Putting it all together"
+      title="Callbacks"
       source={`
         data HttpF next
           = Get Url (String -> next)
@@ -584,12 +598,27 @@ export default () =>
       title="Need to test version 2.0 of existing platform"
       source={`
         dualInterpreter :: Interpreter a -> Interpreter a -> ClinincalF a -> Result a
-        dualInterpreter interpret1 interpret2 clinical =
+        dualInterpreter interpret1 interpret2 clinical = do
           interpret1 clinical
           interpret2 clinical
 
         canaryInterpreter = dualInterpreter safeInterpreter2 realInterpreter
       `} />
+
+
+    <Points title="Other Features">
+      <Point text="Combine Multiple Languages" />
+      <Point text="Compile one language into another" />
+      <Point text="Free applicatives give us automatic concurrency" />
+      <Point text="Pause/Replay programs at a given point" />
+    </Points>
+
+    <Points title="Taking Further - Extensible Effects">
+      <Point text="Used by Idris" />
+      <Point text="Used by React with hooks" />
+      <Point text="Used by Unison for remote execution" />
+    </Points>
+
 
 
 
