@@ -207,6 +207,7 @@ export default () =>
       title="List of Requests"
       lang="haskell"
       source={`
+        requests :: [Http]
         requests = [Get "google.com", 
                     Post "twitter.com" "Fun with Free Monads"]
       `} />
@@ -215,6 +216,7 @@ export default () =>
       title="List of Requests"
       lang="haskell"
       source={`
+        fetch :: Http -> IO ()
         fetch (Get url)       = putStrLn $ "Get " ++ url
         fetch (Post url body) = putStrLn $ "Post " ++ url ++ ", " ++ body
       `} />
@@ -320,7 +322,7 @@ export default () =>
         httpInt = Get "int.com" 123
 
         httpString :: HttpF String
-        httpString = Get "int.com" "String"
+        httpString = Get "string.com" "String"
       `} />
 
     <Code
