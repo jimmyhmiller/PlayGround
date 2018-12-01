@@ -36,4 +36,6 @@
                  [rhizome "0.2.9"]
                  [org.clojure/tools.deps.alpha "0.5.425"]
                  [org.clojure/data.csv "0.1.4"]
+                 [org.foundationdb/fdb-java "5.2.5"]
+                 [byte-streams "0.2.4"]
                  [clj-fuzzy "0.4.1"]])
