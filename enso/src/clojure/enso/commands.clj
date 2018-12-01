@@ -119,27 +119,28 @@
   :type :application
   :executor (fn [{:keys [target]}] (sh "open" "-a" target))})
 
-(def zoom-users 
-  (->
-   (sh "/Users/jimmy/Documents/Code/dev-environment/bin/zoom" "shortlist")
-   :out
-   (string/split #" ")))
+(comment
+  (def zoom-users
+    (->
+     (sh "/Users/jimmy/Documents/Code/dev-environment/bin/zoom" "shortlist")
+     :out
+     (string/split #" ")))
 
-(defn get-zoom-users [text]
-  (->> zoom-users
-       (filter #(string/includes? % text))
-       (sort-by #(string/index-of % text))
-       (map (fn [person] {:type :default :person person}))))
+  (defn get-zoom-users [text]
+    (->> zoom-users
+         (filter #(string/includes? % text))
+         (sort-by #(string/index-of % text))
+         (map (fn [person] {:type :default :person person}))))
 
-(register-suggestor
- {:command :zoom
-  :suggestor get-zoom-users})
+  (register-suggestor
+   {:command :zoom
+    :suggestor get-zoom-users})
 
-(register-executor
- {:command :zoom
-  :type :default
-  :executor (fn [{:keys [person]}] 
-              (sh "/Users/jimmy/Documents/Code/dev-environment/bin/zoom" "join" person))})
+  (register-executor
+   {:command :zoom
+    :type :default
+    :executor (fn [{:keys [person]}] 
+                (sh "/Users/jimmy/Documents/Code/dev-environment/bin/zoom" "join" person))}))
 
 (register-executor
  {:command :google

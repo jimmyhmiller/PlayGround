@@ -30,7 +30,6 @@
 (def myGlobalKeyListener
   (reify
     NativeKeyListener
-    (nativeKeyTyped [this event] (logic/handle-key-press state event logic/on-typed))
     (nativeKeyPressed [this event] 
       (logic/handle-key-press state event logic/on-press))
     (nativeKeyReleased [this event] 
