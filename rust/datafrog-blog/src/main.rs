@@ -1,11 +1,9 @@
-#![feature(universal_impl_trait)]
+
 
 // https://github.com/frankmcsherry/blog/blob/master/posts/2018-05-19.md
 
 use std::rc::Rc;
 use std::cell::RefCell;
-
-
 
 
 /// A sorted list of distinct tuples.
@@ -290,7 +288,10 @@ impl Iteration {
     pub fn changed(&mut self) -> bool {
         let mut result = false;
         for variable in self.variables.iter_mut() {
-            if variable.changed() { result = true; }
+            if variable.changed() { 
+                result = true;
+                break;
+            }
         }
         result
     }
@@ -326,7 +327,10 @@ fn main() {
     let child_of = iteration1.variable::<(&str, &str)>("child_of");
     let ancestor_of = iteration1.variable::<(&str, &str)>("ancestor_of");
 
-    parent_of.insert((vec![("Archie", "Janice"), ("Janice", "Lemon"), ("Janice", "Mango"), ("Lemon", "Warms")]).into());
+    parent_of.insert((vec![("Archie", "Janice"), 
+                           ("Janice", "Lemon"),
+                           ("Janice", "Mango"),
+                           ("Lemon", "Warms")]).into());
 
     while iteration1.changed() {
             
