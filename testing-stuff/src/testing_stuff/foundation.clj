@@ -137,15 +137,15 @@
   `(q* (quote ~query) db))
 
 
+
+
 (transact! db
            [[1 :name "jimmy"]
             [1 :age 26]
             [2 :name "Falcon"]
             [2 :age 74]
-            [4 :name "stuff"]
-            [10 :name "thing"]
+            [10 :name "person"]
             [10 :age 74]])
-
 
 (entity-by-id db 1)
 (entity-by-id db 2)
@@ -153,13 +153,7 @@
 [(tuples-for-attr db :name)
  (tuples-for-attr db :age)]
 
-
-
-(doall
- (q {:find {:name1 ?name1 
-            :name ?name2 
-            :age ?age}
-     :where [[?e1 :age ?age]
-             [?e1 :name ?name1]
-             [?e2 :name ?name2]
-             [?e2 :age ?age]]} db))
+(q {:find {:name ?name
+           :age ?age}
+    :where [[?e :age ?age]
+            [?e :name ?name]]} db)
