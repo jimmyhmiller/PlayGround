@@ -38,4 +38,5 @@
                  [org.clojure/data.csv "0.1.4"]
                  [org.foundationdb/fdb-java "5.2.5"]
                  [byte-streams "0.2.4"]
-                 [clj-fuzzy "0.4.1"]])
+                 [clj-fuzzy "0.4.1"]
+                 [datascript "0.16.9"]])

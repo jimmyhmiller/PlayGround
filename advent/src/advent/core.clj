@@ -6,7 +6,8 @@
 ;;; Challenge 1
 
 (defn challenge1-part1 []
-  (->> (string/split (slurp "challenges/1.txt") #"\n")
+  (->> (slurp "challenges/1.txt")
+       (string/split-lines)
        (map read-string)
        (reduce +)))
 
@@ -22,7 +23,8 @@
 
 
 (defn challenge1-part2 []
-  (->> (string/split (slurp "challenges/1.txt") #"\n")
+  (->> (slurp "challenges/1.txt")
+       (string/split-lines)
        (map read-string)
        (cycle)
        (reduce first-duplicate [#{0} 0])))
@@ -31,7 +33,8 @@
 ;;; Challenge 2
 
 (defn challenge2-part1 []
-  (->> (string/split (slurp "challenges/2.txt") #"\n")
+  (->> (slurp "challenges/2.txt")
+       (string/split-lines)
        (map frequencies)
        (map vals)
        (map set)
@@ -61,10 +64,58 @@
        (map first)
        (string/join)))
 
-(defn challenge2-part2 []
-  (let [ids (string/split (slurp "challenges/2.txt") #"\n")]
-    (->> (find-correct-ids ids)
-         (filter-non-match-char))))
+(defn challenge2-part2 [] 
+  (->> (slurp "challenges/2.txt")
+       (string/split-lines)
+       (find-correct-ids)
+       (filter-non-match-char)))
+
+
+
+;; Challenge 3
+
+(defn square [{:keys [x y width height]}]
+  (for [i (range x (+ x width))
+        j (range y (+ y height))]
+    [i j]))
+
+(defn parse-coords [coords]
+  (->> coords
+       string/split-lines
+       (map #(string/split % #":? |,|x"))
+       (map (fn [[n _ x y w h]] 
+              {:n (subs n 1) 
+               :x (read-string x) 
+               :y (read-string y)
+               :width (read-string w) 
+               :height (read-string h)}))))
+
+(defn challenge3-part1 []
+  (->> (slurp "challenges/3.txt") 
+       parse-coords
+       (map (juxt :n square))
+       (mapcat square)
+       frequencies
+       vals
+       (filter #(> % 1))
+       count))
+
+(defn in-points [points square]
+  (every? (partial contains? points) square))
+
+(defn challenge3-part2 []
+  (let [squares (->> (slurp "challenges/3.txt") 
+                     parse-coords
+                     (map (juxt :n square)))
+        non-overlap (->> squares
+                         (mapcat second)
+                         frequencies 
+                         (filter (comp #{1} second))
+                         (map first)
+                         set)]
+    (->> squares
+         (filter (comp (partial in-points non-overlap) second))
+         ffirst)))
 
 
 (comment
@@ -72,4 +123,6 @@
    [(challenge1-part1)
     (challenge1-part2)
     (challenge2-part1)
-    (challenge2-part2)]))
+    (challenge2-part2)
+    (challenge3-part1)
+    (challenge3-part2)]))
