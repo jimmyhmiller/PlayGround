@@ -1,0 +1,4 @@
+{:deps {org.clojure/clojurescript {:mvn/version "1.10.238"}}
+ :aliases
+ {:cljs {:main-opts ["-m" "cljs.main" "-co" "{:install-deps,true,:npm-deps,{faunadb,\"2.5.2\",dotenv,\"6.2.0\"}}" "-re" "node" "-r"]
+         :extra-deps {org.clojure/clojurescript {:mvn/version "1.10.238"}}}}}
