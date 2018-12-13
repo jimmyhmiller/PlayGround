@@ -5,3 +5,4 @@ ioHook.on('mousemove', event => {
 });
 
 ioHook.start(true);
+ioHook.setDebug(true)
