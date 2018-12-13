@@ -5,6 +5,8 @@
             [fn-fx.util :refer [run-later]]
             [glow.core :as highlight]
             [glow.colorschemes :as colorschemes]
+            [clojure.reflect :as r]
+            [clojure.pprint :refer [print-table]]
             [clojure.repl :as repl])
   (:import [javafx.scene.control TreeItem]
            [javafx.beans.value ChangeListener]))
@@ -22,20 +24,19 @@
        "\n</body>
       </html>"))
 
-(def state (atom {:html ""
-                  :items [{:text "hello"}
-                          {:text "thing"}]}))
+(def state 
+  (atom {:html ""
+         :items ["map" "filter" "clojure.repl/source"]}))
 
+
+(swap! state update :items conj "reduce")
 
 (def ui (agent nil))
 
-(def tree
-  (let [root (TreeItem. "asdf")]
-    (.add (.getChildren root) (TreeItem. "asadfadf"))
-    root))
-
 (defui MainComponent 
-  (should-update? [_ _ _] false)
+  (should-update? [this _ props]
+                  (println (dissoc props :html))
+                 false)
   (render [this args]
           (ui/stage
            :title "Hello World!"
@@ -43,10 +44,26 @@
            :min-width 300
            :min-height 300
            :scene (ui/scene
-                   :root (ui/h-box
-                          :children [(ui/list-view :id "list" 
-                                                   :items ["map" "filter" "clojure.repl/source"])
-                                     (ui/web-view :id "web-browser")])))))
+                   :root (ui/split-pane
+                          :id "split-pane"
+                          :items [(ui/list-view :id "list"
+                                                :items (:items args))
+                                  (ui/web-view :id "web-browser")])))))
+
+(defn get-dom-node [component id]
+  (-> component
+      :render-result
+      :dom-node
+      dom/unwrap-promise
+      .getScene
+      (.lookup id)))
+
+
+
+#_(-> @(:root @ui)
+    .getScene
+    (.lookup "#split-pane")
+    (.setDividerPositions (double-array [0.33])))
 
 
 (defn load-html [html]
@@ -61,8 +78,7 @@
        (load-html html)
        (swap! state 
               assoc 
-              :html html
-              :fn-name (:new e)))))
+              :html html))))
   (println "Received Event: " e))
 
 (defn set-list-selection-handler []
@@ -77,12 +93,12 @@
                                     :old old
                                     :new new}))))))))
 
-
-
 (defn update-app [state]
   (send ui
         (fn [old-ui]
-          (dom/update-app old-ui (main-component state)))))
+          (try
+            (dom/update-app old-ui (main-component state))
+            (catch Exception e old-ui)))))
 
 (defn startup [state]
   (send ui (fn [_]
@@ -98,9 +114,11 @@
 (add-watch #'main-component :ui
            (fn [_ _ _ ns]
              (println "changed!")
-             (update-app ns)))
+             (update-app @state)))
 
 (add-watch state :ui
            (fn [_ _ _ ns]
              (println "changed!")
              (update-app ns)))
+
+
