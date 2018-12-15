@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "name": "poll",
+  "alias": "poll-app.now.sh",
+  "builds": [
+    { "src": "index.js", "use": "@now/node" },
+    { "src": "actions.js", "use": "@now/node" }
+  ],
+  "routes": [
+    { 
+      "src": "/", 
+      "dest": "/index.js" 
+    },
+    { 
+      "src": "/actions", 
+      "dest": "/actions.js" 
+    }
+  ]
+}
