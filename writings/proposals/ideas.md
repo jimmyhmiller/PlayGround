@@ -7,7 +7,7 @@
 * Distributed Systems Theory
 * Time and Relativity in Distributed Systems
 * Learning how to Learn New Technology
-* Datatypes a la Carte
+* Datatypes a la Carte - (wrote as free monad talk)
 * Final Tagless
 * The Downsides of Card Driven Development
 * Fully Functional Microservices
