@@ -232,7 +232,7 @@ const SimpleCard = props =>
               text="Poll App" />
           </Flex>
           <Text secondary align="center" style={{maxWidth: 600}}>
-            Make and take polls right in Slack. Gather feedback or make decisions with out needing to schedule a meeting.
+            Make and take polls right in Slack. Gather feedback or make decisions without needing to schedule a meeting.
           </Text>
           <Flex style={{paddingTop: 20}} justify="center">
             <img 
