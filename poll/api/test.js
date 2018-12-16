@@ -1,4 +1,4 @@
-const { buildMessage } = require('./index');
+const { buildMessage } = require('./poll');
 const { parseField, incrementVote, buildNewMessage } = require('./actions');
 
 
