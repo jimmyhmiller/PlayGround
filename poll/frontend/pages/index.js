@@ -28,13 +28,21 @@ const GlobalStyles = () =>
       display: flex;
     }
 
+    .flex.flex-row {
+      flex-direction: row; 
+    }
+
+    .flex.flex-column {
+      flex-direction: column; 
+    }
+
     .next-to {
       display: flex;
     }
 
     @media (max-width: 1000px) {
-      .flex {
-        display: block;
+      .flex.flex-row {
+        flex-direction: column; 
       }
     }
 
@@ -43,8 +51,7 @@ const GlobalStyles = () =>
 
 
 const Flex = ({ children, direction, justify, align, className="flex", style={} }) => 
-  <div className={className} style={{
-    flexDirection: direction,
+  <div className={className + " flex-" + direction} style={{
     justifyContent: justify,
     alignItems: align,
     ...style,
@@ -221,6 +228,9 @@ const Pricing = () =>
 
 const SimpleCard = props => 
   <>
+    <Head>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    </Head>
     <GlobalStyles />
     <Container direction="column" justify="center">
       <Flex direction="row" justify="center">
@@ -234,7 +244,7 @@ const SimpleCard = props =>
           <Text secondary align="center" style={{maxWidth: 600}}>
             Make and take polls right in Slack. Gather feedback or make decisions without needing to schedule a meeting.
           </Text>
-          <Flex style={{paddingTop: 20}} justify="center">
+          <Flex style={{paddingTop: 0, paddingBottom: 20}} justify="center">
             <img 
               style={{cursor: "pointer"}}
               alt="Add to Slack" 
@@ -245,7 +255,7 @@ const SimpleCard = props =>
           </Flex>
         </Flex>
 
-        <Flex direction="column" justify="center" align="column">
+        <Flex direction="column" justify="center" align="center">
           <img style={{width: 253, height: 500}} src="/static/iphone-white.png" />
         </Flex>
       </Flex>
