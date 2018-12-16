@@ -50,7 +50,7 @@ const GlobalStyles = () =>
   </style>
 
 
-const Flex = ({ children, direction, justify, align, className="flex", style={} }) => 
+const Flex = ({ children, direction="default", justify, align, className="flex", style={} }) => 
   <div className={className + " flex-" + direction} style={{
     justifyContent: justify,
     alignItems: align,
@@ -90,36 +90,21 @@ const Text = ({ children, align="left", secondary, style={} }) =>
     {children}
   </p>
 
-
-const Grid = ({ children }) => 
-  <div>
-    {children}
-  </div>
-
-const Typography = ({ children }) => 
-  <p>{children}</p>
-
 const Card = ({ children, accentColor }) => 
   <div
     style={{
       borderTop: `5px ${accentColor} solid`,
-      width: 250,
-      margin: 20,
+      width: 230,
+      margin: 10,
       boxShadow: "0px 1px 3px 0px rgba(0, 0, 0, 0.2), 0px 1px 1px 0px rgba(0, 0, 0, 0.14), 0px 2px 1px -1px rgba(0, 0, 0, 0.12)",
       borderRadius: 5,
+      fontSize: 16,
     }}
   >
     <Flex direction="column" justify="center" style={{padding:20}}>
       {children}
     </Flex>
   </div>
-
-
-const CardContent = ({ children }) => 
-  <div>{children}</div>
-
-const CardActions = ({ children }) => 
-  <div>{children}</div>
 
 const Button = ({ children, color, filled }) => {
   const backgroundColor = filled ? color : "white";
@@ -169,29 +154,28 @@ const PriceCard = ({
           {subtitle}
         </Text>
       )}
-      <CardContent>
-        <Flex direction="row" justify="center" align="baseline">
+      <div>
+        <Flex direction="row" justify="center" align="center">
           <Text
             style={{ marginTop: 5, marginBottom: 0, fontSize: 32 }}
             align="center"
           >
-            ${price}
+            ${price}<span style={{fontSize:20}}>/mo</span>
           </Text>
-          <span>/mo</span>
         </Flex>
-        <div>
+        <div style={{margin: 10}}>
           {features.map(feature => 
-            <Text variant="subtitle1" align="center" key={feature}>
+            <Text style={{marginBottom: 5, marginTop: 0}} variant="subtitle1" align="center" key={feature}>
               {feature}
             </Text>
           )}
         </div>
-      </CardContent>
-      <CardActions>
+      </div>
+      <div>
         <Button color={buttonColor || accentColor} filled={buttonFilled}>
           {buttonText}
         </Button>
-      </CardActions>
+      </div>
     </Card>
   </Flex>
 );
@@ -199,34 +183,34 @@ const Pricing = () =>
   <Flex direction="row" justify="center" align="flex-end">
     <PriceCard
       price={0}
-      features={["Personal use"]}
+      features={["Non-Commercial Use", "Up to 10 users"]}
       accentColor="rgb(57 104 178)"
       buttonText="Add To Slack"
       title="Personal" />
     <PriceCard 
-      price={10}
-      features={["25 polls a month"]}
+      price={15}
+      features={["50 polls a month", "Unlimited Users", "30 day free trial"]}
       buttonFilled={true}
       accentColor="#fb9353"
       subtitle="Most Popular"
-      buttonText="Sign Up Now"
+      buttonText="Try Now - No sign up"
       title="Basic" />
     <PriceCard
-      price={30}
-      features={["50 polls a month"]}
+      price={25}
+      features={["100 polls a month", "Unlimited Users"]}
       accentColor="rgb(83 166 251)"
       buttonVariant="contained"
       buttonText="Sign Up Now"
       title="Premium" />
     <PriceCard
       price="X"
-      features={["Infinite polls a month"]}
+      features={["Unlimited polls a month", "Unlimited Users"]}
       accentColor="rgb(63, 140, 251)"
       buttonText="Contact"
       title="Enterprise" />
   </Flex>
 
-const SimpleCard = props => 
+export default (props) =>
   <>
     <Head>
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -234,16 +218,18 @@ const SimpleCard = props =>
     <GlobalStyles />
     <Container direction="column" justify="center">
       <Flex direction="row" justify="center">
-        <Flex style={{maxWidth: 700}} direction="column" justify="center">
+        <Flex direction="column" justify="center">
           <Flex className="next-to" direction="row" align="baseline" justify="center">
             <img style={{width: 75, height: 75 }} src="/static/logo.png" />
             <Heading1
               align="center"
               text="Poll App" />
           </Flex>
-          <Text secondary align="center" style={{maxWidth: 600}}>
-            Make and take polls right in Slack. Gather feedback or make decisions without needing to schedule a meeting.
-          </Text>
+          <Flex justify="center">
+            <Text secondary align="center" style={{maxWidth: 600}}>
+              Make and take polls right in Slack. Gather feedback or make decisions without needing to schedule a meeting.
+            </Text>
+          </Flex>
           <Flex style={{paddingTop: 0, paddingBottom: 20}} justify="center">
             <img 
               style={{cursor: "pointer"}}
@@ -264,6 +250,3 @@ const SimpleCard = props =>
       <Pricing />
     </Container>
   </>
-
-
-export default SimpleCard;
