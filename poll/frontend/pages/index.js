@@ -1,0 +1,259 @@
+import React from "react";
+import PropTypes from "prop-types";
+import Head from 'next/head'
+import tinycolor from "tinycolor2"
+
+
+const GlobalStyles = () =>
+  <style jsx global>{`
+    body {
+      margin-top: 20px;
+      font-family: "Roboto", "Helvetica", "Arial", sans-serif;
+      font-size: 20px;
+    }
+    button {
+      font-family: "Roboto", "Helvetica", "Arial", sans-serif;
+      font-size: 14px;
+    }
+    h1 {
+      font-size: 64px;
+      margin: 20px;
+    }
+    h3 {
+      font-size: 24px;
+      margin: 20px;
+    }
+
+    .flex {
+      display: flex;
+    }
+
+    .next-to {
+      display: flex;
+    }
+
+    @media (max-width: 1000px) {
+      .flex {
+        display: block;
+      }
+    }
+
+  `}
+  </style>
+
+
+const Flex = ({ children, direction, justify, align, className="flex", style={} }) => 
+  <div className={className} style={{
+    flexDirection: direction,
+    justifyContent: justify,
+    alignItems: align,
+    ...style,
+  }}>
+    {children}
+  </div>
+
+const Container = ({style={}, ...props}) => 
+  <Flex 
+    style={{
+      "flex": 1,
+      margin: "auto",
+      ...style,
+    }}
+    {...props} />
+
+const Heading1 = ({ text, align="left" }) => 
+  <h1 style={{textAlign: align}}>
+    {text}
+  </h1>
+
+const Heading3 = ({ text, align="left", style={} }) => 
+  <h3 style={{
+      textAlign: align,
+      ...style
+    }}>
+    {text}
+  </h3>
+
+const Text = ({ children, align="left", secondary, style={} }) => 
+  <p style={{
+    textAlign: align,
+    color: secondary ? "rgba(0, 0, 0, 0.54)" : "#000",
+    ...style,
+  }}>
+    {children}
+  </p>
+
+
+const Grid = ({ children }) => 
+  <div>
+    {children}
+  </div>
+
+const Typography = ({ children }) => 
+  <p>{children}</p>
+
+const Card = ({ children, accentColor }) => 
+  <div
+    style={{
+      borderTop: `5px ${accentColor} solid`,
+      width: 250,
+      margin: 20,
+      boxShadow: "0px 1px 3px 0px rgba(0, 0, 0, 0.2), 0px 1px 1px 0px rgba(0, 0, 0, 0.14), 0px 2px 1px -1px rgba(0, 0, 0, 0.12)",
+      borderRadius: 5,
+    }}
+  >
+    <Flex direction="column" justify="center" style={{padding:20}}>
+      {children}
+    </Flex>
+  </div>
+
+
+const CardContent = ({ children }) => 
+  <div>{children}</div>
+
+const CardActions = ({ children }) => 
+  <div>{children}</div>
+
+const Button = ({ children, color, filled }) => {
+  const backgroundColor = filled ? color : "white";
+  const hoverColor = filled ? 
+                    tinycolor(backgroundColor).darken().toString()
+                    : tinycolor(color).setAlpha(0.2).toString()
+  return (
+    <div>
+      <button
+        style={{
+          color: filled ? "white" : color,
+          border: `1px ${color} solid`,
+          borderRadius: 4,
+          width: "100%",
+          height: 30,
+        }}
+      >
+        {children}
+      </button>
+      <style jsx>{`
+        button {
+          background-color: ${backgroundColor}
+        }
+        button:hover {
+          background-color: ${hoverColor};
+        }
+      `}</style>
+    </div>
+  )
+}
+
+const PriceCard = ({
+  title,
+  subtitle,
+  buttonText,
+  buttonColor,
+  accentColor,
+  features,
+  price,
+  buttonFilled = false
+}) => (
+  <Flex>
+    <Card accentColor={accentColor}>
+      <Heading3 style={{ margin: 0 }} text={title} align="center" />
+      {subtitle && (
+        <Text style={{ margin: 0 }} secondary align="center">
+          {subtitle}
+        </Text>
+      )}
+      <CardContent>
+        <Flex direction="row" justify="center" align="baseline">
+          <Text
+            style={{ marginTop: 5, marginBottom: 0, fontSize: 32 }}
+            align="center"
+          >
+            ${price}
+          </Text>
+          <span>/mo</span>
+        </Flex>
+        <div>
+          {features.map(feature => 
+            <Text variant="subtitle1" align="center" key={feature}>
+              {feature}
+            </Text>
+          )}
+        </div>
+      </CardContent>
+      <CardActions>
+        <Button color={buttonColor || accentColor} filled={buttonFilled}>
+          {buttonText}
+        </Button>
+      </CardActions>
+    </Card>
+  </Flex>
+);
+const Pricing = () =>
+  <Flex direction="row" justify="center" align="flex-end">
+    <PriceCard
+      price={0}
+      features={["Personal use"]}
+      accentColor="rgb(57 104 178)"
+      buttonText="Add To Slack"
+      title="Personal" />
+    <PriceCard 
+      price={10}
+      features={["25 polls a month"]}
+      buttonFilled={true}
+      accentColor="#fb9353"
+      subtitle="Most Popular"
+      buttonText="Sign Up Now"
+      title="Basic" />
+    <PriceCard
+      price={30}
+      features={["50 polls a month"]}
+      accentColor="rgb(83 166 251)"
+      buttonVariant="contained"
+      buttonText="Sign Up Now"
+      title="Premium" />
+    <PriceCard
+      price="X"
+      features={["Infinite polls a month"]}
+      accentColor="rgb(63, 140, 251)"
+      buttonText="Contact"
+      title="Enterprise" />
+  </Flex>
+
+const SimpleCard = props => 
+  <>
+    <GlobalStyles />
+    <Container direction="column" justify="center">
+      <Flex direction="row" justify="center">
+        <Flex style={{maxWidth: 700}} direction="column" justify="center">
+          <Flex className="next-to" direction="row" align="baseline" justify="center">
+            <img style={{width: 75, height: 75 }} src="/static/logo.png" />
+            <Heading1
+              align="center"
+              text="Poll App" />
+          </Flex>
+          <Text secondary align="center" style={{maxWidth: 600}}>
+            Make and take polls right in Slack. Gather feedback or make decisions with out needing to schedule a meeting.
+          </Text>
+          <Flex style={{paddingTop: 20}} justify="center">
+            <img 
+              style={{cursor: "pointer"}}
+              alt="Add to Slack" 
+              src="https://platform.slack-edge.com/img/add_to_slack.png" 
+              srcSet="https://platform.slack-edge.com/img/add_to_slack.png 1x, https://platform.slack-edge.com/img/add_to_slack@2x.png 2x" 
+              width="139" 
+              height="40" />
+          </Flex>
+        </Flex>
+
+        <Flex direction="column" justify="center" align="column">
+          <img style={{width: 253, height: 500}} src="/static/iphone-white.png" />
+        </Flex>
+      </Flex>
+    </Container>
+    <Container justify="center" style={{paddingTop: 30}}>
+      <Pricing />
+    </Container>
+  </>
+
+
+export default SimpleCard;
