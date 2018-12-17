@@ -3,7 +3,7 @@ const parseUrlEncode = require('urlencoded-body-parser');
 
 const cleanString = (str) =>
   str.replace(/(\u201C|\u201D)/g, '')
-     .replace('"', '')
+     .replace(/"/g, '')
 
 const parseBody = async (req) => {
   const body = await parseUrlEncode(req);
