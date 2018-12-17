@@ -203,7 +203,7 @@ const Pricing = () =>
       buttonText="Sign Up Now"
       title="Premium" />
     <PriceCard
-      price="100"
+      price={50}
       features={["Unlimited polls a month", "Unlimited Users"]}
       accentColor="rgb(63, 140, 251)"
       buttonText="Sign Up Now"
