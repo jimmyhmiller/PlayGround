@@ -4,6 +4,7 @@
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :plugins [[lein-environ "1.1.0"]]
+  :repositories [["jitpack" "https://jitpack.io"]]
   :dependencies [[org.clojure/math.numeric-tower "0.0.2"]
                  [org.clojure/clojure "1.9.0"]
                  [org.clojure/core.async "0.4.474"]
@@ -39,4 +40,5 @@
                  [org.foundationdb/fdb-java "5.2.5"]
                  [byte-streams "0.2.4"]
                  [clj-fuzzy "0.4.1"]
-                 [datascript "0.16.9"]])
+                 [datascript "0.16.9"]
+                 [com.github.AdRoll/cantor "76b4e1b4fc"]])
