@@ -41,4 +41,5 @@
                  [byte-streams "0.2.4"]
                  [clj-fuzzy "0.4.1"]
                  [datascript "0.16.9"]
-                 [com.github.AdRoll/cantor "76b4e1b4fc"]])
+                 [com.github.AdRoll/cantor "76b4e1b4fc"]
+                 [com.taoensso/carmine "2.19.1"]])
