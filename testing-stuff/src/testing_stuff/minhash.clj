@@ -1,6 +1,31 @@
 (ns testing-stuff.minhash
+  (:require [clojure.spec.alpha :as s])
   (:import [com.adroll.cantor HLLCounter]))
 
+
+(s/def :keyword/entry #{:a :b :c})
+(s/def :keyword/collection (s/coll-of :keyword/entry 
+                                      :into #{}
+                                      :min-count 1
+                                      :max-count 3))
+
+(def counters
+  {:a (HLLCounter. true 1024)
+   :b (HLLCounter. true 1024)
+   :c (HLLCounter. true 1024)})
+
+(defn add-counter [k v]
+  (.put (counters k) v))
+
+(defn insert-keywords! [coll]
+  (let [id (uuid)]
+    (doall (map (fn [k] (add-counter k id)) coll))))
+
+(run! insert-keywords! 
+     (map first (s/exercise :keyword/collection 1000000)))
+
+(defn uuid []
+  (str (java.util.UUID/randomUUID)))
 
 (def a (HLLCounter. true 1024))
 (def b (HLLCounter. true 1024))
@@ -29,4 +54,5 @@
 (doto c
   (.put "2"))
 
-(HLLCounter/intersect (into-array [a b c]))
+(time
+ (HLLCounter/intersect (into-array [(:a counters) (:c counters)  (:b counters)])))
