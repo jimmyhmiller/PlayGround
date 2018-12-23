@@ -27,11 +27,15 @@
 (def Ref (.-Ref q))
 (def Paginate (.-Paginate q))
 (def Map (.-Map q))
+(def Filter (.-Filter q))
 (def Lambda (.-Lambda q))
 (def Casefold (.-Casefold q))
 (def Query (.-Query q))
 (def Call (.-Call q))
 (def Function (.-Function q))
+(def Equals (.-Equals q))
+(def Not (.-Not q))
+(def If (.-If q))
 
 (def client (Client. #js{:secret (.. js/process -env -SECRET)}))
 
@@ -61,9 +65,11 @@
                                         :question "What is is is?"
                                         :anonymous true
                                         :options [{:value "Thing"
-                                                   :votes ["jimmy"]}
+                                                   :votes ["jimmy"]
+                                                   :index 0}
                                                   {:value "Stuff"
-                                                   :votes ["bob"]}]}}))))
+                                                   :votes ["bob"]
+                                                   :index 1}]}}))))
 
 
 (defn get-poll-by-callback-id [callback-id]
@@ -71,22 +77,87 @@
 
 
 
-(defn add-vote [poll position voter]
-  (update-in
-   poll
-   [:data :options position :votes]
-   conj voter))
 
-(add-vote (js->clj @debug :keywordize-keys true) 0 "bob")
+(defn filter-votes [option votes]
+  (Filter (Var "votes")
+          (Lambda "vote"
+                  (Not (Equals (Var "voter") (Var "vote"))))))
+
+
 
 (print-result
  (query client
-        (Let (clj->js {:callback-id "123"
-                       :position 0
-                       :voter "bob" 
-                       :poll (get-poll-by-callback-id (Var "callback-id"))})
-             
-             (Var "poll"))))
+        (Update
+         (Function "remove-vote")
+         (clj->js {:body
+                   (Query
+                    (Lambda #js ["options" "voter"]
+                            (Map (Var "options")
+                                 (Lambda "option"
+                                         (Let (clj->js {:votes (Select #js ["votes"] (Var "option"))
+                                                        :value (Select #js ["value"] (Var "option"))
+                                                        :index (Select #js ["index"] (Var "option"))})
+                                              (clj->js 
+                                               {:votes (filter-votes (Var "votes") (Var "voter"))
+                                                :value (Var "value")
+                                                :index (Var "index")}))))))}))))
+
+
+(print-result
+ (query client
+        (Update
+         (Function "add-vote")
+         (clj->js {:body
+                   (Query
+                    (Lambda #js ["options" "voter" "position"]
+                            (Map (Var "options")
+                                 (Lambda "option"
+                                         (Let (clj->js {:index (Select #js ["index"] (Var "option"))
+                                                        :votes (Select #js ["votes"] (Var "option"))
+                                                        :value (Select #js ["value"] (Var "option"))})
+                                              (clj->js 
+                                               {:value (Var "value")
+                                                :index (Var "index")
+                                                :votes
+                                                (If (Equals (Var "index") (Var "position"))
+                                                    (Append (Var "votes")
+                                                            #js [(Var "voter")])
+                                                    (Var "votes"))}))))))}))))
+
+(print-result
+ (query client
+        (Delete (Ref (Class "polls") "219394599553073677"))))
+
+
+(print-result
+ (query client
+        (get-poll-by-callback-id "123")))
+
+
+
+(print-result
+ (query client
+        (Update (Function "vote")
+         (clj->js {:body
+                  (Query
+                   (Lambda #js ["callback-id" "position" "voter"]
+                           (Let (clj->js {:poll (get-poll-by-callback-id (Var "callback-id"))
+                                          :ref (Select #js ["ref"] (Var "poll"))
+                                          :options (Select #js ["data" "options"] (Var "poll"))
+                                          :removed (Call (Function "remove-vote") 
+                                                         #js[(Var "options") 
+                                                             (Var "voter")])
+                                          :added (Call (Function "add-vote")
+                                                       #js [(Var "removed")
+                                                            (Var "voter")
+                                                            (Var "position")])})
+                                (Update (Var "ref")
+                                        (clj->js {:data {:options (Var "added")}})))))}))))
+
+(print-result
+ (query client
+        (Call (Function "vote")
+              #js ["123" 0 "jimmy"])))
 
 (print-result
  (query client
