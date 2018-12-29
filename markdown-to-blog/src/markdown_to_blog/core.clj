@@ -5,7 +5,7 @@
 
 
 (def markdown
-  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/Basic Functional Studies.md"))
+  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/defending-incommunicability.md"))
 
 
 (defmulti transform
@@ -34,6 +34,8 @@
 (defmethod transform :h5 [tag]
   (heading 6 tag))
 
+(defmethod transform :blockquote [[_ attr content]]
+  [:BlockQuote attr content])
 
 (defn indent-lines [code]
   (->> (string/split code #"\n")
@@ -42,7 +44,7 @@
 
 (defmethod transform :pre [[_ _ [tag attr source] :as content]]
   (if (not= tag :code)
-    (throw (ex-info "Pre without code" content))
+    (throw (ex-info "Pre without conde" content))
     [(keyword (string/capitalize (:class attr))) {} (str "\n  {`\n" (indent-lines source) "\n  `}\n")]))
 
 (defmethod transform :code [[_ attr body :as content]]
