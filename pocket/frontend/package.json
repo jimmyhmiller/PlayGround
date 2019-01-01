@@ -4,15 +4,18 @@
   "private": true,
   "dependencies": {
     "react": "16.7.0-alpha.2",
+    "react-app-rewire-hot-loader": "^1.0.3",
+    "react-app-rewired": "^1.6.2",
     "react-dom": "16.7.0-alpha.2",
+    "react-hot-loader": "^4.6.3",
     "react-inspector": "^2.3.1",
-    "react-scripts": "2.1.2",
+    "react-scripts": "2.1.1",
     "to-time": "^1.0.2"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "now-build": "react-scripts build && mv build dist"
+    "start": "react-app-rewired start",
+    "build": "react-app-rewired build",
+    "now-build": "react-app-rewired build && mv build dist"
   },
   "eslintConfig": {
     "extends": "react-app"

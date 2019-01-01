@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { hot } from 'react-hot-loader'
 import Inspector from 'react-inspector';
 import toTime from 'to-time';
 
@@ -106,17 +107,35 @@ function nWords(str, n) {
   return str.split(/\s+/).slice(0, n).join(" ");
 }
 
-const Item = decorate(inspect(({ given_title, resolved_title, item_id, resolved_url, decorate, onClick, excerpt }) => 
-  <>
-    <li onClick={onClick}>
-      <span style={{maxWidth: 800, overflow: "hidden", textOverflow: "ellipsis"}}>
-        {resolved_title || given_title || nWords(excerpt, 5) || resolved_url}
-      </span>
-      {" "}(<a href={resolved_url}>link</a>)
-      {decorate}
-    </li>
-  </>
-))
+const Conditional = ({ exists, children }) => {
+  if (exists) {
+    return children
+  }
+  return null;
+}
+
+const ItemTitle = inspect(
+  ({resolved_title, given_title, excerpt, resolved_url, onClick }) => 
+    <span onClick={onClick} style={{maxWidth: 800, overflow: "hidden", textOverflow: "ellipsis"}}>
+      {resolved_title || given_title || nWords(excerpt, 5) || resolved_url}
+    </span>
+)
+
+const Item = decorate(
+  ({ decorate, onClick, tags,resolved_url, ...props, }) => 
+    <>
+      <li>
+        <ItemTitle {...props} resolved_url={resolved_url} />
+        {" "}(<a href={resolved_url}>link</a>)
+        {decorate}
+        <Conditional exists={tags}>
+          <div style={{padding:0, marginTop:-5, fontSize: 11, color: "gray"}}>
+            tags: {tags && Object.keys(tags).join(", ")}
+          </div>
+        </Conditional>
+      </li>
+    </>
+)
 
 const totalWords = (items) => 
   items.reduce((total, item) => total + parseInt(item.word_count || 0, 10), 0)
@@ -143,4 +162,4 @@ const App = () => {
   )
 }
 
-export default App;
+export default hot(module)(App);
