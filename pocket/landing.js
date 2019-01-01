@@ -48,6 +48,8 @@ const getItems = async (access_token) => {
   return response.data;
 }
 
+// Maybe just set a cookie here and redirect?
+
 module.exports = async (req, res) => {
   const { userId } = querystring.parse(url.parse(req.url).query);
   const requestToken = await getRequestToken(userId);
