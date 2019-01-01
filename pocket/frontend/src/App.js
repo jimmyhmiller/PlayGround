@@ -42,7 +42,7 @@ const useFetchData = (initial, endpoint, f) => {
           credentials: "same-origin"
         })
         .then(resp => {
-          if (resp.status === 401) {
+          if (resp.status === 401 && !window.location.toString().includes("oauth")) {
             window.location = "/oauth"
           }
           else if (resp.status !== 200) {
@@ -102,13 +102,17 @@ const decorate = (comp) => (props) => {
   return comp({decorate: articleDecorate, ...props});
 }
 
-const Item = decorate(inspect(({ given_title, item_id, given_url, decorate, onClick }) => 
+function nWords(str, n) {
+  return str.split(/\s+/).slice(0, n).join(" ");
+}
+
+const Item = decorate(inspect(({ given_title, resolved_title, item_id, resolved_url, decorate, onClick, excerpt }) => 
   <>
     <li onClick={onClick}>
       <span style={{maxWidth: 800, overflow: "hidden", textOverflow: "ellipsis"}}>
-        {given_title || given_url}
+        {resolved_title || given_title || nWords(excerpt, 5) || resolved_url}
       </span>
-      {" "}(<a href={given_url}>link</a>)
+      {" "}(<a href={resolved_url}>link</a>)
       {decorate}
     </li>
   </>
