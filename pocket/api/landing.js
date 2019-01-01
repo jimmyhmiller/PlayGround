@@ -2,6 +2,7 @@ const axios = require("axios");
 const { send } = require("micro");
 const querystring = require("querystring");
 const url = require('url');
+const cookie = require('cookie');
 require("dotenv").config();
 
 const faunadb = require("faunadb");
@@ -11,8 +12,6 @@ const client = new faunadb.Client({ secret: process.env.FAUNA_SECRET });
 
 const consumer_key = process.env.POCKET_CONSUMER_KEY;
 const authorizeUrl = "https://getpocket.com/v3/oauth/authorize";
-
-const itemsUrl = "https://getpocket.com/v3/get"
 
 const getRequestToken = async userId => {
   const user = await client.query(
@@ -38,22 +37,15 @@ const getAccessTokenData = async code => {
   return response.data
 };
 
-const getItems = async (access_token) => {
-  const response = await axios.post(itemsUrl, {
-    consumer_key,
-    access_token,
-    count: 100,
-    detailType: "complete"
-  })
-  return response.data;
-}
-
-// Maybe just set a cookie here and redirect?
-
 module.exports = async (req, res) => {
   const { userId } = querystring.parse(url.parse(req.url).query);
   const requestToken = await getRequestToken(userId);
   const { access_token } = await getAccessTokenData(requestToken);
-  const items = await getItems(access_token);
-  send(res, 200, items)
+  res.setHeader('Set-Cookie', cookie.serialize('access_token', access_token, {
+    httpOnly: true
+  }));
+
+  res.setHeader("Location", "/");
+
+  send(res, 302)
 };
