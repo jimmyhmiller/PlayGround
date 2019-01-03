@@ -71,7 +71,8 @@
   `(defn ~name ~args
     (find-error-expr ~@body ~name)))
 
-(meta (var complicated-math))
+
+
 
 (defn-debug complicated-math [x y z]
   (+ 2 3 (/ x 2) (/ x y (/ 2 z) 
