@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "name": "debug-https-zeit",
+  "builds": [
+    { "src": "index.js", "use": "@now/node" }
+  ],
+  "routes": [
+    {
+      "src": "^/",
+      "dest": "/index.js"
+    }
+  ]
+}
