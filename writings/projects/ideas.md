@@ -22,4 +22,20 @@
   * Based on Etsy
   * Local full text search or none?
   * Command line driven
-
+* Pocket App
+  * Interaction bad
+  * Compare different articles
+  * Give a reason to read something
+* Pair Helper
+  * Over slack
+  * Open to pair
+  * Need a pair
+* Estimatation Software
+  * Resizable rectangles
+  * https://www.estigator.com/
+  * Tanglejs
+* Flexbox React Component
+  * Show all layouts
+  * Infer meaning, allow veto
+  * Show code in browser
+  * Draw UI in rects
