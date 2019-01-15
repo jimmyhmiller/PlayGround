@@ -7,7 +7,6 @@ const { JSDOM } = require("jsdom");
 const url = require("url");
 const querystring = require("querystring");
 const { send } = require("micro");
-const micro = require("micro");
 
 const readArticle = (url) => {
   return new Promise((resolve, reject) => {
