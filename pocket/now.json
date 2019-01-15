@@ -7,7 +7,6 @@
     { "src": "api/js/landing.js", "use": "@now/node" },
     { "src": "api/js/items.js", "use": "@now/node" },
     { "src": "frontend/package.json", "use": "@now/static-build" },
-    { "src": "api/js/extraction.js", "use": "@now/node"}
   ],
   "env": {
     "FAUNA_SECRET": "@faunadb-secret",
@@ -25,10 +24,6 @@
     {
       "src": "^/api/items",
       "dest": "/api/js/items.js"
-    },
-    {
-      "src": "^/api/extraction",
-      "dest": "api/js/extraction.js"
     },
     {
       "src": "^/static/(.*)",
