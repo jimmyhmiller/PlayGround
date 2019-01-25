@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "name": "nodejs",
+  "builds": [
+      { "src": "*.js", "use": "@now/node" }
+  ],
+  "env": {
+    "FAUNA_SECRET": "@faunadb-pair-secret"
+  }
+}
