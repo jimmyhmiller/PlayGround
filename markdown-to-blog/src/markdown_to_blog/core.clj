@@ -5,7 +5,7 @@
 
 
 (def markdown
-  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/defending-incommunicability.md"))
+  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/Named Function Composition.md"))
 
 
 (defmulti transform
