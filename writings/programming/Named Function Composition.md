@@ -1,6 +1,6 @@
 # Named Function Composition
 
-Some time ago I release a little library on NPM called`fluent-compose`. I've had some mixed feelings about my creation. I know that no one has, or will use it and if they looked at it would probably dismiss it. In fact, if I hadn't written it, I would do the same. And yet, I think I've stumbled onto a fairly decent idea. By decent idea, I mean a hack. But before we dive into this hack, let's look at the situation that gave rise to it.
+Some time ago I release a little library on NPM called `fluent-compose`. I've had some mixed feelings about my creation. I know that no one has, or will use it and if they looked at it would probably dismiss it. In fact, if I hadn't written it, I would do the same. And yet, I think I've stumbled onto a fairly decent idea. By decent idea, I mean a hack. But before we dive into this hack, let's look at the situation that gave rise to it.
 
 There is this fantastic, little known library called [Zaphod](https://zaphod.surge.sh/). The idea behind Zaphod is to mirror Clojure's immutable data API. This makes it incredibly simple to do immutable updates on plain javascript objects.
 
@@ -23,7 +23,7 @@ state
 // {count: 1, otherCount: -1}
 ```
 
-This is actually some really neat functionality. It allows you to chain your operators together. We can build pipelines by continuing to bind. Unfortunately, we don't get function bind syntax for free. Function bind is still a stage 0 proposal. This means there is a very good possibility it will never make it into javascript. In fact, after a few years of sitting at stage 0, it is bascially considered dead. There is quite a lot of risk involved in using it and more conservatice configurations like `create-react-app` wouldn't use it.
+This is actually some really neat functionality. It allows you to chain your operators together. We can build pipelines by continuing to bind. Unfortunately, we don't get function bind syntax for free. Function bind is still a stage 0 proposal. This means there is a very good possibility it will never make it into javascript. In fact, after a few years of sitting at stage 0, it is basically considered dead. There is quite a lot of risk involved in using it and more conservative configurations like `create-react-app` wouldn't use it.
 
 But function bind syntax also has flaws even if it were accepted into the language. Function bind syntax abuses `this` the most misunderstood keyword in all of javascript. The functions you write with function binding in mind, must use `this`, they can't be normal functions. Of course, you can wrap up those functions, but if we need to wrap functions up, why not wrap them in a way that doesn't require function bind?
 
@@ -74,14 +74,21 @@ transformer([1,2,3,4]) // [3, 6]
 
 Here we can see a combination of two totally separate libraries. In fact, I even used `lodash/fp` because rather than taking its primary argument first, it takes it last. Yet, we were still able to compose these libraries in a simple, yet flexible way. 
 
-Yet, `fluent-compose` holds still more power. This time, we will be using some of the lower level features of `fluent-compose`, explaining them here would be beyond the scope of this posts, so I've omitted some implementations, but you can find the full source [here]().
+Yet, `fluent-compose` holds still more power. This time, we will be using some of the lower level features of `fluent-compose`, explaining them here would be beyond the scope of this post.
 
 ```javascript
 import { fluentCompose } from 'fluent-compose';
 
-const baseReducer = ...
-const initialState = ...
-const reduce = ...
+const baseReducer = (state, action) => state;
+
+const initialState = prev => init => (state, action) => prev(state || init, action);
+
+const reduce = prev => (type, f) => (state, action) => {
+  if (action && action.type === type) {
+    return f(state, action)
+  }
+  return prev(state, action)
+}
 
 const INCREMENT = 'INCREMENT';
 const DECREMENT = 'DECREMENT';
@@ -105,13 +112,13 @@ console.log(
 )
 ```
 
-Using `fluent-compose` we've made a fluent reducer for redux! No longer would we need to write switch statements in order to make a reducer. In fact, since `fluent-compose` just makes functions, you can use this reducer with combine reducers. But another really cool thing you can do with it is add on the reducer after the fact. One feature to note with this implementation, is that it actually short circuits, as soon as it finds the action that matches the type, it returns, so there is no wasted computation. And while I omitted the implementation here to not distract from the main point, the implementation is just about 10 lines of code. 
+Using `fluent-compose` we've made a fluent reducer for redux! No longer would we need to write switch statements in order to make a reducer. In fact, since `fluent-compose` just makes functions, you can use this reducer with combine reducers. But another really cool thing you can do with it is add on the reducer after the fact. One feature to note with this implementation, is that it actually short circuits, as soon as it finds the action that matches the type, it returns, so there is no wasted computation.
 
 ## Why do I call this a hack?
 
-I really do think this library is really useful. In fact, I'm very excited about wrapping up functions to work in this way. But at the same time, I can't help but feel a little weird about this library. In order to make this library work, I have to take advantage of the fact that functions are objects. I am making a function and then assigning methods to it. This definitely a strange thing to do. Now, I do avoid mutating the functions passed into, I "copy" them before I assign properties to them, but it still feels like the wrong means for accomplishing the task of creating a pipeline.
+I really do think this library is really useful, but at the same time, I can't help but feel a little weird about this library. In order to make this library work, I have to take advantage of the fact that functions are objects. I am making a function and then assigning methods to it. This definitely a strange thing to do. Now, I do avoid mutating the functions passed into, I "copy" them before I assign properties to them, but it still feels like the wrong means for accomplishing the task of creating a pipeline.
 
-In fact, that is the thing that makes this library a hack; it is the wrong means. This library was created out of the limitation javascript imposes on us. How would we accompolish similar things in other languges? Here are just a couple examples.
+In fact, that is the thing that makes this library a hack; it is the wrong means. This library was created out of the limitation javascript imposes on us. How would we accomplish similar things in other languages? Here are just a couple examples.
 
 ```clojure
 ; Clojure
@@ -130,14 +137,8 @@ range 100
 |> filter even
 ```
 
-Above we see how we could accomplish similar things in Haskell and Clojure. Almost all functional programming languges have a way to do this. In fact, there are some much more powerful techniques for function composition in both Haskell and Clojure.
+Above we see how we could accomplish similar things in Haskell and Clojure. Almost all functional programming languages have a way to do this. In fact, there are some much more powerful techniques for function composition in both Haskell and Clojure.
 
 ### Still interesting
 
-At the same time, this method has some interesting features all on its own. What we have done is allow our functions to have special ways in which they compose. Each function can determine for itself special compostion points. At each point along the way, we keep these composition properties, allowing us to compose further. Each of these composition methods have a name, hence "named function composition". 
-
-### Future Steps
-
-I can see this expanding in a few different ways. First, I think releasing libraries that use this technique could be useful to the community at large. These could simply be combinations of existing libraries into a nice pipeline, or something with a bit more substance to it. Secondly, I'd like to explore how far this style of function composition takes us. I've already make a quick and dirty implementation of the state monad. I think it would even be possible to make an implementation of the parser monad. This would definitely results in some fairly dense code, but might be an interesting experiment to test the limits of `fluent-compose`.
-
-But perhaps most importantly, I need to come to a better understanding of the library myself in order to document how it works. I based the internals off redux-middleware. As I've been writing these helper methods though, I think they may be a better way. In some ways, as I'm writing them I'm reminded of transducers, maybe there is a relation there? Another thing that always comes to mind as I'm writing these is recursion schemes. Can these things form a catamorphism? Maybe once I have a better understanding of those I will know.
+At the same time, this method has some interesting features all on its own. What we have done is allow our functions to have special ways in which they compose. Each function can determine for itself special composition points. At each point along the way, we keep these composition properties, allowing us to compose further. Each of these composition methods have a name, hence "named function composition". While born out of necessity an implemented as a hack, I there is something here, something interesting that might be worth exploring further. (Addendum: It has been two years and I've yet to explore it further.)
