@@ -13,6 +13,8 @@
            [com.urbanairship.datacube.bucketers StringToBytesBucketer HourDayMonthBucketer BigEndianIntBucketer BigEndianLongBucketer BooleanBucketer TagsBucketer ]))
 
 
+;; https://github.com/urbanairship/datacube
+
 (def id-service (CachingIdService. 5 ^IdService (MapIdService.) "id-service"))
 
 (def backingMap (ConcurrentHashMap.))
