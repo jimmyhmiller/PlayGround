@@ -29,8 +29,12 @@
                                                                       :expr expr}))
                (node-builder (second expr))))
            (map? expr) (clj->js expr)
+           (symbol? expr) (.identifier builder #js {:name (name expr)})
            :else expr))
    ast))
+
+(defn convert-ast [ast]
+  (js->clj (process-ast ast)))
 
 (defn compile [ast]
   (codegen/generate (process-ast ast)))
@@ -76,6 +80,29 @@
        :kind "const"}]]}])
 
 
+(defn const [name value]
+  [:variableDeclaration
+   {:declarations
+    [[:variableDeclarator
+      {:id [:identifier {:name name}]
+       :init value}]]
+    :kind "const"}])
+
+(defn arrow-function [args body]
+  [:arrowFunctionExpression
+   {:params (mapv symbol args)
+    :body body}])
+
+(defn return [x]
+  [:returnStatement {:argument x}])
+
+(defn block [& args]
+  [:blockStatement {:body args}])
+
+(compile
+ (const "f" (arrow-function 
+             '[x y]
+             (block 'x (return 'y)))))
 
 
 
