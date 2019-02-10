@@ -1,0 +1,79 @@
+<!-- https://noisehack.com/generate-noise-web-audio-api/ -->
+<!-- Super super ugly code. To clean up later -->
+
+<!DOCTYPE html>
+<html>
+<head>
+  <title></title>
+
+  <style type="text/css">
+    body {
+      font-family: sans-serif;
+      font-size: 100px;
+    }
+    div.wrapper {
+      display: flex;
+      height: 100vh;
+      align-items: center;
+      justify-content: center;
+    }
+  </style>
+  <script type="text/javascript">
+    window.createBrownNoise = () => {
+
+      window.audioContext = new AudioContext()
+      const bufferSize = 4096;
+        const brownNoise = (function() {
+        let lastOut = 0.0;
+        const node = audioContext.createScriptProcessor(bufferSize, 1, 1);
+        node.onaudioprocess = function(e) {
+          const output = e.outputBuffer.getChannelData(0);
+          for (let i = 0; i < bufferSize; i++) {
+              const white = Math.random() * 2 - 1;
+              output[i] = (lastOut + (0.02 * white)) / 1.02;
+              lastOut = output[i];
+              output[i] *= 3.5; // (roughly) compensate for gain
+          }
+        }
+        return node;
+      });
+      return brownNoise(); 
+    }
+    window.audioStarted = false;
+
+    window.startSound = () => {
+      if (!window.audioStarted) {
+        const brownNoise = createBrownNoise();
+        window.brownGain = audioContext.createGain();
+        brownGain.gain.value = 0;
+        brownNoise.connect(brownGain);
+        brownGain.connect(audioContext.destination);
+        window.audioStarted = true;
+      }
+    }
+
+    window.toggleVolume = () => {
+      if (brownGain.gain.value === 0){
+        brownGain.gain.value = 0.3
+      } else {
+        brownGain.gain.value = 0;
+      }
+    }
+
+    window.startAndToggle = () => {
+      startSound();
+      toggleVolume();
+    }
+
+  </script>
+</head>
+<body>
+  <div class="wrapper">
+    <h1 onclick="startAndToggle()">
+      Brown Noise
+    </h1>
+  </div>
+
+</body>
+</html>
+
