@@ -1,13 +1,16 @@
 (ns codegen.core
   (:require ["@jimmyhmiller/estel-estree-builder" :as builder]
             [clojure.walk :as walk]
-            [astring :as codegen]))
+            [astring :as codegen]
+            [clojure.string :as string]))
+
 
 
 (defn describe [type]
-  (mapv keyword (keys (dissoc (js->clj ((aget builder (name type)) #js {}))
-                             "type"
-                             "loc"))))
+  (mapv keyword 
+        (keys (dissoc (js->clj ((aget builder (name type)) #js {}))
+                      "type"
+                      "loc"))))
 
 (defn view-node-types []
   (sort
@@ -29,7 +32,7 @@
                                                                       :expr expr}))
                (node-builder (second expr))))
            (map? expr) (clj->js expr)
-           (symbol? expr) (.identifier builder #js {:name (name expr)})
+           (symbol? expr) (name expr)
            :else expr))
    ast))
 
@@ -39,21 +42,9 @@
 (defn compile [ast]
   (codegen/generate (process-ast ast)))
 
-(describe :variableDeclaration)
+(describe :property)
 (view-node-types)
 
-(defn equal-or-var? [x y]
-  (or (symbol? y) (= x y)))
-
-(defn pattern-matches [values pattern]
-  (if (not= (count values) (count pattern))
-    false
-    (every? (partial apply equal-or-var?) (map vector values pattern))))
-
-
-(pattern-matches [1] [1])
-(pattern-matches [2] [2])
-(pattern-matches [2] '[n])
 
 (def example
   [:functionDeclaration
@@ -88,9 +79,12 @@
        :init value}]]
     :kind "const"}])
 
+(defn identifier [name]
+  [:identifier {:name  name}])
+
 (defn arrow-function [args body]
   [:arrowFunctionExpression
-   {:params (mapv symbol args)
+   {:params args
     :body body}])
 
 (defn return [x]
@@ -98,6 +92,78 @@
 
 (defn block [& args]
   [:blockStatement {:body args}])
+
+
+(defn literal [expr]
+  [:literal {:value expr}])
+
+(defn call [f args]
+  [:callExpression {:callee f
+                    :args args}])
+
+(defn js-if [test consequent alernate]
+  (call (arrow-function []
+                        (block [:ifStatement {:test test
+                                              :consequent (block (return consequent))
+                                              :alternate (block (return alernate))}]))
+        []))
+
+(def null [:literal {:value nil}])
+
+(defn array [elements]
+  [:arrayExpression {:elements elements}])
+
+(defn program [body]
+  [:program {:body body}])
+
+
+(defn object [expr convert-value]
+  [:objectExpression 
+   {:properties (map (fn [[k v]] 
+                       [:property {:key (identifier (name k))
+                                   :value (convert-value v)
+                                   :kind "init"}])
+                     expr)}])
+
+(defn lisp->ast [expr]
+  (cond
+    (number? expr) (literal expr)
+    (string? expr) (literal expr)
+    (boolean? expr) (literal expr)
+    (symbol? expr) (identifier expr)
+    (keyword? expr) (literal (name expr))
+    (nil? expr) null
+    (vector? expr) (array (map lisp->ast expr))
+    (map? expr) (object expr lisp->ast)
+    (= 'if (first expr)) (js-if (lisp->ast (second expr))
+                                (lisp->ast (nth expr 2))
+                                (lisp->ast (nth expr 3)))
+    (= 'def (first expr)) (const (second expr)
+                                 (lisp->ast (nth expr 2)))
+    (= 'defn (first expr)) (lisp->ast (list 'def (second expr) 
+                                            (list 'fn 
+                                                  (nth expr 2)
+                                                  (nth expr 3))))
+    (= 'fn (first expr)) (arrow-function (map lisp->ast (second expr)) 
+                                         (lisp->ast (nth expr 2)))
+    (seq? expr) (call (lisp->ast (first expr))
+                      (map lisp->ast (rest expr)))))
+
+
+(defn program->ast [exprs]
+  (program (map lisp->ast exprs)))
+
+(js/eval)
+(compile
+ (program->ast 
+  '[(defn x [y] {:x 2})]))
+
+
+
+(.-nullLiteral builder)
+
+(.toString (.-callExpression builder ))
+
 
 (compile
  (const "f" (arrow-function 
