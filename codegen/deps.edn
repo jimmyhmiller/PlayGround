@@ -1,5 +1,6 @@
 ;; https://dev.clojure.org/jira/browse/TDEPS-56
-{:deps {org.clojure/clojurescript {:mvn/version "1.10.516"}}
+{:deps {org.clojure/clojurescript {:mvn/version "1.10.516"}
+        instaparse {:mvn/version "1.4.9"}}
  :aliases
  {:cljs {:main-opts ["-m" "cljs.main" "-co" "{:install-deps,true,:npm-deps,{astring,\"1.3.1\",\"@jimmyhmiller/estel-estree-builder\",\"0.3.0\"}}" "-re" "node" "-r"]
          :extra-deps {org.clojure/clojurescript {:mvn/version "1.10.516"}}}}}

@@ -2,9 +2,22 @@
   (:require ["@jimmyhmiller/estel-estree-builder" :as builder]
             [clojure.walk :as walk]
             [astring :as codegen]
-            [clojure.string :as string]))
+            [clojure.string :as string]
+            [instaparse.core :as insta]
+            [clojure.pprint :as pprint]
+            [codegen.grammar :as grammar]))
 
 
+
+(defn parser [grammar]
+  (insta/parser grammar :auto-whitespace :standard))
+
+
+
+
+(time
+
+ (insta/parses (parser grammar/grammar) grammar/text))
 
 (defn describe [type]
   (mapv keyword 
