@@ -45,7 +45,7 @@
 (def new-grammar
   "<expr> =  val
   val = <'val'> identifier identifier 
-  identifier = #'[A-Za-z_][A-Za-z\\-_!?0-9]*' | expr*") 
+  identifier = #'[A-Za-z_][A-Za-z\\-_!?0-9]*' | expr*")
 
 
 (def amb-expr
@@ -257,6 +257,7 @@ implement StateReducer(Action) {
 
 ;; OHM
 
+(comment
 "
 PL0 {
   Start
@@ -285,11 +286,28 @@ PL0 {
     = letter alnum*
 }
 
+
+
 ;; pest
 
 start = { seq }
 seq = { expr ~ seq | expr }
-expr = { val | ident | literal }
+expr = { phrase | val | lambda | fn_application | infix_application  | ident | literal | keyword  }
+keyword = { ":" ~ ident }
+
+
+// This is a hack. Determine the right way to do this.
+infix_application = { (phrase | val | lambda | fn_application | ident | literal | keyword ) ~ (symbol ~ expr) }
+symbol = { ("+" | "*" | "=" | ">" | "<" | "/")+ }
+
+fn_application = { ident  ~ "(" ~ ((ident | literal) ~ ","?)* ~ ")" }
+
+lambda = { fn_args ~ "=>" ~ expr | fn_args ~ "=>" ~ "{" ~ expr ~ "}" | fn_application ~ "=>" ~ expr }
+fn_args = { "(" ~ ((ident | literal | keyword ) ~ ","?)* ~ ")" | ident | literal }
+
+phrase = { ident ~ ident ~ phrase_body | ident ~ ident ~ fn_args ~ phrase_body}
+phrase_body = { "{" ~ expr* ~ "}" }
+
 val = { "val" ~ ident ~ "=" ~ expr}
 literal = { number | string }
 number = { digit+ }
@@ -298,11 +316,11 @@ WHITESPACE = _{ (" " | "\t" | "\r" | "\n") + }
 
 string = { "\"" ~ (!("\"" | "\\") ~ ANY)* ~ "\"" }
 
-alpha = { 'a'..'z' | 'A'..'Z' }
-digit = { '0'..'9' }
+alpha = _{ 'a'..'z' | 'A'..'Z' | "_" | "'" | "-" }
+digit = _{ '0'..'9' }
 
-ident = { alpha ~ (alpha | digit)* }
+ident = @{ alpha ~ (alpha | digit)* }
 
 
 "
-
+)
