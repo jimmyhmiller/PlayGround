@@ -13,7 +13,8 @@
                  [instaparse "1.4.7"]
                  [compojure "1.4.0"]
                  [org.omcljs/om "1.0.0-alpha28"]
-                 [environ "1.0.2"]]
+                 [environ "1.0.2"]
+                 [crustimoney "0.1.0"]]
 
   :plugins [[lein-cljsbuild "1.1.1"]
             [lein-environ "1.0.1"]]
