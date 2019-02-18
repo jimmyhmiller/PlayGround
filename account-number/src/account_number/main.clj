@@ -27,13 +27,21 @@
        (map core/format-output)
        (string/join "\n")))
 
+(defn scenario-4 [content]
+  (->> content
+       core/split-into-rows
+       (map core/rows->seven-segment)
+       (map core/format-output-new)
+       (string/join "\n")))
+
 (def well-formed (io/resource "well-formed.txt"))
 (def ill-formed (io/resource "ill-formed.txt"))
 
 (def scenarios
   {"scenario-1" {:scenario scenario-1 :file well-formed}
    "scenario-2" {:scenario scenario-2 :file well-formed}
-   "scenario-3" {:scenario scenario-3 :file ill-formed}})
+   "scenario-3" {:scenario scenario-3 :file ill-formed}
+   "scenario-4" {:scenario scenario-4 :file ill-formed}})
 
 (defn -main 
   ([command]
@@ -41,6 +49,6 @@
   ([command file]
    (if-let [{:keys [scenario]} (scenarios command)]
      (println (scenario (slurp file)))
-     (println "Please enter a valid scenario [scenario-1 scenario-2 scenario-3]"))))
+     (println "Please enter a valid scenario [scenario-1 scenario-2 scenario-3 scenario-4]"))))
 
-(-main "scenario-3")
+

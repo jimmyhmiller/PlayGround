@@ -1,10 +1,6 @@
 
 
 
-identity : a -> a
-identity x = x
-
-
 
 
 data Vect : Nat -> Type -> Type where
@@ -16,14 +12,11 @@ append : Vect n a -> Vect m a -> Vect (n+m) a
 append [] y = y
 append (x :: z) y = x :: append z y
 
-
-
 q : Vect 1 Int
 q = [1]
 
 q' : Vect 2 Int
 q' = [1,2]
-
 
 
 total
