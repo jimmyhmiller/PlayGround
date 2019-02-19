@@ -12,13 +12,18 @@
 (s/def ::account-number (s/coll-of ::digit :kind vector? :count 9))
 (s/def ::ascii-row (s/coll-of (s/coll-of ::segment-value) :count 3))
 
-(s/def ::valid-account-number (s/and ::account-number core/valid-account-number?))
+(s/def ::valid-account-number 
+  (s/and ::account-number core/valid-account-number?))
+
 (s/def ::invalid-account-number 
   (s/and ::account-number (complement core/valid-account-number?)))
-(s/def ::possible-account-number (s/coll-of (s/nilable ::digit) :count 9))
+
+(s/def ::possible-account-number
+  (s/coll-of (s/nilable ::digit) :count 9))
 
 (s/def ::ill-formed-seven-segment 
   (s/and ::seven-segment #(nil? (core/seven-segment->int %))))
+
 (s/def ::valid-seven-segment
   (set (map core/int->seven-segment (range 10))))
 
@@ -73,3 +78,6 @@
 
 (comment
   (st/instrument))
+
+
+(s/exercise-fn `core/format-output)

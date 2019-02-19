@@ -149,5 +149,28 @@
 (defn generate-possible-account-numbers [account-number-segments]
   (let [account-number (seven-segment->account-number account-number-segments)
         replacements (find-replacements account-number-segments)]
-    (->> (map (partial try-possibility account-number) replacements)
-         (filter valid-account-number?))))
+    (->> (mapv (partial try-possibility account-number) replacements)
+         (filterv valid-account-number?)
+         (mapv string/join))))
+
+(defn determine-new-error-message [segments]
+  (let [has-invalid-numbers (has-invalid-digits? 
+                             (seven-segment->account-number segments))
+        is-valid (valid-account-number?
+                  (seven-segment->account-number segments))
+        possibility (generate-possible-account-numbers segments)]
+    (cond
+      has-invalid-numbers " ILL" 
+      (and (not is-valid) (not (empty? possibility))) (str " AMB " possibility)
+      (not is-valid) " ERR"
+      :else "")))
+
+(defn format-output-new [segments]
+  (let [error-message (determine-new-error-message segments)
+        numbers (seven-segment->account-number segments)]
+    (as-> numbers n
+      (map (fnil identity "?") n)
+      (string/join n)
+      (str n error-message))))
+
+
