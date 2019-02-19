@@ -8,6 +8,7 @@ numbers = "\
 \| |  | _| _||_||_ |_   ||_||_|\n\
 \|_|  ||_  _|  | _||_|  ||_| _|"
 
+-- https://stackoverflow.com/a/8681226
 splitEvery :: Int -> [a] -> [[a]]
 splitEvery _ [] = []
 splitEvery n xs = first : splitEvery n rest
@@ -37,7 +38,6 @@ toSevenSegment :: String -> SevenSegment
 toSevenSegment str = case map segState str of
   [_, tm, _, mr, mm, ml, bl, bm, br] -> Digit (tm, mr, mm, ml, bl, bm, br)
   _ -> error "Should do better"
-
 
 validSegments :: [SevenSegment]
 validSegments = map toSevenSegment $ splitNumbers numbers
@@ -92,14 +92,14 @@ candidateDigits digit = filter ((== 1) . hammingDistance digit) validSegments
 findPotentialAlternativeSegments :: [SevenSegment] -> [[SevenSegment]]
 findPotentialAlternativeSegments segments = map candidateDigits segments
 
-scenario1 :: String -> [[Integer]]
-scenario1 s = map (map fromJust . getAccountNumber) $ extractLines s
+scenario1 :: String -> String
+scenario1 s =  intercalate "\n" $ map (intercalate "" . map show . map fromJust . getAccountNumber) $ extractLines s
 
-scenario2 :: String -> [Bool]
-scenario2 s = map (checkSum . map fromJust . getAccountNumber) $ extractLines s
+scenario2 :: String -> String
+scenario2 s =  intercalate "\n" $ map (show .checkSum . map fromJust . getAccountNumber) $ extractLines s
 
-scenario3 :: String -> [String]
-scenario3 s = map (showAccountNumber. convertAccountNumber . getAccountNumber) $ extractLines s
+scenario3 :: String -> String
+scenario3 s =  intercalate "\n" $ map (show . showAccountNumber. convertAccountNumber . getAccountNumber) $ extractLines s
 
 scenario1File :: String
 scenario1File = "./scenario1.txt"
@@ -109,6 +109,5 @@ scenario3File = "./scenario3.txt"
 
 main :: IO ()
 main = do
-  s <- readFile scenario3File
-  -- print s
-  print $ map (map sevenToInt) $ findPotentialAlternativeSegments [(segmentLookup Map.! 0), (segmentLookup Map.! 0)]
+  s <- readFile scenario1File
+  putStr $ scenario1 s
