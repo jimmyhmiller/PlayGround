@@ -15,6 +15,7 @@ import pre from "spectacle/lib/utils/preloader";
 import createTheme from "spectacle/lib/themes/default";
 
 
+
 export {
   CodePane,
   Deck,
@@ -115,7 +116,7 @@ export const Code = withSlide(({ source, color, lang, title, textSize, headlineS
   return (
     <div>
       <Headline color={color} size={headlineSize || 4} noSlide textAlign="left" text={title} />
-      <CodePane textSize={textSize || 30} 
+      <CodePane theme="external" textSize={textSize || 30} 
       source={formatCode(source)} lang={lang} />
     </div>
   )
