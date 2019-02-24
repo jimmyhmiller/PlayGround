@@ -4,52 +4,53 @@
             [clojure.pprint :as pprint]
             [clojure.string :as string]))
 
-(.config dotenv)
+(do
+  (.config dotenv)
 
-(def q (.. faunadb -query))
-(def Client (.-Client faunadb))
-(def CreateClass (.-CreateClass q))
-(def CreateDatabase (.-CreateDatabase q))
-(def CreateFunction (.-CreateFunction q))
-(def Create (.-Create q))
-(def CreateIndex (.-CreateIndex q))
-(def Index (.-Index q))
-(def Class (.-Class q))
-(def Get (.-Get q))
-(def Match (.-Match q))
-(def Update (.-Update q))
-(def Delete (.-Delete q))
-(def Select (.-Select q))
-(def Append (.-Append q))
-(def Let (.-Let q))
-(def Var (.-Var q))
-(def Date (.-Date q))
-(def Ref (.-Ref q))
-(def Paginate (.-Paginate q))
-(def Map (.-Map q))
-(def Filter (.-Filter q))
-(def Lambda (.-Lambda q))
-(def Casefold (.-Casefold q))
-(def Query (.-Query q))
-(def Call (.-Call q))
-(def Function (.-Function q))
-(def Equals (.-Equals q))
-(def Not (.-Not q))
-(def If (.-If q))
+  (def q (.. faunadb -query))
+  (def Client (.-Client faunadb))
+  (def CreateClass (.-CreateClass q))
+  (def CreateDatabase (.-CreateDatabase q))
+  (def CreateFunction (.-CreateFunction q))
+  (def Create (.-Create q))
+  (def CreateIndex (.-CreateIndex q))
+  (def Index (.-Index q))
+  (def Class (.-Class q))
+  (def Get (.-Get q))
+  (def Match (.-Match q))
+  (def Update (.-Update q))
+  (def Delete (.-Delete q))
+  (def Select (.-Select q))
+  (def Append (.-Append q))
+  (def Let (.-Let q))
+  (def Var (.-Var q))
+  (def Date (.-Date q))
+  (def Ref (.-Ref q))
+  (def Paginate (.-Paginate q))
+  (def Map (.-Map q))
+  (def Filter (.-Filter q))
+  (def Lambda (.-Lambda q))
+  (def Casefold (.-Casefold q))
+  (def Query (.-Query q))
+  (def Call (.-Call q))
+  (def Function (.-Function q))
+  (def Equals (.-Equals q))
+  (def Not (.-Not q))
+  (def If (.-If q))
 
-(def client (Client. #js{:secret (.. js/process -env -SECRET)}))
+  (def client (Client. #js{:secret (.. js/process -env -SECRET)}))
 
-(defn query [client query]
-  (.query client (clj->js query)))
+  (defn query [client query]
+    (.query client (clj->js query)))
 
-(def debug (atom nil))
+  (def debug (atom nil))
 
-(defn print-result [p]
-  (-> p
-      (.then (fn [val] (reset! debug val) val))
-      (.catch (fn [val] (reset! debug val) val))
-      (.then (comp pprint/pprint js->clj))
-      (.catch (comp pprint/pprint js->clj))))
+  (defn print-result [p]
+    (-> p
+        (.then (fn [val] (reset! debug val) val))
+        (.catch (fn [val] (reset! debug val) val))
+        (.then (comp pprint/pprint js->clj))
+        (.catch (comp pprint/pprint js->clj)))))
 
 
 (print-result
@@ -169,3 +170,15 @@
            :values [{:field ["data" "question"]}
                     {:field ["data" "anonymous"]}
                     {:field ["data" "options"]}]}))))
+
+
+
+(print-result
+ (query client
+        (CreateIndex
+         (clj->js
+          {:name "user-by-access-token"
+           :source (Class "users")
+           :terms [{:field ["data" "access_token"]}]}))))
+
+
