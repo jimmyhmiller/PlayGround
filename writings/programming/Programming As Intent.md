@@ -1,6 +1,6 @@
 # Programming as Intent
 
-There is a ton of advice about how to write good code on the internet. This is my attempt to give such advice. In its bits and parts I'm sure it contains nothing novel, but as a whole I hope it is interesting. More than anything though I am writing this for me as means to discover a principle by which to live. Brett Victor spelled out this view of life in his incredibly influential talk "Inventing on Principle", yet despite its influence, its central message was lost. There is a path for the technologist to be an activist. This is the path I hope to take, but what precisely my cause is still eludes me. This is part of that self discovery.
+There is a ton of advice about how to write good code on the internet. This is my attempt to give such advice. In its bits and parts I'm sure it contains nothing novel, but as a whole I hope it is interesting. More than anything though I am writing this for me as means to discover a principle by which to live. Bret Victor spelled out this view of life in his incredibly influential talk "Inventing on Principle", yet despite its influence, its central message was lost. There is a path for the technologist to be an activist. This is the path I hope to take, but what precisely my cause is still eludes me. This is part of that self discovery.
 
 ## Programming with Intentions and Ends
 
@@ -24,7 +24,7 @@ At this point intent starts to jump out at us. There begins to be a meandering p
 
 ### Putting the Pieces Together
 
-This is not the end of our journey. More often then not, this is the stopping point for most people. Making code better can often mean renaming bits, moving things around, adding a comment here or there. But if we are to write good code, these are just tools for understanding. This process we have taken on a bit of code unfamiliar to us what not itself the process of writing good code, but the instead the process for gaining an understanding of the intent behind the code. Or to put it another way, bad code hides its intent, requiring a large amount of work for others to discover.
+This is not the end of our journey. More often then not this is the stopping point for most people. Making code better can often mean renaming bits, moving things around, adding a comment here or there. But if we are to write good code, these are just tools for understanding. This process we have taken on a bit of code unfamiliar to us what not itself the process of writing good code, but instead the process for gaining an understanding of the intent behind the code. Or to put it another way, bad code hides its intent, requiring a large amount of work for others to discover.
 
 If bad code hides its intent, good code wears it on its sleaves. Good code helps those unfamiliar with it become familiar. Good code guides the reader into understanding the intent of the programmer who wrote it. But good code doesn't merely express intent, because our intent may not always be pure. Perhaps our intent is to hack something together just to finish it. Maybe our intent is to follow some advice we read on some blog. Whatever this intent is, just because our code displays it does not make our code good. In other words, clarity of intent is a necessary but not sufficent condition of good code.
 
@@ -34,13 +34,15 @@ What else must our code do in order for it to be good? Our code must fit well in
 
 Clear intent and a fit for its environment are the two key factors in what I consider to be good code. Elaborating on these topics and making them concrete is actually quite difficult. The sort of good code we are primarily concerned with are not examples that we can easily fit in a blog post. Code found in presentations or blogs looks rather different from the code we find in our day jobs. The code in our day jobs is filled with messy, crufty code, with 10 different ways of accomplishing the same things, with seemly unused code, with out of date comments, with endless functions, with the one class to rule them all, with pointlessly deep class hierarchies, with metaprogramming magic, with ungreppable symbols, with hacks to get around strange constraints placed on us by existing frameworks, with tests that are endless walls of mocks. The list goes on.
 
-Too often we oversimplify this messy reality in order to focus on some bit we find particularly compelling. But if we are to right good code on the job, we must confront the code as it is. Our code does not live in isolation. Our code isn't meant to be understood only by us. Too often advice assumes this single author approach. It assumes that those making changes to the code are fully knowledable of the problem and will make changes accordingly. 
+Too often we oversimplify this messy reality in order to focus on some bit we find particularly compelling. But if we are to right good code on the job, we must confront the code as it is. Our code does not live in isolation. Our code isn't meant to be understood only by us. Too often advice assumes this single author approach. It assumes that those making changes to the code are fully knowledgeable of the problem and will make changes accordingly. Good code accepts that hasty programmers will come in and change it. It faces the reality that we can't predict what our code will be used for next. It knows that it doesn't live in isolation.
 
+As programmers, we aren't merely systemetizing a problem, we are arranging an explanation of a problem. We are drawing a picture of the contours of the problem. We are providing a vocabulary for which to think about the problem. We must consider human habits of reading and writing code. We must provide a guide for future visitors of our code base, allowing them navigate, separate, and find a home for their new ideas.
 
+### Human Navigation
 
+As we've discussed our code has in itself a purpose, but so do the people who approach our code bases. Anyone reading a code base is approaching it with some more or less specific purpose in mind. These purposes will vary greatly from person to person and over the lifetime of our program. One of the simpliest purposes someone may have for our code base is to use it as a body of information for which to answer a question. This question may be one about the code base itself like "What technologies does code base use?". It could be about how this code base relates to some other piece of software like "Does this code base talk to service X?". It may be a business question like "How do we calculate the margin for Y?".
 
-
-
+While seemingly obvious, code as a static body of information, not as a thing that executes is not something often considered. How many times have gone to a codebase to answer a question? How many times has the codebase given you the answer readily? How many times to it require digging, thinking, playing computer in your head to answer the question you had? If people are asking our codebases questions, why not structure them in a way that provides the answers easily?
 
 
 
