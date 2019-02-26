@@ -12,8 +12,8 @@
 (def file-path (str (System/getProperty "user.home") "/.calories.json"))
 
 (def pound 3500)
-(def base-rate 2500)
-(def daily 1500)
+(def base-rate 2340)
+(def daily 1840)
 
 (defn write-file [file content]
   (if dry-run
