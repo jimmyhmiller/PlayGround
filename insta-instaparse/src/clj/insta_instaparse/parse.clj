@@ -290,36 +290,37 @@ PL0 {
 
 ;; pest
 
-start = { seq }
-seq = { expr ~ seq | expr }
-expr = { phrase | val | lambda | fn_application | infix_application  | ident | literal | keyword  }
+start = { SOI ~ seq ~ EOI }
+seq = _{ expr ~ seq | expr }
+expr = { term ~ ( symbol ~ term)* | term  }
+term = _{ phrase | val | lambda | fn_application | ident | literal | keyword  }
 keyword = { ":" ~ ident }
 
 
-// This is a hack. Determine the right way to do this.
-infix_application = { (phrase | val | lambda | fn_application | ident | literal | keyword ) ~ (symbol ~ expr) }
-symbol = { ("+" | "*" | "=" | ">" | "<" | "/")+ }
+symbol = @{ ("+" | "*" | "=" | ">" | "<" | "/" | "-" | "|" | "." | "%")+ }
 
-fn_application = { ident  ~ "(" ~ ((ident | literal) ~ ","?)* ~ ")" }
+fn_application = { ident ~ ("(" ~ (expr ~ ","?)* ~ ")")+  }
 
-lambda = { fn_args ~ "=>" ~ expr | fn_args ~ "=>" ~ "{" ~ expr ~ "}" | fn_application ~ "=>" ~ expr }
+lambda_body = { seq }
+lambda = { fn_args ~ "=>" ~ expr | fn_args ~ "=>" ~ "{" ~ lambda_body  ~ "}" | fn_application ~ "=>" ~ expr | fn_application ~ "=>" ~ "{" ~ lambda_body  ~ "}" }
 fn_args = { "(" ~ ((ident | literal | keyword ) ~ ","?)* ~ ")" | ident | literal }
 
 phrase = { ident ~ ident ~ phrase_body | ident ~ ident ~ fn_args ~ phrase_body}
 phrase_body = { "{" ~ expr* ~ "}" }
 
 val = { "val" ~ ident ~ "=" ~ expr}
-literal = { number | string }
-number = { digit+ }
+literal = _{ number | string | keyword }
+number = @{ digit+ }
 
 WHITESPACE = _{ (" " | "\t" | "\r" | "\n") + }
 
 string = { "\"" ~ (!("\"" | "\\") ~ ANY)* ~ "\"" }
 
-alpha = _{ 'a'..'z' | 'A'..'Z' | "_" | "'" | "-" }
+alpha = _{ 'a'..'z' | 'A'..'Z' | "_" | "'" | "-" | "?" | "!" }
 digit = _{ '0'..'9' }
 
 ident = @{ alpha ~ (alpha | digit)* }
+
 
 
 "
