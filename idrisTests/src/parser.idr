@@ -3,23 +3,23 @@ data Parser : Type -> Type where
   Par : (String -> Maybe (a, String)) -> Parser a
 
 
-instance Functor Parser where
+Functor Parser where
     map m (Par f) = Par (\inp => (case f inp of
                                      Nothing => Nothing
                                      (Just (x, inp')) => Just (m x, inp')))
 
 
-instance Applicative Parser where
+Applicative Parser where
     pure x = Par (\inp => Just (x, inp))
     (<*>) (Par f) (Par g) = Par (\inp => (case f inp of
                                                Nothing => Nothing
-                                               (Just (f', inp')) => 
+                                               (Just (f', inp')) =>
                                                  (case g inp' of
                                                    Nothing => Nothing
                                                    (Just (x, inp'')) => Just (f' x, inp''))))
 
 
-instance Monad Parser where
+Monad Parser where
     (>>=) (Par g) f = Par (\inp => (case g inp of
                                          Nothing => Nothing
                                          (Just (x, inp')) => (case f x of
@@ -27,7 +27,7 @@ instance Monad Parser where
 
 
 
-instance Alternative Parser where
+Alternative Parser where
     empty = Par (\inp => Nothing)
     (<|>) (Par f) (Par g) = Par (\inp => (case f inp of
                                                Nothing => g inp
@@ -44,11 +44,11 @@ item = Par (\inp => (case unpack inp of
 
 
 
-sat : (Char -> Bool) -> Parser Char                                                                 
-sat p = do 
+sat : (Char -> Bool) -> Parser Char
+sat p = do
   x <- item
   if p x then pure x else empty
-  
+
 char : Char -> Parser Char
 char x = sat (== x)
 
@@ -62,7 +62,7 @@ upper : Parser Char
 upper = sat isUpper
 
 twoLower : Parser String
-twoLower = do 
+twoLower = do
   x <- lower
   y <- lower
   pure $ pack [x, y]
@@ -75,8 +75,6 @@ runParserPartial (Par f) x = f x
 runParserFull : Parser a -> String -> Maybe a
 runParserFull (Par f) x = case f x of
                                Nothing => Nothing
-                               (Just (a, inp)) => (case unpack inp of
-                                                        [] => Just a
+                               (Just (y, inp)) => (case unpack inp of
+                                                        [] => Just y
                                                         xs => Nothing)
-
-
