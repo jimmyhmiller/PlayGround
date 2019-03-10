@@ -1,14 +1,12 @@
-import Effects
-import System
-import Control.IOExcept
-import Effect.System
-import Effect.StdIO
-import Effect.File
+-- import Effects
+-- import System
+-- import Control.IOExcept
+-- import Effect.System
+-- import Effect.StdIO
+-- import Effect.File
 
 %hide Prelude.List.(++)
 
-
-%default total
 
 data Parser a = Parse (String -> List (a, String))
 
@@ -18,7 +16,7 @@ applyFirst f (a, c) = (f a, c)
 parse : Parser a -> String -> List (a, String)
 parse (Parse f) y = f y
 
-Functor Parser where 
+Functor Parser where
     map func (Parse f) = Parse (\s => map (applyFirst func) (f s))
 
 Applicative Parser where
@@ -104,13 +102,13 @@ toListChar : Parser Char -> Parser (List Char)
 toListChar p = do
   c <- p
   pure [c]
-  
+
 neg : Parser Int
 neg = do
   char '-'
   ds <- digits
   pure $ negate (cast ds)
-  
+
 pos : Parser Int
 pos = do
   ds <- digits
@@ -130,8 +128,8 @@ parens parser =
  (withSpaces $ char '(')
  *> withSpaces parser
  <* (spaces *> char ')')
- 
- 
+
+
 sepBy : (sep : Parser a) -> (parser : Parser b) -> Parser (List b)
 sepBy sep parser = do
   frst <- optional parser
@@ -154,8 +152,8 @@ threewords = do
   spaces1
   word3 <- word
   pure [word1, word2, word3]
-  
-  
+
+
 infixl 3 <||>
 (<||>) : Parser a -> Lazy (Parser a) -> Parser a
 (<||>) (Parse f) p1 = Parse (\s => (case f s of
@@ -176,16 +174,16 @@ mutual
   parseExpr = parseSymbol <|> parseNum <||> parseList
 
   parseList : Parser Expr
-  parseList = do 
+  parseList = do
     char '('
     frst <- parseExpr
     rest <- sepBy spaces1 parseExpr
     char ')'
     pure $ Sexpr frst rest
-  
+
   parseSymbol : Parser Expr
   parseSymbol = map Symbol (symbol <|> stringify (toListChar $ char '+'))
-  
+
   parseNum : Parser Expr
   parseNum =  map Num num
 
@@ -213,12 +211,12 @@ indention k = concat $ replicate k "  "
 
 
 
- 
-data JsExpr 
-  = JsNum String 
-  | JsSymbol String 
-  | JsFunction JsExpr (List JsExpr) (List JsExpr) JsExpr 
-  | JsApplication JsExpr (List JsExpr) 
+
+data JsExpr
+  = JsNum String
+  | JsSymbol String
+  | JsFunction JsExpr (List JsExpr) (List JsExpr) JsExpr
+  | JsApplication JsExpr (List JsExpr)
   | JsBinOp JsExpr JsExpr JsExpr
 
 
@@ -257,11 +255,11 @@ compile s = do
   let jsExprs = map lispToJs lisp
   let js = map (toJs 1) jsExprs
   pure $ unlines js
-  
+
 
 double : Maybe String
 double = compile """
-(defn double (x) 
+(defn double (x)
   (+ x x))
 
 (identity 3)
@@ -280,7 +278,7 @@ printCompile' (Just x) = putStr' x
 
 --emain : Eff (Either String String) [SYSTEM, STDIO, FILE_IO ()]
 --emain = do [prog, file] <- getArgs
---           pure $ Right  
+--           pure $ Right
 
 
 main : IO ()
@@ -290,5 +288,3 @@ main = printCompile' (   compile """
 (defn identity (x) x)
 (identity 2)
 """)
-
- 

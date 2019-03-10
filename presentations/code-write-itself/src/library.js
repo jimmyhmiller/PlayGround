@@ -82,7 +82,7 @@ export const withSlide = Comp => class WithSlide extends React.Component {
       return <Comp {...props} />
     }
     return (
-      <Slide maxWidth={maxWidth || 1300} maxHeight={maxHeight || 800}>
+      <Slide {...props} maxWidth={maxWidth || 1300} maxHeight={maxHeight || 800}>
         <Comp {...props} />
       </Slide>
     )
@@ -173,6 +173,6 @@ export const TwoColumn = withSlide(({ left, right, title }) =>
 )
 
 export const Presentation = ({ children }) => 
-  <Deck theme={theme} controls={false} style={{display: 'none'}} transition={["slide"]} transitionDuration={0} progress="none">
+  <Deck contentWidth={1300} theme={theme} controls={false} style={{display: 'none'}} transition={["slide"]} transitionDuration={0} progress="none">
     {children}
   </Deck>
