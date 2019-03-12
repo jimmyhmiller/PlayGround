@@ -13,7 +13,6 @@ import {
   BlankSlide,
   Image,
   Text,
-  formatCode,
 } from "./library";
 
 
@@ -239,6 +238,7 @@ export default () =>
     <Headline
       textAlign="left"
       color="blue"
+      size={1}
       text="Barliman" />
 
     <Headline
@@ -250,6 +250,130 @@ export default () =>
       textAlign="left"
       color="magenta"
       text="How does this work?" />
+
+    <Headline
+      textAlign="left"
+      color="blue"
+      caps={false}
+      text="miniKanren" />
+
+    <Points title="miniKanren" caps={false}>
+      <Point text="Embedded language" />
+      <Point text="Logic Programming Language" />
+      <Point text="Weird" />
+      <Point text="Has Magic Powers" />
+    </Points>
+
+    <Code
+      lang="clojure"
+      source={`
+      (run 1 (q)
+           (== q 1))
+      ;; => 1
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        (run 1 (q)
+             (conde
+              [(== q 1) succeed]))
+        ;; => 1
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        (run* (q)
+             (conde
+              [(== q 1) succeed]
+              [(== q 2) succeed]))
+        ;; => (1 2)
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        (run 1 (q)
+             (appendo '(1 2 3) '(4 5 6) q))
+        ;; => (1 2 3 4 5 6)
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        (run 1 (q)
+             (appendo '(1 2 3) q '(1 2 3 4 5 6)))
+        ;; => (4 5 6)
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        (run 1 (q)
+             (appendo q '(4 5 6) '(1 2 3 4 5 6)))
+        ;; => (1 2 3)
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        (define numbers
+          (lambda (x q)
+            (conde
+             [(== x 1) (== q "one")]
+             [(== x 2) (== q "two")]
+             [(== x 3) (== q ">2")]
+             [(== x 4) (== q ">2")])))
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        (run* (q)
+             (numbers 4 q))
+        ;; => (">2")
+
+        (run* (q)
+             (numbers q "one"))
+        ;; => (1)
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        (run* (q)
+             (numbers q ">2"))
+        ;; => (3 4)
+
+        (run* (q r)
+             (numbers q r))
+
+        ;; => (1 2 3 4)
+      `}
+    />
+
+    <Headline
+      textAlign="left"
+      color="magenta"
+      text="What if we wrote an interpreter?" />
+
+    <Headline
+      textAlign="left"
+      color="blue"
+      text="Programming is in its infancy" />
+
+
+
+
 
 
 
