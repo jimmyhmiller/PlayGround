@@ -127,9 +127,9 @@ export const Point = ({ text, textSize=50 }) =>
     {text}
   </ListItem>
 
-export const Points = withSlide(({ children, color, title, size, styleContainer }) =>
+export const Points = withSlide(({ children, color, title, size, styleContainer, caps }) =>
   <div style={styleContainer}>
-    <Headline noSlide color={color} size={size} textAlign="left" text={title} />
+    <Headline noSlide caps={caps} color={color} size={size} textAlign="left" text={title} />
     <List>
       {children}
     </List>
