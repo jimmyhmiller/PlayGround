@@ -72,7 +72,7 @@ export default () =>
     <Headline
       textAlign="left"
       color="green"
-      text="Programming is aboue expressing ideas" />
+      text="Programming is about expressing ideas" />
 
     <Headline
       textAlign="left"
@@ -101,7 +101,7 @@ export default () =>
         greet name = "Hello " ++ name
 
         not : Bool -> Bool
-        not x = if true then false else true
+        not x = if x then false else true
       `}
     />
 
