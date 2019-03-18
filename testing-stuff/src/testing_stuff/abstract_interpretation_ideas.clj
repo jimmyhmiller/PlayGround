@@ -2,10 +2,10 @@
 
 
 (defn fizz-buzz-bad [n]
-  (cond 
+  (cond
     (= (mod n 3) 0) "fizz"
     (= (mod n 5) 0) "buzz"
-    (and (= (mod n 3) 0) 
+    (and (= (mod n 3) 0)
          (= (mod n 5) 0)) "fizzbuzz"
     :else n))
 
@@ -46,7 +46,7 @@
 ;; `:increment-n`. I should know that state is a number.
 
 
-(def name-lookup 
+(def name-lookup
   {:jimmy :stuff
    :james :thing})
 
@@ -56,7 +56,7 @@
 ;; Here I want to infer that the only meaningful values are the keys
 ;; in the lookup. `some-name` can of course be other values, but those
 ;; are the only real valid ones. I should also detect the null
-;; reference exception here. 
+;; reference exception here.
 
 (defn conjoin-path [some-name]
   (when some-name
