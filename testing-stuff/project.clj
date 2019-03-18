@@ -33,6 +33,7 @@
                  [com.clojure-goes-fast/clj-java-decompiler "0.1.0"]
                  [walmartlabs/datascope "0.1.1"]
                  [com.zensols.gui/tabres "0.0.7"]
+                 [meander/gamma "0.0.5"]
                  [fsmviz "0.1.3"]
                  [rhizome "0.2.9"]
                  [org.clojure/tools.deps.alpha "0.5.425"]
