@@ -57,12 +57,6 @@ export default () =>
       color="blue"
       text="Not a gimmick" />
 
-    <Points title="Approach">
-      <Point text="Idris - Static" />
-      <Point text="Barliman - Dynamic" />
-      <Point text="Both experimental" />
-    </Points>
-
     <Points title="Why?">
       <Point text="Writing Code is Error prone" />
       <Point text="Waste of time" />
@@ -74,10 +68,11 @@ export default () =>
       color="green"
       text="Programming is about expressing ideas" />
 
-    <Headline
-      textAlign="left"
-      color="magenta"
-      text="Languages should let us think, not inhibit us" />
+    <Points title="Approach">
+      <Point text="Idris - Static" />
+      <Point text="Barliman - Dynamic" />
+      <Point text="Both experimental" />
+    </Points>
 
     <Headline
       textAlign="left"
@@ -128,22 +123,6 @@ export default () =>
       source={`
         bar : a -> a
         bar x = ?bar
-      `}
-    />
-
-    <Code
-      lang="haskell"
-      source={`
-        foo : Int -> Int -> Int
-        foo x y = ?foo
-      `}
-    />
-
-    <Code
-      lang="haskell"
-      source={`
-        bar : a -> a -> a
-        bar x y = ?bar
       `}
     />
 
@@ -221,18 +200,6 @@ export default () =>
       <Point text="Explain our code clearly" />
       <Point text="Use types wisely" />
       <Point text="Keep things pure" />
-    </Points>
-
-    <Headline
-      textAlign="left"
-      color="magenta"
-      text="How does this work?" />
-
-    <Points title="Restricted Search Space">
-      <Point text="Function arguments" />
-      <Point text="Recursion" />
-      <Point text="Constructors" />
-      <Point text="All type information known" />
     </Points>
 
     <Headline
@@ -371,17 +338,6 @@ export default () =>
       color="blue"
       text="Programming is in its infancy" />
 
-
-
-
-
-
-
-
-
-
-
-    
 
     <BlankSlide />
 
