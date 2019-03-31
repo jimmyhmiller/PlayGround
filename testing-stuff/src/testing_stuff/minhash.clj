@@ -9,6 +9,10 @@
                                       :min-count 1
                                       :max-count 3))
 
+(defn uuid []
+  (str (java.util.UUID/randomUUID)))
+
+
 (def counters
   {:a (HLLCounter. true 1024)
    :b (HLLCounter. true 1024)
@@ -24,8 +28,7 @@
 (run! insert-keywords! 
      (map first (s/exercise :keyword/collection 1000000)))
 
-(defn uuid []
-  (str (java.util.UUID/randomUUID)))
+
 
 (def a (HLLCounter. true 1024))
 (def b (HLLCounter. true 1024))
