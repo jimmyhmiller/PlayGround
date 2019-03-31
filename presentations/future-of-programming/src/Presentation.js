@@ -375,21 +375,24 @@ export default () => (
       color="blue"
       text="What if our code was immutable?" />
 
+     <Headline
+      textAlign="left"
+      color="blue"
+      text="What if refactoring didn't suck." />
+
     <Code
       title="Hello Unison"
       lang="haskell"
       source={`
         -- alice : Node, bob : Node
 
-        do Remote
-          x = factorial 6
-          Remote.transfer alice
-          y = foo x -- happens on 'alice' node
-          Remote.transfer bob
-          pure (bar x y) -- happens on 'bob' node
+        x = factorial 6
+        Remote.transfer alice
+        y = foo x -- happens on alice node
+        Remote.transfer bob
+        bar x y -- happens on bob node
       `} 
     />
-
 
     <Code
       title="Hello Unison"
