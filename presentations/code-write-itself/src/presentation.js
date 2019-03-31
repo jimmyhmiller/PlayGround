@@ -114,7 +114,7 @@ export default () =>
       lang="haskell"
       source={`
         foo : Int -> Int
-        foo x = ?foo
+        foo x = _
       `}
     />
 
@@ -122,7 +122,7 @@ export default () =>
       lang="haskell"
       source={`
         bar : a -> a
-        bar x = ?bar
+        bar x = _
       `}
     />
 
@@ -130,7 +130,7 @@ export default () =>
       lang="haskell"
       source={`
         foo : (f : Int -> Bool) -> (xs : List Int) -> List Bool
-        foo f xs = ?foo
+        foo f xs = _
       `}
     />
 
@@ -146,7 +146,7 @@ export default () =>
       lang="haskell"
       source={`
         bar : (f : a -> b) -> (xs : List a) -> List b
-        bar f xs = ?bar
+        bar f xs = _
       `}
     />
 
