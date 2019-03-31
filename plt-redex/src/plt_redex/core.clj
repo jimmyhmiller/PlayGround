@@ -16,6 +16,26 @@
        x)) body))
 
 
+(defn fixed-point [f] 
+  (fn [expr]
+    (loop [expr expr
+           states [expr]]
+      (let [expr* (f expr)]
+        (if (= expr* expr)
+          states
+          (recur expr* (conj states expr*)))))))
+
+
+(defn n-steps [f n] 
+  (fn [expr]
+    (loop [expr expr
+           states [expr]
+           m 0]
+      (let [expr* (f expr)]
+        (if (= m n)
+          states
+          (recur expr* (conj states expr*) (inc m)))))))
+
 
 (defn cc [expr]
   (match expr
@@ -51,7 +71,7 @@
 
 
 
-(cc)
+
 (cc
  '(((fn [x] x) (fn [x] x)) nil))
 
@@ -105,9 +125,6 @@
 
 
 
-(ck
- '(((fn [x] x) (fn [x] x)) nil))
-
 
 
 
@@ -127,16 +144,66 @@
     ((pred value? ?v) (:fn (fn [?x] ?m) ?k)) (list (substitute ?m ?x ?v) ?k)
     ((pred value? ?v) (:ar ?n ?k)) (list ?n (:fn ?v ?k))))
 
-(ck
- (ck
-  (ck
-   (ck
-    (ck
-     (ck
-      (ck
-       '(((((fn [x] 
+
+((fixed-point ck)
+ '(((((fn [x] 
               (fn [y] 
                 (fn [z] ((x y) z)))) 
             (fn [x1] x1)) 
            (fn [y1] y1)) 
-          3) nil))))))))
+          3) nil))
+
+
+
+
+(defn not-symbol? [x]
+  (not (symbol? x)))
+
+
+(defn named [name rhs]
+  (if (instance? clojure.lang.IObj rhs)
+    (with-meta rhs {:name name})
+    rhs))
+
+(defn cek [expr]
+  (match expr
+    (pred value? ?v) 
+    (named :value ?v)
+
+    (((pred value? ?v) (pred empty? ?e)) nil) 
+    (named :empty ?v)
+
+    (((?m ?n) ?e) ?k) 
+    (named :apply (list (list ?m ?e) (list :ar (list ?n ?e) ?k)))
+
+    (((pred not-symbol? ?v) ?e) (:fn ((fn [?x] ?m) ?e') ?k)) 
+    (named :fn (list (list ?m (assoc ?e' ?x (list ?v ?e))) ?k))
+    
+    (((pred not-symbol? ?v) ?e) (:ar (?n ?e') ?k))
+    (named :ar (list (list ?n ?e') (list :fn (list ?v ?e) ?k)))
+
+    ((?x ?e) ?k)
+    (named :lookup (list (get ?e ?x) ?k))))
+
+
+
+;; CEK doesn't have the properties I want for searching. Should I make
+;; my own? Can I make it work?
+
+(map (juxt identity meta)
+     ((fixed-point cek )
+      '(((((fn [x]
+             (fn [dec]
+               (dec x)))
+           0)
+          (fn [x] x))
+         {}) nil)))
+
+
+((fixed-point cek)
+ '((((((fn [x] 
+         (fn [y] 
+           (fn [z] ((x y) z)))) 
+       (fn [x1] x1)) 
+      (fn [y1] y1)) 
+     3) {}) nil))
