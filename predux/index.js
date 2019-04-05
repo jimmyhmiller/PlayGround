@@ -23,18 +23,21 @@ reducer.method("GET", (state, _) => state);
 reducer.defaultMethod(state => state || { count: 0 })
 
 
+
 const transactor = createTransactor(reducer);
 
-module.exports = async (req, res) => {
-  if (req.method === 'GET') {
-    const { id } = params(req)
-    console.log(id)
-    send(res, 200, await transactor.getState(id))
-    return;
-  }
+const handler = multi(req => req.method)
 
+handler.method('GET', async (req, res) => {
+  const { id } = params(req)
+  const result = await transactor.getState(id)
+  send(res, result.error ? 404 : 200, result)
+})
+
+handler.method('POST', async (req, res) => {
   const { id, action } = await json(req);
   const result = await transactor.transact(id, action);
-
   send(res, 200, result);
-};
+})
+
+module.exports = handler
