@@ -8,9 +8,12 @@ const createTransactor = (reducer, initialState) => {
 
   return {
     getState: async (id) => {
-     const result =  await client.query(q.Get(q.Match(q.Index("state-by-id"), id)))
-     console.log(result);
-     return result.data
+      try {
+        const result =  await client.query(q.Get(q.Match(q.Index("state-by-id"), id)))
+        return result.data
+      } catch (e) {
+        return {error: "Does not exist"}
+      }
     },
     transact: async (id, action) => {
       while (true) {

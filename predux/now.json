@@ -8,10 +8,7 @@
         "FAUNA_SECRET": "@fauna-state-secret"
     },
     "routes": [{
-      "src": "^/",
-      "dest": "/index.js"
-    }, {
-      "src": "^/:id",
+      "src": "^/.*",
       "dest": "/index.js"
     }]
 }
