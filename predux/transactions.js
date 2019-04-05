@@ -30,7 +30,6 @@ const createTransactor = (reducer, initialState) => async (id, action) => {
   }
 }
 
-
 module.exports = {
   createTransactor
 }
