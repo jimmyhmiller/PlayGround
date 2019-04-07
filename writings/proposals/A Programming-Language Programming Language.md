@@ -1,0 +1,5 @@
+## A Programming-Language Programming Language
+
+In this talk we will learn about a unique language, with a unique perspective on programming, Racket. Racket is not actually just one programming language, it is family of programming languages that provide tools to build your own languages. With Racket, you can write code that is dynamic, static, object oriented, functional, purely functional, dependently type, logical, presentational, just name it I'm sure Racket it has it.
+
+This talk is an introduction to Racket. We will explore some of Racket's most interesting features. We will explore various languages in Racket and what they have to offer. We will look at Dr. Racket the IDE provided with the language. We will explore a bit of what it takes to implement a language in Racket. Finally we will discuss what other languages can learn from Racket.
