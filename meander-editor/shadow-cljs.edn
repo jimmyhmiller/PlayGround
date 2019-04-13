@@ -1,0 +1,17 @@
+{:dependencies [[meander/gamma "0.0.22"]
+                [lilactown/hx "0.4.0"]
+                [cider/cider-nrepl "0.16.0-SNAPSHOT"]]
+ :source-paths ["src"]
+ :nrepl        {:port 8703}
+ :builds       {:bootstrap {:target     :bootstrap
+                            :output-dir "out/public/js/bootstrap"
+                            :entries    [meander-editor.eval-env]
+                            :exclude    #{cljs.js}}
+                :browser   {:target           :browser
+                            :output-dir       "out/public/js"
+                            :asset-path       "/js"
+                            :compiler-options {:optimizations :simple}
+                            :modules          {:base {:entries [meander-editor.core]}}
+                            :devtools         {:http-root  "out/public"
+                                               :http-port  8702
+                                               :after-load shadow-eval.core/render}}}}
