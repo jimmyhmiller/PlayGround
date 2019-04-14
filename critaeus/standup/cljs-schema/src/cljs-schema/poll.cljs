@@ -77,6 +77,9 @@
   (Get (Match (Index "poll-by-callback") callback-id)))
 
 
+(print-result
+ (query client (Paginate (Match (Index "all_polls")) #js {:size 1000})))
+
 
 
 (defn filter-votes [option votes]

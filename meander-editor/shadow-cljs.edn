@@ -5,13 +5,27 @@
  :nrepl        {:port 8703}
  :builds       {:bootstrap {:target     :bootstrap
                             :output-dir "out/public/js/bootstrap"
-                            :entries    [meander-editor.eval-env]
+                            :entries    [cljs.js meander-editor.eval-env]
                             :exclude    #{cljs.js}}
-                :browser   {:target           :browser
-                            :output-dir       "out/public/js"
-                            :asset-path       "/js"
-                            :compiler-options {:optimizations :simple}
-                            :modules          {:base {:entries [meander-editor.core]}}
-                            :devtools         {:http-root  "out/public"
-                                               :http-port  8702
-                                               :after-load shadow-eval.core/render}}}}
+                :browser {:target :browser
+
+                          :output-dir       "out/public/js"
+                          :asset-path       "/js"
+                          
+
+                          :compiler-options
+                          {:optimizations :simple}
+
+                          :modules
+                          {:base
+                           {:entries [shadow.cljs.bootstrap.env
+                                      meander-editor.core]}
+                           :worker
+                           {:entries [meander-editor.worker]
+                            :depends-on #{:base}
+                            :exclude #{meander-editor.core}
+                            :web-worker true}}
+
+                          :devtools         {:http-root  "out/public"
+                                             :http-port  8702
+                                             :after-load meander-editor.core/render}}}}
