@@ -1,65 +1,69 @@
 (ns meander-editor.core
   (:require [cljs.js :as cljs]
             [shadow.cljs.bootstrap.browser :as boot]
-            [meander-editor.eval-env]
             [meander.match.gamma :as meander :include-macros true]
             [hx.react :as hx :refer [defnc]]
-            [hx.hooks :refer [<-state <-effect]]
-            ["react-dom" :as react-dom]))
-
-
-(defonce c-state (cljs/empty-state))
-
-(defn eval-str [source cb]
-  (cljs/eval-str
-    c-state
-    (str "(let [results (atom nil)] (reset! results " source ") @results)")
-    "[test]"
-    {:eval cljs/js-eval
-     :load (partial boot/load c-state)
-     :ns   (symbol "meander-editor.eval-env")}
-    cb))
-
-
-(defn initialize-eval [ready-cb]
-  (fn []
-    (boot/init c-state
-               {:path         "/js/bootstrap"
-                :load-on-init '#{meander-editor.eval-env}}
-               (fn []
-                 (ready-cb true)))))
+            [hx.hooks :refer [<-state <-effect <-ref]]
+            [clojure.pprint :as pprint]
+            ["react-dom" :as react-dom]
+            [cljs.env :as env]
+            ["use-debounce" :refer [useDebounce]]
+            [cljs.reader :refer [read-string]]))
 
 
 
 (def example-input 
-  [{:name "Jimmy"}
-   {:name "Janice"}
-   {:name "Lemon"}])
+  [{:title "Jimmy"}
+   {:title "Janice"}
+   {:title "Lemon"}])
 
 
-(defn eval-meander [ready? input lhs rhs output-cb]
-  (fn []
-    (when ready?
-      (try (eval-str (str "(meander/match " input " " lhs " " rhs ")") output-cb)
-           (catch js/Object e)))))
+
+
+(defn render-component [[type value]]
+  (if (= type :success)
+    (if (and (vector? value) (keyword? (first value)))
+      value
+      (with-out-str (pprint/pprint value)))
+    nil))
 
 (defnc Main []
   (let [[ready? update-ready?] (<-state false)
-        [input update-input] (<-state (prn-str example-input))
-        [lhs update-lhs] (<-state "[{:name !name} ...]")
-        [rhs update-rhs] (<-state "!name")
-        [output update-output] (<-state nil)]
-    (<-effect (initialize-eval update-ready?) [])
-    (<-effect (eval-meander ready? input lhs rhs update-output)
-              [ready? lhs rhs input])
+        [input update-input] (<-state (with-out-str (pprint/pprint example-input)))
+        [lhs update-lhs] (<-state "{:title ?title}")
+        [rhs update-rhs] (<-state "?title")
+        [debounced-input] (useDebounce input 1000)
+        [debounced-lhs] (useDebounce lhs 1000)
+        [debounced-rhs] (useDebounce rhs 1000)
+        [matches update-matches] (<-state [])
+        worker (<-ref (js/Worker. "/js/worker.js"))]
+    (<-effect (fn []
+                (.. @worker (addEventListener "message" (fn [e] (update-matches (read-string (.-data e))))))
+                (.. @worker (addEventListener "error" (fn [e] (js/console.log e)))))
+              [worker])
+    (<-effect (fn []
+                (.. @worker (postMessage (prn-str 
+                                         {:lhs debounced-lhs 
+                                          :rhs debounced-rhs 
+                                          :input debounced-input}))))
+              [@worker debounced-lhs debounced-rhs debounced-input])
+   
     [:<>
-     [:div
-      [:textarea {:value input :on-change #(update-input (.. % -target -value))}]]
-     [:div
-      [:textarea {:value lhs :on-change #(update-lhs (.. % -target -value))}]]
-     [:div
-      [:textarea {:value rhs :on-change #(update-rhs (.. % -target -value))}]]
-     [:p "Output: " (prn-str (:value output))]]))
+     [:link
+      {:rel "stylesheet",
+       :href "https://unpkg.com/superstylin@1.0.3/src/index.css"}]
+     [:div {:style {:display :flex}}
+      [:div
+       [:div
+        [:textarea {:value input :on-change #(update-input (.. % -target -value))}]]
+       [:div
+        [:textarea {:value lhs :on-change #(update-lhs (.. % -target -value))}]]
+       [:div
+        [:textarea {:value rhs :on-change #(update-rhs (.. % -target -value))}]]]
+      [:div {:style {:margin-left 50}}
+       (map render-component matches)]]]))
+
+
 
 (defn render []
   (react-dom/render
