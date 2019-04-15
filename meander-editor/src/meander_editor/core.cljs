@@ -3,7 +3,7 @@
             [shadow.cljs.bootstrap.browser :as boot]
             [meander.match.gamma :as meander :include-macros true]
             [hx.react :as hx :refer [defnc]]
-            [hx.hooks :refer [<-state <-effect <-ref]]
+            [hx.hooks :refer [<-state <-effect <-ref <-callback]]
             [clojure.pprint :as pprint]
             ["react-dom" :as react-dom]
             [cljs.env :as env]
@@ -40,14 +40,14 @@
     (<-effect (fn []
                 (.. @worker (addEventListener "message" (fn [e] (update-matches (read-string (.-data e))))))
                 (.. @worker (addEventListener "error" (fn [e] (js/console.log e)))))
-              [worker])
+              [])
     (<-effect (fn []
                 (.. @worker (postMessage (prn-str 
                                          {:lhs debounced-lhs 
                                           :rhs debounced-rhs 
                                           :input debounced-input}))))
               [@worker debounced-lhs debounced-rhs debounced-input])
-   
+    (println "render")
     [:<>
      [:link
       {:rel "stylesheet",
