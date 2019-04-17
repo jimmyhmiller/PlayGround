@@ -32,21 +32,37 @@
         [input update-input] (<-state (with-out-str (pprint/pprint example-input)))
         [lhs update-lhs] (<-state "{:title ?title}")
         [rhs update-rhs] (<-state "?title")
-        [debounced-input] (useDebounce input 1000)
-        [debounced-lhs] (useDebounce lhs 1000)
-        [debounced-rhs] (useDebounce rhs 1000)
+        [debounced-input] (useDebounce input 200)
+        [debounced-lhs] (useDebounce lhs 200)
+        [debounced-rhs] (useDebounce rhs 200)
         [matches update-matches] (<-state [])
-        worker (<-ref (js/Worker. "/js/worker.js"))]
+        worker (<-ref nil)]
     (<-effect (fn []
-                (.. @worker (addEventListener "message" (fn [e] (update-matches (read-string (.-data e))))))
-                (.. @worker (addEventListener "error" (fn [e] (js/console.log e)))))
+                (println "Create Worker")
+                (reset! worker (js/Worker. "/js/worker.js")))
               [])
     (<-effect (fn []
-                (.. @worker (postMessage (prn-str 
-                                         {:lhs debounced-lhs 
-                                          :rhs debounced-rhs 
-                                          :input debounced-input}))))
-              [@worker debounced-lhs debounced-rhs debounced-input])
+                (.. @worker (addEventListener "message"
+                                              (fn [e]
+                                                (let [new-coll (read-string (.-data e))
+                                                      seconds (filter identity (map second new-coll))]
+                                                  (when (not (empty? seconds))
+                                                    (update-matches new-coll))))))
+                (.. @worker (addEventListener "error" (fn [e] (js/console.log e)))))
+              [])
+    (<-effect
+     (fn []
+       (.. @worker (postMessage (prn-str [:lhs debounced-lhs]))))
+     [@worker debounced-lhs])
+    (<-effect
+     (fn []
+       (.. @worker (postMessage (prn-str [:rhs debounced-rhs]))))
+     [@worker debounced-rhs])
+    (<-effect
+     (fn []
+       (.. @worker (postMessage (prn-str [:input debounced-input]))))
+     [@worker debounced-input])
+    
     (println "render")
     [:<>
      [:link
@@ -55,11 +71,14 @@
      [:div {:style {:display :flex}}
       [:div
        [:div
-        [:textarea {:value input :on-change #(update-input (.. % -target -value))}]]
+        [:textarea 
+         {:style {:width 500 :margin-top 10} :value input :on-change #(update-input (.. % -target -value))}]]
        [:div
-        [:textarea {:value lhs :on-change #(update-lhs (.. % -target -value))}]]
+        [:textarea 
+         {:style {:width 500 :margin-top 10} :value lhs :on-change #(update-lhs (.. % -target -value))}]]
        [:div
-        [:textarea {:value rhs :on-change #(update-rhs (.. % -target -value))}]]]
+        [:textarea 
+         {:style {:width 500 :margin-top 10} :value rhs :on-change #(update-rhs (.. % -target -value))}]]]
       [:div {:style {:margin-left 50}}
        (map render-component matches)]]]))
 

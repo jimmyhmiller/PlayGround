@@ -47,18 +47,59 @@
 ;; This works except for this issue:
 ;; https://github.com/thheller/shadow-cljs/blob/da2fc8f8b10daeee0c984a10f9437a579933931c/src/main/shadow/cljs/bootstrap/browser.cljs#L37-L43
 
+(def meander-fn (atom nil))
+
+(def has-updated (atom false))
+
+(def state (atom {}))
+
+(defmulti handle-message first)
+
+(defmethod handle-message :lhs [[_ lhs]]
+  (reset! has-updated true)
+  (swap! state assoc :lhs lhs))
+
+(defmethod handle-message :rhs [[_ rhs]]
+  (reset! has-updated true)
+  (swap! state assoc :rhs rhs))
+
+(defmethod handle-message :input [[_ input]]
+  (reset! has-updated true)
+  (swap! state assoc :input (read-string input)))
+
+(defmethod handle-message :default [data]
+  (println "not found " data))
+
+
+(defn create-function [lhs rhs]
+  (eval-promise
+   (str "(fn [coll] (try [:success (meander/match coll " lhs " " rhs ")] 
+              (catch js/Object e [:error (:message e)])))")))
+
+(add-watch state
+           :compute 
+           (fn [_ _ old-state state]
+
+             (if (or (not= (:rhs old-state) (:rhs state))
+                     (not= (:lhs old-state) (:lhs state)))
+               (.then (create-function (:lhs state) (:rhs state))
+                      (fn [[_ f]]
+                        (reset! has-updated false)
+                        (reset! meander-fn f))))))
+
+(add-watch meander-fn :compute
+           (fn [_ _ _ meander-fn]
+             (js/postMessage (prn-str
+                              (take-while #(not @has-updated)
+                                          (map meander-fn (:input @state)))))))
+
 
 ;; If I save the input instead of sending it everytime things should be much faster.
 
 (js/self.addEventListener "message"
   (fn [^js e]
-    (let [message (.. e -data)
-          {:keys [input lhs rhs]} (read-string message)]
+    (let [message (read-string (.. e -data))]
       (println "Recieved message")
       (.then initialize-eval
              (fn [response]
-               (println "initialized")
-               (try
-                 (.then (eval-meander-many input lhs rhs)
-                        (fn [x] (js/postMessage (prn-str x))))
-                 (catch js/Object e (println e))))))))
+               (handle-message message))))))
