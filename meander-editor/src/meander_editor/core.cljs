@@ -4,9 +4,13 @@
             [meander.match.gamma :as meander :include-macros true]
             [hx.react :as hx :refer [defnc]]
             [hx.hooks :refer [<-state <-effect <-ref <-callback]]
+            ["react" :as react]
             [clojure.pprint :as pprint]
             ["react-dom" :as react-dom]
+            ["react-codemirror" :as code-mirror]
+            ["parinfer-codemirror" :as parinfer]
             [cljs.env :as env]
+            ["codemirror/mode/clojure/clojure"]
             ["use-debounce" :refer [useDebounce]]
             [cljs.reader :refer [read-string]]))
 
@@ -31,12 +35,15 @@
   (let [[ready? update-ready?] (<-state false)
         [input update-input] (<-state (with-out-str (pprint/pprint example-input)))
         [lhs update-lhs] (<-state "{:title ?title}")
-        [rhs update-rhs] (<-state "?title")
+        [rhs update-rhs] (<-state "[:p ?title]")
         [debounced-input] (useDebounce input 200)
         [debounced-lhs] (useDebounce lhs 200)
         [debounced-rhs] (useDebounce rhs 200)
         [matches update-matches] (<-state [])
-        worker (<-ref nil)]
+        worker (<-ref nil)
+        cm-input (react/useRef nil)
+        cm-lhs (react/useRef nil)
+        cm-rhs (react/useRef nil)]
     (<-effect (fn []
                 (println "Create Worker")
                 (reset! worker (js/Worker. "/js/worker.js")))
@@ -58,28 +65,47 @@
      (fn []
        (.. @worker (postMessage (prn-str [:rhs debounced-rhs]))))
      [@worker debounced-rhs])
+    (<-effect (fn []
+                
+                (when (.-current cm-rhs)
+                  (.init parinfer (.getCodeMirror (.-current cm-rhs)))))
+              [cm-rhs])
+    (<-effect (fn []
+                (when (.-current cm-lhs)
+                  (.init parinfer (.getCodeMirror (.-current cm-lhs)))))
+          [cm-rhs])
+    (<-effect (fn []
+                (when (.-current cm-input)
+                  (.init parinfer (.getCodeMirror (.-current cm-input)))))
+            [cm-rhs])
     (<-effect
      (fn []
        (.. @worker (postMessage (prn-str [:input debounced-input]))))
      [@worker debounced-input])
-    
+
     (println "render")
     [:<>
-     [:link
-      {:rel "stylesheet",
-       :href "https://unpkg.com/superstylin@1.0.3/src/index.css"}]
      [:div {:style {:display :flex}}
       [:div
        [:div
-        [:textarea 
-         {:style {:width 500 :margin-top 10} :value input :on-change #(update-input (.. % -target -value))}]]
+        [code-mirror
+         {:style {:width 500 :margin-top 10} 
+          :ref cm-input
+          :value input 
+          :on-change #(update-input %)}]]
        [:div
-        [:textarea 
-         {:style {:width 500 :margin-top 10} :value lhs :on-change #(update-lhs (.. % -target -value))}]]
+        [code-mirror
+         {:style {:width 500 :margin-top 10} 
+          :ref cm-lhs
+          :value lhs 
+          :on-change #(update-lhs %)}]]
        [:div
-        [:textarea 
-         {:style {:width 500 :margin-top 10} :value rhs :on-change #(update-rhs (.. % -target -value))}]]]
-      [:div {:style {:margin-left 50}}
+        [code-mirror
+         {:style {:width 500 :margin-top 10}
+          :ref cm-rhs
+          :value rhs 
+          :onChange #(update-rhs %)}]]]
+      [:div {:class "results" :style {:margin-left 50}}
        (map render-component matches)]]]))
 
 
