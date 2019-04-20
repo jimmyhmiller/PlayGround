@@ -6,7 +6,7 @@
  :builds       {:bootstrap {:target     :bootstrap
                             :output-dir "out/public/js/bootstrap"
                             :entries    [cljs.js meander-editor.eval-env]
-                            :exclude    #{cljs.js}}
+                            :exclude    #{cljs.js meander-editor.core}}
                 :browser {:target :browser
 
                           :output-dir       "out/public/js"
@@ -18,8 +18,13 @@
 
                           :modules
                           {:base
-                           {:entries [shadow.cljs.bootstrap.env
-                                      meander-editor.core]}
+                           {:entries [shadow.cljs.bootstrap.env]}
+
+                           ;; Without this split code mirror causes problems for the woker
+                           :core
+                           {:entries [meander-editor.core]
+                            :depends-on #{:base}}
+
                            :worker
                            {:entries [meander-editor.worker]
                             :depends-on #{:base}

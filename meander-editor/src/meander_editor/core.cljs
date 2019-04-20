@@ -22,28 +22,51 @@
    {:title "Lemon"}])
 
 
+(hx/defcomponent ErrorBoundary
+  (constructor
+   [this]
+   (set! (. this -state)
+         #js {:hasError false
+              :message ""})
+   this)
+
+  ^:static (getDerivedStateFromError
+            (fn [error]
+              #js {:hasError true
+                   :message (.toString error)}))
+
+  (render
+   [this]
+   (if (.. this -state -hasError)
+     [:div "Invalid html"]
+     (.. this -props -children))))
+
 
 
 (defn render-component [[type value]]
   (if (= type :success)
-    (if (and (vector? value) (keyword? (first value)))
-      value
-      (with-out-str (pprint/pprint value)))
+    (do (println value)
+        (if (and (vector? value) (keyword? (first value)))
+          value
+          (with-out-str (pprint/pprint value))))
     nil))
 
 (defnc Main []
-  (let [[ready? update-ready?] (<-state false)
-        [input update-input] (<-state (with-out-str (pprint/pprint example-input)))
+  (let [[input update-input] (<-state (with-out-str (pprint/pprint example-input)))
         [lhs update-lhs] (<-state "{:title ?title}")
         [rhs update-rhs] (<-state "[:p ?title]")
         [debounced-input] (useDebounce input 200)
         [debounced-lhs] (useDebounce lhs 200)
         [debounced-rhs] (useDebounce rhs 200)
         [matches update-matches] (<-state [])
+        [render-count update-render-count] (<-state 0)
         worker (<-ref nil)
         cm-input (react/useRef nil)
         cm-lhs (react/useRef nil)
         cm-rhs (react/useRef nil)]
+    (<-effect (fn []
+                (update-render-count (inc render-count)))
+              [matches])
     (<-effect (fn []
                 (println "Create Worker")
                 (reset! worker (js/Worker. "/js/worker.js")))
@@ -66,7 +89,6 @@
        (.. @worker (postMessage (prn-str [:rhs debounced-rhs]))))
      [@worker debounced-rhs])
     (<-effect (fn []
-                
                 (when (.-current cm-rhs)
                   (.init parinfer (.getCodeMirror (.-current cm-rhs)))))
               [cm-rhs])
@@ -83,37 +105,39 @@
        (.. @worker (postMessage (prn-str [:input debounced-input]))))
      [@worker debounced-input])
 
-    (println "render")
     [:<>
      [:div {:style {:display :flex}}
       [:div
-       [:div
+       [:div {:style {:margin-top 10 :width 800}}
         [code-mirror
-         {:style {:width 500 :margin-top 10} 
+         {:options #js {:lineNumbers true}
           :ref cm-input
           :value input 
           :on-change #(update-input %)}]]
-       [:div
+       [:div {:style {:margin-top 10 :width 800}}
         [code-mirror
-         {:style {:width 500 :margin-top 10} 
+         {:options #js {:lineNumbers true}
           :ref cm-lhs
           :value lhs 
           :on-change #(update-lhs %)}]]
-       [:div
+       [:div {:style {:margin-top 10 :width 800}}
         [code-mirror
-         {:style {:width 500 :margin-top 10}
+         {:options #js {:lineNumbers true}
           :ref cm-rhs
           :value rhs 
           :onChange #(update-rhs %)}]]]
-      [:div {:class "results" :style {:margin-left 50}}
-       (map render-component matches)]]]))
+
+      ;; Works, but every update is now a new component.
+      ;; I need to be smart about only updating the key on error.
+      ;; Maybe render a hidden one?
+      [ErrorBoundary {:key render-count}
+       [:div {:class "results" :style {:margin-left 50}}
+        (map render-component matches)]]]]))
 
 
 
 (defn render []
   (react-dom/render
-   ;; hx/f transforms Hiccup into a React element.
-   ;; We only have to use it when we want to use hiccup outside of `defnc` / `defcomponent`
    (hx/f [Main])
    (. js/document getElementById "app")))
 
