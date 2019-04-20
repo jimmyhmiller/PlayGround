@@ -44,8 +44,6 @@
             
              @result))))
 
-;; This works except for this issue:
-;; https://github.com/thheller/shadow-cljs/blob/da2fc8f8b10daeee0c984a10f9437a579933931c/src/main/shadow/cljs/bootstrap/browser.cljs#L37-L43
 
 (def meander-fn (atom nil))
 
@@ -60,6 +58,7 @@
   (swap! state assoc :lhs lhs))
 
 (defmethod handle-message :rhs [[_ rhs]]
+  (println rhs)
   (reset! has-updated true)
   (swap! state assoc :rhs rhs))
 
