@@ -333,6 +333,74 @@ export default () =>
       color="magenta"
       text="What if we wrote an interpreter?" />
 
+    <Code
+      lang="clojure"
+      source={`
+
+        (run 1 (q)
+             (evalo \`(if (equal? #t #t) 1 2) q))
+        ;; => 1
+
+        (run 1 (q)
+             (evalo \`(if (equal? ,q #t) 1 2) 1))
+        ;; => #t
+      `}
+    />
+
+
+    <Code
+      lang="clojure"
+      source={`
+
+        (run 4 (q)
+             (evalo \`(if (equal? ,q #t) 1 2) 1))
+        
+        ;; => (#t ((lambda _ #t)) (and) (not #f))
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+
+        (run 4 (q)
+             (evalo q q))
+        
+      `}
+    />
+
+
+    <Code
+      lang="clojure"
+      source={`
+
+        (run 4 (q)
+             (evalo q q))
+        
+        ;; (num _)
+        ;; #t
+        ;; #f
+        ;; ((lambda (_) (list _ (list 'quote _)))
+        ;;   '(lambda (_) (list _ (list 'quote _))))
+
+      `}
+    />
+
+
+    <Code
+      lang="clojure"
+      source={`
+
+        > ((lambda (_) (list _ (list 'quote _)))
+            '(lambda (_) (list _ (list 'quote _))))
+
+        ((lambda (_) (list _ (list 'quote _)))
+          '(lambda (_) (list _ (list 'quote _))))
+
+      `}
+    />
+
+
     <Headline
       textAlign="left"
       color="blue"
