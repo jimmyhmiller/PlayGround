@@ -1,5 +1,5 @@
 (ns wander.core
-  (:require [meander.match.beta :as m]
+  (:require [meander.match.beta :as m :refer [match search]]
             [meander.strategy.beta :as strat]
             [meander.syntax.beta :as syntax]
             [clojure.spec.alpha :as s]
@@ -169,4 +169,3 @@
                         (eval-expr ?body
                          (assoc env ?arg x)))
     (?f ?x) ((eval-expr ?f env) (eval-expr ?x env))))
-
