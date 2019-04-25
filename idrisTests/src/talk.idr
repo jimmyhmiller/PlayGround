@@ -12,13 +12,13 @@ data Vect : Nat -> Type -> Type where
 -- Ctrl + Cmd + R = Type Check
 -- Ctrl + Cmd + f = Generate Definition
 
+
 myVector : Vect 2 Int
 myVector = [1, 2]
 
 bar : (f : a -> b) -> (xs : Vect n a) -> Vect n b
 bar f [] = []
 bar f (x :: xs) = f x :: bar f xs
-
 
 append : Vect n a -> Vect m a -> Vect (n + m) a
 append [] ys = ys
