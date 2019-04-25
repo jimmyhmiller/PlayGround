@@ -58,7 +58,7 @@ export default () =>
       text="Not a gimmick" />
 
     <Points title="Why?">
-      <Point text="Writing Code is Error prone" />
+      <Point text="Writing Code is error prone" />
       <Point text="Waste of time" />
       <Point text="This is what programming is about" />
     </Points>
@@ -187,7 +187,7 @@ export default () =>
       lang="haskell"
       source={`
         bar : (f : a -> b) -> (xs : Vect n a) -> Vect n b
-        bar f xs = ?bar
+        bar f xs = _
       `}
     />
 
@@ -399,6 +399,19 @@ export default () =>
 
       `}
     />
+
+    <Points title="How it works">
+      <Point text="Lisp interpreter in miniKanren" />
+      <Point text="Smart search for potential code" />
+      <Point text="Runs tests to check" />
+    </Points>
+
+
+    <Points title="What have we seen?">
+      <Point text="Experimental, not ready" />
+      <Point text="Each largely done by a single person" />
+      <Point text="Provider new opportunities to learn" />
+    </Points>
 
 
     <Headline

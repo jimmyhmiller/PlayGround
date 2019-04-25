@@ -1,0 +1,7 @@
+The recent resurgance of interest in functional programming has introduced many to a more declarative approach to data transformation. Rather than manually looping through an array, mutating variables along the way, programs can describe their transformations using higher-order operations (map, reduce, filter, etc). This approach allows greater flexibility and expressivity, allowing programmer to express their intent more clearly.
+
+And yet, reading and writing code involving complex data transformation is still difficult. As requirements change and new data sources are added, our code structure must change as well. Our code's structure no longer mirrors that of our data, transformations become lost inside nested pipelines. Our seemingly declarative approach starts to feel quite imperative.
+
+Meander is an exploration into truly declarative data manipulation created as a library in Clojure. Borrowing ideas from logic programming and term rewriting, meander allows declarative descriptions of arbitrarily complex data; enabling you to search, match, remember, join, and transform any part of your data directly.
+
+This talk will show you how to leverage meander to declaratively solve real-world data transformation problems, give you insight into how meander remains both performant and expressive, and finally cast a vision for what a more declarative future for functional programming may hold.
