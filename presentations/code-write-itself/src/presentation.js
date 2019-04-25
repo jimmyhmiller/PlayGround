@@ -410,7 +410,7 @@ export default () =>
     <Points title="What have we seen?">
       <Point text="Experimental, not ready" />
       <Point text="Each largely done by a single person" />
-      <Point text="Provider new opportunities to learn" />
+      <Point text="Provides new opportunities to learn" />
     </Points>
 
 
