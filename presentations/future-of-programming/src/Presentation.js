@@ -377,7 +377,7 @@ export default () => (
 
      <Headline
       textAlign="left"
-      color="blue"
+      color="green"
       text="What if refactoring didn't suck." />
 
     <Code
@@ -400,12 +400,12 @@ export default () => (
       source={`
         -- alice : Node, bob : Node
 
-        do Remote
-          x = 643fd234 6
-          Remote.transfer alice
-          y = 543gf433 x -- happens on 'alice' node
-          Remote.transfer bob
-          pure (223bn456 x y) -- happens on 'bob' node
+  
+        x = 643fd234 6
+        Remote.transfer alice
+        y = 543gf433 x -- happens on 'alice' node
+        Remote.transfer bob
+        223bn456 x y -- happens on 'bob' node
       `} 
     />
 
