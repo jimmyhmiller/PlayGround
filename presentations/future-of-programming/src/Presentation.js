@@ -347,10 +347,6 @@ export default () => (
         `}
     />
 
-    <Headline
-      color="blue"
-      text="Code that writes itself" />
-
     <Points title="How to get here?">
       <Point text="Get rid of OOP" />
       <Point text="Be rigorous" />
