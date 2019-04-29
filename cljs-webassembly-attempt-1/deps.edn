@@ -1,0 +1,6 @@
+{:deps {org.clojure/clojurescript {:mvn/version "1.10.238"}}
+ :aliases
+ {:cljs {:main-opts ["-m" "cljs.main" "-co" "{:install-deps,true,:npm-deps,{wabt,\"1.0.10\"}}" "-re" "node" "-r"]
+         :extra-deps {org.clojure/clojurescript {:mvn/version "1.10.238"}}}}}
+
+
