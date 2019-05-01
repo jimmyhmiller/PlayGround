@@ -12,3 +12,6 @@
 
 (defmacro s-expr [x]
   `~(transform-expr x))
+
+(defmacro s-exprs [& xs]
+  `~(transform-expr xs))
