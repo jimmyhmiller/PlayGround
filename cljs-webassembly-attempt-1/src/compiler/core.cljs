@@ -1,17 +1,20 @@
 (ns compiler.core
   (:require ["wabt" :as wabt-init])
-  (:require-macros [compiler.helpers :refer [s-expr]]))
+  (:require-macros [compiler.helpers :refer [s-expr s-exprs]]))
+
 
 (def wabt (wabt-init))
 
-(defn run [source]
-  (.main
-   (.-exports
+(defn make-module [source]
+  (.-exports
     (js/WebAssembly.Instance.
      (js/WebAssembly.Module
       (.-buffer
        (.toBinary
-        (.parseWat wabt "test.wat" (str source)) #js {})))))))
+        (.parseWat wabt "test.wat" (str source)) #js {}))))))
+
+(defn run [source]
+  (.main (make-module source)))
 
 (def number-flag 2r00)
 (def immediate-flag 2r1111)
@@ -64,6 +67,7 @@
 
 (def compile-if)
 (def compile-expr)
+(def compile-defn)
 
 
 (def bool-operators 
@@ -107,6 +111,19 @@
               (then ~(compile-expr true-case))
               (else ~(compile-expr false-case)))))
 
+(defn $ [sym]
+  (symbol (str "$" sym)))
+
+(defn compile-defn [[_ name [] body]]
+  (s-expr (func ~($ name)  (result i32)
+                ~(compile-expr body))))
+
+(defn compile-export [[_ name]]
+  (s-expr (export ~(str name) (func ~($ name)))))
+
+(defn compile-call-zero [[name]]
+  (s-expr (call ~($ name))))
+
 (defn compile-expr [expr]
   (cond
     (symbol? expr) (operators expr)
@@ -115,24 +132,33 @@
     (char? expr) (s-expr (i32.const ~(rep-char expr)))
     (nil? expr) (s-expr (i32.const ~(rep-nil expr)))
     (and (seq? expr) (= (first expr) 'if)) (compile-if expr)
+    (and (seq? expr) (= (first expr) 'defn)) (compile-defn expr)
+    (and (seq? expr) (= (first expr) 'export)) (compile-export expr)
     (and (seq? expr) (= (first expr) 'inline)) (second expr)
+    (and (seq? expr) (= (count expr) 1)) (compile-call-zero expr)
     (and (seq? expr) (= (count expr) 3)) (compile-binary-application expr)))
+
+(defn compile-exprs [exprs]
+  (map compile-expr exprs))
 
 ;; Pulling in meander here to do some pattern matching would be good.
 ;; It should be easy to add in primitive webassembly functions.
-;; I should then add function calls (not hard?).
+;; I've added in zero arity functions. Should handle the general case.
+;; Do calls work by stack or params?
 ;; Multiple arity via table?
 
-(defn compile [expr]
-  (s-expr
-   (module 
-    (export "main" (func $main))
-    (func $main (result i32)
-           ~(compile-expr expr)))))
-
+(defn compile [exprs]
+  (concat '(module)
+          (compile-exprs exprs)))
 
 (unrep-bool
- (run (compile (s-expr (if (>= (/ 16 8) 2) true false)))))
-
-
-
+ (run (compile
+       (s-exprs
+        (export main)
+        (export thing)
+        (defn thing [] 2)
+        (defn main []
+          (if (= 2 (thing))
+            true
+            false))))
+   ))
