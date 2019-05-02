@@ -102,10 +102,6 @@
     :else (s-expr (~(compile-expr op) ~(compile-expr lhs) ~(compile-expr rhs)))))
 
 
-(defn compile-binary-application [[op lhs rhs :as app]]
-  (cond (contains? bool-operators op) (compile-bool-op app)
-        (contains? number-operators op) (compile-number-op app)))
-
 (defn compile-if [[_ pred true-case false-case]]
   (s-expr (if (result i32) (i32.eq ~(compile-expr pred) ~(compile-expr true))
               (then ~(compile-expr true-case))
@@ -114,19 +110,28 @@
 (defn $ [sym]
   (symbol (str "$" sym)))
 
-(defn compile-defn [[_ name [] body]]
-  (s-expr (func ~($ name)  (result i32)
-                ~(compile-expr body))))
+
+(defn compile-defn [[_ name args & body]]
+  (concat (s-expr (func ~($ name)))
+          (map (fn [x] (s-expr (param ~($ x) i32))) args)
+          (s-expr ((result i32)))
+          (map compile-expr body)))
+
 
 (defn compile-export [[_ name]]
   (s-expr (export ~(str name) (func ~($ name)))))
 
-(defn compile-call-zero [[name]]
-  (s-expr (call ~($ name))))
+
+(defn compile-application [[name & args :as app]]
+  (cond (contains? bool-operators name) (compile-bool-op app)
+        (contains? number-operators name) (compile-number-op app)
+        :else (concat (s-expr (call ~($ name)))
+                      (map compile-expr args))))
+
 
 (defn compile-expr [expr]
   (cond
-    (symbol? expr) (operators expr)
+    (symbol? expr) (or (operators expr) (s-expr (get_local ~($ expr))))
     (number? expr) (s-expr (i32.const ~(rep-number expr)))
     (boolean? expr) (s-expr (i32.const ~(rep-bool expr)))
     (char? expr) (s-expr (i32.const ~(rep-char expr)))
@@ -135,30 +140,42 @@
     (and (seq? expr) (= (first expr) 'defn)) (compile-defn expr)
     (and (seq? expr) (= (first expr) 'export)) (compile-export expr)
     (and (seq? expr) (= (first expr) 'inline)) (second expr)
-    (and (seq? expr) (= (count expr) 1)) (compile-call-zero expr)
-    (and (seq? expr) (= (count expr) 3)) (compile-binary-application expr)))
+    (and (seq? expr)) (compile-application expr)))
 
 (defn compile-exprs [exprs]
   (map compile-expr exprs))
 
-;; Pulling in meander here to do some pattern matching would be good.
-;; It should be easy to add in primitive webassembly functions.
-;; I've added in zero arity functions. Should handle the general case.
-;; Do calls work by stack or params?
 ;; Multiple arity via table?
+;; Need heap allocation to do real things
+;; After heap allocation I guess I should make GC?
+;; I should also make closures work
+;; Abstract interpreter for dead code elimination would be cool
 
 (defn compile [exprs]
   (concat '(module)
           (compile-exprs exprs)))
 
-(unrep-bool
+(unrep-number
  (run (compile
        (s-exprs
+
         (export main)
         (export thing)
-        (defn thing [] 2)
+
+        (defn thing [x] x)
+        
+        (defn fact [x]
+          (if (= x 0)
+            1
+            (* x (fact (- x 1)))))
+
+        (defn add [x y]
+          (+ x y))
+        
         (defn main []
-          (if (= 2 (thing))
-            true
-            false))))
+          3)))
    ))
+
+
+
+
