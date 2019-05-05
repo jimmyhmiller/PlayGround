@@ -6,6 +6,7 @@
     { "src": "api/js/oauth.js", "use": "@now/node" },
     { "src": "api/js/landing.js", "use": "@now/node" },
     { "src": "api/js/items.js", "use": "@now/node" },
+    { "src": "api/js/extraction.js", "use": "@now/node" },
     { "src": "frontend/package.json", "use": "@now/static-build" }
   ],
   "env": {
@@ -24,6 +25,10 @@
     {
       "src": "^/api/items",
       "dest": "/api/js/items.js"
+    },
+    {
+      "src": "^/api/extract",
+      "dest": "/api/js/extraction.js"
     },
     {
       "src": "^/static/(.*)",

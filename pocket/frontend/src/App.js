@@ -3,22 +3,10 @@ import { hot } from 'react-hot-loader'
 import Inspector from 'react-inspector';
 import toTime from 'to-time';
 import orderBy from 'lodash.orderby';
-
-// const useDebounce = (value, delay) => {
-//   const [currentValue, setCurrentValue] = useState(value);
-
-//   useEffect(() => {
-//     const delayed = setTimeout(() => {
-//       setCurrentValue(value)
-//     }, delay);
-
-//     return () => {
-//       clearInterval(delayed);
-//     }
-//   }, [value, delay])
-
-//   return currentValue;
-// }
+import groupBy from 'lodash.groupby';
+import map from 'lodash.map';
+import range from 'lodash.range';
+import random from 'random-seed';
 
 const useLocalStorage = (key) => {
 
@@ -155,22 +143,90 @@ const totalTime = (items) => {
 }
 
 
-const App = () => {
-  const items = orderBy(
-      useLocalCache([], "/api/items?count=10000", x => Object.values(x.list)),
-      x => x.tags && Object.keys(x.tags)[0],
-    )
+
+const AllItems = ({ items }) => {
+  const orderedItems = orderBy(items, x => x.tags && Object.keys(x.tags)[0]);
+
   return (
     <>
-      <h1>Pocket App</h1>
-      <Small>Total Words: {totalWords(items)}</Small>
+      <h1 style={{marginTop: 0}}>Pocket App</h1>
+      <Small>Total Words: {totalWords(orderedItems)}</Small>
       <Small>•</Small>
-      <Small>Time to Read: {totalTime(items)}</Small>
+      <Small>Time to Read: {totalTime(orderedItems)}</Small>
       <ul>
-        {items.map(item => <Item key={item.item_id} {...item} />)}
+        {orderedItems.map(item => <Item key={item.item_id} {...item} />)}
       </ul>
     </>
   )
 }
+
+const View = ({ name, selectedView, children }) => {
+  return (
+    <div style={{display: name === selectedView ? "block" : "none" }}>
+      {children}
+    </div>
+  )
+}
+
+const Selector = ({ onClick, text }) => {
+  return (
+    <a style={{paddingRight: 15}}
+       href="#" 
+       onClick={(e) => { e.preventDefault(); onClick()} }
+     >{text}</a>
+  )
+}
+
+
+
+// Okay I can get random things.
+// What I need to do is get random things with a different seed every day
+// Then I can navigate between days.
+// I also need to show other things from the site.
+// I need to show 3? selections each with different reading times.
+
+const Experiment1 = ({ items }) => {
+  const filteredItems = items.filter(item => item.is_article === "1")
+  const groupedItems = groupBy(filteredItems, item => siteName(item))
+  const pairGroup = map(groupedItems, (value, key) => [key, value])
+  const orderedItems = map(orderBy(pairGroup, x => x[1].length, "desc"), x => x[1][0])
+  const gen = random("my-seed")
+  const pickItem = (coll) => coll[gen.intBetween(0, coll.length-1)]
+  const randomItems = range(0,10).map(x => pickItem(pickItem(pairGroup)[1]))
+  return (
+    <>
+      <h1 style={{marginTop: 0}}>Pocket App</h1>
+      <ul>
+        {randomItems.map(item => <Item key={item.item_id} {...item} />)}
+      </ul>
+    </>
+  )
+}
+
+
+const App = () => {
+
+  const items = orderBy(
+    useLocalCache([], "/api/items?count=10000", x => Object.values(x.list)),
+  )
+
+  const [selectedView, setView] = useState("experiment1");
+
+  return (
+    <>
+      <div>
+        <Selector onClick={() => setView("all")} text="All" />
+        <Selector onClick={() => setView("experiment1")} text="Experiment 1" />
+      </div>
+      <View name="all" selectedView={selectedView}>
+        <AllItems items={items} />
+      </View>
+      <View name="experiment1" selectedView={selectedView}>
+        <Experiment1 items={items} />
+      </View>
+    </>
+  ) 
+}
+
 
 export default hot(module)(App);
