@@ -1,0 +1,14 @@
+{
+    "version": 2,
+    "name": "static-example",
+    "routes": [
+        {
+            "src": "/",
+            "headers": {
+                "Content-Security-Policy": "default-src 'self'; img-src 'self'; script-src 'self'; style-src 'unsafe-inline'; frame-ancestors; 'none'",
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options": "DENY"
+            }
+        }
+    ]
+}
