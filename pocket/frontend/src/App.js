@@ -179,9 +179,7 @@ const Selector = ({ onClick, text }) => {
 
 
 
-// Okay I can get random things.
-// What I need to do is get random things with a different seed every day
-// Then I can navigate between days.
+// Make it so I can navigate between days.
 // I also need to show other things from the site.
 // I need to show 3? selections each with different reading times.
 
@@ -190,7 +188,7 @@ const Experiment1 = ({ items }) => {
   const groupedItems = groupBy(filteredItems, item => siteName(item))
   const pairGroup = map(groupedItems, (value, key) => [key, value])
   const orderedItems = map(orderBy(pairGroup, x => x[1].length, "desc"), x => x[1][0])
-  const gen = random("my-seed")
+  const gen = random(new Date().toLocaleDateString())
   const pickItem = (coll) => coll[gen.intBetween(0, coll.length-1)]
   const randomItems = range(0,10).map(x => pickItem(pickItem(pairGroup)[1]))
   return (
