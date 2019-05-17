@@ -130,7 +130,7 @@
       ;; Works, but every update is now a new component.
       ;; I need to be smart about only updating the key on error.
       ;; Maybe render a hidden one?
-      [ErrorBoundary {:key render-count}
+      [ErrorBoundary
        [:div {:class "results" :style {:margin-left 50}}
         (map render-component matches)]]]]))
 

@@ -1,0 +1,7 @@
+## Einstein, Hats, and Propaganda: An Introduction to Distrubuted Systems
+
+This week we are going to be diving deep into a topic that applies to us all. Whether we realize it or not, all of us in our day jobs are writing distributed systems . No long do our programs live on a single machine, but are spread across many. As cloud computing becomes more common, the scale of our distribution grows larger. Our old tools for data integrity like transactions become more and more difficult to implement. Debugging becomes more difficult as we try to follow the data flow across machines. Our systems become full of race conditions which we consistently try to patch with retries and timers.
+
+In this talk we are going to look at three works out of academia that tell us something interesting about distributed systems. We will see that while distributed systems do have inherent difficulties, we can overcome them by studying them. This will be an accessible introduction that will help you dive in deeper.
+
+First we will be looking at a seminal paper by Leslie Lamport called "Time Clocks and Ordering of Events in a Distributed System". This paper demonstrates how time works in distributed systems and shows its similarities to Einstein's theory of relativity. Next, we will be looking at the cap theorem which tells us about the constraints we face when trying to make a system consistent and available. Finally, we will explore CALM a thereom that tells us how to get consistency for free. Finally we will consider how all of this is connected with functional programming
