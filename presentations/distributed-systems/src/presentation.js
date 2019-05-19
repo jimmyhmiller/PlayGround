@@ -233,13 +233,12 @@ export default () =>
       text="We will just observe that the entire concept of failure is only meaningful in the context of physical time."
     />
 
-
     <ImageSlide 
       height={700}
       src={images.cap} />
 
 
-    <Points title="CAP Theorm">
+    <Points title="CAP theorem">
       <Point text="Consistency" />
       <Point text="Availability" />
       <Point text="Partition Tolerence" />
@@ -256,8 +255,81 @@ export default () =>
 
     <QuoteSlide
       color="blue"
-      text="The network will be allowed to lose arbitarily man messages sent from one node to another."
+      text="The network will be allowed to lose arbitrarily many messages sent from one node to another."
     />
+
+    <Points title="Pick Two">
+      <Point text="Consistency" />
+      <Point text="Availability" />
+      <Point text="Partition Tolerence" />
+    </Points>
+
+    <Points title="What does this mean?">
+      <Point text="Formal Statement" />
+      <Point text="Popular Interpretation" />
+    </Points>
+
+    <Headline
+      caps={false}
+      textAlign="left"
+      color="blue"
+      text="Linearizability" />
+
+     <Headline
+      caps={false}
+      textAlign="left"
+      color="magenta"
+      text="Every node is available" />
+
+    <Headline
+      caps={false}
+      textAlign="left"
+      color="yellow"
+      text="CP and AP Systems" />
+
+    <QuoteSlide
+      color="blue"
+      text="[The original] expression of CAP served its purpose, which was to open the minds of designers to a wider range of systems and tradeoffs" 
+    />
+
+    <Headline
+      textAlign="left"
+      color="magenta"
+      text="Consistency as Logical Monotonicity" />
+
+    <Headline
+      textAlign="left"
+      color="blue"
+      text="Coordination is Hard" />
+
+    <Headline
+      textAlign="left"
+      color="green"
+      text="Two Generals" />
+
+
+    <QuoteSlide
+      text="A program P is monotonic if for any input sets S, T where S ⊆ T, P(S) ⊆ P(T)"
+    />
+
+    <QuoteSlide
+      color="blue"
+      text="A program has a consistent, coordination-free distributed implementation if and only if it is monotonic"
+    />
+
+    <QuoteSlide
+      color="green"
+      text="Does my program produce deterministic outcomes despite non-determinism in the runtime system?"
+    />
+
+    <Headline
+      textAlign="left"
+      color="yellow"
+      text="Shopping Cart" />
+
+
+
+
 
 
     <BlankSlide />
