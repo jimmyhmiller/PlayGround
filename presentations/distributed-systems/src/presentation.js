@@ -29,6 +29,7 @@ const images = {
   logClocks1: require("./images/logical-clocks-1.png"),
   logClocks2: require("./images/logical-clocks-2.png"),
   cap: require("./images/cap.png"),
+  calm: require("./images/calm.png"),
 };
 
 
@@ -292,6 +293,10 @@ export default () =>
       text="[The original] expression of CAP served its purpose, which was to open the minds of designers to a wider range of systems and tradeoffs" 
     />
 
+    <ImageSlide 
+      height={700}
+      src={images.calm} />
+
     <Headline
       textAlign="left"
       color="magenta"
@@ -326,6 +331,33 @@ export default () =>
       textAlign="left"
       color="yellow"
       text="Shopping Cart" />
+
+    <QuoteSlide
+      color="blue"
+      text="Coordination-freeness is equivalent to availability under partition"
+    />
+
+     <Headline
+      textAlign="left"
+      color="green"
+      text="Loosening Consistency Constraits" />
+
+     <Headline
+      textAlign="left"
+      color="magenta"
+      text="Functional Programming" />
+
+
+     <Headline
+      textAlign="left"
+      color="yellow"
+      text="Bloom" />
+
+     <Headline
+      textAlign="left"
+      color="blue"
+      text="The world we live in" />
+
 
 
 
