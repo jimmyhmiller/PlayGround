@@ -43,7 +43,7 @@ export default () =>
       size={3}
       subtextSize={4}
       text="Einstein, Hats, and Propaganda"
-      subtext="An Introduction to Distrubuted Systems" />
+      subtext="An Introduction to Distributed Systems" />
 
     <TwoColumn
       title="About Me"
@@ -65,7 +65,7 @@ export default () =>
       size={3}
       subtextSize={4}
       text="Einstein, Hats, and Propaganda"
-      subtext="An Introduction to Distrubuted Systems" />
+      subtext="An Introduction to Distributed Systems" />
 
     <Points title="Papers">
       <Point text="Time, Clocks, and the Ordering of Events in a Distributed System" />
@@ -212,7 +212,7 @@ export default () =>
       caps={false}
       textAlign="left"
       color="green"
-      text="P0 > P1 && P1 > P2" />
+      text="P0 < P1 && P1 < P2" />
 
     <ImageSlide 
       height={400}
@@ -246,7 +246,7 @@ export default () =>
     </Points>
 
     <QuoteSlide
-      text="There must exist a total order on all operations such that each operation looks as if it were complete at a single instant."
+      text="There must exist a total order on all operations such that each operation looks as if it were completed at a single instant."
     />
 
     <QuoteSlide
@@ -276,11 +276,27 @@ export default () =>
       color="blue"
       text="Linearizability" />
 
+    <QuoteSlide
+      color="blue"
+      text="There must exist a total order on all operations such that each operation looks as if it were completed at a single instant."
+    />
+
+
      <Headline
       caps={false}
       textAlign="left"
       color="magenta"
       text="Every node is available" />
+
+    <QuoteSlide
+      color="magenta"
+      text="Every request recieved by a non-failing node in a system must result in a response."
+    />
+
+    <Headline
+      textAlign="left"
+      color="green"
+      text="Popular Interpration" />
 
     <Headline
       caps={false}
@@ -340,13 +356,17 @@ export default () =>
      <Headline
       textAlign="left"
       color="green"
-      text="Loosening Consistency Constraits" />
+      text="Loosening Consistency Constraints" />
 
      <Headline
       textAlign="left"
       color="magenta"
       text="Functional Programming" />
 
+     <Headline
+      textAlign="left"
+      color="green"
+      text="Anna" />  
 
      <Headline
       textAlign="left"
