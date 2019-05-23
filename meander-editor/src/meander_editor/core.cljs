@@ -16,7 +16,7 @@
 
 
 
-(def example-input 
+(def example-input
   [{:title "Jimmy"}
    {:title "Janice"}
    {:title "Lemon"}])
@@ -45,10 +45,9 @@
 
 (defn render-component [[type value]]
   (if (= type :success)
-    (do (println value)
-        (if (and (vector? value) (keyword? (first value)))
-          value
-          (with-out-str (pprint/pprint value))))
+    (if (and (vector? value) (keyword? (first value)))
+      value
+      (with-out-str (pprint/pprint value)))
     nil))
 
 (defnc Main []
@@ -77,9 +76,9 @@
                                                 (let [new-coll (read-string (.-data e))
                                                       seconds (filter identity (map second new-coll))]
                                                   (when (not (empty? seconds))
-                                                    (update-matches new-coll))))))
-                (.. @worker (addEventListener "error" (fn [e] (js/console.log e)))))
+                                                    (update-matches new-coll)))))))
               [])
+    
     (<-effect
      (fn []
        (.. @worker (postMessage (prn-str [:lhs debounced-lhs]))))
@@ -88,6 +87,11 @@
      (fn []
        (.. @worker (postMessage (prn-str [:rhs debounced-rhs]))))
      [@worker debounced-rhs])
+    (<-effect
+     (fn []
+       (println "sending input message")
+       (.. @worker (postMessage (prn-str [:input debounced-input]))))
+     [@worker debounced-input])
     (<-effect (fn []
                 (when (.-current cm-rhs)
                   (.init parinfer (.getCodeMirror (.-current cm-rhs)))))
@@ -100,10 +104,7 @@
                 (when (.-current cm-input)
                   (.init parinfer (.getCodeMirror (.-current cm-input)))))
             [cm-rhs])
-    (<-effect
-     (fn []
-       (.. @worker (postMessage (prn-str [:input debounced-input]))))
-     [@worker debounced-input])
+    
 
     [:<>
      [:div {:style {:display :flex}}
@@ -113,13 +114,13 @@
          {:options #js {:lineNumbers true}
           :ref cm-input
           :value input 
-          :on-change #(update-input %)}]]
+          :onChange #(update-input %)}]]
        [:div {:style {:margin-top 10 :width 800}}
         [code-mirror
          {:options #js {:lineNumbers true}
           :ref cm-lhs
           :value lhs 
-          :on-change #(update-lhs %)}]]
+          :onChange #(update-lhs %)}]]
        [:div {:style {:margin-top 10 :width 800}}
         [code-mirror
          {:options #js {:lineNumbers true}
