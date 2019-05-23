@@ -4,7 +4,13 @@
 infixr 10 <->
 infixr 10 ->>
 
-data Grammar =  Var String | P Grammar | (<->) Grammar Grammar | (->>) Grammar Grammar | Not Grammar | Contra
+data Grammar 
+  = Var String
+  | P Grammar
+  | (<->) Grammar Grammar
+  | (->>) Grammar Grammar
+  | Not Grammar
+  | Contra
 
 
 
@@ -29,7 +35,7 @@ contradiction x y = x ->> (Not x ->> y)
 
 distribution_implication : Grammar -> Grammar
 distribution_implication p@(x ->> (y ->> z)) = p ->> ((x ->> y) ->> (x ->> z))
-distribution_implication x = x
+
 
 
 contraposition : Grammar -> Grammar

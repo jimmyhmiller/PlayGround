@@ -58,7 +58,6 @@
   (swap! state assoc :lhs lhs))
 
 (defmethod handle-message :rhs [[_ rhs]]
-  (println rhs)
   (reset! has-updated true)
   (swap! state assoc :rhs rhs))
 
@@ -78,7 +77,6 @@
 (add-watch state
            :compute 
            (fn [_ _ old-state state]
-
              (if (or (not= (:rhs old-state) (:rhs state))
                      (not= (:lhs old-state) (:lhs state)))
                (.then (create-function (:lhs state) (:rhs state))
@@ -86,11 +84,19 @@
                         (reset! has-updated false)
                         (reset! meander-fn f))))))
 
+(add-watch state :re-compute
+           (fn [_ _ old-state state]
+             (when (and
+                    (not (nil? @meander-fn))
+                    (not (nil? (:input state))) 
+                    (not= (:input old-state) (:input state)))
+               (js/postMessage (prn-str
+                                (map @meander-fn (:input state)))))))
+
 (add-watch meander-fn :compute
            (fn [_ _ _ meander-fn]
              (js/postMessage (prn-str
-                              (take-while #(not @has-updated)
-                                          (map meander-fn (:input @state)))))))
+                              (map meander-fn (:input @state))))))
 
 
 ;; If I save the input instead of sending it everytime things should be much faster.
