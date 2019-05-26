@@ -1,0 +1,34 @@
+{:dependencies [[meander/delta "0.0.90"]
+                [cider/cider-nrepl "0.16.0-SNAPSHOT"]]
+ :source-paths ["src"]
+ :nrepl        {:port 8703}
+ :builds       {:bootstrap {:target     :bootstrap
+                            :output-dir "public/js/bootstrap"
+                            :entries    [cljs.js shadow-debug.eval-env]
+                            :exclude    #{cljs.js shadow-debug.core}}
+                :browser {:target :browser
+
+                          :output-dir       "public/js"
+                          :asset-path       "/js"
+                          
+
+                          :compiler-options
+                          {:optimizations :simple}
+
+                          :modules
+                          {:base
+                           {:entries [shadow.cljs.bootstrap.env]}
+
+                           :core
+                           {:entries [shadow-debug.core]
+                            :depends-on #{:base}}
+
+                           :worker
+                           {:entries [shadow-debug.worker]
+                            :depends-on #{:base}
+                            :exclude #{shadow-debug.core}
+                            :web-worker true}}
+
+                          :devtools         {:http-root  "public"
+                                             :http-port  8702
+                                             :after-load shadow-debug.core/render}}}}
