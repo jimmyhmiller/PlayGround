@@ -10,6 +10,76 @@
 
 
 
+(def x 2)
+
+(defn match-my-map [m]
+  (m/match m
+    {:x ~x :y ?y}
+    [:okay ?y]
+    
+    _
+    [:fail]))
+
+
+(match-my-map {:x 1 :y 3})
+;; =>
+[:fail]
+
+(match-my-map {:x 2 :y 3})
+;;=>
+[:okay 3]
+
+
+(let [f (fn [x]
+          (fn [z]
+            (m/match z
+              {:x ~x, :y ?y}
+              [:okay ?y]
+              _
+              [:fail])))
+      g (f 1)]
+  [(g {:x 1 :y 2})
+   (g {:x 2 :y 2})])
+;; =>
+[[:okay 2] [:fail]]
+
+
+(defmacro bup [& body]
+  `(r/until = (r/bottom-up (r/rewrite ~@body))))
+
+
+(def nn
+  (bup
+   ('not ('not ?x))
+   ?x
+   
+   ?x ?x))
+
+(nn )
+
+
+
+((r/until =
+    (r/bottom-up)))
+ 
+
+
+(def nn 
+  (r/until =
+    (r/bottom-up 
+     (r/rewrite 
+      
+      ('not ('not ?x))
+      ?x
+
+      ?x ?x))))
+
+(
+ 
+ '(and (not (not (or 1 2)))
+       (or 3 (not (not 4)))))
+
+
 
 (walk/macroexpand-all
  (quote
@@ -37,24 +107,27 @@
       _ 5))))
 
 
+(defn match-it [x]
+  (clj-match/match x
+                   [[_ _ 2]] :a0
+                   [[1 1 3]] :a1
+                   [[1 2 3]] :a2
+                   :else :a3))
+
+(match-it [[1 2 3]])
+
 (time
  (doseq [n (range 1000000)]
-   (let [x [1 2 2]]
-     (clj-match/match [x]
-                      [[_ _ 2]] :a0
-                      [[1 1 3]] :a1
-                      [[1 2 3]] :a2
-                      :else :a3))))
+   (match-it [[1 2 3]])))
 
 (walk/macroexpand-all
  (quote
 
-  (let [x [1 2 3]]
-    (clj-match/match [x]
-                     [[_ _ 2]] :a0
-                     [[1 1 3]] :a1
-                     [[1 2 3]] :a2
-                     :else :a3))))
+  (clj-match/match x
+                   [[_ _ 2]] :a0
+                   [[1 1 3]] :a1
+                   [[1 2 3]] :a2
+                   :else :a3)))
 
 (time
  (doseq [n (range 1000000)]
@@ -331,6 +404,42 @@
 
 
 
+
+(require '[meander.match.delta :as r.match]
+         '[meander.match.ir.delta :as r.ir]
+         '[meander.matrix.delta :as r.matrix]
+         '[meander.syntax.delta :as r.syntax]
+         '[meander.util.delta :as r.util]
+         '[meander.util.delta :as r.util])
+
+(defn analyze-compile
+  {:style/indent :defn}
+  ([patterns]
+   (analyze-compile patterns :find))
+  ([kind patterns]
+   (let [analyzer (case kind
+                    :match r.match/analyze-match-args
+                    :find r.match/analyze-find-args
+                    :search r.match/analyze-search-args)
+         analysis (analyzer (cons 'target patterns))
+         matrix (:matrix analysis)
+         ir (r.match/compile ['target] matrix)
+         ir* (r.ir/rewrite (r.ir/rewrite ir))
+         code (r.ir/compile ir* nil kind)]
+     {:matrix matrix
+      :ir ir
+      :ir* ir*
+      :code code})))
+
+
+(analyze-compile :match
+  (quote ({:preferred-address {:zip (pred some? !zips)
+                               :city (pred some? !cities)}
+           :other-addresses [{:zip (pred some? !zips)
+                              :city (pred some? !cities)} ...]}
+          {:zips (distinct !zips)
+           :cities (distinct !cities)})))
+
 (walk/macroexpand-all
  (quote
   (m/match (into [] (concat (into [] (mapcat identity (repeat 100 [3 8])))
@@ -344,19 +453,18 @@
 
   ))
 
-(ir/compile
+(m/compile
  (syntax/parse
+
   (quote
-   (r/rewrite
-    [?tag (or {:as ?attrs}) . !body ...]
-    (create-element ~(name ?tag) ?attrs . !body ...)
-
-    [?tag . !body ...]
-    (create-element  ?tag {} . !body ...)
-
-    ?x ?x
-    )))
- 'fail 'rewrite)
+   ({:preferred-address {:zip (pred some? !zips)
+                         :city (pred some? !cities)}
+     :other-addresses [{:zip (pred some? !zips)
+                        :city (pred some? !cities)} ...]}
+    {:zips (distinct !zips)
+     :cities (distinct !cities)}))
+  )
+ 'fail 'match)
 
 (let [test-data {:title "hello world"
                  :body "body"
@@ -384,3 +492,322 @@
     (substitute [[!tags !attrs !xs] ...]))
   ))
   
+(defn reformat-preferred-address [person]
+  (m/match person
+    {:preferred-address 
+     {:address1 ?address1
+      :address2 ?address2
+      :city ?city
+      :state ?state
+      :zip ?zip}}
+    
+    {:address {:line1 ?address1
+               :line2 ?address2}
+     :city-info {:city ?city
+                 :state ?state
+                 :zipcode ?zip}}))
+
+
+(defn same-zip-preferred [person]
+  (let [zip (get-in person [:preferred-address :zip])]
+    (filter #(= (:zip %) zip) (:other-addresses person))))
+
+
+
+(def people
+  [{:name "jimmy"
+    :preferred-address
+    {:address1 "123 street ave"
+     :address2 "apt 2"
+     :city "Townville"
+     :state "IN"
+     :zip "46203"}
+    :other-addresses 
+    [{:address1 "432 street ave"
+      :address2 "apt 7"
+      :city "Cityvillage"
+      :state "New York"
+      :zip "12345"}
+     {:address1 "534 street ave"
+      :address2 "apt 5"
+      :city "Township"
+      :state "IN"
+      :zip "46203"}]}
+   {:name "joel"
+    :preferred-address
+    {:address1 "123 street ave"
+     :address2 "apt 2"
+     :city "Townville"
+     :state "IN"
+     :zip "46203"}
+    :other-addresses 
+    [{:address1 "432 street ave"
+      :address2 "apt 7"
+      :city "Cityvillage"
+      :state "New York"
+      :zip "12345"}
+     {:address1 "534 street ave"
+      :address2 "apt 5"
+      :city "Township"
+      :state "IN"
+      :zip "46203"}]}])
+
+
+(def person
+  {:name "jimmy"
+   :preferred-address 
+   {:address1 "123 street ave"
+    :address2 "apt 2"
+    :city "Townville"
+    :state "IN"
+    :zip "46203"}
+   :other-addresses 
+   [{:address1 "432 street ave"
+     :address2 "apt 7"
+     :city "Cityvillage"
+     :state "New York"
+     :zip "12345"}
+    {:address1 "534 street ave"
+     :address2 "apt 5"
+     :city "Townville"
+     :state "IN"
+     :zip "46203"}
+    {:address1 "123 street ave"
+     :address2 "apt 2"
+     :city "Township"
+     :state "IN"
+     :zip "46203"}]})
+
+
+(defn distinct-zips-and-cities [person]
+  (let [preferred-address-zip (get-in person [:preferred-address :zip])
+        preferred-address-city (get-in person [:preferred-address :city])
+        other-zips (map :zip (:other-addresses person))
+        other-cities (map :city (:other-addresses person))]
+    {:zips (filter some? (distinct (cons preferred-address-zip other-zips)))
+     :cities (filter some? (distinct (cons preferred-address-city other-cities)))}))
+
+(defn distinct-zips-and-cities [person]
+  (let [zip (get-in person [:preferred-address :zip])
+        city (get-in person [:preferred-address :city])
+        addresses (:other-addresses person)]
+    (reduce (fn [acc address] 
+              (assoc acc 
+                     :zips (conj (:zips acc) (:zip address))
+                     :cities (conj (:cities acc) (:city address)))) 
+            {:zips [zip]
+             :cities []}
+            addresses)))
+
+
+(add-watch #'distinct-zips-and-cities-mm :pref 
+           (fn [_ _ _ _]
+             (time
+              (doseq [n (range 100000)]
+                (distinct-zips-and-cities-mm person))) ))
+
+
+(defn distinct-zips-and-cities [person]
+  (let [addresses (conj (:other-addresses person) 
+                        (:preferred-address person))]
+    {:zips (filter some? (distinct (map :zip addresses)))
+     :cities (filter some? (distinct (map :city addresses)))}))
+
+
+(macroexpand
+ (quote
+  (m/match person
+    {:preferred-address {:zip (pred some? !zips)
+                         :city (pred some? !cities)}
+     :other-addresses [{:zip (pred some? !zips)
+                        :city (pred some? !cities)} ...]}
+    {:zips (distinct !zips)
+     :cities (distinct !cities)})))
+
+(defn same-zip-preferred [person]
+  )
+
+
+(def zip "86753")
+(defn find-people-with-zip [people zip]
+  (->> (for [person people]
+         (for [address (:addresses person)
+               :when (= (:zip address) zip)]
+           {:name (:name person)
+            :address address}))
+       (mapcat identity)))
+
+
+(defn person-with-address-comb [person]
+  (map (fn [address]
+         {:name (:name person)
+          :address address})
+       (:addresses person)))
+
+(defn find-people-with-zip [people zip]
+  (->> people
+       (mapcat person-with-address-comb)
+       (filter (comp #{zip} :zip :address))))
+
+(mapcat (fn [person]
+          (let [matching-addresses (filter (comp #{zip} :zip) (:addresses person))]
+            (map (fn [address name]
+                   {:name name
+                    :address address})
+                 matching-addresses
+                 (repeat (:name person))))) 
+        people)
+
+(defn find-people-with-zip [people zip]
+  (m/search people
+    (scan {:name ?name
+           :addresses (scan {:zip ~zip :as ?address})})
+    {:name ?name
+     :address ?address}))
+
+
+
+(def people
+  [{:name "jimmy"
+    :addresses [{:address1 "123 street ave"
+                 :address2 "apt 2"
+                 :city "Townville"
+                 :state "IN"
+                 :zip "46203"
+                 :preferred true}
+                {:address1 "534 street ave",
+                 :address2 "apt 5",
+                 :city "Township",
+                 :state "IN",
+                 :zip "46203"
+                 :preferred false}
+                {:address1 "543 Other St",
+                 :address2 "apt 50",
+                 :city "Town",
+                 :state "CA",
+                 :zip "86753"
+                 :preferred false}]}
+   {:name "joel"
+    :addresses [{:address1 "2026 park ave"
+                 :address2 "apt 200"
+                 :city "Town"
+                 :state "CA"
+                 :zip "86753"
+                 :preferred true}]}])
+
+
+
+(def data
+  {:people 
+   [{:name "jimmy" :id 1}
+    {:name "joel" :id 2}
+    {:name "tim" :id 3}]
+   :addresses
+   {1 [{:address1 "123 street ave"
+        :address2 "apt 2"
+        :city "Townville"
+        :state "IN"
+        :zip "46203"
+        :preferred true}
+       {:address1 "534 street ave",
+        :address2 "apt 5",
+        :city "Township",
+        :state "IN",
+        :zip "46203"
+        :preferred false}]
+    2 [{:address1 "2026 park ave"
+        :address2 "apt 200"
+        :city "Town"
+        :state "CA"
+        :zip "86753"
+        :preferred true}]
+    3 [{:address1 "1448 street st"
+        :address2 "apt 1"
+        :city "City"
+        :state "WA"
+        :zip "92456"
+        :preferred true}]}
+   :visits {1 [{:date "12-31-1900"
+                :geo-location {:zip "46203"}}]
+            2 [{:date "1-1-1970"
+                :geo-location {:zip "12345"}}
+               {:date "1-1-1970"
+                :geo-location {:zip "86753"}}]
+            3 [{:date "4-4-4444"
+                :geo-location {:zip "54221"}}
+               {:date "4-4-4444"
+                :geo-location {:zip "92456"}}]}})
+
+
+
+(def addresses-by-person-id
+  )
+
+
+(m/search data
+  {:people (scan {:id ?id :name ?name})
+   :addresses {?id (scan {:preferred true :zip ?zip})}
+   :visits {?id (scan {:geo-location {:zip (and (not ?zip) ?bad-zip)}
+                       :date ?date})}}
+  {:name ?name
+   :id ?id
+   :zip ?bad-zip
+   :date ?date})
+
+(defn extract-zips [{:keys [people addresses visits]}]
+  (->> people
+       (map (comp addresses :id))) )
+
+
+(def person
+  {:name "jimmy"
+   :preferred-address 
+   {:address1 "123 street ave"
+    :address2 "apt 2"
+    :city "Townville"
+    :state "IN"
+    :zip "46203"}
+   :other-addresses 
+   [{:address1 "432 street ave"
+     :address2 "apt 7"
+     :city "Cityvillage"
+     :state "New York"
+     :zip "12345"}
+    {:address1 "534 street ave"
+     :address2 "apt 5"
+     :city "Townville"
+     :state "IN"
+     :zip "46203"}
+    {:address1 "123 street ave"
+     :address2 "apt 2"
+     :city "Township"
+     :state "IN"
+     :zip "46203"}]})
+
+
+(defn distinct-zip-codes [person])
+
+(defn distinct-zips-and-cities-m
+  [person]
+  
+  (m/match person
+    {:preferred-address {:zip (pred some? !zips)
+                         :city (pred some? !cities)}
+     :other-addresses [{:zip (pred some? !zips)
+                        :city (pred some? !cities)} ...]}
+    {:zips (distinct !zips)
+     :cities (distinct !cities)}))
+
+
+(m/search person
+  {:preferred-address {:zip ?zip}
+   :other-addresses (scan {:zip ?zip :as ?address})}
+  ?address)
+
+(defn reformat-preferred-address [person]
+  (let [address (:preferred-address person)]
+    {:address {:line1 (:address1 person)
+               :line2 (:address2 person)}
+     :city-info {:city (:city address)
+                 :state (:state address)
+                 :zipcode (:zip address)}}))
