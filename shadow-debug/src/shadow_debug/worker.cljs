@@ -28,3 +28,8 @@
                   resolve)
        (catch js/Object e
          (println "error initializing" e))))))
+
+
+(.then initialize-eval
+  (fn [_])
+   (eval-str "(+ 2 2)" println))
