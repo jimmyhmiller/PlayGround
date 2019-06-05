@@ -250,7 +250,9 @@
 (defmacro bup [& body]
   `(r/until = (r/bottom-up (r/trace (r/rewrite ~@body)))))
 
-(defn repeat-n [n s]
+(defn repeat-n 
+  {:style/indent :defn}
+  [n s]
   (apply r/pipe 
          (clojure.core/repeat n s)))
 
@@ -274,7 +276,7 @@
 (unpipe-first '(-> x f g h))
 
 
-()
+
 
 
 (do
@@ -431,6 +433,11 @@
       :ir* ir*
       :code code})))
 
+
+(analyze-compile :search
+  (quote
+   ({?key ?value}
+    (str " " (name ?key) "=\"" (name ?value) "\""))))
 
 (analyze-compile :match
   (quote ({:preferred-address {:zip (pred some? !zips)
@@ -811,3 +818,150 @@
      :city-info {:city (:city address)
                  :state (:state address)
                  :zipcode (:zip address)}}))
+
+
+
+
+
+
+
+
+
+
+
+
+(defn power [b n]
+  (if (zero? n)
+    1.0
+    (* b (power b (dec n)))))
+
+(power 2 3)
+
+
+
+
+
+;; http://scala-lms.github.io/tutorials/02_basics.html#sec220:evalOrder
+;; crazed hacked together, but poc
+
+(def env (atom []))
+
+(defn perform [stm]
+  [:lms/perform stm])
+
+(defn accumulate [res]
+  (if (and (vector? res) (= (first res) :lms/perform))
+    (let [x (gensym "x")]
+      (swap! env  conj x (second res))
+      (accumulate x))
+    res))
+
+
+
+(defn compute [x]
+  x)
+
+(defn power' [b n]
+  (if (zero? n)
+    (perform 1.0)
+    (perform `(* ~(accumulate b) ~(accumulate (power' b (dec n)))))))
+
+(defmacro attempt-stage [expr]
+  (reset! env [])
+  (let [result# (eval expr)]
+    `(let ~(deref env)
+       ~(second result#))))
+
+(macroexpand
+ (quote
+  (attempt-stage
+   (let [x (accumulate (perform '(compute 1)))]
+     (power' (accumulate (perform `(+ (compute 2) ~(accumulate x)))) 5)))))
+
+(macroexpand
+ (quote
+  (attempt-stage
+   (power' 2 6))))
+
+
+
+
+
+
+(def people
+  [{:name "jimmy"
+    :addresses [{:address1 "123 street ave"
+                 :address2 "apt 2"
+                 :city "Townville"
+                 :state "IN"
+                 :zip "46203"
+                 :preferred true}
+                {:address1 "534 street ave",
+                 :address2 "apt 5",
+                 :city "Township",
+                 :state "IN",
+                 :zip "46203"
+                 :preferred false}
+                {:address1 "543 Other St",
+                 :address2 "apt 50",
+                 :city "Town",
+                 :state "CA",
+                 :zip "86753"
+                 :preferred false}]}
+   {:name "joel"
+    :addresses [{:address1 "2026 park ave"
+                 :address2 "apt 200"
+                 :city "Town"
+                 :state "CA"
+                 :zip "86753"
+                 :preferred true}]}])
+
+
+(defn find-people-with-zip [people zip]
+  (for [person people
+        address (:addresses person)
+        :when (= (:zip address) zip)]
+    {:name (:name person)
+     :address address}))
+
+
+(find-people-with-zip people "46203")
+
+
+(meander.match.ir.delta/run-star-vec
+ val__37382
+ [!zips !cities]
+ 1
+ (clojure.core/fn
+   [[!zips !cities] input__37387]
+   (clojure.core/let
+       [nth_0__37388 (clojure.core/nth input__37387 0)]
+     (if
+         (clojure.core/map? nth_0__37388)
+       (clojure.core/let
+           [val__37389
+            (clojure.core/get nth_0__37388 :zip)]
+         (if
+             (some? val__37389)
+           (clojure.core/letfn
+               [(save__37390 [] meander.match.ir.delta/FAIL)]
+             (clojure.core/let
+                 [!zips (clojure.core/conj !zips val__37389)]
+               (clojure.core/let
+                   [val__37391
+                    (clojure.core/get nth_0__37388 :city)]
+                 (if
+                     (some? val__37391)
+                   (clojure.core/letfn
+                       [(save__37392 [] (save__37390))]
+                     (clojure.core/let
+                         [!cities
+                          (clojure.core/conj !cities val__37391)]
+                       [!zips !cities]))
+                   (save__37390)))))
+           meander.match.ir.delta/FAIL))
+       meander.match.ir.delta/FAIL)))
+ (clojure.core/fn
+   [[!zips !cities]]
+   {:zips (distinct !zips),
+    :cities (distinct !cities)}))
