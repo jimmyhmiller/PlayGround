@@ -1,8 +1,8 @@
 # Meander for Practical Data Transformation
 
-As Clojure programmers we love data. We believe that, at its core, programming is just data manipulation. To that end, Clojure provides fantastic data literals for wonderful immutable data structures. Moreover it provides a swiss-army knife of functions for manipulation of data. But as our data grows more complex, things become difficult, our beautiful declarative data transformation pipeline becomes a nested mess. We wind up, yet again, playing computer in our head.
+As Clojure programmers we love data. We believe that, at its core, programming is just data manipulation. To that end, Clojure provides fantastic data literals for its immutable data structures. Moreover core provides tons of functions for manipulation of data. But as our data grows more complex, things become difficult. Our beautiful declarative data transformation pipeline becomes a nested mess. We wind up, yet again, playing computer in our heads.
 
-In this tutorial we are slowly going to build up to understand how Meander can be used in Clojure to solve practical data transformation problems. We will start with simple examples and move to move complicated ones, hopefully choosing problems that reflect the sorts of menial data transformation tasks we all encounter in our day jobs. Let's start with some vanilla clojure code.
+In this tutorial we are going to build up slowly to understand how Meander can be used to solve practical data transformation problems. We will start with simple examples and move to move complicated ones, hopefully choosing problems that reflect the sorts of menial data transformation tasks we all encounter in our day jobs. Let's start with some vanilla Clojure code.
 
 ```clojure
 (def person
@@ -44,7 +44,7 @@ Here we have a pretty decent Clojure function that converts between two differen
 
 Here is code that does the same thing written with Meander. One obvious thing to note here is that the Meander version is much longer. Judging code based on number of lines is not something we are going to do. 
 
-Let's explain what is going on. First we are using the Meander's `match` feature. `match` takes the thing that we are matching on (`person`), a pattern to try to match, and the output. Our pattern here is in the exact shape of the person map we are passed in. In order to extract out pieces of this map, we use logic variables (`?address1`, `?address2`, etc). Logic variables are just symbols that start with `?`. We can assign values in our data to any logic variables we'd like and then use those logic variables in our output. One thing I love about this simple Meander example, is that you can see the exact shape of the input immediately.
+Let's explain what is going on. First we are using the Meander's `match` feature. `match` takes the thing that we are matching on (`person`), a pattern to try to match, and the output. Our pattern here is in the exact shape of the person map we passed in. In order to extract out pieces of this map, we use logic variables (`?address1`, `?address2`, etc). Logic variables are just symbols that start with `?`. We can assign values in our data to any logic variables we'd like and then use those logic variables in our output. One thing I love about this simple Meander example, is that you can see the exact shape of the input immediately.
 
 ## Making Our Example Harder
 
@@ -72,7 +72,7 @@ This example while somewhat realistic is very limited. While I like the fact tha
      :zip "46203"}]})
 ```
 
-In the example above we left out somethings. A person has a preferred address, but they also have other addresses. We have a few different things we want to do with this data. First we want to find all the distinct zipcodes that a person has.
+In the example above we left out some things. A person has a preferred address, but they also have other addresses. We have a few different things we want to do with this data. First we want to find all the distinct zip-codes that a person has.
 
 ```clojure
 (defn distinct-zip-codes [person]
@@ -91,7 +91,7 @@ Here is some pretty straight forward Clojure code for doing exactly that. I'm su
     (distinct !zips)))
 ```
 
-Here is the exact same function, but we've introduced two new concepts. The first are memory variables, in this case `!zip`. Memory variables start with `!` and remember all the values they match with. The next concept we introduced here is the zero or more operator (`…`). The zero or more operator says to repeat the pattern to its left zero or more times. In this case `{:zip !zips}`. Using these two, we can declaratively gather up all the zipcodes in this data structure.
+Here is the exact same function, but we've introduced two new concepts. The first are memory variables, in this case `!zip`. Memory variables start with `!` and remember all the values they match with. The next concept is the zero or more operator (`…`). The zero or more operator says to repeat the pattern to its left zero or more times. In this case `{:zip !zips}`. Using these two, we can declaratively gather up all the zip-codes in this data structure.
 
 ### Minor Modifications
 
@@ -181,7 +181,7 @@ All our examples up until this point have had one answer. Yes, that answer might
                  :preferred true}]}])
 ```
 
-I apologize for the amount of room this takes up on the screen, but real world examples are much larger. I want to try and make something that approaches realistic and in order to do that our input needs to be a bit bigger. Okay, so what we want do now is given a zip code, find all people that have an address with that zip code, and for each of the addresses that match that zip code, return a map of `{:name <name> :address <address>}`. So in this case if we asked for zip `86753` we should get the following response:
+I apologize for the amount of room this takes up on the screen, but real world examples are much larger. I want to try and make something that approaches realistic and in order to do that our input needs to be a bit bigger. Okay, so what we want do now is given a zip-code, find all people that have an address with that zip-code, and for each of the addresses that match that zip-code, return a map of `{:name <name> :address <address>}`. So in this case if we asked for zip `86753` we should get the following response:
 
 ```clojure
 ({:name "jimmy",
@@ -206,12 +206,11 @@ Okay let's start with the vanilla Clojure example.
 
 ```clojure
 (defn find-people-with-zip [people zip]
-  (->> (for [person people]
-         (for [address (:addresses person)
-               :when (= (:zip address) zip)]
-           {:name (:name person)
-            :address address}))
-       (mapcat identity)))
+  (for [person people
+        address (:addresses person)
+        :when (= (:zip address) zip)]
+    {:name (:name person)
+     :address address}))
 ```
 
 This code might not be very idiomatic. I almost never use `for` in actual code. But honestly this was the most succinct way I could think to write it. We could also have written something like this:
@@ -229,7 +228,7 @@ This code might not be very idiomatic. I almost never use `for` in actual code. 
        (filter (comp #{zip} :zip :address))))
 ```
 
-Honestly, it seems like there is a better way I'm overlooking. But regardless I think any of these solutions will be a bit complicated. We've definitely lost the shape of the input data. We have some imperative stuff going on here. Let's contrast this with the Meander implementation.
+It seems like there is a better way I'm overlooking. But regardless I think any of these solutions will be a tiny bit complicated. We've definitely lost the shape of the input data. We have some imperative stuff going on here. Let's contrast this with the Meander implementation.
 
 ```clojure
 (defn find-people-with-zip [people zip]
@@ -289,9 +288,9 @@ For our final example of how Meander can be used to perform data manipulation, w
                 :geo-location {:zip "92456"}}]}})
 ```
 
-Here we have some much more realistic data than anything we've seen before. We have a map with three top level keys. These represent data we have gathered from various sources. The first `:people` is our collection of people with names and ids. The next are the `addresses` of these people, indexed by id for efficient lookup. And finally we have `:visits`. This represents the dates that the users visited our site, again index by user-id. 
+Here we have some much more realistic data than anything we've seen before. We have a map with three top level keys. These represent data we have gathered from various sources. The first `:people` is our collection of people with names and ids. The next are the `:addresses` of these people, indexed by id for efficient lookup. And finally we have `:visits`. This represents the dates that the users visited our site, again indexed by user-id. 
 
-Here's the mock scenario, we've seen supicious activity on our site and we aren't quite sure how to narrow it down. We are going to start our investigation by finding any users who had visits that were not in the same zip as their preferred address. Because of the nature of our application, we happen to know that it is typically used at the preferred location. Once we now the users affected we need to return their name, id, the date of access, and the zip code that didn't match.  But I want to show that despite this somewhat complicated scenario, we can easily express this using Meander. Before we get there, the Clojure implementation.
+Here's the mock scenario, we've seen suspicious activity on our site and we aren't quite sure how to narrow it down. We are going to start our investigation by finding any users who had visits that were not in the same zip as their preferred address. Because of the nature of our application, we happen to know that it is typically used at the preferred location. Once we know the users affected, we need to return their name, id, the date of access, and the zip code that didn't match.  But I want to show that despite this somewhat complicated scenario, we can easily express this using Meander. Before we get there, the Clojure implementation.
 
 ```clojure
 
@@ -316,7 +315,7 @@ Here's the mock scenario, we've seen supicious activity on our site and we aren'
           people))
 ```
 
-I really wanted to come up with a better implementation. `for` might have been useful here. If any reader has a better implementation, I'm happy to replace this one. But honestly, I think any implmentation is going to have the features that make this one less than desirable. Just look at how much of this code is about telling the computer what to do. Let's look at the Meander version now.
+I really wanted to come up with a better implementation. `for` might have been useful here. If any reader has a better implementation, I'm happy to replace this one. But honestly, I think no matter version we went with, it is going to have the features that make this one less than desirable. Just look at how much of this code is about telling the computer what to do. Let's look at the Meander version now.
 
 ```clojure
 (defn find-potential-bad-visits [data]
@@ -331,10 +330,10 @@ I really wanted to come up with a better implementation. `for` might have been u
      :date ?date}))
 ```
 
-This is where Meander shines. `?id` is being used to join across data structures. We can now find an id in people and use that to index into other collections. This allows us to find out everything we need to know about a person easily. We can also search into any collection and match on data at any level. We don't need to rely on pulling things out into a higher scope by using let bindings, making helper functions to work on sub collections, or creating a series of transformations to get at the data we care about. Instead we declare exactly our data needs and the relationships that need to hold between them.
+This is where Meander shines. `?id` is being used to join across data structures. We can now find an id in people and use that to index into other collections. This allows us to find out everything we need to know about a person easily. We can also search into any collection and match on data at any level. We don't need to rely on pulling things out into a higher scope by using let bindings, making helper functions to work on sub collections, or creating a series of transformations to get at the data we care about. Instead we declare our data needs and the relationships that need to hold between them.
 
 ## Conclusion
 
-I hope that this has been a good introduction to how Meander can be used for practical data transformation problems. In many of these examples, the vanilla clojure made for pretty good code. But as the data requirements become more complex, we need tools to handle these. While we may be able to accomplish any of these tasks, the udnerstanding of the structure of ou code becomes lost. Looking at the example above, we know so much about what the data coming in looks like. Our code mirrors precisely the shape of data we get in.
+I hope that this has been a good introduction to how Meander can be used for practical data transformation problems. In many of these examples, the vanilla Clojure made for pretty good code. But as the data requirements become more complex, we need tools to handle these. While we may be able to accomplish any of these tasks, the understanding of the structure of our code becomes lost. Looking at the example above, we know so much about what the data coming in looks like. Our code mirrors precisely the shape of data we get in.
 
-Now I do admit, my examples here are a bit contrived. But they are meant to be simple so we don't focus on the examples and instead focus on the code. In coming posts I will explore more directly various ways we can apply Meander for data transformation. Some ideas I have in mind are using Meander with honeysql to turn our data into sql, transforming a collection of data into hiccup for display as html, and using Meander to scrap the web. I'd also love to do more computer science examples. Using Meander to make little lisp interpretor, a CEK machine or basic arithmetic. And yet, Meander goes way beyond all of these things. Meander is about more than practical data manipulation. It is about a new away of programming, a new way of thinking about problems. Hopefully this introduction will help you to dive in and try it yourself.
+Now I do admit, my examples here are a bit contrived. But they are meant to be simple so we don't focus on the examples and instead focus on the code. In coming posts I will explore more directly various ways we can apply Meander for data transformation. Some ideas I have in mind are using Meander with honeysql to turn our data into sql, transforming a collection of data into hiccup for display as html, and using Meander to scrap the web. I'd also love to do more computer science examples. Using Meander to make little lisp interpreter, a CEK machine or basic arithmetic. And yet, Meander goes way beyond all of these things. Meander is about more than practical data manipulation. It is about a new away of programming, a new way of thinking about problems. Hopefully this introduction will help you to dive in and try it yourself.
