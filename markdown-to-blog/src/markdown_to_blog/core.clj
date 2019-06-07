@@ -5,7 +5,7 @@
 
 
 (def markdown
-  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/Named Function Composition.md"))
+  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/meander-tutorial.md"))
 
 
 (defmulti transform
