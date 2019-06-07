@@ -23,9 +23,10 @@ In this tutorial we are going to build up slowly to understand how Meander can b
                  :zipcode (:zip address)}}))
 ```
 
-Here we have a pretty decent Clojure function that converts between two different address formats. This sort of code is fairly common when we need to convert from the data requirements of one system to another. Honestly, with this simple example, the code is fairly start forward. Our data requirements are simple and so our code isn't difficult. Let's look at how to accomplish this same task in Meander.
+Here we have a pretty decent Clojure function that converts between two different address formats. This sort of code is fairly common when we need to convert from the data requirements of one system to another. Honestly, with this simple example, the code is fairly straight forward. Our data requirements are simple and so our code isn't difficult. Let's look at how to accomplish this same task in Meander.
 
 ```clojure
+(require '[meander.match.delta :as m])
 (defn reformat-preferred-address [person]
   (m/match person
     {:preferred-address 
@@ -42,7 +43,7 @@ Here we have a pretty decent Clojure function that converts between two differen
                  :zipcode ?zip}}))
 ```
 
-Here is code that does the same thing written with Meander. One obvious thing to note here is that the Meander version is much longer. Judging code based on number of lines is not something we are going to do. 
+Here is code that does the same thing written with Meander. One obvious thing to note is that the Meander version is much longer. Judging code based on number of lines is not something we are going to do. 
 
 Let's explain what is going on. First we are using the Meander's `match` feature. `match` takes the thing that we are matching on (`person`), a pattern to try to match, and the output. Our pattern here is in the exact shape of the person map we passed in. In order to extract out pieces of this map, we use logic variables (`?address1`, `?address2`, etc). Logic variables are just symbols that start with `?`. We can assign values in our data to any logic variables we'd like and then use those logic variables in our output. One thing I love about this simple Meander example, is that you can see the exact shape of the input immediately.
 
@@ -95,7 +96,7 @@ Here is the exact same function, but we've introduced two new concepts. The firs
 
 ### Minor Modifications
 
-What happens if one of our zipcodes is nil? Well for both of our functions, nil gets returned in the output. That is probably not what we want. Let's fix that in both versions.
+What happens if one of our zip-codes is nil? Well, for both of our functions, nil gets returned in the output. That is probably not what we want. Let's fix that in both versions.
 
 ```clojure
 (defn distinct-zip-codes [person]
