@@ -31,5 +31,5 @@
 
 
 (.then initialize-eval
-  (fn [_])
-   (eval-str "(+ 2 2)" println))
+       (fn [_]
+         (eval-str "(+ 2 2)" println)))
