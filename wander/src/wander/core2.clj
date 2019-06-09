@@ -884,9 +884,46 @@
    (power' 2 6))))
 
 
+(def person
+  {:name "jimmy"
+   :preferred-address
+   {:address1 "123 street ave"
+    :address2 "apt 2"
+    :city "Townville"
+    :state "IN"
+    :zip "46203"}
+   :other-addresses 
+   [{:address1 "432 street ave"
+     :address2 "apt 7"
+     :city "Cityvillage"
+     :state "New York"
+     :zip nil}
+    {:address1 "534 street ave"
+     :address2 "apt 5"
+     :city "Township"
+     :state "IN"
+     :zip "46203"}]})
 
 
 
+z(defn distinct-zips-and-cities [person]
+  (m/match person
+    {:preferred-address {:zip (or nil !zips)
+                         :city (or nil !cities)}
+     :other-addresses [{:zip (or nil !zips)
+                        :city (or nil !cities)} ...]}
+    {:zips (distinct !zips)
+     :cities (distinct !cities)}))
+
+
+(defn distinct-zip-codes [person]
+  (m/match person
+    {:preferred-address {:zip (or nil !zips)}
+     :other-addresses [{:zip (or nil !zips)} ...]}
+    (distinct !zips)))
+
+
+(distinct-zips-and-cities person)
 
 (def people
   [{:name "jimmy"
@@ -923,6 +960,14 @@
         :when (= (:zip address) zip)]
     {:name (:name person)
      :address address}))
+
+
+
+
+(m/match [0 [:increment]]
+ [?n [:increment]] (inc ?n)
+ [?n [:decrement]] (dec ?n))
+
 
 
 (find-people-with-zip people "46203")
@@ -965,3 +1010,152 @@
    [[!zips !cities]]
    {:zips (distinct !zips),
     :cities (distinct !cities)}))
+
+(meta #'r/n-times)
+
+
+(defn n-times
+  {:style/indent :defn}
+  [n s]
+  (apply r/pipe (clojure.core/repeat n s)))
+
+(def simplify-addition
+  (r/until =
+    (r/bottom-up
+     (r/attempt
+      (r/rewrite
+       (+ ?x 0) ?x
+       (+ 0 ?x) ?x)))))
+
+(def simplify-addition
+  (r/rewrite
+   (+ ?x 0) ?x
+   (+ 0 ?x) ?x))
+
+(def simplify-addition-bu
+  (r/until =
+    (r/bottom-up
+     (r/trace
+      (r/attempt simplify-addition)))))
+
+(def simplify-addition-td
+  (r/until =
+    (r/trace
+     (r/top-down
+      (r/attempt simplify-addition)))))
+
+(do
+  (println "\n\n\n\n")
+  (simplify-addition-bu '(+ (+ 0 3) 0)))
+
+
+
+
+
+
+(do
+  (println "\n\n\n\n")
+  (simplify-addition '(+ 0 2)))
+
+(def simplify-twice
+  (r/n-times 2 simplify-addition))
+
+(simplify-twice )
+
+(simplify-addition '(+ 0 3)) ;; 3
+(simplify-addition '(+ 3 0)) ;; 3
+
+(simplify-addition
+ (simplify-addition '(+ 0 (+ 0 3))))
+
+
+
+(simplify-twice '(+ 0 3))
+
+
+(def find-x
+  (r/rewrite
+   [?x] ?x
+   [?x ?y] ?x
+   [?x ?y ?z] ?x))
+
+(find-x [1]) ;; 1
+(find-x [1 2]) ;; 1
+(find-x [1 2 3]) ;; 1
+
+
+(def one-to-two
+  (r/rewrite
+   1 2))
+
+
+(time
+ (doseq [n (range 10000)]
+   (m/search [:q :r :s :t :a :b :r :t :c :a :c :d :a :b :c :d :a :b]
+     [_ ... :a :b . _ ... :c :d . _ ...]
+     :yep)))
+
+(defn search-1 [xs]
+  (m/search xs
+      [_ ... :a :b . !xs ...]
+    !xs))
+
+(defn search-2 [xs]
+  (m/search xs
+    [_ ... :c :d . _ ...]
+    :yep))
+
+(defn p1 [x]
+  (m/match x
+    [:a :b] true
+    _ false))
+
+((complement p1) [:q :r :s :t :a :b :r :t :c :a :c :d :a :b :c :d :a :b])
+
+
+(take-while (complement p1)  [:q :r :s :t :a :b :r :t :c :a :c :d :a :b :c :d :a :b])
+
+
+(search-1 [:q :r :s :t :a :b :r :t :c :a :c :d :a :b :c :d :a :b])
+
+(def search-it
+  (comp (partial mapcat search-2) search-1) )
+
+(time
+ (doseq [n (range 10000)]
+   (search-it
+    [:q :r :s :t :a :b :r :t :c :a :c :d :a :b :c :d :a :b])))
+
+
+[_ ... :a :b . _ ... :c :d . _ ...]
+
+[:q :r :s :t :a :b :r :t :c :a :c :d :a :b :c :d :a :b]
+
+[[:a :b :r :t :c :a :c :d :a :b :c :d :a :b]
+ [:a :c :d :a :b :c :d :a :b]
+ [:a :b :c :d :a :b]]
+
+[[:b :r :t :c :a :c :d :a :b :c :d :a :b]
+ [:b :c :d :a :b]]
+
+[[:c :a :c :d :a :b :c :d :a :b]
+ [:c :d :a :b :c :d :a :b]
+ [:c :d :a :b]
+ [:c :d :a :b]]
+
+[[:d :a :b :c :d :a :b]
+ [:d :a :b]
+ [:d :a :b]]
+
+
+
+[_ ... :a :b . _ ... :c :d . _ ...]
+
+[:q :r :s :t :a :b :r :t :c :a :c :d :a :b :c :d :a :b]
+
+[[:r :t :c :a :c :d :a :b :c :d :a :b]
+ [:c :d :a :b]]
+
+[:c :d :a :b :c :d :a :b]
+[:c :d :a :b]
+[:c :d :a :b]
