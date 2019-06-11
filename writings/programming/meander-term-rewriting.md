@@ -273,4 +273,4 @@ Here we moved our trace down outside our `attempt` strategy. Now we can see the 
 
 ## Rewriting as General Computation
 
-But what we've 
+What have been doing so far is interesting, but it falls short of the true power of term rewriting. 

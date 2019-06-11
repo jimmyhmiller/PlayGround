@@ -23,13 +23,6 @@ require('normalize.css');
 
 const images = {
   me: require("./images/me.jpg"),
-  timeClocks: require("./images/time-clocks.png"),
-  timeFig1: require("./images/time-fig-1.png"),
-  // https://www.cs.rutgers.edu/~pxk/417/notes/clocks/index.html
-  logClocks1: require("./images/logical-clocks-1.png"),
-  logClocks2: require("./images/logical-clocks-2.png"),
-  cap: require("./images/cap.png"),
-  calm: require("./images/calm.png"),
 };
 
 
@@ -87,11 +80,34 @@ export default () =>
       color="blue"
       text="UI = f(state)" />
 
+    <Points title="Clever Adoption Strategy">
+      <Point text="Started with Classes" />
+      <Point text="Provide Functional State Management" />
+      <Point text="Mutation Warnings in Dev" />
+      <Point text="Never Mention Functional Programming" />
+    </Points>
+
+    <Points title="Larger Effect">
+      <Point text="Elm" />
+      <Point text="SwiftUI" />
+      <Point text="Android Jetpack" />
+      <Point text="Flutter" />
+      <Point text="Revery" />
+    </Points>
+
     <Points title="Redux">
       <Point text="Reducers are pure" />
       <Point text="Emulate algebraic data types" />
       <Point text="Single atom state" />
     </Points>
+
+
+    <Points title="Redux">
+      <Point text="Business logic is pure" />
+      <Point text="Change Can be Modeled Without Mutation" />
+      <Point text="Immutablity Provides Direct Benefit" />
+    </Points>
+
 
     <Points title="React Hooks">
       <Point text="Seemingly mutable" />
@@ -99,6 +115,47 @@ export default () =>
       <Point text="True control over effects" />
       <Point text="No monads" />
     </Points>
+
+
+    <Code
+      lang="javascript"
+      title="React Hooks"
+      source={`
+        const [count, setCount] = useState(0);
+      `}
+    />
+
+    <Code
+      lang="javascript"
+      title="React Hooks"
+      source={`
+        const [error, setError] = useState(null);
+        const [count, setCount] = useState(0);
+        useEffect(() => console.log(count),
+          [count]
+        );
+      `}
+    />
+
+    <Code
+      lang="javascript"
+      title="React Hooks"
+      source={`
+        const [user, setUser] = useState(initialUser);
+        useEffect(() => {
+          const unsubscribe = subscribeToUpdates(user);
+          return unsubscribe;
+        }, [user]);
+      `}
+    />
+
+    <Points title="Lessons to learn">
+      <Point text="What, not how" />
+      <Point text="Pure functions are great" />
+      <Point text="Effects can be lifted to a higher level" />
+    </Points>
+
+
 
     <Points title="BlockChain/Smart Contracts">
       <Point text="Hype is gone" />
