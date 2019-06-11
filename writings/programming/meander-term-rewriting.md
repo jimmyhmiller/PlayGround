@@ -1,10 +1,10 @@
 # Introduction to Term Rewriting with Meander
 
-Meander is heavily inspired by the capabilities of term rewriting languages. But sadly, there aren't many introductions to term rewriting aimed at every day software engineers. Typically introductions to term rewriting immediately dive into discussing the mathematical properties of Term Rewriting. These can be really interesting and useful in their own right, but I've found them most useful after I have a bit of an intuitive grasp of what is going on. That is the aim of this post, to help you have a more intuitive understanding of how Term Rewriting works and what it is capable of.
+Meander is heavily inspired by the capabilities of term rewriting languages. But sadly, there aren't many introductions to term rewriting aimed at every day software engineers. Typically introductions to term rewriting immediately dive into discussing the mathematical properties or proving theorems. These can be really interesting and useful in their own right. But personally I like to get an intuitive feel for something before diving into a formalism. That is the aim of this post, to help you have a more intuitive understanding of how Term Rewriting works and what it is capable of.
 
 ## The Basics
 
-The goal of Term Rewriting is to take some bit of data and rewriting it into some other bit of data. We accomplish this by writing rules that tell us for a given piece of data what we should turn it into. 
+The goal of Term Rewriting is to take some bit of data and rewrite it into some other bit of data. We accomplish this by writing rules that tell us for a given piece of data what we should turn it into. 
 
 ```clojure
 (require '[meander.strategy.delta :as r])
@@ -17,9 +17,9 @@ The goal of Term Rewriting is to take some bit of data and rewriting it into som
 ;; => :y
 ```
 
-Here is the most simple rewrite rule imaginable. If we are given  `:x` we turn it into `:y`. In term rewriting the data we are matching on is often called the `left-hand-side` and the data we return is called the `right-hand-side`. So `:x` is our left-hand-side and `:y` is our right-hand-side. The data we pass in to transform is called the reducible-expression (or `redex` for short).
+Here is the most simple rewrite rule imaginable. If we are given `:x` we turn it into `:y`. In term rewriting the pattern we are using to match is often called the `left-hand-side` and the data we return is called the `right-hand-side`. So `:x` is our left-hand-side and `:y` is our right-hand-side. The data we pass in to transform is called the reducible-expression (or `redex` for short).
 
-Admittiedly, this seems almost useless and it really is with this simplisitic example, but let's take it slow and build it up. 
+Admittiedly, this seems almost useless, and it really is with this overly simplisitic example. But let's take it slow and build it up. 
 
 ```clojure
 (def rewrite-some-keywords
@@ -59,7 +59,7 @@ Here we added the logic-variable `?x` to our left-hand-side. Logic variables sta
 (find-x [1 2 3]) ;; 1
 ```
 
-Here we can see some really simple rules that work on vectors of various sizes. We can use this to extract the first element from each. In this case, sense we only care about `?x`, we can actually simplify this code.
+Here we can see some really simple rules that work on vectors of various sizes. We can use this to extract the first element from each. In this case, since we only care about `?x`, we can actually simplify this code.
 
 ```clojure
 (def find-x
@@ -69,7 +69,7 @@ Here we can see some really simple rules that work on vectors of various sizes. 
    [?x _ _] ?x))
 ```
 
-Here the `_` is a wildcard match that matches anything but doesn't bind at all. What happens if we try to extend this to work for not just vectors, but just a single number?
+The `_` is a wildcard match that matches anything but doesn't bind at all. What happens if we try to extend this to work for not just vectors, but just a single number?
 
 ```clojure
 (def find-x
@@ -83,7 +83,7 @@ Here the `_` is a wildcard match that matches anything but doesn't bind at all. 
 (find-x [1]) ;; [1]
 ```
 
-Here we can see that order matters, `?x` matches anything, so we will always get the first match. We could change the order, or we can constrain the match.
+The order of our rules matter, `?x` matches anything, so we will always get the first match. We could change the order, or we can constrain the match.
 
 ```clojure
 (def find-x
@@ -101,7 +101,7 @@ Okay, now it works. But many of you are probably thinking "Isn't this just patte
 
 ## Applying strategies
 
-We've seen that with meander we can do simple rewrites where we match on the left-hand-side and output a right-hand-side. But just being able to do a single rewrite in this way is really limiting. To see this problem let's consider a classic example in term rewriting.
+We've seen that with Meander we can do simple rewrites where we match on the left-hand-side and output a right-hand-side. But just being able to do a single rewrite in this way is really limiting. To see this problem let's consider a classic example in term rewriting.
 
 ```clojure
 (def simplify-addition
@@ -113,7 +113,7 @@ We've seen that with meander we can do simple rewrites where we match on the lef
 (simplify-addition '(+ 3 0)) ;; 3
 ```
 
-Zero add to anything is just that thing. We can easily express this with term rewriting. But what if we have multple 0's nested?
+Zero added to anything is just that thing. We can easily express this with term rewriting. But what if we have multple 0's nested?
 
 ```clojure
 (simplify-addition '(+ 0 (+ 0 3))) ;; (+ 0 3)
@@ -122,7 +122,7 @@ Zero add to anything is just that thing. We can easily express this with term re
  (simplify-addition '(+ 0 (+ 0 3)))) ;; 3
 ```
 
-As you can see, the first time we apply it, we do simplify, but not all the way. If we call our rewrite again, we fully simplify the expression. But how could we express this with term rewriting? We can use what are called `strategies`. Strategies let use control how our terms are rewritten. Let's stop with an easy strategy the `n-times` strategy.
+As you can see, the first time we apply our ruels, we do simplify, but not all the way. If we call our rules again, we fully simplify the expression. But how could we express this with term rewriting? We can use what are called `strategies`. Strategies let use control how our terms are rewritten. Let's start with an easy strategy the `n-times` strategy.
 
 ```clojure
 (def simplify-twice
@@ -131,7 +131,7 @@ As you can see, the first time we apply it, we do simplify, but not all the way.
 (simplify-twice '(+ 0 (+ 0 3))) ;; 3
 ```
 
-Strategies like `n-times` wrap our rewriting rules and make them do additional things. In this case, the rewriting will be applied twice. But there are a few problems with the strategy as we've written it. Let's slowly discover those problems together and fix them together.
+Strategies  wrap our rewriting rules and make them do additional things. In this case, the rewriting will be applied twice. But there are a few problems with the strategy as we've written it. Let's slowly discover those problems together and fix them.
 
 ```clojure
 (simplify-twice '(+ 0 3)) ;; #meander.delta/fail[]
@@ -152,7 +152,7 @@ Our apply-twice strategy works for things that need to be simplified twice, but 
 (simplify-addition '(+ (+ 0 (+ 0 3)) 0)) ;; (+ 0 3)
 ```
 
-Now that it works for both, we no longer have to call it twice. It can work twice or once. But twice is a little arbitrary. What we really want to say is to just complete applying our rewrite rules until nothing changes. We can do that by using the `(until =)` strategy.
+Now it works for both. But having it only rewrite twice is a little arbitrary. What we really want to say is to continue applying our rewrite rules until nothing changes. We can do that by using the `(until =)` strategy.
 
 ```clojure
 (def simplify-addition
@@ -215,7 +215,7 @@ Our rules are completely separate from how we want to apply them. When writing o
       (r/attempt simplify-addition)))))
 ```
 
-So now we have modified our rewrites to trace eveything the top-down or bottom-up rules are called. Let's try a fairly complicated expression and see what happens.
+So now we have modified our rewrites to trace every time the top-down or bottom-up rules are called. Let's try a fairly complicated expression and see what happens.
 
 ```clojure
 (simplify-addition-td '(+ (+ (+ 0 3) (+ 0 (+ 3 (+ 2 0)))) 0))
@@ -273,3 +273,4 @@ Here we moved our trace down outside our `attempt` strategy. Now we can see the 
 
 ## Rewriting as General Computation
 
+But what we've 
