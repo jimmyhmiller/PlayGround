@@ -23,6 +23,7 @@ require('normalize.css');
 
 const images = {
   me: require("./images/me.jpg"),
+  hashTree: require("./images/hash-tree.svg")
 };
 
 
@@ -131,9 +132,9 @@ export default () =>
       source={`
         const [error, setError] = useState(null);
         const [count, setCount] = useState(0);
-        useEffect(() => console.log(count),
-          [count]
-        );
+        useEffect(() => {
+          console.log(count);
+        }, [count]);
       `}
     />
 
@@ -156,19 +157,10 @@ export default () =>
     </Points>
 
 
-
-    <Points title="BlockChain/Smart Contracts">
-      <Point text="Hype is gone" />
-      <Point text="Serious security issues" />
-      <Point text="Immutable data structures" />
-      <Point text="Need for non-turing complete language" />
-    </Points>
-
-    <Points title="Distributed Logs">
-      <Point text="State becomes a pure function of events" />
-      <Point text="Full history is maintained" />
-      <Point text="Bugs involving historical data are fixable" />
-      <Point text="Ridding ourselves of place oriented programming" />
+        <Points title="Difficulties">
+      <Point text="Multiple Views of Same Data" />
+      <Point text="Async by default" />
+      <Point text="New Paradigm" />
     </Points>
 
     <Points title="Databases">
@@ -177,11 +169,164 @@ export default () =>
       <Point text="Increasingly Immutable" />
     </Points>
 
+    <Points title="Underlying implementations">
+      <Point text="Built on Immutable Logs" />
+      <Point text="Lowers lock contention" />
+      <Point text="Immutability helps with consensus algorithms" />
+      <Point text="Experiments in lattice based KV stores" />
+    </Points>
+
+    <Points title="User Programming Model (Faunadb)">
+      <Point text="Lisp In your DB" />
+      <Point text="Not Turing Complete" />
+      <Point text="Distributed, Relational DB" />
+      <Point text="Serverless" />
+    </Points>
+
+
+    <Points title="User Programming Model (Faunadb)">
+      <Point text="Lisp In your DB" />
+      <Point text="Not Turing Complete" />
+      <Point text="Distributed, Relational DB" />
+      <Point text="Serverless" />
+    </Points>
+
+
+    <Points title="Increasingly Immutable">
+      <Point text="Fauna keep versions" />
+      <Point text="Datomic and Crux immutable by default" />
+      <Point text="RDS allows for 1 second snapshots" />
+      <Point text="New Databases are starting to be fully immutable" />
+    </Points>
+
+
+    <Points title="Distributed Logs">
+      <Point text="Kafka" />
+      <Point text="Kinesis" />
+    </Points>
+
+    <Points title="Distributed Logs">
+      <Point text="Full history is maintained" />
+      <Point text="State becomes a pure function of events" />
+      <Point text="Bugs involving historical data are fixable" />
+      <Point text="Ridding ourselves of place oriented programming" />
+    </Points>
+
+    <Points title="Difference to Queues">
+      <Point text="History is Immutable" />
+      <Point text="Consume from anywhere" />
+      <Point text="Reprocess" />
+      <Point text="Multiple consumers allowed by default" />
+    </Points>
+
+    <Headline
+      textAlign="left"
+      color="yellow"
+      text="CQRS" />
+
+    <Headline
+      textAlign="left"
+      color="yellow"
+      text="(State, Action) => State" />
+
+
+    <Points title="Benefits">
+      <Point text="Auditability" />
+      <Point text="New Features without Planning" />
+      <Point text="Inspectable by Default" />
+      <Point text="Decoupled systems" />
+    </Points>
+
+
+    <Points title="BlockChain/Smart Contracts">
+      <Point text="Hype is gone" />
+      <Point text="Serious security issues" />
+      <Point text="Immutable data structures" />
+      <Point text="Need for non-turing complete language" />
+    </Points>
+
+    <ImageSlide
+      align="center"
+      height={600}
+      title="Merkle Tree"
+      src={images.hashTree} />
+
+    <Headline
+      textAlign="left"
+      color="green"
+      text="One World Computer" />
+
+    <Points title="Problems">
+      <Point text="Infinite loops" />
+      <Point text="Error Handling" />
+      <Point text="Out of Memory" />
+      <Point text="Concurrent by default" />
+    </Points>
+
+    <Code
+      textSize={24}
+      lang="javascript"
+      source={`
+        contract Balance {
+          mapping (address => uint) userBalances;
+
+          function addToBalances() {
+            userBalances[msg.sender] += msg.value;
+          }
+
+          function withdrawBalance() {
+            bool sent = msg.sender.call.value(
+              userBalances[msg.value]
+            )();
+
+            if (!sent) {
+              throw;
+            }
+            userBalances[msg.sender] = 0;
+          }
+        }
+      `}
+    />
+
+    <Code
+      textSize={24}
+      lang="javascript"
+      source={`
+
+        // 100 dollar balance
+
+        contract ExploitWithdrawl {
+            function() external { 
+              int withdrawn = 0;
+              try {
+                withdrawn += Balance.withdrawBalance();
+              } catch (e) {}
+            }
+        }
+      `}
+    />
+
+    <Points title="Functional Benefits">
+      <Point text="All Code is Pure" />
+      <Point text="Can be Turing Incomplete" />
+      <Point text="Encode Guarantees as Types" />
+    </Points>
+
+
     <Points title="Serverless">
       <Point text="Modeled as input and output" />
       <Point text="Immutable Deploys" />
       <Point text="Verb Oriented" />
     </Points>
+
+    <Headline
+      textAlign="left"
+      text="Messy Distributed World" />
+
+
+
+
+    <BlankSlide />
 
     <Code
       lang="clojure"
@@ -190,8 +335,5 @@ export default () =>
         (source example)
       `}
     />
-
-
-    <BlankSlide />
 
   </Presentation>
