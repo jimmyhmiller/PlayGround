@@ -1,6 +1,6 @@
 # Introduction to Term Rewriting with Meander
 
-Meander is heavily inspired by the capabilities of term rewriting languages. But sadly, there aren't many introductions to term rewriting aimed at every day software engineers. Typically introductions to term rewriting immediately dive into discussing the mathematical properties or proving theorems. These can be really interesting and useful in their own right. But personally I like to get an intuitive feel for something before diving into a formalism. That is the aim of this post, to help you have a more intuitive understanding of how Term Rewriting works and what it is capable of.
+Meander is heavily inspired by the capabilities of term rewriting languages. But sadly, there aren't many introductions to term rewriting aimed at every day software engineers. Typically introductions to term rewriting immediately dive into discussing mathematical properties or proving theorems. These can be really interesting and useful in their own right. But personally I like to get an intuitive feel for something before diving into a formalism. That is the aim of this post, to help you have a more intuitive understanding of how Term Rewriting works and what it is capable of.
 
 ## The Basics
 
@@ -17,9 +17,9 @@ The goal of Term Rewriting is to take some bit of data and rewrite it into some 
 ;; => :y
 ```
 
-Here is the most simple rewrite rule imaginable. If we are given `:x` we turn it into `:y`. In term rewriting the pattern we are using to match is often called the `left-hand-side` and the data we return is called the `right-hand-side`. So `:x` is our left-hand-side and `:y` is our right-hand-side. The data we pass in to transform is called the reducible-expression (or `redex` for short).
+Here is the most simple rewrite rule imaginable. If we are given `:x` we turn it into `:y`. In term rewriting, the pattern we are using to match is often called the `left-hand-side` and the data we return is called the `right-hand-side`. So `:x` is our left-hand-side and `:y` is our right-hand-side. The data we pass in to transform is called the reducible-expression (or `redex` for short).
 
-Admittiedly, this seems almost useless, and it really is with this overly simplisitic example. But let's take it slow and build it up. 
+Admittedly, this seems almost useless, and it really is with this overly simplisitic example. But let's take it slow and build it up. 
 
 ```clojure
 (def rewrite-some-keywords
@@ -33,7 +33,7 @@ Admittiedly, this seems almost useless, and it really is with this overly simpli
 ;; => :c
 ```
 
-Here we've extended our rewrite to have multiple rules. Now we can handle more than just `:x`. Of course this is still really limiting. We definitely can't list every single possible input for all of our rules. We need a way to match any input. That is is where `logic-variables` come in.
+Here we've extended our rewrite to have multiple rules. Now we can handle more than just `:x`. Of course this is still really limiting. We definitely can't list every single possible input for all of our rules. We need a way to match any input. That is is where `logic-variables` come in. (Use of logic variables in Meader does deviate a bit from normal term rewriting, but we aren't going to worry about that.)
 
 ```clojure
 (def match-any-thing

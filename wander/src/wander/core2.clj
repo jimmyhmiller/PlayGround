@@ -10,6 +10,69 @@
 
 
 
+
+
+(def game-info
+  {:players [{:name "Jimmer"
+              :class :warrior}
+             {:name "Sir Will"
+              :class :knight}
+             {:name "Dalgrith"
+              :class :rogue}]
+   :weapons [{:name :long-sword
+              :allowed-classes #{:warrior :knight}
+              :standard-upgrade :power}
+             {:name :short-sword
+              :allowed-classes #{:warrior :rogue}
+              :standard-upgrade :speed}
+             {:name :unbeatable
+              :allowed-classes #{:rogue}
+              :standard-upgrade :nuclear}]
+   :stats {:short-sword {:attack-power 2
+                         :upgrades []}
+           :long-sword {:attack-power 4
+                        :upgrades [:reach]}
+           :unbeatable {:attack-power 9001
+                        :upgrades [:indestructible]}}
+   :third-party #{:unbeatable}})
+
+
+
+
+(m/search game-info
+  {:players (scan {:name ?name
+                   :class ?class})
+   :weapons (scan {:name ?weapon
+                   :allowed-classes #{?class}
+                   :standard-upgrade !upgrades})
+   :stats {?weapon {:attack-power ?attack-power
+                    :upgrades [!upgrades ...]}}
+   :third-party (not #{?weapon})}
+
+  {:name ?name
+   :weapon ?weapon
+   :class ?class 
+   :attack-power ?attack-power
+   :upgrades !upgrades})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 (def x 2)
 
 (defn match-my-map [m]
