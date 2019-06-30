@@ -4,12 +4,12 @@
  :source-paths ["src"]
  :nrepl        {:port 8703}
  :builds       {:bootstrap {:target     :bootstrap
-                            :output-dir "out/public/js/bootstrap"
+                            :output-dir "public/js/bootstrap"
                             :entries    [cljs.core cljs.js meander-editor.eval-env]
                             :exclude    #{cljs.js meander-editor.core}}
                 :browser {:target :browser
 
-                          :output-dir       "out/public/js/"
+                          :output-dir       "public/js/"
                           :asset-path       "/js/"
                           
 
@@ -31,6 +31,6 @@
                             :exclude #{meander-editor.core}
                             :web-worker true}}
 
-                          :devtools         {:http-root  "out/public"
+                          :devtools         {:http-root  "public"
                                              :http-port  8702
                                              :after-load meander-editor.core/render}}}}

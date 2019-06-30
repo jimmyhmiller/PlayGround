@@ -89,26 +89,50 @@
 (def arith
   (r/until =
     (r/bottom-up
-     (r/rewrite
+     (r/attempt
+      (r/rewrite
 
-      0 Z
+       0 Z
 
-      (pred number? ?n) (succ ($ ~dec ?n))
+       (pred number? ?n) (succ ($ ~dec ?n))
 
-      (+ Z ?n) ?n
-      (+ ?n Z) ?n
+       (+ Z ?n) ?n
+       (+ ?n Z) ?n
 
-      (+ ?n (succ ?m)) (+ (succ ?n) ?m)
-      
-      (fib Z) Z
-      
-      (fib (succ Z)) (succ Z)
-      
-      (fib (succ (succ ?n))) (+ (fib (succ ?n)) (fib ?n))
+       (+ ?n (succ ?m)) (+ (succ ?n) ?m)
+       
+       (fib Z) Z
+       
+       (fib (succ Z)) (succ Z)
+       
+       (fib (succ (succ ?n))) (+ (fib (succ ?n)) (fib ?n))
 
-      ?x ?x
-      ))))
-
+       )))))
 
 
-(arith '(fib 10))
+
+(def fib-rules
+  (r/rewrite
+
+   (+ Z ?n) ?n
+   (+ ?n Z) ?n
+
+   (+ ?n (succ ?m)) (+ (succ ?n) ?m)
+   
+   (fib Z) Z
+   (fib (succ Z)) (succ Z)
+   (fib (succ (succ ?n))) (+ (fib (succ ?n)) (fib ?n))))
+
+(def convert-numbers
+  (r/rewrite
+   0 Z
+   (pred number? ?n) (succ ($ ~dec ?n))))
+
+
+(def run-fib
+  (r/until =
+    (r/bottom-up
+     (r/attempt
+      (r/choice convert-numbers fib-rules)))))
+
+(run-fib '(fib 10))

@@ -273,4 +273,43 @@ Here we moved our trace down outside our `attempt` strategy. Now we can see the 
 
 ## Rewriting as General Computation
 
-What have been doing so far is interesting, but it falls short of the true power of term rewriting. 
+What have been doing so far is interesting, but it falls short of the true power of term rewriting. Term rewriting is a general programming technique. Using it we can compute absolutely anything that is computable. Let's start with a classic example, fibonacci, but to prove general computability, we will make our own numbers instead relying on Clojure's.
+
+```clojure
+(def fib-rules
+  (r/rewrite
+
+   (+ Z ?n) ?n
+   (+ ?n Z) ?n
+
+   (+ ?n (succ ?m)) (+ (succ ?n) ?m)
+   
+   (fib Z) Z
+   (fib (succ Z)) (succ Z)
+   (fib (succ (succ ?n))) (+ (fib (succ ?n)) (fib ?n))))
+
+
+(def run-fib
+  (r/until =
+    (r/bottom-up
+     (r/attempt fib-rules))))
+
+[(run-fib '(fib Z))
+ (run-fib '(fib (succ Z)))
+ (run-fib '(fib (succ (succ Z))))
+ (run-fib '(fib (succ (succ (succ Z)))))
+ (run-fib '(fib (succ (succ (succ (succ Z))))))
+ (run-fib '(fib (succ (succ (succ (succ (succ Z)))))))
+ (run-fib '(fib (succ (succ (succ (succ (succ (succ Z))))))))]
+
+;; [Z
+;;  (succ Z)
+;;  (succ Z)
+;;  (succ (succ Z))
+;;  (succ (succ (succ Z)))
+;;  (succ (succ (succ (succ (succ Z)))))
+;;  (succ (succ (succ (succ (succ (succ (succ (succ Z))))))))]
+```
+
+If you aren't familiar with defining natural numbers via Peano numbers this may be a little bit confusion. But for our purposes all you need to know is that `Z` means 0 and `succ` means successor. `(succ Z)` means 1 `(succ (succ Z))` means 2 and so on and so forth. Our fibonacci rules start by defining addition for our peano numbers. Anything added to 0 is zero. Otherwise, we can add two numbers my moving all the `succ`s to one side until the right hand side equals 0. With those definitions in place, 
+

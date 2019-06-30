@@ -2,7 +2,8 @@
   (:require [cljs.js :as cljs]
             [cljs.env :as env]
             [shadow.cljs.bootstrap.browser :as boot]
-            [cljs.reader :refer [read-string]]))
+            [cljs.reader :refer [read-string]]
+            [cljs.repl]))
 
 
 (defonce compile-state-ref (env/default-compiler-env))
@@ -21,18 +22,17 @@
 (defonce initialize-eval
   (do
     (js/Promise. (fn [resolve error]
-                   (println "initializing2")
+                   (println "initializing")
                    (try
                      (boot/init compile-state-ref
                                 {:path         "/js/bootstrap"
                                  :load-on-init '#{meander-editor.eval-env}}
-                                (fn [x] (println x)  (resolve x)))
+                                (fn [x]  (resolve x)))
                      (catch js/Object e
                        (println "error initializing" e)))))))
 
 
 (defn eval-promise [source]
-  (println source)
   (js/Promise. 
    (fn [resolve]
      (eval-str source (comp resolve (fn [{:keys [value message] :as result}]
@@ -48,7 +48,6 @@
     (ex-message error)))
 
 (defn eval-main [input]
-  (println input)
   (.then (eval-promise (str input 
                             "\n-main"))
          (fn [[_ meander-fn]]
@@ -70,11 +69,10 @@
 (js/self.addEventListener "message"
   (fn [^js e]
     (let [message (read-string (.. e -data))]
-      (println "Recieved message" message)
+      (println "Recieved message")
       (.catch
        (.then initialize-eval
               (fn [response]
-                (println "got here")
                 (handle-message message)))
        (fn [error]
          (println error))))))

@@ -1,0 +1,11 @@
+{
+    "name": "try-meander",
+    "version": 2,
+    "alias": "try-meander.now.sh",
+    "builds": [
+        { "src": "public/**", "use": "@now/static" }
+    ],
+      "routes": [
+        { "src": "/(.*)", "dest": "public/$1" }
+    ]
+}
