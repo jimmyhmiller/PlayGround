@@ -25,8 +25,8 @@
 
 (defn -main []
   (m/match example
-           [!xs !ys ...]
-           [!xs !ys]))
+    [!xs !ys ...]
+    [!xs !ys]))
 ")
 
 
