@@ -1,6 +1,6 @@
 # Introduction to Term Rewriting with Meander
 
-Meander is heavily inspired by the capabilities of term rewriting languages. But sadly, there aren't many introductions to term rewriting aimed at every day software engineers. Typically introductions to term rewriting immediately dive into discussing mathematical properties or proving theorems. These can be really interesting and useful in their own right. But personally I like to get an intuitive feel for something before diving into a formalism. That is the aim of this post, to help you have a more intuitive understanding of how Term Rewriting works and what it is capable of.
+Meander is heavily inspired by the capabilities of term rewriting languages. But sadly, there aren't many introductions to term rewriting aimed at every day software engineers. Typically introductions to term rewriting immediately dive into discussing mathematical properties or proving theorems. These can be really interesting and useful in their own right. But personally I like to get an intuitive feel for something before diving into a formalism. That is the aim of this post, to help you have a more intuitive understanding of how Term Rewriting works and what it is capable of. This post will not focus on practical uses of meander, if you are interested in that check out [Meander for Practical Data Transformation](/meander-practical/).
 
 ## The Basics
 
@@ -199,7 +199,7 @@ We have now eliminated all the zeros in our additions no matter where they are i
      (r/attempt simplify-addition))))
 ```
 
-Our rules are completely separate from how we want to apply them. When writing our transformations, we don't have the think at all about the context they live in. We just express our simple rules and later we can apply strategies to them. But what if we want to understand what these strategies are doing? After playing around with things, it seems that the top-down strategy and the bottom-up strategy always give us the same result. But what are they doing that is different? We can inspect our strategies at any point by using the `trace` strategy.
+Our rules are completely separate from how we want to apply them. When writing our transformations, we don't have to think at all about the context they live in. We just express our simple rules and later we can apply strategies to them. But what if we want to understand what these strategies are doing? After playing around with things, it seems that the top-down strategy and the bottom-up strategy always give us the same result. But what are they doing that is different? We can inspect our strategies at any point by using the `trace` strategy.
 
 ```clojure
 (def simplify-addition-bu
@@ -311,5 +311,27 @@ What have been doing so far is interesting, but it falls short of the true power
 ;;  (succ (succ (succ (succ (succ (succ (succ (succ Z))))))))]
 ```
 
-If you aren't familiar with defining natural numbers via Peano numbers this may be a little bit confusion. But for our purposes all you need to know is that `Z` means 0 and `succ` means successor. `(succ Z)` means 1 `(succ (succ Z))` means 2 and so on and so forth. Our fibonacci rules start by defining addition for our peano numbers. Anything added to 0 is zero. Otherwise, we can add two numbers my moving all the `succ`s to one side until the right hand side equals 0. With those definitions in place, 
+If you aren't familiar with defining natural numbers via Peano numbers this may be a little bit confusion. But for our purposes all you need to know is that `Z` means 0 and `succ` means successor. `(succ Z)` means 1 `(succ (succ Z))` means 2 and so on and so forth. Our fibonacci rules start by defining addition for our peano numbers. Anything added to 0 is zero. Otherwise, we can add two numbers my moving all the `succ`s to one side until the right hand side equals 0. With those definitions in place, we can define fibonacci, which is basically just the definition of fibonacci. With term rewriting our strategies can enable us to have recursion without directly implementing it. Our rules read like they are recursive. But our rules don't call a function. They don't cause anything to occur. They just return more data. It is the process of interpretation that makes them recursive.
+
+In fact, with Meander, we are limited to what the clojure reader can interpret, but in general with term rewriting, the syntax doesn't matter. I wrote things as `(fib n)` merely as convention. I could have writen `(n fib)`. There is nothing special about the syntax other than what rules we apply to it. 
+
+## Why Should We Care?
+
+Admittedly the example of fibonacci above isn't very useful. And of course if we had a real language, we would never want a number system like that. So why should we care about term rewriting? Term Rewriting offers a power yet simple way of viewing programming. It gives us the potential take the lisp montra that code is data and data is code much more seriously. How so? First, in lisps functions might be values, but they opaque. Evaluating a function defintion returns you something that you can't inspect directly. Something you can't directly transform (`#function[]` in clojure). With term rewriting things can just remain data, because we have separated execution from description.
+
+Not only can our "code" be data more than it can in lisp, but we can actually have our execution as data. Executing a Term Rewriting rule is just taking in data, matching on it and producing more data. That means all our intermediate values are data. The entire execution of our program now becomes data. Ever ran your program and have no idea where a certain value came from? Well, imagine if you could just ask your language to pattern match on every intermediate value that contains that value, oh and give me the 5 steps before it that led to that value. With Term Rewriting this is entirely possible.
+
+Term Rewriting also gives us a easy basis for talking about partial programs. Our current programming languages have a problem where if they encounter something they don't understand, they just blow up, not telling us anything. Let's consider the following program:
+
+```clojure
+(+ 3 4 (unimplemented!))
+```
+
+What does the program return? Well as its name is clear, unimplemented is in fact, unimplemented. So most languages, will just throw an error. That can be what we want at times. But as people, we can look at that code and tell you something else. We know that it will return `(+ 7 something)`. Why can't our languages tell us that? Why can't we start writing partial programs and run them continually refining things as we go?
+
+ ## Term Rewriting as Programming Paradigm
+
+Is Term Rewriting functional programming? Is it imperative programming? Is it logic programming? I honestly think the answer to all the questions is no. Term Rewriting represents a distinct way of programming. It can emulate very easily a pure functional style and yet it goes beyond that. Term Rewriting offers us a uniform way of dealing with data. It give us the ability to think about things as syntatic structures. It offers us a way to truly have code as data, to go beyond the arbitrary distictions imposed by our languages about what can and cannot be manipluated. Meander isn't at that point. But it is the beginning of an exploration into how to get there.
+
+
 
