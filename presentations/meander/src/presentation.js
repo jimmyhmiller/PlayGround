@@ -119,6 +119,12 @@ export default () =>
     </Points>
 
 
+    <Headline
+      color="green"
+      textAlign="left"
+      text="Is This That Much Better?" />
+
+
     <Code
       title="Clean Pipeline"
       lang="clojure"
@@ -133,11 +139,6 @@ export default () =>
       `}
      />
 
-
-    <Headline
-      color="green"
-      textAlign="left"
-      text="Is This That Much Better?" />
 
 
     <Headline
