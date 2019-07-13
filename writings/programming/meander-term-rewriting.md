@@ -218,25 +218,24 @@ Our rules are completely separate from how we want to apply them. When writing o
 So now we have modified our rewrites to trace every time the top-down or bottom-up rules are called. Let's try a fairly complicated expression and see what happens.
 
 ```clojure
-(simplify-addition-td '(+ (+ (+ 0 3) (+ 0 (+ 3 (+ 2 0)))) 0))
+(simplify-addition-td '(+ (+ (+ 0 3) (+ 0 (+ 0 (+ 2 0)))) 0)
 
 ;; printed
-{:id t_27283, :in (+ (+ (+ 0 3) (+ 0 (+ 0 (+ 2 0)))))}
-{:id t_27283, :out (+ (+ 3 (+ 0 2)))}
-{:id t_27283, :in (+ (+ 3 (+ 0 2)))}
-{:id t_27283, :out (+ (+ 3 2))}
-{:id t_27283, :in (+ (+ 3 2))}
-{:id t_27283, :out (+ (+ 3 2))}
+{:id t_20100, :in (+ (+ (+ 0 3) (+ 0 (+ 0 (+ 2 0)))) 0)}
+{:id t_20100, :out (+ 3 (+ 0 2))}
+{:id t_20100, :in (+ 3 (+ 0 2))}
+{:id t_20100, :out (+ 3 2)}
+{:id t_20100, :in (+ 3 2)}
+{:id t_20100, :out (+ 3 2)}
 
 
-
-(simplify-addition-bu '(+ (+ (+ 0 3) (+ 0 (+ 3 (+ 2 0)))) 0))
+(simplify-addition-bu '(+ (+ (+ 0 3) (+ 0 (+ 0 (+ 2 0)))) 0)
 
 ;;printed
-{:id t_27284, :in (+ (+ (+ 0 3) (+ 0 (+ 0 (+ 2 0)))))}
-{:id t_27284, :out (+ (+ 3 2))}
-{:id t_27284, :in (+ (+ 3 2))}
-{:id t_27284, :out (+ (+ 3 2))}
+{:id t_20099, :in (+ (+ (+ 0 3) (+ 0 (+ 0 (+ 2 0)))) 0)}
+{:id t_20099, :out (+ 3 2)}
+{:id t_20099, :in (+ 3 2)}
+{:id t_20099, :out (+ 3 2)}
 ```
 
 If we look at the top-down approach, we can see that the top-down strategy actually gets called three times. Once it rewrites quite a bit, but leaves in a 0 that needs to be rewritten. Then it gets called again, eliminating all zeros. Finally it is called and nothing changes. Our bottom-up strategy however is only called twice. But we can actually get more fine grained than this. We can put trace at any point in our strategies.
