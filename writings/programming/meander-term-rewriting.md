@@ -268,7 +268,7 @@ If we look at the top-down approach, we can see that the top-down strategy actua
 {:id t_27317, :out 3}
 ```
 
-Here we moved our trace down outside our `attempt` strategy. Now we can see the exact order of our bottom-up strategy. Having this sorts of visibility into how the process is working is really fantastic.
+Here we moved our trace down outside our `attempt` strategy. Now we can see the exact order of our bottom-up strategy. Having this sort of visibility into how the process is working is really fantastic.
 
 ## Rewriting as General Computation
 
@@ -326,7 +326,7 @@ Term Rewriting also gives us an easy basis for talking about partial programs. O
 (+ 3 4 (unimplemented!))
 ```
 
-What does the program return? Well as its name is clear, unimplemented is in fact, unimplemented. So most languages, will just throw an error. That can be what we want at times. But as people, we can look at that code and tell you something else. We know that it will return `(+ 7 something)`. Why can't our languages tell us that? Why can't we start writing partial programs and run them continually refining things as we go?
+What does the program return? Well as its name is clear, unimplemented is in fact, unimplemented. So most languages, will just throw an error. That can be what we want at times. But as people, we can look at that code and tell something else. We know that it will return `(+ 7 something)`. Why can't our languages tell us that? Why can't we start writing partial programs and run them continually refining things as we go? Term Rewriting gives us this ability.
 
  ## Term Rewriting as Programming Paradigm
 
