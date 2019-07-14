@@ -1,0 +1,5 @@
+{:deps {org.clojure/clojurescript {:mvn/version "1.10.238"}
+        meander/delta {:mvn/version "0.0.137"}}
+ :aliases
+ {:cljs {:main-opts ["-m" "cljs.main" "-co" "{:install-deps,true,:npm-deps,{}}" "-re" "node" "-r"]
+         :extra-deps {org.clojure/clojurescript {:mvn/version "1.10.238"}}}}}

@@ -521,6 +521,23 @@ export default () =>
      />
 
 
+    <Code
+      lang="clojure"
+      source={`
+        (search (parse-js example)
+          ($ (or
+              {:type "FunctionDeclaration"
+               :id {:name ?name}
+               :loc ?loc}
+
+              {:type "VariableDeclarator"
+               :id {:name ?name}
+               :loc ?loc
+               :init {:type (or "FunctionExpression" "ArrowFunctionExpression")}}))
+          {:name ?name
+           :loc ?loc})
+      `}
+     />
 
 
 
