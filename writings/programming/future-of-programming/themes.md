@@ -55,3 +55,13 @@
   * [Eve](http://witheve.com/)
   * Dynamicland
   * [Hazel](https://hazel.org/)
+* Perspectives
+  * Programming as Theory Building
+  * Programming is a pop culture
+  * Human Machine Symbiosis
+* People
+  * Bret Victor
+  * Jonathan Edwards
+  * Edsger W. Dijkstra
+  * Englebart
+  * Alan Kay
