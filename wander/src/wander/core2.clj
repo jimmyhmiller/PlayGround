@@ -12,6 +12,76 @@
 
 
 
+
+
+((r/rewrite
+  [:S [:group [:name ?group-name]
+       . [:window [:name !window-name]
+          (or [:feature
+               [:bounds !top !left !height !width]
+               [:linkerChannel !linker-channel]]
+              
+              (and [:feature
+                    [:bounds !top !left !height !width]]
+                   (m/let !linker-channel "default-channel"))
+              
+              (and [:feature
+                    [:linkerChannel !linker-channel]]
+                   (m/let [!top !left !height !width] [0 0 100 100]))
+              
+              (let [!top !left !height !width] [0 0 100 100]))
+          ]
+       ...]]
+
+  {:groups {?group-name ~(set !window-name)}
+   :windows {& [[!window-name {:defaultTop !top
+                               :defaultLeft !left
+                               :defaultHeight !height
+                               :defaultWidth !width}] ...]}})
+ [:S [:group
+      [:name "G1"]
+      [:window
+       [:name "W1"]
+       [:feature
+        [:bounds 100 200 300 400]
+        [:linkerChannel "yellow"]]]
+      [:window
+       [:name "W2"]
+       [:feature
+        [:bounds 100 200 300 400]]]
+      [:window
+       [:name "W3"]
+       [:feature
+        [:linkerChannel "yellow"]]]
+      [:window
+       [:name "W4"]
+       [:feature
+        [:linkerChannel "yellow"]]]]])
+
+
+
+(opt-default nil ?x)
+
+
+(def data {:a [{:aa 1 :bb 2}
+               {:cc 3}]
+           :b [{:dd 4}]})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 (def game-info
   {:players [{:name "Jimmer"
               :class :warrior}
@@ -36,6 +106,34 @@
                         :upgrades [:indestructible]}}
    :third-party #{:unbeatable}})
 
+
+(defn weapons-for-class [class weapons]
+  (filter (fn [{:keys [allowed-classes]}] 
+            (contains? allowed-classes class)) 
+          weapons))
+
+(defn gather-weapon-info [class {:keys [weapons stats third-party] :as info}]
+  (->> weapons
+       (weapons-for-class class)
+       (filter #(not (contains? third-party (:name %))))
+       (map #(assoc % :stats (stats (:name %))))))
+
+(defn player-with-weapons [{:keys [weapons stats third-party] :as info} player]
+  (map (fn [weapon player]
+         {:name (:name player)
+          :weapon (:name weapon)
+          :class (:class player)
+          :attack-power (get-in weapon [:stats :attack-power])
+          :upgrades (conj (get-in weapon [:stats :upgrades])
+                          (get-in weapon [:standard-upgrade]))})
+       (gather-weapon-info (:class player) info)
+       (repeat player)))
+
+(defn players-with-weapons [{:keys [players weapons stats third-party] :as info}]
+  (mapcat (partial player-with-weapons info) players))
+
+
+(players-with-weapons game-info)
 
 
 
@@ -62,7 +160,9 @@
 
 
 
-
+(def fib
+  (r/rewrite 
+   ))
 
 
 
@@ -887,6 +987,28 @@
 
 
 
+((r/rewrite
+  (map ?f '()) '()
+  (map ?f (?x . !xs ...)) (app ?f ?x))
+
+ '(map f (1 2 3)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1224,3 +1346,40 @@ z(defn distinct-zips-and-cities [person]
 [:c :d :a :b]
 
 
+
+
+
+
+
+(def simplify-addition
+  (r/rewrite
+   (+ ?x 0) ?x
+   (+ 0 ?x) ?x))
+
+(def simplify-addition-bu
+  (r/until =
+    (r/bottom-up
+     (r/attempt simplify-addition))))
+
+(def simplify-addition-td
+  (r/until =
+    (r/top-down
+     (r/attempt simplify-addition))))
+
+
+
+(def simplify-addition-bu
+  (r/until =
+    (r/trace
+     (r/bottom-up
+      (r/attempt simplify-addition)))))
+
+(def simplify-addition-td
+  (r/until =
+    (r/trace
+     (r/top-down
+      (r/attempt simplify-addition)))))
+
+(simplify-addition-bu '(+ (+ (+ 0 3) (+ 0 (+ 0 (+ 2 0)))) 0))
+
+(simplify-addition-b '(+ (+ (+ 0 3) (+ 0 (+ 3 (+ 2 0)) )) 0))

@@ -43,6 +43,10 @@ export default () =>
       subtext="Declarative Explorations at the Limits of FP" />
 
 
+    <Headline
+      color="green"
+      textAlign="left"
+      text="FP = Better" />
 
 
 
@@ -320,6 +324,201 @@ export default () =>
       `}
      />
 
+
+
+    <Headline
+      textAlign="left"
+      text="Pattern Matching On Steroids" />
+
+
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Extended Example" />
+
+      <Code
+        lang="clojure"
+        source={`
+          (def game-info
+            {:players ...
+             :weapons ...
+             :stats ...
+             :third-party ...})
+       `}
+      />
+
+      <Code
+        lang="clojure"
+        title="players"
+        source={`
+          [{:name "Jimmer"
+            :class :warrior}
+           {:name "Sir Will"
+            :class :knight}
+           {:name "Dalgrith"
+            :class :rogue}]
+       `}
+      />
+
+
+      <Code
+        lang="clojure"
+        title="Weapons"
+        source={`
+          [{:name :long-sword
+            :allowed-classes #{:warrior :knight}
+            :standard-upgrade :power}
+           {:name :short-sword
+            :allowed-classes #{:warrior :rogue}
+            :standard-upgrade :speed}
+           {:name :unbeatable
+            :allowed-classes #{:rogue}
+            :standard-upgrade :nuclear}]
+       `}
+      />
+
+      <Code
+        lang="clojure"
+        title="Stats"
+        source={`
+          {:short-sword {:attack-power 2
+                         :upgrades []}
+           :long-sword {:attack-power 4
+                        :upgrades [:reach]}
+           :unbeatable {:attack-power 9001
+                        :upgrades [:indestructible]}}
+        `}
+      />
+
+      <Code
+        lang="clojure"
+        title="ThirdParty"
+        source={`
+          #{:unbeatable}
+        `}
+      />
+
+      <Code
+        lang="clojure"
+        textSize={20}
+        source={`
+          {:players [{:name "Jimmer"
+                      :class :warrior}
+                     {:name "Sir Will"
+                      :class :knight}
+                     {:name "Dalgrith"
+                      :class :rogue}]
+           :weapons [{:name :long-sword
+                      :allowed-classes #{:warrior :knight}
+                      :standard-upgrade :power}
+                     {:name :short-sword
+                      :allowed-classes #{:warrior :rogue}
+                      :standard-upgrade :speed}
+                     {:name :unbeatable
+                      :allowed-classes #{:rogue}
+                      :standard-upgrade :nuclear}]
+           :stats {:short-sword {:attack-power 2
+                                 :upgrades []}
+                   :long-sword {:attack-power 4
+                                :upgrades [:reach]}
+                   :unbeatable {:attack-power 9001
+                                :upgrades [:indestructible]}}
+           :third-party #{:unbeatable}}
+        `}
+      />
+
+      <Points title="Requirements">
+        <Point text="All Valid Player/Weapon Combinations" />
+        <Point text="name, weapon, class, attack power, and all upgrades" />
+        <Point text="No third party weapons allowed" />
+      </Points>
+
+      <Code
+        textSize={22}
+        lang="clojure"
+        source={`
+          ({:name "Jimmer"
+            :weapon :long-sword
+            :class :warrior
+            :attack-power 4
+            :upgrades [:reach :power]}
+           {:name "Jimmer"
+            :weapon :short-sword
+            :class :warrior
+            :attack-power 2
+            :upgrades [:speed]}
+           {:name "Sir Will"
+            :weapon :long-sword
+            :class :knight
+            :attack-power 4
+            :upgrades [:reach :power]}
+           {:name "Dalgrith"
+            :weapon :short-sword
+            :class :rogue
+            :attack-power 2
+            :upgrades [:speed]})
+        `}
+      />
+
+
+     <Code
+       textSize={16}
+       lang="clojure"
+       source={`
+        (defn weapons-for-class [class weapons]
+          (filter (fn [{:keys [allowed-classes]}] 
+                    (contains? allowed-classes class)) 
+                  weapons))
+
+        (defn gather-weapon-info [class {:keys [weapons stats third-party] :as info}]
+          (->> weapons
+               (weapons-for-class class)
+               (filter #(not (contains? third-party (:name %))))
+               (map #(assoc % :stats (stats (:name %))))))
+
+        (defn player-with-weapons [{:keys [weapons stats third-party] :as info} player]
+          (map (fn [weapon player]
+                 {:name (:name player)
+                  :weapon (:name weapon)
+                  :class (:class player)
+                  :attack-power (get-in weapon [:stats :attack-power])
+                  :upgrades (conj (get-in weapon [:stats :upgrades])
+                                  (get-in weapon [:standard-upgrade]))})
+               (gather-weapon-info (:class player) info)
+               (repeat player)))
+
+        (defn players-with-weapons [{:keys [players weapons stats third-party] :as info}]
+          (mapcat (partial player-with-weapons info) players))
+
+
+        (players-with-weapons game-info)
+
+
+      `}
+    />
+
+
+    <Code
+      lang="clojure"
+      source={`
+        (m/search game-info
+          {:players (scan {:name ?name
+                           :class ?class})
+           :weapons (scan {:name ?weapon
+                           :allowed-classes #{?class}
+                           :standard-upgrade !upgrades})
+           :stats {?weapon {:attack-power ?attack-power
+                            :upgrades [!upgrades ...]}}
+           :third-party (not #{?weapon})}
+
+          {:name ?name
+           :weapon ?weapon
+           :class ?class 
+           :attack-power ?attack-power
+           :upgrades !upgrades})
+
+      `}
+     />
 
 
 
