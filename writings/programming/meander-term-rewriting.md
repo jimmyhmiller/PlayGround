@@ -333,6 +333,3 @@ What does the program return? Well as its name is clear, unimplemented is in fac
 Term Rewriting represents a distinct way of programming.  It offers us a uniform way of dealing with data. It gives us the ability to think about things as syntactic structures. It offers us a way to truly have code as data, to go beyond the arbitrary distinctions imposed by our languages about what can and cannot be manipulated. It is a fundamental shift in how we view programs. It gives us new perspectives, new ways of thinking about how code executes and what our programs mean.
 
 Meander isn't at that point. But it is the beginning of an exploration into how to get there. In many ways, Meander is a testament to the flexiblity of lisps and Clojure in particular. Using Clojure rich data literals and macros we are able to embed our own language inside it. Yet at the same time, Meander pushes us beyond the way we've traditionally conceived of programming. Maybe functions aren't the best abstraction for working with data. Could programming be better if we truly had a way to work with data directly? That is Meander's conviction and its chief aim.
-
-
-

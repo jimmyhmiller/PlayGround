@@ -42,7 +42,7 @@
   (fn [env x y] (type x)))
 
 (defn reducer [env [x y]]
-  (unify env x yc))
+  (unify env x y))
 
 (defmethod unify-terms clojure.lang.Sequential
   [env x y]
@@ -91,6 +91,7 @@
 (add-rule {:left (* 0 ?x) :right 0})
 (add-rule {:left (* ?x 0) :right 0})
 
+
 (add-rule (1 => 2))
 
 (add-meta-rule {:left (?x => ?y)
@@ -99,23 +100,22 @@
 
 
 
+
+
 (run-rules 1)
 
 
-(macroexpand
- (quote
-  (rewrite {:left (+ ?x 0)
-            :right x})))
 
 
-((rewrite {:left ?x
-           :right (?x 2)})
 
- '(5 3))
+(rewrite '{:left ?x
+          :right (?x 2)}
 
-((rewrite
-  {:left x
-   :right :thing})
+         '(5 3))
+
+(rewrite
+ '{:left ?x
+   :right :thing}
  :thin)
 
 (rules
