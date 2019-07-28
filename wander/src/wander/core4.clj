@@ -2,6 +2,7 @@
 
 (require '[clojure.string :as string]
          '[meander.match.delta :as r.match]
+         '[meander.match.delta :as m]
          '[meander.strategy.delta :as r]
          '[meander.substitute.delta :as sub]
          '[hiccup.core :as hiccup])
@@ -110,7 +111,23 @@
        )))))
 
 
+(let [target__25042 {:k1 1, :k2 2}]
+  (if (map? target__25042)
+    (let [result__25043 ((fn [m__14273__auto__]
+                           (dissoc m__14273__auto__))
+                          target__25042)]
+      (if (seq? result__25043)
+        (let [!xs (vec result__25043)] (list !xs))
+        nil))
+    nil))
 
+
+
+
+
+
+
+(fn [x] x)
 (def fib-rules
   (r/rewrite
 
@@ -133,6 +150,21 @@
   (r/until =
     (r/bottom-up
      (r/attempt
-      (r/choice convert-numbers fib-rules)))))
+      fib-rules))))
 
-(run-fib '(fib 10))
+[(run-fib '(fib Z))
+ (run-fib '(fib (succ Z)))
+ (run-fib '(fib (succ (succ Z))))
+ (run-fib '(fib (succ (succ (succ Z)))))
+ (run-fib '(fib (succ (succ (succ (succ Z))))))
+ (run-fib '(fib (succ (succ (succ (succ (succ Z)))))))
+ (run-fib '(fib (succ (succ (succ (succ (succ (succ Z))))))))]
+
+
+[Z
+ (succ Z)
+ (succ Z)
+ (succ (succ Z))
+ (succ (succ (succ Z)))
+ (succ (succ (succ (succ (succ Z)))))
+ (succ (succ (succ (succ (succ (succ (succ (succ Z))))))))]

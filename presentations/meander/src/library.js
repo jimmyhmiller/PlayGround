@@ -152,7 +152,7 @@ export const QuoteSlide = withSlide(({ text, color }) =>
 export const ImageSlide = ({Slide=Dark, src, height, maxWidth, maxHeight, caps, color, size=3, title, align }) => 
   <Slide maxWidth={maxWidth || 1300} maxHeight={maxHeight || 800}>
     <Headline noSlide caps={caps} color={color} size={size} textAlign={ align || "left" } text={title} />
-    <Image src={src} height={height} />
+    <Image style={{paddingTop: 30}} src={src} height={height} />
   </Slide>
 
 export const Subtitle = ({ color="blue", caps, size=5, text, ...props }) =>
