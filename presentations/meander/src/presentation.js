@@ -23,7 +23,7 @@ require('normalize.css');
 
 const images = {
   me: require("./images/me.jpg"),
-  hashTree: require("./images/hash-tree.svg")
+  falcon: require("./images/falcon.jpg"),
 };
 
 
@@ -61,18 +61,6 @@ export default () =>
      />
 
      <Code
-      lang="javascript"
-      source={`
-        let temp = [];
-        for (let i = 0; i < arr.length; i ++) {
-          if (i % 2 === 0) {
-            temp.push(i * 2)
-          }
-        }
-      `}
-     />
-
-    <Code
       lang="javascript"
       source={`
         let temp = [];
@@ -150,6 +138,49 @@ export default () =>
       textAlign="left"
       text="Still Playing Computer" />
 
+
+    <Points title="The Plan">
+      <Point text="Practical Data Manipulation" />
+      <Point text="Advanced Features" />
+      <Point text="The Future" />
+    </Points>
+
+
+    <TwoColumn
+      left={
+        <>
+         <Headline color="cyan" size={4} textAlign="center" noSlide text="About Me" />
+         <Image height={300} src={images.me} />
+       </>
+      }
+      right={
+        <>
+          <Text textColor="blue" textSize={60} textAlign="left">Jimmy Miller</Text>
+          <Points noSlide styleContainer={{paddingTop: 10}}>
+            <Point textSize={40} text="Self Taught" /> 
+            <Point textSize={40} text="Senior Developer - Adzerk" /> 
+            <Point textSize={40} text="FP Nerd" />
+          </Points>
+        </>
+      }
+    />
+
+
+    <Points title="Meander">
+      <Point text="Clojure Library" />
+      <Point text="Actively worked on" />
+      <Point text="Takes breaking changes seriously" />
+    </Points>
+
+
+    <ImageSlide
+      size={4}
+      align="center"
+      color="blue"
+      caps={false}
+      title="Joel (noprompt) (falcon) Holdbrooks"
+      src={images.falcon}
+    />
 
     <TwoColumn
       title="Example Problem"
@@ -513,7 +544,7 @@ export default () =>
 
           {:name ?name
            :weapon ?weapon
-           :class ?class 
+           :class ?class
            :attack-power ?attack-power
            :upgrades !upgrades})
 
@@ -524,7 +555,24 @@ export default () =>
     <Code
       lang="clojure"
       source={`
-        (search (parse-js example)
+        (m/rewrite pokemon
+          {:itemTemplates (gather {:pokemonSettings
+                                   {:pokemonId !pokemon
+                                    :form !form
+                                    :rarity (not-nil !rarity)
+                                    :stats {:as !stats}}})}
+
+          (gather {:pokemon !pokemon 
+                   :form !form
+                   :rarity !rarity
+                   :stats !stats}))
+      `}
+     />
+
+    <Code
+      lang="clojure"
+      source={`
+        (m/search (parse-js example)
           ($ (or
               {:type "FunctionDeclaration"
                :id {:name ?name}
@@ -539,48 +587,29 @@ export default () =>
       `}
      />
 
+    <Code
+      lang="clojure"
+      source={`
+        (m/rewrite reddit
+          {:data
+           {:children 
+            (gather {:data 
+                     {:title !title
+                      :permalink !link
+                      :preview {:images 
+                                [{:source {:url !image}} & _]}}})}}
+
+          [:div {:class :container}
+           .
+           [:div
+            [:p [:a {:href (m/app str "https://reddit.com" !link)} 
+                 !title]]
+            [:img {:src (m/app unescape !image)}]]
+           ...])
+      `}
+     />
 
 
     <BlankSlide />
-
-
-    <Points title="Serverless">
-      <Point text="Modeled as input and output" />
-      <Point text="Immutable Deploys" />
-      <Point text="Verb Oriented" />
-    </Points>
-
-    <Headline
-      textAlign="left"
-      text="Messy Distributed World" />
-
-
-
-    <TwoColumn
-      left={
-        <>
-         <Headline color="cyan" size={4} textAlign="center" noSlide text="About Me" />
-         <Image src={images.me} />
-       </>
-      }
-      right={
-        <>
-          <Text textColor="blue" textSize={60} textAlign="left">Jimmy Miller</Text>
-          <Points noSlide styleContainer={{paddingTop: 10}}>
-            <Point textSize={40} text="Self Taught" /> 
-            <Point textSize={40} text="Senior Developer - Adzerk" /> 
-            <Point textSize={40} text="FP Nerd" />
-          </Points>
-        </>
-      } 
-    />
-
-    <Code
-      lang="clojure"
-      title="Source Example"
-      source={`
-        (source example)
-      `}
-    />
 
   </Presentation>
