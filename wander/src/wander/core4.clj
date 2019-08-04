@@ -23,7 +23,20 @@
        [:p {:class color} color]
        [:br]])]])
 
-
+(def lots-of-hiccup
+  [:html {:lang "en"}
+   [:head
+    [:meta {:charset "UTF-8"}]
+    [:meta {:name "viewport"
+            :content "width=device-width, initial-scale=1"}]
+    [:title]
+    [:link {:href "https://unpkg.com/tachyons@4.10.0/css/tachyons.min.css"
+            :rel "stylesheet"}]]
+   [:body
+    (for [color (mapcat identity (repeat 1000 ["blue" "dark-blue" "light-blue"]))]
+      [:div
+       [:p {:class color} color]
+       [:br]])]])
 
 
 (def void-tags #{:area :base :br :col :embed :hr :img :input :link :meta :param :source :track :wbr})
@@ -37,11 +50,6 @@
   (string/join ""))
 
 
-(macroexpand
- (quote
-  (r.match/search attrs
-    {?key ?value}
-    (str " " (name ?key) "=\"" (name ?value) "\""))))
 
 
 (defn hiccup->html [data]
@@ -63,7 +71,7 @@
 
       (let [tag (name ?tag-name)]
         (str "<"
-             tag 
+             tag
              (build-attrs (first !attrs))
              ">"  (string/join "" (map rec !content)) "</" tag ">"))
       
@@ -111,60 +119,74 @@
        )))))
 
 
-(let [target__25042 {:k1 1, :k2 2}]
-  (if (map? target__25042)
-    (let [result__25043 ((fn [m__14273__auto__]
-                           (dissoc m__14273__auto__))
-                          target__25042)]
-      (if (seq? result__25043)
-        (let [!xs (vec result__25043)] (list !xs))
-        nil))
-    nil))
 
 
 
+(def addition*
+  (r/rewrite
+   (+ Z ?n) ?n
+   (+ ?n Z) ?n
+   (+ ?n (S ?m)) (+ (S ?n) ?m)))
+
+(addition* '(+ Z Z))
+(addition* '(+ (S Z) Z))
+(addition* '(+ (S Z) (S Z)))
 
 
 
+(def addition
+  (r/until =
+    (r/bottom-up 
+     (r/attempt addition*))))
 
-(fn [x] x)
+(addition '(+ Z Z))
+(addition '(+ (S Z) Z))
+(addition '(+ (S Z) (S Z)))
+(addition '(+ (S (S Z)) (S (S Z))))
+
+
+
 (def fib-rules
   (r/rewrite
 
    (+ Z ?n) ?n
    (+ ?n Z) ?n
 
-   (+ ?n (succ ?m)) (+ (succ ?n) ?m)
+   (+ ?n (S ?m)) (+ (S ?n) ?m)
    
    (fib Z) Z
-   (fib (succ Z)) (succ Z)
-   (fib (succ (succ ?n))) (+ (fib (succ ?n)) (fib ?n))))
+   (fib (S Z)) (S Z)
+   (fib (S (S ?n))) (+ (fib (S ?n)) (fib ?n))))
+
+
+
+
+
 
 (def convert-numbers
   (r/rewrite
    0 Z
-   (pred number? ?n) (succ ($ ~dec ?n))))
+   (pred number? ?n) (S ($ ~dec ?n))))
+
 
 
 (def run-fib
   (r/until =
     (r/bottom-up
-     (r/attempt
-      fib-rules))))
+     (r/pipe
+      (r/attempt convert-numbers)
+      (r/attempt fib-rules)))))
+
+
+(run-fib '(fib 20))
 
 [(run-fib '(fib Z))
- (run-fib '(fib (succ Z)))
- (run-fib '(fib (succ (succ Z))))
- (run-fib '(fib (succ (succ (succ Z)))))
- (run-fib '(fib (succ (succ (succ (succ Z))))))
- (run-fib '(fib (succ (succ (succ (succ (succ Z)))))))
- (run-fib '(fib (succ (succ (succ (succ (succ (succ Z))))))))]
+ (run-fib '(fib (S Z)))
+ (run-fib '(fib (S (S Z))))
+ (run-fib '(fib (S (S (S Z)))))
+ (run-fib '(fib (S (S (S (S Z))))))
+ (run-fib '(fib (S (S (S (S (S Z)))))))
+ (run-fib '(fib (S (S (S (S (S (S Z))))))))]
 
 
-[Z
- (succ Z)
- (succ Z)
- (succ (succ Z))
- (succ (succ (succ Z)))
- (succ (succ (succ (succ (succ Z)))))
- (succ (succ (succ (succ (succ (succ (succ (succ Z))))))))]
+

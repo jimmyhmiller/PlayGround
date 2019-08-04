@@ -6,6 +6,18 @@
 
 
 
+
+{:lhs :a
+ :rhs :b}
+
+
+{:main {:lhs ?x}
+ :void {:rhs ~(prn ?x)}}
+
+
+
+
+
 (def rule-cache (atom {}))
 (def execution (atom {:main nil}))
 (def rules (atom {}))
@@ -34,24 +46,21 @@
   ([in-scope rule-scope]
    (let [{:keys [type data] :as context} (@execution in-scope)
          rules (@rules rule-scope)
-         matched (first
-                  (filter (fn [{:keys [id meta] :as rule}]
-                            (let [match (:match (@rule-cache id))]
-                              
-                              (cond
-                                meta
-                                (match context)
-                                
-                                (= type :submit)
-                                (match data)
-                                
-                                :else false)))
-                          rules))]
-     (when matched
-       (set-scope rule-scope
-                  {:type :match
-                   :rule matched
-                   :data (if (:meta matched) context data)})))))
+         matched 
+         (filter (fn [{:keys [id meta] :as rule}]
+                   (let [match (:match (@rule-cache id))]
+                     
+                     (cond
+                       meta
+                       (match context)
+                       
+                       (= type :submit)
+                       (match data)
+                       
+                       :else false)))
+                 rules)]
+     {:rules matched 
+      :context context})))
 
 
 (defn rewrite
@@ -74,13 +83,18 @@
   ([scope rule-scope] (run-scope-step scope rule-scope (fn [])))
   ([scope rule-scope cb]
    (cb)
-   (when (match scope rule-scope)
-     (cb)
-     (rewrite rule-scope)
-     (cb)
-     (submit rule-scope)
+   (when-let [{:keys [rules context] :as matched} (match scope rule-scope)]
+     (doseq [rule rules]
+       (do
+         (set-scope rule-scope
+                    {:type :match
+                     :rule rule
+                     :data (if (:meta rule) context (:data context))})
+         (cb)
+         (rewrite rule-scope)
+         (cb)
+         (submit rule-scope)))
      true)))
-
 
 
 (defn strict-eval [s]
@@ -164,6 +178,8 @@
 
 
 
+
+
 (set-rules
   {:lhs (extract-foos [{:foo (m/or nil !foos)} ...])
    :rhs [{:bar {:foo !foos}} ...]}
@@ -195,7 +211,6 @@
   (println "\n\n")
   (run-all '(extract-foos [{:foo 3} {:foo 6} {:foo 4} {:bar {:foos [5 3 2 5 6]}}])))
 
-
 (do
   (println "\n\n")
   (run-all '({:foo 1} <> {:bar 3})))
@@ -210,9 +225,8 @@
 (println "test" "\n" "asdsa")
 
 (set-rules :execution
-  {:meta true
-   :lhs ?x
-   :rhs ~(prn ?x)})
+  {:lhs ?x
+   :rhs ?x})
 
 
 (set-rules :execution

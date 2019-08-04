@@ -367,15 +367,40 @@ export default () =>
       textAlign="left"
       text="Extended Example" />
 
+
+      <Points title="Requirements">
+        <Point text="All Valid Player/Weapon Combinations" />
+        <Point text="name, weapon, class, attack power, and all upgrades" />
+        <Point text="No third party weapons allowed" />
+      </Points>
+
       <Code
         lang="clojure"
+        textSize={20}
         source={`
-          (def game-info
-            {:players ...
-             :weapons ...
-             :stats ...
-             :third-party ...})
-       `}
+          {:players [{:name "Jimmer"
+                      :class :warrior}
+                     {:name "Sir Will"
+                      :class :knight}
+                     {:name "Dalgrith"
+                      :class :rogue}]
+           :weapons [{:name :long-sword
+                      :allowed-classes #{:warrior :knight}
+                      :standard-upgrade :power}
+                     {:name :short-sword
+                      :allowed-classes #{:warrior :rogue}
+                      :standard-upgrade :speed}
+                     {:name :unbeatable
+                      :allowed-classes #{:rogue}
+                      :standard-upgrade :nuclear}]
+           :stats {:short-sword {:attack-power 2
+                                 :upgrades []}
+                   :long-sword {:attack-power 4
+                                :upgrades [:reach]}
+                   :unbeatable {:attack-power 9001
+                                :upgrades [:indestructible]}}
+           :third-party #{:unbeatable}}
+        `}
       />
 
       <Code
@@ -429,35 +454,7 @@ export default () =>
         `}
       />
 
-      <Code
-        lang="clojure"
-        textSize={20}
-        source={`
-          {:players [{:name "Jimmer"
-                      :class :warrior}
-                     {:name "Sir Will"
-                      :class :knight}
-                     {:name "Dalgrith"
-                      :class :rogue}]
-           :weapons [{:name :long-sword
-                      :allowed-classes #{:warrior :knight}
-                      :standard-upgrade :power}
-                     {:name :short-sword
-                      :allowed-classes #{:warrior :rogue}
-                      :standard-upgrade :speed}
-                     {:name :unbeatable
-                      :allowed-classes #{:rogue}
-                      :standard-upgrade :nuclear}]
-           :stats {:short-sword {:attack-power 2
-                                 :upgrades []}
-                   :long-sword {:attack-power 4
-                                :upgrades [:reach]}
-                   :unbeatable {:attack-power 9001
-                                :upgrades [:indestructible]}}
-           :third-party #{:unbeatable}}
-        `}
-      />
-
+      
       <Points title="Requirements">
         <Point text="All Valid Player/Weapon Combinations" />
         <Point text="name, weapon, class, attack power, and all upgrades" />
@@ -596,7 +593,7 @@ export default () =>
             (gather {:data 
                      {:title !title
                       :permalink !link
-                      :preview {:images 
+                      :preview {:images
                                 [{:source {:url !image}} & _]}}})}}
 
           [:div {:class :container}
@@ -606,6 +603,40 @@ export default () =>
                  !title]]
             [:img {:src (m/app unescape !image)}]]
            ...])
+      `}
+     />
+
+
+    <Code
+      lang="clojure"
+      source={`
+
+        (def addition*
+          (r/rewrite
+           (+ Z ?n) ?n
+           (+ ?n Z) ?n
+           (+ ?n (S ?m)) (+ (S ?n) ?m)))
+
+        (addition* '(+ Z Z)) ;; => Z
+        (addition* '(+ (S Z) Z)) ;; => (S Z)
+        (addition* '(+ (S Z) (S Z))) ;; => (+ (S (S Z)) Z)
+
+      `}
+     />
+
+     <Code
+      lang="clojure"
+      source={`
+
+        (def addition
+          (r/until =
+            (r/bottom-up 
+             (r/attempt addition*))))
+
+        (addition '(+ Z Z)) ;; => Z
+        (addition '(+ (S Z) Z)) ;; => (S Z)
+        (addition '(+ (S Z) (S Z))) ;; => (S (S Z))
+
       `}
      />
 
