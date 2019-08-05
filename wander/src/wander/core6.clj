@@ -46,8 +46,8 @@
   (fn rec [t]
     ((r/pipe
       (r/rewrite
-       [& ?x] ~(mapv rec ?x)
-       (& ?x) ~(map rec ?x)
+       (m/pred vector? ?x) ~(mapv rec ?x)
+       (m/pred seq? ?x) ~(map rec ?x)
        ?x ?x)
       s)
      t)))

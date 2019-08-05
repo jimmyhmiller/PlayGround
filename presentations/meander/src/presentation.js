@@ -454,13 +454,6 @@ export default () =>
         `}
       />
 
-      
-      <Points title="Requirements">
-        <Point text="All Valid Player/Weapon Combinations" />
-        <Point text="name, weapon, class, attack power, and all upgrades" />
-        <Point text="No third party weapons allowed" />
-      </Points>
-
       <Code
         textSize={22}
         lang="clojure"
@@ -613,9 +606,9 @@ export default () =>
 
         (def addition*
           (r/rewrite
-           (+ Z ?n) ?n
-           (+ ?n Z) ?n
-           (+ ?n (S ?m)) (+ (S ?n) ?m)))
+            (+ Z ?n)      ?n
+            (+ ?n Z)      ?n
+            (+ ?n (S ?m)) (+ (S ?n) ?m)))
 
         (addition* '(+ Z Z)) ;; => Z
         (addition* '(+ (S Z) Z)) ;; => (S Z)
@@ -631,7 +624,7 @@ export default () =>
         (def addition
           (r/until =
             (r/bottom-up 
-             (r/attempt addition*))))
+              (r/attempt addition*))))
 
         (addition '(+ Z Z)) ;; => Z
         (addition '(+ (S Z) Z)) ;; => (S Z)
@@ -639,6 +632,26 @@ export default () =>
 
       `}
      />
+
+    <Code
+      lang="clojure"
+      source={`
+
+        (def fibonacci
+          (r/rewrite
+            (+ Z ?n) ?n
+            (+ ?n Z) ?n
+            (+ ?n (S ?m)) (+ (S ?n) ?m)
+           
+            (fib Z) Z
+            (fib (S Z)) (S Z)
+            (fib (S (S ?n))) (+ (fib (S ?n)) (fib ?n))))
+
+      `}
+     />
+
+
+
 
 
     <BlankSlide />
