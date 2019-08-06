@@ -38,13 +38,27 @@
 (defn fill-in-constants [lvars constants]
   (reduce replace-vars lvars (filter (comp constants second) (:vars lvars))))
 
+(def lvars
+  (assign-lvars 
+   {:name "jimmy"
+    :age 27}))
+(defn log [x]
+  (println x)
+  x)
 
+
+(defn first-constants [lvars const]
+  (first (filter (comp #{const} second) (:vars lvars))))
 
 (defn fill-in-lvars [lvars1 lvars2 constants]
-  (let [replacements1 (map first (filter (comp constants second) (:vars lvars1)))
-        replacements2 (map first (filter (comp constants second) (:vars lvars2)))]
-    {:input (reduce replace-vars lvars1 (map vector replacements1 replacements2))
-     :output lvars2}))
+  (let [constants (seq constants)
+        replacements1 (map first (map (partial first-constants lvars1) constants))
+        replacements2  (map first (map (partial first-constants lvars2) constants))]
+    (println replacements1 replacements2 constants lvars1 lvars2)
+    {:input (reduce (fn [acc x] (update-in acc [:vars] #(dissoc % x))) 
+             (reduce replace-vars lvars1 (map vector replacements1 replacements2))
+             replacements2)
+     :output (reduce (fn [acc x] (update-in acc [:vars] #(dissoc % x))) lvars2 replacements2)}))
 
 
 
@@ -56,46 +70,48 @@
   (set (filter lvar? (flatten (seq data)))))
 
 (defn has-some-lvars [source-vars lvars var]
-  (some (all-containing-lvars (lvars var)) (keys source-vars)))
+  (if (coll? (lvars var))
+    (some (all-containing-lvars (lvars var)) (keys source-vars))
+    false))
 
 
 
 (defn construct-clause [source-vars lvars]
   (let [entry (get (:vars lvars) (:data lvars))]
-    (walk/postwalk
-     (r/attempt
-      (r/rewrite
-       [(m/and (m/not (m/pred lvar?)) ?k)
-        (m/and (m/pred lvar? ?v)
-               (m/pred #(contains? source-vars %) ?v))]
-       [?k ?v]
+    ((r/until =
+       (fn [t]
+         (walk/postwalk
+          (r/attempt
+           (r/rewrite
+            [(m/and (m/not (m/pred lvar?)) ?k)
+             (m/and (m/pred lvar? ?v)
+                    (m/pred #(contains? source-vars %) ?v))]
+            [?k ~(source-vars ?v)]
 
-       [(m/and ?k (m/not (m/pred lvar?)))
+            [(m/and ?k (m/not (m/pred lvar?)))
 
-        (m/and (m/pred lvar? ?v)
-                (m/pred (partial has-some-lvars source-vars (:vars lvars)) ?v))]
+             (m/and (m/pred lvar? ?v)
+                    (m/pred (partial has-some-lvars source-vars (:vars lvars)) ?v))]
 
 
-       [?k ~((:vars lvars) ?v)]
-       
-       [(m/and (m/pred lvar? ?k)
-               (m/pred #(contains? source-vars %) ?k))
-        (m/and (m/pred lvar? ?v)
-               (m/pred #(contains? source-vars %) ?v))]
-       [~(source-vars ?k) ~(source-vars ?v)]
+            [?k ~((:vars lvars) ?v)]
+            
+            [(m/and (m/pred lvar? ?k)
+                    (m/pred #(contains? source-vars %) ?k))
+             (m/and (m/pred lvar? ?v)
+                    (m/pred #(contains? source-vars %) ?v))]
+            [~(source-vars ?k) ~(source-vars ?v)]
 
-       [(m/and (m/pred lvar? ?k)
-               (m/pred #(contains? source-vars %) ?v))
-        (m/and (m/not (m/pred lvar?)) ?v)]
-       [?k ?v]
-       
-       [?k ?v] nil))
-     entry)))
+            [(m/and (m/pred lvar? ?k)
+                    (m/pred #(contains? source-vars %) ?v))
+             (m/and (m/not (m/pred lvar?)) ?v)]
+            [?k ?v]))
+          t))) entry)))
 
 (defn construct-match [{:keys [input output]}]
   `(~'r/rewrite
-     ~(construct-clause (:vars output) input)
-     ~(construct-clause (:vars output) output)))
+    ~(construct-clause (:vars input) input)
+    ~(construct-clause (:vars output) output)))
 
 
 (defn infer-match [& input-outputs]
@@ -106,11 +122,12 @@
                                                 (find-constants inputs))
         representative-output (fill-in-constants (first outputs)
                                                  (find-constants inputs))
+        representative-output' (fill-in-constants representative-output
+                                                 (find-constants outputs))
         input-output (fill-in-lvars representative-input
-                                    representative-output
-                                    (find-constants [representative-input representative-output]))]
+                                    representative-output'
+                                    (find-constants [representative-input representative-output']))]
     `~(construct-match input-output)))
-
 
 
 
@@ -132,8 +149,6 @@
    :age 36}})
 
 
-
-;; Not quite right yet
 (infer-match
  {:name "Jimmy"
   :address
@@ -167,6 +182,19 @@
               :zipcode "4622303"}})
 
 
+
+
+((r/rewrite
+  {:name ?x_24502,
+   :address
+   {:address1 ?x_24505,
+    :address2 ?x_24507,
+    :city ?x_24511,
+    :state ?x_24513,
+    :zip ?x_24515}}
+  {:name ?x_24502,
+   :address {:line1 ?x_24505, :line2 ?x_24507},
+   :city-info {:city ?x_24511, :state ?x_24513, :zipcode ?x_24515}}))
 
 
 
