@@ -14,7 +14,6 @@ import {
   Image,
   ImageSlide,
   Text,
-  QuoteSlide,
 } from "./library";
 
 

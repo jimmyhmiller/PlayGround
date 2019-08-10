@@ -55,6 +55,7 @@
   * [Eve](http://witheve.com/)
   * Dynamicland
   * [Hazel](https://hazel.org/)
+  * Dark
 * Perspectives
   * Programming as Theory Building
   * Programming is a pop culture
