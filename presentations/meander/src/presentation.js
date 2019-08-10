@@ -84,15 +84,6 @@ export default () =>
       `}
      />
 
-
-    <Code
-      lang="clojure"
-      source={`
-          (reduce + 0 (filter even? (map (parital * 2) coll)))
-      `}
-     />
-
-
     <Code
       lang="clojure"
       source={`
@@ -168,6 +159,7 @@ export default () =>
 
     <Points title="Meander">
       <Point text="Clojure Library" />
+      <Point text="Borrows heavily from Term Rewriting" />
       <Point text="Actively worked on" />
       <Point text="Takes breaking changes seriously" />
     </Points>
@@ -216,24 +208,6 @@ export default () =>
         />
       } 
     />
-
-
-
-
-    <Code
-      lang="clojure"
-      source={`
-        (let [address (:address person)]
-          {:name (:name person)
-           :address {:line1 (:address1 address)
-                     :line2 (:address2 address)}
-           :city-info {:city (:city address)
-                       :state (:state address)
-                       :zipcode (:zip address)}})
-
-      `}
-     />
-
 
     <TwoColumn
       left={
@@ -355,12 +329,9 @@ export default () =>
       `}
      />
 
-
-
     <Headline
       textAlign="left"
       text="Pattern Matching On Steroids" />
-
 
     <Headline
       color="blue"
@@ -402,6 +373,17 @@ export default () =>
            :third-party #{:unbeatable}}
         `}
       />
+
+      <Code
+        lang="clojure"
+        source={`
+          {:players ...
+           :weapons ...
+           :stats ...
+           :third-party ...}
+        `}
+      />
+
 
       <Code
         lang="clojure"
@@ -511,10 +493,7 @@ export default () =>
         (defn players-with-weapons [{:keys [players weapons stats third-party] :as info}]
           (mapcat (partial player-with-weapons info) players))
 
-
         (players-with-weapons game-info)
-
-
       `}
     />
 
@@ -523,21 +502,20 @@ export default () =>
       lang="clojure"
       source={`
         (m/search game-info
-          {:players (scan {:name ?name
-                           :class ?class})
-           :weapons (scan {:name ?weapon
-                           :allowed-classes #{?class}
-                           :standard-upgrade !upgrades})
+          {:players (m/scan {:name ?name
+                             :class ?class})
+           :weapons (m/scan {:name ?weapon
+                             :allowed-classes #{?class}
+                             :standard-upgrade !upgrades})
            :stats {?weapon {:attack-power ?attack-power
                             :upgrades [!upgrades ...]}}
-           :third-party (not #{?weapon})}
+           :third-party (m/not #{?weapon})}
 
           {:name ?name
            :weapon ?weapon
            :class ?class
            :attack-power ?attack-power
            :upgrades !upgrades})
-
       `}
      />
 
@@ -552,10 +530,10 @@ export default () =>
                                     :rarity (not-nil !rarity)
                                     :stats {:as !stats}}})}
 
-          (gather {:pokemon !pokemon 
-                   :form !form
-                   :rarity !rarity
-                   :stats !stats}))
+          [{:pokemon !pokemon 
+            :form !form
+            :rarity !rarity
+            :stats !stats} ...])
       `}
      />
 
@@ -599,20 +577,34 @@ export default () =>
       `}
      />
 
+    <Points title="A Ton of Operators">
+      <Point text="app" />
+      <Point text="$" />
+      <Point text="and" />
+      <Point text="or" />
+      <Point text="let" />
+      <Point text="pred" />
+      <Point text="guard" />
+      <Point text="..." />
+      <Point text="..1" />
+      <Point text="..!n" />
+    </Points>
+
+    <Headline
+      textAlign="left"
+      text="Is this enough?" />
+
 
     <Code
       lang="clojure"
       source={`
 
-        (def addition*
+        (def simplify-addition
           (r/rewrite
-            (+ Z ?n)      ?n
-            (+ ?n Z)      ?n
-            (+ ?n (S ?m)) (+ (S ?n) ?m)))
-
-        (addition* '(+ Z Z)) ;; => Z
-        (addition* '(+ (S Z) Z)) ;; => (S Z)
-        (addition* '(+ (S Z) (S Z))) ;; => (+ (S (S Z)) Z)
+           (+ ?x 0) ?x
+           (+ 0 ?x) ?x))
+        (simplify-addition '(+ 0 3)) ;; => 3
+        (simplify-addition '(+ 0 (+ 0 3))) ;; => (+ 0 3)
 
       `}
      />
@@ -621,14 +613,13 @@ export default () =>
       lang="clojure"
       source={`
 
-        (def addition
+        (def fully-simplify-addition
           (r/until =
             (r/bottom-up 
-              (r/attempt addition*))))
+              (r/attempt simplify-addition))))
 
-        (addition '(+ Z Z)) ;; => Z
-        (addition '(+ (S Z) Z)) ;; => (S Z)
-        (addition '(+ (S Z) (S Z))) ;; => (S (S Z))
+        (simplify-addition '(+ (+ 0 (+ 0 3)) 0)) ;; 3
+        (simplify-addition '(+ (+ 0 (+ 0 (+ 3 (+ 2 0)))) 0)) ;; (+ 3 (+ 2 0))
 
       `}
      />
@@ -636,19 +627,73 @@ export default () =>
     <Code
       lang="clojure"
       source={`
-
-        (def fibonacci
+        (def little-lang
           (r/rewrite
-            (+ Z ?n) ?n
-            (+ ?n Z) ?n
-            (+ ?n (S ?m)) (+ (S ?n) ?m)
-           
-            (fib Z) Z
-            (fib (S Z)) (S Z)
-            (fib (S (S ?n))) (+ (fib (S ?n)) (fib ?n))))
-
+           (if true ?t) ?t
+           (if false ?t) nil 
+           (if true ?t ?f) ?t
+           (if false ?t ?f) ?f
+           (= ?x ?x) true
+           (= ?x ?y) false
+           (ignore ?x ?y) ?y
+           (error) ~(throw (ex-info "error" {}))))
       `}
      />
+
+
+    <Code
+      lang="clojure"
+      source={`
+        (def prog  '(ignore (error) true))
+
+        (strict-eval little-lang prog) ;; "error"
+
+        (lazy-eval little-lang prog) ;; true
+      `}
+     />
+
+
+    <Code
+      lang="clojure"
+      source={`
+       ;; l-system
+      `}
+     />
+
+
+    <Headline
+      textAlign="left"
+      text="Isn't this going to be slow?" />
+
+    <Points title="Speed">
+      <Point text="Meander is often slower than hand written Clojure" />
+      <Point text="I have never had it be too slow" />
+      <Point text="It will continue to get faster" />
+    </Points>
+
+
+    <Points title="Under the hood">
+      <Point text="Parser" />
+      <Point text="Expander" />
+      <Point text="Matrix Based IR" />
+      <Point text="Second Level IR" />
+      <Point text="Dead Code Elimination" />
+      <Point text="Optimizations" />
+      <Point text="Simple Type Inference" />
+      <Point text="Code Generation" />
+    </Points>
+
+    <Points title="Near(ish) Future">
+      <Point text="Better Error Messages" />
+      <Point text="Faster Code" />
+      <Point text="Less Code Generated" />
+      <Point text="More Powerful Recursive Matches" />
+      <Point text="Update In Place" />
+      <Point text="More Use Extensibility" />
+    </Points>
+
+
+
 
 
 
