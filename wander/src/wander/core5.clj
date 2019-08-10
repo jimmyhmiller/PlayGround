@@ -4,6 +4,7 @@
             [meander.syntax.epsilon :as r.syntax]
             [meander.match.syntax.epsilon :as r.match.syntax]
             [meander.strategy.epsilon :as r]
+             [meander.strategy.epsilon :as strat]
             [hiccup.core :as hiccup]
             [clojure.string :as string]))
 
@@ -21,17 +22,17 @@
 
 (m/rewrite reddit
   {:data
-   {:children 
-    (gather {:data 
+   {:children
+    (gather {:data
              {:title !title
               :permalink !link
-              :preview {:images 
+              :preview {:images
                         [{:source {:url !image}} & _]}}})}}
 
   [:div {:class :container}
    .
    [:div
-    [:p [:a {:href (m/app str "https://reddit.com" !link)} 
+    [:p [:a {:href (m/app str "https://reddit.com" !link)}
          !title]]
     [:img {:src (m/app unescape !image)}]]
    ...])
@@ -39,7 +40,7 @@
 (def pokemon (json/parse-string (slurp "/Users/jimmyhmiller/Desktop/GAME_MASTER.json") true))
 
 
-(r.syntax/defsyntax gather 
+(r.syntax/defsyntax gather
   ([pattern]
    (gather pattern '...))
   ([pattern repeat-pattern]
@@ -54,7 +55,7 @@
   ([pattern repeat-pattern]
    (case (::r.syntax/phase &env)
      (let [!xs (gensym "!xs")]
-       `(m/and (m/seqable (m/or (m/and ~pattern ~!xs) ~'_) ...) 
+       `(m/and (m/seqable (m/or (m/and ~pattern ~!xs) ~'_) ...)
                (m/guard (pos? (count ~!xs)))
                (m/and ~repeat-pattern (m/app count ~!xs))))
      ;; else
@@ -88,7 +89,7 @@
 
 
 (m/match [:b 1 :s]
-  (m/and [(m/or (m/and (m/pred number? !xs) !ys) _) ...] 
+  (m/and [(m/or (m/and (m/pred number? !xs) !ys) _) ...]
          (m/guard (>= (count !ys) 1)))
   !xs)
 
@@ -97,7 +98,7 @@
 
 (m/match [:a :b :c]
   (m/and
-   (m/let [*xs 0] _) 
+   (m/let [*xs 0] _)
    [(m/and (m/let [*xs (inc *xs)] !xs)) ...])
   *xs)
 
@@ -114,7 +115,7 @@
   [!xs *x])
 
 (m/rewrite [:a 1]
-  (m/and (m/seqable (m/or (m/pred number? !xs) _) ..?n) 
+  (m/and (m/seqable (m/or (m/pred number? !xs) _) ..?n)
          (m/guard (pos? ?n)))
   !xs)
 
@@ -168,7 +169,7 @@
                   :properties [!properties ..!n]}
                  _)
            ...]}
- 
+
  [{:name !names
    :properties [!properties ..!n]} ...])
 
@@ -195,7 +196,7 @@
                   :properties [(m/or {:valid true :name !properties} _) ..!n]}
                  _)
            ...]}
- 
+
  [{:name !names
    :properties [!properties ..!n]} ...])
 
@@ -212,7 +213,7 @@
                             :rarity (not-nil !rarity)
                             :stats {:as !stats}}})}
 
-  (gather {:pokemon !pokemon 
+  (gather {:pokemon !pokemon
            :form !form
            :rarity !rarity
            :stats !stats}))
@@ -228,3 +229,68 @@
             :bar [:child3 :child4]}
   (m/seqable [!parent [!children ..!]] ..!)
   [(<> !parent . !children ..!) ..!])
+
+
+
+(defn grab-all-foods [user]
+  {:favorite-foods [{:name !foods} ...]
+   :recipes [{:title !foods} ...]
+   :meal-plan {:breakfast [{:food !foods} ...]
+               :lunch [{:food !foods} ...]
+               :dinner [{:food !foods} ...]}}
+
+  !foods)
+
+(def point [1 2])
+
+
+(m/match point
+  (m/with [%num? (m/pred number?)]
+    (m/or [%num? (m/pred number? ?y)]
+          [%num? (m/pred number? ?y) %num?]))
+  ?y)
+
+
+(m/defsyntax num?
+  ([] `(m/pred number?))
+  ([pattern] `(m/pred number? ~pattern)))
+
+(m/match point
+  [(num?) (num? ?y)] ?y
+  [(num?) (num? ?y) (num?)] ?y)
+
+
+(defn favorite-food-info [user foods]
+  (m/search {:user user
+            :foods foods}
+
+    {:user
+     {:name ?name
+      :favorite-foods (m/scan {:name ?food})}
+     :foods {?food {:popularity ?popularity
+                    :calories ?calories}}}
+
+    {:name ?name
+     :favorite-food {:food ?food
+                     :popularity ?popularity
+                     :calories ?calories}}))
+
+
+(favorite-food-info 
+ {:name "jimmy" 
+  :favorite-foods [{:name :nachos} {:name :tacos}]}
+ {:nachos {:popularity :pop
+           :calories 300}
+  :tacos {:popularity :pop
+          :calories 3000}})
+
+
+
+(def eliminate-zeros
+  (strat/rewrite
+   (+ ?x 0) ?x
+   (+ 0 ?x) ?x))
+
+(def apply-to-all
+  (strat/bottom-up
+   (strat/attempt eliminate-zeros)))
