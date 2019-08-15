@@ -9,10 +9,8 @@ import {
   ListItem,
   List,
   Slide,
-  Text,
   BlockQuote,
   Quote,
-  Cite,
 } from "spectacle";
 import pre from "spectacle/lib/utils/preloader";
 import createTheme from "spectacle/lib/themes/default";

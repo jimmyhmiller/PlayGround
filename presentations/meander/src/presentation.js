@@ -174,7 +174,6 @@ export default () =>
     />
 
     <TwoColumn
-      title="Example Problem"
       color="magenta"
       align="left"
       left={
@@ -207,39 +206,6 @@ export default () =>
         />
       } 
     />
-
-    <TwoColumn
-      left={
-        <Code
-          noSlide
-          lang="clojure"
-          source={`
-           {:name "Jimmy"
-            :address
-            {:address1 "123 street ave"
-             :address2 "apt 2"
-             :city "Townville"
-             :state "IN"
-             :zip "46203"}}}
-          `}
-        />
-      }
-      right={
-        <Code
-          noSlide
-          lang="clojure"
-          source={`
-            {:name "Jimmy"
-             :address {:line1 "123 street ave"
-                       :line2 "apt 2"}
-             :city-info {:city "Townville"
-                         :state "IN"
-                         :zipcode "46203"}}
-          `}
-        />
-      } 
-    />
-
 
     <TwoColumn
       left={
@@ -602,6 +568,7 @@ export default () =>
           (r/rewrite
            (+ ?x 0) ?x
            (+ 0 ?x) ?x))
+
         (simplify-addition '(+ 0 3)) ;; => 3
         (simplify-addition '(+ 0 (+ 0 3))) ;; => (+ 0 3)
 
@@ -618,7 +585,7 @@ export default () =>
               (r/attempt simplify-addition))))
 
         (simplify-addition '(+ (+ 0 (+ 0 3)) 0)) ;; 3
-        (simplify-addition '(+ (+ 0 (+ 0 (+ 3 (+ 2 0)))) 0)) ;; (+ 3 (+ 2 0))
+        (simplify-addition '(+ (+ 0 (+ 0 (+ 3 (+ 2 0)))) 0)) ;; (+ 3 2)
 
       `}
      />
@@ -628,8 +595,6 @@ export default () =>
       source={`
         (def little-lang
           (r/rewrite
-           (if true ?t) ?t
-           (if false ?t) nil 
            (if true ?t ?f) ?t
            (if false ?t ?f) ?f
            (= ?x ?x) true
@@ -688,9 +653,73 @@ export default () =>
       <Point text="Less Code Generated" />
       <Point text="More Powerful Recursive Matches" />
       <Point text="Update In Place" />
-      <Point text="More Use Extensibility" />
+      <Point text="More User Extensibility" />
     </Points>
 
+
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Where this can go" />
+
+    <Headline
+      color="red"
+      textAlign="left"
+      text="Truly data oriented programming" />
+
+    <Headline
+      color="green"
+      textAlign="left"
+      text="Programming by Example" />
+
+    <Code
+      lang="clojure"
+      source={`
+        (infer-rewrite
+         {:name "Jimmy"
+          :address
+          {:address1 "123 street ave"
+           :address2 "apt 2"
+           :city "Townville"
+           :state "IN"
+           :zip "46203"}}
+
+         {:name "Jimmy"
+          :address {:line1 "123 street ave"
+                    :line2 "apt 2"}
+          :city-info {:city "Townville"
+                      :state "IN"
+                      :zipcode "46203"}})
+      `}
+     />
+
+    <Code
+      lang="clojure"
+      source={`
+        (r/rewrite
+         {:name ?name
+          :address
+          {:address1 ?address1
+           :address2 ?address2
+           :city ?city
+           :state ?state
+           :zip ?zip}}
+
+         {:name ?name
+          :address {:line1 ?address1 
+                    :line2 ?address2}
+          :city-info {:city ?city
+                      :state ?state
+                      :zipcode ?zip}})
+      `}
+     />
+
+
+
+    <Headline
+      color="green"
+      textAlign="left"
+      text="A More Transparent Future" />
 
 
 
