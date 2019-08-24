@@ -87,7 +87,7 @@ export default () =>
       lang="clojure"
       source={`
           (->> coll
-               (map (parital * 2))
+               (map (partial * 2))
                (filter even?)
                (reduce + 0))
       `}
@@ -303,13 +303,6 @@ export default () =>
       textAlign="left"
       text="Extended Example" />
 
-
-      <Points title="Requirements">
-        <Point text="All Valid Player/Weapon Combinations" />
-        <Point text="name, weapon, class, attack power, and all upgrades" />
-        <Point text="No third party weapons allowed" />
-      </Points>
-
       <Code
         lang="clojure"
         textSize={20}
@@ -400,6 +393,17 @@ export default () =>
           #{:unbeatable}
         `}
       />
+
+
+
+      <Points title="Requirements">
+        <Point text="All Valid Player/Weapon Combinations" />
+        <Point text="name, weapon, class, attack power, and all upgrades" />
+        <Point text="No third party weapons allowed" />
+      </Points>
+
+
+
 
       <Code
         textSize={22}
@@ -501,7 +505,7 @@ export default () =>
             :stats !stats} ...])
       `}
      />
-
+    {/* Width of code*/}
     <Code
       lang="clojure"
       source={`
@@ -666,6 +670,59 @@ export default () =>
       color="red"
       textAlign="left"
       text="Truly data oriented programming" />
+
+    <Code
+      lang="clojure"
+      source={`
+        (fn [] "do things")
+        ;; => #function[wander.core5/eval22472/fn--22473]
+      `}
+    />
+
+    <Headline
+      color="blue"
+      textAlign="left"
+      text="Text of Our Code is Data" />
+
+    <Headline
+      color="green"
+      textAlign="left"
+      text="Execution as data" />
+
+    <Code
+      lang="clojure"
+      source={`
+        {:expr (my-function ?x ?y)}
+        => 
+        (println ?x ?y)
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        {:expr (?rule & ?args)
+         :result [:weird :data]}
+          =>
+        (println ?rule ?args)
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        {:execution-history
+         [_ ... . (scan 0 :as !steps) !steps ... . (/ _ 0 :as !steps)]}
+        =>
+        !steps
+      `}
+    />
+
+
+
+
+
+
 
     <Headline
       color="green"

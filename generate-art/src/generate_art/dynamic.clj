@@ -199,7 +199,7 @@
 
 
 
-(defn draw4 []
+(defn draw []
   (clear-canvas)
   (q/stroke-weight 1)
   (doseq [y (random-step-range 0 (height) 0 10)]
@@ -208,29 +208,97 @@
                x y (+ x length) y
                (r+- x 10) (r+- y 10)))))
 
-(defn draw5 [] 
+
+
+
+(defn slope [[x1 y1] [x2 y2]]
+  (/ (- y2 y1)
+     (- x2 x1)))
+
+(defn diagonal [width height x]
+  (int (* x (slope [0 0] [width height]))))
+
+
+(defn draw []
+  (clear-canvas)
+  (q/no-loop)
+  (q/no-fill)
+  (q/stroke-weight 0.5)
+  (q/stroke 0 0 0)
+  (doseq [i (range 10)]
+    (doseq [x (range 0 (width))
+            y (range 0 (height))
+            :when (= (diagonal (width) (height) x) y)]
+      (let [offset (gauss 10 600)
+            offset2 (gauss 10 600)]
+        (when (odds 0.9)
+          (q/line (+ x 0) 
+                  (- offset offset) 
+                  (+ x offset)
+                  (+ y 0))))))
+
+  (q/save "sketch.tif"))
+
+
+
+
+(defn draw []
+  (clear-canvas)
   (q/fill 0 0 100)
   (q/rect 0 0 (q/width) (q/height))
   (q/no-loop)
   (q/no-fill)
   (q/stroke-weight 0.5)
   (q/stroke 0 0 0)
+  (doseq [i (range 10)]
+    (doseq [x (range 0 (width) 5)
+            y (range 0 (height))
+            :when (= (diagonal (width) (height) x) y)]
+
+      (when (odds 0.02)
+        (doseq [_ (range 10)]
+          (let [offset (gauss 0 10)]
+            (when (odds 0.9)
+              (q/line (- offset offset) 
+                      (+ y offset) 
+                      x 
+                      (+ y offset))))))
+      (let [offset (gauss 0 10)]
+        (when (odds 0.9)
+          (q/line (- offset offset) 
+                  (+ y offset) 
+                  x 
+                  (+ y offset))))
+
+      (when (odds 0.02)
+        (doseq [_ (range 10)]
+          (let [offset (gauss 0 10)]
+            (q/line (+ x offset) 
+                    (- offset offset) 
+                    (+ x offset)
+                    y))))
+      (let [offset (gauss 10 10)]
+        (when (odds 0.9)
+          (q/line (+ x offset) 
+                  (- offset offset) 
+                  (+ x offset)
+                  y)))))
   (doseq [x (range 0 (width) 5)
           y (range 0 (height))]
+    (let [offset (random 0 3)]
+      (when (odds 0.1)
+        (q/line (- x 10) (+ y offset) x (+ y offset))))
     (let [offset (random 0 3)]
       (when (odds 0.1)
         (q/line (+ x offset) 
                 (- y 10) 
                 (+ x offset)
                 y))))
-  (doseq [x (range 0 (width))
-          y (range 0 (height) 5)]
-    (let [offset (random 0 3)]
-      (when (odds 0.1)
-        (q/line (- x 10) (+ y offset) x (+ y offset))))))
+  (q/save "sketch.tif"))
 
 
 (defn draw []
+  (clear-canvas)
   (let [tris (triangles)]
     (q/no-loop)
     ;(q/fill 49 9 96)
@@ -245,25 +313,46 @@
     (q/save "sketch.tif")))
 
 
-(defn draw3 []
+(def rotations [q/PI (/ q/PI 4) (/ q/PI 2) (* 2 (/ q/PI 2))])
+
+(defn right-triangle 
+  ([x y width height]
+   (right-triangle x y width height 0))
+  ([x y width height rotate]
+   (q/triangle
+    (+ x width) (+ y width)
+    (+ x 0) (+ y 0)
+    (+ x height) (+ y 0))))
+
+(defn draw []
   (q/no-loop)
+  (clear-canvas)
   (doseq [y (range 0 (q/height) 5)]
     (let [hue (rescale y 0 (q/height) 180 220)]
       (q/no-stroke)
       (q/fill hue 30 90)
       (q/rect 0 y (q/width) 15)))
-  (doseq [y (range -20 (q/height) 30)
-          x (range -20 (q/width) 30)]
-    (let [hue (rescale (q/random y (+ y 200)) 0 (q/height) 30 220)
-          size (q/random 0 50)
+  (doseq [y (range 0 (q/height) 10)
+          x (range 0 (q/width) 10)]
+    (let [hue (rescale (q/random y (+ y 1000)) 0 (q/height) 30 220)
+          size-0 (gauss 1 50)
+          size-1 (gauss 1 10)
+          size-2 (gauss 1 5)
+          size-3 (gauss 1 2)
+          rotate (rand-int 2)
+          offset-x 0
+          offset-y 0
           to-draw (q/random 0 10)]
       (q/no-stroke)
-      (q/fill hue 30 90) 
+      (q/fill hue 30 90)
+      (when (< (r+ 1 300) to-draw)
+        (right-triangle (+ offset-x x) (+ offset-y y) size-0 size-0 rotate))
       (when (< (r+ 1 4) to-draw)
-        (q/triangle 
-         (+ x 50) (+ y 50)
-         (+ x 20) (+ y 20)
-         (+ x 50) (+ y 20)))))
+        (right-triangle (+ offset-x x) (+ offset-y y) size-1 size-1 rotate))
+      (when (< (r+ 1 4) to-draw)
+        (right-triangle (+ offset-x x) (+ offset-y y) size-2 size-2 rotate))
+      (when (< (r+ 1 4) to-draw)
+        (right-triangle (+ offset-x x) (+ offset-y y) size-3 size-3 rotate))))
   (q/save "sketch.tif"))
 
 
@@ -289,11 +378,11 @@
   (q/save "sketch.tif"))
 
 
-(defn draw-richter []
+(defn draw []
   (q/no-loop)
   (q/background 0 0 100)
   (doseq [y (range 0 (q/height) 1)]
-    (let [hue (rescale (q/random y (+ y 200)) 0 (q/height) 0 360)
+    (let [hue (rescale (q/random y (+ y 500)) 0 (q/height) 0 360)
           brightness (q/random 50 100)]
       (q/stroke-weight (q/random 0 5))
       (q/stroke hue (q/random 50 70) brightness)
