@@ -20,10 +20,56 @@
 (m/match []
   (m/or {} _)
   :yep)
+[{:cols 
+  [{:tag :vec, :prt {:tag :prt, :left 
+                     {:tag :cat, :elements 
+                      [{:tag :lvr, :symbol ?name}
+                       {:tag :map, :as nil, 
+                        :rest-map nil, 
+                        :map {{:tag :lvr, :symbol ?name} 
+                              {:tag :lvr, :symbol ?prop}}}]}, 
+                     :right {:tag :cat, :elements []}}, :as nil}], 
+  :rhs {:value {:name ?name}, :op :return}, :env #{}, :refs {}, :ref-specs {}}]
+
+
+{:cols [{:tag :set, 
+         :elements ({:tag :cat, :elements
+                     [{:tag :lit, :value :name} 
+                      {:tag :lvr, :symbol ?name}]} 
+                    {:tag :cat, :elements [{:tag :lvr, :symbol ?name}
+                                           {:tag :lvr, :symbol ?thing}]})} 
+        {:tag :any, :symbol _}], 
+ :rhs {:value {:name ?name}, :op :return}, :env #{}, :refs {}, :ref-specs {}}
+
+
+[{:cols [{:tag :map, :as nil, :rest-map nil, 
+          :map {{:tag :lvr, :symbol ?name} {:tag :lvr, :symbol ?prop}}}], 
+  :rhs {:value {:name ?name}, :op :return}, :env #{{:tag :lvr, :symbol ?name}}, :refs {}, :ref-specs {}}]
+
+(analyze
+ (m/match ["jimmy" {"jimmy" :name}]
+   [?name {?name ?prop}]
+   {:name ?name}))
+
+(analyze)
+(m/match {:stuff 1
+          :name "jimmy"
+          "jimmy" :thing}
+  {:name ?name
+   ?name ?thing}
+  {:name ?name
+   :thing ?thing})
 
 
 
-
+[{:cols [{:tag :map,
+          :as nil, 
+          :rest-map nil, 
+          :map {{:tag :lit, :value :name} 
+                {:tag :lvr, :symbol ?name}, 
+                {:tag :lvr, :symbol ?name}
+                {:tag :lvr, :symbol ?thing}}}], 
+  :rhs {:value {:name ?name}, :op :return}, :env #{}, :refs {}, :ref-specs {}}]
 
 
 (defn analyze-compile
