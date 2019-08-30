@@ -1,0 +1,16 @@
+quickstart.dsort : (a -> a -> base.Boolean) -> [a] ->{quickstart.Remote} [a]
+quickstart.dsort lt as =
+  use base.Universal <
+  if base.List.size as < 2 then as
+  else
+    case base.List.halve as of
+      (l, r) ->
+        use quickstart dsort
+        use quickstart.remote force
+        use quickstart.remote.Remote at spawn
+        leftF = at spawn '(dsort lt l)
+        rightF = at spawn '(dsort lt r)
+        quickstart.merge lt (force leftF) (force rightF)
+
+
+> runLocal 

@@ -1,0 +1,10 @@
+# Inventing On Principle
+
+Bret Victor's talk "Inventing on Principle" is perhaps the single most influential talk about the Future of Programming. Of course it must be said that in many ways, that is not the subject of his talk but merely a backdrop for his larger project. Yet, its influence cannot be denied. As such, this talk makes an incredibly useful jumping off point for understanding much of the recent work in this field. In this post, I will attempt to summarize not the talk as it is, but the talk as I see it. I will focus on the parts I find most interesting and the parts that others have run with. Bret's work is remarkable in its clarity and breadth. If you have not watched this talk, recommend going and listening first before diving in.
+
+## The Misunderstanding
+
+While "Inventing on Principle" is certainly influential for what it did say, I think it is also largely misunderstood. Perhaps misunderstood is too strong of word, but I'm not sure the right way to characterize it. Bret's talk captivated those who watched it. His simple presentation styled combined with amazing demos draws you. More than that, he makes you feel at each point as if you've reached the climax of the demo, only to undercut you with a "this isn't good enough". In fact, one incredibly fantastic aspect of the recording is the fact that it captured the audiences raw reactions to all he showed. This compelling presentation style draws you in and in someways convinces you with its demonstration and yet I think its impact made people miss the point. To understand what I mean, look at how Bret starts his talk.
+
+> This talk is actually about a way of living your life that most people don't talk about. As you approach your career, you'll hear a lot about following your passion, or doing something you love. I'm going to talk about something kind of different. I'm going to talk about following a principle — finding a guiding principle for your work, something you believe is important and necessary and right, and using that to guide what you do.
+
