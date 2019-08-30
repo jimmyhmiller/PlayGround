@@ -18,9 +18,11 @@ const Entry = ({ name, calories, first }) => (
     {name}
     <div style={{ fontSize: 13, marginTop: -10 }}>{calories} cal</div>
 
+  {/*Thing about light and dark theme, or just make it all dark*/}
     <style jsx>{`
       .entry:hover, .entry:focus {
         filter: brightness(120%);
+
         background-color: #272727;
       }
 
@@ -40,14 +42,6 @@ const Home = () => (
     <h1>1200 Calories</h1>
 
     <Entry name="Burrito" calories="1150" first />
-    <Entry name="Bowl" calories="850" />
-    <Entry name="Cortado" calories="80" />
-    <Entry name="Biscuit" calories="180" />
-    <Entry name="Burrito" calories="1150" />
-    <Entry name="Bowl" calories="850" />
-    <Entry name="Cortado" calories="80" />
-    <Entry name="Biscuit" calories="180" />
-    <Entry name="Burrito" calories="1150" />
     <Entry name="Bowl" calories="850" />
     <Entry name="Cortado" calories="80" />
     <Entry name="Biscuit" calories="180" />
