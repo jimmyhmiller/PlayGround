@@ -16,6 +16,11 @@
    :yep))
 
 
+(analyze
+ (m/match '(a a a a)
+           (?a ..1)
+           ?a))
+
 
 (m/match []
   (m/or {} _)
@@ -106,4 +111,7 @@
 (defmacro analyze [expr]
   (m/match expr
     (~'m/match ?expr & ?body)
-    `(analyze-compile :match (quote ~?body) (quote ~?expr))))
+    `(analyze-compile :match (quote ~?body) (quote ~?expr)))
+  (m/search expr
+    (~'m/match ?expr & ?body)
+    `(analyze-compile :search (quote ~?body) (quote ~?expr))))
