@@ -18,7 +18,7 @@ const Entry = ({ name, calories, first }) => (
     {name}
     <div style={{ fontSize: 13, marginTop: -10 }}>{calories} cal</div>
 
-  {/*Thing about light and dark theme, or just make it all dark*/}
+  {/*Think about light and dark theme, or just make it all dark*/}
     <style jsx>{`
       .entry:hover, .entry:focus {
         filter: brightness(120%);

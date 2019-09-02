@@ -1,6 +1,7 @@
 (ns wander.core10
   (:require [meander.match.ir.epsilon :as ir]
             [meander.strategy.epsilon :as r]
+             [meander.strategy.epsilon :as strat]
             [meander.epsilon :as m]
             [meander.match.epsilon :as match]))
 
@@ -18,8 +19,73 @@
 
 (analyze
  (m/match '(a a a a)
-           (?a ..1)
-           ?a))
+   (?a ..1)
+   !a))
+
+
+
+(m/match {{:thing :stuff} :stuff
+          :thing ?stuff}
+
+  {:thing ?stuff
+   {:thing ?stuff} _}
+  [?stuff ?thing])
+
+
+
+(m/match {[1 2 3] :hello
+          :answer 3}
+  {:answer ?x
+   [1 2 ?x] ?thing}
+  [?thing])
+
+()
+
+(m/search {1 3
+           2 3
+           3 9}
+  {!xs ?x}
+  [!xs ?x])
+
+
+(m/match {:me :thing :stuff {:thing {:a {:b {:c {:d {:e :me}}}}}}}
+  {?thing :thing
+   :stuff {:thing {:a {:b {:c {:d {:e ?thing}}}}}}}
+
+  [?thing])
+
+(defn favorite-food-info [user foods-by-name]
+  (m/match {:user user
+            :foods-by-name foods-by-name}
+    {:foods-by-name {?food {:popularity ?popularity
+                            :calories ?calories}}
+
+     :user
+     {:name ?name
+      :favorite-food {:name ?food}}}
+    {:name ?name
+     :favorite {:food ?food
+                :popularity ?popularity
+                :calories ?calories}}))
+(println "\n\n\n\n")
+
+(favorite-food-info 
+ {:name "jimmy" :favorite-food {:name :nachos}}
+ {:nachos {:popularity :very
+           :calories 2000}})
+
+
+(m/search [1 2 [ 3 4 1]]
+  (m/$ [_ ... 1])
+  :yep)
+
+
+
+
+
+(m/search '[(+ 2 3) (* 3 5 0) (- 2 3) (/ 2 0)]
+  [_ ... . (m/and (m/scan 0) !steps) . !steps ... . (/ _ 0 :as !steps)]
+  !steps)
 
 
 (m/match []
@@ -111,7 +177,4 @@
 (defmacro analyze [expr]
   (m/match expr
     (~'m/match ?expr & ?body)
-    `(analyze-compile :match (quote ~?body) (quote ~?expr)))
-  (m/search expr
-    (~'m/match ?expr & ?body)
-    `(analyze-compile :search (quote ~?body) (quote ~?expr))))
+    `(analyze-compile :match (quote ~?body) (quote ~?expr))))

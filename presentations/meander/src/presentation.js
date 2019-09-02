@@ -130,8 +130,8 @@ export default () =>
 
 
     <Points title="The Plan">
-      <Point text="Practical Data Manipulation" />
-      <Point text="Advanced Features" />
+      <Point text="Meander and its Philosophy" />
+      <Point text="Taking the Approach Further" />
       <Point text="The Future" />
     </Points>
 
@@ -161,6 +161,7 @@ export default () =>
       <Point text="Borrows heavily from Term Rewriting" />
       <Point text="Actively worked on" />
       <Point text="Takes breaking changes seriously" />
+      <Point text="Accepted into Clojurists Together" />
     </Points>
 
 
@@ -174,8 +175,6 @@ export default () =>
     />
 
     <TwoColumn
-      color="magenta"
-      align="left"
       left={
         <Code
           noSlide
@@ -394,15 +393,11 @@ export default () =>
         `}
       />
 
-
-
       <Points title="Requirements">
         <Point text="All Valid Player/Weapon Combinations" />
         <Point text="name, weapon, class, attack power, and all upgrades" />
         <Point text="No third party weapons allowed" />
       </Points>
-
-
 
 
       <Code
@@ -493,11 +488,11 @@ export default () =>
       lang="clojure"
       source={`
         (m/rewrite pokemon
-          {:itemTemplates (gather {:pokemonSettings
-                                   {:pokemonId !pokemon
-                                    :form !form
-                                    :rarity (not-nil !rarity)
-                                    :stats {:as !stats}}})}
+          {:itemTemplates (m/gather {:pokemonSettings
+                                     {:rarity (not-nil !rarity)
+                                      :pokemonId !pokemon
+                                      :form !form
+                                      :stats {:as !stats}}})}
 
           [{:pokemon !pokemon 
             :form !form
@@ -510,15 +505,15 @@ export default () =>
       lang="clojure"
       source={`
         (m/search (parse-js example)
-          ($ (or
-              {:type "FunctionDeclaration"
-               :id {:name ?name}
-               :loc ?loc}
+          (m/$ (m/or
+                {:type "FunctionDeclaration"
+                 :id {:name ?name}
+                 :loc ?loc}
 
-              {:type "VariableDeclarator"
-               :id {:name ?name}
-               :loc ?loc
-               :init {:type (or "FunctionExpression" "ArrowFunctionExpression")}}))
+                {:type "VariableDeclarator"
+                 :id {:name ?name}
+                 :loc ?loc
+                 :init {:type (m/or "FunctionExpression" "ArrowFunctionExpression")}}))
           {:name ?name
            :loc ?loc})
       `}
@@ -530,11 +525,11 @@ export default () =>
         (m/rewrite reddit
           {:data
            {:children 
-            (gather {:data 
-                     {:title !title
-                      :permalink !link
-                      :preview {:images
-                                [{:source {:url !image}} & _]}}})}}
+            (m/gather {:data 
+                       {:title !title
+                        :permalink !link
+                        :preview {:images
+                                  [{:source {:url !image}} & _]}}})}}
 
           [:div {:class :container}
            .
@@ -561,32 +556,19 @@ export default () =>
 
     <Headline
       textAlign="left"
-      text="Is this enough?" />
-
-
-    <Code
-      lang="clojure"
-      source={`
-
-        (def simplify-addition
-          (r/rewrite
-           (+ ?x 0) ?x
-           (+ 0 ?x) ?x))
-
-        (simplify-addition '(+ 0 3)) ;; => 3
-        (simplify-addition '(+ 0 (+ 0 3))) ;; => (+ 0 3)
-
-      `}
-     />
+      text="Taking it Further" />
 
      <Code
       lang="clojure"
       source={`
 
-        (def fully-simplify-addition
-          (r/until =
-            (r/bottom-up 
-              (r/attempt simplify-addition))))
+        (def simplify-addition
+          (strat/until =
+            (strat/bottom-up 
+             (strat/attempt          
+              (strat/rewrite
+               (+ ?x 0) ?x
+               (+ 0 ?x) ?x)))))
 
         (simplify-addition '(+ (+ 0 (+ 0 3)) 0)) ;; 3
         (simplify-addition '(+ (+ 0 (+ 0 (+ 3 (+ 2 0)))) 0)) ;; (+ 3 2)
@@ -620,13 +602,6 @@ export default () =>
       `}
      />
 
-
-    <Code
-      lang="clojure"
-      source={`
-       ;; l-system
-      `}
-     />
 
 
     <Headline
@@ -712,17 +687,82 @@ export default () =>
       lang="clojure"
       source={`
         {:execution-history
-         [_ ... . (scan 0 :as !steps) !steps ... . (/ _ 0 :as !steps)]}
+         (all-steps-between (m/scan 0) (/ _ 0) !steps)}
         =>
         !steps
       `}
     />
 
+    <Code
+      lang="clojure"
+      source={`
+      (with-execution-rule
+        {:rule !rules} => !rules
+        (my-test))
+      `}
+    />
 
 
 
+    <Headline
+      color="green"
+      textAlign="left"
+      text="Rules as data" />
 
 
+    <Code
+      lang="clojure"
+      source={`
+        {:rules
+         (m/scan
+          {:rhs (m/scan println)
+           :as ?rule})}
+        =>
+        ?rule
+
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        {:rules
+         (m/scan
+          {:lhs (my-deprecated-rule & _)
+           :as ?rule})}
+        =>
+        ?rule
+
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        {:rules
+         (locate
+          {:lhs (my-deprecated-rule ?x ?y ?z)
+           & ?rest
+           :as ?rule})}
+        =>
+        (replace ?rule
+         {:lhs (new-rule ?y ?x ?z)
+          & ?rest})
+
+      `}
+    />
+
+    <Code
+      lang="clojure"
+      source={`
+        {:rule-history
+         {:rule ?name
+          :changes [_ ..10]}}
+
+        => 
+        ?name
+      `}
+    />
 
     <Headline
       color="green"
