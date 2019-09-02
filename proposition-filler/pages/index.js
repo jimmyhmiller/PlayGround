@@ -1,8 +1,7 @@
 import React, { useState } from 'react'
 import Link from 'next/link'
 import Head from 'next/head'
-
-
+import { useDebounce } from 'use-debounce';
 
 const distinct = (coll) => [...new Set(coll)];
 
@@ -67,6 +66,7 @@ const Index = () => {
 
   const proposition = useInput("");
   const [variables, setVariables] = useVariables();
+  const [debouncedProposition] = useDebounce(proposition.value, 200)
 
   return (
     <div>
@@ -98,7 +98,7 @@ const Index = () => {
         style={{fontSize: 16, maxWidth: "85vw", width: "500px", height: 100}}  />
 
       <p>Variables:</p>
-      {extractSingleLetterWords(proposition.value)
+      {extractSingleLetterWords(debouncedProposition)
         .map(name => <Variable key={name} name={name} value={variables[name] || ""} onChange={setVariables(name)} />)
       }
       <div
