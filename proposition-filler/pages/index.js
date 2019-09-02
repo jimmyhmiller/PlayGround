@@ -62,9 +62,13 @@ const useVariables = () => {
 }
 
 
+const modusPonens = `if p then q
+p
+therefore q`
+
 const Index = () => {
 
-  const proposition = useInput("");
+  const proposition = useInput(modusPonens);
   const [variables, setVariables] = useVariables();
   const [debouncedProposition] = useDebounce(proposition.value, 200)
 
