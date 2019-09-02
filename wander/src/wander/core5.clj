@@ -39,6 +39,27 @@
     [:img {:src (m/app unescape !image)}]]
    ...])
 
+
+
+
+
+(r.syntax/defsyntax all-steps-between [first-pattern second-pattern mvar]
+  `[~'_ ... . (m/and ~first-pattern ~mvar) . ~mvar ... . (m/and ~second-pattern ~mvar)])
+
+
+
+(m/find '[(/ (- 4 2) (* 3 5 (- 2 2))) 
+          (* 3 5 (- 2 2)) 
+          (* 3 5 0) 
+          (- 4 2)
+          (/ 2 0)]
+  (all-steps-between (m/scan 0) (/ _ 0) !steps)
+  !steps)
+
+
+
+
+
 (def pokemon (json/parse-string (slurp "/Users/jimmyhmiller/Desktop/GAME_MASTER.json") true))
 
 
@@ -107,6 +128,11 @@ I was hoping maybe someone could help. I think this is an incredibly useful oper
     ;; else
     pattern))
 
+
+(m/match [1 2 3 2]
+  [(not-nil !xs) ...]
+  !xs)
+
 (r.syntax/defsyntax map-of
   ([key-pattern value-pattern]
    (map-of key-pattern value-pattern '...))
@@ -118,6 +144,11 @@ I was hoping maybe someone could help. I think this is an incredibly useful oper
      `{& [[~key-pattern ~value-pattern] ~repeat-pattern]})))
 
 
+
+
+(m/match {"test" 2 "thing" 4 }
+  (map-of (m/pred string? !ks) (m/pred number? !vs) ..2)
+  (m/subst (map-of !ks !vs ..2)))
 
 
 (m/match [:a 2]
