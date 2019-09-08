@@ -175,13 +175,15 @@
 
 
 (defn clear-canvas []
-  (q/fill 0 0 100)
-  (q/rect 0 0 (q/width) (q/height))
-  (q/no-loop))
+  (q/no-loop)
+  (q/background 360))
 
 
 (defn r+- [x y]
   (+ x (random (- y) y)))
+
+(defn r- [x y]
+  (+ x (random (- y) 0)))
 
 (range 0 1 10)
 
@@ -219,27 +221,128 @@
   (int (* x (slope [0 0] [width height]))))
 
 
+(def position (atom 200))
+
+(defn draw []
+  (q/background 360)
+  (q/no-loop)
+  (q/line 10
+          100
+          100
+          @position))
+
+
+
+(defn key-release []
+  (when (and (= (q/raw-key) \i))
+    (swap! key-meta assoc \i nil)
+    (q/redraw)))
+
+(def key-meta (atom {}))
+
+
+;; Idea, be able to control randomness via keyboard
+
+
+(defn key-press []
+  (prn (q/raw-key))
+  (when (and (= (q/raw-key) \i) (not (get @key-meta \i)))
+    (swap! key-meta assoc \i {:pressed true 
+                              :mouse-y (q/mouse-y)})
+    (q/redraw))
+  (when (= (q/raw-key) \r)
+    (q/redraw)))
+
+
+
+(def iterations (atom 1))
+
+
 (defn draw []
   (clear-canvas)
-  (q/no-loop)
   (q/no-fill)
   (q/stroke-weight 0.5)
+
+  (q/no-stroke)
+  (q/fill 0)
   (q/stroke 0 0 0)
-  (doseq [i (range 10)]
-    (doseq [x (range 0 (width))
-            y (range 0 (height))
-            :when (= (diagonal (width) (height) x) y)]
-      (let [offset (gauss 10 600)
+  (doseq [i (range @iterations)]
+    (doseq [x (range 0 (width))]
+      (let [y (diagonal (width) (height) x) 
+            offset (gauss 10 600)
             offset2 (gauss 10 600)]
         (when (odds 0.9)
           (q/line (+ x 0) 
                   (- offset offset) 
                   (+ x offset)
                   (+ y 0))))))
+  (q/rect 600 800 200 100)
+  (q/fill 360)
+  (q/text-size 20)
+  (q/text (str  (get-in @key-meta [\i :mouse-y]))
+          620 850)
+  
 
   (q/save "sketch.tif"))
 
 
+(defn draw []
+  (clear-canvas)
+  (q/fill 0 0 100)
+  (q/rect 0 0 (q/width) (q/height))
+  (q/no-loop)
+  (q/no-fill)
+  (q/stroke-weight 0.5)
+  (q/stroke 0 0 0)
+  (doseq [i (range 2)]
+    (doseq [x (range 0 (width) 5)
+            y (range 0 (height))
+            :when (= y 1)]
+
+     #_ (when (odds 0.02)
+        (doseq [_ (range 10)]
+          (let [offset (gauss 0 10)]
+            (when (odds 0.9)
+              (q/line (- offset offset) 
+                      (+ y offset) 
+                      x 
+                      (+ y offset))))))
+      #_(let [offset (gauss 0 10)]
+        (when (odds 0.9)
+          (q/line (- offset offset) 
+                  (+ y offset) 
+                  x 
+                  (+ y offset))))
+
+      #_(when (odds 0.02)
+        (doseq [_ (range 10)]
+          (let [offset (gauss 0 10)]
+            (q/line (+ x offset) 
+                    (- offset offset) 
+                    (+ x offset)
+                    y))))
+      (let [offset (gauss 10 10)]
+        (when (odds 0.9)
+          (q/curve (+ x offset) 
+                   (- offset (r+ offset 20)) 
+                   (+ (r+- x 100) (r+- offset 100))
+                   (r+ y 10000)
+                   (+ x offset) 
+                   (- offset (r+ x 20)) 
+                   (+ (r+- x 100) (r+- offset 100))
+                   (r+ x y))))))
+  #_(doseq [x (range 0 (width) 5)
+          y (range 0 (height))]
+    (let [offset (random 0 3)]
+      (when (odds 0.1)
+        (q/line (- x 10) (+ y offset) x (+ y offset))))
+    (let [offset (random 0 3)]
+      (when (odds 0.1)
+        (q/line (+ x offset) 
+                (- y 10) 
+                (+ x offset)
+                y))))
+  (q/save "sketch.tif"))
 
 
 (defn draw []
