@@ -147,7 +147,6 @@ export default () =>
         <>
           <Text textColor="blue" textSize={60} textAlign="left">Jimmy Miller</Text>
           <Points noSlide styleContainer={{paddingTop: 10}}>
-            <Point textSize={40} text="Self Taught" /> 
             <Point textSize={40} text="Senior Developer - Adzerk" /> 
             <Point textSize={40} text="FP Nerd" />
           </Points>
