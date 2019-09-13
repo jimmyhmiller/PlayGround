@@ -116,10 +116,10 @@ export const BlankSlide = withSlide(() => {
 export const Code = withSlide(({ source, color, lang, title, textSize, headlineSize }) => {
   return (
     <div>
-      <Headline color={color} size={headlineSize || 4} noSlide textAlign="left" text={title} />
+      {title ? <Headline color={color} size={headlineSize || 4} noSlide textAlign="left" text={title} /> : null}
       <CodePane
         theme="external"
-        textSize={textSize || 30} 
+        textSize={textSize || 36} 
         source={formatCode(source)}
         lang={lang} />
     </div>
@@ -189,6 +189,6 @@ export const TwoColumn = withSlide(({ left, right, title, align="left", color="c
 )
 
 export const Presentation = ({ children }) => 
-  <Deck contentWidth={1300} theme={theme} controls={false} style={{display: 'none'}} transition={["slide"]} transitionDuration={0} progress="none">
+  <Deck contentWidth={1400} contentHeight={950} theme={theme} controls={false} style={{display: 'none'}} transition={["slide"]} transitionDuration={0} progress="none">
     {children}
   </Deck>
