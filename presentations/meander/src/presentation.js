@@ -47,37 +47,15 @@ export default () =>
       textAlign="left"
       text="FP = Better" />
 
-
-
-    <Code
-      lang="javascript"
-      source={`
-        let temp = [];
-        for (let i = 0; i < arr.length; i ++) {
-          temp.push(i * 2)
-        }
-      `}
-     />
-
      <Code
       lang="javascript"
       source={`
         let temp = [];
-        for (let i = 0; i < arr.length; i ++) {
-          if (i % 2 === 0) {
-            temp.push(i * 2)
-          }
-        }
-      `}
-     />
-
-     <Code
-      lang="javascript"
-      source={`
-        let total = 0;
-        for (let i = 0; i < arr.length; i ++) {
-          if (i % 2 === 0) {
-            total += x*2
+        for (let i = 0; i < arr.length; i++) {
+          if (arr[i].length >= 2) {
+            for (let j = 1; j < arr[i].length; j++) {
+              temp.push(arr[i][j] * 2)
+            }
           }
         }
       `}
@@ -86,10 +64,10 @@ export default () =>
     <Code
       lang="clojure"
       source={`
-          (->> coll
-               (map (partial * 2))
-               (filter even?)
-               (reduce + 0))
+        (->> coll
+             (filter #(>= (count %) 2))
+             (mapcat (partial drop 1))
+             (map (partial * 2)))
       `}
      />
 
@@ -303,7 +281,7 @@ export default () =>
 
       <Code
         lang="clojure"
-        textSize={20}
+        textSize={29}
         source={`
           {:players [{:name "Jimmer"
                       :class :warrior}
@@ -343,6 +321,7 @@ export default () =>
 
       <Code
         lang="clojure"
+        textSize={36}
         title="players"
         source={`
           [{:name "Jimmer"
@@ -400,7 +379,7 @@ export default () =>
 
 
       <Code
-        textSize={22}
+        textSize={30}
         lang="clojure"
         source={`
           ({:name "Jimmer"
@@ -428,7 +407,7 @@ export default () =>
 
 
      <Code
-       textSize={16}
+       textSize={23}
        lang="clojure"
        source={`
         (defn weapons-for-class [class weapons]
@@ -462,6 +441,7 @@ export default () =>
 
 
     <Code
+      textSize={38}
       lang="clojure"
       source={`
         (m/search game-info
@@ -485,23 +465,25 @@ export default () =>
 
     <Code
       lang="clojure"
+      textSize={38}
       source={`
-        (m/rewrite pokemon
+        (m/match pokemon
           {:itemTemplates (m/gather {:pokemonSettings
-                                     {:rarity (not-nil !rarity)
+                                     {:rarity (m/some !rarity)
                                       :pokemonId !pokemon
                                       :form !form
                                       :stats {:as !stats}}})}
 
-          [{:pokemon !pokemon 
-            :form !form
-            :rarity !rarity
-            :stats !stats} ...])
+          (m/subst [{:pokemon !pokemon 
+                     :form !form
+                     :rarity !rarity
+                     :stats !stats} ...]))
       `}
      />
     {/* Width of code*/}
     <Code
       lang="clojure"
+      textSize={38}
       source={`
         (m/search (parse-js example)
           (m/$ (m/or
@@ -512,16 +494,18 @@ export default () =>
                 {:type "VariableDeclarator"
                  :id {:name ?name}
                  :loc ?loc
-                 :init {:type (m/or "FunctionExpression" "ArrowFunctionExpression")}}))
+                 :init {:type (m/or "FunctionExpression" 
+                                    "ArrowFunctionExpression")}}))
           {:name ?name
            :loc ?loc})
       `}
      />
 
     <Code
+      textSize={36}
       lang="clojure"
       source={`
-        (m/rewrite reddit
+        (m/match reddit
           {:data
            {:children 
             (m/gather {:data 
@@ -530,13 +514,14 @@ export default () =>
                         :preview {:images
                                   [{:source {:url !image}} & _]}}})}}
 
-          [:div {:class :container}
-           .
-           [:div
-            [:p [:a {:href (m/app str "https://reddit.com" !link)} 
-                 !title]]
-            [:img {:src (m/app unescape !image)}]]
-           ...])
+          (m/subst
+            [:div {:class :container}
+             .
+             [:div
+              [:p [:a {:href (m/app str "https://reddit.com" !link)} 
+                   !title]]
+              [:img {:src (m/app unescape !image)}]]
+             ...]))
       `}
      />
 
@@ -559,6 +544,7 @@ export default () =>
 
      <Code
       lang="clojure"
+      textSize={36}
       source={`
 
         (def simplify-addition
@@ -575,33 +561,30 @@ export default () =>
       `}
      />
 
-    <Code
+
+
+     <Code
       lang="clojure"
+      textSize={36}
       source={`
-        (def little-lang
-          (r/rewrite
-           (if true ?t ?f) ?t
-           (if false ?t ?f) ?f
-           (= ?x ?x) true
-           (= ?x ?y) false
-           (ignore ?x ?y) ?y
-           (error) ~(throw (ex-info "error" {}))))
+
+        (defn simplify-addition [expr]
+          (m/match expr
+            (m/with [%add (m/or (+ 0 %add)
+                                (+ %add 0)
+                                (+ %add %add)
+                                !xs)]
+              %add)
+            (m/rewrite !xs
+              [] 0
+              [?x] ?x
+              _ (+ . !xs ...))))
+
+        (simplify-addition '(+ (+ 0 (+ 0 3)) 0)) ;; 3
+        (simplify-addition '(+ (+ 0 (+ 0 (+ 3 (+ 2 0)))) 0)) ;; (+ 3 2)
+
       `}
      />
-
-
-    <Code
-      lang="clojure"
-      source={`
-        (def prog  '(ignore (error) true))
-
-        (strict-eval little-lang prog) ;; "error"
-
-        (lazy-eval little-lang prog) ;; true
-      `}
-     />
-
-
 
     <Headline
       textAlign="left"
@@ -818,6 +801,12 @@ export default () =>
       text="A More Transparent Future" />
 
 
+
+
+    <Points title="Resources">
+      <Point text="https://github.com/noprompt/meander/" />
+      <Point text="#meander @ Clojurians Slack" />
+    </Points>
 
 
 

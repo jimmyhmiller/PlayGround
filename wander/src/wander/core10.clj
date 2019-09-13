@@ -24,7 +24,7 @@
 
 
 
-(m/match {{:thing :stuff} :stuff
+(m/search {{:thing :stuff} :stuff
           :thing ?stuff}
 
   {:thing ?stuff
@@ -33,13 +33,18 @@
 
 
 
+(m/match '(1 1)
+  (?x ~?x)
+  ?x)
+
+
 (m/match {[1 2 3] :hello
           :answer 3}
   {:answer ?x
    [1 2 ?x] ?thing}
   [?thing])
 
-()
+map?
 
 (m/search {1 3
            2 3
@@ -178,3 +183,113 @@
   (m/match expr
     (~'m/match ?expr & ?body)
     `(analyze-compile :match (quote ~?body) (quote ~?expr))))
+
+
+
+(m/match reddit
+  {:data
+   {:children 
+    (m/gather {:data 
+               {:title !title
+                :permalink !link
+                :preview {:images
+                          [{:source {:url !image}} & _]}}})}}
+
+  (m/subst
+    [:div {:class :container}
+     .
+     [:div
+      [:p [:a {:href (m/app str "https://reddit.com" !link)} 
+           !title]]
+      [:img {:src (m/app unescape !image)}]]
+     ...]))
+
+
+
+
+
+(m/search (parse-js example)
+  (m/$ (m/or
+        {:type "FunctionDeclaration"
+         :id {:name ?name}
+         :loc ?loc}
+
+        {:type "VariableDeclarator"
+         :id {:name ?name}
+         :loc ?loc
+         :init {:type (m/or "FunctionExpression" 
+                            "ArrowFunctionExpression")}}))
+  {:name ?name
+   :loc ?loc})
+
+
+(def coll [[1,2], [2, 3], [1]])
+
+(->> coll
+     (filter #(>= (count %) 2))
+     (mapcat (partial drop 1))
+     (map (partial * 2)))
+
+(def expr '(+ (+ 0 (+ 0 0)) 0))
+(def expr '(+ (+ 0 (+ 0 3)) 0))
+(def expr '(+ (+ 0 (+ 0 (+ 3 (+ 2 0)))) 0))
+
+(def simplify-addition
+  (m/match expr
+    (m/with [%add (m/or (+ 0 %add)
+                        (+ %add 0)
+                        (+ %add %add)
+                        !xs)]
+      %add)
+    (m/rewrite !xs
+      [] 0
+      [?x] ?x
+      _ (+ . !xs ...))))
+
+(= [1 2 3] '(1 2 3))
+
+
+(analyze)
+(m/match (list false) [false] :ok)
+
+(analyze)
+(m/match [false] (false) :ok)
+
+(analyze)
+(m/match (list false) [?x] :ok)
+
+
+(case (list false)
+  ([false]) :ok)
+
+(case (list false)
+)
+
+(= (list false) [false])
+(= '(1) [1])
+
+
+(m/match pokemon
+  {:itemTemplates (m/gather {:pokemonSettings
+                             {:rarity (m/some !rarity)
+                              :pokemonId !pokemon
+                              :form !form
+                              :stats {:as !stats}}})}
+
+  (m/subst [{:pokemon !pokemon 
+             :form !form
+             :rarity !rarity
+             :stats !stats} ...]))
+
+
+
+
+
+(m/match expr
+  (m/with [%addition (m/or (+ . (m/or 0 %addition) ...) 
+                           !xs)]
+    %0)
+  (m/rewrite !xs
+    [] 0
+    [?x] ?x
+    _ (+ . !xs ...)))
