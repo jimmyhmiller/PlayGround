@@ -38,7 +38,7 @@ Here Ryle contrasts the process of building the theory, from having a theory by 
 
 Having a theory must go beyond mere recitation. Theories are things which can be applied and to have a theory requires the ability to apply that theory. Theories are varied in their presentation and use and a certain level of mastery is required in order to claim possesion of a theory.  To put these in Ryle's terms, having a theory involves aspects of knowing how and knowing that.
 
-####Knowing How and Knowing That
+#### Knowing How and Knowing That
 
 While not the originator of the idea, Ryle offers a spirited defense of the distinction between knowing how and knowing that. Roughing speaking to "know how", is to have the ability to perform an action. Whereas "knowing that" is to justifiably believe a true fact. In *The Concept of Mind*, Ryle intends to defend two claims concerning these types of knowledge. First, "knowing how" and "knowing that" are not reducible to each other, they are two distinct forms of knowing. Secondly, "knowing how" doesn't require prior instances of "knowing that". This second claim we will not explore further, but in order to understand Ryle's notion of theory, we must explore more Ryle's separation of these two forms of knowing.
 
