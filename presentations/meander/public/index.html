@@ -12,7 +12,7 @@
 
         .spectacle-presenter-main, spectacle-presenter-main > div, spectacle-presenter-main > div > div {
           width: 48vw !important;;
-          height: 500px !important;
+          height: 740px !important;
           flex:   none !important;
           border: none !important;
           display: block;
@@ -21,7 +21,7 @@
 
         .spectacle-presenter-main + div, .spectacle-presenter-main + div > div, .spectacle-presenter-main + div > div > div {
           width: 48vw !important;;
-          height: 460px !important;
+          height: 700px !important;
           flex:   none;
           border: none !important;
           opacity: 1;
@@ -29,11 +29,19 @@
         }
 
         .spectacle-presenter-main .spectacle-content {
-          transform:  scale(0.6);
+          transform: scale(0.6);
+          width:1300px;
+          margin-left: -250px;
         }
         .spectacle-presenter-main + div .spectacle-content {
-          transform:  scale(0.6);
+          transform: scale(0.6);
+          margin-left: -200px;
         }
+
+        .spectacle-presenter-main + div .spectacle-content .prism-code {
+          width:1700px;
+        }
+
 
 
   </style>

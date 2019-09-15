@@ -12,7 +12,7 @@ const useMouseMove = (drag) => {
     }
     () => {
       setPosition({})
-      document.addEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mousemove', onMouseMove)
     }
   }, [drag])
   return position;

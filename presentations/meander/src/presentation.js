@@ -251,7 +251,7 @@ export default () =>
     <Code
       lang="clojure"
       source={`
-        (match person
+        (m/match person
           {:name ?name
            :address 
            {:address1 ?address1
@@ -649,7 +649,7 @@ export default () =>
     <Code
       lang="clojure"
       source={`
-        {:expr (my-function ?x ?y)}
+        {:expr (my-rule ?x ?y)}
         => 
         (println ?x ?y)
       `}
@@ -775,7 +775,7 @@ export default () =>
     <Code
       lang="clojure"
       source={`
-        (r/rewrite
+        (strat/rewrite
          {:name ?name
           :address
           {:address1 ?address1
@@ -799,8 +799,6 @@ export default () =>
       color="green"
       textAlign="left"
       text="A More Transparent Future" />
-
-
 
 
     <Points title="Resources">
