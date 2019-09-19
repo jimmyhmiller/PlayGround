@@ -13,10 +13,10 @@
   (cljs/eval-str
    compile-state-ref
    (str source)
-   "[test]"
+   "[test]" ;; What is this again?
    {:eval cljs/js-eval
     :load (partial boot/load compile-state-ref)
-    :ns   (symbol "meander-editor.eval-env")}
+    :ns (symbol "meander-editor.eval-env")}
    cb))
 
 (defonce initialize-eval

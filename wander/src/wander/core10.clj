@@ -293,3 +293,65 @@ map?
     [] 0
     [?x] ?x
     _ (+ . !xs ...)))
+
+
+
+
+
+
+(require '[meander.epsilon :as m])
+
+(defn favorite-food-info [foods-by-name user]
+  (m/match {:user user
+            :foods-by-name foods-by-name}
+    {:user
+     {:name ?name
+      :favorite-food {:name ?food}}
+     :foods-by-name {?food {:popularity ?popularity
+                            :calories ?calories}}}
+    {:name ?name
+     :favorite {:food ?food
+                :popularity ?popularity
+                :calories ?calories}}))
+
+
+(def foods-by-name
+  {:nachos {:popularity :high
+            :calories :lots}
+   :smoothie {:popularity :high
+              :calories :less}})
+
+
+
+
+(defn favorite-foods-info [foods-by-name user]
+{:user user
+             :foods-by-name foods-by-name}
+  (m/search {:user user
+             :foods-by-name foods-by-name}
+    {:user
+     {:name ?name
+      :favorite-foods [{:name ?food}]}
+     :foods-by-name !xs}
+    {:name ?name
+     :x !xs}))
+
+
+(favorite-foods-info
+ foods-by-name
+ {:name :alice 
+  :favorite-foods [{:name :nachos} 
+                   {:name :smoothie}]})
+
+(defn favorite-foods-info [foods-by-name user]
+  (m/search {:user user
+             :foods-by-name foods-by-name}
+    {:user
+     {:name ?name
+      :favorite-foods (m/scan {:name ?food})}
+     :foods-by-name {?food {:popularity ?popularity
+                            :calories ?calories}}}
+    {:name ?name
+     :favorite {:food ?food
+                :popularity ?popularity
+                :calories ?calories}}))
