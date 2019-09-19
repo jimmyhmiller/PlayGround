@@ -32,7 +32,6 @@
      [(get @component-registry @page)]
      [:a {:href "#" :on-click (fn [e]
                                 (.preventDefault e)
-                                (println "Click")
                                 (load-page :noxt.about (fn [new-page component]
                                                          (swap! component-registry assoc new-page component)
                                                          (swap! page new-page))))}
