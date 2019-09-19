@@ -19,7 +19,7 @@
 (def example-input
 
 ";; Namespaces already required
-;; (require '[meander.match.delta :as m])
+;; (require '[meander.epsilon :as m])
 
 (def example [1 2 3 4 5 6])
 
@@ -63,10 +63,10 @@
       [:div {:style {:margin-top 10 :width "40vw" :min-width 400}}
        [code-mirror
         {:className "left-codemirror"
-         :options #js {:lineNumbers true}
+         :options #js {:lineNumbers true :matchBrackets true}
          :ref cm-input
          :value input
-         :onChange #(update-input %)}]]
+         :onChange update-input}]]
 
 
       

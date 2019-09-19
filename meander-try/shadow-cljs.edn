@@ -1,4 +1,4 @@
-{:dependencies [[meander/delta "0.0.90"]
+{:dependencies [[meander/epsilon "0.0.187-test"]
                 [lilactown/hx "0.4.0"]
                 [cider/cider-nrepl "0.16.0-SNAPSHOT"]]
  :source-paths ["src"]
@@ -14,7 +14,8 @@
                           
 
                           :compiler-options
-                          {:optimizations :simple}
+                          {:optimizations :simple
+                           :source-map true}
 
                           :modules
                           {:base
@@ -31,6 +32,6 @@
                             :exclude #{meander-editor.core}
                             :web-worker true}}
 
-                          :devtools         {:http-root  "public"
-                                             :http-port  8702
-                                             :after-load meander-editor.core/render}}}}
+                          :devtools {:http-root "public"
+                                     :http-port 8702
+                                     :after-load meander-editor.core/render}}}}
