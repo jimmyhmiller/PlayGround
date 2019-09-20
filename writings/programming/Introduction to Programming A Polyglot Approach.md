@@ -81,7 +81,7 @@ We shall see exactly this now as we explore our first language, scheme. Scheme i
 ```
 Here is a rather simple program. It adds 2 to 2. This will seem strange. Why write this with the `+` first? Why do we need these parenthesis?  The answer isn't immediately obvious, and yet as we leave scheme to visit other languages with a more "natural" syntax, we will see the incredible power this simple syntax transformation offers us.
 
-Speaking more abstractly, in LISP all our verbs come before our nouns. To add two numbers, we state the action (in this case `+`) that we want to perform and then we talk about what it is we want to add. When thought in these terms the order isn't nearly as strange. In English, I might say that I "hit the ball". This is a verb followed by a noun. What makes the above example feel strange is not it difference from English, but from the mathematical notation we have learned.
+Speaking more abstractly, in LISP all our verbs come before our nouns. To add two numbers, we state the action (in this case `+` that we want to perform and then we talk about what it is we want to add. When thought in these terms the order isn't nearly as strange. In English, I might say that I "hit the ball". This is a verb followed by a noun. What makes the above example feel strange is not it difference from English, but from the mathematical notation we have learned.
 
 Arithemetical statements typically employ what are called "infix" operators. That is, our operator (+) goes between or inside of our operation. To add numbers we write `2 + 2` with `+` in between our numbers. In contrast LISP uses prefix notation, the operator comes before the numbers. Some languages we will encounter later will use postfix notation `2 2 +`. This use of prefix notation with parenthesis gives LISP some fairly nice properties. Unlike infix notation, prefix notation scales to many different items being operated on, and it has an ordering defined by sytax rather than convention.
 
@@ -127,7 +127,6 @@ x
 nil
 
 ; lists
-
 (1 2 3)
 (cons 2 nil)
 ("string" 2 cons 2.3)

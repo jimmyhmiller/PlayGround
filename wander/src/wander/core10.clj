@@ -3,7 +3,8 @@
             [meander.strategy.epsilon :as r]
              [meander.strategy.epsilon :as strat]
             [meander.epsilon :as m]
-            [meander.match.epsilon :as match]))
+            [meander.match.epsilon :as match]
+            [clojure.string :as string]))
 
 
 (analyze
@@ -324,24 +325,7 @@ map?
 
 
 
-(defn favorite-foods-info [foods-by-name user]
-{:user user
-             :foods-by-name foods-by-name}
-  (m/search {:user user
-             :foods-by-name foods-by-name}
-    {:user
-     {:name ?name
-      :favorite-foods [{:name ?food}]}
-     :foods-by-name !xs}
-    {:name ?name
-     :x !xs}))
 
-
-(favorite-foods-info
- foods-by-name
- {:name :alice 
-  :favorite-foods [{:name :nachos} 
-                   {:name :smoothie}]})
 
 (defn favorite-foods-info [foods-by-name user]
   (m/search {:user user
@@ -355,3 +339,52 @@ map?
      :favorite {:food ?food
                 :popularity ?popularity
                 :calories ?calories}}))
+
+(favorite-foods-info
+ foods-by-name
+ {:name :alice 
+  :favorite-foods [{:name :nachos} 
+                   {:name :smoothie}]})
+
+
+
+(comment
+  {:http/query {:name ?name}}
+
+  (str "Hello " ?name)
+
+
+
+  {:http/query {:id ?id}}
+
+  let ?user = query :db/table :users
+                    :db/where {:= :id ?id}
+
+  match ?user:
+    nil {:http/status 404
+         :http/body {:message "User not found."}}
+
+    {:name ?name} {:http/status 200
+                   :http/body {:greeting (str "Hello " ?name)}}
+
+
+ )
+
+(analyze  
+ (m/match names
+      [!firsts ... ?last]
+   [!firsts ?last]))
+
+(defn split-full-name
+  [full-name]
+  (let [names (string/split full-name #" ")]
+    (m/match names
+      [!firsts ... ?last]
+      [!firsts ?last])))
+
+
+(split-full-name "JOHN PAUL DOE")
+[["JOHN" "PAUL"] "DOE"]   ;;; Works as expected
+(split-full-name "MADONNA")
+nil         ;;; Works as expected
+(split-full-name "JOHN DOE")
