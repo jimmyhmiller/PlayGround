@@ -36,6 +36,7 @@
         [output update-output] (<-state :uninitialized)
         worker (<-ref nil)
         cm-input (react/useRef nil)]
+
     (<-effect (fn []
                 (println "Create Worker")
                 (reset! worker (js/Worker. "/js/worker.js")))
@@ -54,8 +55,22 @@
     
     (<-effect (fn []
                 (when (.-current cm-input)
+                  (set! (.-my-codemirror js/window) (.-current cm-input))
                   (.init parinfer (.getCodeMirror (.-current cm-input)))))
               [cm-input])
+
+    (<-effect (fn []
+                (when (.-current cm-input)
+                  (let [f (fn [_ data]
+                            (when (.-from data)
+                              (update-input (.getValue (.getCodeMirror (.-current cm-input))))))]
+                    (.on (.getCodeMirror (.-current cm-input)) 
+                         "change"
+                         f)
+                    (fn []  (.off (.getCodeMirror (.-current cm-input)) 
+                                  "change"
+                                  f)))))
+              [cm-input update-input])
     
 
     [:<>
@@ -66,7 +81,7 @@
          :options #js {:lineNumbers true :matchBrackets true}
          :ref cm-input
          :value input
-         :onChange update-input}]]
+         :onChange (fn [x] #_(update-input x))}]]
 
 
       
