@@ -13,14 +13,16 @@
        (filter (fn [p] (re-matches #".*cljs$" p)))
        (map #(string/replace (string/replace (string/replace % #"^pages/" "") #"/" ".") #"\.cljs" ""))
        (map (fn [page] {(keyword page) {:entries #{(symbol page)}
-                                        :output-to (str "public/js/" page ".js")}}))
+                                        :output-to (str "public/js/page/" page ".js")}}))
        (reduce merge {})))
 
 (def opts
   {:output-dir "public/js"
-   :asset-path "js/"
-   :optimizations :advanced
-   :warnings {:single-segment-namsespace false}
+   :asset-path "js"
+   :optimizations :none
+   :main "noxt.main"
+   :verbose false
+   :warnings {:single-segment-namespace false}
    :modules (merge
              {:main {:entries '#{noxt.main}
                      :output-to "public/js/main.js"}}
