@@ -10,21 +10,23 @@
        file-seq
        (filter #(.isFile %))
        (map #(.getPath %))
+       (filter (fn [p] (re-matches #".*cljs$" p)))
        (map #(string/replace (string/replace (string/replace % #"^pages/" "") #"/" ".") #"\.cljs" ""))
        (map (fn [page] {(keyword page) {:entries #{(symbol page)}
-                                        :output-to (str "out/" page ".js")}}))
+                                        :output-to (str "public/js/" page ".js")}}))
        (reduce merge {})))
 
 (def opts
-  {:output-dir "out"
-   :asset-path "/out"
+  {:output-dir "public/js"
+   :asset-path "js/"
    :optimizations :advanced
+   :warnings {:single-segment-namsespace false}
    :modules (merge
              {:main {:entries '#{noxt.main}
-                     :output-to "out/main.js"}}
-            (get-modules))
-   :source-maps true})
+                     :output-to "public/js/main.js"}}
+            (get-modules))})
 
 
-(b/build #{"src" "pages"} opts)
+(defn -main []
+  (b/watch (b/inputs "src" "pages") opts))
 
