@@ -70,3 +70,4 @@ The theory of the programs we write live inside us. As we move onto new projects
 As we inherit code bases writen by others, we encounter the same things, code bases whose theory are gone to time or locked away in a location unaccessible to us. Programs that have been modified under many different theories, often incompatible ones. Bugs begin to find their way in, often at the intersection of two theories. Hacks begin to emerge as needs evolve, but theory is lacking. The code becomes worse and worse.
 
 These are the facts we face as professional software engineers. We write code whose theories will one day be lost and we inherit code bases whose theories are long forgotten. If we are to do programming well, we most adopt practices that address these issues.
+
