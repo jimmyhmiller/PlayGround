@@ -1,58 +1,46 @@
 (ns noxt.main
   (:require [uix.core.alpha :as uix :include-macros true]
             [uix.dom.alpha :as uix.dom]
+            [uix.compiler.alpha :as compiler]
+            [react]
             [cljs.loader :as loader]
             [goog.object]
+            [noxt.lib]
             [clojure.string :as string]
-            [noxt.index])
+            ["react-dom/server" :as react-dom])
   (:import [goog.events EventType]))
 
 (enable-console-print!)
 
-(defn find-page-main [page]
-  (reduce (fn [obj prop] (goog.object/get obj prop))
-          js/window
-          (concat (string/split (name page) #"\." ) ["main"])))
+(defn current-location []
+  (if (= js/window.location.pathname "/") 
+    :index
+    (keyword (subs js/window.location.pathname 1))))
 
-;; I can't resolve methods dynamically.
-;; Do I somehow make it not munge these names?
-;; Do I generate this source with all the page names?
-;; ^export might be the right approach.
-;; It will require some preprocessing the source
-(defn load-page [page cb]
-  (loader/load page
-               (fn []
-                 (cb page (find-page-main page)))))
-
+(defn current-page []
+  (let [{:keys [registry-provider]} (react/useContext noxt.lib/LinkContext)]))
 
 (defn app []
-  (let [page (uix/state :index)
-        component-registry (uix/state {:index noxt.index/main})]
-    [:<>
-     [(get @component-registry @page)]
-     [:a {:href "#" :on-click (fn [e]
-                                (.preventDefault e)
-                                (load-page :noxt.about (fn [new-page component]
-                                                         (swap! component-registry assoc new-page component)
-                                                         (swap! page new-page))))}
-      "Load About"]]))
+  (let [current-page (uix/state (current-location))
+        component-registry (uix/state {})]
+    (uix/with-effect [@current-page]
+      (noxt.lib/load-page @current-page 
+                          (fn [new-page component]
+                            (swap! component-registry assoc new-page component))))
+
+    (uix/with-effect []
+      (let [f (fn [e]
+                (reset! current-page (current-location)))]
+        (js/window.addEventListener "popstate" f)
+        (fn []
+          (js/window.removeEventListener "popstate" f))))
+
+    [:> (.-Provider noxt.lib/LinkContext) {:value {:component-registry component-registry
+                                                   :on-change #(reset! current-page (current-location))}}
+     (let [Comp (get @component-registry @current-page)]
+       (if Comp [Comp] nil))]))
 
 (uix.dom/render [app] (js/document.getElementById "app"))
 
 
 (loader/set-loaded! :main)
-
-
-(comment
-
-  (defonce page (atom "index"))
-
-  (events/listen (gdom/getElement "button") EventType.CLICK
-                 (fn [e]
-                   (if (= "index" @page)
-                     (loader/load :noxt.about
-                                  (fn []
-                                    ((resolve 'noxt.about/main))
-                                    (reset! page "about")))
-                     (do (noxt.index/main)
-                         (reset! page "index"))))))
