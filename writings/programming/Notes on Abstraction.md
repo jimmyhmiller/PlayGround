@@ -30,3 +30,9 @@ Of course, a definition of a difficult term like abstraction shouldn't just capt
 
 There are certain ways we talk about abstraction that are necessarily subjective. We may talk about something being "too abstract" simplicitor or "too abstract" to be useful/popular/understood etc. This sort of talk is coupling a certain understanding of what it means for something to be abstract with a value judgement. It also make quite a few assumptions about people and their purposes and abilities. It should not be expected that any theory of abstraction will help us decide questions like is this thing "too abstract", but a theory may give us insight into why people may think of something as "too abstract". If a theory allows us to define a spretrum of any sort, we may be able to find properties these "too abstract" things have in common.
 
+
+
+### Random Thoughts
+
+* Are abstraction and reification related?
+
