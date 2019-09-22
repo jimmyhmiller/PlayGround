@@ -1,7 +1,7 @@
 (ns wander.core10
   (:require [meander.match.ir.epsilon :as ir]
             [meander.strategy.epsilon :as r]
-             [meander.strategy.epsilon :as strat]
+            [meander.strategy.epsilon :as strat]
             [meander.epsilon :as m]
             [meander.match.epsilon :as match]
             [clojure.string :as string]))
@@ -171,19 +171,37 @@ map?
 
          target (gensym "target__")
          ir (match/compile [target] matrix)
-         ir* (ir/rewrite 
-              (ir/op-bind target (ir/op-eval expr) ir))
-         code (ir/compile ir* `(~fail) kind)]
+        
+       ]
      {:clauses clauses
       :matrix matrix
       :ir ir
-      :ir* ir*
-      :code code})))
+      
+      })))
 
 (defmacro analyze [expr]
   (m/match expr
     (~'m/match ?expr & ?body)
     `(analyze-compile :match (quote ~?body) (quote ~?expr))))
+
+(analyze
+ (m/match false
+   (m/or true false)
+   true))
+
+(analyze
+ (m/match [1 2 3]
+   (m/gather !xs 4)
+   :okay
+
+   _
+   :fail))
+
+
+
+[!firsts ..1 
+ (m/or (m/<> "VAN" "DER") (m/<> "DE LA"))
+ !lasts ...]
 
 
 
@@ -388,3 +406,88 @@ map?
 (split-full-name "MADONNA")
 nil         ;;; Works as expected
 (split-full-name "JOHN DOE")
+
+
+
+
+
+(defn- split-full-name
+  "Split a `full-name` string into a first and last name. Correctly
+  deals with multi-part first names (e.g., 'John Paul') as well as
+  multi-part last names (e.g., 'Von Gunten'). If there is only a
+  single name (e.g., 'Sting' or 'Madonna') then return it as both the
+  first and last name."
+  [full-name]
+  (let [names  (string/split full-name #" ")]
+    (m/find names
+      ;; Match a prefix that starts the last name and everything that
+      ;; follows is part of the last name
+      [!firsts ..1
+       (m/and (m/re #"VAN|VON|DE|LA|DELA|VANDER|O'|MV|MAC|ST|ST\.") ?p) .
+       !lasts ...]
+      [(string/join !firsts) (str (if (= ?p "ST.") "ST" ?p)
+                                  (string/join !lasts))]
+
+      ;; no prefixes, but at least two words
+      [!firsts ..1 ?last]
+      [(string/join !firsts) ?last]
+
+      ;; single name (e.g., Sting or Madonna)
+      [?single]
+      [?single ?single])))
+
+(split-full-name "JOHN VAN DAM")
+
+
+
+(def data
+  [{:event-type :pictures-liked
+    :user       {:kind :user
+                 :id   123
+                 :name "blah"}
+    :data       [{:kind :picture 
+                  :id   345 
+                  :src  "someurl"}
+                 {:kind :picture
+                  :id   678
+                  :src  "someurl"}]}
+   
+   {:event-type :comment-added
+    :user       {:kind :user
+                 :id   321 
+                 :name "bleh"}
+    :data       {:target  {:kind   :note
+                           :id     876
+                           :title  "foo"
+                           :body   "bar"
+                           :author {:kind :user
+                                    :id   543
+                                    :name "baz"}}
+                 :comment {:kind   :comment
+                           :id     987
+                           :body   "comment body"
+                           :author {:kind :user
+                                    :id   321
+                                    :name "bleh"}}}}
+   ])
+
+
+(m/match data
+  [(m/or {:event-type :pictures-liked 
+          :user 
+          {:kind !kind
+           :id !id
+           :name !name}
+          :data [(m/let [!eid (gensym)]
+                   {:kind !kind
+                    :id !id
+                    :src !name}) ...]}
+
+         _) ...]
+  (let [?user-id (gensym)]
+    (m/subst
+      [[?user-id :kind !kind]
+       [?user-id :id !id]
+       [?user-id :name !name]
+
+       []])))
