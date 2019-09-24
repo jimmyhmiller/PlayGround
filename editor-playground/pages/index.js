@@ -24,6 +24,7 @@ const makeComponent = ({ name, code}) => {
   const result = hooks ? post : pre;
   return `
   const ${name} = (props) => {
+    const [state, setState] = useState(undefined);
     ${hooks}
     return <>${result}</>
   }
@@ -36,17 +37,10 @@ const makeComponents = (components) =>
 // Hack to play with the concept
 const splitCodeSections = (code) => code.split("--")
 
-const wrapCode = (code, components) => {
-  const [pre, post] = splitCodeSections(code)
-  const hooks = post ? pre : "";
-  const result = hooks ? post : pre;
+const wrapCode = (components) => {
   return `
   ${makeComponents(components)}
-  const App = () => {
-    ${hooks}
-    return <>${result}</>
-  }
-  render(App);
+  render(Main);
   `
 }
 
@@ -64,14 +58,43 @@ const wrapCode = (code, components) => {
 // Worker task?
 // Keep hooks state?
 
+
+const ComponentEditor = ({ name, code, setComponents }) => (
+  <div
+    style={{
+      background: "rgb(50, 42, 56) none repeat scroll 0% 0%",
+      marginTop: 10,
+      borderRadius: 5
+    }}
+  >
+    <div style={{padding:10, borderBottom: "2px solid rgb(50, 42, 56)", filter: "brightness(80%)"}}>
+      {name}
+    </div>
+    <Editor
+      key={name}
+      padding={20}
+      language="jsx"
+      code={code}
+      onValueChange={value => {
+        setComponents(comps => ({
+          ...comps,
+          [name]: { code: value, name }
+        }));
+      }}
+    />
+  </div>
+);
+
+
+
 const Home = () => {
-  const [code, setCode] = useState("Hello World")
-  const [debouncedCode] = useDebounce(code, 200)
-  const [components, setComponents] = useState({});
+
+  const [components, setComponents] = useState({Main: {code: "Hello World", name: "Main"}});
+  const [debouncedComponents] = useDebounce(components, 200)
   const [Element, setElement] = useState(() => () => null);
 
   useEffect(() => {
-    const comps = extractComponents(debouncedCode);
+    const comps = extractComponents(Object.values(debouncedComponents).map(c => c.code).join("\n"));
     comps.forEach(c => {
       if (!components[c]) {
         setComponents((components) => ({
@@ -81,15 +104,16 @@ const Home = () => {
       }
     })
 
-  }, [debouncedCode])
+  }, [debouncedComponents])
 
   useEffect(() => {
     try {
-      renderElementAsync({ code: wrapCode(debouncedCode, components), scope: {React, useState} }, (elem) => setElement((_) => elem),  e => console.log(e));
+      renderElementAsync({ code: wrapCode(components), scope: {React, useState} }, 
+        (elem) => setElement((_) => elem),  e => console.log(e));
     } catch (e) {
       console.error(e)
     }
-  }, [debouncedCode, components])
+  }, [components])
 
   return (
     <div>
@@ -98,6 +122,7 @@ const Home = () => {
           body {
             background-color: #363638;
             color: #fff;
+            font-family: sans-serif;
           }
         `}
       </style>
@@ -108,29 +133,9 @@ const Home = () => {
       <div style={{display: "flex", flexDirection: "row"}}>
 
         <div style={{width: "45vw", height: "95vh"}}>
-          <Editor
-            padding={20}
-            language="jsx"
-            style={{ background: "rgb(50, 42, 56) none repeat scroll 0% 0%" }}
-            code={code}
-            onValueChange={setCode}
-          />
-          {Object.values(components).map(({ code, name }) =>
-            <div style={{marginTop: 20}}>
-              <Editor
-                key={name}
-                padding={20}
-                language="jsx"
-                style={{ background: "rgb(50, 42, 56) none repeat scroll 0% 0%" }}
-                code={code}
-                onValueChange={(value) => {
-                  setComponents(comps => ({
-                    ...comps,
-                    [name]: {code: value, name}
-                  }))
-                }}
-              />
-            </div>
+
+          {Object.values(components).map(({ code, name }) => 
+            <ComponentEditor name={name} code={code} setComponents={setComponents} />
           )}
           
         </div>
