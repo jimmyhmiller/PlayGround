@@ -15,15 +15,22 @@ import {
 // rgb(42, 47, 56)
 // rgb(56, 42, 42)
 
-const extractComponents = (code) =>
-  [...code.matchAll(/<([A-Z][a-zA-Z0-9]+).*\/?>/g)].map(x => x[1])
+const extractComponents = (code) => {
+  const compRegex = /<([A-Z][a-zA-Z0-9]+).*\/?>/g
+  const propsRegex = /([A-Za-z]+)=/g
+  return [...code.matchAll(compRegex)]
+    .map(x => ({
+      name: x[1],
+      props: [...x[0].matchAll(propsRegex)].map(x => x[1])
+    }))
+ }
 
-const makeComponent = ({ name, code}) => {
+const makeComponent = ({ name, code, props }) => {
   const [pre, post] = splitCodeSections(code)
   const hooks = post ? pre : "";
   const result = hooks ? post : pre;
   return `
-  const ${name} = (props) => {
+  const ${name} = (${props && props.length > 0  ? "{ " + props.join(", ") + " }" : "props"}) => {
     ${hooks}
     return <>${result}</>
   }
@@ -58,7 +65,7 @@ const wrapCode = (components) => {
 // Combine state and reducers into one box?
 
 
-const ComponentEditor = ({ name, code, setComponents }) => (
+const ComponentEditor = ({ name, code, setComponents, props }) => (
   <div
     style={{
       background: "rgb(50, 42, 56) none repeat scroll 0% 0%",
@@ -67,7 +74,7 @@ const ComponentEditor = ({ name, code, setComponents }) => (
     }}
   >
     <div style={{padding:10, borderBottom: "2px solid rgb(50, 42, 56)", filter: "brightness(80%)"}}>
-      {name}
+      {name}{props && props.length > 0 && `({ ${props && props.join(", ")} })`}
     </div>
     <Editor
       key={name}
@@ -134,7 +141,7 @@ const StateEditor = ({ name, code, components, setComponents, setAppState }) => 
   </div>
 );
 
-const defaultReducerCode = `(state, _) => ({
+const defaultReducerCode = (props) => `(state, ${props && props.length > 0  ? "{ " + props.join(", ") + " }" : "_"}) => ({
   ...state,
 
 })`
@@ -205,11 +212,17 @@ const constructState = (componentCode, stateComponentCode = "{}") => {
 };
 
 const extractActions = code => {
-  return [...code.matchAll(/Actions\.([a-zA-Z_0-9]+)/g)]
-    .map(x => ({
-      actionType: x[1],
-      code: defaultReducerCode,
-    }))
+  const propsRegex = /([a-z]+)(:|,| |})/g
+  return [...code.matchAll(/Actions\.([a-zA-Z_0-9]+)(\(.*\))?/g)]
+    .map(x => {
+      const props = [...x[0].matchAll(propsRegex)].map(x => x[1]);
+      console.log(x[0], props)
+      return {
+        actionType: x[1],
+        props: props,
+        code: defaultReducerCode(props),
+      }
+    })
 };
 
 
@@ -263,7 +276,7 @@ const Home = () => {
     const extractedActions = extractActions(code);
 
     const additionalActions = extractedActions
-      .filter(action => !actions[action.actionType])
+      .filter(action => !actions[action.actionType] || actions[action.actionType] && actions[action.actionType].props && actions[action.actionType].props.length < action.props.length)
       .reduce((obj, action) => ({
         ...obj,
         [action.actionType]: action,
@@ -272,11 +285,9 @@ const Home = () => {
     const inCodeActions = new Set(Object.values(extractedActions).map(a => a.actionType))
 
     setActions((actions) => ({
-      ...Object.fromEntries(Object.entries(actions).filter(([_, {code, actionType}]) => code !== defaultReducerCode || inCodeActions.has(actionType))),
+      ...Object.fromEntries(Object.entries(actions).filter(([_, {code, actionType, props}]) => code !== defaultReducerCode(props) || inCodeActions.has(actionType))),
       ...additionalActions,
     }))
-
-
 
     if (Object.keys(stateValue).length > 0 && (!components["State"] || JSON.stringify(stateValue, null, 1) !== components["State"]["code"])) {
       setAppState(stateValue)
@@ -291,11 +302,23 @@ const Home = () => {
     }
 
     const comps = extractComponents(code);
+
+    const inComps = new Set(Object.values(comps).map(c => c.name))
+
     comps.forEach(c => {
-      if (!components[c]) {
+      if (!components[c.name]) {
         setComponents((components) => ({
+          ...Object.fromEntries(Object.entries(components).filter(([_, {code, name}]) => code !== name || inComps.has(name))),
+          [c.name]: {code: c.name, name: c.name, type: "component", props: c.props},
+        }))
+      }
+      if (components[c.name] && components[c.name].props.length < c.props.length) {
+          setComponents((components) => ({
           ...components,
-          [c]: {code: c, name: c, type: "component"},
+          [c.name]: {
+            ...components[c.name],
+            props: c.props
+          },
         }))
       }
     })
@@ -328,10 +351,10 @@ const Home = () => {
 
       <div style={{display: "flex", flexDirection: "row"}}>
 
-        <div style={{width: "45vw", height: "95vh"}}>
+        <div style={{width: "45vw", height: "95vh", overflow: "scroll"}}>
 
-          {Object.values(components).filter(c => c.type === "component").map(({ code, name }) => 
-            <ComponentEditor name={name} code={code} setComponents={setComponents} />
+          {Object.values(components).filter(c => c.type === "component").map(({ code, name, props }) => 
+            <ComponentEditor name={name} code={code} setComponents={setComponents} props={props} />
           )}
 
           {Object.values(actions).map(({ actionType, code }) =>
