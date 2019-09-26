@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useReducer } from "react";
 import Head from "next/head";
 import { useDebounce } from 'use-debounce';
 
@@ -47,7 +47,6 @@ const wrapCode = (components) => {
 // Extract out components to make code below better
 // Allow deletion
 // Only create if finished
-// Work on state management (different color editor)
 // Use actually parser
 // Destructure props and show them
 // Prettier
@@ -56,6 +55,7 @@ const wrapCode = (components) => {
 // Keep hooks state?
 // Dispatch
 // Better place to store state
+// Combine state and reducers into one box?
 
 
 const ComponentEditor = ({ name, code, setComponents }) => (
@@ -134,6 +134,54 @@ const StateEditor = ({ name, code, components, setComponents, setAppState }) => 
   </div>
 );
 
+const defaultReducerCode = `(state, _) => ({
+  ...state,
+
+})`
+
+const ReducerEditor = ({ code, setReducers, actionType, setActions }) => (
+  <div
+    style={{
+      background: "rgb(42, 47, 56) none repeat scroll 0% 0%",
+      marginTop: 10,
+      borderRadius: 5
+    }}
+  >
+    <div style={{padding:10, borderBottom: "2px solid rgb(42, 47, 56)", filter: "brightness(80%)"}}>
+      {actionType}
+    </div>
+    <Editor
+      key={actionType}
+      padding={20}
+      language="jsx"
+      code={code}
+      onValueChange={
+        value => {
+          setActions(actions => ({
+            ...actions,
+            [actionType]: {actionType, code: value}
+          }))
+          try {
+            const reducer = eval(value);
+            const discriminatingReducer = (f) => (state, action) => {
+              if (action.type !== actionType) {
+                return f(state, action)
+              }
+              return reducer(state, action)
+            }
+            setReducers(reducers => ({
+              ...reducers,
+              [actionType]: discriminatingReducer
+            }))
+          } catch (e) {
+            console.error(e)
+          }
+        }
+      }
+    />
+  </div>
+);
+
 const extractState = code => {
   return Object.fromEntries(
     [...code.matchAll(/State\.([a-zA-Z_0-9]+)/g)].map(x => [x[1], null])
@@ -156,6 +204,15 @@ const constructState = (componentCode, stateComponentCode = "{}") => {
   }
 };
 
+const extractActions = code => {
+  return [...code.matchAll(/Actions\.([a-zA-Z_0-9]+)/g)]
+    .map(x => ({
+      actionType: x[1],
+      code: defaultReducerCode,
+    }))
+};
+
+
 const extractAllCode = (components) => {
   return Object.values(
         components
@@ -165,17 +222,61 @@ const extractAllCode = (components) => {
       .join("\n");
 }
 
+const defaultReducer = (state, action={}) => {
+  if (action.type === "SET_STATE") {
+    return action.payload;
+  }
+  return state;
+}
+
 const Home = () => {
-  const [appState, setAppState] = useState({});
+  const [reducers, setReducers] = useState({});
+  const [reducer, setReducer] = useState(() => defaultReducer);
+  const [appState, dispatch] = useReducer(reducer, {});
+  const [actions, setActions] = useState([]);
+  const [actionCreators, setActionCreators] = useState();
   const [components, setComponents] = useState({Main: {code: "Hello World", name: "Main",  type: "component"}});
   const [debouncedComponents] = useDebounce(components, 200)
   const [Element, setElement] = useState(() => () => null);
 
+  const setAppState = (stateValue) => dispatch({type: "SET_STATE", payload: stateValue})
+
   useEffect(() => {
-    const code = extractAllCode(debouncedComponents)
+    setReducer(() => Object.values(reducers).reduce((f, g) => g(f), defaultReducer))
+  }, [reducers])
+
+  useEffect(() => {
+    setActionCreators(
+      Object.values(actions).reduce((actionObj, {actionType}) => ({
+        ...actionObj,
+        [actionType]: (args) => dispatch({type: actionType, ...args})
+      }), {})
+    )
+  }, [actions])
+
+  useEffect(() => {
+    const code = extractAllCode(components)
 
     const stateValue = constructState(code, components["State"] && components["State"]["code"]);
     const formattedCode = JSON.stringify(stateValue, null, 1);
+
+    const extractedActions = extractActions(code);
+
+    const additionalActions = extractedActions
+      .filter(action => !actions[action.actionType])
+      .reduce((obj, action) => ({
+        ...obj,
+        [action.actionType]: action,
+      }), {})
+
+    const inCodeActions = new Set(Object.values(extractedActions).map(a => a.actionType))
+
+    setActions((actions) => ({
+      ...Object.fromEntries(Object.entries(actions).filter(([_, {code, actionType}]) => code !== defaultReducerCode || inCodeActions.has(actionType))),
+      ...additionalActions,
+    }))
+
+
 
     if (Object.keys(stateValue).length > 0 && (!components["State"] || JSON.stringify(stateValue, null, 1) !== components["State"]["code"])) {
       setAppState(stateValue)
@@ -203,12 +304,12 @@ const Home = () => {
 
   useEffect(() => {
     try {
-      renderElementAsync({ code: wrapCode(components), scope: {React, useState, State: appState} }, 
+      renderElementAsync({ code: wrapCode(components), scope: {React, useState, State: appState, Actions: actionCreators} }, 
         (elem) => setElement((_) => elem), e => console.error(e));
     } catch (e) {
       console.error(e)
     }
-  }, [debouncedComponents])
+  }, [debouncedComponents, appState])
 
   return (
     <div>
@@ -231,6 +332,14 @@ const Home = () => {
 
           {Object.values(components).filter(c => c.type === "component").map(({ code, name }) => 
             <ComponentEditor name={name} code={code} setComponents={setComponents} />
+          )}
+
+          {Object.values(actions).map(({ actionType, code }) =>
+            <ReducerEditor 
+              actionType={actionType} 
+              code={code} 
+              setReducers={setReducers}
+              setActions={setActions} />
           )}
 
           {components["State"] &&
