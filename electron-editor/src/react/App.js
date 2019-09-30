@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Editor } from "react-live";
-import prettier from "prettier/standalone";
-import parserBabel from "prettier/parser-babylon";
-import './App.css';
+import { connect } from "react-redux";
+import { updateCode, prettifyCode } from './actions';
 import { channels } from '../shared/constants';
 const { ipcRenderer } = window; 
 
@@ -28,48 +27,56 @@ const colors = ["#2a2f38", "#322a38", "#022b3a", "#2a382d", "#382a2a" ]
 // Zeit Integration
 
 
-const ComponentEditor = ({ color }) => {
+
+
+const componentColor = "#2a2f38";
+
+
+const formatProps = (props) => props && props.length > 0 && `({ ${props && props.join(", ")} })`
+
+const ComponentEditor = ({ name, code, updateCode, prettifyCode, props }) => {
 
   return (
     <div
       style={{
         width:"45em",
-        background: `${color} none repeat scroll 0% 0%`,
+        background: `${componentColor} none repeat scroll 0% 0%`,
         marginTop: 10,
-        borderRadius: 5
+        borderRadius: 5,
+        margin: 20,
       }}
     >
-      <div style={{padding:10, borderBottom: `2px solid ${color}`, filter: "brightness(80%)", minHeight: 15}}>
+      <div style={{padding:10, borderBottom: `2px solid ${componentColor}`, filter: "brightness(80%)", minHeight: 15}}>
+        {name}{formatProps(props)}
       </div>
 
       <Editor
         padding={20}
         language="jsx"
-        code={prettier.format(ComponentEditor.toString(), {parser: "babel", plugins: [parserBabel]})}
+        code={code}
+        // onBlur={() => prettifyCode({ name })}
+        onValueChange={(code) => updateCode({ code, name })}
       />
     </div>
   )
 }
 
-const App = () => {
+const ConnectedComponentEditor = connect(
+  (state, { name }) => state.editors[name],
+  { updateCode, prettifyCode },
+)(ComponentEditor)
 
-  // const [{appName, appVersion}, setAppVersion] = useState({ appName: '', appVersion: '' });
 
-  useEffect(() => {
-    ipcRenderer.send(channels.APP_INFO);
 
-    ipcRenderer.on(channels.APP_INFO, (event, { appName, appVersion }) => {
-      // setAppVersion({ appName, appVersion });
-    })
-    return () => ipcRenderer.removeAllListeners(channels.APP_INFO);
-  }, [])
-
+const App = ({ editors }) => {
   return (
-    <div className="App" style={{padding:20}}>
-      {colors.map(color => <ComponentEditor color={color} />)}
-    </div>
+    <>
+      {Object.keys(editors).map(name => (
+        <ConnectedComponentEditor key={name} name={name} />
+      ))}
+    </>
   );
-}
+};
 
 
-export default App;
+export default connect(({ editors }) => ({ editors }))(App);

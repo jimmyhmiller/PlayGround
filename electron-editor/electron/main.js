@@ -1,16 +1,30 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
+const os = require('os')
 const url = require('url');
 const { channels } = require('../src/shared/constants');
 
 let mainWindow;
 
+
+const extensionUrl = '/Users/jimmy/Library/Application Support/Google/Chrome/Default/Extensions';
+const reactExtension = 'fmkadmapgofadopljbjfkapdkoienihi/4.1.2_0';
+const reduxExtension = 'lmhkpmbekcpmknklioeibfkpmmfibljd/2.17.0_0';
+
 function createWindow () {
+
+
+  BrowserWindow.addDevToolsExtension(`${extensionUrl}/${reactExtension}`);
+  BrowserWindow.addDevToolsExtension(`${extensionUrl}/${reduxExtension}`);
+ 
+
   const startUrl = process.env.ELECTRON_START_URL || url.format({
     pathname: path.join(__dirname, '../index.html'),
     protocol: 'file:',
     slashes: true,
   });
+
+
   mainWindow = new BrowserWindow({
     width: 800,
     height: 600,
@@ -18,7 +32,10 @@ function createWindow () {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
+
+
   mainWindow.loadURL(startUrl);
+
   mainWindow.on('closed', function () {
     mainWindow = null;
   });
