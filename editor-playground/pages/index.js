@@ -63,6 +63,14 @@ const wrapCode = (components) => {
 // Dispatch
 // Better place to store state
 // Combine state and reducers into one box?
+// Think about apis
+// Show live data
+
+
+
+
+
+
 
 
 const ComponentEditor = ({ name, code, setComponents, props }) => (
