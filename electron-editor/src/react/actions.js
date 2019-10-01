@@ -30,3 +30,12 @@ export const deleteComponent = ({ name }) => ({
   type: DELETE_COMPONENT,
   name,
 })
+
+export const UPDATE_COMPONENT_METADATA = 'UPDATE_COMPONENT_METADATA';
+
+export const updateComponentMetadata = ({ name, props }) => ({
+  type: UPDATE_COMPONENT_METADATA,
+  name,
+  props,
+})
+

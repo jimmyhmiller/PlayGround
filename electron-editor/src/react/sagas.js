@@ -1,17 +1,41 @@
 import { call, put, takeEvery, takeLatest, select, debounce } from 'redux-saga/effects'
+import { groupBy, property, mapValues as mapValuesPrime, compose, values, flatMap } from 'lodash/fp';
 
-import { UPDATE_CODE, createComponent, deleteComponent } from './actions';
+import { UPDATE_CODE, createComponent, deleteComponent, updateComponentMetadata } from './actions';
+
+const mapValues = mapValuesPrime.convert({ 'cap': false });
 
 
 const extractComponents = (code) => {
   const compRegex = /<([A-Z][a-zA-Z0-9]+).*\/?>?/g
   const propsRegex = /([A-Za-z]+)=/g
-  return [...code.matchAll(compRegex)]
-    .map(x => ({
-      name: x[1],
-      props: [...x[0].matchAll(propsRegex)].map(x => x[1])
-    }))
- }
+
+  // This is a complete mess,  but is shows me the sorts of issues
+  // I will have to deal with to make these derived properties generic.
+  // I also need to no delete things if the props are referenced in the code.
+  // and I need to be able to get rid of unused props.
+
+  // I guess I need to consider different kinds of derivation. 
+  // How to derive properties? How do they combine? 
+  // What do we do when outside code mentions something?
+  // What about when code in an editor mentions something that doesn't exist?
+  // How do we show used vs unused?
+
+
+  // Also, I am really tempted to pull in fluent compose. It would be make this beautiful.
+  return compose(
+    values,
+    mapValues((values, name) => ({
+      name,
+      props: [...new Set(flatMap(property("props"), values))]
+    })),
+    groupBy(property("name"))
+  )([...code.matchAll(compRegex)]
+      .map(x => ({
+        name: x[1],
+        props: [...x[0].matchAll(propsRegex)].map(x => x[1])
+      })))
+   }
 
 
 const extractAllCode = (components) => {
@@ -27,10 +51,13 @@ const setDifference = (set1, set2) => {
 
 const deriveComponents = function* ({ code, name }) {
 
+  // Needs refactoring to be generic.
+  // What are the key features I care about?
+
   const allComponents = yield select(state => Object.values(state.editors).filter(c => c.type = "component"))
   const allCode = extractAllCode(allComponents);
 
-  const unchangedComponents = allComponents.filter(c => c.name === c.code);
+  const unchangedComponents = allComponents.filter(c => (c.name === c.code || c.code === "") && c.name !== "Main" );
 
   const componentsInCode = extractComponents(allCode);
 
@@ -47,6 +74,8 @@ const deriveComponents = function* ({ code, name }) {
     const exists = yield select(state => !!state.editors[name])
     if (!exists) {
       yield put(createComponent({ code: name, name, props }))
+    } else {
+      yield put(updateComponentMetadata({ name, props }))
     }
   }
 
