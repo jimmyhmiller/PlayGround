@@ -6,7 +6,8 @@ import {
   UPDATE_CODE,
   PRETTIFY_CODE,
   CREATE_COMPONENT,
-  DELETE_COMPONENT
+  DELETE_COMPONENT,
+  UPDATE_COMPONENT_METADATA,
 } from "./actions";
 
 
@@ -39,6 +40,10 @@ const createComponent = (state, { code, name, props }) =>
 const deleteComponent = (state, { code, name }) =>
   unset(state, name)
 
+const updateComponentMetadata = (state, { name, props }) =>
+  setIn(state, [name, "props"], props)
+
+
 
 const initialEditorState = {
   Main: {
@@ -63,6 +68,9 @@ export const editorReducer = (state=initialEditorState, action) => {
     }
     case DELETE_COMPONENT: {
       return deleteComponent(state, action)
+    }
+    case UPDATE_COMPONENT_METADATA: {
+      return updateComponentMetadata(state,action)
     }
   }
   return state;
