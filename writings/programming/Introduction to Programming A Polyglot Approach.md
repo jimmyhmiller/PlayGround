@@ -8,33 +8,33 @@ This endeavor cannot help but create its own bias. The choice of languages in th
 
 This book flows out of the belief that [programming is theory building](). Programming is not a working program, it is not a set of instructions, it is not the source code, the documentation nor all of these things combined. Programming is the activity of building a theory about how the program connects to and corresponds with the world. In this view, programming languages are the tools which allow us to build theories.
 
-This view drives the book's approach to each language. The emphasis will not be on any particular program and its details, but the way in which each language enables and inhibits our thoughts. For some, this may make the book seem "impractical", but it is our contention that "theory is practical" and "practice is theoretical". To that end, we seek to strike a balance between rigor and allowing the reader to gain an intuition about the topic at hand.
+This view drives the book's approach to each language. The emphasis will not be on any particular program and its details, but the way in which each language enables and inhibits our thoughts. For some, this may make the book seem "impractical", but it is our contention that "theory is practical" and "practice is theoretical". To that end, I seek to strike a balance between rigor and allowing the reader to gain an intuition about the topic at hand.
 
 ## Intended Audience
 
 The primary aim of this book is to do what the title says, to introduce people to programming. This means this book is aimed at people with no knowledge of programming. That said, the book hopes to follow in the footsteps of *The Structure and Interpretation of Computer Programming* (SICP) AKA "the wizard book"[^1]. For anyone not familiar with this book, this means that the focus is on the subject of programming rather than helping a beginner get setup with a programming environment. Books which aim to teach how to setup a development environment, which libraries to use, etc, have their place, but limit themselves in terms of their time of relevance. This book hopes to cover subjects that will be fruitful to beginners for many years to come.
 
-[^1]: We have no false pretensions that this book is be anywhere near as good as SICP.
+[^1]: I have no false pretensions that this book is be anywhere near as good as SICP.
 
-SICP is not just a book that doesn't cover these sorts of practical manners for its readers, but it also a book of great depth. Many readers have remarked on the books depth and difficulty and we believe the same may be said for the following. This book is not an intended as an easy introduction. Programming certainly can be easy but it requires taking on a certain mindset and practicing particular intellectual virtues. Good programs are created by labor rather than luck. Many today see programming as an easy profession to make lots of money, we see it as a learned skill and a way of thinking.
+SICP is not just a book that doesn't cover these sorts of practical manners for its readers, but it also a book of great depth. Many readers have remarked on the books depth and difficulty and I believe the same may be said for the following. This book is not an intended as an easy introduction. Programming certainly can be easy but it requires taking on a certain mindset and practicing particular intellectual virtues. Good programs are created by labor rather than luck. Many today see programming as an easy profession to make lots of money, I see it as a learned skill and a way of thinking.
 
 ### Experienced Developers
 
-While the book is aimed at those who have not done any programming before, we hope this book may well be found useful by experienced developers. Because of the large number of languages and concepts the book covers, many developers may be inexperienced with a particular technology and will hopefully find the discussion in those sections enlightening. We would however encourage even experienced developers to consider reading the book from the beginning. The sections in this book are meant to build and much may be missed by reading them out of context. 
+While the book is aimed at those who have not done any programming before, I hope this book may well be found useful by experienced developers. Because of the large number of languages and concepts the book covers, many developers may be inexperienced with a particular technology and will hopefully find the discussion in those sections enlightening. I would however encourage even experienced developers to consider reading the book from the beginning. The sections in this book are meant to build and much may be missed by reading them out of context. 
 
 ### Self Taught Developers
 
-Self taught developers will hopefully find this book particularly useful. In crafting this book, we have shied away, not from the academic world as a whole, but from the academic means of explanation. This means, we will not assume prior knowledge of academic subjects, we omit deep theortical concerns (proofs), and do not dwell on mathematical minutia. That being said, we find the academic world to be ripe with interesting ideas, something to be mined and refined rather than ignored.
+Self taught developers will hopefully find this book particularly useful. In crafting this book, I have shied away, not from the academic world as a whole, but from the academic means of explanation. This means, I will not assume prior knowledge of academic subjects, I omit deep theortical concerns (proofs), and do not dwell on mathematical minutia. That being said, I find the academic world to be ripe with interesting ideas, something to be mined and refined rather than ignored.
 
 ## Reading Advice
 
-Often books recommend following some strict plan of study. This often means a recommendation to take notes, reread sections, and to fully complete all exercises. We view that sort of reading as not quite in the spirit of the book. This book aims not to be a textbook, but a spring board for ideas. Don't feel the need to do percisely what the book says, experiment and play. Copying a program line for line is not the goal, but rather taking the program, changing it to see its outcome. Or even better, looking at a program and trying to rewrite it in a completely different style or fashion.
+Often books recommend following some strict plan of study. This often means a recommendation to take notes, reread sections, and to fully complete all exercises. I view that sort of reading as not quite in the spirit of the book. This book aims not to be a textbook, but a spring board for ideas. Don't feel the need to do percisely what the book says, experiment and play. Copying a program line for line is not the goal, but rather taking the program, changing it to see its outcome. Or even better, looking at a program and trying to rewrite it in a completely different style or fashion.
 
-We hope to model this style throughout the book. In fact, the majority of programs in this book you will see multiple times in various languages. This means if you do not fully understand a certain program, you need not fret, hopefully another language will make it more clear.
+I hope to model this style throughout the book. In fact, the majority of programs in this book you will see multiple times in various languages. This means if you do not fully understand a certain program, you need not fret, hopefully another language will make it more clear.
 
 ### Pace
 
-This book is deliberately fast-paced. Often reading a programming text feels like reading math. The style of exposition requires the reader to sit and concentrate on each of the details at hand. While these experiences can be educational and sometimes even cathartic, we hope not to duplicate this feeling in this book. Instead, we model this book after works in the tradition of Analytic Philosophy. Analytic Philosophy is marked by its clearity, exactness, depth, and dry humor. Most importantly though, while Analytic Philosophy might not be a best selling novel, it is imminently readable and often a joy to work through.
+This book is deliberately fast-paced. Often reading a programming text feels like reading math. The style of exposition requires the reader to sit and concentrate on each of the details at hand. While these experiences can be educational and sometimes even cathartic, I hope not to duplicate this feeling in this book. Instead, I modeled this book after works in the tradition of Analytic Philosophy. Analytic Philosophy is marked by its clearity, exactness, depth, and dry humor. Most importantly though, while Analytic Philosophy might not be a best selling novel, it is imminently readable and often a joy to work through.
 
 To put it more exactly, this book is meant to be read without sitting at a computer or a pen and paper. Read the book quickly, pause and think at moments that matter, but for the most part just keep reading. This book is paced so that it may be armchair reading; something to get your mind going.
 
@@ -50,9 +50,9 @@ Along the way we will encounter various paradigms of programming as well as many
 
 Finally one strange feature this book posesses is a complete lack of low level languages (C, assymbly, etc). This may seem to be a fatal flaw of the book. There is much to be said for understanding how computers work in their lowest levels. There are large groups that lament the lack of understand that new developers have of the internal workings of computers and this book is just contributing to that problem.
 
-If anyone levys these criticisms against this book, we accept them. We see nothing wrong with learning C, but it doesn't quite fit with our goal. Programming is theory building; theories are defined not by the mechanical movements of their parts, but by abstractions which unify various ideas. For example, Darwin's *Theory of Natural Selection*, if stated in terms of purely mechanical parts, is just physics. Instead, Darwin operates at a higher level, talking about populations, adaptations, species (or lack thereof), and many other terms that operate above the level of mechanical functioning. 
+If anyone levys these criticisms against this book, I accept them. I see nothing wrong with learning C, but it doesn't quite fit with our goal. Programming is theory building; theories are defined not by the mechanical movements of their parts, but by abstractions which unify various ideas. For example, Darwin's *Theory of Natural Selection*, if stated in terms of purely mechanical parts, is just physics. Instead, Darwin operates at a higher level, talking about populations, adaptations, species (or lack thereof), and many other terms that operate above the level of mechanical functioning. 
 
-While all programs are reducable to the functionings of our computers, thinking of them in these terms is limiting. We believe that the end of programming, the goal at which it aims, is to continue to operate at a higher and higher level. The languages we have chosen are those which allow us to build these levels. Languages that offer the programmer a way to abstract and express concepts succinctly.
+While all programs are reducable to the functionings of our computers, thinking of them in these terms is limiting. I believe that the end of programming, the goal at which it aims, is to continue to operate at a higher and higher level. The languages I have chosen are those which allow us to build these levels. Languages that offer the programmer a way to abstract and express concepts succinctly.
 
 To the extent that we delve into "low level" details, they will be of a mathematical and relational nature rather than mechanical ones. Programming is no more about machines than astronomy is about telescopes. Computers are the tools on which our programs run. Our programs continue to live beyond the life of any given machine and thus should be thought about separate from them.
 
@@ -128,14 +128,58 @@ nil
 
 ; lists
 (1 2 3)
-(cons 2 nil)
-("string" 2 cons 2.3)
+("string" 2 hello 2.3)
+(#t #f #t #f)
 ```
 
 These are the nouns Scheme provides for us to write our programs. As well continue learning more and more languages, we will see similar features. In fact, in most languages, these elements are only different in very minor ways. This is one of those features that makes programming languages so different from natural language. A book like this one but written for natural language, would simply be impossible. There is no way to learn so many natural languages at once, because they all differ in so many ways. But, once we have learned one programming language, the next becomes much easier.
 
 In sticking with our arm-chair reading philosophy, we won't dive into these nouns in detail at the moment, instead we will take them as they appear in our programs. I would like to call out just a couple things to ensure this list is readable. Any line that starts with a `;` is a comment. It is often useful in our programs to leave comments about our intent or to mark things off. Once comments are cleared up, the other strange thing in our list of nouns are the "booleans". If you already know what booleans are, then the `#t` and `#f` are easy to figure out, but this is an introduction. Unfortunately, this is one ugly area of Scheme, `#t` stands for true, while `#f` stands for false. Every language has its ugly parts and we are certainly not done with finding them in Scheme.
 
-### The Building Blocks
+### Building the Building Blocks
 
-Now that we've explored our nouns, lets look at how to use these nouns to accomplish tasks. You see, nouns by themselves can't do much, at least in Scheme. We need to connect up our nouns, pass them to things that will take our nouns and return us new nouns. 
+Now that we've explored our nouns, let's look at how to use these nouns to accomplish tasks. You see, nouns by themselves can't do much, at least in Scheme. We need to connect up our nouns, pass them to things that will take our nouns and return us new nouns. These are our verbs. This is our first ideological split we see between programming languages. Does this language favor verbs or nouns? Scheme lands on the verb side of this great debate, so if we are to understand it, we must dive in.
+
+## Lambdas a Strange Verb with a Stranger Name
+
+Here we encounter our first programming "uber" concept. By "uber" concept I mean a concept that prevades and defines a whole world of programming. A concept from which all else can be built. A concept that has been taken as fundamental. This is the concept of a Lambda, or in perhaps more familiar language a function.
+
+What is a function? Well, they are exactly like the functions you may have learned about in algebra `f(x) = x*2`, but saying that might not be helpful. While in someways I understood functions in school, they never really seemed important, nor did they feel like "things", just notation for talking about math. But with scheme, functions are the fundamental components of the language, so let's look at some examples.
+
+```scheme
+(lambda (x) (* x 2))
+(lambda (name) (string-append "Hello " name))
+(lambda (is-allowed)
+  (if (= is-allowed #t)
+      "Come on in" 
+      "Sorry you aren't allowed"))
+```
+
+Here we have defined three lambdas. The first means precisely the same as our mathematical example above (`f(x) = x*2`). The next two feel quite a bit different from our mathematical formula, and yet as far as we are concerned in programming, these are functions just like any others. You can see here that I keep using lambda and function synonymously, this is fairly common, but also potentially confusing. We can be more percise. All lambdas are functions, but not all functions are lamdbas. So what are lambdas? They are functions without names! Look above, what is the name of these lambdas? We have no idea. Let's fix that.
+
+```scheme
+(define multiply-by-two (lambda (x) (* x 2)))
+(define greet (lambda (name) (string-append "Hello " name)))
+(define respond-to-enter-request (is-allowed)
+    (if (= is-allowed #t)
+        "Come on in" 
+      	"Sorry you aren't allowed"))
+```
+
+Here we have given our lambdas names by assigning them to variables. In that way we promoted them from anonymous functions, to named functions. In fact, if you look at the last example, you will see we have totally gotten rid of the word lambda! Defining functions is so common in scheme, that there is a shorthand way. At this point this all might be a bit confusing. That isn't surprising at all! Sometimes we can overload terms in programming. What is a function in one context might not be in another. But for now, when we say functions, we mean all functions, named or not. 
+
+Okay, now we've seen functions being defined, but what are they and how do we use them? Functions are things that take input and produce output. We use a function by "calling them". This means wrapping them up in parenthesis, let's see some examples.
+
+```scheme
+(* 2 2) ;; => 4
+(multiply-by-two 2) ;; => 4
+(greet "Jimmy") ;; => "Hello Jimmy"
+(respond-to-enter-request #f) ;; => "Sorry you aren't allowed"
+```
+
+As you can see, we have already talked about functions indirectly. Functions are our verbs that are in the prefix position. In `(+ 2 2)` our function is `+`. In scheme there are a bunch of builtin functions that we can used to build up our own functions. Building these functions is all there is to programming.
+
+### Actually Programming Something
+
+
+
