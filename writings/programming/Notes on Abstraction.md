@@ -35,4 +35,5 @@ There are certain ways we talk about abstraction that are necessarily subjective
 ### Random Thoughts
 
 * Are abstraction and reification related?
+* Conceptual Engineering and abstraction?
 

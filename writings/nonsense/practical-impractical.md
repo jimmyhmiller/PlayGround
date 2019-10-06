@@ -8,4 +8,4 @@ While the picture I paint is bleak, I don't think it is uncommon or unrealistic.
 
 But the fact that informed developers can create technical debt is not strong enough a claim. My claim is further, obsession with practical matters leads inevitably to technical debt. Or to put it another way, lack of focus on the theoritical leads to technical debt. To be clear, by theoritical I do not mean theoritical computer science. Most technical debt has nothing to do with theoritical computer science issues. Sure understanding of these topics can make us better developers, but they do not in themselves prevent technical debt.
 
-What I mean by theoritical are meta questions about software development itself. What is programming? Why should we program? Does programming have a purpose? How do we evaluate if a program is good or bad? 
+What I mean by theoretical are meta questions about software development itself. What is programming? Why should we program? Does programming have a purpose? How do we evaluate if a program is good or bad? 
