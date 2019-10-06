@@ -7,8 +7,8 @@ const { channels } = require('../src/shared/constants');
 let mainWindow;
 
 
-const extensionUrl = '/Users/jimmy/Library/Application Support/Google/Chrome/Default/Extensions';
-const reactExtension = 'fmkadmapgofadopljbjfkapdkoienihi/4.1.2_0';
+const extensionUrl = '/Users/jimmyhmiller/Library/Application Support/Google/Chrome/Default/Extensions';
+const reactExtension = 'fmkadmapgofadopljbjfkapdkoienihi/4.2.0_0';
 const reduxExtension = 'lmhkpmbekcpmknklioeibfkpmmfibljd/2.17.0_0';
 
 function createWindow () {

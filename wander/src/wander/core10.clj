@@ -5,6 +5,127 @@
             [meander.epsilon :as m]
             [meander.match.epsilon :as match]
             [clojure.string :as string]))
+(do
+  (println "\n\n\n")
+
+  (analyze
+   (m/match [1 2 23 2]
+     [(m/pred number? !xs) ...]
+     !xs)
+
+   ))
+
+
+
+
+(defn do-it4 []
+  (clojure.core/let
+      [target__35682 (into [] (range 10)) ]
+    (clojure.core/let
+        [!xs (transient [])]
+      (clojure.core/let
+          [ret__32941__auto__
+           (meander.match.runtime.epsilon/run-star-1
+             target__35682
+             [!xs]
+             (clojure.core/fn
+               [[!xs] input__35685]
+               (clojure.core/let
+                   [input__35685_nth_0__ (input__35685 0)]
+                 (if
+                     (number? input__35685_nth_0__)
+                   (clojure.core/let
+                       [!xs (clojure.core/conj! !xs input__35685_nth_0__)]
+                     [!xs])
+                   meander.match.runtime.epsilon/FAIL)))
+             (clojure.core/fn [[!xs]] (persistent! !xs)))]
+        (if
+            (meander.match.runtime.epsilon/fail? ret__32941__auto__)
+          ((clojure.core/fn
+             []
+             (throw
+              (clojure.core/ex-info "non exhaustive pattern match"))))
+          ret__32941__auto__)))))
+
+(m/match [1 2 23 2]
+  [(m/pred number? !xs) ...]
+  !xs)
+
+(analyze
+   (m/match [1 2 23 2]
+     [(m/some !xs) ...]
+     !xs)
+)
+
+(analyze
+
+(m/find (quote [1 2 3 4 5 6]) [!xs ..?n !ys ..?n] [!xs !ys])
+(m/find (quote (1 2 3 4 5 6)) (!xs ..?n !ys ..?n) [!xs !ys])
+
+)
+
+
+(analyze
+ (m/match (into [] (range 1000))
+   (m/gather (m/some !xs) ...)
+   !xs))
+
+(analyze
+ (m/match [1 2 2 nil 2]
+   (m/seqable (m/or nil !xs) ...)
+   !xs))
+
+
+(analyze
+ (m/match (into [] (range 10))
+   [(m/or nil !xs) ...]
+   !xs))
+
+(defn do-it []
+  (m/match coll
+    [(m/pred number? !xs) ...]
+    !xs))
+
+(defn do-it2 []
+  (filterv number? (into [] (range 10))))
+
+(defn do-it3 []
+  (m/match (into [] (range 10))
+    (m/gather (m/some !xs) ...)
+    !xs))
+
+(time 
+ (dotimes [x 100000000]
+   (let [[!xs] [[1 2 3]]]
+     !xs)))
+(time 
+ (dotimes [x 100000000]
+   (let [!xs (nth [[1 2 3]] 0)]
+     !xs)))
+
+(def xs (vector [1 2 3]))
+
+
+(m/match [1 2 2 2]
+  (m/gather (m/some !xs) ...)
+  !xs)
+
+(time
+ (dotimes [x 10000]
+   (do-it)))
+
+
+(time
+ (dotimes [x 10000]
+   (do-it2)))
+
+(time
+ (dotimes [x 10000]
+   (do-it3)))
+
+(time
+ (dotimes [x 10000]
+   (do-it4)))
 
 
 (analyze
@@ -148,7 +269,6 @@ map?
                 {:tag :lvr, :symbol ?thing}}}], 
   :rhs {:value {:name ?name}, :op :return}, :env #{}, :refs {}, :ref-specs {}}]
 
-
 (defn analyze-compile
   {:style/indent :defn}
   ([patterns]
@@ -171,18 +291,28 @@ map?
 
          target (gensym "target__")
          ir (match/compile [target] matrix)
-        
-       ]
+         ir* (ir/rewrite 
+              (ir/op-bind target (ir/op-eval expr) ir))
+         code (ir/compile ir* `(~fail) kind)]
      {:clauses clauses
       :matrix matrix
       :ir ir
-      
-      })))
+      :ir* ir*
+      :code code})))
 
 (defmacro analyze [expr]
   (m/match expr
     (~'m/match ?expr & ?body)
-    `(analyze-compile :match (quote ~?body) (quote ~?expr))))
+    `(analyze-compile :match (quote ~?body) (quote ~?expr))
+    (~'m/search ?expr & ?body)
+    `(analyze-compile :search (quote ~?body) (quote ~?expr))))
+
+
+
+
+
+
+
 
 (analyze
  (m/match false
@@ -491,3 +621,248 @@ nil         ;;; Works as expected
        [?user-id :name !name]
 
        []])))
+
+
+
+
+
+
+
+(def person
+  {:name "jimmy"
+   :preferred-address
+   {:address1 "123 street ave"
+    :address2 "apt 2"
+    :city "Townville"
+    :state "IN"
+    :zip "46203"}
+   :other-addresses 
+   [{:address1 "432 street ave"
+     :address2 "apt 7"
+     :city "Cityvillage"
+     :state "New York"
+     :zip "12345"}
+    {:address1 "534 street ave"
+     :address2 "apt 5"
+     :city "Township"
+     :state "IN"
+     :zip "46203"}]})
+
+
+
+(defn distinct-zips-and-cities [person]
+  (m/match person
+    {:preferred-address {:zip (m/or nil !zips)
+                         :city (m/or nil !cities)}
+     :other-addresses [{:zip (m/or nil !zips)
+                        :city (m/or nil !cities)} ...]}
+    {:zips (doall (distinct !zips))
+     :cities (doall (distinct !cities))}))
+
+
+(analyze
+ (m/match person
+   {:preferred-address {:zip !zips
+                        :city !cities}
+    :other-addresses [{:zip !zips
+                       :city !cities} ...]}
+   {:zips (doall (distinct !zips))
+    :cities (doall (distinct !cities))}))
+
+
+(defn distinct-zips-and-cities' [person]
+  (let [addresses (cons (:preferred-address person) 
+                        (:other-addresses person))]
+    {:zips (doall (filter some? (distinct (map :zip addresses))))
+     :cities (doall (filter some? (distinct (map :city addresses))))}))
+
+
+(time
+ (dotimes [x 10000]
+   (distinct-zips-and-cities person)))
+
+
+(time
+ (dotimes [x 10000]
+   (distinct-zips-and-cities' person)))
+
+
+(def data
+  {:people 
+   [{:name "jimmy" :id 1}
+    {:name "joel" :id 2}
+    {:name "tim" :id 3}]
+   :addresses
+   {1 [{:address1 "123 street ave"
+        :address2 "apt 2"
+        :city "Townville"
+        :state "IN"
+        :zip "46203"
+        :preferred true}
+       {:address1 "534 street ave",
+        :address2 "apt 5",
+        :city "Township",
+        :state "IN",
+        :zip "46203"
+        :preferred false}]
+    2 [{:address1 "2026 park ave"
+        :address2 "apt 200"
+        :city "Town"
+        :state "CA"
+        :zip "86753"
+        :preferred true}]
+    3 [{:address1 "1448 street st"
+        :address2 "apt 1"
+        :city "City"
+        :state "WA"
+        :zip "92456"
+        :preferred true}]}
+   :visits {1 [{:date "12-31-1900"
+                :geo-location {:zip "46203"}}]
+            2 [{:date "1-1-1970"
+                :geo-location {:zip "12345"}}
+               {:date "1-1-1970"
+                :geo-location {:zip "86753"}}]
+            3 [{:date "4-4-4444"
+                :geo-location {:zip "54221"}}
+               {:date "4-4-4444"
+                :geo-location {:zip "92456"}}]}})
+
+
+
+(analyze
+ (m/search data
+   {:people (m/scan {:id ?id :name ?name})
+    :addresses {?id (m/scan {:preferred true :zip ?zip})}
+    :visits {?id (m/scan {:geo-location {:zip (m/and (m/not ?zip) ?bad-zip)}
+                          :date ?date})}}
+   {:name ?name
+    :id ?id
+    :zip ?bad-zip
+    :date ?date}))
+
+(defn find-potential-bad-visits [data]
+  (m/search data
+    {:people (m/scan {:id ?id :name ?name})
+     :addresses {?id (m/scan {:preferred true :zip ?zip})}
+     :visits {?id (m/scan {:geo-location {:zip (m/and (m/not ?zip) ?bad-zip)}
+                           :date ?date})}}
+    {:name ?name
+     :id ?id
+     :zip ?bad-zip
+     :date ?date}))
+
+
+
+
+
+(defn find-potential-bad-visits'' [data]
+  (clojure.core/let
+ [target__34959 data val__34960 (target__34959 :people)]
+ (clojure.core/let
+     [result__34961  val__34960]
+  (clojure.core/mapcat
+   (clojure.core/fn
+    [result__34961_parts__]
+    (clojure.core/let
+     [val__34964
+      (result__34961_parts__ :id)
+      ?id
+      val__34964
+      val__34965
+      (result__34961_parts__ :name)
+      ?name
+      val__34965
+      val__34966
+      (target__34959 :addresses)
+      val__34967
+      (val__34966 ?id)]
+     (clojure.core/let
+         [result__34968  val__34967]
+      (clojure.core/mapcat
+       (clojure.core/fn
+        [result__34968_parts__]
+        (clojure.core/let
+         [val__34971 (result__34968_parts__ :preferred)]
+         (clojure.core/case
+          val__34971
+          (true)
+          (clojure.core/let
+           [val__34972
+            (result__34968_parts__ :zip)
+            ?zip
+            val__34972
+            val__34973
+            (target__34959 :visits)
+            val__34974
+            (val__34973 ?id)]
+           (clojure.core/let
+               [result__34975  val__34974]
+            (clojure.core/mapcat
+             (clojure.core/fn
+              [result__34975_parts__]
+              (clojure.core/let
+               [val__34978
+                (result__34975_parts__ :geo-location)
+                val__34979
+                (val__34978 :zip)]
+               (clojure.core/letfn
+                [(save__34980 [] :fail)
+                 (f__35229
+                  []
+                  (clojure.core/let
+                   [?bad-zip val__34979]
+                   (clojure.core/let
+                    [val__34981
+                     (result__34975_parts__ :date)
+                     ?date
+                     val__34981]
+                    (clojure.core/list
+                     {:name ?name,
+                      :id ?id,
+                      :zip ?bad-zip,
+                      :date ?date}))))]
+                (if
+                 (clojure.core/= ?zip val__34979)
+                 (save__34980)
+                 (f__35229)))))
+             result__34975)))
+          :fail)))
+       result__34968))))
+   result__34961))))
+
+(time
+ (dotimes [x 10000]
+   (find-potential-bad-visits data)))
+
+
+(time
+ (dotimes [x 10000]
+   (find-potential-bad-visits' data)))
+
+(time
+ (dotimes [x 10000]
+   (find-potential-bad-visits'' data)))
+
+
+
+
+(defn find-non-matching-visits [address visits]
+  (filter (comp (complement #{(:zip address)}) :zip :geo-location) visits))
+
+(defn find-bad-visits-for-person [addresses visits person]
+  (let [preferred-address (first (filter :preferred addresses))
+        non-matching (find-non-matching-visits preferred-address visits)]
+    (map (fn [visit] {:name (:name person)
+                      :id (:id person)
+                      :zip (get-in visit [:geo-location :zip])
+                      :date (:date visit)})
+        non-matching)))
+
+(defn find-potential-bad-visits' [{:keys [addresses visits people]}]
+  (mapcat (fn [{:keys [id] :as person}] 
+            (find-bad-visits-for-person 
+             (addresses id)
+             (visits id) 
+             person))
+          people))
