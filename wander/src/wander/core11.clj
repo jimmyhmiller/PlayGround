@@ -110,3 +110,23 @@
   [:repeat {:repeat-type :all :coll-type :vector}
    [:pred {:value `number?}
     [:mvr-append {:name '!xs}]]]])
+
+
+
+
+;; data MeanderExpr
+;;     = Literal Atom
+;;     | RepeatStar Kind Pattern
+;;     | RepeatPlus Kind Int Pattern
+;;     | Vector [Pattern]
+;;     | Seq [Pattern]
+;;     | Map [(Pattern, Pattern)]
+;;     | Set [Pattern]
+;;     | Wildcard
+;;     | Or Pattern Pattern
+;;     | And Pattern Pattern
+;;     | Pred (a -> Bool) Pattern
+;;     | Apply (a -> b) Pattern
+;;     | Not Pattern
+;;     | With [(Name, Pattern)] Pattern
+;;     | Unquote RawExpr
