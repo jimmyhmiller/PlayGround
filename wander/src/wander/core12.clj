@@ -232,108 +232,151 @@
       code)))
 
 
+
+
+
+(defn propagate-compile-information-dispatch [{:keys [node fail env]}]
+  (:op node))
+
 (defmulti propagate-compile-information
   {:arglists '([ir fail-ir env])}
-  #'compile*-dispatch
+  #'propagate-compile-information-dispatch
   :default ::default)
 
-(defmethod propagate-compile-information ::bind [{:keys [symbol expr then] :as node} fail-ir env]
-  (let [expr-info (propagate-compile-information expr fail-ir (assoc env :current-symbol symbol))
-        env (:env expr-info)
-        then-info (propagate-compile-information then fail-ir env)
-        more-data (if (= (:node then-info) then) 
-                    then-info
-                    (propagate-compile-information (:node then-info) fail-ir (:env then-info)))]
-    {:env (:env more-data)
-     :node (if
-             (get-in (:env more-data) [:unused-vars symbol]) (:node more-data)
-             (assoc node
-                    :expr (:node expr-info)
-                    :then (:node more-data)))}))
-
-(defmethod propagate-compile-information ::code [{:keys [code] :as node} fail-ir env]
-  (let [new-env (if (coll? code)
-                  ;; have handle s-expressions and symbols
-                  (-> env
-                      (assoc-in [:type-info (:current-symbol env)] (type code))
-                      (assoc-in [:size-info (:current-symbol env)] (count code))
-                      (assoc-in [:value-info (:current-symbol env)] code))
-                  (-> env
-                      (assoc-in [:type-info (:current-symbol env)] (type code))
-                       (assoc-in [:value-info (:current-symbol env)] code)))]
-    {:env new-env
-     :node node}))
 
 
-(defmethod propagate-compile-information ::check-vector [{:keys [symbol] :as node} fail-ir env]
-  (let [current-symbol (:current-symbol env)
-        type-of-symbol (get-in env [:type-info symbol])]
+
+(defn add-current-symbol [context]
+  (assoc-in context [:env :parent-info :symbol] (get-in context [:node :symbol])))
+
+(defn compile-subexpr [context expr-key]
+  (let [compiled (propagate-compile-information
+                  (assoc context :node (get-in context [:node expr-key])))]
+    (-> context
+        (assoc-in [:node expr-key] (:node compiled))
+        (assoc-in [:env] (:env compiled)))))
+
+(defn extract-subexpr [context expr-key]
+  (assoc-in context [:node] (get-in context [:node expr-key])))
+
+(defn get-current-symbol [context]
+   (get-in context [:env :parent-info :symbol]))
+
+(defn add-type-info [context code]
+   ;; Need to handle s-expr and symbols properly
+  (assoc-in context [:env :types (get-current-symbol context)] (type code)))
+
+(defn get-type [context symbol]
+  (get-in context [:env :types symbol]))
+
+(defn add-additional-var-info [context value]
+  ;; Need to handle s-expr properly
+  (-> (if (coll? value)
+        (assoc-in context [:env :size-info (get-current-symbol context)] (count value))
+        context)
+      (assoc-in [:env :value-info (get-current-symbol context)] value)))
+
+(defn remove-node-if-unused [context]
+  (if (get-in context [:env :unused-vars (get-in context [:node :symbol])])
+    (assoc-in context [:node] (get-in context [:node :then]))
+    context))
+
+(defn mark-symbol-unused [context]
+  (assoc-in context [:env :unused-vars (get-current-symbol context)] true))
+
+(defn add-symbol-value [context value]
+  (assoc-in context [:env :value-info (get-current-symbol context)] value))
+
+(defn get-var-value [context symbol]
+   (get-in context [:env :value-info symbol]))
+
+(defn get-var-size [context symbol]
+   (get-in context [:env :size-info symbol]))
+
+(defn change-node [context new-node]
+  (assoc-in context [:node] new-node))
+
+(defmethod propagate-compile-information ::bind [{:keys [node fail env] :as context}]
+  (-> context
+      (add-current-symbol)
+      (compile-subexpr :expr)
+      (compile-subexpr :then)
+      (remove-node-if-unused)))
+
+(defmethod propagate-compile-information ::code [{:keys [node fail env] :as context}]
+  (let [code (:code node)]
+    (-> context
+        (add-type-info  code)
+        (add-additional-var-info code))))
+
+
+(defmethod propagate-compile-information ::check-vector [{:keys [node fail env] :as context}]
+  (let [current-type (get-type context (:symbol node))]
     (cond
-      (not type-of-symbol)
-      {:env env
-       :node node}
-      (isa? type-of-symbol clojure.lang.IPersistentVector)
-      {:env (-> env
-                (assoc-in [:value-info current-symbol] true)
-                (assoc-in [:unused-vars current-symbol] true))
-       :node node}
+      (nil? current-type)
+      context
+      (isa? current-type clojure.lang.IPersistentVector)
+      (-> context
+          (mark-symbol-unused)
+          (add-symbol-value true))
       :else
-      {:env (-> env
-                (assoc-in [:value-info current-symbol] false)
-                (assoc-in [:unused-vars current-symbol] true))
-       :node node})))
+      (-> context 
+          (mark-symbol-unused)
+          (add-symbol-value false)))))
 
-(defmethod propagate-compile-information ::branch [{:keys [symbol then else] :as node} fail-ir env]
-  (let [value-of-symbol (get-in env [:value-info symbol])]
+(defmethod propagate-compile-information ::branch [{:keys [node fail env] :as context}]
+   (let [value (get-var-value context (:symbol node))]
     (cond
-      (nil? value-of-symbol)
-      {:env env
-       :node node}
-      (true? value-of-symbol)
-      {:env env
-       :node then}
+      (nil? value)
+      (-> context
+          (compile-subexpr :then)
+          (compile-subexpr :else))
+      (true? value)
+      (-> context
+          (compile-subexpr :then)
+          (extract-subexpr :then)) 
       :else
-      {:env (assoc-in env [:value-info symbol] false)
-       :node else})))
+      (-> context
+          (compile-subexpr :else)
+          (extract-subexpr :else)))))
 
 
-(defmethod propagate-compile-information ::check-bounds [{:keys [symbol length] :as node} fail-ir env]
-  (let [{:keys [env]} (propagate-compile-information length fail-ir env)
-        current-symbol (:current-symbol env)
-        size-of-symbol (get-in env [:size-info symbol])
-        length (get-in length [:code])]
-    (cond
-      (nil? size-of-symbol)
-      {:env env
-       :node node}
-      (= size-of-symbol length)
-      {:env (-> env 
-                (assoc-in [:value-info current-symbol] true)
-                (assoc-in [:unused-vars current-symbol] true))
-       :node node}
-      :else
-      {:env (-> env
-                (assoc-in [:value-info current-symbol] false)
-                (assoc-in [:unused-vars current-symbol] true))
-       :node node})))
+(defmethod propagate-compile-information ::check-bounds [{:keys [node fail env] :as context}]
+   (let [size (get-var-size context (:symbol node))
+         expected-size (get-in node [:length :code])]
+     (cond
+       (nil? size)
+       context
+       (= size expected-size size)
+       (-> context
+           (mark-symbol-unused)
+           (add-symbol-value true))
+       :else
+       (-> context 
+           (mark-symbol-unused)
+           (add-symbol-value false)))))
 
-(defmethod propagate-compile-information ::nth-get [{:keys [index symbol then] :as node} fail-ir env]
-  (let [current-symbol (:current-symbol env)
-        value-of-symbol (get-in env [:value-info symbol])
-        index (get-in index [:code])]
-    (if (nil? value-of-symbol)
-      {:env env
-       :node node}
-      (let [value (nth value-of-symbol index)]
-        {:env (assoc-in env [:value-info current-symbol] value)
-         :node (code value)}))))
+
+(defmethod propagate-compile-information ::nth-get [{:keys [node fail env] :as context}]
+  (let [value (get-var-value context (:symbol node))
+        index (get-in node [:index :code])]
+    (println value index)
+    (if (nil? value) 
+      context
+      (-> context
+          (add-symbol-value value)
+          (change-node (code value))))))
+
+
+(defmethod propagate-compile-information ::check-equal [{:keys [node fail env] :as context}]
+  context)
 
 (defmethod propagate-compile-information ::check-equal [{:keys [symbol-1 symbol-2] :as node} fail-ir env]
   (let [current-symbol (:current-symbol env)
         symbol-1-value (get-in env [:value-info symbol-1] :not-found)
         symbol-2-value (get-in env [:value-info symbol-2] :not-found)]
     (cond
-      (or (=  symbol-1-value :not-found) (= symbol-2-value :not-found))
+      (or (= symbol-1-value :not-found) (= symbol-2-value :not-found))
       {:env env
        :node node}
       (= symbol-1-value symbol-2-value)
@@ -344,6 +387,7 @@
                 (assoc-in [:unused-vars symbol-2] true))
        :node node}
       :else
+
       {:env (-> env
                 (assoc-in [:value-info current-symbol] false)
                 (assoc-in [:unused-vars current-symbol] true)
@@ -351,12 +395,13 @@
                 (assoc-in [:unused-vars symbol-2] true))
        :node node})))
 
-(defmethod propagate-compile-information ::return [{:keys [] :as node} fail-ir env]
-  {:env env
-   :node node})
+(defmethod propagate-compile-information ::return [{:keys [node fail env] :as context}]
+  context)
 
 
-(propagate-compile-information example :fail {})
+
+
+(propagate-compile-information {:node example :fail :fail :env {}})
 
 (compile*
  (:node (propagate-compile-information example :fail {})) 
@@ -384,40 +429,4 @@
                   (code nil))))
             (code nil)))))))
 
-;; Scratch
-;; ---------------------------------------------------------------------
 
-(compile*
- (accumulate (code [1])
-   (fn [target]
-     (accumulate (check-vector target)
-       (fn [bool]
-         (branch bool
-           (accumulate (check-bounds target (code 1))
-             (fn [bool]
-               (branch bool
-                 (accumulate (nth-get target (code 0))
-                   (fn [nth0]
-                     (accumulate (code 1)
-                       (fn [val0]
-                         (accumulate (check-equal nth0 val0)
-                           (fn [bool]
-                             (branch bool
-                               (return true)
-                               (return false))))))))
-                 (code nil))))
-           (code nil))))))
- (code nil)
- {})
-;; =>
-(let [X__8771 [1]
-      X__8772 (vector? X__8771)]
-  (if X__8772
-    (let [X__8773 (= (count X__8771) 1)]
-      (if X__8773
-        (let [X__8774 (nth X__8771 0)
-              X__8775 1
-              X__8776 (= X__8774 X__8775)]
-          (if X__8776 true false))
-        nil))
-    nil))
