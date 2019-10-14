@@ -243,9 +243,6 @@
   #'propagate-compile-information-dispatch
   :default ::default)
 
-
-
-
 (defn add-current-symbol [context]
   (assoc-in context [:env :parent-info :symbol] (get-in context [:node :symbol])))
 
@@ -266,8 +263,8 @@
    ;; Need to handle s-expr and symbols properly
   (assoc-in context [:env :types (get-current-symbol context)] (type code)))
 
-(defn get-type [context symbol]
-  (get-in context [:env :types symbol]))
+(defn get-type [context symbol default-value]
+  (get-in context [:env :types symbol] default-value))
 
 (defn add-additional-var-info [context value]
   ;; Need to handle s-expr properly
@@ -281,17 +278,20 @@
     (assoc-in context [:node] (get-in context [:node :then]))
     context))
 
-(defn mark-symbol-unused [context]
-  (assoc-in context [:env :unused-vars (get-current-symbol context)] true))
+(defn mark-symbol-unused 
+  ([context]
+   (mark-symbol-unused context (get-current-symbol context)))
+  ([context symbol]
+   (assoc-in context [:env :unused-vars symbol] true)))
 
 (defn add-symbol-value [context value]
   (assoc-in context [:env :value-info (get-current-symbol context)] value))
 
-(defn get-var-value [context symbol]
-   (get-in context [:env :value-info symbol]))
+(defn get-var-value [context symbol default-value]
+  (get-in context [:env :value-info symbol] default-value))
 
-(defn get-var-size [context symbol]
-   (get-in context [:env :size-info symbol]))
+(defn get-var-size [context symbol default-value]
+   (get-in context [:env :size-info symbol] default-value))
 
 (defn change-node [context new-node]
   (assoc-in context [:node] new-node))
@@ -309,11 +309,10 @@
         (add-type-info  code)
         (add-additional-var-info code))))
 
-
 (defmethod propagate-compile-information ::check-vector [{:keys [node fail env] :as context}]
-  (let [current-type (get-type context (:symbol node))]
+  (let [current-type (get-type context (:symbol node) ::not-found)]
     (cond
-      (nil? current-type)
+      (= current-type ::not-found)
       context
       (isa? current-type clojure.lang.IPersistentVector)
       (-> context
@@ -325,9 +324,9 @@
           (add-symbol-value false)))))
 
 (defmethod propagate-compile-information ::branch [{:keys [node fail env] :as context}]
-   (let [value (get-var-value context (:symbol node))]
+  (let [value (get-var-value context (:symbol node) ::not-found)]
     (cond
-      (nil? value)
+      (= value ::not-found)
       (-> context
           (compile-subexpr :then)
           (compile-subexpr :else))
@@ -340,71 +339,62 @@
           (compile-subexpr :else)
           (extract-subexpr :else)))))
 
-
 (defmethod propagate-compile-information ::check-bounds [{:keys [node fail env] :as context}]
-   (let [size (get-var-size context (:symbol node))
-         expected-size (get-in node [:length :code])]
-     (cond
-       (nil? size)
-       context
-       (= size expected-size size)
-       (-> context
-           (mark-symbol-unused)
-           (add-symbol-value true))
-       :else
-       (-> context 
-           (mark-symbol-unused)
-           (add-symbol-value false)))))
+  (let [size (get-var-size context (:symbol node) ::not-found)
+        expected-size (get-in node [:length :code])]
+    (cond
+      (= size ::not-found)
+      context
+      (>= size expected-size)
+      (-> context
+          (mark-symbol-unused)
+          (add-symbol-value true))
+      :else
+      (-> context 
+          (mark-symbol-unused)
+          (add-symbol-value false)))))
 
 
 (defmethod propagate-compile-information ::nth-get [{:keys [node fail env] :as context}]
-  (let [value (get-var-value context (:symbol node))
+  (let [value (get-var-value context (:symbol node) ::not-found)
         index (get-in node [:index :code])]
-    (println value index)
-    (if (nil? value) 
+    (if (= value ::not-found)
       context
       (-> context
-          (add-symbol-value value)
+          (add-symbol-value (nth value index))
           (change-node (code value))))))
 
 
 (defmethod propagate-compile-information ::check-equal [{:keys [node fail env] :as context}]
-  context)
-
-(defmethod propagate-compile-information ::check-equal [{:keys [symbol-1 symbol-2] :as node} fail-ir env]
-  (let [current-symbol (:current-symbol env)
-        symbol-1-value (get-in env [:value-info symbol-1] :not-found)
-        symbol-2-value (get-in env [:value-info symbol-2] :not-found)]
+  (let [symbol-1 (:symbol-1 node)
+        symbol-2 (:symbol-2 node)
+        symbol-1-value (get-var-value context symbol-1 ::not-found)
+        symbol-2-value (get-var-value context symbol-2 ::not-found)]
     (cond
-      (or (= symbol-1-value :not-found) (= symbol-2-value :not-found))
-      {:env env
-       :node node}
+      (or (= symbol-1-value ::not-found)
+          (= symbol-2-value ::not-found))
+      context
       (= symbol-1-value symbol-2-value)
-      {:env (-> env 
-                (assoc-in [:value-info current-symbol] true)
-                (assoc-in [:unused-vars current-symbol] true)
-                (assoc-in [:unused-vars symbol-1] true)
-                (assoc-in [:unused-vars symbol-2] true))
-       :node node}
+      (-> context
+          (add-symbol-value true)
+          (mark-symbol-unused)
+          (mark-symbol-unused symbol-1)
+          (mark-symbol-unused symbol-2))
       :else
-
-      {:env (-> env
-                (assoc-in [:value-info current-symbol] false)
-                (assoc-in [:unused-vars current-symbol] true)
-                (assoc-in [:unused-vars symbol-1] true)
-                (assoc-in [:unused-vars symbol-2] true))
-       :node node})))
+      (-> context
+          (add-symbol-value false)
+          (mark-symbol-unused)
+          (mark-symbol-unused symbol-1)
+          (mark-symbol-unused symbol-2)))))
 
 (defmethod propagate-compile-information ::return [{:keys [node fail env] :as context}]
   context)
 
 
-
-
 (propagate-compile-information {:node example :fail :fail :env {}})
 
 (compile*
- (:node (propagate-compile-information example :fail {})) 
+ (:node (propagate-compile-information {:node example :fail :fail :env {}})) 
  (code nil)
  {})
 
