@@ -866,3 +866,48 @@ nil         ;;; Works as expected
              (visits id) 
              person))
           people))
+
+
+
+(m/find [{:name "Alice" :id 1} {:name "Bob" :id 2} {:name "Bob" :id 3}]
+  (m/scan {:name "Bob" :as ?bobs-info})
+  ?bobs-info)
+
+(m/rewrite {:xs [1 2 3 4 5]
+            :ys [6 7 8 9 10]}
+  {:xs [!xs ...]
+   :ys [!ys ...]}
+  [!xs ... . !ys ...])
+
+
+(m/rewrites {:name "entity1"
+             :status :complete
+             :history [{:value 100} {:value 300} {:value 700}]
+             :future [{:value 1000} {:value 10000}]}
+  {:name ?name
+   :status ?status
+   :history (m/scan {:value ?value})
+   :future [{:value !values} ...]}
+  [:div
+   [:h3 ?name]
+   [:strong (m/app name ?status) - ?value]
+   [:ul .
+    [:li !values] ...]])
+
+(m/rewrites {:name "entity1"
+             :status :complete
+             :history [{:id 1} 
+                       {:id 2}]
+             :values {1 [{:value 100 :status :failed} 
+                         {:value 200 :status :failed}]
+                      2 [{:value 300 :status :complete}
+                         [:value 400 :staus :complete]]}}
+  {:name ?name
+   :status ?status
+   :history (m/scan {:id ?id})
+   :values {?id (m/gather {:value !values 
+                           :status (m/not :failed)})}}
+
+  {:name ?name
+   :status ?status
+   :values [!values ]})
