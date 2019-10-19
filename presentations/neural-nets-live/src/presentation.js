@@ -68,10 +68,12 @@ export default () =>
       }
     />
 
-    <Headline
-      color="red"
-      textAlign="left"
-      text="Disclaimer" />
+    <Points title="Plan of Attack">
+      <Point text="Basic Idea" />
+      <Point text="Demo" />
+      <Point text="Wrap up/Future" />
+    </Points>
+
 
     <Headline
       color="green"
