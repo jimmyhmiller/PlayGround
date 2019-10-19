@@ -911,3 +911,39 @@ nil         ;;; Works as expected
   {:name ?name
    :status ?status
    :values [!values ]})
+
+
+
+
+
+(let [hiccup [:div
+              [:p {"foo" "bar"}
+               [:strong "Foo"]
+               [:em {"baz" "quux"} "Bar"
+                [:u "Baz"]]]
+              [:ul
+               [:li "Beef"]
+               [:li "Lamb"]
+               [:li "Pork"]
+               [:li "Chicken"]]]]
+  ;; meander.match.delta/find
+  (m/find hiccup
+          (m/with [%h1 [!tags {:as !attrs} . %hiccup ...]
+                   %h2 [!tags . %hiccup ...]
+                   %h3 !xs
+                   %hiccup (m/or %h1 %h2 %h3)]
+                  %hiccup)
+          [!tags !attrs !xs]))
+;; =>
+[[:div :p :strong :em :u :ul :li :li :li :li]
+ [{"foo" "bar"} {"baz" "quux"}]
+ ["Foo" "Bar" "Baz" "Beef" "Lamb" "Pork" "Chicken"]]
+
+
+
+
+(m/rewrite (range 8)
+  (!xs ...)
+  [[[!xs !xs] [!xs !xs]] [!xs ...]])
+
+
