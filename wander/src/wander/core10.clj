@@ -947,3 +947,27 @@ nil         ;;; Works as expected
   [[[!xs !xs] [!xs !xs]] [!xs ...]])
 
 
+
+(def db {:user {1 {:name "jimmy" :boss 2 :address 3}
+                2 {:name "falcon"}}
+         :address {3 {:street "1234 street"
+                      :country 5}}
+         :country {5 {:country-code "US"}}})
+
+(m/match db
+  
+  {:user {1 {:name ?name :boss ?boss :address ?address}
+          ?boss {:name ?boss-name}}
+   :address {?address {:street ?street
+                       :country ?country}}
+   :country {?country {:country-code ?country-code}}}
+
+  {:name ?name
+   :boss ?boss-name
+   :address {:street ?street
+             :country-code ?country-code}})
+
+
+
+
+
