@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Pattern<'a> {
     Wildcard,
     LogicVariable(String),
@@ -26,36 +26,63 @@ enum PatternResult<'a> {
     Error(String),
     // Should this be a variable type instead of string?
     // Does that mean I need a new enum?
-    Result(&'a mut HashMap<String, Term<'a>>),
+    Result(&'a mut HashMap<String, &'a Term<'a>>),
 }
 
 fn interpret<'a>(
-    pattern: Pattern<'a>,
-    term: Term<'a>,
+    pattern: &'a Pattern<'a>,
+    term: &'a Term<'a>,
     result: PatternResult<'a>,
 ) -> PatternResult<'a> {
     match result {
-        PatternResult::Error(s) => PatternResult::Error(s),
+        PatternResult::Error(s) => PatternResult::Error(s.to_string()),
         PatternResult::Result(env) => match (pattern, term) {
             (Pattern::Wildcard, _) => PatternResult::Result(env),
-            (Pattern::LogicVariable(name), term) => match env.get(&name) {
+            (Pattern::LogicVariable(name), term) => match env.get(name) {
                 Some(val) => {
                     if val == &term {
                         PatternResult::Result(env)
                     } else {
                         PatternResult::Error(format!(
                             "Failed to match {0}, found value {1:?} expected {2:?}",
-                            name, val, &term
+                            name, val, term
                         ))
                     }
                 }
                 None => {
-                    env.insert(name, term);
+                    env.insert(name.to_string(), term);
                     PatternResult::Result(env)
                 }
             },
-            // Temp
-            _ => PatternResult::Result(env),
+            (Pattern::Concat(pattern1, pattern2), Term::Concat(term1, term2)) => {
+                match interpret(pattern1, term1, PatternResult::Result(env)) {
+                    PatternResult::Error(res) => PatternResult::Error(res.to_string()),
+                    PatternResult::Result(env) => interpret(pattern2, term2, PatternResult::Result(env))
+                }
+            }
+            (Pattern::Concat(_, _), _) => {
+                PatternResult::Error("Didn't match".to_string())
+            }
+            (Pattern::StringConstant(str1), Term::StringConstant(str2)) => {
+                if str1 == str2 {
+                    PatternResult::Result(env)
+                 } else {
+                     PatternResult::Error("Didn't match".to_string())
+                 }
+            }
+            (Pattern::StringConstant(_), _) => {
+                PatternResult::Error("Didn't match".to_string())
+            }
+            (Pattern::IntegerConstant(i1), Term::IntegerConstant(i2)) => {
+                if i1 == i2 {
+                    PatternResult::Result(env)
+                 } else {
+                     PatternResult::Error("Didn't match".to_string())
+                 }
+            }
+            (Pattern::IntegerConstant(_), _) => {
+                PatternResult::Error("Didn't match".to_string())
+            }
         },
     }
 }
@@ -66,16 +93,18 @@ fn main() {
     let c1 = &Pattern::LogicVariable("x".to_string());
     let c2 = &Pattern::Concat(&Pattern::Wildcard, c1);
     let c3 = &Pattern::StringConstant("Hello".to_string());
-    let examplePattern: Pattern = Pattern::Concat(c2, c3);
+    let example_pattern: Pattern = Pattern::Concat(c2, c3);
     let c4 = &Term::StringConstant("test".to_string());
     let c5 = &Term::Concat(c4, c4);
     let c6 = &Term::StringConstant("Hello".to_string());
-    let exampleTerm: Term = Term::Concat(c5, c6);
-    let env: &mut HashMap<String, Term> = &mut HashMap::new();
+    let example_term: Term = Term::Concat(c5, c6);
+    let env: &mut HashMap<String, &Term> = &mut HashMap::new();
 
     println!(
-        "{:?}",
-        interpret(examplePattern, exampleTerm, PatternResult::Result(env))
+        "{:?}\n {:?}\n {:?}",
+        example_pattern,
+        example_term,
+        interpret(&example_pattern, &example_term, PatternResult::Result(env))
     );
     println!("Hello, world!");
 }
