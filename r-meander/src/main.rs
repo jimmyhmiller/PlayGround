@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
 
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum Pattern {
     Wildcard,
     LogicVariable(String),
@@ -46,14 +48,16 @@ impl Into<Option<Output>> for Term {
 // How do people define custom matching operators?
 // Can this work with plan text?
 #[derive(Debug, Eq, PartialEq, Clone)]
+#[allow(dead_code)]
 enum Term {
     Concat(Box<Term>, Box<Term>),
     StringConstant(String),
     IntegerConstant(i32),
+    End
 }
 
 
-
+#[allow(dead_code)]
 #[derive(Debug)]
 enum PatternResult<'a> {
     Error(String, &'a mut HashMap<String, Output>),
@@ -62,6 +66,8 @@ enum PatternResult<'a> {
     Result(&'a mut HashMap<String, Output>),
 }
 
+
+#[allow(dead_code)]
 fn interpret<'a>(
     pattern: Pattern,
     term: Term,
@@ -112,17 +118,18 @@ fn interpret<'a>(
                         }
                     }
                     // borrow checker doesn't like using term here. How do I fix that?
-                    PatternResult::Error(format!("Unexpected1"), env)
+                    PatternResult::Error(format!("Unexpected"), env)
                 }
                 None => {
                     println!("{}", name);
+                    let t1 = term.clone();
                     match Into::into(term) {
                         Some(output) => {
                             env.insert(name.to_string(), output);
                             PatternResult::Result(env)
                         }
-                        // borrow checker doesn't like using term here. How do I fix that?
-                        None => PatternResult::Error(format!("Unexpected2"), env)
+                        // Need to extract a function for dealing with errors here
+                        None => PatternResult::Error(format!("Can't convert {:?}", t1), env)
                     }
                 }
             },
@@ -134,7 +141,7 @@ fn interpret<'a>(
                     let p1_2 = *p1.clone();
                     match interpret(p1_1, *term1, PatternResult::Result(env)) {
                         PatternResult::Error(_res, env) => interpret(*pattern2, *term2, PatternResult::Result(env)),
-                        PatternResult::Result(env) => interpret(Pattern::RepeatZeroOrMore(Box::new(p1_2)), *term2, PatternResult::Result(env))
+                        PatternResult::Result(env) => interpret(Pattern::Concat(Box::new(Pattern::RepeatZeroOrMore(Box::new(p1_2))), pattern2), *term2, PatternResult::Result(env))
                     }
                 } else {
 
@@ -144,62 +151,78 @@ fn interpret<'a>(
                     }
                 }
             }
-            (Pattern::Concat(_, _), _) => {
-                PatternResult::Error("Didn't match".to_string(), env)
+            (Pattern::Concat(pattern1, pattern2), term) => {
+                println!("Concat!");
+                let pattern1_1 = *pattern1.clone();
+                if let Pattern::RepeatZeroOrMore(p1) = pattern1_1 {
+                    match interpret(*p1, term, PatternResult::Result(env)) {
+                        PatternResult::Result(env) => interpret(*pattern2, Term::End, PatternResult::Result(env)),
+                        PatternResult::Error(res, env) => PatternResult::Error(res.to_string(), env),
+                    }
+                } else {
+                    PatternResult::Error(format!("Didn't match concat {:?} {:?} {:?}", pattern1, pattern2, term), env)
+                }
             }
             (Pattern::StringConstant(str1), Term::StringConstant(str2)) => {
                 if str1 == str2 {
                     PatternResult::Result(env)
                  } else {
-                     PatternResult::Error("Didn't match".to_string(), env)
+                     PatternResult::Error(format!("Didn't match string {} {}", str1, str2), env)
                  }
             }
-            (Pattern::StringConstant(_), _) => {
-                PatternResult::Error("Didn't match".to_string(), env)
+            (Pattern::StringConstant(s), term) => {
+                PatternResult::Error(format!("{:?} is not a string and not {}", term, s), env)
             }
             (Pattern::IntegerConstant(i1), Term::IntegerConstant(i2)) => {
                 if i1 == i2 {
                     PatternResult::Result(env)
                  } else {
-                     PatternResult::Error("Didn't match".to_string(), env)
+                     PatternResult::Error(format!("Didn't match integer {} {}", i1, i2), env)
                  }
             }
-            (Pattern::IntegerConstant(_), _) => {
-                PatternResult::Error("Didn't match".to_string(), env)
+            (Pattern::IntegerConstant(i), term) => {
+                PatternResult::Error(format!("{:?} is not an integer and not {}", term, i), env)
             }
         },
     }
 }
 
-
+#[allow(dead_code)]
 fn lvar(s : &'static str) -> Pattern {
      Pattern::LogicVariable(s.to_string())
 }
 
+#[allow(dead_code)]
 fn mvar(s : &'static str) -> Pattern {
      Pattern::MemoryVariable(s.to_string())
 }
 
+#[allow(dead_code)]
 fn wc() -> Pattern {
      Pattern::Wildcard
 }
 
+#[allow(dead_code)]
 fn ps(s : &'static str) -> Pattern {
     Pattern::StringConstant(s.to_string())
 }
 
+#[allow(dead_code)]
 fn pc(p1: Pattern, p2: Pattern) -> Pattern {
     Pattern::Concat(Box::new(p1), Box::new(p2))
 }
 
+#[allow(dead_code)]
 fn ts(s : &'static str) -> Term {
     Term::StringConstant(s.to_string())
 }
 
+#[allow(dead_code)]
 fn tc(p1: Term, p2: Term) -> Term {
     Term::Concat(Box::new(p1), Box::new(p2))
 }
 
+#[allow(dead_code)]
 fn rpz(p1 : Pattern) -> Pattern {
     Pattern::RepeatZeroOrMore(Box::new(p1))
 }
@@ -210,18 +233,129 @@ fn main() {
 
     let env: &mut HashMap<String, Output> = &mut HashMap::new();
 
-    // We don't handle length mismatch
+    // We don't handle length mismatch when repeat
     // Do we need an end node to do that?
     // Maybe we want to allow partial matches?
     // Should lvars and mvars have the same namespace?
     // Should Zero or more be greedy?
     // This is currently match, how would I do search?
-    println!(
-        "{:?}",
-        interpret(
-            pc(lvar("x"), rpz(mvar("xs"))),
-            tc(ts("x"), tc(ts("y"), ts("Hey"))),
 
-            PatternResult::Result(env))
-    );
+    // Not super happy with ending things.
+    // How does zero or interact with things?
+    // Maybe I should look at regex and derivatives?
+
+    // println!(
+    //     "{:?}",
+    //     interpret(
+    //         pc(lvar("x"), pc(lvar("y"), lvar("z"))),
+    //         tc(ts("x"), ts("y")),
+    //
+    //         PatternResult::Result(env))
+    // );
+    let mut states = to_state_machine(Pattern::Concat(Box::new(Pattern::LogicVariable("x".to_string())), Box::new(Pattern::IntegerConstant(2))));
+    states.sort_by_key(|s| s.label);
+    for state in states {
+        println!("{:?}", state)
+    }
+
 }
+
+type Label = i32;
+
+#[derive(Debug)]
+#[allow(dead_code)]
+enum Op {
+    NOOP,
+    Return,
+    SKIP,
+    CheckString(String),
+    CheckInteger(i32),
+    Accumulate(String),
+    Assign(String),
+    CheckVar(String),
+}
+
+#[derive(Debug)]
+struct State {
+    label: Label,
+    operation: Op,
+    then_case: Label, // Maybe Option?
+    else_case: Label // Maybe Option?
+    // Or should the be an enum? There are states that can't fail and that is good to know
+}
+
+// Should make an interator for patterns
+fn to_state_machine(pattern : Pattern) -> Vec<State> {
+    let mut current_label = 0;
+    let start = State { label: current_label, operation: Op::NOOP, then_case: current_label + 1, else_case: -1 };
+    const END_STATE : i32 = std::i32::MAX;
+    let end = State { label: END_STATE, operation: Op::Return, then_case: -1, else_case: -1};
+    let mut states = vec!(start, end);
+    current_label += 1;
+
+    let mut queue = VecDeque::new();
+    queue.push_front(pattern);
+
+    let mut else_context = VecDeque::new();
+    else_context.push_front(END_STATE);
+
+    // How to deal with last node before end?
+
+    loop {
+        if let Some(pattern) = queue.pop_front() {
+            match pattern {
+                Pattern::Wildcard => {
+                    states.push(State { label: current_label, operation: Op::SKIP, then_case: current_label +1, else_case: *else_context.front().unwrap_or(&END_STATE) });
+                    current_label += 1;
+                }
+                // Really should go to current fail not end
+                Pattern::IntegerConstant(i) => {
+                    states.push(State { label: current_label, operation: Op::CheckInteger(i), then_case: current_label +1, else_case: *else_context.front().unwrap_or(&END_STATE) });
+                    current_label += 1;
+                }
+                Pattern::StringConstant(s) => {
+                    states.push(State { label: current_label, operation: Op::CheckString(s), then_case: current_label +1, else_case: *else_context.front().unwrap_or(&END_STATE) });
+                    current_label += 1;
+                }
+                Pattern::MemoryVariable(name) => {
+                    states.push(State { label: current_label, operation: Op::Accumulate(name), then_case: current_label +1, else_case: *else_context.front().unwrap_or(&END_STATE) });
+                    current_label += 1;
+                }
+                Pattern::LogicVariable(name) => {
+                    states.push(State { label: current_label, operation: Op::CheckVar(name.clone()), then_case: current_label +1, else_case: *else_context.front().unwrap_or(&END_STATE) });
+                    current_label += 1;
+                    states.push(State { label: current_label, operation: Op::Assign(name), then_case: current_label +1, else_case: *else_context.front().unwrap_or(&END_STATE) });
+                    current_label += 1;
+                }
+                Pattern::RepeatZeroOrMore(pattern) => {
+                    queue.push_front(*pattern);
+                    else_context.push_front(current_label);
+
+                    // I guess in order for this to work I need to change the whole way then works as well.
+                    // Then isn't the current_label + 1. How does this work with a concat?
+                    // I need to think about this part more.
+                }
+                Pattern::Concat(p1, p2) => {
+                    queue.push_back(*p1);
+                    queue.push_back(*p2);
+                }
+                _ => break
+            }
+        } else {
+            break;
+        }
+    }
+    return states
+}
+
+
+
+
+
+
+
+// State Machine Thoughts
+
+// Operation
+// Then
+// Else
