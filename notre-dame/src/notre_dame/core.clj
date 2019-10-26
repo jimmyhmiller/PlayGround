@@ -64,24 +64,24 @@
             ?string))))
 
 
-(find-isbn example-page)
+(comment
 
-(def results
-  (let [initial-page (fetch-page initial-url)
-        index-links (archive-links initial-page)
-        index-link-data (fetch-links index-links)
-        index-numbered-pages (map find-pagination-links index-link-data)
-        all-search-listing-urls (mapcat all-pages index-links index-numbered-pages)
-        all-search-listings (map fetch-page all-search-listing-urls)
-        all-article-page-urls (mapcat find-article-links all-search-listings)
-        all-article-pages  (map-indexed (fn [index page]
-                                          (println index page)
-                                         (let [page-data (fetch-page page)
-                                               isbn (find-isbn page-data)]
-                                           (println isbn) 
-                                           [page page-data isbn])) 
-                                       all-article-page-urls)]
-    (doall all-article-pages)))
+  (def results
+    (let [initial-page (fetch-page initial-url)
+          index-links (archive-links initial-page)
+          index-link-data (fetch-links index-links)
+          index-numbered-pages (map find-pagination-links index-link-data)
+          all-search-listing-urls (mapcat all-pages index-links index-numbered-pages)
+          all-search-listings (map fetch-page all-search-listing-urls)
+          all-article-page-urls (mapcat find-article-links all-search-listings)
+          all-article-pages  (map-indexed (fn [index page]
+                                            (println index page)
+                                            (let [page-data (fetch-page page)
+                                                  isbn (find-isbn page-data)]
+                                              (println isbn) 
+                                              [page page-data isbn])) 
+                                          all-article-page-urls)]
+      (doall all-article-pages))))
 
 
 
@@ -101,39 +101,63 @@
   (html/as-hiccup (last (second download-page))))
 
 (defn download-page-info [{:keys [href extension] :as info}]
-  (if-not href
-    info
-    (let [page (parse-download-page (fetch-page href))
-          img (m/find page
-                (m/$ [:img {:src ?image}])
-                ?image)
-          title (m/find page
-                  (m/$ [:td {} (m/re #"Title: (.*)" [_ ?title]) & _])
-                  ?title)
-          href (m/find page
-                 (m/$ [:a {:href ?href} [:h2 {} "GET"]])
-                 ?href)
-          description (m/find page
-                        (m/$ [:td {:colspan "2"} (m/pred string? !description) &
-                              (m/gather (m/pred string? !description))])
-                        (string/join "\n" !description))]
+  (try
+    (if-not href
+      info
+      (let [page (parse-download-page (fetch-page href))
+            img (m/find page
+                        (m/$ [:img {:src ?image}])
+                        ?image)
+            title (m/find page
+                          (m/$ [:td {} (m/re #"Title: (.*)" [_ ?title]) & _])
+                          ?title)
+            href (m/find page
+                         (m/$ [:a {:href ?href} [:h2 {} "GET"]])
+                         ?href)
+            description (m/find page
+                                (m/$ [:td {:colspan "2"} (m/pred string? !description) &
+                                      (m/gather (m/pred string? !description))])
+                                (string/join "\n" !description))]
 
-      (merge info
-             {:image img
-              :title title
-              :download href
-              :description description}))))
+        (merge info
+               {:image img
+                :title title
+                :download href
+                :description description})))
+    (catch Exception e
+      (println "error fetching" info)
+      info)))
 
 
 (def state (atom {:n 0
                   :items []}))
 
+(count
+ (filter :href
+         (:items @state)))
+
+(comment)
 
 
-(spit "/Users/jimmyhmiller/Documents/misc/scraping/partial.json"
-      (json/generate-string @state))
+(def task
+  (future
+    (doall
+     (map (fn [{:keys [link isbn]}]
+            (let [item (merge {:isbn isbn
+                               :ndpr link} 
+                              (download-page-info (fetch-gen-lib-search-page isbn)))]
+              (swap! state (fn [state] (-> state
+                                           (update :n inc)
+                                           (update :items conj item))))))
+          (map (fn [[link isbn]]
+                 {:link (last
+                         (re-matches #"[0-9]+ (.*)" link))
+                  :isbn isbn})
+               (partition 2
+                          (string/split-lines
+                           (slurp "/Users/jimmyhmiller/Documents/misc/scraping/isbn.txt"))))))))
 
-(first (filterv :download (:items @state)))
+
 (spit "/Users/jimmyhmiller/Documents/misc/scraping/partial.html"
       (utils/to-html
        (m/rewrite (filterv :download (:items @state))
@@ -144,35 +168,32 @@
            :download !download
            :description !description} ...]
 
-         [:div .
-          [:div
-           [:h3 [:a {:href !download} !title]]
-           [:img {:src (m/app str "http://booksdl.org/" !image)}]
-           [:p [:a {:href !ndpr} "Review"]]
-           [:p !description]] ...])))
+         [:html
+          [:head
+           [:link {:rel "stylesheet" :href "index.css" :type "text/css"}]]
+          [:body
+           [:div {:class "container"} .
+            [:div {:class "item"}
+             [:h3 {:class "heading"} [:a {:href !download} !title]]
+             [:img {:class "image" :src (m/app str "http://booksdl.org/" !image)}]
+             [:p {:class "review"} [:a {:href !ndpr} "Review"]]
+             [:p {:class "description"} !description]] ...]]])))
 
 (add-watch state :logger
            (fn [_ _ _ new-state]
              (println (str "fetching " (:n new-state)))))
 
 
+(first (filterv :download (:items @state)))
 
-;; a mess
+(spit "/Users/jimmyhmiller/Documents/misc/scraping/partial.json"
+      (json/generate-string @state))
 
-(doall
- (map (fn [{:keys [link isbn]}]
-        (let [item (merge {:ndpr link} 
-                          (download-page-info (fetch-gen-lib-search-page isbn)))]
-          (swap! state (fn [state] (-> state
-                                       (update :n inc)
-                                       (update :items conj item))))))
-      (map (fn [[link isbn]]
-             {:link (last
-                     (re-matches #"[0-9]+ (.*)" link))
-              :isbn isbn})
-           (partition 2
-                      (string/split-lines
-                       (slurp "/Users/jimmyhmiller/Documents/misc/scraping/isbn.txt"))))))
+  ;; a mess
+
+
+
+
 
 
 (m/search (parse-download-page download-info)
@@ -194,9 +215,11 @@
 
 
 
-;; need to grab extension and title
-;; Maybe grab the description and notre dame review
-;; Then I could browse easier?
+  ;; need to grab extension and title
+  ;; Maybe grab the description and notre dame review
+  ;; Then I could browse easier?
+
+
 
 
 
@@ -206,9 +229,9 @@
     (clojure.java.io/copy in out)))
 
 (copy-uri-to-file "/Users/jimmyhmiller/Desktop/book.pdf"
-      (m/find (parse-download-page download-page)
-        (m/$ [:a {:href ?href} [:h2 {} "GET"]])
-        ?href))
+                  (m/find (parse-download-page download-page)
+                    (m/$ [:a {:href ?href} [:h2 {} "GET"]])
+                    ?href))
 
 (def gen-lib-page
   (fetch-page "http://libgen.lc/search.php?req=9780231171489"))
@@ -223,3 +246,5 @@
 (find-article-links
  (fetch-page "https://ndpr.nd.edu/news/archives/2019/page/1/"))
 
+  
+  
