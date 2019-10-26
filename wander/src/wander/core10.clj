@@ -971,3 +971,14 @@ nil         ;;; Works as expected
 
 
 
+(m/match (list 1 2 3 4)
+  (!xs ... ?x)
+  [!xs ?x])
+
+
+(defn match-it []
+  (m/match {:x {:y {:z 2}}}
+    {:x
+     {:y
+      {:z 1}}}
+    :match))
