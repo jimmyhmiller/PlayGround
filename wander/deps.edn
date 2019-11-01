@@ -1,8 +1,8 @@
-{:deps {#_noprompt/meander #_{:local/root "/Users/jimmyhmiller/Documents/Code/open-source/meander"}
+{:deps {noprompt/meander {:local/root "/Users/jimmyhmiller/Documents/Code/open-source/meander"}
 
         #_{:git/url "https://github.com/noprompt/meander.git"
            :sha  "1ea2a2bf45f4f9ea778a67d415bb2d03e73a6469"}
-        meander/epsilon {:mvn/version "0.0.221"}
+        #_meander/epsilon #_{:mvn/version "0.0.221"}
         meander/gamma {:mvn/version "0.0.27"}
         meander/delta {:mvn/version "0.0.137"}
         cheshire {:mvn/version "5.8.1"}

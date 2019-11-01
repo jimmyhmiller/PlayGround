@@ -338,7 +338,7 @@ map?
 (m/match reddit
   {:data
    {:children 
-    (m/gather {:data 
+    (m/gather {:data
                {:title !title
                 :permalink !link
                 :preview {:images
@@ -636,7 +636,7 @@ nil         ;;; Works as expected
     :city "Townville"
     :state "IN"
     :zip "46203"}
-   :other-addresses 
+   :other-addresses
    [{:address1 "432 street ave"
      :address2 "apt 7"
      :city "Cityvillage"
@@ -976,9 +976,83 @@ nil         ;;; Works as expected
   [!xs ?x])
 
 
-(defn match-it []
-  (m/match {:x {:y {:z 2}}}
-    {:x
-     {:y
-      {:z 1}}}
-    :match))
+
+(m/match {:x {:y {:z 2}}}
+  {:x
+   {:y
+    {:z 1}}}
+  :match)
+
+(match-it)
+
+
+
+
+          {:players [{:name "Jimmer"
+                      :class :warrior}
+                     {:name "Sir Will"
+                      :class :knight}
+                     {:name "Dalgrith"
+                      :class :rogue}]
+           }
+
+
+(def game-info
+  {:players {1 {:name "Jimmer"
+                :class :warrior
+                :weapon :short-sword
+                :reports-to 2}
+             2 {:name "Sir Will"
+                :class :knight
+                :weapon :short-sword}
+             3 {:name "Dalgrith"
+                :class :rogue
+                :reports-to 1
+                :weapon :short-sword}}
+   :stats {:short-sword {:attack-power 2
+                         :upgrades []}
+           :long-sword {:attack-power 4
+                        :upgrades [:reach]}
+           :unbeatable {:attack-power 9001
+                        :upgrades [:indestructible]}}})
+
+
+
+(def 
+  {1 {:parent 2}
+   2 {:parent 3}
+   3 {:parent 4}
+   4 {}})
+
+{1 {:parent 2}
+ 2 {:parent 3}
+ 3 {:parent 4}
+ 4 {}}
+
+
+(m/rewrites game-info
+  {:players {?id {:reports-to ?reports-to
+                  :weapon ?report-weapon
+                  :as ?report}
+             ?reports-to {:weapon ?commander-weapon
+                          :as ?commander}}
+   :stats (m/and {?report-weapon ?report-stats}
+                 {?commander-weapon ?commander-stats})}
+  
+  [:report-and-commander
+   {:report ?report
+    :commander ?commander
+    :report-weapon {:name ?report-weapon & ?report-stats}
+    :commander-weapon {:name ?commander-weapon & ?commander-stats}}]
+
+  {:players {?id {:reports-to nil
+                  :weapon ?weapon
+                  :as ?commander}}
+   :stats {?weapon ?stats}}
+
+  [:top-level
+   {:commander ?commander
+    :weapon {:name ?weapon & ?stats}}])
+
+
+
