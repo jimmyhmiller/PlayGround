@@ -77,8 +77,16 @@
   (Get (Match (Index "poll-by-callback") callback-id)))
 
 
-(print-result
- (query client (Paginate (Match (Index "all_polls")) #js {:size 1000})))
+(print-result)
+
+(defn delete-all [index]
+  (.then
+   (query client (Paginate (Match (Index index)) #js {:size 1000}))
+   (fn [xs]
+     (doseq [x (.-data xs)]
+       (query client (Delete x))))))
+
+
 
 
 
