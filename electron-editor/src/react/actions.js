@@ -39,3 +39,10 @@ export const updateComponentMetadata = ({ name, props }) => ({
   props,
 })
 
+export const EXPORT_CODE = 'EXPORT_CODE';
+
+export const exportCode = ({ code }) => ({
+  type: EXPORT_CODE,
+  code
+})
+

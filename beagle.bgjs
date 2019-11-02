@@ -19,7 +19,7 @@ data Person {
 fn double(x) { x * 2 }
 
 fn get-customer-id {
-    Customer(:id) => Just(id)
+    Customer(id) => Just(id)
     Employee(_) => None
 }
 
