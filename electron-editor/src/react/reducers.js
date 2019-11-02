@@ -8,6 +8,7 @@ import {
   CREATE_COMPONENT,
   DELETE_COMPONENT,
   UPDATE_COMPONENT_METADATA,
+  EXPORT_CODE,
 } from "./actions";
 
 
@@ -72,6 +73,27 @@ export const editorReducer = (state=initialEditorState, action) => {
     case UPDATE_COMPONENT_METADATA: {
       return updateComponentMetadata(state,action)
     }
+    default: {
+      return state;
+    }
   }
-  return state;
 }
+
+const exportCode = (state, { code }) => ({
+  ...state,
+  code,
+})
+
+export const exportReducer = (state="", action) => {
+  switch (action.type) {
+    case EXPORT_CODE: {
+      return exportCode(state, action)
+    }
+    default: {
+      return state;
+    }
+  }
+}
+
+
+

@@ -1,7 +1,8 @@
 import { call, put, takeEvery, takeLatest, select, debounce } from 'redux-saga/effects'
 import { groupBy, property, mapValues as mapValuesPrime, compose, values, flatMap } from 'lodash/fp';
+import { stripMargin } from 'stripmargin';
 
-import { UPDATE_CODE, createComponent, deleteComponent, updateComponentMetadata } from './actions';
+import { UPDATE_CODE, createComponent, deleteComponent, updateComponentMetadata, exportCode } from './actions';
 
 const mapValues = mapValuesPrime.convert({ 'cap': false });
 
@@ -78,11 +79,27 @@ const deriveComponents = function* ({ code, name }) {
       yield put(updateComponentMetadata({ name, props }))
     }
   }
+}
+
+const deriveCode = function* () {
+  const editors = yield select(state => Object.values(state.editors));
+  const componentCode = editors
+    .filter(e => e.type === "component")
+    .map(({ code, name, props }) => stripMargin(`
+      |  const ${name} = (${props && props.length > 0  ? "{ " + props.join(", ") + " }" : "props"}) => {
+      |    return <>${code}</>
+      |  }`)
+    )
+    .join("\n\n");
+
+
+  yield put(exportCode({ code: componentCode }))
 
 }
 
 const editorSaga = function* () {
   yield debounce(100, UPDATE_CODE, deriveComponents);
+  yield debounce(100, UPDATE_CODE, deriveCode);
 }
 
 export default editorSaga

@@ -7,7 +7,7 @@ import createSagaMiddleware from 'redux-saga'
 import './index.css';
 import App from './react/App';
 import * as serviceWorker from './serviceWorker';
-import { editorReducer } from './react/reducers';
+import { editorReducer, exportReducer } from './react/reducers';
 import sagas from './react/sagas'
 
 
@@ -19,7 +19,8 @@ const sagaMiddleware = createSagaMiddleware()
 
 const store = createStore(
   combineReducers({
-    editors: editorReducer
+    editors: editorReducer,
+    exportCode: exportReducer,
   }),
   composeEnhancers(applyMiddleware(sagaMiddleware))
 );

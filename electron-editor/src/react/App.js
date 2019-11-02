@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Editor } from "react-live";
+import { Editor, renderElementAsync } from "react-live";
 import { connect } from "react-redux";
 import { updateCode, prettifyCode } from './actions';
 import { channels } from '../shared/constants';
@@ -67,16 +67,45 @@ const ConnectedComponentEditor = connect(
 )(ComponentEditor)
 
 
+// This is fine for now, but I should do live reload properly.
+const ViewingArea = ({ code }) => {
+  const [Element, setElement] = useState(() => () => null);
+
+  useEffect(() => {
+    try {
+      renderElementAsync(
+        {
+          code: `${code};\n\n render(Main);`,
+          scope: { React, useState }
+        },
+        elem => setElement(_ => elem),
+        e => console.error(e)
+      );
+    } catch (e) {
+      console.error(e);
+    }
+  }, [code]);
+
+  return <Element />;
+};
+
+const ConnectedViewingArea = connect(
+  ({ exportCode }) => ({ code: exportCode.code })
+)(ViewingArea);
 
 const App = ({ editors }) => {
   return (
-    <>
-      {Object.keys(editors).map(name => (
-        <ConnectedComponentEditor key={name} name={name} />
-      ))}
-    </>
+    <div style={{ display: "flex", flexDirection: "row" }}>
+      <div style={{ width: "45vw", height: "95vh", overflow: "scroll" }}>
+        {Object.keys(editors).map(name => (
+          <ConnectedComponentEditor key={name} name={name} />
+        ))}
+      </div>
+      <div style={{ width: "45vw", height: "95vh", padding: 20 }}>
+        <ConnectedViewingArea />
+      </div>
+    </div>
   );
 };
-
 
 export default connect(({ editors }) => ({ editors }))(App);
