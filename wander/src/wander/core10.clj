@@ -1018,16 +1018,9 @@ nil         ;;; Works as expected
 
 
 
-(def 
-  {1 {:parent 2}
-   2 {:parent 3}
-   3 {:parent 4}
-   4 {}})
-
-{1 {:parent 2}
- 2 {:parent 3}
- 3 {:parent 4}
- 4 {}}
+(m/rewrite [1 2 3 4]
+  [?a ?b ?c ?d]
+  [?d ?b ?c ?a])
 
 
 (m/rewrites game-info
@@ -1053,6 +1046,21 @@ nil         ;;; Works as expected
   [:top-level
    {:commander ?commander
     :weapon {:name ?weapon & ?stats}}])
+
+
+
+
+
+
+
+(m/match [1 2 3 4 5 6]
+  [!xs ...]
+  !xs)
+
+(let [!xs [1 2 3 4 5 6]]
+  (m/subst
+    [[!xs !xs] ...]))
+
 
 
 
