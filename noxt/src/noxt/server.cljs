@@ -2,19 +2,19 @@
   (:require ["micro" :as micro]
             ["http" :as http]
             [react]
+            [uix.compiler.alpha]
             ["react-dom/server" :as react-dom]))
 
+
+
 (defn handler [req res]
-  (Promise/resolve "Hello!"))
+  (.setHeader res "Content-Type" "text/html")
+  (micro/send res 200
+              (react-dom/renderToString 
+               (uix.compiler.alpha/as-element [:h1 "Hello!"]))))
 
 (def server
   (.listen
    (micro (fn [req res] (@#'handler req res)))
    8080))
 
-
-;; Fails because of loader.
-;; https://clojure.atlassian.net/browse/CLJS-3067
-;; Might fix it, but I have to figure out how to use latest with
-;; cider or wait for release, which I think is soon anyways.
-(require '[about])

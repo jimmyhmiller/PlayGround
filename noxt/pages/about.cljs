@@ -7,5 +7,7 @@
    [Link {:page :index} "index"]])
 
 
+;; Need to make a different loader module
+;; Should autogen these
 (loader/set-loaded! :about)
 
