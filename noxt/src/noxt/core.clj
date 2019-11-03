@@ -19,7 +19,7 @@
 (def opts
   {:output-dir "public/js"
    :asset-path "js"
-   :optimizations :none
+   :optimizations :advanced
    :main "noxt.main"
    :verbose false
    :warnings {:single-segment-namespace false}
