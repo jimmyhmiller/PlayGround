@@ -7,5 +7,3 @@
    [Link {:page :index} "index"]])
 
 (loader/set-loaded! :about)
-
-
