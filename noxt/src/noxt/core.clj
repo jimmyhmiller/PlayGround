@@ -10,10 +10,13 @@
        file-seq
        (filter #(.isFile %))
        (map #(.getPath %))
-       (filter (fn [p] (re-matches #".*cljs$" p)))
+       ;; Need to generate files instead of finding them
+       ;; Can I do that in memory instead of on the file system?
+       (filter (fn [p] (re-matches #".*_loader.cljs$" p)))
        (map #(string/replace (string/replace (string/replace % #"^pages/" "") #"/" ".") #"\.cljs" ""))
-       (map (fn [page] {(keyword page) {:entries #{(symbol page)}
-                                        :output-to (str "public/js/page/" page ".js")}}))
+       (map (fn [page] {(keyword (string/replace page #"_loader" ""))
+                        {:entries #{(symbol (string/replace page #"_" "-"))}
+                         :output-to (str "public/js/page/" page ".js")}}))
        (reduce merge {})))
 
 (def opts
@@ -32,3 +35,6 @@
 (defn -main []
   (b/watch (b/inputs "src" "pages") opts))
 
+(comment 
+  (b/build (b/inputs "src" "pages" ) opts)
+)
