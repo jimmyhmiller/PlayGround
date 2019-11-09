@@ -28,11 +28,13 @@
                         [:script {:src "/js/main.js" :type "text/javascript"}]]])))))
     (serve-handler req res #js {:public "public"})))
 
-(def server
-  (.listen
-   (micro (fn [req res] (@#'handler req res)))
-   8080))
+(def server (atom nil))
 
+(defn -main []
+  (reset! server
+    (.listen
+       (micro (fn [req res] (@#'handler req res)))
+       8080)))
 
 (comment
   (when (exists? js/Symbol)
