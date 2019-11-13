@@ -7,10 +7,12 @@ enum Pattern {
     Wildcard,
     LogicVariable(String),
     MemoryVariable(String),
-    RepeatZeroOrMore(Box<Pattern>),
+    // Repeats are hard. Need to think about thing closely
+    // RepeatZeroOrMore(Box<Pattern>),
     Concat(Box<Pattern>, Box<Pattern>),
     StringConstant(String),
     IntegerConstant(i32),
+    Disjunction(Box<Pattern>, Box<Pattern>),
 }
 
 
@@ -22,25 +24,7 @@ fn b<T>(t : T) -> Box<T> {
 fn main() {
 
     let mut states = to_state_machine(
-        Pattern::RepeatZeroOrMore(
-            b(
-                Pattern::Concat(
-                    b(
-                        Pattern::RepeatZeroOrMore(b(Pattern::IntegerConstant(1)))
-                    ),
-                    b(
-                        Pattern::Concat(
-                            b(
-                                Pattern::RepeatZeroOrMore(b(Pattern::IntegerConstant(2)))
-                            ),
-                            b(
-                                Pattern::Wildcard
-                            )
-                        )
-                    )
-                )
-            )
-        )
+        Pattern::Disjunction(b(Pattern::IntegerConstant(2)), b(Pattern::IntegerConstant(3)))
     );
 
 
@@ -120,16 +104,16 @@ fn to_state_machine(pattern : Pattern) -> Vec<State> {
                 Pattern::LogicVariable(name) => {
                     states.push(State { label: current_label, operation: Op::LogicVariableAssign(name), then_case: next, else_case: else_case });
                 }
-                Pattern::RepeatZeroOrMore(pattern) => {
-                    queue.push_front(*pattern);
-                    next_context.push_front(current_label);
-                    if else_case != std::i32::MAX {
-                        else_context.push_front(else_case);
-                    } else {
-                        else_context.push_front(next);
-                    }
-                    continue;
-                }
+                // Pattern::RepeatZeroOrMore(pattern) => {
+                //     queue.push_front(*pattern);
+                //     next_context.push_front(current_label);
+                //     if else_case != std::i32::MAX {
+                //         else_context.push_front(else_case);
+                //     } else {
+                //         else_context.push_front(next);
+                //     }
+                //     continue;
+                // }
                 Pattern::Concat(p1, p2) => {
                     queue.push_front(*p2);
                     queue.push_front(*p1);
@@ -139,6 +123,13 @@ fn to_state_machine(pattern : Pattern) -> Vec<State> {
                         else_context.push_front(else_case + 1);
                         else_context.push_front(else_case + 1);
                     }
+                    continue;
+                }
+                Pattern::Disjunction(p1, p2) => {
+                    queue.push_front(*p2);
+                    queue.push_front(*p1);
+                    next_context.push_front(else_case);
+                    else_context.push_front(current_label + 1);
                     continue;
                 }
                 _ => break
