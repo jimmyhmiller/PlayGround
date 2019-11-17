@@ -1,6 +1,7 @@
 (ns ^:figwheel-hooks cljs-proxy.core
   (:require
    [goog.dom :as gdom]
+   [goog.object :as gobj]
    [react :as react]
    [react-dom :as react-dom]
    [sablono.core :as sab :include-macros true]))
@@ -17,35 +18,135 @@
   (gdom/getElement "app"))
 
 
+
+(defn unwrap
+  [^js p]
+  (.-__unwrap p))
+
+
+(defn shallow-clj->js
+  [m]
+  (loop [entries (seq m)
+         o #js {}]
+    (if (nil? entries)
+      o
+      (let [entry (first entries)
+            k (key entry)
+            v (val entry)]
+        (recur
+         (next entries)
+         (doto o
+           (gobj/set (name k) v)))))))
+
+
+(declare ueaq)
+
+;; -- traps
+
+
+(defn getter
+  [o prop]
+  (this-as handler
+    (let [opts (.-opts ^js handler)
+          context (.-context ^js handler)
+          {:keys [recursive? prop->key]} opts
+
+          v (get o (prop->key prop)
+                 (gobj/get context prop))]
+      (if (and recursive? (associative? v))
+        (ueaq v opts)
+        v))))
+
+
+(defn has
+  [o prop]
+  (this-as handler
+    (let [{:keys [prop->key]} (.-opts ^js handler)]
+      (contains? o (prop->key prop)))))
+
+
+(defn own-keys
+  [o]
+  (js/Reflect.ownKeys o))
+
+
+(defn enumerate
+  [o]
+  (map name (keys o)))
+
+
+(defn get-own-property-descriptor
+  [o prop]
+  (this-as handler
+    (let [{:keys [prop->key]} (.-opts ^js handler)
+          k (prop->key prop)]
+      (if (contains? o k)
+        #js {:enumerable true :configurable true
+             :writable false :value (get o k)}
+        (js/Object.getOwnPropertyDescriptor o prop)))))
+
+
+(defn get-prototype-of
+  [_]
+  (this-as handler
+    (.-context ^js handler)))
+
+
+(defn setter
+  [_ k v]
+  (this-as handler
+    (let [context (.-context ^js handler)]
+      (gobj/set context k v))))
+
+
+(defn ^js ueaq
+  ([o] (ueaq o {}))
+  ([o {:keys [recursive? prop->key mutable?] :as opts
+       :or {recursive? false
+            prop->key keyword}}]
+   (let [;; this is an object to hold implementations of various protocols for
+         ;; CLJS usage
+         context (specify! #js {}
+                   Object
+                   (toString [this]
+                     (pr-str* this))
+
+                   IPrintWithWriter
+                   (-pr-writer [_ writer _]
+                     ;; prn is not a fast path
+                     (-write writer
+                             (if recursive?
+                               (pr-str (clj->js o))
+                               (pr-str (shallow-clj->js o))))))
+
+         handler #js {:opts (assoc opts
+                                   :prop->key prop->key)
+                      :context context
+                      :get getter
+                      :has has
+                      :ownKeys own-keys
+                      :enumerate enumerate
+                      :getOwnPropertyDescriptor get-own-property-descriptor
+                      :getPrototypeOf get-prototype-of
+                      :set setter}]
+    (js/Proxy. (shallow-clj->js o) handler))))
+
+
+;; Because of the invariants, target needs to actually have the properties I am talking about it seems.
 (defn make-obj [coll]
-  (js/Proxy. #js {} 
+  (js/Proxy. (shallow-clj->js coll)
              #js {:enumerate (fn [target]
                                (throw (ex-info "enumerate" {})))
                   :getOwnPropertyDescriptor 
                   (fn [target key]
-                    (println key)
-                    (if (contains? coll (keyword key))
-                      #js {:value (get coll key)
-                           :enumerable true
-                           :configurable true}
-                      (clj->js
-                       (merge
-                        (js->clj
-                         (js/Object.getOwnPropertyDescriptor target))
-                        {:enumerable false
-                         :configurable true}))))
+                      (js/Object.getOwnPropertyDescriptor target key))
                   :has (fn [target key]
                          (contains? coll (keyword key)))
-                  :preventExtensions (fn [target]
-                                       true)
                   :ownKeys (fn [target]
                              (clj->js (mapv name (keys coll))))
                   :set (fn [obj prop value]
                          (println "set" obj prop value))
-                  :isExtensible (fn [target]
-                                  false)
-                  :defineProperty (fn [target key desc]
-                                    (throw (ex-info "define" {:data [target key desc]})))
+  
                   :get (fn [obj prop]
                          (println "get" obj prop)
 
@@ -58,26 +159,15 @@
                                result))))}))
 
 
-;; Invariants around proxy make this terrible. Is there an alternative?
-;; I think possibly.
-(set! (.-freeze (.-Object js/window)) (fn [x] x))
-
-
-
-(def p
-  )
-
-
-
 
 
 (defn hello-world [state]
-  (js/console.log p)
-  (react/createElement "div" (make-obj {:style {:color "green"
+  (react/createElement "div" (ueaq {:style {:color "green"
                                                 :fontSize 120
                                                 :cursor "pointer"}
                                         :id "thing"
-                                        :onClick (fn [e] (println e))})
+                                        :onClick (fn [e] (println e))}
+                                        {:recursive? true})
                        "Hello World"))
 
 (defn mount [el]
