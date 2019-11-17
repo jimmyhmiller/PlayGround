@@ -267,7 +267,40 @@
 
 
 
+rule match:
+  ?x + ?y => {
+    a <- ?x
+    b <- ?y
+    a + b
+  }
 
+rule match:
+  ?x(?y) => {
+    a <- ?y
+    b <- ?x
+    a(b)
+  }
+
+rule:
+  match:
+    fib(1) => 1
+    fib(2) => 2
+    fib(?n) => fib(?n - 1) + fib(?n - 2)
+
+rule:
+  match #meta:
+    fib(5) => io: print(5)
+
+
+main: fib(8)
+
+
+fib(8)
+fib(8-1) + fib(8-2)
+8 - 1
+7
+fib
+fib(7)
 
 
 
