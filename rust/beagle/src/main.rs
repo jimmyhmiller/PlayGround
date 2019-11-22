@@ -15,6 +15,7 @@ enum Token {
     Braces(Vec<Token>),
     Brackets(Vec<Token>),
     Tree(Vec<Token>),
+    Phrase(Box<Token>, Box<Token>, Box<Token>, Box<Token>),
     Binary(Box<Token>, Box<Token>, Box<Token>),
 }
 
@@ -201,6 +202,17 @@ fn enforest(
                 tokens.push_front(Token::Tree(vec![Token::Number(x.to_string())]));
                 enforest(tokens, combine, precedence, stack)
             }
+
+            Token::Identifier(x) if x == "fn" => {
+                // Should check the types of these.
+                let phrase_type = Box::new(Token::Identifier("fn".to_string()));
+                let phrase_name = Box::new(tokens.pop_front().unwrap());
+                let phrase_params = Box::new(tokens.pop_front().unwrap());
+                let phrase_block = Box::new(tokens.pop_front().unwrap());
+                let tree = Token::Tree(vec!(Token::Phrase(phrase_type, phrase_name, phrase_params, phrase_block)));
+                tokens.push_front(tree);
+                enforest(tokens, combine, precedence, stack)
+            }
             Token::Identifier(x) => {
                 tokens.push_front(Token::Tree(vec![Token::Identifier(x.to_string())]));
                 enforest(tokens, combine, precedence, stack)
@@ -243,8 +255,8 @@ fn enforest(
 // Honu: Syntactic Extension for Algebraic Notation through Enforestation
 
 fn main() {
-    // let mut tokenizer = Tokenizer::new("fn fib(n) { 0 => 0; 1 => 1; n => fib(n - 1) + fib(n - 2)}");
-    let mut tokenizer = Tokenizer::new("2 + 3 + 4");
+    let mut tokenizer = Tokenizer::new("fn fib(n) { 0 => 0; 1 => 1; n => fib(n - 1) + fib(n - 2)}");
+    // let mut tokenizer = Tokenizer::new("2 + 3 + 4");
 
 
     let result = tokenizer.parse_all();
