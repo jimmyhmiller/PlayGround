@@ -5,6 +5,17 @@ use core::convert::identity;
 use core::str::from_utf8;
 use regex::Regex;
 use std::collections::VecDeque;
+use std::collections::HashMap;
+
+// Overall this isn't quite right. But my plan is to just continue with it.
+// I would rather get something working that is wrong than to stop and redo it.
+// That is a big tendency of mine, to not like something and just stop.
+// But in this case if I can get something working, I can also go back and change things.
+
+
+// Things are workingish. But how does this extend to macros?
+// Maybe I can make a fake macro?
+
 
 #[derive(Debug, Clone)]
 enum Token {
@@ -16,8 +27,28 @@ enum Token {
     Brackets(Vec<Token>),
     Tree(Vec<Token>),
     Phrase(Box<Token>, Box<Token>, Box<Token>, Box<Token>),
+    Call(Box<Token>, Vec<Token>),
     Binary(Box<Token>, Box<Token>, Box<Token>),
+    Val(Box<Token>, Box<Token>),
 }
+
+#[derive(Debug, Clone)]
+enum PhraseType {
+    Fn
+}
+
+#[derive(Debug, Clone)]
+enum Ast {
+    Str(String),
+    Number(String),
+    Identifier(String),
+    Block(Vec<Ast>),
+    Val(String, Box<Ast>),
+    Call(Box<Ast>, Vec<Ast>),
+    Phrase(PhraseType, Vec<Ast>, Box<Ast>),
+    NamedPhrase(PhraseType, String, Vec<Ast>, Box<Ast>),
+}
+
 
 #[derive(Debug)]
 struct Tokenizer<'a> {
@@ -192,30 +223,47 @@ impl Tokenizer<'_> {
 // Not sure if the higher order function stuff is the best for rust
 fn enforest(
     tokens: &mut VecDeque<Token>,
+    bindings: &mut HashMap<String,Token>,
     combine: Box<dyn Fn(Token) -> Token>,
     precedence: usize,
     mut stack: Vec<(Box<dyn Fn(Token) -> Token>, usize)>,
-) -> (Token, &VecDeque<Token>) {
+) -> Token {
     if let Some(first) = tokens.pop_front() {
         match first {
             Token::Number(x) => {
                 tokens.push_front(Token::Tree(vec![Token::Number(x.to_string())]));
-                enforest(tokens, combine, precedence, stack)
+                enforest(tokens, bindings, combine, precedence, stack)
+            }
+            Token::Identifier(x) if x == "val" => {
+                // Should check the types of these.
+                let val_name = tokens.pop_front().unwrap();
+                tokens.pop_front(); // equals sign
+                let val_value = enforest(tokens, bindings, combine, precedence, stack);
+                if let Token::Identifier(name) = val_name.clone() {
+                    bindings.insert(name, val_value.clone());
+                }
+                let tree = Token::Tree(vec!(Token::Val(Box::new(val_name), Box::new(val_value))));
+                return tree;
             }
 
             Token::Identifier(x) if x == "fn" => {
                 // Should check the types of these.
-                let phrase_type = Box::new(Token::Identifier("fn".to_string()));
-                let phrase_name = Box::new(tokens.pop_front().unwrap());
-                let phrase_params = Box::new(tokens.pop_front().unwrap());
-                let phrase_block = Box::new(tokens.pop_front().unwrap());
-                let tree = Token::Tree(vec!(Token::Phrase(phrase_type, phrase_name, phrase_params, phrase_block)));
-                tokens.push_front(tree);
-                enforest(tokens, combine, precedence, stack)
+                let phrase_type = Token::Identifier("fn".to_string());
+                // Need to handle anonymous functions as well.
+                let phrase_name = tokens.pop_front().unwrap();
+                let phrase_params = tokens.pop_front().unwrap();
+                let phrase_block = tokens.pop_front().unwrap();
+                let phrase = Token::Phrase(Box::new(phrase_type), Box::new(phrase_name.clone()), Box::new(phrase_params), Box::new(phrase_block));
+                let tree = Token::Tree(vec!(phrase.clone()));
+                if let Token::Identifier(name) = phrase_name.clone() {
+                    bindings.insert(name, phrase.clone());
+                }
+                return tree;
             }
+
             Token::Identifier(x) => {
                 tokens.push_front(Token::Tree(vec![Token::Identifier(x.to_string())]));
-                enforest(tokens, combine, precedence, stack)
+                enforest(tokens, bindings, combine, precedence, stack)
             }
             Token::Tree(tree) => match tokens.front() {
                 // Should make this programmable, not hardcoded
@@ -226,40 +274,149 @@ fn enforest(
                         Box::new(move |t: Token| -> Token {
                             Token::Tree(
                                 vec!(
-                                    Token::Identifier("+".to_string()),
-                                    Token::Tree(tree.clone()),
-                                    t
+                                    Token::Call(
+                                        Box::new(Token::Identifier("+".to_string())),
+
+                                        vec!(
+                                            Token::Tree(tree.clone()),
+                                            t,
+                                        )
+                                    )
                                 )
                             )
                         });
-                    enforest(tokens, combine2, 10, stack)
+                    enforest(tokens, bindings, combine2, 10, stack)
+                }
+                Some(Token::Parens(args)) => {
+                    let new_args = args.clone();
+                    tokens.pop_front();
+                    let token = Token::Tree(vec!(Token::Call(Box::new(Token::Tree(tree.clone())), new_args.to_vec())));
+                    token
                 }
                 _ => match stack.pop() {
                     Some((combine2, precedence2)) => {
-                        tokens.pop_front();
                         tokens.push_front(combine(Token::Tree(tree)));
-                        enforest(tokens, combine2, precedence2, stack)
+                        enforest(tokens, bindings, combine2, precedence2, stack)
                     }
-                    None => (combine(Token::Tree(tree)), tokens),
+                    None => combine(Token::Tree(tree)),
                 },
             },
-            _ => (first, tokens),
+            _ => first,
         }
     } else {
-        (Token::Str("?".to_string()), tokens)
+        Token::Str("?".to_string())
     }
+}
+
+
+
+fn get_identifier(token : Box<Token>) -> String {
+    if let Token::Identifier(name) = *token {
+        name
+    } else {
+        "".to_string()
+    }
+}
+
+fn parse(tokens: VecDeque<Token>, bindings: HashMap<String, Token>) -> Vec<Ast> {
+    let mut queue : VecDeque<Token> = tokens.into();
+    // probably need to combine these bindings;
+    let (tokens, bindings2) = parse1(&mut queue);
+    let ast = parse2(tokens, bindings.into_iter().chain(bindings2).collect());
+    ast
+}
+
+fn parse_single(token : Token, bindings: HashMap<String, Token>) -> Box<Ast> {
+    Box::new(parse(VecDeque::from(vec!(token)), bindings).first().unwrap().clone())
+}
+
+// terrible function
+fn parse_multiple_single(token : Token, bindings: HashMap<String, Token>) -> Vec<Ast> {
+    parse(VecDeque::from(vec!(token)), bindings)
+}
+
+fn parse1(tokens : &mut VecDeque<Token>) -> (VecDeque<Token>, HashMap<String, Token>) {
+    let results : &mut VecDeque<Token> = &mut VecDeque::new();
+
+    // Should this be token or some other information?
+    // This *might* not be good for it to be mutable?
+    // We need nested bindings, not sure the right way to represent this.
+    // Although I guess it is only mutable in this scope?
+    let bindings : &mut HashMap<String, Token> = &mut HashMap::new();
+    while !tokens.is_empty() {
+        results.push_front(enforest(tokens, bindings, Box::new(identity), 0, vec!()));
+    }
+    return (results.clone(), bindings.clone());
+}
+
+fn parse2(mut tokens: VecDeque<Token>, bindings: HashMap<String, Token>) -> Vec<Ast> {
+    let results : &mut VecDeque<Ast> = &mut VecDeque::new();
+    while !tokens.is_empty() {
+        match tokens.pop_front().unwrap() {
+            token => {
+                let mut elems : VecDeque<Token> = if let Token::Tree(xs) = token { xs } else { vec!(token) }.into();
+                // Need to figure out this whole tree situation
+                // I don't really understand it.
+                while !elems.is_empty() {
+                    match elems.pop_front().unwrap() {
+                        Token::Val(name, v) => results.push_front(Ast::Val(get_identifier(name.clone()), parse_single(*v.clone(), bindings.clone()))),
+                        // Need to handle type
+                        Token::Phrase(phrase_type, name, args, body) => results.push_front(Ast::NamedPhrase(PhraseType::Fn, get_identifier(name.clone()), parse_multiple_single(*args, bindings.clone()), parse_single(*body.clone(), bindings.clone()))),
+                        Token::Brackets(elems) => results.push_front(Ast::Block(parse(VecDeque::from(elems), bindings.clone()))),
+                        Token::Call(name, args) => results.push_front(Ast::Call(parse_single(*name, bindings.clone()), parse(VecDeque::from(args), bindings.clone()))),
+                        Token::Identifier(s) => results.push_front(Ast::Identifier(s.to_string())),
+                        Token::Number(n) => results.push_front(Ast::Number(n.to_string())),
+                        Token::Str(s) => results.push_front(Ast::Str(s.to_string())),
+                        Token::Parens(elems) => parse(VecDeque::from(elems), bindings.clone()).iter().for_each(|elem| results.push_front(elem.clone())),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    Vec::from(results.clone())
 }
 
 // Working through implementing something like this
 // https://www.cs.utah.edu/plt/publications/gpce12-rf.pdf
 // Honu: Syntactic Extension for Algebraic Notation through Enforestation
 
+// Probably shouldn't be needed
+fn eliminate_singleton_trees(token: &Token) -> Token {
+    match token {
+        Token::Tree(elems) => {
+
+            match elems.as_slice() {
+                [t] => {
+                    t.clone()
+                }
+                x => {
+                    let q : Vec<Token> = x.to_vec().iter().map(eliminate_singleton_trees).collect();
+                    Token::Tree(q)
+                }
+            }
+        }
+        _ => token.clone()
+    }
+}
+
 fn main() {
-    let mut tokenizer = Tokenizer::new("fn fib(n) { 0 => 0; 1 => 1; n => fib(n - 1) + fib(n - 2)}");
+    // let mut tokenizer = Tokenizer::new("fn fib(n) { 0 => 0; 1 => 1; n => fib(n - 1) + fib(n - 2)}");
     // let mut tokenizer = Tokenizer::new("2 + 3 + 4");
+    let mut tokenizer = Tokenizer::new("
+    val x = 2 + 3
+    val y = x + 3
+    val z = y + 2
+    fn do-stuff(n) {
+        n + 2
+    }
+
+    do-stuff(z)
+    ");
+    // let mut tokenizer = Tokenizer::new("2 + 2");
 
 
-    let result = tokenizer.parse_all();
-    let mut deque: VecDeque<Token> = result.into();
-    println!("{:#?}", enforest(&mut deque, Box::new(identity), 0, vec!()));
+    let result : VecDeque<Token> = tokenizer.parse_all().into();
+    println!("{:?}", result);
+    println!("{:#?}", parse(result, HashMap::new()));
 }
