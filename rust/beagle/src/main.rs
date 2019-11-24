@@ -16,6 +16,8 @@ use std::collections::HashMap;
 // Things are workingish. But how does this extend to macros?
 // Maybe I can make a fake macro?
 
+// All the cloning and converting is bad. Should learn rust better and do better.
+
 
 #[derive(Debug, Clone)]
 enum Token {
