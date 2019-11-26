@@ -30,7 +30,6 @@ enum Token {
     Tree(Vec<Token>),
     Phrase(Box<Token>, Box<Token>, Box<Token>, Box<Token>),
     Call(Box<Token>, Vec<Token>),
-    Binary(Box<Token>, Box<Token>, Box<Token>),
     Val(Box<Token>, Box<Token>),
 }
 
