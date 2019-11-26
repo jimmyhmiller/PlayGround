@@ -177,14 +177,13 @@ enum Expr {
 }
 
 
-fn read(mut tokens: VecDeque<Token>) -> Expr {
-    // Maybe I could do this all with a flat vector and a vector of lengths?
-    // That might be faster
+fn read(tokens: VecDeque<Token>) -> Expr {
+    // Is there a faster way to do this?
     let mut exprs_stack = Vec::with_capacity(tokens.len()); // arbitrary
     let mut current = Vec::with_capacity(10); // arbitrary
 
-    while !tokens.is_empty() {
-        match tokens.pop_front().unwrap() {
+    for token in tokens {
+        match token {
              Token::Atom(s) if s == "True" => current.push(Expr::Bool(true)),
              Token::Atom(s) if s == "False" => current.push(Expr::Bool(false)),
              Token::Atom(s) => current.push(Expr::Atom(s)),
