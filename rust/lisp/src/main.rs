@@ -161,7 +161,6 @@ impl Tokenizer<'_> {
 }
 
 
-// Need to change this to allow strings
 fn tokenize(text: String) -> VecDeque<Token> {
     Tokenizer::new(&text).read()
 }
@@ -214,6 +213,8 @@ fn s_expr_len(x : Expr) -> usize {
         0
     }
 }
+
+// Need to do error handling and yet still be fast
 
 fn main() {
     let expr = format!("({:})", "(+ 1 1)".repeat(1000000)).to_string();
