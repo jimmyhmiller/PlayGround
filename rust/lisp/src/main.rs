@@ -1,24 +1,24 @@
 #[macro_use]
 extern crate lazy_static;
 
-use std::str::from_utf8;
 use std::collections::VecDeque;
 use std::time::{Instant};
 
 #[derive(Debug, PartialEq)]
-enum Token {
+enum Token<'a> {
     OpenParen,
     CloseParen,
-    String(String),
-    Integer(String),
-    Float(String),
-    Atom(String),
+    String(&'a str),
+    Integer(&'a str),
+    Float(&'a str),
+    Atom(&'a str),
 }
 
 
 #[derive(Debug)]
 struct Tokenizer<'a> {
-    input: &'a [u8],
+    input: &'a str,
+    input_bytes: &'a [u8],
     position: usize,
     temp : Vec<u8>,
 }
@@ -37,10 +37,11 @@ lazy_static! {
 }
 
 
-impl Tokenizer<'_> {
+impl<'a> Tokenizer<'a> {
     fn new(input: &str) -> Tokenizer {
         Tokenizer {
-            input: input.as_bytes(),
+            input: input,
+            input_bytes: input.as_bytes(),
             position: 0,
             // This is so we only have to allocate once
             // Seems to make things faster
@@ -52,20 +53,14 @@ impl Tokenizer<'_> {
         self.position += 1;
     }
 
-    fn consume_to_temp(&mut self) -> () {
-        let c = self.input[self.position];
-        self.position += 1;
-        self.temp.push(c)
-    }
-
-    fn temp_to_string(&mut self) -> String {
-        let string = from_utf8(&self.temp).unwrap().to_string();
-        self.temp.clear();
-        string
-    }
+    // fn consume_to_temp(&mut self) -> () {
+    //     let c = self.input[self.position];
+    //     self.position += 1;
+    //     self.temp.push(c)
+    // }
 
     fn current_byte(&self) -> u8 {
-        self.input[self.position]
+        self.input_bytes[self.position]
     }
 
     fn is_space(&self) -> bool {
@@ -82,13 +77,14 @@ impl Tokenizer<'_> {
         self.current_byte() == *DOUBLE_QUOTE
     }
 
-    fn parse_string(&mut self) -> Token {
+    fn parse_string(&mut self) -> Token<'a> {
         self.consume(); // skip open quote
+        let start = self.position;
         while !self.at_end() && !self.is_quote() {
-            self.consume_to_temp()
+            self.consume();
         }
         self.consume(); // skip closing quote
-        Token::String(self.temp_to_string())
+        Token::String(&self.input[start .. self.position])
     }
 
     fn is_open_paren(&self) -> bool {
@@ -109,30 +105,32 @@ impl Tokenizer<'_> {
         self.current_byte() >= *ZERO && self.current_byte() <= *NINE
     }
 
-    fn parse_number(&mut self) -> Token {
+    fn parse_number(&mut self) -> Token<'a>{
         let mut is_float = false;
+        let start = self.position;
         while self.is_valid_number_char() || self.current_byte() == *PERIOD {
             // Need to handle making sure there is only one "."
             if self.current_byte() == *PERIOD {
                 is_float = true;
             }
-            self.consume_to_temp();
+            self.consume();
         }
         if is_float {
-            Token::Float(self.temp_to_string())
+            Token::Float(&self.input[start .. self.position])
         } else {
-            Token::Integer(self.temp_to_string())
+            Token::Integer(&self.input[start .. self.position])
         }
     }
 
-    fn parse_identifier(&mut self) -> Token {
+    fn parse_identifier(&mut self) -> Token<'a> {
+        let start = self.position;
         while !self.is_space() && !self.is_open_paren() && !self.is_close_paren() {
-            self.consume_to_temp()
+            self.consume()
         }
-        Token::Atom(self.temp_to_string())
+        Token::Atom(&self.input[start .. self.position])
     }
 
-    fn parse_single(&mut self) -> Token {
+    fn parse_single(&mut self) -> Token<'a> {
         self.consume_spaces();
         let result = if self.is_open_paren() {
             self.consume();
@@ -150,7 +148,7 @@ impl Tokenizer<'_> {
         result
     }
 
-    fn read(&mut self) -> VecDeque<Token> {
+    fn read(&mut self) -> VecDeque<Token<'a>> {
         let mut tokens = VecDeque::new();
         while !self.at_end() {
             tokens.push_back(self.parse_single());
@@ -161,16 +159,16 @@ impl Tokenizer<'_> {
 }
 
 
-fn tokenize(text: String) -> VecDeque<Token> {
-    Tokenizer::new(&text).read()
+fn tokenize<'a>(text: &'a str) -> VecDeque<Token<'a>> {
+    Tokenizer::new(text).read()
 }
 
 #[derive(Debug)]
-enum Expr {
-    SExpr(Vec<Expr>),
-    Atom(String),
+enum Expr<'a> {
+    SExpr(Vec<Expr<'a>>),
+    Atom(&'a str),
     Bool(bool),
-    String(String),
+    String(&'a str),
     Integer(i64),
     Float(f64)
 }
@@ -178,6 +176,9 @@ enum Expr {
 
 fn read(tokens: VecDeque<Token>) -> Expr {
     // Is there a faster way to do this?
+    // Need to probably refer to slices of things
+    // Like I ended up doing above. But not 100% sure how to do that
+    // given the SExpr structure
     let mut exprs_stack = Vec::with_capacity(tokens.len()); // arbitrary
     let mut current = Vec::with_capacity(10); // arbitrary
 
@@ -217,9 +218,9 @@ fn s_expr_len(x : Expr) -> usize {
 // Need to do error handling and yet still be fast
 
 fn main() {
-    let expr = format!("({:})", "(+ 1 1)".repeat(1000000)).to_string();
+    let expr = format!("({:})", "(+ 1 1)".repeat(1000000));
     let start = Instant::now();
-    let read_expr = read(tokenize(expr));
+    let read_expr = read(tokenize(&expr));
     let duration = start.elapsed();
     println!("{:?}", s_expr_len(read_expr));
     println!("{:?}", duration);
