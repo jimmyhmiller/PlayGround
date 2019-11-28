@@ -208,8 +208,22 @@ fn s_expr_len(x: Expr) -> usize {
     }
 }
 
+#[allow(dead_code)]
+fn parse_file(filename: String) -> () {
+    let file = File::open(filename).unwrap();
+    let mut expr = String::new();
+    let mut buf_reader = BufReader::new(file);
+    buf_reader.read_to_string(&mut expr).unwrap();
+
+    let start = Instant::now();
+    let read_expr = read(tokenize(&expr));
+    let duration = start.elapsed();
+    println!("{:?}", s_expr_len(read_expr));
+    println!("{:?}", duration);
+}
+
 #[derive(Debug, Clone)]
-enum Instructions<'a> {
+enum Instructions {
     ConstI32(i32),
     ConstI64(i64),
     Load,
@@ -219,7 +233,7 @@ enum Instructions<'a> {
     LocalGet(usize),
     LocalSet(usize),
     Call(usize),
-    Block(&'a Vec<Instructions<'a>>),
+    Block(Vec<Instructions>),
     Br(usize),
     BrIf(usize),
 }
@@ -230,10 +244,10 @@ enum Value {
     I64(i64),
 }
 #[derive(Debug, Clone)]
-struct Function<'a> {
+struct Function {
     number_of_params: usize,
     does_return: bool,
-    code: &'a Vec<Instructions<'a>>,
+    code: Vec<Instructions>,
 }
 
 
@@ -261,10 +275,16 @@ impl ops::Mul<Value> for Value {
     }
 }
 
+enum Outcome {
+    NextInstruction,
+    CallFunction(usize),
+    Br(usize),
+}
+
 struct MachineState<'a> {
     stack: &'a mut Vec<Value>,
     heap: &'a mut Vec<Value>,
-    functions: Vec<Function<'a>>,
+    functions: &'a Vec<Function>,
     label_stack: &'a mut Vec<Value>,
 }
 
@@ -272,7 +292,7 @@ impl<'a> MachineState<'a> {
     fn new(
         stack: &'a mut Vec<Value>,
         heap: &'a mut Vec<Value>,
-        functions: Vec<Function<'a>>,
+        functions: &'a Vec<Function>,
         label_stack: &'a mut Vec<Value>,
     ) -> MachineState<'a> {
         MachineState {
@@ -287,6 +307,10 @@ impl<'a> MachineState<'a> {
         self.functions[i].number_of_params
     }
 
+    fn get_function_code(& self, i: usize) -> & Vec<Instructions> {
+        & self.functions[i].code
+    }
+
     fn get_function_does_return(& self, i: usize) -> bool {
         self.functions[i].does_return
     }
@@ -298,80 +322,111 @@ impl<'a> MachineState<'a> {
     // Really not sure how that would work. Will try it out.
     // Need to also make locals be better.
 
-    fn run(&mut self, instructions: Vec<Instructions>, locals: &mut Vec<Value>, depth: usize) -> () {
-        let mut instruction_pointer = 0;
-        while instruction_pointer < instructions.len() {
-            println!("{:?}", instructions[instruction_pointer]);
-            match instructions[instruction_pointer] {
-                Instructions::ConstI32(i) => self.stack.push(Value::I32(i)),
-                Instructions::ConstI64(i) => self.stack.push(Value::I64(i)),
-                Instructions::Load => {
-                    if let Value::I32(addr) = self.stack.pop().unwrap() {
-                        self.stack.push(*self.heap.get(addr as usize).unwrap())
-                    }
+    fn step(&mut self, instruction : & Instructions, locals: &mut Vec<Value>, depth: usize) -> Outcome {
+        match instruction {
+            Instructions::ConstI32(i) => {
+                self.stack.push(Value::I32(*i));
+                Outcome::NextInstruction
+            },
+            Instructions::ConstI64(i) => {
+                self.stack.push(Value::I64(*i));
+                Outcome::NextInstruction
+            },
+            Instructions::Load => {
+                if let Value::I32(addr) = self.stack.pop().unwrap() {
+                    self.stack.push(*self.heap.get(addr as usize).unwrap())
                 }
-                Instructions::Store => {
-                    let val = self.stack.pop().unwrap();
-                    let addr_value = self.stack.pop().unwrap();
-                    if let Value::I32(addr) = addr_value {
-                        self.heap[addr as usize] = val;
-                        self.stack.push(addr_value);
-                    }
+                Outcome::NextInstruction
+            }
+            Instructions::Store => {
+                let val = self.stack.pop().unwrap();
+                let addr_value = self.stack.pop().unwrap();
+                if let Value::I32(addr) = addr_value {
+                    self.heap[addr as usize] = val;
+                    self.stack.push(addr_value);
                 }
-                Instructions::Add => {
-                    let x = self.stack.pop().unwrap();
-                    let y = self.stack.pop().unwrap();
-                    self.stack.push(x + y);
-                }
-                Instructions::Mul => {
-                    let x = self.stack.pop().unwrap();
-                    let y = self.stack.pop().unwrap();
-                    self.stack.push(x * y);
-                }
-                Instructions::LocalGet(i) => {
-                    self.stack.push(locals[i])
-                }
-                Instructions::LocalSet(i) => {
-                    locals[i] = self.stack.pop().unwrap();
-                }
-                Instructions::Call(i) => {
-                    // This isn't good, fix this to make it faster and not allocate.
+                Outcome::NextInstruction
+            }
+            Instructions::Add => {
+                let x = self.stack.pop().unwrap();
+                let y = self.stack.pop().unwrap();
+                self.stack.push(x + y);
+                Outcome::NextInstruction
+            }
+            Instructions::Mul => {
+                let x = self.stack.pop().unwrap();
+                let y = self.stack.pop().unwrap();
+                self.stack.push(x * y);
+                Outcome::NextInstruction
+            }
+            Instructions::LocalGet(i) => {
+                self.stack.push(locals[*i]);
+                Outcome::NextInstruction
+            }
+            Instructions::LocalSet(i) => {
+                locals[*i] = self.stack.pop().unwrap();
+                Outcome::NextInstruction
+            }
+            Instructions::Call(i) => {
+                Outcome::CallFunction(*i)
+            }
+            Instructions::Br(i) => {
+                Outcome::Br(*i)
+            }
+            Instructions::BrIf(i) => {
+                Outcome::NextInstruction
+            }
+            Instructions::Block(code) => {
+                Outcome::NextInstruction
+            }
+        }
+    }
+
+    fn run(&mut self, instructions : & Vec<Instructions>, locals: &mut Vec<Value>, depth: usize) {
+        let mut position = 0;
+        let mut position_stack : Vec<usize> = Vec::with_capacity(100); // arbitrary
+        let mut instructions_stack : Vec<& Vec<Instructions>> = Vec::with_capacity(10); // arbitrary
+        let mut current_instructions = instructions;
+        let mut i = 0;
+        while position <= current_instructions.len() {
+
+            if position == current_instructions.len() && !instructions_stack.is_empty() {
+                current_instructions = instructions_stack.pop().unwrap();
+                position = position_stack.pop().unwrap();
+            } else if position == current_instructions.len() {
+                break;
+            }
+            println!("{:?} {:?} {:?}", &current_instructions[position], position,current_instructions.len());
+
+            match self.step(&current_instructions[position], locals, depth) {
+                Outcome::NextInstruction => {
+                    position += 1;
+                },
+                Outcome::CallFunction(i) => {
+                    position_stack.push(position + 1);
+                    instructions_stack.push(current_instructions);
+                    position = 0;
+                    current_instructions = &self.functions[i].code;
                     let function_params_number = self.get_function_params(i);
                     let mut args = Vec::with_capacity(function_params_number);
                     for _ in 0..function_params_number {
                         args.push(self.stack.pop().unwrap())
                     }
                     args.reverse();
-                    self.run(self.functions.get(i).unwrap().code.to_vec(), &mut args, depth);
-                    if self.get_function_does_return(i) {
-                        let val = self.stack.pop().unwrap();
-                        self.stack.push(val);
+                    *locals = args
+                }
+                Outcome::Br(mut i) => {
+                    while i != 0 {
+                        current_instructions = instructions_stack.pop().unwrap();
+                        position_stack.pop();
+                        i -= 1;
                     }
                 }
-                Instructions::Br(i) => {
-                }
-                Instructions::BrIf(i) => {
-                }
-                Instructions::Block(code) => {
-                }
             }
-            instruction_pointer += 1;
         }
     }
 
-    #[allow(dead_code)]
-    fn parse_file(filename: String) -> () {
-        let file = File::open(filename).unwrap();
-        let mut expr = String::new();
-        let mut buf_reader = BufReader::new(file);
-        buf_reader.read_to_string(&mut expr).unwrap();
 
-        let start = Instant::now();
-        let read_expr = read(tokenize(&expr));
-        let duration = start.elapsed();
-        println!("{:?}", s_expr_len(read_expr));
-        println!("{:?}", duration);
-    }
 }
 // Need to do error handling and yet still be fast
 
@@ -382,7 +437,7 @@ fn main() {
     let update_position = Function {
         number_of_params: 3,
         does_return: true,
-        code: &vec![
+        code: vec![
             Instructions::LocalGet(0),
             Instructions::LocalGet(1),
             Instructions::LocalGet(2),
@@ -401,9 +456,9 @@ fn main() {
         Instructions::Call(0),
         Instructions::Store,
     ];
-    let mut machine = MachineState::new(&mut stack, &mut heap, functions, &mut label_stack);
+    let mut machine = MachineState::new(&mut stack, &mut heap, & functions, &mut label_stack);
     let mut locals = vec!();
-    machine.run(instructions, &mut locals, 0);
+    machine.run(&instructions, &mut locals, 0);
     let val = stack.pop();
     if let Some(Value::I32(addr)) = val {
         println!("{:?}", heap[addr as usize]);
