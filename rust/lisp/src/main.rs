@@ -1,14 +1,12 @@
 #[macro_use]
 extern crate lazy_static;
 
-use std::env;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::Read;
 use std::ops;
 use std::process::abort;
 use std::time::Instant;
-use std::collections::VecDeque;
 
 #[derive(Debug)]
 enum Token<'a> {
@@ -230,15 +228,28 @@ enum Instructions {
     Store,
     Add,
     Mul,
+    Sub,
+    LT,
+    GT,
+    GTE,
+    LTE,
     LocalGet(usize),
     LocalSet(usize),
     Call(usize),
     Block(Vec<Instructions>),
+    Loop(Vec<Instructions>),
     Br(usize),
     BrIf(usize),
+    I32Eq,
+    // I actually don't know how to properly implement this.
+    // I think I need the concept of a frame, which I do not current have.
+    // Maybe my instructions are frames? But if so, I don't know if blocks
+    // should be using them or what. I need to look into this more.
+    Return,
+    End,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Value {
     I32(i32),
     I64(i64),
@@ -275,31 +286,57 @@ impl ops::Mul<Value> for Value {
     }
 }
 
-enum Outcome {
+impl ops::Sub<Value> for Value {
+    type Output = Value;
+
+    fn sub(self, rhs: Value) -> Value {
+        match (self, rhs) {
+            (Value::I32(x), Value::I32(y)) => Value::I32(x - y),
+            (Value::I64(x), Value::I64(y)) => Value::I64(x - y),
+            _ => abort(),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Outcome<'a> {
     NextInstruction,
     CallFunction(usize),
     Br(usize),
+    Block(&'a Vec<Instructions>),
+    Loop(&'a Vec<Instructions>),
+    Return,
+    End,
 }
 
 struct MachineState<'a> {
     stack: &'a mut Vec<Value>,
     heap: &'a mut Vec<Value>,
     functions: &'a Vec<Function>,
-    label_stack: &'a mut Vec<Value>,
 }
+
+// Here is what I'm thinking.
+// I need a frame stack.
+// The frame stack will tell me how many objects there are on the local stack.
+// I need a local stack.
+// On the local stack I add all the values.
+// Then I can also keep a local_stack offset.
+// That way when I call LocalGet(0) that get translated to LocalGet(offset + 0 - number_of_params)
+// Then I am not allocating any vectors during execution.
+// When a frame is done. I pop off the value stack n times.
+// And I set the offset to offset - number of params
+// I could possibly not need the offset? Not 100% sure.
 
 impl<'a> MachineState<'a> {
     fn new(
         stack: &'a mut Vec<Value>,
         heap: &'a mut Vec<Value>,
         functions: &'a Vec<Function>,
-        label_stack: &'a mut Vec<Value>,
     ) -> MachineState<'a> {
         MachineState {
             stack: stack,
             heap: heap,
             functions: functions,
-            label_stack: label_stack,
         }
     }
 
@@ -307,13 +344,6 @@ impl<'a> MachineState<'a> {
         self.functions[i].number_of_params
     }
 
-    fn get_function_code(& self, i: usize) -> & Vec<Instructions> {
-        & self.functions[i].code
-    }
-
-    fn get_function_does_return(& self, i: usize) -> bool {
-        self.functions[i].does_return
-    }
 
     // Need to make run return an outcome. Make it single step.
     // Make instructions part of the machine;
@@ -322,7 +352,19 @@ impl<'a> MachineState<'a> {
     // Really not sure how that would work. Will try it out.
     // Need to also make locals be better.
 
-    fn step(&mut self, instruction : & Instructions, locals: &mut Vec<Value>, depth: usize) -> Outcome {
+    fn step(&mut self, instruction : &'a Instructions, locals: Vec<Value>, indent : usize) -> Outcome<'a> {
+        let mut local_locals = locals.to_vec(); //ugly
+
+        // match instruction {
+        //     Instructions::Block(_) => {},
+        //     Instructions::LocalGet(x) => println!("{:}Arg {:?}", "    ".repeat(indent), local_locals[*x]),
+        //     Instructions::GT => println!("{:}{:?} > {:?}", "    ".repeat(indent),self.stack[self.stack.len() - 1], self.stack[self.stack.len() - 2]),
+        //     Instructions::Add => println!("{:}{:?} + {:?}","    ".repeat(indent), self.stack[self.stack.len() - 1], self.stack[self.stack.len() - 2]),
+        //     Instructions::Call(_) => println!("{:}fib({:?})","    ".repeat(indent), self.stack[self.stack.len() - 1]),
+        //     // x => println!("Step: {:} {:?} {:?} {:?}", "    ".repeat(indent), x, self.stack, locals),
+        //     _ => {}
+        // }
+
         match instruction {
             Instructions::ConstI32(i) => {
                 self.stack.push(Value::I32(*i));
@@ -350,6 +392,7 @@ impl<'a> MachineState<'a> {
             Instructions::Add => {
                 let x = self.stack.pop().unwrap();
                 let y = self.stack.pop().unwrap();
+                // println!("Add: {:?} {:?}", x, y);
                 self.stack.push(x + y);
                 Outcome::NextInstruction
             }
@@ -359,12 +402,62 @@ impl<'a> MachineState<'a> {
                 self.stack.push(x * y);
                 Outcome::NextInstruction
             }
+            Instructions::Sub => {
+                let x = self.stack.pop().unwrap();
+                let y = self.stack.pop().unwrap();
+                // println!("Sub: {:?} {:?}", x, y);
+                self.stack.push(x - y);
+                Outcome::NextInstruction
+            }
+            Instructions::GT => {
+                let x = self.stack.pop().unwrap();
+                let y = self.stack.pop().unwrap();
+                // Make these values
+                if x > y {
+                    self.stack.push(Value::I32(1));
+                } else {
+                    self.stack.push(Value::I32(0));
+                }
+
+                Outcome::NextInstruction
+            }
+            Instructions::LT => {
+                let x = self.stack.pop().unwrap();
+                let y = self.stack.pop().unwrap();
+                if x < y {
+                    self.stack.push(Value::I32(1));
+                } else {
+                    self.stack.push(Value::I32(0));
+                }
+                Outcome::NextInstruction
+            }
+            Instructions::GTE => {
+                let x = self.stack.pop().unwrap();
+                let y = self.stack.pop().unwrap();
+                if x >= y {
+                    self.stack.push(Value::I32(1));
+                } else {
+                    self.stack.push(Value::I32(0));
+                }
+                Outcome::NextInstruction
+            }
+            Instructions::LTE => {
+                let x = self.stack.pop().unwrap();
+                let y = self.stack.pop().unwrap();
+                if x <= y {
+                    self.stack.push(Value::I32(1));
+                } else {
+                    self.stack.push(Value::I32(0));
+                }
+                Outcome::NextInstruction
+            }
             Instructions::LocalGet(i) => {
-                self.stack.push(locals[*i]);
+                // println!("Arg: {:?}", local_locals[*i]);
+                self.stack.push(local_locals[*i]);
                 Outcome::NextInstruction
             }
             Instructions::LocalSet(i) => {
-                locals[*i] = self.stack.pop().unwrap();
+                local_locals[*i] = self.stack.pop().unwrap();
                 Outcome::NextInstruction
             }
             Instructions::Call(i) => {
@@ -374,35 +467,82 @@ impl<'a> MachineState<'a> {
                 Outcome::Br(*i)
             }
             Instructions::BrIf(i) => {
-                Outcome::NextInstruction
+                let val = self.stack.pop().unwrap();
+                // println!("BrIf: {:?}", val);
+                if let Value::I32(x) = val {
+                    if x == 0 {
+                        Outcome::NextInstruction
+                    } else {
+                        Outcome::Br(*i)
+                    }
+                } else {
+                    Outcome::NextInstruction
+                }
             }
             Instructions::Block(code) => {
+                Outcome::Block(& code)
+            }
+            // This might not be the best way to do a loop.
+            // Seems a little weird that we would keep popping from the
+            // stack and then putting this look back on.
+            // Maybe some optimizaiton here.
+            Instructions::Loop(code) => {
+                Outcome::Loop(& code)
+            }
+            Instructions::I32Eq => {
+                let val1 = self.stack.pop().unwrap();
+                let val2 = self.stack.pop().unwrap();
+
+                println!("Eq: {:?} {:?}", val1, val2);
+                // should check i32
+                if val1 == val2 {
+                    self.stack.push(Value::I32(0));
+                } else {
+                    self.stack.push(Value::I32(1));
+                }
+
                 Outcome::NextInstruction
+            }
+            Instructions::Return => {
+                Outcome::Return
+            }
+            Instructions::End => {
+                Outcome::End
             }
         }
     }
 
-    fn run(&mut self, instructions : & Vec<Instructions>, locals: &mut Vec<Value>, depth: usize) {
+
+    // This is all incredibly slow and incredibly ugly.
+
+    fn run(&mut self, instructions : &'a std::vec::Vec<Instructions>, mut locals : Vec<Value>) {
         let mut position = 0;
+        let mut indent = 0;
         let mut position_stack : Vec<usize> = Vec::with_capacity(100); // arbitrary
         let mut instructions_stack : Vec<& Vec<Instructions>> = Vec::with_capacity(10); // arbitrary
+        let mut locals_stack : Vec<Vec<Value>> = Vec::with_capacity(100); // arbitrary;
+        locals_stack.push(locals.to_vec());
         let mut current_instructions = instructions;
-        let mut i = 0;
-        while position <= current_instructions.len() {
+        while position < current_instructions.len() {
 
-            if position == current_instructions.len() && !instructions_stack.is_empty() {
-                current_instructions = instructions_stack.pop().unwrap();
-                position = position_stack.pop().unwrap();
-            } else if position == current_instructions.len() {
-                break;
+            // Temp
+            if self.stack.len() > 0 {
+                if let Some(Value::I32(x)) = self.stack.get(self.stack.len() - 1) {
+                    if x < &-1 {
+                        println!("Negative!");
+                        break;
+                    }
+                }
             }
-            println!("{:?} {:?} {:?}", &current_instructions[position], position,current_instructions.len());
+            // println!("{:?} {:?}", &current_instructions[position], if self.stack.len() > 0 { self.stack[self.stack.len() - 1] } else { Value::I32(123213)});
 
-            match self.step(&current_instructions[position], locals, depth) {
+            match self.step(&current_instructions[position], locals.to_vec(), indent) {
                 Outcome::NextInstruction => {
                     position += 1;
                 },
                 Outcome::CallFunction(i) => {
+                    indent += 1;
+                    // Make this better and ideally not allocate.
                     position_stack.push(position + 1);
                     instructions_stack.push(current_instructions);
                     position = 0;
@@ -413,14 +553,53 @@ impl<'a> MachineState<'a> {
                         args.push(self.stack.pop().unwrap())
                     }
                     args.reverse();
-                    *locals = args
+                    // println!("args: {:?}", args);
+                    locals_stack.push(locals);
+                    locals = args;
+                    // Need to deal with returns...
                 }
                 Outcome::Br(mut i) => {
+
+                    // Might not do the right thing if in a function call?
+                    // Not sure what should happen then, or if that is invalid.
+
+
+                    // We should always do this once. And then if i > 0 we will do it
+                    // i additional times.
+                    current_instructions = instructions_stack.pop().unwrap();
+                    position = position_stack.pop().unwrap();
                     while i != 0 {
                         current_instructions = instructions_stack.pop().unwrap();
-                        position_stack.pop();
+                        position = position_stack.pop().unwrap();
                         i -= 1;
                     }
+                }
+                Outcome::Block(instructions) => {
+                    position_stack.push(position + 1);
+                    instructions_stack.push(current_instructions);
+                    position = 0;
+                    current_instructions = &instructions
+                }
+                Outcome::Loop(instructions) => {
+                    // For a loop we don't want to increment the position counter
+                    // That way the loop instruction is the thing executed again.
+                    // Loop is used with block so that the block contains the exit path.
+                    position_stack.push(position);
+                    instructions_stack.push(current_instructions);
+                    position = 0;
+                    current_instructions = &instructions
+                }
+                Outcome::Return => {
+                    // if { indent > 0 } { indent -= 1; }
+                    current_instructions = instructions_stack.pop().unwrap();
+                    position = position_stack.pop().unwrap();
+                    locals = locals_stack.pop().unwrap();
+                }
+                Outcome::End => {
+                    // if { indent > 0 } { indent -= 1; }
+                    current_instructions = instructions_stack.pop().unwrap();
+                    position = position_stack.pop().unwrap();
+                    // This is a block. No need to get rid of locals
                 }
             }
         }
@@ -432,36 +611,94 @@ impl<'a> MachineState<'a> {
 
 fn main() {
     let mut stack = Vec::with_capacity(100); // arbitrary
-    let mut label_stack = Vec::with_capacity(100); // arbitrary
     let mut heap = vec![Value::I32(22), Value::I32(42)]; // arbitrary
     let update_position = Function {
         number_of_params: 3,
         does_return: true,
         code: vec![
-            Instructions::LocalGet(0),
-            Instructions::LocalGet(1),
-            Instructions::LocalGet(2),
-            Instructions::Mul,
-            Instructions::Add,
+            Instructions::Block(vec![
+                Instructions::LocalGet(0),
+                Instructions::LocalGet(1),
+                Instructions::LocalGet(2),
+                Instructions::Mul,
+                Instructions::Add,
+            ])
         ],
     };
-    let functions = vec!(update_position); // arbitrary
+    let loop_around = Function {
+        number_of_params: 1,
+        does_return: true,
+        code: vec![
+            Instructions::Block(vec![
+                Instructions::Loop(vec![
+                    Instructions::LocalGet(0),
+                    Instructions::ConstI32(-1),
+                    Instructions::Add,
+                    Instructions::LocalSet(0),
+                    Instructions::LocalGet(0),
+                    Instructions::ConstI32(0),
+                    Instructions::I32Eq,
+                    Instructions::BrIf(1),
+                    Instructions::Br(0),
+                    Instructions::End,
+                ]),
+            Instructions::End])
+        ]
+    };
+    let recursive_fibonacci = Function {
+        number_of_params: 1,
+        does_return: true, // probably don't need this?
+        code: vec![
+            Instructions::Block(vec![
+                Instructions::Block(vec![
+                    Instructions::LocalGet(0),
+                    Instructions::ConstI32(2),
+                    Instructions::GT,
+                    Instructions::BrIf(0),
+
+                    Instructions::ConstI32(1),
+                    Instructions::LocalGet(0),
+                    Instructions::Sub,
+                    Instructions::Call(2),
+                    Instructions::ConstI32(2),
+                    Instructions::LocalGet(0),
+                    Instructions::Sub,
+                    Instructions::Call(2),
+                    Instructions::Add,
+                    Instructions::Br(1),
+                    Instructions::End,
+                ]),
+            Instructions::ConstI32(1),
+            Instructions::End,
+            ]),
+        Instructions::Return,
+        ]
+    };
+    let functions = vec!(update_position, loop_around, recursive_fibonacci); // arbitrary
     let instructions = vec![
+        // Instructions::ConstI32(0), // This is here for the final store call
+        // Instructions::ConstI32(0),
+        // Instructions::Load,
+        // Instructions::ConstI32(1),
+        // Instructions::Load,
+        // Instructions::ConstI32(2),
+        // Instructions::Call(0),
+        // Instructions::Store,
         Instructions::ConstI32(0),
-        Instructions::ConstI32(0),
-        Instructions::Load,
-        Instructions::ConstI32(1),
-        Instructions::Load,
-        Instructions::ConstI32(2),
-        Instructions::Call(0),
+        Instructions::ConstI32(8),
+        Instructions::Call(2),
         Instructions::Store,
     ];
-    let mut machine = MachineState::new(&mut stack, &mut heap, & functions, &mut label_stack);
-    let mut locals = vec!();
-    machine.run(&instructions, &mut locals, 0);
+    let mut machine = MachineState::new(&mut stack, &mut heap, & functions);
+    let locals = vec!();
+    machine.run(&instructions, locals);
     let val = stack.pop();
     if let Some(Value::I32(addr)) = val {
-        println!("{:?}", heap[addr as usize]);
+        if let Some(value) = heap.get(addr as usize) {
+            println!("{:?}", value);
+        } else {
+            println!("no value at {:?} on the heap {:?}", addr, heap);
+        }
     } else {
         println!("{:?}", val);
     }
