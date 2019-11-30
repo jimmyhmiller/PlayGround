@@ -256,6 +256,7 @@ enum Value {
 }
 #[derive(Debug, Clone)]
 struct Function {
+    name: String,
     number_of_params: usize,
     does_return: bool,
     code: Vec<Instructions>,
@@ -309,39 +310,65 @@ enum Outcome<'a> {
     End,
 }
 
+struct Frame<'a> {
+    locals_offset: usize,
+    number_of_locals: usize,
+    fn_name: &'a str,
+}
+
+impl<'a> Frame<'a> {
+    fn new(locals_offset: usize, number_of_locals: usize, fn_name: &'a str) -> Frame<'a> {
+        Frame {
+            locals_offset: locals_offset,
+            number_of_locals: number_of_locals,
+            fn_name: fn_name,
+        }
+    }
+
+    fn get_local_position(& self, i : usize) -> usize {
+        // Locals go backwards onto value stack.
+        // So if there are there locals it is
+        // [2 1 0]
+        // So in this case if we ask for 0 and our offset is 0
+        // 0 - 0 + 2 = 2
+        // if we asked for 2 it would be
+        // 0 - 2 + 2 = 0
+        self.locals_offset - i + (self.number_of_locals - 1)
+    }
+}
+
 struct MachineState<'a> {
     stack: &'a mut Vec<Value>,
     heap: &'a mut Vec<Value>,
     functions: &'a Vec<Function>,
+    locals_stack: &'a mut Vec<Value>,
+    frame_stack: &'a mut Vec<Frame<'a>>,
 }
 
-// Here is what I'm thinking.
-// I need a frame stack.
-// The frame stack will tell me how many objects there are on the local stack.
-// I need a local stack.
-// On the local stack I add all the values.
-// Then I can also keep a local_stack offset.
-// That way when I call LocalGet(0) that get translated to LocalGet(offset + 0 - number_of_params)
-// Then I am not allocating any vectors during execution.
-// When a frame is done. I pop off the value stack n times.
-// And I set the offset to offset - number of params
-// I could possibly not need the offset? Not 100% sure.
+// We now need to do a few things.
+// Implement if as suguar.
+// Implement other operators.
+// Try to hook this up to a real web assembly code base.
+// Implement some data structures.
+// Implement GC.
+// Think about how we could make this even faster.
+// Consider a JIT.
 
 impl<'a> MachineState<'a> {
     fn new(
         stack: &'a mut Vec<Value>,
         heap: &'a mut Vec<Value>,
         functions: &'a Vec<Function>,
+        locals_stack: &'a mut Vec<Value>,
+        frame_stack : &'a mut Vec<Frame<'a>>,
     ) -> MachineState<'a> {
         MachineState {
             stack: stack,
             heap: heap,
             functions: functions,
+            locals_stack: locals_stack,
+            frame_stack: frame_stack,
         }
-    }
-
-    fn get_function_params(& self, i: usize) -> usize {
-        self.functions[i].number_of_params
     }
 
 
@@ -352,8 +379,7 @@ impl<'a> MachineState<'a> {
     // Really not sure how that would work. Will try it out.
     // Need to also make locals be better.
 
-    fn step(&mut self, instruction : &'a Instructions, locals: Vec<Value>, indent : usize) -> Outcome<'a> {
-        let mut local_locals = locals.to_vec(); //ugly
+    fn step(&mut self, instruction : &'a Instructions) -> Outcome<'a> {
 
         // match instruction {
         //     Instructions::Block(_) => {},
@@ -364,6 +390,8 @@ impl<'a> MachineState<'a> {
         //     // x => println!("Step: {:} {:?} {:?} {:?}", "    ".repeat(indent), x, self.stack, locals),
         //     _ => {}
         // }
+
+        let frame = self.frame_stack.last().unwrap();
 
         match instruction {
             Instructions::ConstI32(i) => {
@@ -453,11 +481,12 @@ impl<'a> MachineState<'a> {
             }
             Instructions::LocalGet(i) => {
                 // println!("Arg: {:?}", local_locals[*i]);
-                self.stack.push(local_locals[*i]);
+
+                self.stack.push(self.locals_stack[frame.get_local_position(*i)]);
                 Outcome::NextInstruction
             }
             Instructions::LocalSet(i) => {
-                local_locals[*i] = self.stack.pop().unwrap();
+                self.locals_stack[frame.get_local_position(*i)] = self.stack.pop().unwrap();
                 Outcome::NextInstruction
             }
             Instructions::Call(i) => {
@@ -515,14 +544,13 @@ impl<'a> MachineState<'a> {
 
     // This is all incredibly slow and incredibly ugly.
 
-    fn run(&mut self, instructions : &'a std::vec::Vec<Instructions>, mut locals : Vec<Value>) {
+    fn run(&mut self, instructions : &'a std::vec::Vec<Instructions>, initial_frame : Frame<'a>) {
         let mut position = 0;
-        let mut indent = 0;
         let mut position_stack : Vec<usize> = Vec::with_capacity(100); // arbitrary
         let mut instructions_stack : Vec<& Vec<Instructions>> = Vec::with_capacity(10); // arbitrary
-        let mut locals_stack : Vec<Vec<Value>> = Vec::with_capacity(100); // arbitrary;
-        locals_stack.push(locals.to_vec());
         let mut current_instructions = instructions;
+
+        self.frame_stack.push(initial_frame);
         while position < current_instructions.len() {
 
             // Temp
@@ -536,27 +564,24 @@ impl<'a> MachineState<'a> {
             }
             // println!("{:?} {:?}", &current_instructions[position], if self.stack.len() > 0 { self.stack[self.stack.len() - 1] } else { Value::I32(123213)});
 
-            match self.step(&current_instructions[position], locals.to_vec(), indent) {
+            match self.step(&current_instructions[position]) {
                 Outcome::NextInstruction => {
                     position += 1;
                 },
                 Outcome::CallFunction(i) => {
-                    indent += 1;
                     // Make this better and ideally not allocate.
                     position_stack.push(position + 1);
                     instructions_stack.push(current_instructions);
                     position = 0;
                     current_instructions = &self.functions[i].code;
-                    let function_params_number = self.get_function_params(i);
-                    let mut args = Vec::with_capacity(function_params_number);
-                    for _ in 0..function_params_number {
-                        args.push(self.stack.pop().unwrap())
+                    self.frame_stack.push(Frame::new(
+                        self.locals_stack.len(),
+                        self.functions[i].number_of_params,
+                        &self.functions[i].name,
+                    ));
+                    for _ in 0..self.functions[i].number_of_params {
+                        self.locals_stack.push(self.stack.pop().unwrap());
                     }
-                    args.reverse();
-                    // println!("args: {:?}", args);
-                    locals_stack.push(locals);
-                    locals = args;
-                    // Need to deal with returns...
                 }
                 Outcome::Br(mut i) => {
 
@@ -593,13 +618,16 @@ impl<'a> MachineState<'a> {
                     // if { indent > 0 } { indent -= 1; }
                     current_instructions = instructions_stack.pop().unwrap();
                     position = position_stack.pop().unwrap();
-                    locals = locals_stack.pop().unwrap();
+                    let f = self.frame_stack.pop().unwrap();
+                    for _ in 0..f.number_of_locals {
+                        self.locals_stack.pop();
+                    }
                 }
                 Outcome::End => {
                     // if { indent > 0 } { indent -= 1; }
                     current_instructions = instructions_stack.pop().unwrap();
                     position = position_stack.pop().unwrap();
-                    // This is a block. No need to get rid of locals
+                    // This is a block. No need to get rid of frames
                 }
             }
         }
@@ -613,6 +641,7 @@ fn main() {
     let mut stack = Vec::with_capacity(100); // arbitrary
     let mut heap = vec![Value::I32(22), Value::I32(42)]; // arbitrary
     let update_position = Function {
+        name: "update_position".to_string(),
         number_of_params: 3,
         does_return: true,
         code: vec![
@@ -626,6 +655,7 @@ fn main() {
         ],
     };
     let loop_around = Function {
+        name: "loop_around".to_string(),
         number_of_params: 1,
         does_return: true,
         code: vec![
@@ -646,6 +676,7 @@ fn main() {
         ]
     };
     let recursive_fibonacci = Function {
+        name: "fib".to_string(),
         number_of_params: 1,
         does_return: true, // probably don't need this?
         code: vec![
@@ -676,22 +707,16 @@ fn main() {
     };
     let functions = vec!(update_position, loop_around, recursive_fibonacci); // arbitrary
     let instructions = vec![
-        // Instructions::ConstI32(0), // This is here for the final store call
-        // Instructions::ConstI32(0),
-        // Instructions::Load,
-        // Instructions::ConstI32(1),
-        // Instructions::Load,
-        // Instructions::ConstI32(2),
-        // Instructions::Call(0),
-        // Instructions::Store,
         Instructions::ConstI32(0),
-        Instructions::ConstI32(8),
+        Instructions::ConstI32(30),
         Instructions::Call(2),
         Instructions::Store,
     ];
-    let mut machine = MachineState::new(&mut stack, &mut heap, & functions);
-    let locals = vec!();
-    machine.run(&instructions, locals);
+    let mut locals_stack = Vec::with_capacity(20);
+    let mut frame_stack = Vec::with_capacity(20);
+    let mut machine = MachineState::new(&mut stack, &mut heap, & functions, &mut locals_stack, &mut frame_stack);
+    let frame = Frame::new(0, 0, "Main");
+    machine.run(&instructions, frame);
     let val = stack.pop();
     if let Some(Value::I32(addr)) = val {
         if let Some(value) = heap.get(addr as usize) {
