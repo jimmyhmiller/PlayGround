@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate lazy_static;
 
+use std::borrow::BorrowMut;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::Read;
@@ -227,10 +228,14 @@ enum Instructions {
     Load,
     Store,
     Add,
+    AddConst(Value),
     Mul,
     Sub,
+    SubConst(Value),
     LT,
+    LTConst(Value),
     GT,
+    GTConst(Value),
     GTE,
     LTE,
     LocalGet(usize),
@@ -240,11 +245,8 @@ enum Instructions {
     Loop(Vec<Instructions>),
     Br(usize),
     BrIf(usize),
+    If(Vec<Instructions>, Vec<Instructions>),
     I32Eq,
-    // I actually don't know how to properly implement this.
-    // I think I need the concept of a frame, which I do not current have.
-    // Maybe my instructions are frames? But if so, I don't know if blocks
-    // should be using them or what. I need to look into this more.
     Return,
     End,
 }
@@ -300,20 +302,18 @@ impl ops::Sub<Value> for Value {
 }
 
 #[derive(Debug)]
-enum Outcome<'a> {
+enum Outcome {
     NextInstruction,
-    CallFunction(usize),
+    Noop,
     Br(usize),
-    Block(&'a Vec<Instructions>),
-    Loop(&'a Vec<Instructions>),
-    Return,
-    End,
 }
 
+#[derive(Debug)]
 struct Frame<'a> {
     locals_offset: usize,
     number_of_locals: usize,
     fn_name: &'a str,
+    locals_position: usize,
 }
 
 impl<'a> Frame<'a> {
@@ -322,6 +322,8 @@ impl<'a> Frame<'a> {
             locals_offset: locals_offset,
             number_of_locals: number_of_locals,
             fn_name: fn_name,
+            locals_position: (if number_of_locals == 0 { 0 } else { number_of_locals - 1}) + locals_offset
+
         }
     }
 
@@ -333,7 +335,9 @@ impl<'a> Frame<'a> {
         // 0 - 0 + 2 = 2
         // if we asked for 2 it would be
         // 0 - 2 + 2 = 0
-        self.locals_offset - i + (self.number_of_locals - 1)
+
+
+        self.locals_position - i
     }
 }
 
@@ -341,9 +345,20 @@ struct MachineState<'a> {
     stack: &'a mut Vec<Value>,
     heap: &'a mut Vec<Value>,
     functions: &'a Vec<Function>,
+    compiled_functions: &'a Vec<Box<dyn Execute>>,
     locals_stack: &'a mut Vec<Value>,
     frame_stack: &'a mut Vec<Frame<'a>>,
+    position: usize,
+    position_stack: Vec<usize>,
+    instructions_stack: Vec<&'a Vec<Instructions>>,
+    current_instructions: &'a Vec<Instructions>,
 }
+
+const TRUE : i32 = 1;
+const FALSE : i32 = 0;
+
+const TRUE_V : Value = Value::I32(1);
+const FALSE_V : Value =  Value::I32(0);
 
 // We now need to do a few things.
 // Implement if as suguar.
@@ -359,15 +374,22 @@ impl<'a> MachineState<'a> {
         stack: &'a mut Vec<Value>,
         heap: &'a mut Vec<Value>,
         functions: &'a Vec<Function>,
+        compiled_functions: &'a Vec<Box<dyn Execute>>,
         locals_stack: &'a mut Vec<Value>,
         frame_stack : &'a mut Vec<Frame<'a>>,
+        instructions : &'a Vec<Instructions>,
     ) -> MachineState<'a> {
         MachineState {
             stack: stack,
             heap: heap,
             functions: functions,
+            compiled_functions: compiled_functions,
             locals_stack: locals_stack,
-            frame_stack: frame_stack,
+            frame_stack: { frame_stack.push(Frame::new(0, 0, "Main")); frame_stack },
+            position: 0,
+            position_stack: Vec::with_capacity(100), // arbitrary
+            instructions_stack: Vec::with_capacity(10),
+            current_instructions: instructions, // arbitrary
         }
     }
 
@@ -379,7 +401,7 @@ impl<'a> MachineState<'a> {
     // Really not sure how that would work. Will try it out.
     // Need to also make locals be better.
 
-    fn step(&mut self, instruction : &'a Instructions) -> Outcome<'a> {
+    fn step(&mut self, instruction : &'a Instructions) -> Outcome {
 
         // match instruction {
         //     Instructions::Block(_) => {},
@@ -391,7 +413,6 @@ impl<'a> MachineState<'a> {
         //     _ => {}
         // }
 
-        let frame = self.frame_stack.last().unwrap();
 
         match instruction {
             Instructions::ConstI32(i) => {
@@ -424,6 +445,14 @@ impl<'a> MachineState<'a> {
                 self.stack.push(x + y);
                 Outcome::NextInstruction
             }
+            Instructions::AddConst(i) => {
+                // println!("Add: {:?} {:?}", x, y);
+                if let Some(val) = self.stack.last_mut() {
+                    *val = *val + *i;
+                }
+
+                Outcome::NextInstruction
+            }
             Instructions::Mul => {
                 let x = self.stack.pop().unwrap();
                 let y = self.stack.pop().unwrap();
@@ -437,25 +466,55 @@ impl<'a> MachineState<'a> {
                 self.stack.push(x - y);
                 Outcome::NextInstruction
             }
+            Instructions::SubConst(i) => {
+                // println!("Add: {:?} {:?}", x, y);
+                if let Some(val) = self.stack.last_mut() {
+                    *val = *val - *i;
+                }
+
+                Outcome::NextInstruction
+            }
             Instructions::GT => {
                 let x = self.stack.pop().unwrap();
                 let y = self.stack.pop().unwrap();
                 // Make these values
                 if x > y {
-                    self.stack.push(Value::I32(1));
+                    self.stack.push(TRUE_V);
                 } else {
-                    self.stack.push(Value::I32(0));
+                    self.stack.push(FALSE_V);
                 }
 
+                Outcome::NextInstruction
+            }
+            Instructions::GTConst(i) => {
+
+                if let Some(val) = self.stack.last_mut() {
+                    if *val > *i {
+                        *val = TRUE_V
+                    } else {
+                        *val = FALSE_V
+                    }
+                }
                 Outcome::NextInstruction
             }
             Instructions::LT => {
                 let x = self.stack.pop().unwrap();
                 let y = self.stack.pop().unwrap();
                 if x < y {
-                    self.stack.push(Value::I32(1));
+                    self.stack.push(TRUE_V);
                 } else {
-                    self.stack.push(Value::I32(0));
+                    self.stack.push(FALSE_V);
+                }
+                Outcome::NextInstruction
+            }
+            Instructions::LTConst(i) => {
+
+                if let Some(val) = self.stack.last_mut() {
+                    if *val < *i {
+                        *val = TRUE_V
+                    } else {
+                        *val = FALSE_V
+                    }
                 }
                 Outcome::NextInstruction
             }
@@ -463,9 +522,9 @@ impl<'a> MachineState<'a> {
                 let x = self.stack.pop().unwrap();
                 let y = self.stack.pop().unwrap();
                 if x >= y {
-                    self.stack.push(Value::I32(1));
+                    self.stack.push(TRUE_V);
                 } else {
-                    self.stack.push(Value::I32(0));
+                    self.stack.push(FALSE_V);
                 }
                 Outcome::NextInstruction
             }
@@ -473,24 +532,54 @@ impl<'a> MachineState<'a> {
                 let x = self.stack.pop().unwrap();
                 let y = self.stack.pop().unwrap();
                 if x <= y {
-                    self.stack.push(Value::I32(1));
+                    self.stack.push(TRUE_V);
                 } else {
-                    self.stack.push(Value::I32(0));
+                    self.stack.push(FALSE_V);
                 }
+                Outcome::NextInstruction
+            }
+            Instructions::I32Eq => {
+                let val1 = self.stack.pop().unwrap();
+                let val2 = self.stack.pop().unwrap();
+
+                // println!("Eq: {:?} {:?}", val1, val2);
+                // should check i32
+                if val1 == val2 {
+                    self.stack.push(TRUE_V);
+                } else {
+                    self.stack.push(FALSE_V);
+                }
+
                 Outcome::NextInstruction
             }
             Instructions::LocalGet(i) => {
                 // println!("Arg: {:?}", local_locals[*i]);
-
+                let frame = self.frame_stack.last().unwrap();
                 self.stack.push(self.locals_stack[frame.get_local_position(*i)]);
                 Outcome::NextInstruction
             }
             Instructions::LocalSet(i) => {
+                let frame = self.frame_stack.last().unwrap();
                 self.locals_stack[frame.get_local_position(*i)] = self.stack.pop().unwrap();
                 Outcome::NextInstruction
             }
             Instructions::Call(i) => {
-                Outcome::CallFunction(*i)
+                // Make this better and ideally not allocate.
+                let f = &self.functions[*i];
+                let num_params = f.number_of_params;
+                self.position_stack.push(self.position + 1);
+                self.instructions_stack.push(self.current_instructions);
+                self.position = 0;
+                self.current_instructions = &f.code;
+                self.frame_stack.push(Frame::new(
+                    self.locals_stack.len(),
+                    num_params,
+                    &self.functions[*i].name,
+                ));
+                for _ in 0..num_params {
+                    self.locals_stack.push(self.stack.pop().unwrap())
+                }
+                Outcome::Noop
             }
             Instructions::Br(i) => {
                 Outcome::Br(*i)
@@ -508,35 +597,60 @@ impl<'a> MachineState<'a> {
                     Outcome::NextInstruction
                 }
             }
-            Instructions::Block(code) => {
-                Outcome::Block(& code)
+            Instructions::If(true_case, false_case) => {
+                let val = self.stack.pop().unwrap();
+                // println!("BrIf: {:?}", val);
+                self.position_stack.push(self.position + 1);
+                self.instructions_stack.push(self.current_instructions);
+                self.position = 0;
+                if let Value::I32(_) = val {
+                    if val == TRUE_V {
+                        self.current_instructions = &true_case;
+                    } else {
+                        self.current_instructions = &false_case;
+                    }
+                } else {
+                    println!("Handle something other than i32 {:?}", val);
+                }
+                Outcome::Noop
+            }
+            Instructions::Block(instructions) => {
+                self.position_stack.push(self.position + 1);
+                self.instructions_stack.push(self.current_instructions);
+                self.position = 0;
+                self.current_instructions = &instructions;
+                Outcome::Noop
             }
             // This might not be the best way to do a loop.
             // Seems a little weird that we would keep popping from the
             // stack and then putting this look back on.
             // Maybe some optimizaiton here.
-            Instructions::Loop(code) => {
-                Outcome::Loop(& code)
-            }
-            Instructions::I32Eq => {
-                let val1 = self.stack.pop().unwrap();
-                let val2 = self.stack.pop().unwrap();
-
-                println!("Eq: {:?} {:?}", val1, val2);
-                // should check i32
-                if val1 == val2 {
-                    self.stack.push(Value::I32(0));
-                } else {
-                    self.stack.push(Value::I32(1));
-                }
-
-                Outcome::NextInstruction
+            Instructions::Loop(instructions) => {
+                // For a loop we don't want to increment the position counter
+                // That way the loop instruction is the thing executed again.
+                // Loop is used with block so that the block contains the exit path.
+                self.position_stack.push(self.position);
+                self.instructions_stack.push(self.current_instructions);
+                self.position = 0;
+                self.current_instructions = &instructions;
+                Outcome::Noop
             }
             Instructions::Return => {
-                Outcome::Return
+                // if { indent > 0 } { indent -= 1; }
+                self.current_instructions = self.instructions_stack.pop().unwrap();
+                self.position = self.position_stack.pop().unwrap();
+                let f = self.frame_stack.pop().unwrap();
+                for _ in 0..f.number_of_locals {
+                    self.locals_stack.pop();
+                }
+                Outcome::Noop
             }
             Instructions::End => {
-                Outcome::End
+                // if { indent > 0 } { indent -= 1; }
+                self.current_instructions = self.instructions_stack.pop().unwrap();
+                self.position = self.position_stack.pop().unwrap();
+                // This is a block. No need to get rid of frames
+                Outcome::Noop
             }
         }
     }
@@ -544,90 +658,31 @@ impl<'a> MachineState<'a> {
 
     // This is all incredibly slow and incredibly ugly.
 
-    fn run(&mut self, instructions : &'a std::vec::Vec<Instructions>, initial_frame : Frame<'a>) {
-        let mut position = 0;
-        let mut position_stack : Vec<usize> = Vec::with_capacity(100); // arbitrary
-        let mut instructions_stack : Vec<& Vec<Instructions>> = Vec::with_capacity(10); // arbitrary
-        let mut current_instructions = instructions;
+    fn run(&mut self) {
+        while self.position < self.current_instructions.len() {
 
-        self.frame_stack.push(initial_frame);
-        while position < current_instructions.len() {
-
-            // Temp
-            if self.stack.len() > 0 {
-                if let Some(Value::I32(x)) = self.stack.get(self.stack.len() - 1) {
-                    if x < &-1 {
-                        println!("Negative!");
-                        break;
-                    }
-                }
-            }
             // println!("{:?} {:?}", &current_instructions[position], if self.stack.len() > 0 { self.stack[self.stack.len() - 1] } else { Value::I32(123213)});
 
-            match self.step(&current_instructions[position]) {
-                Outcome::NextInstruction => {
-                    position += 1;
+            match self.step(&self.current_instructions[self.position]) {
+                Outcome::Noop => {
+                    continue;
                 },
-                Outcome::CallFunction(i) => {
-                    // Make this better and ideally not allocate.
-                    position_stack.push(position + 1);
-                    instructions_stack.push(current_instructions);
-                    position = 0;
-                    current_instructions = &self.functions[i].code;
-                    self.frame_stack.push(Frame::new(
-                        self.locals_stack.len(),
-                        self.functions[i].number_of_params,
-                        &self.functions[i].name,
-                    ));
-                    for _ in 0..self.functions[i].number_of_params {
-                        self.locals_stack.push(self.stack.pop().unwrap());
-                    }
-                }
-                Outcome::Br(mut i) => {
+                Outcome::NextInstruction => {
+                    self.position += 1;
+                },
+                Outcome::Br(i) => {
 
                     // Might not do the right thing if in a function call?
                     // Not sure what should happen then, or if that is invalid.
 
 
-                    // We should always do this once. And then if i > 0 we will do it
-                    // i additional times.
-                    current_instructions = instructions_stack.pop().unwrap();
-                    position = position_stack.pop().unwrap();
-                    while i != 0 {
-                        current_instructions = instructions_stack.pop().unwrap();
-                        position = position_stack.pop().unwrap();
-                        i -= 1;
+                    // We do this i times and then one more. Meaning if i is 0 we do it once.
+                    for _ in 0..i {
+                        self.instructions_stack.pop();
+                        self.position_stack.pop();
                     }
-                }
-                Outcome::Block(instructions) => {
-                    position_stack.push(position + 1);
-                    instructions_stack.push(current_instructions);
-                    position = 0;
-                    current_instructions = &instructions
-                }
-                Outcome::Loop(instructions) => {
-                    // For a loop we don't want to increment the position counter
-                    // That way the loop instruction is the thing executed again.
-                    // Loop is used with block so that the block contains the exit path.
-                    position_stack.push(position);
-                    instructions_stack.push(current_instructions);
-                    position = 0;
-                    current_instructions = &instructions
-                }
-                Outcome::Return => {
-                    // if { indent > 0 } { indent -= 1; }
-                    current_instructions = instructions_stack.pop().unwrap();
-                    position = position_stack.pop().unwrap();
-                    let f = self.frame_stack.pop().unwrap();
-                    for _ in 0..f.number_of_locals {
-                        self.locals_stack.pop();
-                    }
-                }
-                Outcome::End => {
-                    // if { indent > 0 } { indent -= 1; }
-                    current_instructions = instructions_stack.pop().unwrap();
-                    position = position_stack.pop().unwrap();
-                    // This is a block. No need to get rid of frames
+                    self.current_instructions = self.instructions_stack.pop().unwrap();
+                    self.position = self.position_stack.pop().unwrap();
                 }
             }
         }
@@ -637,12 +692,153 @@ impl<'a> MachineState<'a> {
 }
 // Need to do error handling and yet still be fast
 
+struct Environment<'a> {
+    compiled_functions: &'a Vec<Box<dyn Execute>>,
+    locals_stack: &'a mut Vec<i32>,
+}
+
+
+
+// Need to do this but without the stack at all.
+trait Execute {
+    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32;
+}
+
+struct ConstI32 {
+    i: i32
+}
+
+impl Execute for ConstI32 {
+    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
+        self.i
+    }
+}
+
+struct If {
+    val : Box<dyn Execute>,
+    true_case: Box<dyn Execute>,
+    false_case: Box<dyn Execute>,
+}
+
+impl Execute for If {
+    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
+        let val = self.val.execute(frame, env);
+        if val == TRUE {
+            self.true_case.execute(frame, env)
+        } else {
+            self.false_case.execute(frame, env)
+        }
+    }
+}
+
+struct LocalGet {
+    i: usize
+}
+
+impl Execute for LocalGet {
+    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
+        // println!("{:?} {:?} {:?} {:?}", env.locals_stack, frame, self.i, frame.get_local_position(self.i));
+        env.locals_stack[frame.get_local_position(self.i)]
+    }
+}
+
+
+struct LTConst {
+    i: i32,
+    val: Box<dyn Execute>,
+}
+
+impl Execute for LTConst {
+    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
+        if self.val.execute(frame, env) < self.i {
+             TRUE
+        } else {
+             FALSE
+        }
+    }
+}
+
+struct SubConst {
+    i: i32,
+    val: Box<dyn Execute>,
+}
+
+impl Execute for SubConst {
+    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
+        self.val.execute(frame, env) - self.i
+    }
+}
+
+
+struct Add {
+    left: Box<dyn Execute>,
+    right: Box<dyn Execute>,
+}
+
+impl Execute for Add {
+    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
+        let x = self.left.execute(frame, env);
+        let y = self.right.execute(frame, env);
+        // println!("Add: {:?} {:?}", x, y);
+        x + y
+    }
+}
+
+struct Call {
+    i: usize,
+    args: Box<Vec<Box<dyn Execute>>>,
+}
+
+impl Call {
+    fn new(i: usize, args:  Box<Vec<Box<dyn Execute>>>) -> Call {
+        Call{
+            i: i,
+            args: args,
+        }
+    }
+}
+
+impl Execute for Call {
+    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
+
+        let f = &env.compiled_functions[self.i];
+
+        for arg in self.args.iter() {
+            let value = arg.execute(frame, env);
+            env.locals_stack.push(value);
+        }
+
+
+        f.execute(&Frame::new(
+            env.locals_stack.len() - self.args.len(),
+            1, //temp
+            "name",
+        ), env)
+    }
+}
+
+
+impl Execute for Vec<Box<dyn Execute>> {
+    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
+        // placeholder
+        let mut value = 123123;
+
+        for step in self {
+            value = step.execute(frame, env);
+        }
+        value
+    }
+}
+
+
+
+
+
 fn main() {
-    let mut stack = Vec::with_capacity(100); // arbitrary
-    let mut heap = vec![Value::I32(22), Value::I32(42)]; // arbitrary
+
     let update_position = Function {
         name: "update_position".to_string(),
-        number_of_params: 3,
+        number_of_params: 1,
         does_return: true,
         code: vec![
             Instructions::Block(vec![
@@ -680,51 +876,77 @@ fn main() {
         number_of_params: 1,
         does_return: true, // probably don't need this?
         code: vec![
-            Instructions::Block(vec![
-                Instructions::Block(vec![
-                    Instructions::LocalGet(0),
-                    Instructions::ConstI32(2),
-                    Instructions::GT,
-                    Instructions::BrIf(0),
-
-                    Instructions::ConstI32(1),
-                    Instructions::LocalGet(0),
-                    Instructions::Sub,
-                    Instructions::Call(2),
-                    Instructions::ConstI32(2),
-                    Instructions::LocalGet(0),
-                    Instructions::Sub,
-                    Instructions::Call(2),
-                    Instructions::Add,
-                    Instructions::Br(1),
-                    Instructions::End,
-                ]),
-            Instructions::ConstI32(1),
-            Instructions::End,
+            Instructions::LocalGet(0),
+            Instructions::LTConst(Value::I32(2)),
+            Instructions::If(
+            vec![
+                Instructions::ConstI32(1),
+                Instructions::End,
+            ], vec![
+                Instructions::LocalGet(0),
+                Instructions::SubConst(Value::I32(1)),
+                Instructions::Call(2),
+                Instructions::LocalGet(0),
+                Instructions::SubConst(Value::I32(2)),
+                Instructions::Call(2),
+                Instructions::Add,
+                Instructions::End,
             ]),
-        Instructions::Return,
+            Instructions::Return,
         ]
     };
-    let functions = vec!(update_position, loop_around, recursive_fibonacci); // arbitrary
+    let functions = vec!(update_position, loop_around, recursive_fibonacci);
+    let mut locals_stack = Vec::with_capacity(20);
+    let mut frame_stack = Vec::with_capacity(20);
+    let mut stack = Vec::with_capacity(100); // arbitrary
+    let mut heap = vec![Value::I32(22), Value::I32(42)]; // arbitrary
+
     let instructions = vec![
         Instructions::ConstI32(0),
-        Instructions::ConstI32(30),
+        Instructions::ConstI32(40),
         Instructions::Call(2),
         Instructions::Store,
     ];
-    let mut locals_stack = Vec::with_capacity(20);
-    let mut frame_stack = Vec::with_capacity(20);
-    let mut machine = MachineState::new(&mut stack, &mut heap, & functions, &mut locals_stack, &mut frame_stack);
-    let frame = Frame::new(0, 0, "Main");
-    machine.run(&instructions, frame);
-    let val = stack.pop();
-    if let Some(Value::I32(addr)) = val {
-        if let Some(value) = heap.get(addr as usize) {
-            println!("{:?}", value);
-        } else {
-            println!("no value at {:?} on the heap {:?}", addr, heap);
-        }
-    } else {
-        println!("{:?}", val);
-    }
+
+    let true_case : Box<Vec<Box<dyn Execute>>> = Box::new(vec![Box::new(ConstI32{i: 1})]);
+    let false_args_l : Box<Vec<Box<dyn Execute>>> = Box::new(vec![Box::new(SubConst{i: 1, val: Box::new(LocalGet{ i: 0})})]);
+    let false_args_r : Box<Vec<Box<dyn Execute>>> = Box::new(vec![Box::new(SubConst{i: 2, val: Box::new(LocalGet{ i: 0})})]);
+    let false_case: Box<Vec<Box<dyn Execute>>> = Box::new(vec![
+        Box::new(Add{
+            left: Box::new(Call::new(0, false_args_l)),
+            right: Box::new(Call::new(0, false_args_r)),
+        }),
+    ]);
+    let comp_do_something : Box<Vec<Box<dyn Execute>>> = Box::new(
+        vec![
+            Box::new(If {
+                val: Box::new(LTConst{i : 2, val: Box::new(LocalGet{ i: 0})}),
+                true_case: true_case as Box<dyn Execute>,
+                false_case: false_case as Box<dyn Execute>,
+            })
+    ]);
+
+    let mut compiled_functions = vec!(comp_do_something as Box<dyn Execute>); // arbitrary
+
+    stack.push(Value::I32(40));
+    let machine = MachineState::new(&mut stack, &mut heap, & functions, & compiled_functions, &mut locals_stack, &mut frame_stack, &instructions);
+
+    let args : Box<Vec<Box<dyn Execute>>> = Box::new(vec![Box::new(ConstI32{i: 40})]);
+    let do_machine = Box::new(Call::new(0, args));
+    let mut locals = vec![];
+    let mut env = Environment { compiled_functions: &mut compiled_functions, locals_stack: &mut locals};
+    let main_frame = Frame::new(0, 0, "Main");
+    println!("{:?}", do_machine.execute(&main_frame, &mut env));
+
+    // machine.run();
+    // let val = stack.pop();
+    // if let Some(Value::I32(addr)) = val {
+    //     if let Some(value) = heap.get(addr as usize) {
+    //         println!("{:?}", value);
+    //     } else {
+    //         println!("no value at {:?} on the heap {:?}", addr, heap);
+    //     }
+    // } else {
+    //     println!("{:?}", val);
+    // }
 }
