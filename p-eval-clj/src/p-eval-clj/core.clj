@@ -123,7 +123,7 @@
   ;; get rid of this ugliness
   (let [fdef (atom fns)]
     (letfn [(peval2' [expr env]
-              (println expr)
+             #_ (println expr)
               (m/match expr
 
                 (m/pred logic-variable?)
@@ -132,9 +132,13 @@
                 (m/and (m/pred symbol? ?x))
                 (get env ?x ?x)
 
-
                 (clojure.core/list & ?args)
                 `(clojure.core/list ~@(map-strict #(peval2' % env) ?args))
+
+
+               (clojure.core/mapcat (fn [?arg] ?body) (clojure.core/list ?x))
+               (peval2' ?body (assoc env ?arg ?x))
+
 
                 ((m/and (m/symbol "clojure.core" ?sym) ?f) & ?args :as ?expr)
                 (let [args (map-strict #(peval2' % env) ?args)]
@@ -164,10 +168,11 @@
 
                 (fn ?args ?body)
                 ;; singlular body for now
-                (let [evaled-body (peval2' ?body env)]
+                (let [renamed-args (map-strict (fn [_] (gensym)) ?args)
+                      evaled-body (peval2' ?body (merge env (into {} (map vector ?args renamed-args))))]
                   (if (atom? evaled-body)
-                    (eval `(fn [~@?args] ~evaled-body))
-                    `(~'fn [~@?args] ~evaled-body)))
+                    (eval `(fn [~@renamed-args] ~evaled-body))
+                    `(~'fn [~@renamed-args] ~evaled-body)))
 
                 (?f & ?args :as ?expr)
                 (if-let [{:keys [args body]} (get @fdef ?f)]
@@ -182,7 +187,11 @@
                                                     :body nil})
                               (swap! fdef assoc f' {:args (map-strict first not-atoms)
                                                     :body (peval2' body (into {} atoms))})))
-                        (cons f' (map-strict second not-atoms)))))
+                        (let [{:keys [args body]} (get @fdef f')
+                              renamed-args (map-strict gensym args)
+                              renamed-body (peval2' body (into {} (map-strict vector args renamed-args)))]
+                          (peval2' renamed-body (into {} (map-strict vector renamed-args
+                                                                     (map-strict second not-atoms))))))))
                   (throw (ex-info "not found function" {:expr ?expr :env env})))
                 nil nil
                
@@ -262,12 +271,18 @@
        ~(clojure.walk/postwalk (fn [x] (if (logic-variable? x)
                                          `(quote ~x)
                                          x))
-         (apply inline-all
-                (peval2 `(~'interpret ~(zyntax/parse pattern) ~arg {})
-                        {}
-                        {'interpret {:args '[ast form smap]
-                                     :body interpreter}}))))))
+                               (first
+                                (peval2 `(~'interpret ~(zyntax/parse pattern) ~arg {})
+                                        {}
+                                        {'interpret {:args '[ast form smap]
+                                                     :body interpreter}}))))))
 
+(add-watch #'peval2 :thing (fn [_ _ _ _]
+                             (clojure.pprint/pprint (create-specializer* '[?x ?y ?z]))))
+
+
+
+(create-specializer* '[?x ?y ?z])
 
 (peval2 '?v {} {})
 (defmacro specializer [pattern]
