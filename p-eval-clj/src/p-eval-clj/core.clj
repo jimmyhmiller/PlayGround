@@ -10,7 +10,8 @@
        (string/starts-with? (name x) "?")))
 
 (defn atom? [expr]
-  (if (coll? expr)
+  (if
+    (coll? expr)
     ;; this isn't right
     (every? (some-fn atom? logic-variable?) expr)
     (boolean
@@ -119,11 +120,21 @@
   (doall (apply map f args)))
 
 
+
+(m/match '(clojure.core/conj [[{:tag :logic-variable, :symbol ?x, :form ?x} (clojure.core/nth arg46503 0)]] [{:tag :logic-variable, :symbol ?y, :form ?y} (clojure.core/nth (clojure.core/next arg46503) 0)])
+  
+  
+  (clojure.core/conj [& _ :as ?args] ?arg)
+  (conj ?args ?arg))
+
+
+
+
 (defn peval2 [expr env fns]
   ;; get rid of this ugliness
   (let [fdef (atom fns)]
     (letfn [(peval2' [expr env]
-             #_ (println expr)
+            #_ (println expr)
               (m/match expr
 
                 (m/pred logic-variable?)
@@ -135,16 +146,42 @@
                 (clojure.core/list & ?args)
                 `(clojure.core/list ~@(map-strict #(peval2' % env) ?args))
 
+                
 
-               (clojure.core/mapcat (fn [?arg] ?body) (clojure.core/list ?x))
-               (peval2' ?body (assoc env ?arg ?x))
+                (clojure.core/mapcat (fn [?arg] ?body) (clojure.core/list ?x))
+                (peval2' ?body (assoc env ?arg (peval2' ?x env)))
 
-
+                
+                (clojure.core/empty? ?coll)
+                (let [result (peval2' ?coll env)]
+                   (if (coll? result)
+                     (empty? result)
+                     `(clojure.core/empty? ~result)))
+                
+                (clojure.core/ffirst (m/pred coll? ?coll))
+                (let [result (peval2' ?coll env)]
+                  (m/match result
+                    [[?k _] & _] (peval2' ?k env)
+                    _ `(clojure.core/ffirst ~result)))
+                  
+                
+                (clojure.core/conj [& _ :as ?args] ?arg)
+                (let [coll-result (mapv #(peval2' % env) ?args)
+                      arg (peval2' ?arg env)]
+                  (if (coll? coll-result)
+                    (conj coll-result arg)
+                    `(clojure.core/conj ~coll-result ~arg)))
+               
                 ((m/and (m/symbol "clojure.core" ?sym) ?f) & ?args :as ?expr)
-                (let [args (map-strict #(peval2' % env) ?args)]
-                  (if (every? atom? args)
-                    (apply (resolve ?f) args)
-                    (cons ?f args)))
+                (do
+                  (if (= ?sym "ffirst") (println ?expr))
+                  (let [args (map-strict #(peval2' % env) ?args)]
+                    (if (every? atom? args)
+                      (apply (resolve ?f) args)
+                      ;; better specializing
+                      (if (and (= ?sym "ffirst") (coll? (first args)))
+                        (peval2'   (cons ?f args) env)
+                        (cons ?f args)))))
 
                 (let [?var ?val] ?body)
                 (let [evaled-val (peval2' ?val env)]
@@ -187,18 +224,17 @@
                                                     :body nil})
                               (swap! fdef assoc f' {:args (map-strict first not-atoms)
                                                     :body (peval2' body (into {} atoms))})))
-                        (let [{:keys [args body]} (get @fdef f')
-                              renamed-args (map-strict gensym args)
-                              renamed-body (peval2' body (into {} (map-strict vector args renamed-args)))]
-                          (peval2' renamed-body (into {} (map-strict vector renamed-args
-                                                                     (map-strict second not-atoms))))))))
+                        ;; Maybe aggressive inlining isn't correct?
+                        (let [{:keys [args body]} (get @fdef f')]
+                          (peval2' body (into {} (map-strict vector args (map-strict second not-atoms))))))))
                   (throw (ex-info "not found function" {:expr ?expr :env env})))
                 nil nil
-               
+                
                 (m/pred atom? ?x) ?x
                 (m/pred vector? ?x) (mapv #(peval2' % env) ?x)
+                (m/pred map? ?x) (reduce-kv (fn [acc k v] (assoc acc (peval2' k env) (peval2' v env))) {} ?x)
                 ?x (throw (ex-info "not found expression" {:expr ?x :env env}))))]
-      (let [result (peval2' expr env)]
+      (let [result  (peval2' (peval2' expr env) env) ]
         [result @fdef]))))
 
 
@@ -235,6 +271,18 @@
                                      (clojure.core/* x (exp x (clojure.core/- n 1))))}}))
 
 
+(def insert
+  '(if (clojure.core/empty? coll)
+    [[k v]]
+    (clojure.core/conj coll [k v])))
+
+
+(def lookup
+  '(if (clojure.core/empty? coll)
+     nil
+     (if (clojure.core/= (clojure.core/ffirst coll) x)
+       (clojure.core/second (clojure.core/first coll))
+       (lookup (clojure.core/rest coll) x))))
 
 (def interpreter
   '(let [tag (clojure.core/get ast :tag)]
@@ -243,11 +291,11 @@
          (if (clojure.core/= x form)
            (clojure.core/list smap)))
        (if (clojure.core/= tag :logic-variable)
-         (let [other-form (clojure.core/get smap ast)]
+         (let [other-form (lookup smap ast)]
            (if other-form
              (if (clojure.core/= other-form form)
                (clojure.core/list smap))
-             (clojure.core/list (clojure.core/assoc smap ast form))))
+             (clojure.core/list (insert smap ast form))))
          (if (clojure.core/= tag :cat)
            (if (clojure.core/seq form)
              (clojure.core/mapcat
@@ -265,6 +313,9 @@
                ast)))))))
 
 
+
+
+
 (defn create-specializer* [pattern]
   (let [arg (gensym "arg")]
     `(fn [~arg]
@@ -272,9 +323,13 @@
                                          `(quote ~x)
                                          x))
                                (first
-                                (peval2 `(~'interpret ~(zyntax/parse pattern) ~arg {})
+                                (peval2 `(~'interpret ~(zyntax/parse pattern) ~arg [])
                                         {}
-                                        {'interpret {:args '[ast form smap]
+                                        {'insert {:args '[coll k v]
+                                                  :body insert}
+                                         'lookup {:args '[coll x]
+                                                  :body lookup}
+                                         'interpret {:args '[ast form smap]
                                                      :body interpreter}}))))))
 
 (add-watch #'peval2 :thing (fn [_ _ _ _]
