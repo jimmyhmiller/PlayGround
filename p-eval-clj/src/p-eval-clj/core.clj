@@ -30,126 +30,126 @@
   (let [fdef (atom fns)]
     (letfn [(peval2' [expr env]
             #_ (println expr)
-              (m/match expr
+              m/match expr
 
-                (m/pred logic-variable?)
-                `(quote ~expr)
+              (m/pred logic-variable?)
+              `(quote ~expr)
 
-                (m/and (m/pred symbol? ?x))
-                (get env ?x ?x)
-
-
-                ;; Need to split this stuff out into specialization
-                ;; or even better figure out a way of partial evaluating
-                ;; where we can be sure these things are safe even though
-                ;; not everything here is an atom.
-                (clojure.core/list & ?args)
-                `(clojure.core/list ~@(map-strict #(peval2' % env) ?args))
-
-               
-                (clojure.core/mapcat (fn [?arg] ?body) (clojure.core/list ?x))
-                (peval2' ?body (assoc env ?arg (peval2' ?x env)))
-
-                
-                (clojure.core/empty? ?coll)
-                (let [result (peval2' ?coll env)]
-                   (if (coll? result)
-                     (empty? result)
-                     `(clojure.core/empty? ~result)))
-
-                (clojure.core/first (m/pred coll? ?coll))
-                (let [result (peval2' ?coll env)]
-                  (m/match result
-                    [?k & _] (peval2' ?k env)
-                    _ `(clojure.core/first ~result)))
+              (m/and (m/pred symbol? ?x))
+              (get env ?x ?x)
 
 
-                (clojure.core/second (m/pred coll? ?coll))
-                (let [result (peval2' ?coll env)]
-                  (m/match result
-                    [_ ?k & _] (peval2' ?k env)
-                    _ `(clojure.core/second ~result)))
-                
-                
-                
-                (clojure.core/ffirst (m/pred coll? ?coll))
-                (let [result (peval2' ?coll env)]
-                  (m/match result
-                    [[?k _] & _] (peval2' ?k env)
-                    _ `(clojure.core/ffirst ~result)))
-                  
-                
-                (clojure.core/conj [& _ :as ?args] ?arg)
-                (let [coll-result (mapv #(peval2' % env) ?args)
-                      arg (peval2' ?arg env)]
-                  (if (coll? coll-result)
-                    (conj coll-result arg)
-                    `(clojure.core/conj ~coll-result ~arg)))
-               
-                ((m/and (m/symbol "clojure.core" ?sym) ?f) & ?args :as ?expr)
-                (do
-                  (if (= ?sym "ffirst") (println ?expr))
-                  (let [args (map-strict #(peval2' % env) ?args)]
-                    (if (every? atom? args)
-                      (apply (resolve ?f) args)
-                      ;; better specializing
-                      (if (and (#{"ffirst"} ?sym) (coll? (first args)))
-                        (peval2'   (cons ?f args) env)
-                        (cons ?f args)))))
+              ;; Need to split this stuff out into specialization
+              ;; or even better figure out a way of partial evaluating
+              ;; where we can be sure these things are safe even though
+              ;; not everything here is an atom.
+              (clojure.core/list & ?args)
+              `(clojure.core/list ~@(map-strict #(peval2' % env) ?args))
 
-                (let [?var ?val] ?body)
-                (let [evaled-val (peval2' ?val env)
-                      renamed-var (gensym)]
-                  (if (atom? evaled-val)
-                    (peval2' ?body (assoc env ?var evaled-val))
-                    `(~'let [~renamed-var ~evaled-val]
-                      ~(peval2' ?body (assoc env ?var renamed-var)))))
+              
+              (clojure.core/mapcat (fn [?arg] ?body) (clojure.core/list ?x))
+              (peval2' ?body (assoc env ?arg (peval2' ?x env)))
 
-                (if ?pred ?t)
-                (peval2' (list 'if ?pred ?t nil) env)
+              
+              (clojure.core/empty? ?coll)
+              (let [result (peval2' ?coll env)]
+                (if (coll? result)
+                  (empty? result)
+                  `(clojure.core/empty? ~result)))
 
-                (if ?pred ?t ?f)
-                (let [evaled-pred (peval2' ?pred env)]
-                  (if (atom? evaled-pred)
-                    (if evaled-pred
-                      (peval2' ?t env)
-                      (peval2' ?f env))
-                    `(if ~evaled-pred
-                       ~(peval2' ?t env)
-                       ~(peval2' ?f env))))
+              (clojure.core/first (m/pred coll? ?coll))
+              (let [result (peval2' ?coll env)]
+                (m/match result
+                  [?k & _] (peval2' ?k env)
+                  _ `(clojure.core/first ~result)))
 
-                (fn ?args ?body)
-                ;; singlular body for now
-                (let [renamed-args (map-strict (fn [_] (gensym)) ?args)
-                      evaled-body (peval2' ?body (merge env (into {} (map vector ?args renamed-args))))]
-                  (if (atom? evaled-body)
-                    (eval `(fn [~@renamed-args] ~evaled-body))
-                    `(~'fn [~@renamed-args] ~evaled-body)))
 
-                (?f & ?args :as ?expr)
-                (if-let [{:keys [args body]} (get @fdef ?f)]
-                  (let [evaled-args (map-strict vector args (map-strict #(peval2' % env) ?args))
-                        [atoms not-atoms] (split-pred (comp atom? second) evaled-args)]
-                    (if (empty? not-atoms)
-                      (peval2' body (merge env (into {} atoms)))
-                      ;; make sure empty atoms are empty string
-                      (let [f' (symbol (str ?f (if atoms (hash atoms) "")))]
-                        (when (not (contains? @fdef f'))
-                          (do (swap! fdef assoc f' {:args nil
-                                                    :body nil})
-                              (swap! fdef assoc f' {:args (map-strict first not-atoms)
-                                                    :body (peval2' body (into {} atoms))})))
-                        ;; Maybe aggressive inlining isn't correct?
-                        (let [{:keys [args body]} (get @fdef f')]
-                          (peval2' body (into {} (map-strict vector args (map-strict second not-atoms))))))))
-                  (throw (ex-info "not found function" {:expr ?expr :env env})))
-                nil nil
-                
-                (m/pred atom? ?x) ?x
-                (m/pred vector? ?x) (mapv #(peval2' % env) ?x)
-                (m/pred seq? ?x) (map-strict #(peval2' % env) ?x)
-                (m/pred map? ?x) (reduce-kv (fn [acc k v] (assoc acc (peval2' k env) (peval2' v env))) {} ?x)
-                ?x (throw (ex-info "not found expression" {:expr ?x :env env}))))]
+              (clojure.core/second (m/pred coll? ?coll))
+              (let [result (peval2' ?coll env)]
+                (m/match result
+                  [_ ?k & _] (peval2' ?k env)
+                  _ `(clojure.core/second ~result)))
+              
+              
+              
+              (clojure.core/ffirst (m/pred coll? ?coll))
+              (let [result (peval2' ?coll env)]
+                (m/match result
+                  [[?k _] & _] (peval2' ?k env)
+                  _ `(clojure.core/ffirst ~result)))
+              
+              
+              (clojure.core/conj [& _ :as ?args] ?arg)
+              (let [coll-result (mapv #(peval2' % env) ?args)
+                    arg (peval2' ?arg env)]
+                (if (coll? coll-result)
+                  (conj coll-result arg)
+                  `(clojure.core/conj ~coll-result ~arg)))
+              
+              ((m/and (m/symbol "clojure.core" ?sym) ?f) & ?args :as ?expr)
+              (do
+                (if (= ?sym "ffirst") (println ?expr))
+                (let [args (map-strict #(peval2' % env) ?args)]
+                  (if (every? atom? args)
+                    (apply (resolve ?f) args)
+                    ;; better specializing
+                    (if (and (#{"ffirst"} ?sym) (coll? (first args)))
+                      (peval2'   (cons ?f args) env)
+                      (cons ?f args)))))
+
+              (let [?var ?val] ?body)
+              (let [evaled-val (peval2' ?val env)
+                    renamed-var (gensym)]
+                (if (atom? evaled-val)
+                  (peval2' ?body (assoc env ?var evaled-val))
+                  `(~'let [~renamed-var ~evaled-val]
+                    ~(peval2' ?body (assoc env ?var renamed-var)))))
+
+              (if ?pred ?t)
+              (peval2' (list 'if ?pred ?t nil) env)
+
+              (if ?pred ?t ?f)
+              (let [evaled-pred (peval2' ?pred env)]
+                (if (atom? evaled-pred)
+                  (if evaled-pred
+                    (peval2' ?t env)
+                    (peval2' ?f env))
+                  `(if ~evaled-pred
+                     ~(peval2' ?t env)
+                     ~(peval2' ?f env))))
+
+              (fn ?args ?body)
+              ;; singlular body for now
+              (let [renamed-args (map-strict (fn [_] (gensym)) ?args)
+                    evaled-body (peval2' ?body (merge env (into {} (map vector ?args renamed-args))))]
+                (if (atom? evaled-body)
+                  (eval `(fn [~@renamed-args] ~evaled-body))
+                  `(~'fn [~@renamed-args] ~evaled-body)))
+
+              (?f & ?args :as ?expr)
+              (if-let [{:keys [args body]} (get @fdef ?f)]
+                (let [evaled-args (map-strict vector args (map-strict #(peval2' % env) ?args))
+                      [atoms not-atoms] (split-pred (comp atom? second) evaled-args)]
+                  (if (empty? not-atoms)
+                    (peval2' body (merge env (into {} atoms)))
+                    ;; make sure empty atoms are empty string
+                    (let [f' (symbol (str ?f (if atoms (hash atoms) "")))]
+                      (when (not (contains? @fdef f'))
+                        (do (swap! fdef assoc f' {:args nil
+                                                  :body nil})
+                            (swap! fdef assoc f' {:args (map-strict first not-atoms)
+                                                  :body (peval2' body (into {} atoms))})))
+                      ;; Maybe aggressive inlining isn't correct?
+                      (let [{:keys [args body]} (get @fdef f')]
+                        (peval2' body (into {} (map-strict vector args (map-strict second not-atoms))))))))
+                (throw (ex-info "not found function" {:expr ?expr :env env})))
+              nil nil
+              
+              (m/pred atom? ?x) ?x
+              (m/pred vector? ?x) (mapv #(peval2' % env) ?x)
+              (m/pred seq? ?x) (map-strict #(peval2' % env) ?x)
+              (m/pred map? ?x) (reduce-kv (fn [acc k v] (assoc acc (peval2' k env) (peval2' v env))) {} ?x)
+              ?x (throw (ex-info "not found expression" {:expr ?x :env env})))]
       (let [result  (peval2' (peval2' expr env) env) ]
         [result @fdef]))))
 
