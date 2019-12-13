@@ -5,7 +5,6 @@
 
 
 (defn atom? [expr]
-  
   (cond 
     (and (seq? expr) (= (first expr) 'quote))
     true
@@ -310,25 +309,13 @@
        :pattern {:tag :logic-variable, :symbol '?x, :form '?x},
        :next
        {:tag :cat,
-        :pattern
-        {:tag :vector,
-         :pattern
-         {:tag :cat,
-          :pattern {:tag :logic-variable, :symbol '?a, :form '?a},
-          :next
-          {:tag :cat,
-           :pattern {:tag :logic-variable, :symbol '?b, :form '?b},
-           :next
-           {:tag :cat,
-            :pattern {:tag :logic-variable, :symbol '?c, :form '?c},
-            :next {:tag :empty}}}},
-         :form ['?a '?b '?c]},
+        :pattern {:tag :logic-variable, :symbol '?y, :form '?y},
         :next
         {:tag :cat,
          :pattern {:tag :logic-variable, :symbol '?z, :form '?z},
          :next {:tag :empty}}}},
-      :form '[?x [?a ?b] ?z]}
-     [1 [a b] 2]
+      :form ['?x '?y '?z]}
+     arg
      [])
     
     ]))
@@ -338,5 +325,5 @@
 
 
 (prn)
-(zyntax/parse '[?x [?a ?b ?c] ?z])
+(zyntax/parse '[?x ?y ?z])
 
