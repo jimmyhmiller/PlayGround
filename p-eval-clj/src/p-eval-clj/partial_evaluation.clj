@@ -181,15 +181,15 @@
                                                            (evaluate* env globals v))) {} ?x)
           ?x (throw (ex-info "not found" {:expr ?x})))]
 
-    #_(println expr " => " result)
+    (println expr " => " result)
     result))
 
 
 (defmethod specialize 'clojure.core/mapcat [env globals expr]
   ;; handle single case right now
   (m/match expr
-    (_ (fn [?arg] ?body) (clojure.core/list ?x))
-    (evaluate* (assoc env ?arg (evaluate* env globals ?x)) globals ?body)
+    #_(_ (fn [?arg] ?body) (clojure.core/list ?x))
+    #_(evaluate* (assoc env ?arg ?x) globals ?body)
     
     _ expr))
 
@@ -223,7 +223,6 @@
     _ expr))
 
 (defmethod specialize 'clojure.core/seq [env globals expr]
-  (println "here" expr env)
   (m/match expr
     (_ [& ?coll]) `(clojure.core/list ~@(seq ?coll))
     _ expr))
@@ -315,7 +314,7 @@
          :pattern {:tag :logic-variable, :symbol '?z, :form '?z},
          :next {:tag :empty}}}},
       :form ['?x '?y '?z]}
-     arg
+     [1 2 3]
      [])
     
     ]))
