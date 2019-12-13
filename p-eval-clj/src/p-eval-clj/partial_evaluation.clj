@@ -18,13 +18,11 @@
 (defn collection-literal? [expr]
   (m/match expr
     (m/or [& _]
-          (list & _)
+          ((m/or list clojure.core/list) & _)
           {}
           #{})
     true
     _ false))
-
-
 
 (defn split-pred [pred coll]
   (let [grouped (group-by pred coll)]
@@ -71,8 +69,11 @@
                 renamed-var (gensym)]
             (if (atom? evaled-val)
               (evaluate* (assoc env ?var evaled-val) globals ?body)
-              `(~'let [~renamed-var ~evaled-val]
-                ~(evaluate* (assoc env ?var renamed-var) globals ?body))))
+              (let [new-env (if (collection-literal? evaled-val)
+                              (assoc env ?var evaled-val)
+                              (assoc env ?var renamed-var))]
+                `(~'let [~renamed-var ~evaled-val]
+                  ~(evaluate* new-env globals ?body)))))
 
           ((m/or cond clojure.core/cond))
           nil
@@ -89,10 +90,16 @@
 
           (if ?pred ?t ?f)
           (let [evaled-pred (evaluate* env globals ?pred)]
-            (if (atom? evaled-pred)
+            (cond 
+              (atom? evaled-pred)
               (if evaled-pred
                 (evaluate* env globals ?t)
                 (evaluate* env globals ?f))
+
+              (collection-literal? evaled-pred)
+              (evaluate* env globals ?t)
+
+              :else 
               `(if ~evaled-pred
                  ~(evaluate* env globals ?t)
                  ~(evaluate* env globals ?f))))
@@ -152,9 +159,8 @@
                     (swap! globals assoc-in [new-fn-name :current] true))
                   
                   ;; This is ugly. We do need an inline policy. But perhaps better?
-                  ;; in fact yes. This is too conservative
                   (let [{:keys [args body current]} (get @globals new-fn-name)
-                        result (if current
+                        result (if (and current (not-empty (filter #{new-fn-name} (tree-seq coll? seq body))))
                                  `(~new-fn-name ~@(mapv second  not-atom-args))
                                  (evaluate* (into env (mapv vector args 
                                                             (mapv second not-atom-args))) globals body))]
@@ -173,10 +179,10 @@
           (m/pred seq? ?x) (doall (map (partial evaluate* env globals) ?x))
           (m/pred map? ?x) (reduce-kv (fn [acc k v] (assoc acc
                                                            (evaluate* env globals k)
-b                                                           (evaluate* env globals v))) {} ?x)
+                                                           (evaluate* env globals v))) {} ?x)
           ?x (throw (ex-info "not found" {:expr ?x})))]
 
-    (println expr " => " result)
+    #_(println expr " => " result)
     result))
 
 
@@ -187,8 +193,6 @@ b                                                           (evaluate* env globa
     (evaluate* (assoc env ?arg (evaluate* env globals ?x)) globals ?body)
     
     _ expr))
-
-
 
 (defmethod specialize 'clojure.core/empty? [env globals expr]
   (m/match expr
@@ -214,6 +218,33 @@ b                                                           (evaluate* env globa
     _ expr))
 
 
+(defmethod specialize 'clojure.core/vector? [env globals expr]
+  (m/match expr
+    (_ [& _]) true
+    _ expr))
+
+(defmethod specialize 'clojure.core/seq [env globals expr]
+  (println "here" expr env)
+  (m/match expr
+    (_ [& ?coll]) `(clojure.core/list ~@(seq ?coll))
+    _ expr))
+
+(defmethod specialize 'clojure.core/next [env globals expr]
+  (m/match expr
+    (_ [_ & ?coll]) ?coll
+    _ expr))
+
+
+(defmethod specialize 'clojure.core/nth [env globals expr]
+  (m/match expr
+    (_ [& ?coll] ?n) (nth ?coll ?n)
+    _ expr))
+
+
+
+
+
+
 
 (defn evaluate [exprs]
   (let [globals (atom {})]
@@ -221,86 +252,89 @@ b                                                           (evaluate* env globa
 
 
 
-(last)
-(evaluate 
- '[(defn insert [coll k v]
-     (if (empty? coll)
-       [[k v]]
-       (conj coll [k v])))
+(last
+ (evaluate 
+  '[(defn insert [coll k v]
+      (if (empty? coll)
+        [[k v]]
+        (conj coll [k v])))
 
 
-   (defn lookup [coll x]
-     (if (clojure.core/empty? coll)
-       nil
-       (if (clojure.core/= (clojure.core/ffirst coll) x)
-         (clojure.core/second (clojure.core/first coll))
-         (lookup (clojure.core/rest coll) x))))
+    (defn lookup [coll x]
+      (if (clojure.core/empty? coll)
+        nil
+        (if (clojure.core/= (clojure.core/ffirst coll) x)
+          (clojure.core/second (clojure.core/first coll))
+          (lookup (clojure.core/rest coll) x))))
 
 
-   (defn interpret [ast form smap]
-     (let [tag (clojure.core/get ast :tag)]
+    (defn interpret [ast form smap]
+      (let [tag (clojure.core/get ast :tag)]
 
-       (if (clojure.core/= tag :literal)
-         (let [x (clojure.core/get ast :form)]
-           (if (clojure.core/= x form)
-             (clojure.core/list smap)))
+        (if (clojure.core/= tag :literal)
+          (let [x (clojure.core/get ast :form)]
+            (if (clojure.core/= x form)
+              (clojure.core/list smap)))
 
-         (if (clojure.core/= tag :logic-variable)
-           (let [other-form (lookup smap ast)]
-             (if other-form
-               (if (clojure.core/= other-form form)
-                 (clojure.core/list smap))
-               (clojure.core/list (insert smap ast form))))
+          (if (clojure.core/= tag :logic-variable)
+            (let [other-form (lookup smap ast)]
+              (if other-form
+                (if (clojure.core/= other-form form)
+                  (clojure.core/list smap))
+                (clojure.core/list (insert smap ast form))))
 
-           (if (clojure.core/= tag :cat)
-             (if (clojure.core/seq form)
-               (let [next-one (clojure.core/next form)]
-                 (clojure.core/mapcat
-                  (fn [smap]
-                    (interpret (clojure.core/get ast :next) next-one smap))
-                  (interpret (clojure.core/get ast :pattern) (clojure.core/nth form 0) smap))))
+            (if (clojure.core/= tag :cat)
+              (if (clojure.core/seq form)
+                (let [next-one (clojure.core/next form)]
+                  (clojure.core/mapcat
+                   (fn [smap]
+                     (interpret (clojure.core/get ast :next) next-one smap))
+                   (interpret (clojure.core/get ast :pattern) (clojure.core/nth form 0) smap))))
 
-             (if (clojure.core/= tag :vector)
-               (if (clojure.core/vector? form)
-                 (let [pattern (clojure.core/get ast :pattern)]
-                   (interpret pattern form smap)))
+              (if (clojure.core/= tag :vector)
+                (if (clojure.core/vector? form)
+                  (let [pattern (clojure.core/get ast :pattern)]
+                    (interpret pattern form smap)))
 
-               (if (clojure.core/= tag :empty)
-                 (if (clojure.core/seq form)
-                   nil
-                   (clojure.core/list smap))
-                 ast)))))))
+                (if (clojure.core/= tag :empty)
+                  (if (clojure.core/seq form)
+                    nil
+                    (clojure.core/list smap))
+                  ast)))))))
 
 
-   (interpret 
-    {:tag :vector,
-     :pattern
-     {:tag :cat,
-      :pattern {:tag :logic-variable, :symbol '?x, :form '?x},
-      :next
+    (interpret 
+     {:tag :vector,
+      :pattern
       {:tag :cat,
-       :pattern
-       {:tag :vector,
-        :pattern
-        {:tag :cat,
-         :pattern {:tag :logic-variable, :symbol '?a, :form '?a},
-         :next
-         {:tag :cat,
-          :pattern {:tag :logic-variable, :symbol '?b, :form '?b},
-          :next
-          {:tag :cat,
-           :pattern {:tag :logic-variable, :symbol '?c, :form '?c},
-           :next {:tag :empty}}}},
-        :form ['?a '?b '?c]},
+       :pattern {:tag :logic-variable, :symbol '?x, :form '?x},
        :next
        {:tag :cat,
-        :pattern {:tag :logic-variable, :symbol '?z, :form '?z},
-        :next {:tag :empty}}}},
-     :form '[?x [?a ?b ?c] ?z]}
-    arg
-    [])
-   globals
-   ])
+        :pattern
+        {:tag :vector,
+         :pattern
+         {:tag :cat,
+          :pattern {:tag :logic-variable, :symbol '?a, :form '?a},
+          :next
+          {:tag :cat,
+           :pattern {:tag :logic-variable, :symbol '?b, :form '?b},
+           :next
+           {:tag :cat,
+            :pattern {:tag :logic-variable, :symbol '?c, :form '?c},
+            :next {:tag :empty}}}},
+         :form ['?a '?b '?c]},
+        :next
+        {:tag :cat,
+         :pattern {:tag :logic-variable, :symbol '?z, :form '?z},
+         :next {:tag :empty}}}},
+      :form '[?x [?a ?b] ?z]}
+     [1 [a b] 2]
+     [])
+    
+    ]))
+
+
+
 
 
 (prn)
