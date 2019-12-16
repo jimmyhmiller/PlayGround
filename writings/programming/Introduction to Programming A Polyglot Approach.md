@@ -44,19 +44,47 @@ Choosing the order in which to tackle these languages has been rather difficult.
 
 We begin and end with LISP. LISP is the perfect language to begin our journey in programming because of its inherent simplicity. Throughout the book we shift to different languages, each language offering its own unique perspective on the task of programming and yet, we will often return to LISP. LISP gives us to flexibility to reimplement these features, allow us a way to quickly see through what appear to be magical features in a language.
 
-Along the way we will encounter various paradigms of programming as well as many different languages. There will be some obvious omissions in this book that people may find strange. Many languages that are popular or influential will be left out. These omissions stem from two different forces that must be balanced in this book. First, this book is limited in scope, we simply cannot cover all that the programming world offers. More importantly, not all languages are interesting, even good ones. There are plenty of fantastic languages that offer very little by way of interesting content for new developers. 
-
-## Short Comings
-
-Finally one strange feature this book posesses is a complete lack of low level languages (C, assymbly, etc). This may seem to be a fatal flaw of the book. There is much to be said for understanding how computers work in their lowest levels. There are large groups that lament the lack of understand that new developers have of the internal workings of computers and this book is just contributing to that problem.
-
-If anyone levys these criticisms against this book, I accept them. I see nothing wrong with learning C, but it doesn't quite fit with our goal. Programming is theory building; theories are defined not by the mechanical movements of their parts, but by abstractions which unify various ideas. For example, Darwin's *Theory of Natural Selection*, if stated in terms of purely mechanical parts, is just physics. Instead, Darwin operates at a higher level, talking about populations, adaptations, species (or lack thereof), and many other terms that operate above the level of mechanical functioning. 
-
-While all programs are reducable to the functionings of our computers, thinking of them in these terms is limiting. I believe that the end of programming, the goal at which it aims, is to continue to operate at a higher and higher level. The languages I have chosen are those which allow us to build these levels. Languages that offer the programmer a way to abstract and express concepts succinctly.
-
-To the extent that we delve into "low level" details, they will be of a mathematical and relational nature rather than mechanical ones. Programming is no more about machines than astronomy is about telescopes. Computers are the tools on which our programs run. Our programs continue to live beyond the life of any given machine and thus should be thought about separate from them.
+Along the way we will encounter various paradigms of programming as well as many different languages. There will be some obvious omissions in this book that people may find strange. Many languages that are popular or influential will be left out. These omissions stem from two different forces that must be balanced in this book. First, this book is limited in scope, we simply cannot cover all that the programming world offers. More importantly, not all languages are interesting, even good ones. There are plenty of fantastic languages that offer very little by way of interesting content for new developers.
 
 # Chapter 1
+
+Programming is the most wonderful exercise in wish fulfillment humans have ever created. Programs and even whole programming languages can be created merely in our head. To make a program real all we need to do is think about it. Perhaps this seems wrong. Aren't programs the things that run on computers? Aren't programming languages the things that computers understand? How can there be programs or programming languages unless a computer is capable of running them? This is the true beauty of programming that this book will explore: programming languages do not depend on computers. 
+
+To be clear, while programming languages can be wished into existence, this doesn't mean that they are fictional and unconstrained in the way a fantasy novel might be. Programs really exist, the notation we provide for them, our particular approach to implementing them, the choices we make about what elements to include and exclude are all our creation, but at base there is something real that defies our wishes if they run afoul of certain laws. For instance, perhaps we want to make a program that inspects other programs. Perhaps it can tell us how many words are in the program, how much memory it would used if executed this certain way, etc. But one thing our program can never do, no matter how hard we try is tell us for sure if the program we gave it halts or continues to run forever.[^2]
+
+At this point in this book the things I said might not be clear, but hopefully as you explore the world of programming you will come to see what I mean. What I hope you will see through the course of this book is that programming languages aren't things set in stone. We can make them be what we want them to be, within limits, and making them come to life on a computer is also within our grasp.
+
+## Wishing a Language into Existence
+
+The fact that languages can be wished into existence is precisely why so many exist. This will be the focus of this book. For each language we learn about we will try to understand, why would someone want this language to exist? What do we gain by wishing this language into existence? How do each of its features interact with others? What features has it borrowed, which features are new to it? How do facts about the world around it affect the way it was made? Seeing languages as a given whose features are set in stone and must be learned by the diligent student is something we want to avoid. Instead, we will tear apart languages, exploring their parts and how they relate, but also imagining our own, perhaps better languages. Through out this book we will learn new languages but also create our own. In fact, let's begin that process now.
+
+When listing code, it is often useful to be able to refer to parts of the code by referencing the line it is one. So when we list code in this book, we always make sure there are line numbers we can point back to. For example:
+
+```
+Some code would go here
+This is is a long long that will wrap around and so even though it is multiple lines in this book it is only one line in our program.
+Some more code
+```
+
+While we certainly could type out these line numbers manually, as code listings get long and we want to edit them, it will be useful to automate this. So let's make a programming langauge designed for this purpose. Our programming language will be very simple for the time consisting of just one instruction `LINE`. What does line do? It prints out the line we are on. So to produce the output above we would have typed:
+
+```
+LINE Some code would go here
+LINE This is is a long long that will wrap around and so even though it is multiple lines in this book it is only one line in our program.
+LINE Some more code
+```
+
+Now if we decide to edit our program and add a line in the middle, there will be no need to change anything else about it. For now that is all our program does. If it sees`LINE` it will replace it with the number of the current line and some spaces. Later in this book we will add new features to this langauge, and actually implement it. But for now, we have made our simple, and yet useful programming language.
+
+For any one reading this that has experience with programming languages I imagine you are having two reactions. First, you might be thinking that our language isn't very well defined. What if I wrote `LINE LINE` What should the output be? Should it be two lines or should we ignore the second line. In fact, isn't `LINE` always supposed to be replaced by a number? If so, how do you even output the code above, because it has the word `LINE` in it! This is a great reaction and one we will discuss more when we implement our program. For now, we can decide that `LINE` only turns into a number if it is at the beginning of a line of text. Anywhere else, we just ignore it.
+
+But I know some of you think that I'm cheating, that this is not a language at all. Programming languages just simply can't be this simple. A REAL programming language has things like variables and loops and all the things you'd expect in a language. But this is simply not true. A general purpose programming might indeed have those sorts of features, but even then, none of those features are required. There are plenty of general purpose languages that lack these features. But regardless, our language is not general purpose, and yet that doesn't make it any less of a language.
+
+
+
+[^2]: To be clear, for some programs it can tell us this. But there will always be some programs it will be unsure about.
+
+# Chapter 2
 
 Despite the place that computers hold in society, programming is barely understood outside of those who practice it. Telling someone you program for a living will almost immediately cut off all possible conversation. The average person does not even know how to ask questions about what programmers do. (Sofware Devloper/Engineer is the more common term for "programmers", but we will just continue to use programmers.) As far as anyone from the outside is concerned, we are "computer people". We must know a lot about computers or something. 
 
@@ -66,9 +94,9 @@ It isn't uncommon to use terms borrowed from natural language to talk about prog
 
 Natural languages have been grown organically, causing them to be riddled with ambiguity, inconsistency, and irregularity. Yet, it is these "ugly" elements of the language that allow for some of its most beautiful expressions. Works of literature play with this ambiguity, poetry pushes our language to its bounds inviting the reader to follow along, to read between the lines, to find the double meanings in the text. Stories are told, puns are made, symbolism abounds.
 
-This aesthetic taste of natural language does not hold for programming languages. Good and beautiful programming languages are not those riddled with ambiquity. They aren't those whose meaning is indeterminate, whose syntax allows multiple interpretations. Instead the beautiful of a programming language comes from its simplicity and consistency.[^2]
+This aesthetic taste of natural language does not hold for programming languages. Good and beautiful programming languages are not those riddled with ambiquity. They aren't those whose meaning is indeterminate, whose syntax allows multiple interpretations. Instead the beautiful of a programming language comes from its simplicity and consistency.[^3]
 
-[^2]: These decidedly subjective aethestic judgement may seem out of place in a "science" and yet the sciences, broadly understood, are riddled with them.  [[Maybe more]]
+[^3]: These decidedly subjective aethestic judgement may seem out of place in a "science" and yet the sciences, broadly understood, are riddled with them.  [[Maybe more]]
 
 ##  Overcoming Familiarity
 
