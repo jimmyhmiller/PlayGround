@@ -305,7 +305,9 @@ map?
     (~'m/match ?expr & ?body)
     `(analyze-compile :match (quote ~?body) (quote ~?expr))
     (~'m/search ?expr & ?body)
-    `(analyze-compile :search (quote ~?body) (quote ~?expr))))
+    `(analyze-compile :search (quote ~?body) (quote ~?expr))
+    (~'m/find ?expr & ?body)
+    `(analyze-compile :find (quote ~?body) (quote ~?expr))))
 
 
 
@@ -1062,5 +1064,67 @@ nil         ;;; Works as expected
     [[!xs !xs] ...]))
 
 
+(m/search {:a 2 :b 2}
+  {:a 2}
+  :ok)
 
 
+(m/search {:a 2 :b 3 :c 5}
+  (m/not {:a 2})
+  :ok)
+
+(m/search {:a 1} 
+  (m/not {:a 2})
+  :ok)
+
+
+
+
+(m/search [[:a 2] [:b 3] [:c 4]]
+  (m/not (m/scan [:a 2]))
+  :ok)
+
+
+(m/search {:a 2 :b 3 :c 4}
+  {:a}
+  :ok)
+
+(m/search [1 2 3]
+  [_ ... . (m/not 1) . _ ...]
+  :yep)
+
+
+
+(def my-map
+  {:a :a
+   :b :d
+   :c :a
+   :d :e})
+
+(m/search my-map
+  {?a ?a} [?a]
+  
+  {?a ?b
+   ?b (m/some ?c)} [?a ?b ?c])
+
+
+(m/search #{1 2 3}
+  #{(m/and ?x (m/not 1))}
+  ?x)
+
+
+#{} #{1} #{2} #{3} #{1 2} #{2 3} #{1 2 3}
+
+(m/search #{1 2 3} 
+  #{(m/not 1)}
+  :ok)
+
+(m/search #{1 2 3 4}
+  #{(m/pred even? ?x) (m/pred odd? ?y)}
+  #{?x ?y})
+
+
+(analyze
+ (m/search nil
+   (m/not (m/and (m/not nil)))
+   true))
