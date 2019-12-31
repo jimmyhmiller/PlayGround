@@ -1,0 +1,13 @@
+{
+    "rewrites": [
+        {"source": "/api", "destination": "/api"},
+        {"source": "/api/(.*)", "destination": "/api?route=$1"},
+        {"source": "/admin/update-route", "destination": "/api/update-route"},
+        {"source": "/admin/routes", "destination": "/api/routes"}
+    ],
+    "engines": "12.x",
+    
+    "env": {
+        "DATABASE_SECRET": "@live-app-server-db-prod"
+      }
+}
