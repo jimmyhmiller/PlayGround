@@ -1116,15 +1116,143 @@ nil         ;;; Works as expected
 #{} #{1} #{2} #{3} #{1 2} #{2 3} #{1 2 3}
 
 (m/search #{1 2 3} 
-  #{(m/not 1)}
+  (m/not #{1})
   :ok)
+
+
+(comment
+  ;; Here are some semantics for search.
+  ;; Let our input be V.
+
+  ;; ∃ v ∈ V: p(v)
+  [_ ... . p . _ ...]
+
+  ;; ∃ v ∈ V: !p(v)
+  [_ ... . (not p) . _ ...]
+
+  ;; !∀ v ∈ V: p(v) <=> ∃ v ∈ V: !p(v)
+  (not [_ ... . p . _ ...])
+
+
+  ;; ∃ v ∈ V: p(v)
+  #{p}
+
+  ;; ∃ v ∈ V: !p(v)
+  #{(not p)}
+
+  ;; !∀ v ∈ V: p(v) <=> ∃ v ∈ V: !p(v)
+  (not #{p}))
+
+
+
+
+
+
+(m/search [1 1 2]
+  (m/not [_ ... . 1 . _ ...])
+  :yep)
+
+
+
 
 (m/search #{1 2 3 4}
   #{(m/pred even? ?x) (m/pred odd? ?y)}
   #{?x ?y})
 
 
-(analyze
- (m/search nil
-   (m/not (m/and (m/not nil)))
-   true))
+(analyze)
+(m/search nil
+  (m/not (m/some _))
+  true)
+
+
+(m/rewrite {:records  [{:name "A" :value 1 :foo "not-important"} 
+	               {:name "B" :value 2 :bar "not-important"}]}
+
+  {:records  [(m/or (m/let [!value 0] {:name (m/and "A" !name)})
+                    {:name !name :value !value}) ...]}
+  {:records [{:name !name :value !value} ...]})
+
+
+
+(m/rewrite {:records  [{:name "A" :value 1 :foo "not-important"} 
+	               {:name "B" :value 2 :bar "not-important"}]}
+
+  (m/with [%record (m/or (m/let [!value 0]
+                           {:name (m/and "A" !name)})
+                         
+                         {:name !name :value !value})]
+    
+    {:records [%record ...]})
+  {:records [{:name !name :value !value} ...]})
+
+
+
+
+(m/defsyntax if
+  [pred true-branch false-branch]
+  `(meander.epsilon/or (meander.epsilon/and ~pred ~true-branch)
+                       ~false-branch))
+
+
+(m/defsyntax if
+  [pred true-branch false-branch]
+  `(meander.epsilon/or (meander.epsilon/and ~pred ~true-branch)
+                       ~false-branch))
+
+
+
+(let [x "B"]
+  (m/match x
+    (wander.core10/if "A" 
+      (m/let [?x "A"] _)
+      (m/let [?x "B"] _))
+    ?x))
+
+
+
+
+(m/rewrite {:records [{:name "A" :value 1 :foo "not-important"} 
+	              {:name "B" :value 2 :bar "not-important"}]}
+
+  (m/with [%record (wander.core10/if {:name "A"}
+                     (m/let [!value 0] {:name !name})
+                     {:name !name :value !value})]
+    
+    {:records [%record ...]})
+  {:records [{:name !name :value !value} ...]})
+
+
+
+
+
+(m/rewrite {:records [{:name "A" :value 1 :foo "not-important"} 
+	              {:name "B" :value 2 :bar "not-important"}]}
+  {:records [(m/cata !record) ...]}
+  {:records [!record ...]}
+  
+  
+  {:name (m/and "A" ?name)} {:name ?name :value 0}
+ 
+  {:name ?name :value ?value} {:name ?name :value ?value})
+
+
+
+
+(m/defsyntax sub-rewrite
+  [var & patterns]
+  `(meander.epsilon/app
+    (meander.strategy.epsilon/rewrite ~@patterns)
+    ~var))
+
+
+(m/rewrite {:records [{:name "A" :value 1 :foo "not-important"} 
+	              {:name "B" :value 2 :bar "not-important"}]}
+
+  (m/with [%record (sub-rewrite !record
+                    {:name (m/and "A" ?name)} {:name ?name :value 0}
+                    {:name ?name :value ?value} {:name ?name :value ?value})]
+
+    {:records [%record ...]})
+
+  {:records [!record ...]})
