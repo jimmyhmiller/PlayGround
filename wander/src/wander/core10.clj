@@ -1246,13 +1246,175 @@ nil         ;;; Works as expected
     ~var))
 
 
+(defn transform-record [record]
+  (m/rewrite record
+    {:name (m/and "A" ?name)} {:name ?name :value 0}
+    {:name ?name :value ?value} {:name ?name :value ?value}))
+
+
+(m/rewrite {:records [{:name "A" :value 1 :foo "not-important"} 
+	              {:name "B" :value 2 :bar "not-important"}]})
+
+
 (m/rewrite {:records [{:name "A" :value 1 :foo "not-important"} 
 	              {:name "B" :value 2 :bar "not-important"}]}
 
-  (m/with [%record (sub-rewrite !record
-                    {:name (m/and "A" ?name)} {:name ?name :value 0}
-                    {:name ?name :value ?value} {:name ?name :value ?value})]
-
-    {:records [%record ...]})
+  {:records [(m/app transform-record !record) ...]}
 
   {:records [!record ...]})
+
+
+(m/rewrite [1 2 3 4 5 6]
+  [!xs ...]
+  {& [[!xs [!xs !xs]] ...]})
+
+
+
+
+(m/search [1 2 3 4 5]
+  [1 . _ ... 2 . _ ... ?x & ?c]
+  [?x ?c])
+
+
+(m/rewrite [1 2 3 4 5 6]
+  [!xs ...]
+  [[!xs !xs] ...])
+
+(m/rewrite [[1 2 3 4] [5 6 7 8] [9 10 11 12]]
+  [[!xs ...] ..?n]
+  [[!xs !xs !xs] ..?n])
+
+
+(m/rewrite [1 2 3 4 5 6]
+  [!xs ...]
+  [[!xs !xs] ...])
+
+
+
+(m/match [0 1 2 5 8]
+  [(m/and !num !parity)
+   ...]
+  [!num !parity])
+
+
+
+
+(m/search {:a {1 "a1"
+               2 "a2"}
+           :b {3 "b3"}}
+  (m/scan [?k1 (m/scan [?k2 ?v])])
+  [?k1 ?k2 ?v])
+
+
+(m/search [1 2 3 4 5]
+  [1 . _ ... 2 . _ ... ?x & ?c]
+  [ ?x ?c])
+
+
+
+(m/with [%my-var (make-var [] (fn [k] (fn [v] (fn [acc] (update acc k conj v)))))]
+  [%my-var %my-var ...])
+
+(m/rewrite {:a {:b :c}}
+  {!k1 {!k2 !v}}                      
+  {!k2 {!k1 !v}})
+
+(meander.match.runtime.epsilon/partitions
+ 2
+ [2 3 4 5])
+
+
+
+[[1 [2 3]]
+ [4 [5 6]]]
+
+{2 [3 4]
+ 5 [6 1]}
+
+
+(m/rewrite [:a [1 2 3] :b [4 5]]
+  [!k [!x ..!n] ..!m]
+  [!k [!x ..!n] ..!m])
+;; => [:a [1 2 3] :b [4 5]]
+
+
+(m/match [[1 [2 3]]
+          [3 [4 5]]]
+ 
+  {:k1 !k1
+   :k2 !k2
+   :v !v})
+
+
+(m/rewrite [:a [1 2 3] :b [4 5]]
+  [!k [!x ...] ...]
+  [!k [!x ...] ...])
+
+
+(m/match [:a [1 2 3] :b [4 5]]
+  [!ks [!vs ...] ...]
+  (m/subst [!ks [!vs ..1] ..2]))
+
+
+(m/match {:a 1 :b 2}
+  {:a 1 & ?rest}
+  ?rest)
+
+;; =>
+{:b 2}
+
+(m/rewrite [:a 1 :b 2]
+  [!xs ...]
+  {& [[!xs ..2] ...]})
+
+
+
+
+(make-vars [!k !v] {} (fn [acc [!k !v] (update acc !k conj !v)]))
+
+
+(m/match [:a [1 2]
+          :b [2 1 3]]
+  [!xs [!ys ...] !ys [!xs ...]]
+  {:xs !xs
+   :ys !ys})
+
+[:a :a 2 1 3]
+[1 2 :b :b :b]
+
+(m/match [[1 2 3] [4 5]]
+  [[!xs ..!n] [!ys ..!n]]
+  [!xs !xs !n])
+
+{}
+
+(m/match [2 :one :two :three]
+  [?x . !xs ..?x]
+  [?x !xs])
+
+(m/match [2 :one :two]
+  [?x . !xs ..?x]
+  [!xs ?x])
+
+
+(m/match [1 2 3]
+  [!xs ..?x]
+  [!xs ?x])
+
+(m/match [2 1 1]
+  [?x . !xs ..?x]
+  [?x !xs])
+
+(m/match [[:a [[1 "a1"]
+               [2 "a2"]]]
+          [:b [[3 "b3"]]]]
+  [[!k1 [[!k1.k2 !k1.v] ...]] ...]
+  {:k1s !k1})
+
+;; =>
+
+{:k1s [:a [{:k2 1 :v "a1"} {:k2 2 :v "a2"}]
+       :b [{:k2 3 :v "b3"}]]}
+
+
+
