@@ -1,9 +1,13 @@
 {
     "rewrites": [
+        {"source": "/", "destination": "/"},
         {"source": "/api", "destination": "/api"},
         {"source": "/api/(.*)", "destination": "/api?route=$1"},
         {"source": "/admin/update-route", "destination": "/api/update-route"},
-        {"source": "/admin/routes", "destination": "/api/routes"}
+        {"source": "/admin/routes", "destination": "/api/routes"},
+        {"source": "/admin/update-component", "destination": "/api/update-component"},
+        {"source": "/admin/components", "destination": "/api/components"},
+        {"source": "/admin/component", "destination": "/api/component"}
     ],
     "engines": "12.x",
     
