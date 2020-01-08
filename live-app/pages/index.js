@@ -1,5 +1,5 @@
 import useSWR, { SWRConfig, trigger, mutate } from "swr";
-import { Suspense, useState, useEffect } from "react";
+import { Suspense, useState, useEffect, useRef } from "react";
 import { Editor, renderElementAsync } from "react-live";
 import { useDebounce } from 'use-debounce';
 import prettier from "prettier/standalone";
@@ -13,6 +13,11 @@ const formatCode = (code) => {
   })
 }
 
+const formatCodeHandler = (code, setCode) => e => {
+  if (e.ctrlKey && e.keyCode === 70) {
+    setCode(formatCode(code));
+  }
+};
 
 // https://github.com/gregberge/loadable-components/issues/322#issuecomment-553370417
 const LoadingIndicatorWithDelay = ({ delay=200 }) => {
@@ -51,61 +56,6 @@ const ViewingArea = ({ code }) => {
   return <Element />;
 };
 
-
-const Route = ({ code: initialCode, route }) => {
-  const [code, setCode] = useState(initialCode);
-  const [debouncedCode] = useDebounce(code, 300);
-  useEffect(() => {
-    const updateFunction = async () => {
-      await fetch("/admin/update-route", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          route,
-          code: debouncedCode,
-        })
-      });
-      console.log("Triggering")
-      trigger(`/api/${route}`);
-    }
-
-    updateFunction();
-
-  }, [route, debouncedCode])
-
-  return (
-      <div style={{backgroundColor: editorColor, width: 500, caretColor: "white", margin:20, borderRadius: 5}}
-           onKeyUp={e => { 
-             if (e.ctrlKey && e.keyCode === 70) {
-              setCode(formatCode(code))
-            }
-           }}>
-        <div style={{color: "white", padding:10, borderBottom: `2px solid ${editorColor}`, filter: "brightness(80%)", minHeight: 15}}>
-          /api/{route}
-        </div>
-        <Editor
-          padding={20}
-          language="jsx"
-          code={code}
-          // onBlur={() => prettifyCode({ name })}
-          onValueChange={(code) => setCode(code)}
-        />
-    </div>
-  );
-};
-
-const Routes = () => {
-  const { data: routes } = useSWR("/admin/routes");
-  return (
-    <div>
-      {routes.map(r => <Route key={r.route} {...r} />)}
-    </div>
-  );
-};
-
-
 const CreateRoute = () => {
   const [route, setRoute] = useState("");
 
@@ -135,96 +85,114 @@ const CreateRoute = () => {
   )
 }
 
-// Should probably get rid of duplicated code
+const noop = () => {}
 
-const Component = ({ code: initialCode, name }) => {
-  const [code, setCode] = useState(initialCode);
-  const [debouncedCode] = useDebounce(code, 300);
+const useUpdateEntity = ({ endpoint, entity, code, beforeUpdate, afterUpdate }) => {
+  const isFirstRun = useRef(true);
   useEffect(() => {
+
+    // We don't need to update on the first render.
+    if (isFirstRun.current) {
+      isFirstRun.current = false;
+      return;
+    }
+
     const updateFunction = async () => {
-      mutate(`/admin/component?name=${name}`, {name, code: debouncedCode}, false)  
-      await fetch("/admin/update-component", {
+      beforeUpdate({...entity, code})
+      await fetch(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          name,
-          code: debouncedCode,
+          ...entity,
+          code,
         })
       });
-      
-      // trigger(`/admin/component?name={name}`);
+      afterUpdate({...entity, code})
     }
 
     updateFunction();
 
-  }, [name, debouncedCode])
+  }, [code])
+}
+
+const EditorCard = ({ code, setCode, title }) => {
+  const cardBodyStyle = {
+    backgroundColor: editorColor,
+    width: 500,
+    caretColor: "white",
+    margin: 20,
+    borderRadius: 5
+  };
+
+  const cardHeaderStyle = {
+    color: "white",
+    padding: 10,
+    borderBottom: `2px solid ${editorColor}`,
+    filter: "brightness(80%)",
+    minHeight: 15
+  };
 
   return (
-      <div style={{backgroundColor: editorColor, width: 500, caretColor: "white", margin:20, borderRadius: 5}}
-           onKeyUp={e => { 
-             if (e.ctrlKey && e.keyCode === 70) {
-              setCode(formatCode(code))
-            }
-           }}>
-
-
-        <div style={{color: "white", padding:10, borderBottom: `2px solid ${editorColor}`, filter: "brightness(80%)", minHeight: 15}}>
-          {name}
-        </div>
-        <Editor
-          padding={20}
-          language="jsx"
-          code={code}
-          // onBlur={() => prettifyCode({ name })}
-          onValueChange={(code) => setCode(code)}
-        />
+    <div style={cardBodyStyle} onKeyUp={formatCodeHandler(code, setCode)}>
+      <div style={cardHeaderStyle}>{title}</div>
+      <Editor
+        padding={20}
+        language="jsx"
+        code={code}
+        onValueChange={code => setCode(code)}
+      />
     </div>
   );
 };
-
-const Components = () => {
-  const { data: components } = useSWR("/admin/components");
-  return (
-    <div>
-      {components.map(c => <Component key={c.name} {...c} />)}
-    </div>
-  );
-};
-
-
-const CreateComponent = () => {
-  const [name, setName] = useState("");
+const EntityEditor = ({ endpoint, beforeUpdate=noop, afterUpdate=noop, entity, titleFn }) => {
+  const [code, setCode] = useState(entity.code);
+  const [debouncedCode] = useDebounce(code, 300);
+  useUpdateEntity({ endpoint, entity, code: debouncedCode, beforeUpdate, afterUpdate });
 
   return (
-    <div>
-      Component Name:
-      <input value={name} onChange={e => setName(e.target.value)} />
-      <div>
-        <button
-          onClick={async () => {
-            await fetch("/admin/update-component", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                name,
-                code: `(req, res) => res.send("Hello World")`
-              })
-            });
-            trigger("/admin/components");
-          }}>
-          Create
-      </button>
-    </div>
-  </div>
+    <EditorCard code={code} setCode={setCode} title={titleFn(entity)} />
   )
 }
 
+const mutateComponentCode = ({ name, code }) => {
+  mutate(`/admin/entity?identifier=${name}&type=component`, {name, code}, false)  
+}
+
+const ComponentEditor = ({ entity }) => {
+  return (
+    <EntityEditor
+      endpoint="/admin/entity"
+      beforeUpdate={mutateComponentCode}
+      entity={{...entity, type:"component"}}
+      titleFn={entity => entity.name}
+    />
+  );
+};
+
+const RouteEditor = ({ entity }) => {
+  return (
+    <EntityEditor
+      endpoint="/admin/entity"
+      afterUpdate={() => trigger(`/api/${entity.route}`)}
+      entity={{...entity, type:"endpoint"}}
+      titleFn={entity => `/api/${entity.route}`}
+    />
+  )
+}
+
+const ListEntities = ({ keyFn, endpoint, Editor }) => {
+  const { data } = useSWR(endpoint, {dedupingInterval: 2000});
+  return (
+    <div>
+      {data.map(entity => <Editor key={keyFn(entity)} entity={entity} />)}
+    </div>
+  );
+}
+
 const ViewMainComponent = () => {
-  const { data: {name, code} } = useSWR("/admin/component?name=Main");
+  const { data: {name, code} } = useSWR("/admin/entity?identifier=Main&type=component");
   return <ViewingArea code={code} />
 }
 
@@ -243,10 +211,15 @@ const Index = () => {
         <Suspense fallback={<LoadingIndicatorWithDelay />}>
           <div style={{display: "flex", flexDirection: "row"}}>
             <div style={{width: "45vw", height: "95vh", overflow: "scroll"}}>
-              <Routes />
-              <Components />
+               <ListEntities 
+                 keyFn={e => e.route} 
+                 endpoint={"/admin/entity?type=endpoint"} 
+                 Editor={RouteEditor} />
+               <ListEntities 
+                 keyFn={e => e.name} 
+                 endpoint={"/admin/entity?type=component"} 
+                 Editor={ComponentEditor} />
               <CreateRoute />
-              {/*<CreateComponent />*/}
              </div>
             <div style={{width: "45vw", height: "95vh", padding: 20}}>
               <ViewMainComponent />
