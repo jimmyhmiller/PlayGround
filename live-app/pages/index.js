@@ -19,8 +19,19 @@ const formatCodeHandler = (code, setCode) => e => {
   }
 };
 
+
+const httpRequest = ({ method, body, url }) => {
+  return fetch(url, {
+    method: method,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body)
+  });
+}
+
 // https://github.com/gregberge/loadable-components/issues/322#issuecomment-553370417
-const LoadingIndicatorWithDelay = ({ delay=200 }) => {
+const LoadingIndicatorWithDelay = ({ delay=300 }) => {
   const [showLoadingIndicator, setLoadingIndicatorVisibility] = useState(false);
 
   useEffect(() => {
@@ -66,17 +77,17 @@ const CreateRoute = () => {
       <div>
         <button
           onClick={async () => {
-            await fetch("/admin/update-route", {
+
+            await httpRequest({ 
+              url: "/admin/entity",
               method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
+              body: {
                 route,
+                type: "endpoint",
                 code: `(req, res) => res.send("Hello World")`
-              })
-            });
-            trigger("/admin/routes");
+              }
+            })
+            trigger("/admin/entity?type=endpoint");
           }}>
           Create
       </button>
@@ -99,16 +110,16 @@ const useUpdateEntity = ({ endpoint, entity, code, beforeUpdate, afterUpdate }) 
 
     const updateFunction = async () => {
       beforeUpdate({...entity, code})
-      await fetch(endpoint, {
+
+      await httpRequest({
+        url: endpoint,
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+        body: {
           ...entity,
           code,
-        })
-      });
+        }
+      })
+
       afterUpdate({...entity, code})
     }
 
@@ -117,7 +128,19 @@ const useUpdateEntity = ({ endpoint, entity, code, beforeUpdate, afterUpdate }) 
   }, [code])
 }
 
-const EditorCard = ({ code, setCode, title }) => {
+const deleteEntityHandler = ({ identifier, type }) => async e => {
+  await httpRequest({
+    url: `/admin/entity?type=${type}&identifier=${identifier}`,
+    method: "DELETE",
+  })
+
+  // Probably want to be able to not trigger list?
+  // Or maybe I want to modify the list locally?
+  // Not sure.
+  trigger(`/admin/entity?type=${type}`)
+}
+
+const EditorCard = ({ code, setCode, title, identifier, type, }) => {
   const cardBodyStyle = {
     backgroundColor: editorColor,
     width: 500,
@@ -129,6 +152,7 @@ const EditorCard = ({ code, setCode, title }) => {
   const cardHeaderStyle = {
     color: "white",
     padding: 10,
+    display: "flex",
     borderBottom: `2px solid ${editorColor}`,
     filter: "brightness(80%)",
     minHeight: 15
@@ -136,7 +160,9 @@ const EditorCard = ({ code, setCode, title }) => {
 
   return (
     <div style={cardBodyStyle} onKeyUp={formatCodeHandler(code, setCode)}>
-      <div style={cardHeaderStyle}>{title}</div>
+      <div style={cardHeaderStyle}>
+        {title}
+        <div onClick={deleteEntityHandler({identifier, type})} style={{marginLeft:"auto", cursor: "pointer"}}>X</div></div>
       <Editor
         padding={20}
         language="jsx"
@@ -146,13 +172,14 @@ const EditorCard = ({ code, setCode, title }) => {
     </div>
   );
 };
-const EntityEditor = ({ endpoint, beforeUpdate=noop, afterUpdate=noop, entity, titleFn }) => {
+
+const EntityEditor = ({ endpoint, type, identifier, beforeUpdate=noop, afterUpdate=noop, entity, titleFn }) => {
   const [code, setCode] = useState(entity.code);
   const [debouncedCode] = useDebounce(code, 300);
   useUpdateEntity({ endpoint, entity, code: debouncedCode, beforeUpdate, afterUpdate });
 
   return (
-    <EditorCard code={code} setCode={setCode} title={titleFn(entity)} />
+    <EditorCard type={type} identifier={identifier} code={code} setCode={setCode} title={titleFn(entity)} />
   )
 }
 
@@ -164,6 +191,8 @@ const ComponentEditor = ({ entity }) => {
   return (
     <EntityEditor
       endpoint="/admin/entity"
+      type="component"
+      identifier={entity.name}
       beforeUpdate={mutateComponentCode}
       entity={{...entity, type:"component"}}
       titleFn={entity => entity.name}
@@ -175,6 +204,8 @@ const RouteEditor = ({ entity }) => {
   return (
     <EntityEditor
       endpoint="/admin/entity"
+      type="endpoint"
+      identifier={entity.route}
       afterUpdate={() => trigger(`/api/${entity.route}`)}
       entity={{...entity, type:"endpoint"}}
       titleFn={entity => `/api/${entity.route}`}
@@ -183,7 +214,7 @@ const RouteEditor = ({ entity }) => {
 }
 
 const ListEntities = ({ keyFn, endpoint, Editor }) => {
-  const { data } = useSWR(endpoint, {dedupingInterval: 2000});
+  const { data } = useSWR(endpoint, {dedupingInterval: 200});
   return (
     <div>
       {data.map(entity => <Editor key={keyFn(entity)} entity={entity} />)}
@@ -206,6 +237,13 @@ const Index = () => {
         fetcher: (...args) => fetch(...args).then(res => res.json())
       }}
     >
+    <style jsx global> {`
+       body {
+         font-family: helvetica;
+       }
+
+    `}
+    </style>
       {/*ugliness because suspense doesn't support server side rendering*/}
       {process.browser ? (
         <Suspense fallback={<LoadingIndicatorWithDelay />}>
