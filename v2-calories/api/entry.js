@@ -103,6 +103,7 @@ const summary = () => {
         ["extra", q.Var("extra")],
         ["total", q.Var("total")],
         ["pounds", q.Var("pounds")],
+        ["daily", bmr-goal],
       ]))
   )
 }
