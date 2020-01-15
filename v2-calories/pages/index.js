@@ -6,8 +6,9 @@ import useSWR, { SWRConfig, trigger, mutate } from "swr";
 import { startOfToday, format as formatDate } from "date-fns";
 
 
-const timeZone = 'America/Chicago'
-const today = () => formatDate(startOfToday(), "yyyy-MM-dd", { timeZone });
+
+const today = () => formatDate(startOfToday(), "yyyy-MM-dd");
+console.log(today())
 
 const httpRequest = ({ method, body, url }) => {
   return fetch(url, {
