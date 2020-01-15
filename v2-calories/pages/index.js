@@ -1,66 +1,129 @@
-import React, { Suspense } from 'react'
+import React, { Suspense, useState } from 'react'
 import Link from 'next/link'
 import Head from 'next/head'
 import useSWR, { SWRConfig, trigger, mutate } from "swr";
+// in browser we don't need time zone stuff
+import { startOfToday, format as formatDate } from "date-fns";
+
+
+const timeZone = 'America/Chicago'
+const today = () => formatDate(startOfToday(), "yyyy-MM-dd", { timeZone });
+
+const httpRequest = ({ method, body, url }) => {
+  return fetch(url, {
+    method: method,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body)
+  });
+}
 
 
 const Entry = ({ name, calories, first }) => (
-  <div
-    className="entry"
-    style={{
-      fontSize: 26,
-      borderTop: first ? "1px solid #343334" : "none",
-      borderBottom: "1px solid #343334",
-      padding: "10px 15px 10px 15px",
-      textAlign: "right"
-    }}
-  >
-    {name}
-    <div style={{ fontSize: 13, marginTop: -10 }}>{calories} cal</div>
+  <div>
+    <button
+      onClick={async () => {
 
-  {/*Think about light and dark theme, or just make it all dark*/}
-    <style jsx>{`
+        await httpRequest({ 
+          url: "/api/entry",
+          method: "POST",
+          body: {
+            calories,
+            name,
+            date: today()
+          }
+        })
+        trigger("/api/entry?summary=true");
+      }}
+      className="entry"
+      style={{
+        fontSize: 26,
+        borderTop: first ? "1px solid #343334" : "none",
+        borderBottom: "1px solid #343334",
+        padding: "10px 15px 10px 15px",
+        textAlign: "right"
+      }}
+    >
+      {name}
+      <div style={{ fontSize: 13, marginTop: -10 }}>{calories} cal</div>
 
-      .entry {
-        box-shadow: 5px 5px 10px #1d1d1d, 
-            -5px -5px 10px #313131;
-        margin-top:30px;
-      }
+    {/*Think about light and dark theme, or just make it all dark*/}
+      <style jsx>{`
 
-      .entry:active {
-        box-shadow: 5px 5px 10px #313131, 
-            -5px -5px 10px #1d1d1d;
-      }
+        .entry {
+          box-shadow: 5px 5px 10px #1d1d1d, 
+              -5px -5px 10px #313131;
+          margin-top:10px;
+          width: 100%;
+          background-color: #272727;
+          border: none;
+          color: #c1c1c1;
+          line-height: 30px;
+        }
+
+        .entry:active {
+          box-shadow: 5px 5px 10px #313131, 
+              -5px -5px 10px #1d1d1d;
+        }
 
 
-    `}
-    </style>
+      `}
+      </style>
+    </button>
   </div>
 );
 
-const AddItem = () => {
+const subtractRemaining = ({ summary, calories }) => {
+  return {
+    summary: {
+      ...summary,
+      remaining: summary.remaining - calories
+    }
+  }
+}
+
+const AddItem = ({ calories, summary, setCalories }) => {
   return (
     <div
-     className="add-item"
-     style={{
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      position:"fixed",
-      bottom: 20,
-      right: 20,
-      backgroundColor: "#272727",
-      width: 70,
-      height: 70,
-      zIndex:99999,
-      borderRadius: 19,
-      textShadow: "0px 1px 0px #2e2e2e", 
-      // background: "linear-gradient(145deg, #f8fef7, #d1d5d0)",
-      
-      // color: "black",
-      fontSize: 90,
-      fontWeight: 400,
-    }}
+      onClick={async () => {
+        if (!calories) {
+          return;
+        }
+
+        await httpRequest({ 
+          url: "/api/entry",
+          method: "POST",
+          body: {
+            calories: parseInt(calories, 10),
+            name: "food",
+            date: today(),
+          }
+        })
+
+        mutate("/api/entry?summary=true", subtractRemaining({ summary, calories}));
+        setCalories("");
+      }}
+      className="add-item"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        position:"fixed",
+        bottom: 20,
+        right: 20,
+        backgroundColor: "#272727",
+        width: 70,
+        height: 70,
+        zIndex:99999,
+        borderRadius: 19,
+        textShadow: "0px 1px 0px #2e2e2e", 
+        // background: "linear-gradient(145deg, #f8fef7, #d1d5d0)",
+        
+        // color: "black",
+        fontSize: 90,
+        fontWeight: 400,
+      }}
     ><span>+</span>
 
     <style jsx>{`
@@ -91,16 +154,24 @@ const AddItem = () => {
 
 const Home = () => {
   const {data : { summary }} = useSWR("/api/entry?summary=true");
-
+  const [calories, setCalories] = useState("");
   return (
     <div>
 
       <h1>{summary.remaining} Calories</h1>
 
-      <Entry name="Bowl" calories="700" first />
-      <Entry name="Cortado" calories="80" />
-      <Entry name="Biscuit" calories="250" />
-      <AddItem />
+      <Entry name="Bowl" calories={850} first />
+      <Entry name="Cortado" calories={100} />
+      <Entry name="Biscuit" calories={250} />
+      <Entry name="1 Mile Walk" calories={-100} />
+      {/*Ugly*/}
+      <input
+        value={calories}
+        onChange={e => setCalories(e.target.value)} 
+        style={{marginTop: 30, width: "100%", borderRadius: 0}} 
+        type="number" 
+        placeholder="Calories" />
+      <AddItem calories={calories} setCalories={setCalories} summary={summary} />
     </div>
   )
 }
@@ -124,9 +195,11 @@ const App = () => {
         body {
           color: #c1c1c1;
           font-family: 'helvetica', arial;
+          margin: 20px;
         }
 
         h1 {
+          margin-top: 0;
           text-shadow: 
                 5px 5px 10px #101010, 
               -5px -5px 10px #3e3e3e;

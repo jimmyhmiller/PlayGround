@@ -29,11 +29,6 @@ const db = {
     )
   },
 
-  delete: (collection, id) => {
-    client.query(
-      q.Delete(q.Select("ref", q.Get(q.Match(`${collection}_by_id`, id))))
-    );
-  },
 }
 
 
@@ -125,7 +120,5 @@ module.exports = async (req, res) => {
   else if (req.method === "POST" || req.method === "PUT") {
     res.send(await db.create("entry", req.body));
   }
-  else if (req.method === "DELETE") {
-    res.send(await db.delete("entry", req.query.id))
-  }
+  // Need a way to delete. Which means I need ids? Or I could just use refs.
 };
