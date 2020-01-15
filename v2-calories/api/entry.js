@@ -37,11 +37,8 @@ const db = {
 }
 
 
-// Maybe I want to combine these queries? Turn them into functions?
-// Not really sure yet.
 const getTotal = () => {
-  return client.query(
-    q.Sum(
+  return q.Sum(
       q.Select(
         "data",
         q.Map(
@@ -50,55 +47,77 @@ const getTotal = () => {
         )
       )
     )
-  );
 };
 
+const numberOfDays = () => {
+  return q.Count(
+    q.Distinct(q.Select("data", 
+      q.Map(
+        q.Paginate(q.Match("all_entry")),
+        q.Lambda("x", q.Select(["data", "date"], q.Get(q.Var("x"))))))));
+}
+
 const bmr = 2260;
+// 500 = 1lb per week;
+const goal = 500;
 
 const getPounds = () => {
-  return client.query(
-    q.Let({total: q.Sum(
-                    q.Select("data", q.Map(
-                      q.Paginate(q.Match("all_entry")),
-                      q.Lambda("x", q.Select(["data", "calories"], q.Get(q.Var("x"))))))),
-        days: q.Count(q.Distinct(q.Select("data", q.Map(
-                  q.Paginate(q.Match("all_entry")),
-                  q.Lambda("x", q.Select(["data", "date"], q.Get(q.Var("x"))))))))},
-   q.Divide(q.ToDouble(q.Subtract(q.Multiply(q.Var("days"), bmr), q.Var("total"))), 3500.0))
-  )
+  return q.Let({
+        total: getTotal(),
+        days: numberOfDays(),
+      },
+    q.Divide(q.ToDouble(q.Subtract(q.Multiply(q.Var("days"), bmr), q.Var("total"))), 3500.0))
+
 }
+
+
+const extraCalories = () => {
+  return q.Let({
+        total: getTotal(),
+         days: numberOfDays(),
+      },
+   q.Subtract(q.Multiply(q.Var("days"), bmr-goal), q.Var("total")))
+}
+
 
 const timeZone = 'America/Chicago'
 const today = () => formatDate(utcToZonedTime(startOfToday(), timeZone), "yyyy-MM-dd", { timeZone });
 
 const getRemainingToday = () => {
-  return client.query(
-    // I wish they did the map and filter argument order correctly
-    q.Let({total: q.Sum(
-                      q.Select("data", q.Map(
-                        q.Filter(
-                          q.Paginate(q.Match("all_entry")),
-                          q.Lambda("x", q.Equals(today(), q.Select(["data", "date"], q.Get(q.Var("x")))))),
-                        q.Lambda("x", q.Select(["data", "calories"], q.Get(q.Var("x")))))),
+  return q.Let({total: q.Sum(
+                        q.Select("data", q.Map(
+                          q.Filter(
+                            q.Paginate(q.Match("all_entry")),
+                            q.Lambda("x", q.Equals(today(), q.Select(["data", "date"], q.Get(q.Var("x")))))),
+                          q.Lambda("x", q.Select(["data", "calories"], q.Get(q.Var("x")))))),
                       )},
-   // 500 = 1lb per week
-   q.Subtract(bmr, 500, q.Var("total")))
+   q.Subtract(bmr, goal, q.Var("total")))
+}
+
+
+const summary = () => {
+  return client.query(
+    q.Let({
+      remaining: getRemainingToday(),
+      extra: extraCalories(),
+      total: getTotal(),
+      pounds: getPounds(),
+    },
+      q.ToObject([
+        ["remaining", q.Var("remaining")], 
+        ["extra", q.Var("extra")],
+        ["total", q.Var("total")],
+        ["pounds", q.Var("pounds")],
+      ]))
   )
 }
 
 
 
 
-
 module.exports = async (req, res) => {
-  if (req.method === "GET" && req.query.total) {
-    res.json({total: await getTotal()});
-  }
-  else if (req.method === "GET" && req.query.pounds) {
-    res.json({total: await getPounds()});
-  }
-  else if (req.method === "GET" && req.query.today) {
-    res.json({remaining: await getRemainingToday()});
+  if (req.method === "GET" && req.query.summary) {
+    res.json({summary: await summary()});
   }
   else if (req.method === "GET") {
     res.send(await db.getAll("entry"));

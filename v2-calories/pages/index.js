@@ -1,7 +1,7 @@
-import React from 'react'
+import React, { Suspense } from 'react'
 import Link from 'next/link'
 import Head from 'next/head'
-
+import useSWR, { SWRConfig, trigger, mutate } from "swr";
 
 
 const Entry = ({ name, calories, first }) => (
@@ -89,34 +89,60 @@ const AddItem = () => {
   )
 }
 
-const Home = () => (
-  <div>
-    <Head>
-      <link href="https://unpkg.com/superstylin@2.0.2/src/index.css" rel="stylesheet" />
-      <title>Home</title>
-    </Head>
+const Home = () => {
+  const {data : { summary }} = useSWR("/api/entry?summary=true");
 
-    <style jsx global>{`
-      body {
-        color: #c1c1c1;
-        font-family: 'helvetica', arial;
+  return (
+    <div>
+
+      <h1>{summary.remaining} Calories</h1>
+
+      <Entry name="Bowl" calories="700" first />
+      <Entry name="Cortado" calories="80" />
+      <Entry name="Biscuit" calories="250" />
+      <AddItem />
+    </div>
+  )
+}
+
+
+const App = () => {
+  return (
+    <SWRConfig
+      value={{
+        suspense: process.browser,
+        refreshInterval: 0,
+        fetcher: (...args) => fetch(...args).then(res => res.json())
+      }}
+    >
+      <Head>
+        <link href="https://unpkg.com/superstylin@2.0.2/src/index.css" rel="stylesheet" />
+        <title>Home</title>
+      </Head>
+
+      <style jsx global>{`
+        body {
+          color: #c1c1c1;
+          font-family: 'helvetica', arial;
+        }
+
+        h1 {
+          text-shadow: 
+                5px 5px 10px #101010, 
+              -5px -5px 10px #3e3e3e;
+        }
+
+      `}</style>
+      {process.browser ? 
+        <Suspense fallback={<p></p>}>
+          <Home /> 
+        </Suspense>
+        : null
       }
+    </SWRConfig>
+  )
+}
 
-      h1 {
-        text-shadow: 
-              5px 5px 10px #101010, 
-            -5px -5px 10px #3e3e3e;
-      }
 
-    `}</style>
 
-    <h1>1200 Calories</h1>
-
-    <Entry name="Bowl" calories="700" first />
-    <Entry name="Cortado" calories="80" />
-    <Entry name="Biscuit" calories="250" />
-    <AddItem />
-  </div>
-)
-
-export default Home
+export default App
