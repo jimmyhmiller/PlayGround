@@ -162,7 +162,7 @@ const Home = () => {
 
       <Entry name="Bowl" calories={850} first />
       <Entry name="Cortado" calories={100} />
-      <Entry name="Biscuit" calories={250} />
+      <Entry name="Biscuit" calories={185} />
       <Entry name="1 Mile Walk" calories={-100} />
       {/*Ugly*/}
       <input
