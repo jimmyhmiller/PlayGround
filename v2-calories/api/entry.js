@@ -1,6 +1,5 @@
 const faunadb = require("faunadb");
 const q = faunadb.query;
-const { startOfToday } = require("date-fns"); 
 const {format: formatDate, utcToZonedTime} = require("date-fns-tz");
 
 const client = new faunadb.Client({ secret: process.env.DATABASE_SECRET });
@@ -75,8 +74,9 @@ const extraCalories = () => {
 }
 
 
-const timeZone = 'America/Chicago'
-const today = () => formatDate(utcToZonedTime(startOfToday(), timeZone), "yyyy-MM-dd", { timeZone });
+const timeZone = 'America/New_York'
+const today = () => formatDate(utcToZonedTime(new Date(), timeZone), "yyyy-MM-dd", { timeZone });
+console.log(today())
 
 const getRemainingToday = () => {
   return q.Let({total: q.Sum(
