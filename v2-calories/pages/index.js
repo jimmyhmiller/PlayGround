@@ -153,14 +153,10 @@ const AddItem = ({ calories, summary, setCalories }) => {
   )
 }
 
-const Home = () => {
-  const {data : { summary }} = useSWR("/api/entry?summary=true");
+const AddEntry = ({ summary }) => {
   const [calories, setCalories] = useState("");
   return (
-    <div>
-
-      <h1>{summary.remaining} Calories</h1>
-
+    <>
       <Entry name="Bowl" calories={850} first />
       <Entry name="Cortado" calories={100} />
       <Entry name="Biscuit" calories={185} />
@@ -173,6 +169,33 @@ const Home = () => {
         type="number" 
         placeholder="Calories" />
       <AddItem calories={calories} setCalories={setCalories} summary={summary} />
+    </>
+  )
+}
+
+const Summary = ({ summary }) => {
+  return (
+    <ul>
+      <li>Remaining: {summary["remaining"]}</li>
+      <li>Extra One Pound: {summary["extraOnePound"]}</li>
+      <li>Extra Two Pounds: {summary["extraTwoPounds"]}</li>
+      <li>Total: {summary["total"]}</li>
+      <li>Pounds: {summary["pounds"]}</li>
+      <li>Daily: {summary["daily"]}</li>
+    </ul>
+  )
+}
+
+
+const Main = () => {
+  const {data : { summary }} = useSWR("/api/entry?summary=true");
+  const [showSummary, setShowSummary] = useState(false);
+  return (
+    <div>
+
+      <h1 onClick={() => setShowSummary(!showSummary)}>{summary.remaining} Calories</h1>
+      {showSummary ? <Summary summary={summary} /> : <AddEntry summary={summary} />}
+
     </div>
   )
 }
@@ -189,7 +212,7 @@ const App = () => {
     >
       <Head>
         <link href="https://unpkg.com/superstylin@2.0.2/src/index.css" rel="stylesheet" />
-        <title>Home</title>
+        <title>Calories</title>
       </Head>
 
       <style jsx global>{`
@@ -209,7 +232,7 @@ const App = () => {
       `}</style>
       {process.browser ? 
         <Suspense fallback={<p></p>}>
-          <Home /> 
+          <Main /> 
         </Suspense>
         : null
       }

@@ -76,7 +76,7 @@ const extraCalories = () => {
 
 const timeZone = 'America/New_York'
 const today = () => formatDate(utcToZonedTime(new Date(), timeZone), "yyyy-MM-dd", { timeZone });
-console.log(today())
+
 
 const getRemainingToday = () => {
   return q.Let({total: q.Sum(
@@ -93,6 +93,7 @@ const getRemainingToday = () => {
 const summary = () => {
   return client.query(
     q.Let({
+      days: numberOfDays(),
       remaining: getRemainingToday(),
       extra: extraCalories(),
       total: getTotal(),
@@ -100,7 +101,8 @@ const summary = () => {
     },
       q.ToObject([
         ["remaining", q.Var("remaining")], 
-        ["extra", q.Var("extra")],
+        ["extraOnePound", q.Var("extra")],
+        ["extraTwoPounds", q.Subtract(q.Var("extra"), q.Multiply(q.Var("days"), 500))],
         ["total", q.Var("total")],
         ["pounds", q.Var("pounds")],
         ["daily", bmr-goal],
