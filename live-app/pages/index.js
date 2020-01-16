@@ -54,7 +54,7 @@ const ViewingArea = ({ code }) => {
       renderElementAsync(
         {
           code: `${code};\n\n render(Main);`,
-          scope: { React, useState, useSWR }
+          scope: { React, useState, useSWR, trigger, mutate, SWRConfig }
         },
         elem => setElement(_ => elem),
         e => console.error(e)
@@ -227,6 +227,37 @@ const ViewMainComponent = () => {
   return <ViewingArea code={code} />
 }
 
+const ListCollections = () => {
+  const { data: { collections } } = useSWR("/admin/collection");
+  const [name, setName] = useState("");
+
+  return (
+    <>
+      <ul>
+        {collections.map(x => <li key={x.name}>{x.name}</li>)}
+      </ul>
+      <input 
+        placeholder="collection" 
+        value={name} 
+        onChange={(e) => setName(e.target.value)} />
+      <button
+        onClick={async () => {
+          await httpRequest({
+            url: "/admin/collection",
+            method: "POST",
+            body: {
+              name
+            }
+          })
+
+          mutate("/admin/collection", {collections: collections.concat([{name}])});
+          setName("");
+        }}
+      >Add Collection</button>
+    </>
+  )
+}
+
 const Index = () => {
   return (
     <SWRConfig
@@ -241,7 +272,6 @@ const Index = () => {
        body {
          font-family: helvetica;
        }
-
     `}
     </style>
       {/*ugliness because suspense doesn't support server side rendering*/}
@@ -249,6 +279,7 @@ const Index = () => {
         <Suspense fallback={<LoadingIndicatorWithDelay />}>
           <div style={{display: "flex", flexDirection: "row"}}>
             <div style={{width: "45vw", height: "95vh", overflow: "scroll"}}>
+               <ListCollections />
                <ListEntities 
                  keyFn={e => e.route} 
                  endpoint={"/admin/entity?type=endpoint"} 
