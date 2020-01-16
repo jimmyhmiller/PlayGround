@@ -13,6 +13,9 @@ const client = new faunadb.Client({ secret: process.env.DATABASE_SECRET });
 
 // This code is a duplicate of what I do in entities more or less.
 const db = {
+
+  newId: () => q.NewId(),
+
   get: (collection, id) => {
     return client.query(
       q.Select("data", q.Get(q.Match(`${collection}_by_id`, id)))

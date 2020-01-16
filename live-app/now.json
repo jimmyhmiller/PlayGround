@@ -3,7 +3,8 @@
         {"source": "/", "destination": "/"},
         {"source": "/api", "destination": "/api"},
         {"source": "/api/(.*)", "destination": "/api?route=$1"},
-        {"source": "/admin/entity", "destination": "/api/entity"}
+        {"source": "/admin/entity", "destination": "/api/entity"},
+        {"source": "/admin/collection", "destination": "/api/collection"}
     ],
     "engines": "12.x",
     

@@ -192,10 +192,8 @@ const Main = () => {
   const [showSummary, setShowSummary] = useState(false);
   return (
     <div>
-
       <h1 onClick={() => setShowSummary(!showSummary)}>{summary.remaining} Calories</h1>
       {showSummary ? <Summary summary={summary} /> : <AddEntry summary={summary} />}
-
     </div>
   )
 }
