@@ -58,7 +58,7 @@ const db = {
   },
 
   delete: (collection, id) => {
-    client.query(
+    return client.query(
       q.Delete(q.Select("ref", q.Get(q.Match(`${collection}_by_id`, id))))
     );
   },
