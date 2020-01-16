@@ -1,6 +1,7 @@
 {
     "rewrites": [
         {"source": "/", "destination": "/"},
+        {"source": "/demo", "destination": "/demo"},
         {"source": "/api", "destination": "/api"},
         {"source": "/api/(.*)", "destination": "/api?route=$1"},
         {"source": "/admin/entity", "destination": "/api/entity"},

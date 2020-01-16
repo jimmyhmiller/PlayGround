@@ -1,6 +1,6 @@
 import useSWR, { SWRConfig, trigger, mutate } from "swr";
 import { Suspense, useState, useEffect, useRef } from "react";
-import { Editor, renderElementAsync } from "react-live";
+import { Editor, renderElementAsync } from "@jimmyhmiller/react-live";
 import { useDebounce } from 'use-debounce';
 import prettier from "prettier/standalone";
 import parserBabel from "prettier/parser-babylon";
@@ -9,7 +9,7 @@ const formatCode = (code) => {
   return prettier.format(code, {
     parser: "babel",
     plugins: [parserBabel],
-    printWidth: 58
+    printWidth: 66
   })
 }
 
@@ -29,6 +29,19 @@ const httpRequest = ({ method, body, url }) => {
     body: JSON.stringify(body)
   });
 }
+
+const api = {
+  get: (url) => {
+    return httpRequest({ method: "GET", url })
+  },
+  post: (url, { body }) => {
+    return httpRequest({ method: "POST", body, url })
+  },
+  delete: (url) => {
+    return httpRequest({ method: "DELETE", url })
+  },
+}
+
 
 // https://github.com/gregberge/loadable-components/issues/322#issuecomment-553370417
 const LoadingIndicatorWithDelay = ({ delay=300 }) => {
@@ -54,7 +67,7 @@ const ViewingArea = ({ code }) => {
       renderElementAsync(
         {
           code: `${code};\n\n render(Main);`,
-          scope: { React, useState, useSWR, trigger, mutate, SWRConfig }
+          scope: { React, useState, useSWR, trigger, mutate, SWRConfig, api }
         },
         elem => setElement(_ => elem),
         e => console.error(e)
@@ -143,7 +156,7 @@ const deleteEntityHandler = ({ identifier, type }) => async e => {
 const EditorCard = ({ code, setCode, title, identifier, type, }) => {
   const cardBodyStyle = {
     backgroundColor: editorColor,
-    width: 500,
+    width: 550,
     caretColor: "white",
     margin: 20,
     borderRadius: 5
@@ -264,7 +277,7 @@ const Index = () => {
       value={{
         suspense: process.browser,
         refreshInterval: 0,
-        dedupingInterval: 10,
+        dedupingInterval: 0,
         fetcher: (...args) => fetch(...args).then(res => res.json())
       }}
     >
