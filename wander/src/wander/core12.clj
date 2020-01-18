@@ -390,14 +390,6 @@
 (defmethod propagate-compile-information ::return [{:keys [node fail env] :as context}]
   context)
 
-
-(propagate-compile-information {:node example :fail :fail :env {}})
-
-(compile*
- (:node (propagate-compile-information {:node example :fail :fail :env {}})) 
- (code nil)
- {})
-
 (def example
   (accumulate (code [1])
     (fn [target]
@@ -418,5 +410,15 @@
                                 (return false))))))))
                   (code nil))))
             (code nil)))))))
+
+
+(compile*
+ (:node (propagate-compile-information {:node example :fail :fail :env {}})) 
+ (code nil)
+ {})
+
+;; This compiles the example above into:
+;; =>
+(clojure.core/let [X__21939 [1]] true)
 
 

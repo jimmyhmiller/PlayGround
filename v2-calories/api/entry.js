@@ -36,7 +36,7 @@ const getTotal = () => {
       q.Select(
         "data",
         q.Map(
-          q.Paginate(q.Match("all_entry")),
+          q.Paginate(q.Match("all_entry"), {size: 10000}),
           q.Lambda("x", q.Select(["data", "calories"], q.Get(q.Var("x"))))
         )
       )
@@ -47,7 +47,7 @@ const numberOfDays = () => {
   return q.Count(
     q.Distinct(q.Select("data", 
       q.Map(
-        q.Paginate(q.Match("all_entry")),
+        q.Paginate(q.Match("all_entry"), {size: 10000}),
         q.Lambda("x", q.Select(["data", "date"], q.Get(q.Var("x"))))))));
 }
 
@@ -82,7 +82,7 @@ const getRemainingToday = () => {
   return q.Let({total: q.Sum(
                         q.Select("data", q.Map(
                           q.Filter(
-                            q.Paginate(q.Match("all_entry")),
+                            q.Paginate(q.Match("all_entry"), {size: 10000}),
                             q.Lambda("x", q.Equals(today(), q.Select(["data", "date"], q.Get(q.Var("x")))))),
                           q.Lambda("x", q.Select(["data", "calories"], q.Get(q.Var("x")))))),
                       )},
