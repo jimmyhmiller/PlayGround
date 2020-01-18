@@ -1,952 +1,121 @@
-#[macro_use]
-extern crate lazy_static;
 
-use std::borrow::BorrowMut;
-use std::fs::File;
-use std::io::BufReader;
-use std::io::Read;
-use std::ops;
-use std::process::abort;
-use std::time::Instant;
 
-#[derive(Debug)]
-enum Token<'a> {
-    OpenParen,
-    CloseParen,
-    String(&'a str),
-    Integer(&'a str),
-    Float(&'a str),
-    Atom(&'a str),
+struct Machine {
+    stack: [u8; 4048],
+    stack_pointer: usize,
+    program: [u16; 4048],
+    program_counter: usize,
 }
 
-#[derive(Debug)]
-struct Tokenizer<'a> {
-    input: &'a str,
-    input_bytes: &'a [u8],
-    position: usize,
-    temp: Vec<u8>,
+enum Instruction {
+    Next,
+    Halt,
+    Jump(u8),
 }
 
-lazy_static! {
-    static ref ZERO: u8 = '0' as u8;
-    static ref NINE: u8 = '9' as u8;
-    static ref SPACE: u8 = ' ' as u8;
-    static ref NEW_LINE: u8 = '\n' as u8;
-    static ref COMMA: u8 = ',' as u8;
-    static ref DOUBLE_QUOTE: u8 = '"' as u8;
-    static ref OPEN_PAREN: u8 = '(' as u8;
-    static ref CLOSE_PAREN: u8 = ')' as u8;
-    static ref PERIOD: u8 = '.' as u8;
-}
-
-impl<'a> Tokenizer<'a> {
-    fn new(input: &str) -> Tokenizer {
-        Tokenizer {
-            input: input,
-            input_bytes: input.as_bytes(),
-            position: 0,
-            // This is so we only have to allocate once
-            // Seems to make things faster
-            temp: Vec::with_capacity(10),
+impl Machine {
+    fn new() -> Machine {
+        Machine{
+            stack: [0; 4048],
+            stack_pointer: 0,
+            program: [0; 4048],
+            program_counter: 0,
         }
     }
 
-    fn consume(&mut self) -> () {
-        self.position += 1;
+    fn current(& self) -> u8 {
+        self.stack[self.stack_pointer - 1]
     }
 
-    fn current_byte(&self) -> u8 {
-        self.input_bytes[self.position]
+    fn previous(& self) -> u8 {
+        self.stack[self.stack_pointer - 2]
     }
 
-    fn is_space(&self) -> bool {
-        self.current_byte() == *SPACE
-            || self.current_byte() == *COMMA
-            || self.current_byte() == *NEW_LINE
+    fn u8const(& mut self, num : u8) -> Instruction {
+        println!("const");
+        self.stack[self.stack_pointer] = num;
+        self.stack_pointer += 1;
+        Instruction::Next
     }
 
-    fn at_end(&self) -> bool {
-        self.input.len() == self.position
+    fn add(& mut self) -> Instruction {
+        println!("add");
+        self.stack[self.stack_pointer - 2] = self.current().wrapping_add(self.previous());
+        self.stack_pointer -= 1;
+        Instruction::Next
     }
 
-    fn is_quote(&self) -> bool {
-        self.current_byte() == *DOUBLE_QUOTE
+    fn sub(& mut self) -> Instruction {
+        println!("sub");
+        self.stack[self.stack_pointer - 2] = self.previous().wrapping_sub(self.current());
+        self.stack_pointer -= 1;
+        Instruction::Next
     }
 
-    fn parse_string(&mut self) -> Token<'a> {
-        self.consume(); // skip open quote
-        let start = self.position;
-        while !self.at_end() && !self.is_quote() {
-            self.consume();
-        }
-        self.consume(); // skip closing quote
-        Token::String(&self.input[start..self.position])
-    }
 
-    fn is_open_paren(&self) -> bool {
-        self.current_byte() == *OPEN_PAREN
-    }
-
-    fn is_close_paren(&self) -> bool {
-        self.current_byte() == *CLOSE_PAREN
-    }
-
-    fn consume_spaces(&mut self) -> () {
-        while !self.at_end() && self.is_space() {
-            self.consume();
-        }
-    }
-
-    fn is_valid_number_char(&mut self) -> bool {
-        self.current_byte() >= *ZERO && self.current_byte() <= *NINE
-    }
-
-    fn parse_number(&mut self) -> Token<'a> {
-        let mut is_float = false;
-        let start = self.position;
-        while self.is_valid_number_char() || self.current_byte() == *PERIOD {
-            // Need to handle making sure there is only one "."
-            if self.current_byte() == *PERIOD {
-                is_float = true;
-            }
-            self.consume();
-        }
-        if is_float {
-            Token::Float(&self.input[start..self.position])
+    fn jump_if_zero(& mut self, jump_address: u8) -> Instruction {
+        println!("jumpif {:?}", self.current());
+        if self.current() == 0 {
+            Instruction::Jump(jump_address)
         } else {
-            Token::Integer(&self.input[start..self.position])
+            Instruction::Next
         }
     }
 
-    fn parse_identifier(&mut self) -> Token<'a> {
-        let start = self.position;
-        while !self.is_space() && !self.is_open_paren() && !self.is_close_paren() {
-            self.consume()
-        }
-        Token::Atom(&self.input[start..self.position])
+    fn jump(& mut self, jump_address: u8) -> Instruction {
+        println!("jump");
+        Instruction::Jump(jump_address)
     }
 
-    fn parse_single(&mut self) -> Token<'a> {
-        self.consume_spaces();
-        let result = if self.is_open_paren() {
-            self.consume();
-            Token::OpenParen
-        } else if self.is_close_paren() {
-            self.consume();
-            Token::CloseParen
-        } else if self.is_valid_number_char() {
-            self.parse_number()
-        } else if self.is_quote() {
-            self.parse_string()
-        } else {
-            self.parse_identifier()
-        };
-        result
-    }
-
-    fn read(&mut self) -> Vec<Token<'a>> {
-        let mut tokens = Vec::with_capacity(self.input.len());
-        while !self.at_end() {
-            tokens.push(self.parse_single());
-        }
-        tokens
-    }
-}
-
-fn tokenize<'a>(text: &'a str) -> Vec<Token<'a>> {
-    Tokenizer::new(text).read()
-}
-
-#[derive(Debug)]
-enum Expr<'a> {
-    SExpr(Vec<Expr<'a>>),
-    Atom(&'a str),
-    Bool(bool),
-    String(&'a str),
-    Integer(i64),
-    Float(f64),
-}
-
-fn read(tokens: Vec<Token>) -> Expr {
-    // Is there a faster way to do this?
-    // Need to probably refer to slices of things
-    // Like I ended up doing above. But not 100% sure how to do that
-    // given the SExpr structure
-    let mut exprs_stack = Vec::with_capacity(tokens.len()); // arbitrary
-    let mut current = Vec::with_capacity(10); // arbitrary
-
-    for token in tokens {
-        match token {
-            Token::Atom(s) if s == "True" => current.push(Expr::Bool(true)),
-            Token::Atom(s) if s == "False" => current.push(Expr::Bool(false)),
-            Token::Atom(s) => current.push(Expr::Atom(s)),
-            Token::Integer(s) => current.push(Expr::Integer(s.parse::<i64>().unwrap())),
-            Token::Float(s) => current.push(Expr::Float(s.parse::<f64>().unwrap())),
-            Token::String(s) => current.push(Expr::String(s)),
-            Token::OpenParen => {
-                exprs_stack.push(current);
-                current = Vec::with_capacity(10); // arbitrary
-            }
-            Token::CloseParen => {
-                let expr = Expr::SExpr(current);
-                current = exprs_stack.pop().unwrap();
-                current.push(expr);
-            }
-        };
-    }
-
-    assert_eq!(current.len(), 1);
-    current.pop().unwrap()
-}
-
-fn s_expr_len(x: Expr) -> usize {
-    if let Expr::SExpr(x) = x {
-        x.len()
-    } else {
-        0
-    }
-}
-
-#[allow(dead_code)]
-fn parse_file(filename: String) -> () {
-    let file = File::open(filename).unwrap();
-    let mut expr = String::new();
-    let mut buf_reader = BufReader::new(file);
-    buf_reader.read_to_string(&mut expr).unwrap();
-
-    let start = Instant::now();
-    let read_expr = read(tokenize(&expr));
-    let duration = start.elapsed();
-    println!("{:?}", s_expr_len(read_expr));
-    println!("{:?}", duration);
-}
-
-#[derive(Debug, Clone)]
-enum Instructions {
-    ConstI32(i32),
-    ConstI64(i64),
-    Load,
-    Store,
-    Add,
-    AddConst(Value),
-    Mul,
-    Sub,
-    SubConst(Value),
-    LT,
-    LTConst(Value),
-    GT,
-    GTConst(Value),
-    GTE,
-    LTE,
-    LocalGet(usize),
-    LocalSet(usize),
-    Call(usize),
-    Block(Vec<Instructions>),
-    Loop(Vec<Instructions>),
-    Br(usize),
-    BrIf(usize),
-    If(Vec<Instructions>, Vec<Instructions>),
-    I32Eq,
-    Return,
-    End,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Value {
-    I32(i32),
-    I64(i64),
-}
-#[derive(Debug, Clone)]
-struct Function {
-    name: String,
-    number_of_params: usize,
-    does_return: bool,
-    code: Vec<Instructions>,
-}
-
-
-impl ops::Add<Value> for Value {
-    type Output = Value;
-
-    fn add(self, rhs: Value) -> Value {
-        match (self, rhs) {
-            (Value::I32(x), Value::I32(y)) => Value::I32(x + y),
-            (Value::I64(x), Value::I64(y)) => Value::I64(x + y),
-            _ => abort(),
-        }
-    }
-}
-
-impl ops::Mul<Value> for Value {
-    type Output = Value;
-
-    fn mul(self, rhs: Value) -> Value {
-        match (self, rhs) {
-            (Value::I32(x), Value::I32(y)) => Value::I32(x * y),
-            (Value::I64(x), Value::I64(y)) => Value::I64(x * y),
-            _ => abort(),
-        }
-    }
-}
-
-impl ops::Sub<Value> for Value {
-    type Output = Value;
-
-    fn sub(self, rhs: Value) -> Value {
-        match (self, rhs) {
-            (Value::I32(x), Value::I32(y)) => Value::I32(x - y),
-            (Value::I64(x), Value::I64(y)) => Value::I64(x - y),
-            _ => abort(),
-        }
-    }
-}
-
-#[derive(Debug)]
-enum Outcome {
-    NextInstruction,
-    Noop,
-    Br(usize),
-}
-
-#[derive(Debug)]
-struct Frame<'a> {
-    locals_offset: usize,
-    number_of_locals: usize,
-    fn_name: &'a str,
-    locals_position: usize,
-}
-
-impl<'a> Frame<'a> {
-    fn new(locals_offset: usize, number_of_locals: usize, fn_name: &'a str) -> Frame<'a> {
-        Frame {
-            locals_offset: locals_offset,
-            number_of_locals: number_of_locals,
-            fn_name: fn_name,
-            locals_position: (if number_of_locals == 0 { 0 } else { number_of_locals - 1}) + locals_offset
-
+    fn decode(& mut self, opcode: [u8; 2]) -> Instruction {
+        match opcode {
+            [0x0, 0x0] => Instruction::Halt,
+            [0x1, x] => self.u8const(x),
+            [0x2, _] => self.add(),
+            [0x3, _] => self.sub(),
+            [0x4, x] => self.jump(x),
+            [0x5, x] => self.jump_if_zero(x),
+            // Need op codes for copy and drop
+            // Maybe swap or rotate?
+            // Then we might want an assembler
+            _ => Instruction::Halt
         }
     }
 
-    fn get_local_position(& self, i : usize) -> usize {
-        // Locals go backwards onto value stack.
-        // So if there are there locals it is
-        // [2 1 0]
-        // So in this case if we ask for 0 and our offset is 0
-        // 0 - 0 + 2 = 2
-        // if we asked for 2 it would be
-        // 0 - 2 + 2 = 0
-
-
-        self.locals_position - i
-    }
-}
-
-struct MachineState<'a> {
-    stack: &'a mut Vec<Value>,
-    heap: &'a mut Vec<Value>,
-    functions: &'a Vec<Function>,
-    compiled_functions: &'a Vec<Box<dyn Execute>>,
-    locals_stack: &'a mut Vec<Value>,
-    frame_stack: &'a mut Vec<Frame<'a>>,
-    position: usize,
-    position_stack: Vec<usize>,
-    instructions_stack: Vec<&'a Vec<Instructions>>,
-    current_instructions: &'a Vec<Instructions>,
-}
-
-const TRUE : i32 = 1;
-const FALSE : i32 = 0;
-
-const TRUE_V : Value = Value::I32(1);
-const FALSE_V : Value =  Value::I32(0);
-
-// We now need to do a few things.
-// Implement if as suguar.
-// Implement other operators.
-// Try to hook this up to a real web assembly code base.
-// Implement some data structures.
-// Implement GC.
-// Think about how we could make this even faster.
-// Consider a JIT.
-
-impl<'a> MachineState<'a> {
-    fn new(
-        stack: &'a mut Vec<Value>,
-        heap: &'a mut Vec<Value>,
-        functions: &'a Vec<Function>,
-        compiled_functions: &'a Vec<Box<dyn Execute>>,
-        locals_stack: &'a mut Vec<Value>,
-        frame_stack : &'a mut Vec<Frame<'a>>,
-        instructions : &'a Vec<Instructions>,
-    ) -> MachineState<'a> {
-        MachineState {
-            stack: stack,
-            heap: heap,
-            functions: functions,
-            compiled_functions: compiled_functions,
-            locals_stack: locals_stack,
-            frame_stack: { frame_stack.push(Frame::new(0, 0, "Main")); frame_stack },
-            position: 0,
-            position_stack: Vec::with_capacity(100), // arbitrary
-            instructions_stack: Vec::with_capacity(10),
-            current_instructions: instructions, // arbitrary
-        }
+    fn run_once(& mut self) -> Instruction {
+        self.decode(self.program[self.program_counter].to_ne_bytes())
     }
 
-
-    // Need to make run return an outcome. Make it single step.
-    // Make instructions part of the machine;
-    // If the instructions are a pointer can I just change it to point to
-    // the things in the blocks or functions?
-    // Really not sure how that would work. Will try it out.
-    // Need to also make locals be better.
-
-    fn step(&mut self, instruction : &'a Instructions) -> Outcome {
-
-        // match instruction {
-        //     Instructions::Block(_) => {},
-        //     Instructions::LocalGet(x) => println!("{:}Arg {:?}", "    ".repeat(indent), local_locals[*x]),
-        //     Instructions::GT => println!("{:}{:?} > {:?}", "    ".repeat(indent),self.stack[self.stack.len() - 1], self.stack[self.stack.len() - 2]),
-        //     Instructions::Add => println!("{:}{:?} + {:?}","    ".repeat(indent), self.stack[self.stack.len() - 1], self.stack[self.stack.len() - 2]),
-        //     Instructions::Call(_) => println!("{:}fib({:?})","    ".repeat(indent), self.stack[self.stack.len() - 1]),
-        //     // x => println!("Step: {:} {:?} {:?} {:?}", "    ".repeat(indent), x, self.stack, locals),
-        //     _ => {}
-        // }
-
-
-        match instruction {
-            Instructions::ConstI32(i) => {
-                self.stack.push(Value::I32(*i));
-                Outcome::NextInstruction
-            },
-            Instructions::ConstI64(i) => {
-                self.stack.push(Value::I64(*i));
-                Outcome::NextInstruction
-            },
-            Instructions::Load => {
-                if let Value::I32(addr) = self.stack.pop().unwrap() {
-                    self.stack.push(*self.heap.get(addr as usize).unwrap())
-                }
-                Outcome::NextInstruction
-            }
-            Instructions::Store => {
-                let val = self.stack.pop().unwrap();
-                let addr_value = self.stack.pop().unwrap();
-                if let Value::I32(addr) = addr_value {
-                    self.heap[addr as usize] = val;
-                    self.stack.push(addr_value);
-                }
-                Outcome::NextInstruction
-            }
-            Instructions::Add => {
-                let x = self.stack.pop().unwrap();
-                let y = self.stack.pop().unwrap();
-                // println!("Add: {:?} {:?}", x, y);
-                self.stack.push(x + y);
-                Outcome::NextInstruction
-            }
-            Instructions::AddConst(i) => {
-                // println!("Add: {:?} {:?}", x, y);
-                if let Some(val) = self.stack.last_mut() {
-                    *val = *val + *i;
-                }
-
-                Outcome::NextInstruction
-            }
-            Instructions::Mul => {
-                let x = self.stack.pop().unwrap();
-                let y = self.stack.pop().unwrap();
-                self.stack.push(x * y);
-                Outcome::NextInstruction
-            }
-            Instructions::Sub => {
-                let x = self.stack.pop().unwrap();
-                let y = self.stack.pop().unwrap();
-                // println!("Sub: {:?} {:?}", x, y);
-                self.stack.push(x - y);
-                Outcome::NextInstruction
-            }
-            Instructions::SubConst(i) => {
-                // println!("Add: {:?} {:?}", x, y);
-                if let Some(val) = self.stack.last_mut() {
-                    *val = *val - *i;
-                }
-
-                Outcome::NextInstruction
-            }
-            Instructions::GT => {
-                let x = self.stack.pop().unwrap();
-                let y = self.stack.pop().unwrap();
-                // Make these values
-                if x > y {
-                    self.stack.push(TRUE_V);
-                } else {
-                    self.stack.push(FALSE_V);
-                }
-
-                Outcome::NextInstruction
-            }
-            Instructions::GTConst(i) => {
-
-                if let Some(val) = self.stack.last_mut() {
-                    if *val > *i {
-                        *val = TRUE_V
-                    } else {
-                        *val = FALSE_V
-                    }
-                }
-                Outcome::NextInstruction
-            }
-            Instructions::LT => {
-                let x = self.stack.pop().unwrap();
-                let y = self.stack.pop().unwrap();
-                if x < y {
-                    self.stack.push(TRUE_V);
-                } else {
-                    self.stack.push(FALSE_V);
-                }
-                Outcome::NextInstruction
-            }
-            Instructions::LTConst(i) => {
-
-                if let Some(val) = self.stack.last_mut() {
-                    if *val < *i {
-                        *val = TRUE_V
-                    } else {
-                        *val = FALSE_V
-                    }
-                }
-                Outcome::NextInstruction
-            }
-            Instructions::GTE => {
-                let x = self.stack.pop().unwrap();
-                let y = self.stack.pop().unwrap();
-                if x >= y {
-                    self.stack.push(TRUE_V);
-                } else {
-                    self.stack.push(FALSE_V);
-                }
-                Outcome::NextInstruction
-            }
-            Instructions::LTE => {
-                let x = self.stack.pop().unwrap();
-                let y = self.stack.pop().unwrap();
-                if x <= y {
-                    self.stack.push(TRUE_V);
-                } else {
-                    self.stack.push(FALSE_V);
-                }
-                Outcome::NextInstruction
-            }
-            Instructions::I32Eq => {
-                let val1 = self.stack.pop().unwrap();
-                let val2 = self.stack.pop().unwrap();
-
-                // println!("Eq: {:?} {:?}", val1, val2);
-                // should check i32
-                if val1 == val2 {
-                    self.stack.push(TRUE_V);
-                } else {
-                    self.stack.push(FALSE_V);
-                }
-
-                Outcome::NextInstruction
-            }
-            Instructions::LocalGet(i) => {
-                // println!("Arg: {:?}", local_locals[*i]);
-                let frame = self.frame_stack.last().unwrap();
-                self.stack.push(self.locals_stack[frame.get_local_position(*i)]);
-                Outcome::NextInstruction
-            }
-            Instructions::LocalSet(i) => {
-                let frame = self.frame_stack.last().unwrap();
-                self.locals_stack[frame.get_local_position(*i)] = self.stack.pop().unwrap();
-                Outcome::NextInstruction
-            }
-            Instructions::Call(i) => {
-                // Make this better and ideally not allocate.
-                let f = &self.functions[*i];
-                let num_params = f.number_of_params;
-                self.position_stack.push(self.position + 1);
-                self.instructions_stack.push(self.current_instructions);
-                self.position = 0;
-                self.current_instructions = &f.code;
-                self.frame_stack.push(Frame::new(
-                    self.locals_stack.len(),
-                    num_params,
-                    &self.functions[*i].name,
-                ));
-                for _ in 0..num_params {
-                    self.locals_stack.push(self.stack.pop().unwrap())
-                }
-                Outcome::Noop
-            }
-            Instructions::Br(i) => {
-                Outcome::Br(*i)
-            }
-            Instructions::BrIf(i) => {
-                let val = self.stack.pop().unwrap();
-                // println!("BrIf: {:?}", val);
-                if let Value::I32(x) = val {
-                    if x == 0 {
-                        Outcome::NextInstruction
-                    } else {
-                        Outcome::Br(*i)
-                    }
-                } else {
-                    Outcome::NextInstruction
-                }
-            }
-            Instructions::If(true_case, false_case) => {
-                let val = self.stack.pop().unwrap();
-                // println!("BrIf: {:?}", val);
-                self.position_stack.push(self.position + 1);
-                self.instructions_stack.push(self.current_instructions);
-                self.position = 0;
-                if let Value::I32(_) = val {
-                    if val == TRUE_V {
-                        self.current_instructions = &true_case;
-                    } else {
-                        self.current_instructions = &false_case;
-                    }
-                } else {
-                    println!("Handle something other than i32 {:?}", val);
-                }
-                Outcome::Noop
-            }
-            Instructions::Block(instructions) => {
-                self.position_stack.push(self.position + 1);
-                self.instructions_stack.push(self.current_instructions);
-                self.position = 0;
-                self.current_instructions = &instructions;
-                Outcome::Noop
-            }
-            // This might not be the best way to do a loop.
-            // Seems a little weird that we would keep popping from the
-            // stack and then putting this look back on.
-            // Maybe some optimizaiton here.
-            Instructions::Loop(instructions) => {
-                // For a loop we don't want to increment the position counter
-                // That way the loop instruction is the thing executed again.
-                // Loop is used with block so that the block contains the exit path.
-                self.position_stack.push(self.position);
-                self.instructions_stack.push(self.current_instructions);
-                self.position = 0;
-                self.current_instructions = &instructions;
-                Outcome::Noop
-            }
-            Instructions::Return => {
-                // if { indent > 0 } { indent -= 1; }
-                self.current_instructions = self.instructions_stack.pop().unwrap();
-                self.position = self.position_stack.pop().unwrap();
-                let f = self.frame_stack.pop().unwrap();
-                for _ in 0..f.number_of_locals {
-                    self.locals_stack.pop();
-                }
-                Outcome::Noop
-            }
-            Instructions::End => {
-                // if { indent > 0 } { indent -= 1; }
-                self.current_instructions = self.instructions_stack.pop().unwrap();
-                self.position = self.position_stack.pop().unwrap();
-                // This is a block. No need to get rid of frames
-                Outcome::Noop
-            }
-        }
-    }
-
-
-    // This is all incredibly slow and incredibly ugly.
-
-    fn run(&mut self) {
-        while self.position < self.current_instructions.len() {
-
-            // println!("{:?} {:?}", &current_instructions[position], if self.stack.len() > 0 { self.stack[self.stack.len() - 1] } else { Value::I32(123213)});
-
-            match self.step(&self.current_instructions[self.position]) {
-                Outcome::Noop => {
-                    continue;
+    fn run(& mut self) {
+        loop {
+            match self.run_once() {
+                Instruction::Next => {
+                    self.program_counter += 1;
+                    continue
                 },
-                Outcome::NextInstruction => {
-                    self.position += 1;
-                },
-                Outcome::Br(i) => {
-
-                    // Might not do the right thing if in a function call?
-                    // Not sure what should happen then, or if that is invalid.
-
-
-                    // We do this i times and then one more. Meaning if i is 0 we do it once.
-                    for _ in 0..i {
-                        self.instructions_stack.pop();
-                        self.position_stack.pop();
-                    }
-                    self.current_instructions = self.instructions_stack.pop().unwrap();
-                    self.position = self.position_stack.pop().unwrap();
+                Instruction::Halt => break,
+                Instruction::Jump(n) => {
+                    self.program_counter = n as usize;
+                    continue
                 }
             }
         }
     }
-
-
-}
-// Need to do error handling and yet still be fast
-
-struct Environment<'a> {
-    compiled_functions: &'a Vec<Box<dyn Execute>>,
-    locals_stack: &'a mut Vec<i32>,
 }
 
-
-
-// Need to do this but without the stack at all.
-trait Execute {
-    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32;
-}
-
-struct ConstI32 {
-    i: i32
-}
-
-impl Execute for ConstI32 {
-    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
-        self.i
-    }
-}
-
-struct If {
-    val : Box<dyn Execute>,
-    true_case: Box<dyn Execute>,
-    false_case: Box<dyn Execute>,
-}
-
-impl Execute for If {
-    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
-        let val = self.val.execute(frame, env);
-        if val == TRUE {
-            self.true_case.execute(frame, env)
-        } else {
-            self.false_case.execute(frame, env)
-        }
-    }
-}
-
-struct LocalGet {
-    i: usize
-}
-
-impl Execute for LocalGet {
-    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
-        // println!("{:?} {:?} {:?} {:?}", env.locals_stack, frame, self.i, frame.get_local_position(self.i));
-        env.locals_stack[frame.get_local_position(self.i)]
-    }
-}
-
-
-struct LTConst {
-    i: i32,
-    val: Box<dyn Execute>,
-}
-
-impl Execute for LTConst {
-    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
-        if self.val.execute(frame, env) < self.i {
-             TRUE
-        } else {
-             FALSE
-        }
-    }
-}
-
-struct SubConst {
-    i: i32,
-    val: Box<dyn Execute>,
-}
-
-impl Execute for SubConst {
-    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
-        self.val.execute(frame, env) - self.i
-    }
-}
-
-
-struct Add {
-    left: Box<dyn Execute>,
-    right: Box<dyn Execute>,
-}
-
-impl Execute for Add {
-    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
-        let x = self.left.execute(frame, env);
-        let y = self.right.execute(frame, env);
-        // println!("Add: {:?} {:?}", x, y);
-        x + y
-    }
-}
-
-struct Call {
-    i: usize,
-    args: Box<Vec<Box<dyn Execute>>>,
-}
-
-impl Call {
-    fn new(i: usize, args:  Box<Vec<Box<dyn Execute>>>) -> Call {
-        Call{
-            i: i,
-            args: args,
-        }
-    }
-}
-
-impl Execute for Call {
-    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
-
-        let f = &env.compiled_functions[self.i];
-
-        for arg in self.args.iter() {
-            let value = arg.execute(frame, env);
-            env.locals_stack.push(value);
-        }
-
-
-        f.execute(&Frame::new(
-            env.locals_stack.len() - self.args.len(),
-            1, //temp
-            "name",
-        ), env)
-    }
-}
-
-
-impl Execute for Vec<Box<dyn Execute>> {
-    fn execute(& self, frame : & Frame, env : &mut Environment) -> i32 {
-        // placeholder
-        let mut value = 123123;
-
-        for step in self {
-            value = step.execute(frame, env);
-        }
-        value
-    }
-}
-
-
-
+// 2
 
 
 fn main() {
+    let mut machine = Machine::new();
+    machine.program[0] = 0x0A01;
+    machine.program[1] = 0x0505;
+    machine.program[2] = 0x0101;
+    machine.program[3] = 0x0003;
+    machine.program[4] = 0x0104;
 
-    let update_position = Function {
-        name: "update_position".to_string(),
-        number_of_params: 1,
-        does_return: true,
-        code: vec![
-            Instructions::Block(vec![
-                Instructions::LocalGet(0),
-                Instructions::LocalGet(1),
-                Instructions::LocalGet(2),
-                Instructions::Mul,
-                Instructions::Add,
-            ])
-        ],
-    };
-    let loop_around = Function {
-        name: "loop_around".to_string(),
-        number_of_params: 1,
-        does_return: true,
-        code: vec![
-            Instructions::Block(vec![
-                Instructions::Loop(vec![
-                    Instructions::LocalGet(0),
-                    Instructions::ConstI32(-1),
-                    Instructions::Add,
-                    Instructions::LocalSet(0),
-                    Instructions::LocalGet(0),
-                    Instructions::ConstI32(0),
-                    Instructions::I32Eq,
-                    Instructions::BrIf(1),
-                    Instructions::Br(0),
-                    Instructions::End,
-                ]),
-            Instructions::End])
-        ]
-    };
-    let recursive_fibonacci = Function {
-        name: "fib".to_string(),
-        number_of_params: 1,
-        does_return: true, // probably don't need this?
-        code: vec![
-            Instructions::LocalGet(0),
-            Instructions::LTConst(Value::I32(2)),
-            Instructions::If(
-            vec![
-                Instructions::ConstI32(1),
-                Instructions::End,
-            ], vec![
-                Instructions::LocalGet(0),
-                Instructions::SubConst(Value::I32(1)),
-                Instructions::Call(2),
-                Instructions::LocalGet(0),
-                Instructions::SubConst(Value::I32(2)),
-                Instructions::Call(2),
-                Instructions::Add,
-                Instructions::End,
-            ]),
-            Instructions::Return,
-        ]
-    };
-    let functions = vec!(update_position, loop_around, recursive_fibonacci);
-    let mut locals_stack = Vec::with_capacity(20);
-    let mut frame_stack = Vec::with_capacity(20);
-    let mut stack = Vec::with_capacity(100); // arbitrary
-    let mut heap = vec![Value::I32(22), Value::I32(42)]; // arbitrary
+    machine.run();
+    let result = machine.current();
 
-    let instructions = vec![
-        Instructions::ConstI32(0),
-        Instructions::ConstI32(40),
-        Instructions::Call(2),
-        Instructions::Store,
-    ];
-
-    let true_case : Box<Vec<Box<dyn Execute>>> = Box::new(vec![Box::new(ConstI32{i: 1})]);
-    let false_args_l : Box<Vec<Box<dyn Execute>>> = Box::new(vec![Box::new(SubConst{i: 1, val: Box::new(LocalGet{ i: 0})})]);
-    let false_args_r : Box<Vec<Box<dyn Execute>>> = Box::new(vec![Box::new(SubConst{i: 2, val: Box::new(LocalGet{ i: 0})})]);
-    let false_case: Box<Vec<Box<dyn Execute>>> = Box::new(vec![
-        Box::new(Add{
-            left: Box::new(Call::new(0, false_args_l)),
-            right: Box::new(Call::new(0, false_args_r)),
-        }),
-    ]);
-    let comp_do_something : Box<Vec<Box<dyn Execute>>> = Box::new(
-        vec![
-            Box::new(If {
-                val: Box::new(LTConst{i : 2, val: Box::new(LocalGet{ i: 0})}),
-                true_case: true_case as Box<dyn Execute>,
-                false_case: false_case as Box<dyn Execute>,
-            })
-    ]);
-
-    let mut compiled_functions = vec!(comp_do_something as Box<dyn Execute>); // arbitrary
-
-    stack.push(Value::I32(40));
-    let machine = MachineState::new(&mut stack, &mut heap, & functions, & compiled_functions, &mut locals_stack, &mut frame_stack, &instructions);
-
-    let args : Box<Vec<Box<dyn Execute>>> = Box::new(vec![Box::new(ConstI32{i: 40})]);
-    let do_machine = Box::new(Call::new(0, args));
-    let mut locals = vec![];
-    let mut env = Environment { compiled_functions: &mut compiled_functions, locals_stack: &mut locals};
-    let main_frame = Frame::new(0, 0, "Main");
-    println!("{:?}", do_machine.execute(&main_frame, &mut env));
-
-    // machine.run();
-    // let val = stack.pop();
-    // if let Some(Value::I32(addr)) = val {
-    //     if let Some(value) = heap.get(addr as usize) {
-    //         println!("{:?}", value);
-    //     } else {
-    //         println!("no value at {:?} on the heap {:?}", addr, heap);
-    //     }
-    // } else {
-    //     println!("{:?}", val);
-    // }
+    println!("{:?}", result);
 }
