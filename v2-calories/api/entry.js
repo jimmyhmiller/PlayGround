@@ -12,7 +12,7 @@ const db = {
       q.Select(
         "data",
         q.Map(
-          q.Paginate(q.Match(q.Index(`all_${collection}`))),
+          q.Paginate(q.Match(q.Index(`all_${collection}`)), {size: 10000}),
           q.Lambda("x", q.Select("data", q.Get(q.Var("x"))))
         )
       )
