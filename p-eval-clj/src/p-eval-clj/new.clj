@@ -188,6 +188,18 @@
                              (extract-expr (p-eval (second (first (:args expr))) env))
                              env))))
 
+
+(defn collect-def [expr env]
+  (case (:op expr)
+    :def (add-var (:name expr) (:body expr) env)
+    env))
+
+
+(defn collect-defs [exprs env]
+  (if (empty? exprs)
+    env
+    (collect-defs (rest exprs) (collect-def (first exprs) env))))
+
 (defn p-eval 
   ([expr]
    (p-eval expr '()))
@@ -207,3 +219,5 @@
 
 
 (p-eval (analyze '(let* [x 2] (let* [y 3] (+ (+ x y) z)))))
+
+(collect-defs (analyze-many '((def x 2) (def x (fn [x] (* x 2)))) analyze) {})
