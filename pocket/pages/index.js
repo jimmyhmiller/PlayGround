@@ -12,17 +12,26 @@ const useLocalStorage = (key) => {
 
   const initialValue = process.browser && window.localStorage[key] && JSON.parse(localStorage[key])
   // ugly hard coded value
-  const offset = parseInt(process.browser && window.localStorage["offset"] || 0, 10);
+  const initialOffset = parseInt(process.browser && window.localStorage["offset"] || 0, 10);
 
   const [value, setValue] = useState(initialValue);
+  const [offset, setOffset] = useState(initialOffset);
 
   useEffect(() => {
     if (key && value) {
       window.localStorage[key] = JSON.stringify(value);
+
     }
   }, [key, value])
 
-  return {value, setValue, offset}
+
+  useEffect(() => {
+    if (key && value) {
+      window.localStorage["offset"] = JSON.stringify(offset);
+    }
+  }, [offset])
+
+  return {value, setValue, offset, setOffset}
 }
 
 
@@ -48,28 +57,29 @@ const useFetchPaginate = (initial, endpoint, count, initialOffset, f) => {
         })
         .then(f)
         .then(newData => {
-          if (newData.length > 0) {
+          if (newData.length === count) {
             setData(data.concat(newData));
             setOffset(offset + count);
           } else {
+            setOffset(offset + newData.length);
             setComplete(true);
           }
-          
         })
       }
   }, [endpoint, offset, complete])
 
-  return complete ? data : undefined;
+  return complete ? [data, offset] : [];
 }
 
 
 const useLocalCache = (initial, endpoint, f) => {
-  const {value, setValue, offset} = useLocalStorage(endpoint);
+  const {value, setValue, offset, setOffset} = useLocalStorage(endpoint);
   // ugly hard coding of endpoint to fetch
-  const data = useFetchPaginate(value, endpoint, 1000, offset, f);
+  const [data, newOffset] = useFetchPaginate(value, endpoint, 1000, offset, f);
   useEffect(() => {
     if (data) {
       setValue(data)
+      setOffset(newOffset);
     }
   }, [value, data])
   return value || data || initial
@@ -205,7 +215,7 @@ const Experiment1 = ({ items }) => {
   const orderedItems = map(orderBy(pairGroup, x => x[1].length, "desc"), x => x[1][0])
   const gen = random(new Date().toLocaleDateString())
   const pickItem = (coll) => coll[gen.intBetween(0, coll.length-1)]
-  const randomItems = range(0, Math.min(pairGroup.length,10)).map(x => pickItem(pickItem(pairGroup)[1]))
+  const randomItems = range(0, Math.min(pairGroup.length, 10)).map(x => pickItem(pickItem(pairGroup)[1]))
   return (
     <>
       <h1 style={{marginTop: 0}}>Pocket App</h1>
