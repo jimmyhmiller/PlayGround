@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { hot } from 'react-hot-loader'
 import Inspector from 'react-inspector';
 import toTime from 'to-time';
 import orderBy from 'lodash.orderby';
@@ -7,33 +6,40 @@ import groupBy from 'lodash.groupby';
 import map from 'lodash.map';
 import range from 'lodash.range';
 import random from 'random-seed';
-
+import Head from 'next/head'
+ 
 const useLocalStorage = (key) => {
 
-  const initialValue = localStorage[key] && JSON.parse(localStorage[key])
+  const initialValue = process.browser && window.localStorage[key] && JSON.parse(localStorage[key])
+  // ugly hard coded value
+  const offset = parseInt(process.browser && window.localStorage["offset"] || 0, 10);
 
   const [value, setValue] = useState(initialValue);
 
   useEffect(() => {
     if (key && value) {
-      localStorage[key] = JSON.stringify(value);
+      window.localStorage[key] = JSON.stringify(value);
     }
   }, [key, value])
 
-  return [value, setValue]
+  return {value, setValue, offset}
 }
 
-const useFetchData = (initial, endpoint, f) => {
-  const [data, setData] = useState(initial);
+
+const useFetchPaginate = (initial, endpoint, count, initialOffset, f) => {
+  const [data, setData] = useState(initial || []);
+  const [offset, setOffset] = useState(initialOffset);
+  const [complete, setComplete] = useState(false);
 
   useEffect(() => {
-    if (endpoint) {
-      fetch(endpoint, {
+    console.log(offset, endpoint, complete)
+    if (endpoint && !complete) {
+      fetch(`${endpoint}?count=${count}&offset=${offset}`, {
           credentials: "same-origin"
         })
         .then(resp => {
           if (resp.status === 401 && !window.location.toString().includes("oauth")) {
-            window.location = "/oauth"
+            window.location = "/api/oauth"
           }
           else if (resp.status !== 200) {
             return initial
@@ -41,19 +47,28 @@ const useFetchData = (initial, endpoint, f) => {
           return resp.json()
         })
         .then(f)
-        .then(data => setData(data))
+        .then(newData => {
+          if (newData.length > 0) {
+            setData(data.concat(newData));
+            setOffset(offset + count);
+          } else {
+            setComplete(true);
+          }
+          
+        })
       }
-  }, [endpoint])
+  }, [endpoint, offset, complete])
 
-  return data;
+  return complete ? data : undefined;
 }
 
+
 const useLocalCache = (initial, endpoint, f) => {
-  const [value, setValue] = useLocalStorage(endpoint);
-  const endpointToFetch = value ? undefined : endpoint;
-  const data = useFetchData(undefined, endpointToFetch, f);
+  const {value, setValue, offset} = useLocalStorage(endpoint);
+  // ugly hard coding of endpoint to fetch
+  const data = useFetchPaginate(value, endpoint, 1000, offset, f);
   useEffect(() => {
-    if (!value && data) {
+    if (data) {
       setValue(data)
     }
   }, [value, data])
@@ -111,7 +126,7 @@ const siteName = ({ resolved_url, given_url, domain_metadata }) =>
   (given_url && new URL(given_url).hostname) ||
   "WHAT?"
 
-const Item = ({ onClick, tags, excerpt, given_url, resolved_url, domain_metadata, ...props, }) =>
+const Item = ({ onClick, tags, excerpt, given_url, resolved_url, domain_metadata, ...props }) =>
     <>
       <li>
         <ItemTitle excerpt={excerpt} {...props} resolved_url={resolved_url} />
@@ -205,13 +220,18 @@ const Experiment1 = ({ items }) => {
 const App = () => {
 
   const items = orderBy(
-    useLocalCache([], "/api/items?count=10000", x => Object.values(x.list)),
+    useLocalCache([], "/api/items", x => x ? Object.values(x.list) : []),
   )
+
 
   const [selectedView, setView] = useState("experiment1");
 
   return (
     <>
+      <Head>
+        <title>Pocket App</title>
+        <link href="https://unpkg.com/superstylin@1.0.3/src/index.css" rel="stylesheet" />
+      </Head>
       <div>
         <Selector onClick={() => setView("all")} text="All" />
         <Selector onClick={() => setView("experiment1")} text="Experiment 1" />
@@ -227,4 +247,4 @@ const App = () => {
 }
 
 
-export default hot(module)(App);
+export default App;

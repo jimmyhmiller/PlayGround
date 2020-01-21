@@ -1,58 +1,8 @@
 {
-  "version": 2,
   "name": "pocket",
   "alias": "pocket-app.now.sh",
-  "builds": [
-    { "src": "api/js/oauth.js", "use": "@now/node" },
-    { "src": "api/js/landing.js", "use": "@now/node" },
-    { "src": "api/js/items.js", "use": "@now/node" },
-    { "src": "api/js/extraction.js", "use": "@now/node" },
-    { "src": "frontend/package.json", "use": "@now/static-build" }
-  ],
   "env": {
     "FAUNA_SECRET": "@faunadb-secret",
     "POCKET_CONSUMER_KEY": "@pocket-consumer-key"
-  },
-  "routes": [
-    {
-      "src": "^/oauth",
-      "dest": "/api/js/oauth.js"
-    },
-    {
-      "src": "^/landing",
-      "dest": "/api/js/landing.js"
-    },
-    {
-      "src": "^/api/items",
-      "dest": "/api/js/items.js"
-    },
-    {
-      "src": "^/api/extract",
-      "dest": "/api/js/extraction.js"
-    },
-    {
-      "src": "^/static/(.*)",
-      "dest": "frontend/static/$1"
-    },
-    {
-      "src": "^/favicon.ico",
-      "dest": "frontend/favicon.ico"
-    },
-    {
-      "src": "^/asset-manifest.json",
-      "dest": "frontend/asset-manifest.json"
-    },
-    {
-      "src": "^/manifest.json",
-      "dest": "frontend/manifest.json"
-    },
-    {
-      "src": "^/precache-manifest.(.*)",
-      "dest": "frontend/precache-manifest.$1"
-    },
-    {
-      "src": "^/(.*)", 
-      "dest": "frontend/index.html"
-    }
-  ]
+  }
 }

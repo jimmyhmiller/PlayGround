@@ -9,7 +9,7 @@ const q = faunadb.query;
 const client = new faunadb.Client({ secret: process.env.FAUNA_SECRET });
 
 const consumer_key = process.env.POCKET_CONSUMER_KEY;
-const redirect_url = "https://pocket-app.now.sh/landing";
+const redirect_url = "https://pocket-app.now.sh/api/landing";
 
 const requestUrl = "https://getpocket.com/v3/oauth/request";
 const authorizeUrl = "https://getpocket.com/auth/authorize";
