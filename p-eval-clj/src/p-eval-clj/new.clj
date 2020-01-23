@@ -204,7 +204,6 @@
   ([expr]
    (p-eval expr '()))
   ([expr env]
-   (println expr)
    (case (:op expr)
      :const [expr env]
      :symbol [(lookup expr env) env]
@@ -213,8 +212,7 @@
      :let (p-eval-let expr env))))
 
 
-;; Need to collect the top level definitions. Probably going to do
-;; that in a prephase. Need to specialize functions. Need to handle
+;; Need to specialize functions. Need to handle
 ;; case. Need to have a nice way of documenting things.
 
 
