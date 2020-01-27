@@ -3,8 +3,17 @@
             [meander.strategy.epsilon :as r]
             [meander.strategy.epsilon :as strat]
             [meander.epsilon :as m]
+            [meander.substitute.syntax.epsilon :as r.substitute.syntax]
             [meander.match.epsilon :as match]
             [clojure.string :as string]))
+
+
+(ns-publics 'r.substitute.syntax)
+(let [x  [1 2 3]]
+  (m/match x
+    [?x ?y ?z]
+    [?x ?y ?z]))
+
 (do
   (println "\n\n\n")
 
@@ -14,6 +23,8 @@
      !xs)
 
    ))
+
+
 
 
 
@@ -291,9 +302,9 @@ map?
 
          target (gensym "target__")
          ir (match/compile [target] matrix)
-         ir* (ir/rewrite 
-              (ir/op-bind target (ir/op-eval expr) ir))
-         code (ir/compile ir* `(~fail) kind)]
+         ir* 
+         (ir/op-bind target (ir/op-eval expr) ir)
+         code (ir/compile ir `(~fail) kind)]
      {:clauses clauses
       :matrix matrix
       :ir ir
@@ -310,10 +321,18 @@ map?
     `(analyze-compile :find (quote ~?body) (quote ~?expr))))
 
 
+(analyze
+ (m/match [:d {}]
+   [:b [[]  ...]]
+   :yep
+
+   [:d {}]
+   :e))
 
 
 
 
+(ir/compile  :fail {})
 
 
 (analyze
@@ -1415,6 +1434,160 @@ nil         ;;; Works as expected
 
 {:k1s [:a [{:k2 1 :v "a1"} {:k2 2 :v "a2"}]
        :b [{:k2 3 :v "b3"}]]}
+
+
+
+
+(m/search [1 2 4 5 7 6 8]
+  (m/scan (m/pred even? !xs) ..1)
+  !xs)
+
+
+
+(m/match [:d {}]
+  [:d {}]
+  :e)
+
+(analyze)
+(let [x  ])
+(m/match [:d (list 1 1)]
+  [_ (1 ...)]
+  :nope
+
+  [_ {}]
+  :yep)
+
+
+(let*
+  [ret__14003__auto__
+   (let*
+     [TARGET__21698 [:d (list 1 1)]]
+     (if (= (count TARGET__21698) 2)
+       (let*
+         [TARGET__21698_nth_1__ (TARGET__21698 1)]
+         (letfn*
+           [state__21706
+            (fn*
+              state__21706
+              ([]
+                (if (seq? TARGET__21698_nth_1__)
+                  (let*
+                    [ret__13987__auto__
+                     (meander.match.runtime.epsilon/run-star-1
+                       TARGET__21698_nth_1__
+                       []
+                       (fn*
+                         ([p__21709 input__21703]
+                           (let*
+                             [vec__21710 p__21709]
+                             (println input__21703)
+                             (if (= input__21703 [1])
+                               []
+                               meander.match.runtime.epsilon/FAIL))))
+                       (fn*
+                         ([p__21713]
+                           (let* [vec__21714 p__21713] :nope))))]
+                    (if (meander.match.runtime.epsilon/fail?
+                          ret__13987__auto__)
+                      (state__21707)
+                      ret__13987__auto__))
+                  (state__21707))))
+            state__21707
+            (fn*
+              state__21707
+              ([]
+                (if (map? TARGET__21698_nth_1__)
+                  :yep
+                  meander.match.runtime.epsilon/FAIL)))]
+           (state__21706)))
+       meander.match.runtime.epsilon/FAIL))]
+  (if (meander.match.runtime.epsilon/fail? ret__14003__auto__)
+    (throw (ex-info "non exhaustive pattern match" '{}))
+    ret__14003__auto__))
+
+(println "\n\n\n\n")
+
+
+
+
+
+
+
+(ns algopop.leaderboardx.ascratch
+  (:require [meander.substitute.syntax.epsilon :as ss]
+            [meander.substitute.epsilon :as s]
+            [meander.epsilon :as m]))
+
+
+
+(defn substitute [env pattern]
+  (-> (ss/parse pattern env)
+      (s/compile env)))
+
+
+
+(defn entity-editor []
+  (substitute
+   '{titles ["A" "B" "C"]
+     values [1 2 3]}
+   '))
+(entity-editor)
+
+
+
+(defn do-some-stuff [!things !stuff]
+  (m/subst {:things [!things ...]
+            :stuff [!stuff ...]}))
+
+(do-some-stuff [1 2 3] ["a" "b" "c"])
+
+
+(defn entity-editor [?heading !titles !values]
+  (m/subst
+    '[:div.form-inline
+      [:h3 heading]
+      [:table.table.table-responsive.panel.panel-default
+       [:thead . [:tr . [:td !titles] ...]]
+       [:tbody . [:tr . [:td !values] ...]] ...]]))
+
+
+(entity-editor "test" ["a" "b" "c"] [[1 2 3] [4 5 6]])
+
+(let [?x 2]
+  (m/subst '[1 heading ?x]))
+
+
+
+(let [?x 2]
+  (m/subst '[1 2 3 ?x] [?x]))
+
+
+
+
+
+
+(require '[meander.substitute.syntax.epsilon :as ss]
+          '[meander.substitute.epsilon :as s]
+          )
+
+
+(m/subst )
+
+(defn substitute [env pattern]
+  (-> (ss/parse pattern env)
+      (s/compile env)))
+
+
+(defn entity-editor []
+  (substitute
+   '{!titles ["A" "B" "C"]
+     !values [1 2 3]}
+   '[:div.form-inline
+     [:h3 heading]
+     [:table.table.table-responsive.panel.panel-default
+      [:thead . [:tr . [:td !titles] ...]]
+      [:tbody . [:tr . [:td !values] ...] ...
+       [:tr . [:td]]]]]))
 
 
 
