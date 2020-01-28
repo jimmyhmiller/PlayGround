@@ -200,91 +200,63 @@
 
 (let [label (atom (gensym "label_"))
       stack (atom ())]
-  (filter identity
-          (mapv (fn [x]
-                  (m/match x
+  ;; The text in all of these is backwards
+  ;; Should failure be a single node?
+  (reduce (fn [acc x]
+            (m/match x
 
-                    (let [?x (if & _)] _)
-                    [@label ?x]
+              ;; Ummm, not sure what to do with this one?
+              ;; This is the value of the if statement,
+              ;; but we aren't using that?
+              ;; but we need it in other places
+              (let [?x (if & _)] _)
+              (update-in acc [@label :text] conj ?x) 
 
-                    (let [?x ?v] _)
-                    [@label [?x ?v]]
+              (let [?x ?v] _)
+              (update-in acc [@label :text] conj [?x ?v])
 
-                    (if ?pred & _)
-                    (do
-                      (let [current @label
-                            next (gensym "label_")
-                            else (gensym "label_")]
-                        (reset! label next)
-                        (swap! stack conj else)
-                        [current [:if ?pred next else]]))
+              (if ?pred & _)
+              (do
+                (let [current @label
+                      next (gensym "label_")
+                      else (gensym "label_")]
+                  (reset! label next)
+                  (swap! stack conj else)
+                  (-> acc
+                      (update-in [current :text] conj [:if ?pred])
+                      (assoc-in [current :edges] [next else]))))
 
-                    [:let]
-                    (let [current @label]
-                      (swap! stack conj current)
-                      nil)
-                    
-                    
-                    [:body]
-                    (do
-                      (let [prev (first @stack)]
-                        (reset! label (gensym "label_"))
-                        (swap! stack rest)
-                        [prev @label]))
-                    
-                    
-                    [:else]
-                    (do
-                      (reset! label (first @stack))
-                      (swap! stack rest)
-                      nil)
-                    
-                    ?x [@label ?x]))
-                ordered-code)))
+              [:let]
+              (let [current @label]
+                (swap! stack conj current)
+                acc)
+              
+              
+              ;; What I really want is if it is a complex let, meaning
+              ;; it has an if statement as a value, then I want to
+              ;; ensure I set the exit condition of the split in the
+              ;; if. Basically, It will make a diamond shape. This
+              ;; currently does not do that.
+              [:body]
+              (do
+                (let [prev (first @stack)]
+                  (reset! label (gensym "label_"))
+                  (swap! stack rest)
+                  acc))
+              
+              
+              [:else]
+              (do
+                (reset! label (first @stack))
+                (swap! stack rest)
+                acc)
+              
+              ?x (update-in acc [@label :text] conj ?x)))
+          {}
+          ordered-code))
 
 
 
-
-
-
-
-(let
- [x [1 2 3]]
- (let
-  [G__7427348 (vector? x)]
-  (let
-   [ret__14025__auto__
-    (if
-     G__7427348
-     (let
-      [G__7427352 (count x)]
-      (let
-       [G__7427350 (= G__7427352 3)]
-       (if
-        G__7427350
-        (let
-         [x_nth_0__ (nth x 0)]
-         (let
-          [x_nth_1__ (nth x 1)]
-          (let
-           [x_nth_2__ (nth x 2)]
-           (let
-            [?x x_nth_0__]
-            (let [?y x_nth_1__] (let [?z x_nth_2__] [?x ?y ?z]))))))
-        meander.match.runtime.epsilon/FAIL)))
-     meander.match.runtime.epsilon/FAIL)]
-   (let
-    [G__7427431
-     (meander.match.runtime.epsilon/fail? ret__14025__auto__)]
-    (if
-     G__7427431
-     (let
-      [G__7427436 '{}]
-      (let
-       [G__7427434
-        (ex-info "non exhaustive pattern match" G__7427436)]
-       (throw G__7427434)))
-     ret__14025__auto__)))))
 
 
 
