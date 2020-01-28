@@ -156,12 +156,12 @@
               (m/cata (let [?x (m/cata ?body1)]
                         (m/cata ?body2)))))
 
-    (let [thing ?y] ?body)
-    (let [thing ?y] ?body)
+    ;; This ensures we eliminate lets in the value position, while not infinite looping
+    (let [?x (m/and ?y (m/cata (m/or (m/pred value?) ((m/not let) & _)))) ] ?body)
+    (let [?x ?y] (m/cata ?body))
 
     (let [?x ?y] ?body)
-    ;; placeholder need to figure out proper termination, not thing
-    (m/cata (let [thing (m/cata ?y)] (m/cata ?body)))
+    (m/cata (let [?x (m/cata ?y)] (m/cata ?body)))
     
     (let [?x ?y . !rest ...] ?body)
     (m/cata (let [?x ?y]
@@ -187,16 +187,105 @@
     ))
 
 
+(def ordered-code (tree-seq (fn [x] (and (seq? x) (#{'let 'if} (first x))))
+                            (fn [x] (m/match x 
+                                      (let [_ (m/and ?arg (if & _) )] ?body)
+                                      [?arg [:body] ?body]
+                                      (let [_ _] ?body)
+                                      [ ?body]
+                                      (if _ ?t ?f)
+                                      [?t [:else] ?f]))
+                            (a-normal code)))
 
-(m/rewrite (a-normal code)
-  (let [?var ?val]
-    (m/cata ?body))
-  [[?var ?val] ?body]
 
-  ?x (:fall ?x))
+(let [label (atom (gensym "label_"))
+      stack (atom ())]
+  (filter identity
+          (mapv (fn [x]
+                  (m/match x
+
+                    (let [?x (if & _)] _)
+                    [@label ?x]
+
+                    (let [?x ?v] _)
+                    [@label [?x ?v]]
+
+                    (if ?pred & _)
+                    (do
+                      (let [current @label
+                            next (gensym "label_")
+                            else (gensym "label_")]
+                        (reset! label next)
+                        (swap! stack conj else)
+                        [current [:if ?pred next else]]))
+
+                    [:let]
+                    (let [current @label]
+                      (swap! stack conj current)
+                      nil)
+                    
+                    
+                    [:body]
+                    (do
+                      (let [prev (first @stack)]
+                        (reset! label (gensym "label_"))
+                        (swap! stack rest)
+                        [prev @label]))
+                    
+                    
+                    [:else]
+                    (do
+                      (reset! label (first @stack))
+                      (swap! stack rest)
+                      nil)
+                    
+                    ?x [@label ?x]))
+                ordered-code)))
 
 
-(a-normal code)
+
+
+
+
+
+(let
+ [x [1 2 3]]
+ (let
+  [G__7427348 (vector? x)]
+  (let
+   [ret__14025__auto__
+    (if
+     G__7427348
+     (let
+      [G__7427352 (count x)]
+      (let
+       [G__7427350 (= G__7427352 3)]
+       (if
+        G__7427350
+        (let
+         [x_nth_0__ (nth x 0)]
+         (let
+          [x_nth_1__ (nth x 1)]
+          (let
+           [x_nth_2__ (nth x 2)]
+           (let
+            [?x x_nth_0__]
+            (let [?y x_nth_1__] (let [?z x_nth_2__] [?x ?y ?z]))))))
+        meander.match.runtime.epsilon/FAIL)))
+     meander.match.runtime.epsilon/FAIL)]
+   (let
+    [G__7427431
+     (meander.match.runtime.epsilon/fail? ret__14025__auto__)]
+    (if
+     G__7427431
+     (let
+      [G__7427436 '{}]
+      (let
+       [G__7427434
+        (ex-info "non exhaustive pattern match" G__7427436)]
+       (throw G__7427434)))
+     ret__14025__auto__)))))
+
 
 
 
