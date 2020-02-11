@@ -29,10 +29,10 @@
 (defn normalize-name* [m* k]
   (if (empty? m*)
     (k '())
-    (normalize-name 
+    (normalize-name
      (first m*)
      (fn [t]
-       (normalize-name* 
+       (normalize-name*
         (rest m*)
         (fn [t*]
           (k `(~t ~@t*))))))))
@@ -47,8 +47,8 @@
      (k `(~'fn ~?args ~(normalize ?body)))
 
      (let [?x ?y] ?body)
-     (normalize 
-      ?y 
+     (normalize
+      ?y
       (fn [n]
         `(~'let [~?x ~n]
            ~(normalize ?body k))))
@@ -60,14 +60,14 @@
                 k)
 
      (if ?pred ?t ?f)
-     (normalize-name 
+     (normalize-name
       ?pred
-      (fn [t] (k `(if ~t 
+      (fn [t] (k `(if ~t
                     ~(normalize ?t)
                     ~(normalize ?f)))))
 
      (?f & ?args)
-     (normalize-name 
+     (normalize-name
       ?f
       (fn [t]
         (normalize-name*
@@ -144,7 +144,7 @@
       (m/cata ?t)
       (m/cata ?f))
 
-    (m/let [?pred-sym (gensym)] 
+    (m/let [?pred-sym (gensym)]
       (if ?pred ?t ?f))
     (let [?pred-sym (m/cata ?pred)]
       (if ?pred-sym
@@ -152,7 +152,7 @@
         (m/cata ?f)))
 
     (let [?x (let [?y ?z] ?body1)] ?body2)
-    (m/cata (let [?y (m/cata ?z)] 
+    (m/cata (let [?y (m/cata ?z)]
               (m/cata (let [?x (m/cata ?body1)]
                         (m/cata ?body2)))))
 
@@ -162,7 +162,7 @@
 
     (let [?x ?y] ?body)
     (m/cata (let [?x (m/cata ?y)] (m/cata ?body)))
-    
+
     (let [?x ?y . !rest ...] ?body)
     (m/cata (let [?x ?y]
               (m/cata (let [!rest ...]
@@ -171,37 +171,84 @@
     ((m/pred value? !args) ...)
     (!args ...)
 
-    (m/let [?sym (gensym)] 
+    (m/let [?sym (gensym)]
       ((m/pred value? !values) ..1 . (m/pred (complement value?) ?not) . !rest ...))
-    (m/cata (let [?sym (m/cata ?not)] 
+    (m/cata (let [?sym (m/cata ?not)]
               (m/cata (!values ... ?sym . !rest ...))))
 
     (m/let [?sym (gensym)]
       ((m/pred (complement value?) ?not-value) . !rest ..1))
     (m/cata (let [?sym (m/cata ?not-value)]
               (m/cata (?sym . !rest ...))))
-    
+
     (m/pred value? ?x) ?x
 
     ?x (:fall ?x)
     ))
 
 
+(def normal-code  (a-normal code))
+
+
+
+
+(def deflated-code
+  (m/rewrite normal-code
+    (let [?x (if ?pred ?t ?f)] ?body)
+    ;; What I need to do is to make this turn into a diamond shape
+    ;; Where t and f both exit to body.
+    ;; I can't think about how to do that with a stack for some reason.
+    (m/cata [?x (if ?pred) :new-edge :new-edge
+             :pop [:nested (m/cata ?t)] :new-edge
+             :pop [:nested (m/cata ?f)] :pop-edge
+             :pop [:nested (m/cata ?body)]])
+
+    (let [?x ?arg] ?body)
+    (m/cata [?x (m/cata ?arg) & (m/cata ?body)])
+
+    (if ?pred ?t ?f)
+    (m/cata [(if ?pred) :new-edge :new-edge
+             :pop [:nested (m/cata ?t)]
+             :pop [:nested (m/cata ?f)]])
+
+    [!start ... . [:nested [!xs ...]] & ?rest]
+    (m/cata [!start ... . !xs ... & (m/cata ?rest)])
+
+    [!start ... . [:nested ?x] & ?rest]
+    (m/cata [!start ... . ?x & (m/cata ?rest)])
+
+
+    ?x  ?x
+    ))
+
+(last
+ (reduce (fn [[label stack labels] code]
+           (m/match code
+             :new-edge (let [s (gensym)] [label (cons s stack) (update-in labels [label :edges] conj s)])
+             :pop-edge  [(first stack) (rest stack) (update-in labels [label :edges] conj (first stack))]
+             :duplicate (let [s (first stack)] [label (cons s stack) labels])
+             :pop [(first stack) (rest stack) labels]
+             ?x [label stack (update-in labels [label :text] #(concat % (list ?x)))]))
+         (let [s (gensym)] [s '() {}])
+         deflated-code))
+
+
+
+
 (def ordered-code (tree-seq (fn [x] (and (seq? x) (#{'let 'if} (first x))))
-                            (fn [x] (m/match x 
+                            (fn [x] (m/match x
                                       (let [_ (m/and ?arg (if & _) )] ?body)
-                                      [?arg [:body] ?body]
+                                      [?arg [:double-push] ?body [:let]]
                                       (let [_ _] ?body)
                                       [ ?body]
                                       (if _ ?t ?f)
                                       [?t [:else] ?f]))
-                            (a-normal code)))
+                           normal-code))
+
 
 
 (let [label (atom (gensym "label_"))
       stack (atom ())]
-  ;; The text in all of these is backwards
-  ;; Should failure be a single node?
   (reduce (fn [acc x]
             (m/match x
 
@@ -210,28 +257,27 @@
               ;; but we aren't using that?
               ;; but we need it in other places
               (let [?x (if & _)] _)
-              (update-in acc [@label :text] conj ?x) 
+              (update-in acc [@label :text] #(concat % (list ?x)))
 
               (let [?x ?v] _)
-              (update-in acc [@label :text] conj [?x ?v])
+              (update-in acc [@label :text] #(concat % (list [?x ?v])))
 
               (if ?pred & _)
-              (do
-                (let [current @label
+              (do                (let [current @label
                       next (gensym "label_")
                       else (gensym "label_")]
                   (reset! label next)
                   (swap! stack conj else)
                   (-> acc
-                      (update-in [current :text] conj [:if ?pred])
+                      (update-in [current :text] #(concat % (list [:if ?pred])))
                       (assoc-in [current :edges] [next else]))))
 
               [:let]
               (let [current @label]
                 (swap! stack conj current)
                 acc)
-              
-              
+
+
               ;; What I really want is if it is a complex let, meaning
               ;; it has an if statement as a value, then I want to
               ;; ensure I set the exit condition of the split in the
@@ -243,15 +289,15 @@
                   (reset! label (gensym "label_"))
                   (swap! stack rest)
                   acc))
-              
-              
+
+
               [:else]
               (do
                 (reset! label (first @stack))
                 (swap! stack rest)
                 acc)
-              
-              ?x (update-in acc [@label :text] conj ?x)))
+
+              ?x (update-in acc [@label :text] #(concat % (list ?x)))))
           {}
           ordered-code))
 
@@ -262,3 +308,41 @@
 
 
 
+
+(let
+ [x [1 2 3]]
+ (let
+  [G__7447503 (vector? x)]
+  (let
+   [ret__14025__auto__
+    (if
+     G__7447503
+     (let
+      [G__7447507 (count x)]
+      (let
+       [G__7447505 (= G__7447507 3)]
+       (if
+        G__7447505
+        (let
+         [x_nth_0__ (nth x 0)]
+         (let
+          [x_nth_1__ (nth x 1)]
+          (let
+           [x_nth_2__ (nth x 2)]
+           (let
+            [?x x_nth_0__]
+            (let [?y x_nth_1__] (let [?z x_nth_2__] [?x ?y ?z]))))))
+        meander.match.runtime.epsilon/FAIL)))
+     meander.match.runtime.epsilon/FAIL)]
+   (let
+    [G__7447586
+     (meander.match.runtime.epsilon/fail? ret__14025__auto__)]
+    (if
+     G__7447586
+     (let
+      [G__7447591 '{}]
+      (let
+       [G__7447589
+        (ex-info "non exhaustive pattern match" G__7447591)]
+       (throw G__7447589)))
+     ret__14025__auto__)))))
