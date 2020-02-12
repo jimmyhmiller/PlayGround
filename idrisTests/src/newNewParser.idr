@@ -37,6 +37,7 @@ Monad Parser where
 
 
 Alternative Parser where
+
   empty = Parse (\s => [])
   (<|>) p1 p2 = Parse (\s =>
     (case parse p1 s of
@@ -72,9 +73,7 @@ space = satisfies isSpace
 
 
 stringify : Parser (List Char) -> Parser String
-stringify p = do 
-  x <- p
-  pure $ pack x
+stringify p = map pack p
  
  
 mutual
