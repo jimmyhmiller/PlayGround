@@ -1,5 +1,10 @@
 (ns wander.core15
-  (:require [meander.epsilon :as m]))
+  (:require [meander.epsilon :as m]
+            [dorothy.core :as dot]
+            [dorothy.jvm :as dot-jvm]
+            [clojure.string :as string]
+            [clojure.walk :as walk]))
+
 
 
 (defn value? [m]
@@ -190,22 +195,26 @@
 (def normal-code  (a-normal code))
 
 
+(def new-normal (a-normal ))
+
 
 
 (def deflated-code
-  (m/rewrite normal-code
+  (m/rewrite new-normal
+
     (let [?x (if ?pred ?t ?f)] ?body)
-    ;; What I need to do is to make this turn into a diamond shape
-    ;; Where t and f both exit to body.
-    ;; I can't think about how to do that with a stack for some reason.
-    (m/cata [?x (if ?pred) :new-edge :new-edge
-             :pop [:nested (m/cata ?t)] :new-edge
-             :pop [:nested (m/cata ?f)] :pop-edge
+    (m/cata [?x (if ?pred) :new-edge :placeholder :new-edge
+             :pop [:nested (m/cata ?t)] :duplicate :pop-edge :swap
+             :pop [:nested (m/cata ?f)] :duplicate :pop-edge
              :pop [:nested (m/cata ?body)]])
 
-    (let [?x ?arg] ?body)
-    (m/cata [?x (m/cata ?arg) & (m/cata ?body)])
+    (let [?x ?arg] (m/and ?body (m/seqable (m/not (m/or 'let 'if)) & _ )))
+    (m/cata [(m/app str ?x " = " (m/cata ?arg)) ?body])
 
+    (let [?x ?arg] ?body)
+    (m/cata [(m/app str ?x " = " (m/cata ?arg)) & (m/cata ?body)])
+
+    
     (if ?pred ?t ?f)
     (m/cata [(if ?pred) :new-edge :new-edge
              :pop [:nested (m/cata ?t)]
@@ -221,128 +230,61 @@
     ?x  ?x
     ))
 
-(last
- (reduce (fn [[label stack labels] code]
-           (m/match code
-             :new-edge (let [s (gensym)] [label (cons s stack) (update-in labels [label :edges] conj s)])
-             :pop-edge  [(first stack) (rest stack) (update-in labels [label :edges] conj (first stack))]
-             :duplicate (let [s (first stack)] [label (cons s stack) labels])
-             :pop [(first stack) (rest stack) labels]
-             ?x [label stack (update-in labels [label :text] #(concat % (list ?x)))]))
-         (let [s (gensym)] [s '() {}])
-         deflated-code))
+(def control-flow-graph
+  (last
+   (reduce (fn [[label stack labels] code]
+             ;; this is super ugly, fix
+             (let [result (m/match code
+                            :swap [label (cons (second stack) (cons (first stack) (rest (rest stack)))) labels]
+                            :placeholder (let [s (gensym)] [label (cons s stack) labels])
+                            :new-edge (let [s (gensym)] [label (cons s stack) (update-in labels [label :edges] conj s)])
+                            :push-current [label (cons label stack) labels]
+                            :pop-edge  [label (rest stack) (update-in labels [label :edges] conj (first stack))]
+                            :duplicate (let [s (first stack)] [label (cons s stack) labels])
+                            :pop [(first stack) (rest stack) labels]
+                            ?x [label stack (update-in labels [label :text] #(concat % (list ?x)))])]
+               (if (keyword? code) (println code (second result)))
+               result))
+           (let [s (gensym)] [s '() {}])
+           deflated-code)))
+
+
+;; Need to find all duplicate exits/nodes and replace them.
+;; Then I can simplify things a lot.
+;; Also, need to go backwards from cfg to anf
+
+
+;; (solve '(1 2 3 4 5) (?x ?y (meander.zeta/or ?x ?z) ?q ?r))
 
 
 
 
-(def ordered-code (tree-seq (fn [x] (and (seq? x) (#{'let 'if} (first x))))
-                            (fn [x] (m/match x
-                                      (let [_ (m/and ?arg (if & _) )] ?body)
-                                      [?arg [:double-push] ?body [:let]]
-                                      (let [_ _] ?body)
-                                      [ ?body]
-                                      (if _ ?t ?f)
-                                      [?t [:else] ?f]))
-                           normal-code))
 
+(do
+  (dot-jvm/save!
+   
+   (dot/dot
+    (dot/digraph (concat [{:rankdir "LR"}]
+                         (mapcat identity
+                                 (m/rewrites control-flow-graph
+                                   {(m/app str ?edge)
+                                    {:text (m/app 
+                                            #(string/join "\\l" (map str %)) 
+                                            ?label) 
+                                     :edges (m/or (!edges ...) nil)}}
+                                   [[?edge {:label ?label :shape "rectangle" :margin "0.3 0.3"}]
+                                    . [?edge (m/app str !edges)] ...])))))
+   
+   "test.png" {:format :png})
+  nil)
 
-
-(let [label (atom (gensym "label_"))
-      stack (atom ())]
-  (reduce (fn [acc x]
-            (m/match x
-
-              ;; Ummm, not sure what to do with this one?
-              ;; This is the value of the if statement,
-              ;; but we aren't using that?
-              ;; but we need it in other places
-              (let [?x (if & _)] _)
-              (update-in acc [@label :text] #(concat % (list ?x)))
-
-              (let [?x ?v] _)
-              (update-in acc [@label :text] #(concat % (list [?x ?v])))
-
-              (if ?pred & _)
-              (do                (let [current @label
-                      next (gensym "label_")
-                      else (gensym "label_")]
-                  (reset! label next)
-                  (swap! stack conj else)
-                  (-> acc
-                      (update-in [current :text] #(concat % (list [:if ?pred])))
-                      (assoc-in [current :edges] [next else]))))
-
-              [:let]
-              (let [current @label]
-                (swap! stack conj current)
-                acc)
-
-
-              ;; What I really want is if it is a complex let, meaning
-              ;; it has an if statement as a value, then I want to
-              ;; ensure I set the exit condition of the split in the
-              ;; if. Basically, It will make a diamond shape. This
-              ;; currently does not do that.
-              [:body]
-              (do
-                (let [prev (first @stack)]
-                  (reset! label (gensym "label_"))
-                  (swap! stack rest)
-                  acc))
-
-
-              [:else]
-              (do
-                (reset! label (first @stack))
-                (swap! stack rest)
-                acc)
-
-              ?x (update-in acc [@label :text] #(concat % (list ?x)))))
-          {}
-          ordered-code))
+(dot-jvm/show!
+ (dot/dot (dot/digraph) 
+          [
+           [:a :b :c]]))
 
 
 
 
 
 
-
-
-
-(let
- [x [1 2 3]]
- (let
-  [G__7447503 (vector? x)]
-  (let
-   [ret__14025__auto__
-    (if
-     G__7447503
-     (let
-      [G__7447507 (count x)]
-      (let
-       [G__7447505 (= G__7447507 3)]
-       (if
-        G__7447505
-        (let
-         [x_nth_0__ (nth x 0)]
-         (let
-          [x_nth_1__ (nth x 1)]
-          (let
-           [x_nth_2__ (nth x 2)]
-           (let
-            [?x x_nth_0__]
-            (let [?y x_nth_1__] (let [?z x_nth_2__] [?x ?y ?z]))))))
-        meander.match.runtime.epsilon/FAIL)))
-     meander.match.runtime.epsilon/FAIL)]
-   (let
-    [G__7447586
-     (meander.match.runtime.epsilon/fail? ret__14025__auto__)]
-    (if
-     G__7447586
-     (let
-      [G__7447591 '{}]
-      (let
-       [G__7447589
-        (ex-info "non exhaustive pattern match" G__7447591)]
-       (throw G__7447589)))
-     ret__14025__auto__)))))
