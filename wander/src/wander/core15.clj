@@ -256,9 +256,36 @@
 
 ;; (solve '(1 2 3 4 5) (?x ?y (meander.zeta/or ?x ?z) ?q ?r))
 
+(defn duplicates [control-flow-graph]
+  (map second
+       (filter (fn [x] (> (count (second x)) 1))
+               (group-by second control-flow-graph))))
+
+
+(defn update-edges [edge-to-find new-edge control-flow-graph]
+  (walk/postwalk (fn [x]
+                  (if (= x edge-to-find)
+                    new-edge
+                    x))
+                 control-flow-graph))
+
+(defn remove-duplicates [control-flow-graph duplicate-collection]
+  (let [new-state (gensym)
+        text (second (first duplicate-collection))]
+    (reduce (fn [cfg [id _]]
+              (update-edges id new-state (dissoc cfg id))) 
+            (assoc control-flow-graph new-state text) 
+            duplicate-collection)))
 
 
 
+(def dups-removed
+  (reduce remove-duplicates control-flow-graph  (duplicates control-flow-graph)))
+
+(defn str-even-lazy [x]
+  (if (seq? x)
+    (str (into [] x))
+    (str x)))
 
 (do
   (dot-jvm/save!
@@ -266,10 +293,10 @@
    (dot/dot
     (dot/digraph (concat [{:rankdir "LR"}]
                          (mapcat identity
-                                 (m/rewrites control-flow-graph
+                                 (m/rewrites dups-removed
                                    {(m/app str ?edge)
-                                    {:text (m/app 
-                                            #(string/join "\\l" (map str %)) 
+                                    {:text (m/app
+                                            #(string/join "\\l" (map str-even-lazy %)) 
                                             ?label) 
                                      :edges (m/or (!edges ...) nil)}}
                                    [[?edge {:label ?label :shape "rectangle" :margin "0.3 0.3"}]
