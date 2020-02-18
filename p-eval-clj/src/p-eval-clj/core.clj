@@ -289,3 +289,69 @@
 
 
 
+;; 
+(defn primes [n]
+  (let [sieve (boolean-array n true)]
+    (doseq [p (range 3 (int (Math/ceil (Math/sqrt n))) 2)]
+      (when (aget sieve p)
+        (doseq [i (range (* p p) n (* p 2))]
+          (aset sieve i false))))
+    (cons 2 (filterv #(aget sieve %) (range 3 n 2)))))
+
+
+(time
+ (do (primes 1000000)
+     nil))
+
+
+
+
+(defn bitset-sieve [n]
+  (let [primes (java.util.BitSet. n)
+        imax (-> n Math/sqrt int inc)]
+    ;; Start by assuming they are all primes
+    (.set primes 2 n)
+    ;; Now, iterate through the primes.
+    (loop [i (.nextSetBit primes 0)]
+      ;; Imperative code ...
+      (if (or (> i imax)
+              (= i -1))
+        primes
+        (do
+          (doseq [j (range (+ i i) n i)]
+            ;; Not prime -- multiple of i!
+            (.clear primes j))
+          (recur (.nextSetBit primes (inc i))))))))
+
+(defn bitset->vec [bs]
+  (->> (range (.size bs))
+       (filter (fn [x] (.get bs x)))
+       (into [])))
+
+(time (do
+       
+        (bitset-sieve-2 1000000)
+        nil))
+
+(set! *warn-on-reflection* true)
+
+
+(defn bitset-sieve-2 [n]
+  (let [primes (java.util.BitSet. n)
+        imax (-> n Math/sqrt int inc)]
+    ;; Start by assuming they are all primes
+    (.set primes 2  n)
+    ;; Now, iterate through the primes.
+    (loop [i (.nextSetBit primes 0)]
+      ;; Imperative code ...
+      (if (or (> i imax)
+              (= i -1))
+        (filter #(.get primes %)
+                (range 2 n))
+        (do
+          (doseq [j (range (* i i) n i)]
+            ;; Not prime -- multiple of i!
+            (.clear primes j))
+          (recur (.nextSetBit primes (inc i))))))))
+
+(bit)
