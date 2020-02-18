@@ -34,7 +34,7 @@ exit:
   mov rdi, 0
   syscall
 
-
+section .data
 format:
   default rel
     db    "%20ld", 10, 0
