@@ -28,6 +28,7 @@ print_answer:
   call    _printf
 
 exit:
+  pop rbx
   mov rax, 0x2000001 ; magic MacOS exit thing
   mov rdi, 0
   syscall
