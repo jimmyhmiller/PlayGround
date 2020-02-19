@@ -3,7 +3,7 @@ extern _printf
 
 section .text
 start:
-  push    rbx
+  push    rbx ; something said I need to do this on mac, not sure 
  
   mov     r15,  0  ; sum
   mov     r12,  3  ; counter
@@ -40,6 +40,7 @@ print_answer:
   call    _printf
 
 exit:
+  pop rbx
   mov rax, 0x2000001 ; magic MacOS exit thing
   mov rdi, 0
   syscall
