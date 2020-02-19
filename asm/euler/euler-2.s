@@ -3,12 +3,11 @@ extern _printf
 
 section .text
 start:
-start:
   push    rbx
 
-  xor     r15,  r15 ; sum
+  xor     r15, r15 ; sum
   xor     r13, r13 ; num1
-  mov     r14, 1 ; num 2
+  mov     r14, 1   ; num 2
 
 main:
   test r14, 1 ; How does this work? Why is this odd? I think because of bits comparison?
