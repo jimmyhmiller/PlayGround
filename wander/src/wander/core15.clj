@@ -3,7 +3,8 @@
             [dorothy.core :as dot]
             [dorothy.jvm :as dot-jvm]
             [clojure.string :as string]
-            [clojure.walk :as walk]))
+            [clojure.walk :as walk]
+            [clojure.set :as set]))
 
 
 
@@ -14,7 +15,8 @@
       (symbol? m)
       (keyword? m)
       (vector? m)
-      (map? m)))
+      (map? m)
+      (and (seq? m) (= (first m) 'quote))))
 
 
 (def normalize)
@@ -138,6 +140,14 @@
                  ret__14025__auto__))))
 
 
+
+(defn hash-to-sym [code]
+  (let [value (hash code)
+        prefix_neg (if (neg? value) "neg" "")
+        abs-value (Math/abs value)]
+    (symbol (str "sym_" prefix_neg "_" abs-value))))
+
+
 (defn a-normal [code]
   (m/rewrite code
 
@@ -149,10 +159,9 @@
       (m/cata ?t)
       (m/cata ?f))
 
-    (m/let [?pred-sym (gensym)]
-      (if ?pred ?t ?f))
-    (let [?pred-sym (m/cata ?pred)]
-      (if ?pred-sym
+    (if ?pred ?t ?f)
+    (let (m/app (juxt hash-to-sym identity) (m/cata ?pred))
+      (if (m/app hash-to-sym (m/cata ?pred))
         (m/cata ?t)
         (m/cata ?f)))
 
@@ -165,6 +174,10 @@
     (let [?x (m/and ?y (m/cata (m/or (m/pred value?) ((m/not let) & _)))) ] ?body)
     (let [?x ?y] (m/cata ?body))
 
+    (let [?x (m/pred value? ?y)] ?body)
+    (let [?x ?y]
+      (m/cata ?body))
+
     (let [?x ?y] ?body)
     (m/cata (let [?x (m/cata ?y)] (m/cata ?body)))
 
@@ -176,15 +189,13 @@
     ((m/pred value? !args) ...)
     (!args ...)
 
-    (m/let [?sym (gensym)]
-      ((m/pred value? !values) ..1 . (m/pred (complement value?) ?not) . !rest ...))
-    (m/cata (let [?sym (m/cata ?not)]
-              (m/cata (!values ... ?sym . !rest ...))))
+    ((m/pred value? !values) ..1 . (m/pred (complement value?) ?not) . !rest ...)
+    (m/cata (let (m/app (juxt hash-to-sym identity) (m/cata ?not))
+              (m/cata (!values ... (m/app hash-to-sym (m/cata ?not)) . !rest ...))))
 
-    (m/let [?sym (gensym)]
-      ((m/pred (complement value?) ?not-value) . !rest ..1))
-    (m/cata (let [?sym (m/cata ?not-value)]
-              (m/cata (?sym . !rest ...))))
+    ((m/pred (complement value?) ?not-value) . !rest ..1)
+    (m/cata (let (m/app (juxt hash-to-sym identity) (m/cata ?not-value))
+              (m/cata ((m/app hash-to-sym (m/cata ?not-value)) . !rest ...))))
 
     (m/pred value? ?x) ?x
 
@@ -192,10 +203,23 @@
     ))
 
 
+
+(m/rewrite [1 2 3]
+  [1 2 3]
+  (m/let ['?x 2]
+    3))
+
+
+
+(hash-to-sym '(find S__21583 '?z))
+
 (def normal-code  (a-normal code))
 
 
-(def new-normal (a-normal ))
+(def new-normal (a-normal (read-string (slurp "src/wander/big-code-example.txt"))))
+
+
+
 
 
 
@@ -203,16 +227,16 @@
   (m/rewrite new-normal
 
     (let [?x (if ?pred ?t ?f)] ?body)
-    (m/cata [?x (if ?pred) :new-edge :placeholder :new-edge
+    (m/cata [[:phi ?x] (if ?pred) :new-edge :placeholder :new-edge
              :pop [:nested (m/cata ?t)] :duplicate :pop-edge :swap
              :pop [:nested (m/cata ?f)] :duplicate :pop-edge
              :pop [:nested (m/cata ?body)]])
 
     (let [?x ?arg] (m/and ?body (m/seqable (m/not (m/or 'let 'if)) & _ )))
-    (m/cata [(m/app str ?x " = " (m/cata ?arg)) ?body])
+    (m/cata [{:left ?x :right (m/cata ?arg)} ?body])
 
     (let [?x ?arg] ?body)
-    (m/cata [(m/app str ?x " = " (m/cata ?arg)) & (m/cata ?body)])
+    (m/cata [{:left ?x :right (m/cata ?arg)} & (m/cata ?body)])
 
     
     (if ?pred ?t ?f)
@@ -236,7 +260,7 @@
              ;; this is super ugly, fix
              (let [result (m/match code
                             :swap [label (cons (second stack) (cons (first stack) (rest (rest stack)))) labels]
-                            :placeholder (let [s (gensym)] [label (cons s stack) labels])
+                            :placeholder (let [s (gensym)] [label (cons s stack) (assoc-in labels [label :phi] s)])
                             :new-edge (let [s (gensym)] [label (cons s stack) (update-in labels [label :edges] conj s)])
                             :push-current [label (cons label stack) labels]
                             :pop-edge  [label (rest stack) (update-in labels [label :edges] conj (first stack))]
@@ -269,6 +293,10 @@
                     x))
                  control-flow-graph))
 
+
+
+
+
 (defn remove-duplicates [control-flow-graph duplicate-collection]
   (let [new-state (gensym)
         text (second (first duplicate-collection))]
@@ -278,9 +306,117 @@
             duplicate-collection)))
 
 
+(defn keep-removing [control-flow-graph]
+  (let [dups (duplicates control-flow-graph)]
+    (if (empty? dups)
+      control-flow-graph
+      (keep-removing (reduce remove-duplicates control-flow-graph dups)))))
+
+
 
 (def dups-removed
-  (reduce remove-duplicates control-flow-graph  (duplicates control-flow-graph)))
+  (keep-removing control-flow-graph))
+
+
+(do
+
+  (defn find-entry [control-flow-graph]
+    (let [edges (set (keys control-flow-graph))
+          edges-visited (set (filter identity (mapcat :edges (vals control-flow-graph))))
+          entry  (set/difference edges edges-visited)]
+      (assert (= 1 (count entry)) "Multiple entries, maybe dead code?")
+      (first entry)))
+
+  (defn reassemble [control-flow-graph]
+    (let [entry (find-entry control-flow-graph)]
+      (m/rewrite (get control-flow-graph entry)
+        {:text ({:left (m/some !left) :right (m/some !right)} ... . (if ?sym)) 
+         :edges (?true ?false)}
+        (let [!left !right ...]
+          (if ?sym
+            (m/cata (m/app #(get control-flow-graph % :failed-find1) ?true))
+            (m/cata (m/app #(get control-flow-graph % :failed-find2) ?false))))
+
+
+        {:text ({:left (m/some !left) :right (m/some !right)} ..1) 
+         :edges (?edge)}
+        (let [!left !right ...]
+          (m/cata (m/app #(get control-flow-graph % :failed-find3) ?edge)))
+
+        {:text ({:left (m/some !left) :right (m/some !right)} ..1 . ?result)}
+        (let [!left !right ...]
+          ?result)
+
+
+
+        ;; Bug in meander without and
+        {:text (m/and ({:left (m/some !left) :right (m/some !right)} ... . (m/not (m/pred map?)) ...)
+                      (_ ... . [:phi ?phi] (if ?sym))) 
+         :edges (?true ?false)
+         :phi (m/some ?phi-edge)}
+        (let [!left !right ... .
+              ?phi (if ?sym 
+                     (m/cata (m/app #(get control-flow-graph % :failed-find4) ?true))
+                     (m/cata (m/app #(get control-flow-graph % :failed-find5) ?false)))]
+          (m/cata (m/app #(get control-flow-graph % :failed-find6) ?phi-edge)))
+
+
+        {:text (?x)}
+        ?x
+
+        ?x ?x)))
+
+
+
+  (defn reassemble2 [control-flow-graph]
+    (let [entry (find-entry control-flow-graph)]
+      (m/rewrite (get control-flow-graph entry)
+        {:text ({:left (m/some !left) :right (m/some !right)} ... . (if ?sym)) 
+         :edges (?true ?false)}
+        (m/cata [[!left !right] ... .
+                 
+                 [:nested (m/cata (m/app #(get control-flow-graph % :failed-find1) ?true))]
+                 [:nested (m/cata (m/app #(get control-flow-graph % :failed-find2) ?false))]])
+
+
+        {:text ({:left (m/some !left) :right (m/some !right)} ..1) 
+         :edges (?edge)}
+        (m/cata [[!left !right] ... .
+                 [:nested (m/cata (m/app #(get control-flow-graph % :failed-find3) ?edge))]])
+
+        {:text ({:left (m/some !left) :right (m/some !right)} ..1 . ?result)}
+        [[!left !right] ...]
+
+        ;; Bug in meander without and
+        {:text (m/and ({:left (m/some !left) :right (m/some !right)} ... . (m/not (m/pred map?)) ...)
+                      (_ ... . [:phi ?phi] (if ?sym))) 
+         :edges (?true ?false)
+         :phi (m/some ?phi-edge)}
+        (m/cata [[!left !right] ... .
+                 [:nested
+                  (m/cata (m/app #(get control-flow-graph % :failed-find4) ?true))]
+                 [:nested
+                  (m/cata (m/app #(get control-flow-graph % :failed-find5) ?false))]
+                 [:nested
+                  (m/cata (m/app #(get control-flow-graph % :failed-find6) ?phi-edge))]])
+
+
+        [!start ... . [:nested [!xs ...]] & ?rest]
+        (m/cata [!start ... . !xs ... & (m/cata ?rest)])
+
+        [!start ... . [:nested ?x] & ?rest]
+        (m/cata [!start ... . ?x & (m/cata ?rest)])
+
+
+
+        {:text (?x)}
+        []
+
+        ?x ?x)))
+
+
+  (reassemble2 dups-removed))
+
 
 (defn str-even-lazy [x]
   (if (seq? x)
@@ -298,8 +434,10 @@
                                     {:text (m/app
                                             #(string/join "\\l" (map str-even-lazy %)) 
                                             ?label) 
-                                     :edges (m/or (!edges ...) nil)}}
-                                   [[?edge {:label ?label :shape "rectangle" :margin "0.3 0.3"}]
+                                     :edges (m/and ?edges (m/or (!edges ...) nil))}}
+                                   [[?edge {:label ?label 
+                                            :shape ~(if ?edges "rectangle" "doublecircle") 
+                                            :margin "0.3 0.3"}]
                                     . [?edge (m/app str !edges)] ...])))))
    
    "test.png" {:format :png})
@@ -309,6 +447,8 @@
  (dot/dot (dot/digraph) 
           [
            [:a :b :c]]))
+
+
 
 
 

@@ -32,6 +32,16 @@ There are certain ways we talk about abstraction that are necessarily subjective
 
 
 
+## Abstraction is Relative
+
+I have this idea that I think might be right. Let's start with the notion of a set. In java, a set is an abstraction. There is the java.util.Set interface that helps us define the abstraction (not an exhaustive definition). There are a few things that make this an abstraction, but one necessary condition for it being an abstraction is that it is built out of other things. This is of course not sufficient. A car is not an abstraction nor is a person and they are both built. But what we cannot say from this is that sets are abstractions simplicitor. In ZFC, sets are not an abstraction, sets are fundamental. In fact, in ZFC, integers would be an abstraction and sets would not be, whereas in java it would be the exact opposite. 
+
+So to say something is an abstraction implies that is it not fundamental relative to some base. This reminds me quite a lot of "Making Things Up" by Karen Bennett. There definitely seems to be a relationship.
+
+So what about degrees of abstraction? Let's take a famous programming example, monads. As I mentioned in Cheng Lou's proposal monads are a pretty famous example of "very" abstract things. And yet Cheng Lou's notion of power would actually make monads less abstract than functions. So to keep our language precise, let's talk about monads vs functions in haskell. In haskell, why would a monad be more abstract than a function? Here it actually seems pretty straight forward. A monad is built out of functions. If Y is built out of X then Y is more abstract than X. We will end up with a partial order, even when restricting our bases. I need to review making things up because I think there is a lot that is useful there.
+
+
+
 ### Random Thoughts
 
 * Are abstraction and reification related?
