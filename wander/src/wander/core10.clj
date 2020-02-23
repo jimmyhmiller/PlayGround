@@ -302,8 +302,8 @@ map?
 
          target (gensym "target__")
          ir (match/compile [target] matrix)
-         ir* 
-         (ir/op-bind target (ir/op-eval expr) ir)
+         ir* (ir/rewrite
+              (ir/op-bind target (ir/op-eval expr) ir))
          code (ir/compile ir `(~fail) kind)]
      {:clauses clauses
       :matrix matrix
@@ -1180,6 +1180,17 @@ nil         ;;; Works as expected
 
 
 (analyze)
+(m/match '{:text ({:a 1 :b 2} [:thing 1] (stuff 2))}
+
+  {:text (!a ... .  _)}
+  !a
+  
+  {:text (!a ... . _ _)}
+  !a)
+
+
+
+
 (m/search nil
   (m/not (m/some _))
   true)
@@ -1588,7 +1599,6 @@ nil         ;;; Works as expected
       [:thead . [:tr . [:td !titles] ...]]
       [:tbody . [:tr . [:td !values] ...] ...
        [:tr . [:td]]]]]))
-
 
 
 

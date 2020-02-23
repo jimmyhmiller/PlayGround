@@ -267,7 +267,7 @@
                             :duplicate (let [s (first stack)] [label (cons s stack) labels])
                             :pop [(first stack) (rest stack) labels]
                             ?x [label stack (update-in labels [label :text] #(concat % (list ?x)))])]
-               (if (keyword? code) (println code (second result)))
+               #_(if (keyword? code) (println code (second result)))
                result))
            (let [s (gensym)] [s '() {}])
            deflated-code)))
@@ -448,10 +448,46 @@
           [
            [:a :b :c]]))
 
+(time
+ (dotimes [n 10000]
+   (m/match [1 [2 1]]
+     [?x [?y ?x]]
+     [?x ?y])))
+
+(time
+ (dotimes [n 10000]
+   (m/match [[2 1] 1]
+     [[?y ?x] ?x]
+     [?x ?y])))
 
 
-
-
-
-
-
+(let*
+  [ret__14626__auto__
+   (let*
+     [TARGET__118096 [1 [2 1]]]
+     (if (= (count TARGET__118096) 2)
+       (let*
+         [TARGET__118096_nth_0__
+          (TARGET__118096 0)
+          TARGET__118096_nth_1__
+          (TARGET__118096 1)]
+         (let*
+           [?x TARGET__118096_nth_0__]
+           (if (vector? TARGET__118096_nth_1__)
+             (if (= (count TARGET__118096_nth_1__) 2)
+               (let*
+                 [TARGET__118096_nth_1___nth_0__
+                  (nth TARGET__118096_nth_1__ 0)
+                  TARGET__118096_nth_1___nth_1__
+                  (nth TARGET__118096_nth_1__ 1)]
+                 (let*
+                   [?y TARGET__118096_nth_1___nth_0__]
+                   (if (= ?x TARGET__118096_nth_1___nth_1__)
+                     [?x ?y]
+                     meander.match.runtime.epsilon/FAIL)))
+               meander.match.runtime.epsilon/FAIL)
+             meander.match.runtime.epsilon/FAIL)))
+       meander.match.runtime.epsilon/FAIL))]
+  (if (meander.match.runtime.epsilon/fail? ret__14626__auto__)
+    (throw (ex-info "non exhaustive pattern match" '{}))
+    ret__14626__auto__))
