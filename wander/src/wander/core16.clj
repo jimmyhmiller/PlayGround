@@ -1,27 +1,44 @@
 (ns wander.core16
-  (:require [meander.epsilon :as m]))
+  (:require [meander.epsilon :as m]
+            [clojure.walk :as walk]))
 
 
 
+(do
+  (def rules
+    '((rule fact
+            (fact 1) 1
+            (fact ?n) (* ?n (fact (- ?n 1))))
+      
+      (rule add
+            (add ?x ?y) (+ ?x ?y))
 
-(def rules
-  '((rule fact
-          (fact 1) 1
-          (fact ?n) (* ?n (fact (- ?n 1))))
-    
-    (rule add
-          (add ?x ?y) (+ ?x ?y))
+      ;; Need to modify eval-match not to use regular eval
+      ;; this rule is an example of why. It would infinitely recurse.
+      ;; Actually is that right? Maybe I need to instead ensure I
+      ;; separate meta rules? Need to think about this more.
 
-    (rule print-fact
-          ((fact ?x) => ?y) (:clj (println ?x ?y)))))
+      #_(rule print-fact
+            ((fact ?x) => ?y)  (println ?x ?y))
 
-(def parsed-rules
-  (m/rewrite rules
-    ((rule !name . !left !right ..!n) ..!m)
-    ({:type :rule
-      :name !name
-      :clauses [{:left !left :right !right} ..!n]}
-     ..!m)))
+      (rule print-fact
+            ((fact ?x) => ?y) (:clj (println (quote ?x) (quote ?y))))
+
+      #_(rule print
+            (println ?x ?y) (:clj (println (quote ?x) (quote ?y))))
+      (rule subject
+            (- ?x ?y) (:clj (- ?x ?y)))
+      
+      (rule multiply
+            (* ?x ?y) (:clj (* ?x ?y)))))
+
+  (def parsed-rules
+    (m/rewrite rules
+      ((rule !name . !left !right ..!n) ..!m)
+      ({:type :rule
+        :name !name
+        :clauses [{:left !left :right !right} ..!n]}
+       ..!m))))
 
 
 
@@ -55,20 +72,33 @@
           (map (fn [rule]
                  (let [ms (filter identity (map (partial matches expr) (:clauses rule)))]
                    (when (seq ms)
-                     (assoc rule :matches ms)))) 
+                     (assoc rule :matches ms :expr expr)))) 
                rules)))
 
-;; Need to go ahead and have a substituted expr here
+(defn substitute [expr env]
+  (walk/postwalk-replace env expr))
+
+
+(defn eval-if-clj [expr]
+  (if (and (seq? expr) (= (first expr) :clj))
+    (eval (second expr))
+    expr))
+
+(mapcat (partial find-matching-rules parsed-rules) (tree-seq coll? seq '(* 2 (* 3 4))))
+
 (defn eval-expr [rules expr]
-  (let [matching (find-matching-rules rules expr)
+  (let [matching (reverse (mapcat (partial find-matching-rules rules) (tree-seq coll? seq expr)))
         rule (first matching)
         clauses (:matches rule)
-        clause (first clauses)]
+        clause (first clauses)
+        result (eval-if-clj (substitute (get-in clause [:clause :right]) (get-in clause [:env]))) ]
    #_ (assert (= 1 (count matching) (count clauses)) "not doing multiple yet")
-    {:expr expr
-     :clause clause
-     :rule rule
-     :result (get-in clause [:clause :right])}))
+   {:expr expr
+    :sub-expression (:expr rule)
+    :clause clause
+    :rule rule
+     ;; probably wrong to do this given side effects?
+    :result (substitute expr {(:expr rule) result})}))
 
 (defn build-result-expr [evaled-expr]
   (m/rewrite evaled-expr
@@ -76,7 +106,7 @@
      :result ?result}
     (?expr => ?result)))
 
-;; Need to go ahead and have a substituted expr here
+
 (defn match-on-eval [rules evaled-expr]
   (let [result-expr (build-result-expr evaled-expr)
         matching (find-matching-rules rules result-expr)
@@ -91,7 +121,7 @@
              {:rule rule
               :expr result-expr
               :clause clause
-              :result (get-in clause [:clause :right])}))))
+              :result (substitute (get-in clause [:clause :right]) (get-in clause [:env])) }))))
 
 
 ;; Need to think about the fact that I will need to refire
@@ -105,25 +135,21 @@
        (match-on-eval rules)))
 
 
-(defn make-eval-env-code [expr env]
-  (m/rewrite env
-    {?k ?v & ?rest}
-     ;; not correct, just for now
-    (let [?k ('quote ?v)]
-      (m/cata ?rest))
-    {}  ~expr))
-
+(def result-atom (atom nil))
 
 ;; @Ugly
 (defn fixed-point-eval-match [rules eval-match]
   (let [result (:result eval-match)]
+    (reset! result-atom result)
     (cond
-      (not result)
+      (or (not result) (= result '(quote nil))) 
       :no-result
 
       (= (first result) :clj)
       (do
-        (eval (make-eval-env-code (second result) (get-in eval-match [:clause :env])))
+        
+        ;; Need to figure out how to properly print code values
+        (eval (second result))
         nil)
       
       :else (let [stepped (step rules result)]
@@ -136,11 +162,27 @@
   (let [result (step rules expr)]
     (when-let [eval-match (:eval-match result)]
       (fixed-point-eval-match rules eval-match))
-    result))
+    (dissoc result :eval-match)))
 
-(full-step parsed-rules '(fact 2))
+(defn n-step [n rules expr results]
+  (if (zero? n)
+    (conj results expr)
+    (recur (dec n) rules (:result (full-step rules expr)) (conj results expr))))
+
+(defn fixed-point-steps [rules expr results]
+  (let [result (:result (full-step rules expr))]
+    (if (= result (last results))
+      results
+      (recur rules result (conj results expr)))))
+
+(n-step 20 parsed-rules '(fact 5) [])
 
 
+(fixed-point-steps parsed-rules '(fact (* 1 5)) [])
+
+(full-step parsed-rules
+           (:result
+            (full-step parsed-rules '(fact 2))))
 
 ;; Next we need to look for things that are matching on results
 ;; To optimize we would need to associate clauses with their result
