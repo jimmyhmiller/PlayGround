@@ -23,6 +23,7 @@
     (some (all-containing-lvars (lvars var)) (keys source-vars))
     false))
 
+
 (defn assign-lvars [data]
   (let [vars (atom [])
         new-structure 
@@ -144,7 +145,7 @@
     `~(construct-match input-output)))
 
 (defn infer-rewrite [& input-outputs]
-  (infer-match* input-outputs))
+  (infer-rewrite* input-outputs))
 
 (defmacro infer-transform [& input-outputs]
   (infer-rewrite* input-outputs))
@@ -195,7 +196,7 @@
    :age 36}})
 
 (infer-rewrite [1 2 3]
-             [3 2 1])
+               [3 2 1])
 
 
 
