@@ -22,7 +22,7 @@
             ((fact ?x) => ?y)  (println ?x ?y))
 
       (rule print
-            (?x => ?y) (:clj (println (quote ?x) (quote ?y))))
+            (?x => ?y) (:clj (println (quote ?x) '=> (quote ?y))))
 
       #_(rule print
             (println ?x ?y) (:clj (println (quote ?x) (quote ?y))))
@@ -93,13 +93,47 @@
         clause (first clauses)
         result (eval-if-clj (substitute (get-in clause [:clause :right]) (get-in clause [:env]))) ]
    #_ (assert (= 1 (count matching) (count clauses)) "not doing multiple yet")
-   {:expr expr
-    :sub-expression (:expr rule)
-    :sub-result result
-    :clause clause
-    :rule rule
-     ;; probably wrong to do this given side effects?
-    :result (substitute expr {(:expr rule) result})}))
+   (if (= (:expr rule) expr)
+     {:expr expr
+      :clause clause
+      :rule rule
+      ;; probably wrong to do this given side effects?
+      :result (substitute expr {(:expr rule) result})}
+     {:expr expr
+      :sub-expression (:expr rule)
+      :sub-result result
+      :clause clause
+      :rule rule
+      ;; probably wrong to do this given side effects?
+      :result (substitute expr {(:expr rule) result})})))
+
+
+;; Ugly duplicated code for no real reason.
+(defn build-result-sub-expr [evaled-expr]
+  (m/rewrite evaled-expr
+    {:sub-expression ?expr
+     :sub-result ?result}
+    (?expr => ?result)))
+
+
+(defn match-on-eval-sub [rules evaled-expr]
+  (if (not (:sub-expression evaled-expr))
+    evaled-expr
+    (let [result-expr (build-result-sub-expr evaled-expr)
+          matching (find-matching-rules rules result-expr)
+          rule (first matching)
+          clauses (:matches rule)
+          clause (first clauses)]
+      #_(assert (= 1 (count matching) (count clauses)) "not doing multiple yet")
+      (if-not rule
+        evaled-expr
+        (assoc evaled-expr
+               :eval-match
+               {:rule rule
+                :expr result-expr
+                :clause clause
+                :result (substitute (get-in clause [:clause :right])
+                                    (get-in clause [:env]))})))))
 
 (defn build-result-expr [evaled-expr]
   (m/rewrite evaled-expr
@@ -107,11 +141,10 @@
      :result ?result}
     (?expr => ?result)))
 
-
 ;; Actually need to run match on eval on the sub-expression and the
 ;; outer expression in order to do what I really want. What should the
 ;; order be?
-(defn match-on-eval [rules evaled-expr]
+(defn match-on-eval-main [rules evaled-expr]
   (let [result-expr (build-result-expr evaled-expr)
         matching (find-matching-rules rules result-expr)
         rule (first matching)
@@ -125,7 +158,12 @@
              {:rule rule
               :expr result-expr
               :clause clause
-              :result (substitute (get-in clause [:clause :right]) (get-in clause [:env])) }))))
+              :result (substitute (get-in clause [:clause :right])
+                                  (get-in clause [:env]))}))))
+
+
+
+
 
 
 ;; Need to think about the fact that I will need to refire
@@ -134,19 +172,26 @@
 ;; that maybe should print,
 ;; but so should more exact things
 (defn step [rules expr]
-  (->> expr
-       (eval-expr rules)
-       (match-on-eval rules)))
+  (let [evaled-expr (->> expr
+                         (eval-expr rules))]
+    ;; Need to actually return multple
+    (assoc evaled-expr :eval-match c
+           [(match-on-eval-sub rules evaled-expr)
+            (match-on-eval-main rules evaled-expr)])))
 
 
 (def result-atom (atom nil))
 
 ;; @Ugly
 (defn fixed-point-eval-match [rules eval-match]
+  
   (let [result (:result eval-match)]
+   #_ (println result)
     (reset! result-atom result)
     (cond
-      (or (not result) (= result '(quote nil))) 
+      (or (not result) 
+          (= result '(quote nil))
+          (not (seq? result))) 
       :no-result
 
       (= (first result) :clj)
@@ -156,16 +201,19 @@
         (eval (second result))
         nil)
       
-      :else (let [stepped (step rules result)]
-              (when (:eval-match stepped)
-                (fixed-point-eval-match rules (:eval-match stepped)))
+      :else (let [stepped (step rules  result)]
               (recur rules stepped)))))
+
+
+(defn fixed-point-eval-matches [rules eval-matches]
+  (doseq [match eval-matches]
+    (fixed-point-eval-match rules (:eval-match match))))
 
 
 (defn full-step [rules expr]
   (let [result (step rules expr)]
-    (when-let [eval-match (:eval-match result)]
-      (fixed-point-eval-match rules eval-match))
+    (when-let [eval-matches (:eval-match result)]
+      (fixed-point-eval-matches rules eval-matches))
     (dissoc result :eval-match)))
 
 (defn n-step [n rules expr results]
@@ -179,14 +227,23 @@
       results
       (recur rules result (conj results expr)))))
 (comment)
-(n-step 20 parsed-rules '(fact 5) [])
+(n-step 14 parsed-rules '(fact 5) [])
 
 
-(fixed-point-steps parsed-rules '(fact (* 1 5)) [])
+(fixed-point-steps parsed-rules '(fact 5) [])
 
 (full-step parsed-rules
            (:result
             (full-step parsed-rules '(fact 2))))
+
+
+
+;; Need to add to eval-match the rule so we can see what rules caused
+;; the transition. Need to clean up this terrible terrible code. Need
+;; to clearly define transition points.
+
+
+
 
 ;; Next we need to look for things that are matching on results
 ;; To optimize we would need to associate clauses with their result
