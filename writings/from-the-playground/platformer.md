@@ -46,14 +46,13 @@ Here is a simple example in the picture above you can see red and blue platforms
             :bottom stand}})
 ```
 
-What we have done is given the floor a function for what should happen when an object interacts with its sides. For top we use the portal function. All this function does is changes some data of the entity it is handed. So in this case, we change its velocity and position.   This model is incredibly flexible (probably not very performant in the long run.) Here are a couple more examples:
+What we have done is given the floor a function for what should happen when an object interacts with its sides, for example, top uses the portal function. All this function does is changes some data of the entity it is handed. So in this case, we change its velocity and position. This model is incredibly flexible (probably not very performant in the long run.) Here are a couple more examples:
 
 ```clojure
 (defn bounce [obj floor]
   (assoc obj
     :y (top floor)
     :vy (* .88 (opposite-velocity (:vy obj)))))
-
 
 (defn fast [obj floor]
   (assoc obj
@@ -77,3 +76,4 @@ Not quite bad, but it is interesting to see that this project is implemented an 
 
 ## Ways to Make This Better
 
+Instead of rendering divs it would have been better to render in canvas. In general this idea was a bit silly. I'd probably want a better approach things like `:standing`, I actually just don't understand what it is doing at all. I also was really inconsistent about the interaction model. Above there is something about overrides. I guess that is me overriding an attribute. I assume I did this because I wanted the ability to restore the old function? In fact, I think on every single frame I am running the collision code and re-associng? Probably should have changed that. Finally, I should probably have done a proper collision detection algorithm with raycasting. As well as consider things that interact at a distance.
