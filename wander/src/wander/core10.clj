@@ -12,7 +12,7 @@
 (let [x  [1 2 3]]
   (m/match x
     [?x ?y ?z]
-    [?x ?y ?z]))
+in    [?x ?y ?z]))
 
 (do
   (println "\n\n\n")
@@ -37,7 +37,7 @@
       (clojure.core/let
           [ret__32941__auto__
            (meander.match.runtime.epsilon/run-star-1
-             target__35682
+             target_ () _35682
              [!xs]
              (clojure.core/fn
                [[!xs] input__35685]
@@ -294,6 +294,7 @@ map?
          analysis (analyzer (cons 'target patterns))
          matrix (:matrix analysis)
          clauses (:clauses analysis)
+         result (:result  analysis)
          final-clause (:final-clause analysis)
          fail `(fn [] 
                  ~(if (some? final-clause)
@@ -305,7 +306,8 @@ map?
          ir* (ir/rewrite
               (ir/op-bind target (ir/op-eval expr) ir))
          code (ir/compile ir `(~fail) kind)]
-     {:clauses clauses
+     {:result result
+      :clauses clauses
       :matrix matrix
       :ir ir
       :ir* ir*
@@ -319,6 +321,14 @@ map?
     `(analyze-compile :search (quote ~?body) (quote ~?expr))
     (~'m/find ?expr & ?body)
     `(analyze-compile :find (quote ~?body) (quote ~?expr))))
+
+
+
+
+(analyze)
+(m/rewrite [1 2 1 2 1]
+  [(m/or 1 2) ... :as ?xs]
+  ?xs)
 
 
 (analyze
@@ -1521,85 +1531,34 @@ nil         ;;; Works as expected
 
 
 
+(m/match [1 2 3]
+  (m/or 3 2 1 !xs)
+  !xs)
 
 
 
-(ns algopop.leaderboardx.ascratch
-  (:require [meander.substitute.syntax.epsilon :as ss]
-            [meander.substitute.epsilon :as s]
-            [meander.epsilon :as m]))
+(def extract-resource-methods
+  (r/rewrite 
+   (m/with [%resource {:methods {& (m/seqable [_ !methods] ...)}
+                       :resources (m/or nil {& (m/seqable [_ %resource] ...)})}]
+     [?baseUrl %resource])
+   ;;=>
+   [[?baseUrl !methods] ...]))
 
 
-
-(defn substitute [env pattern]
-  (-> (ss/parse pattern env)
-      (s/compile env)))
-
-
-
-(defn entity-editor []
-  (substitute
-   '{titles ["A" "B" "C"]
-     values [1 2 3]}
-   '))
-(entity-editor)
+(m/rewrite
+  
+  {:methods {& (m/seqable [_ !methods] ...)}
+   :resources (m/or {& (m/seqable [_ (m/or (m/cata ?other-methods) _)] ...)} _)}
+  [!methods ... & ?other-methods]
+  
+  [?base-url (m/cata !methods)]
+  [?base-url !methods])
 
 
-
-(defn do-some-stuff [!things !stuff]
-  (m/subst {:things [!things ...]
-            :stuff [!stuff ...]}))
-
-(do-some-stuff [1 2 3] ["a" "b" "c"])
-
-
-(defn entity-editor [?heading !titles !values]
-  (m/subst
-    '[:div.form-inline
-      [:h3 heading]
-      [:table.table.table-responsive.panel.panel-default
-       [:thead . [:tr . [:td !titles] ...]]
-       [:tbody . [:tr . [:td !values] ...]] ...]]))
-
-
-(entity-editor "test" ["a" "b" "c"] [[1 2 3] [4 5 6]])
-
-(let [?x 2]
-  (m/subst '[1 heading ?x]))
-
-
-
-(let [?x 2]
-  (m/subst '[1 2 3 ?x] [?x]))
-
-
-
-
-
-
-(require '[meander.substitute.syntax.epsilon :as ss]
-          '[meander.substitute.epsilon :as s]
-          )
-
-
-(m/subst )
-
-(defn substitute [env pattern]
-  (-> (ss/parse pattern env)
-      (s/compile env)))
-
-
-(defn entity-editor []
-  (substitute
-   '{!titles ["A" "B" "C"]
-     !values [1 2 3]}
-   '[:div.form-inline
-     [:h3 heading]
-     [:table.table.table-responsive.panel.panel-default
-      [:thead . [:tr . [:td !titles] ...]]
-      [:tbody . [:tr . [:td !values] ...] ...
-       [:tr . [:td]]]]]))
-
+(extract-resource-methods
+ ["url" {:methods {:a :my-method}
+         :resources {:thing {:methods {:b :method2}}}}]) 
 
 
 
