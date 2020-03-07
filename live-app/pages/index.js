@@ -4,6 +4,7 @@ import { Editor, renderElementAsync } from "@jimmyhmiller/react-live";
 import { useDebounce } from 'use-debounce';
 import prettier from "prettier/standalone";
 import parserBabel from "prettier/parser-babylon";
+import CommandPalette from 'react-command-palette';
 
 const formatCode = (code) => {
   return prettier.format(code, {
@@ -14,6 +15,7 @@ const formatCode = (code) => {
 }
 
 const formatCodeHandler = (code, setCode) => e => {
+  // 70 is f for format. Not great for windows
   if (e.ctrlKey && e.keyCode === 70) {
     setCode(formatCode(code));
   }
@@ -226,6 +228,17 @@ const RouteEditor = ({ entity }) => {
   )
 }
 
+
+const Commands = () => {
+  const [commands, setCommands] = useState([{name: "Create Component", command: (...args) => console.log(args)}]);
+  return (
+    <CommandPalette
+      showSpinnerOnSelect={false}
+      onSelect={() => setCommands([{name: "Create Component Named _", command: () => {}}])}
+      commands={commands} />
+  );
+}
+
 const ListEntities = ({ keyFn, endpoint, Editor }) => {
   const { data } = useSWR(endpoint, {dedupingInterval: 200});
   return (
@@ -306,6 +319,7 @@ const Index = () => {
             <div style={{width: "45vw", height: "95vh", padding: 20}}>
               <ViewMainComponent />
             </div>
+            <Commands />
           </div>
         </Suspense>
       ) : (

@@ -21,8 +21,8 @@
       #_(rule print-fact
             ((fact ?x) => ?y)  (println ?x ?y))
 
-      (rule print-fact
-            ((fact ?x) => ?y) (:clj (println (quote ?x) (quote ?y))))
+      (rule print
+            (?x => ?y) (:clj (println (quote ?x) (quote ?y))))
 
       #_(rule print
             (println ?x ?y) (:clj (println (quote ?x) (quote ?y))))
@@ -95,6 +95,7 @@
    #_ (assert (= 1 (count matching) (count clauses)) "not doing multiple yet")
    {:expr expr
     :sub-expression (:expr rule)
+    :sub-result result
     :clause clause
     :rule rule
      ;; probably wrong to do this given side effects?
@@ -107,6 +108,9 @@
     (?expr => ?result)))
 
 
+;; Actually need to run match on eval on the sub-expression and the
+;; outer expression in order to do what I really want. What should the
+;; order be?
 (defn match-on-eval [rules evaled-expr]
   (let [result-expr (build-result-expr evaled-expr)
         matching (find-matching-rules rules result-expr)
@@ -174,7 +178,7 @@
     (if (= result (last results))
       results
       (recur rules result (conj results expr)))))
-
+(comment)
 (n-step 20 parsed-rules '(fact 5) [])
 
 
