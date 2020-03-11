@@ -21,7 +21,7 @@
       #_(rule print-fact
             ((fact ?x) => ?y)  (println ?x ?y))
 
-      (rule print
+      #_(rule print
             (?x => ?y) (:clj (println (quote ?x) '=> (quote ?y))))
 
       #_(rule print
@@ -221,6 +221,21 @@
     (conj results expr)
     (recur (dec n) rules (:result (full-step rules expr)) (conj results expr))))
 
+(defn fixed-point [rules expr]
+  (let [result (:result (full-step rules expr))]
+    (if (= result expr)
+      result
+      (recur rules result))))
+
+
+(defn fact [n]
+  (if (= n 1)
+    1
+    (* n (fact (- n 1)))))
+
+
+(fixed-point parsed-rules '(fact 1000N))
+
 (defn fixed-point-steps [rules expr results]
   (let [result (:result (full-step rules expr))]
     (if (= result (last results))
@@ -229,8 +244,11 @@
 (comment)
 (n-step 14 parsed-rules '(fact 5) [])
 
-
-(fixed-point-steps parsed-rules '(fact 5) [])
+(with-open [w (clojure.java.io/writer  "huge-fact.txt" :append true)]
+  (binding [*out* w]
+    (do
+      (fixed-point-steps parsed-rules '(fact 100N) [])
+      nil)))
 
 (full-step parsed-rules
            (:result
