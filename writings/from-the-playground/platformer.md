@@ -1,6 +1,6 @@
 # Platformer
 
-Platformer is a fairly old project (Oct 2014) that I had a ton of fun writing. It isn't code I'd recommend anyone to emulate, but I certainly learned a good amount from it and had a lot of fun. Platformer is exactly that a very simple in browser platformer. It never really turned into a game and was never really meant to.
+Platformer is a very old project (Oct 2014) that I had a ton of fun writing. It isn't code I'd recommend anyone to emulate, but I certainly learned a good amount from it and had a lot of fun. Platformer is exactly that a very simple in browser platformer. It never really turned into a game and was never really meant to.
 
 ![Screenshot_2020-02-22 Screenshot](/Users/jimmyhmiller/Documents/Code/PlayGround/writings/from-the-playground/images/platformer.png)
 
