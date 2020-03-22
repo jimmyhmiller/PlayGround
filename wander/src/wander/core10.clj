@@ -7,6 +7,10 @@
             [meander.match.epsilon :as match]
             [clojure.string :as string]))
 
+(def test [[1] [2] [3]])
+(m/match test
+  [(m/and (m/pred sequential?) (m/pred (p every? sequential?)) ?int-vars-vectors)]
+  ?int-vars-vectors)
 
 (ns-publics 'r.substitute.syntax)
 (let [x  [1 2 3]]
@@ -1562,3 +1566,38 @@ nil         ;;; Works as expected
 
 
 
+(let [test [[1] [2] [3]]]
+  (assert (sequential? test))
+  (assert (every? sequential? test))
+
+  
+  (m/match test
+    (m/and (m/pred sequential?) (m/pred (partial every? sequential?)) ?int-vars-vectors)
+    ?int-vars-vectors)
+
+  (assert
+   (m/match [test]
+     [(m/pred sequential? (partial every? sequential?) ?int-vars-vectors)]
+     :all-lists)))
+
+
+(m/match test
+  [(m/pred sequential?) ... :as ?int-vars-vectors]
+  ?int-vars-vectors)
+
+
+
+(m/match test
+  (m/seqable (m/seqable !xs) ...)
+  !xs)
+
+
+
+
+(require '[orchestra.spec.test :as stest])
+
+(stest/instrument)
+
+(m/match nil
+  (m/seqable)
+  nil)

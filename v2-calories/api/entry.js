@@ -51,7 +51,9 @@ const numberOfDays = () => {
         q.Lambda("x", q.Select(["data", "date"], q.Get(q.Var("x"))))))));
 }
 
-const bmr = 2260;
+const bmr = 2471;
+// I got this wrong before, adjusting now.
+const bmrDiff = bmr - 2260
 // 500 = 1lb per week;
 const goal = 500;
 
@@ -70,7 +72,7 @@ const extraCalories = () => {
         total: getTotal(),
          days: numberOfDays(),
       },
-   q.Subtract(q.Multiply(q.Var("days"), bmr-goal), q.Var("total")))
+   q.Subtract(q.Multiply(q.Var("days"), bmr - goal), q.Var("total")))
 }
 
 
@@ -98,14 +100,19 @@ const summary = () => {
       extra: extraCalories(),
       total: getTotal(),
       pounds: getPounds(),
+      two: q.Subtract(q.Var("extra"), q.Multiply(q.Var("days"), 500)),
     },
       q.ToObject([
         ["remaining", q.Var("remaining")], 
         ["extraOnePound", q.Var("extra")],
-        ["extraTwoPounds", q.Subtract(q.Var("extra"), q.Multiply(q.Var("days"), 500))],
+        ["extraTwoPounds", q.Var("two")],
+        ["extraTwoOriginal", q.Subtract(q.Var("two"), q.Multiply(bmrDiff, q.Var("days")))],
+        ["days", q.Var("days")],
+        ["weeks", q.Divide(q.Var("days"), 7)],
+        ["projectedLoss", q.Multiply(q.Divide(q.Var("days"), 7), 2)],
         ["total", q.Var("total")],
         ["pounds", q.Var("pounds")],
-        ["daily", bmr-goal],
+        ["daily", bmr - goal],
       ]))
   )
 }

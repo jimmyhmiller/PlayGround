@@ -76,3 +76,72 @@ Here we pull out all the contents of our vector and use `m/cata` to recursively 
 
 ## Interpreter
 
+Now that we have an ast, we can write a simple interpreter. What our interpreter will do is given an input and a pattern and an evironment, we will return an environment with all our logic variables set to some value, or we will return `:fail`. Rather than try to assemble our interpreter piece by piece, I wil begen by showing you the entire thing.
+
+```clojure
+(defn interpret [expr target env]
+  (m/match [expr target env]
+    
+    [{:tag :logic-variable :symbol ?symbol} ?target ?env]
+    (if (contains? ?env ?symbol)
+      (if (= ?target (get ?env ?symbol))
+        ?env
+        :fail)
+      (assoc ?env ?symbol ?target))
+    
+    [{:tag :vector :sequence ()} ?target ?env]
+    ?env
+
+    [{:tag :vector :sequence (?x)} ?target ?env]
+    (interpret ?x (nth ?target 0) ?env)
+    
+    [{:tag :vector :sequence (?x & ?rest)} ?target ?env]
+    (interpret {:tag :vector :sequence ?rest} 
+               (subvec ?target 1) 
+               (interpret ?x (nth ?target 0) ?env))))
+
+(interpret (parse '[?x ?y]) [1 2] {})
+
+;; =>
+{'?x 1 '?y 2}
+
+```
+
+If you've written an interpreter before this shouldn't be too suprising. First we handle logic variables by looking them up in the evironment. We handle the cases of it existing in the environment and matching, it existing and not matching, and it not existing. Next we handle some vectors cases. Here we handle the empty case, the single element case, and the case with more than one element. This interpreter does in fact work for the input we've given it. But think about what would happen if we did the same pattern but just passed a single number? We'd throw an error, because we never actually check that our input is a vector. We could just go and add a vector check to all of our vector cases, but that means we will be checking that something is a vector for every single element of our vector. So let's try a different apporach.
+
+```clojure
+(defn interpret [expr target env]
+  (m/match [expr target env]
+    
+    [{:tag :logic-variable :symbol ?symbol} ?target ?env]
+    (if (contains? ?env ?symbol)
+      (if (= ?target (get ?env ?symbol))
+        ?env
+        :fail)
+      (assoc ?env ?symbol ?target))
+
+    ;; Ensure target is a vector
+    [{:tag :vector :checked nil :sequence ?sequence} ?target ?env]
+    (if (vector? ?target)
+      (interpret {:tag :vector :checked true :sequence ?sequence} ?target ?env)
+      :fail)
+    
+    [{:tag :vector :sequence ()} ?target ?env]
+    ?env
+
+    [{:tag :vector :sequence (?x)} ?target ?env]
+    (interpret ?x (nth ?target 0) ?env)
+    
+    [{:tag :vector :checked ?checked :sequence (?x & ?rest)} ?target ?env]
+    (interpret {:tag :vector :checked ?checked :sequence ?rest} 
+               (subvec ?target 1) 
+               (interpret ?x (nth ?target 0) ?env))))
+```
+
+Taking advantage of the fact that meander matches are ordered, we added an earlier match that will perform the check for us and then, when we recurse, we simply set checked to true. That means, this pattern will no longer match and we can continue with the interpreter as before. There is still a problem with this interpreter that we aren't going to fix in this post, it does not check the size of the vector. For our purposes, doing this would actually be fairly easy, we check the size of `?sequence` and ensure target has the same size. But what would we do if we added repeats (e.g. `...`, `..1` etc)? For now we will leave this off, but this might be a good exercise for thinking about on your own.
+
+Now that we have a working interpreter, let's look at how we can make this a compiler. Doing so with meander will actually be suprisingly easy.
+
+## Compiler
+
+ 
