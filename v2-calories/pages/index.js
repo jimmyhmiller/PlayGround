@@ -179,8 +179,12 @@ const Summary = ({ summary }) => {
       <li>Remaining: {summary["remaining"]}</li>
       <li>Extra One Pound: {summary["extraOnePound"]}</li>
       <li>Extra Two Pounds: {summary["extraTwoPounds"]}</li>
-      <li>Total: {summary["total"]}</li>
+      <li>Extra Two Original: {summary["extraTwoOriginal"]}</li>
       <li>Pounds: {summary["pounds"]}</li>
+      <li>Pounds By Weeks: {summary["projectedLoss"]}</li>
+      <li>Days: {summary["days"]}</li>
+      <li>Weeks: {summary["weeks"]}</li>
+      <li>Total: {summary["total"]}</li>
       <li>Daily: {summary["daily"]}</li>
     </ul>
   )

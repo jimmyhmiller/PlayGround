@@ -9,6 +9,11 @@
     '((rule fact
             (fact 1) 1
             (fact ?n) (* ?n (fact (- ?n 1))))
+
+      (rule fib
+            (fib 0) 0
+            (fib 1) 1
+            (fib ?n) (+ (fib (- ?n 1)) (fib (- ?n 2))))
       
       (rule add
             (add ?x ?y) (+ ?x ?y))
@@ -18,16 +23,19 @@
       ;; Actually is that right? Maybe I need to instead ensure I
       ;; separate meta rules? Need to think about this more.
 
-      #_(rule print-fact
-            ((fact ?x) => ?y)  (println ?x ?y))
+      #_(rule step-fact
+            ((fact ?x) => ?y) (:clj (do (read-line) (println '(fact ?x) (quote ?y)))))
 
-      #_(rule print
-            (?x => ?y) (:clj (println (quote ?x) '=> (quote ?y))))
+      (rule print
+              (?x => ?y) (:clj (println (quote ?x) '=> (quote ?y))))
 
-      #_(rule print
+      (rule print
             (println ?x ?y) (:clj (println (quote ?x) (quote ?y))))
       (rule subject
             (- ?x ?y) (:clj (- ?x ?y)))
+      
+      (rule add
+            (+ ?x ?y) (:clj (+ ?x ?y)))
       
       (rule multiply
             (* ?x ?y) (:clj (* ?x ?y)))))
@@ -63,7 +71,7 @@
       {:clause clause :env env})))
 
 
-(matches '((fact 1 => 1)) '{:left ((fact 1 => 1))})
+(matches '((fact 1) => 1) '{:left (?x => ?y)})
 
 
 ;; @Ugly
@@ -228,31 +236,11 @@
       (recur rules result))))
 
 
-(defn fact [n]
-  (if (= n 1)
-    1
-    (* n (fact (- n 1)))))
 
 
-(fixed-point parsed-rules '(fact 1000N))
+(fixed-point parsed-rules '(fib 3))
 
-(defn fixed-point-steps [rules expr results]
-  (let [result (:result (full-step rules expr))]
-    (if (= result (last results))
-      results
-      (recur rules result (conj results expr)))))
-(comment)
-(n-step 14 parsed-rules '(fact 5) [])
 
-(with-open [w (clojure.java.io/writer  "huge-fact.txt" :append true)]
-  (binding [*out* w]
-    (do
-      (fixed-point-steps parsed-rules '(fact 100N) [])
-      nil)))
-
-(full-step parsed-rules
-           (:result
-            (full-step parsed-rules '(fact 2))))
 
 
 
