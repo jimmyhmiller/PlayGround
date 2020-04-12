@@ -319,7 +319,6 @@ const Index = () => {
             <div style={{width: "45vw", height: "95vh", padding: 20}}>
               <ViewMainComponent />
             </div>
-            <Commands />
           </div>
         </Suspense>
       ) : (

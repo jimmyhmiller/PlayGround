@@ -14,6 +14,7 @@
       (string? m)
       (symbol? m)
       (keyword? m)
+      (nil? m)
       (vector? m)
       (map? m)
       (and (seq? m) (= (first m) 'quote))))
@@ -202,7 +203,10 @@
     ?x (:fall ?x)
     ))
 
-
+;; I need to do alpha conversion on all of these, but the variable
+;; name needs to be determined by the content of the binding. But the
+;; content of the binding can only be applied after we substitute
+;; variables that already exist.
 
 (m/rewrite [1 2 3]
   [1 2 3]
@@ -219,8 +223,194 @@
 (def new-normal (a-normal (read-string (slurp "src/wander/big-code-example.txt"))))
 
 
+(def new-code '(nth
+  (let
+    [?__35238
+     (m.runtime/logic-variable '?__35238)
+     ?__35237
+     (m.runtime/logic-variable '?__35237)
+     ?__35239
+     (m.runtime/logic-variable '?__35239)
+     ?__35240
+     (m.runtime/logic-variable '?__35240)
+     ?__35241
+     (m.runtime/logic-variable '?__35241)]
+    ((fn*
+       C__35234
+       ([T__35236]
+         (m.runtime/knit
+           [(let
+              [G__35252
+               (m.runtime/call
+                 vec
+                 (m.runtime/call
+                   (fn* ([xs] (cons (nth xs 0) (nth xs 1))))
+                   (m.runtime/pair
+                     ?__35237
+                     (m.runtime/call
+                       (fn* ([xs] (cons (nth xs 0) (nth xs 1))))
+                       (m.runtime/pair
+                         ?__35238
+                         (m.runtime/call
+                           (fn* ([xs] (cons (nth xs 0) (nth xs 1))))
+                           (m.runtime/pair
+                             ?__35239
+                             (m.runtime/const []))))))))]
+              (map
+                (fn*
+                  ([B__35251] (m.runtime/run-gen G__35252 B__35251)))
+                (let
+                  [S__35235 {:max-length 32}]
+                  (if (vector? T__35236)
+                    (let
+                      [result__26084__auto__
+                       (m.runtime/-split-at T__35236 3)]
+                      (if (identical?
+                            result__26084__auto__
+                            m.runtime/FAIL)
+                        result__26084__auto__
+                        (let
+                          [G__35242 result__26084__auto__]
+                          (let
+                            [G__35243
+                             (nth G__35242 0)
+                             G__35244
+                             (nth G__35242 1)]
+                            (let
+                              [G__35245 (nth G__35243 0)]
+                              (let
+                                [G__35246 (nth G__35243 1)]
+                                (let
+                                  [G__35247 (nth G__35243 2)]
+                                  (if
+                                    (seq G__35244)
+                                    m.runtime/FAIL
+                                    (let
+                                      [result__26084__auto__
+                                       (m.runtime/bind-variable
+                                         S__35235
+                                         ?__35237
+                                         G__35245)]
+                                      (if
+                                        (identical?
+                                          result__26084__auto__
+                                          m.runtime/FAIL)
+                                        result__26084__auto__
+                                        (let
+                                          [S__35235
+                                           result__26084__auto__]
+                                          (let
+                                            [result__26084__auto__
+                                             (m.runtime/bind-variable
+                                               S__35235
+                                               ?__35238
+                                               G__35246)]
+                                            (if
+                                              (identical?
+                                                result__26084__auto__
+                                                m.runtime/FAIL)
+                                              result__26084__auto__
+                                              (let
+                                                [S__35235
+                                                 result__26084__auto__]
+                                                (let
+                                                  [result__26084__auto__
+                                                   (m.runtime/bind-variable
+                                                     S__35235
+                                                     ?__35239
+                                                     G__35247)]
+                                                  (if
+                                                    (identical?
+                                                      result__26084__auto__
+                                                      m.runtime/FAIL)
+                                                    result__26084__auto__
+                                                    (let
+                                                      [S__35235
+                                                       result__26084__auto__]
+                                                      (list
+                                                        S__35235))))))))))))))))))
+                    m.runtime/FAIL))))
+            (let
+              [G__35261
+               (m.runtime/call
+                 vec
+                 (m.runtime/call
+                   (fn* ([xs] (cons (nth xs 0) (nth xs 1))))
+                   (m.runtime/pair
+                     ?__35240
+                     (m.runtime/call
+                       (fn* ([xs] (cons (nth xs 0) (nth xs 1))))
+                       (m.runtime/pair
+                         ?__35241
+                         (m.runtime/const []))))))]
+              (map
+                (fn*
+                  ([B__35260] (m.runtime/run-gen G__35261 B__35260)))
+                (let
+                  [S__35235 {:max-length 32}]
+                  (if (vector? T__35236)
+                    (let
+                      [result__26084__auto__
+                       (m.runtime/-split-at T__35236 2)]
+                      (if (identical?
+                            result__26084__auto__
+                            m.runtime/FAIL)
+                        result__26084__auto__
+                        (let
+                          [G__35253 result__26084__auto__]
+                          (let
+                            [G__35254
+                             (nth G__35253 0)
+                             G__35255
+                             (nth G__35253 1)]
+                            (let
+                              [G__35256 (nth G__35254 0)]
+                              (let
+                                [G__35257 (nth G__35254 1)]
+                                (if
+                                  (seq G__35255)
+                                  m.runtime/FAIL
+                                  (let
+                                    [result__26084__auto__
+                                     (m.runtime/bind-variable
+                                       S__35235
+                                       ?__35240
+                                       G__35256)]
+                                    (if
+                                      (identical?
+                                        result__26084__auto__
+                                        m.runtime/FAIL)
+                                      result__26084__auto__
+                                      (let
+                                        [S__35235
+                                         result__26084__auto__]
+                                        (let
+                                          [result__26084__auto__
+                                           (m.runtime/bind-variable
+                                             S__35235
+                                             ?__35241
+                                             G__35257)]
+                                          (if
+                                            (identical?
+                                              result__26084__auto__
+                                              m.runtime/FAIL)
+                                            result__26084__auto__
+                                            (let
+                                              [S__35235
+                                               result__26084__auto__]
+                                              (list
+                                                S__35235))))))))))))))
+                    m.runtime/FAIL))))])))
+      [1 2 3]))
+  0
+  nil)
 
 
+
+
+  )
+
+(def new-normal (a-normal new-code))
 
 
 (def deflated-code
@@ -370,6 +560,7 @@
 
   (defn reassemble2 [control-flow-graph]
     (let [entry (find-entry control-flow-graph)]
+      
       (m/rewrite (get control-flow-graph entry)
         {:text ({:left (m/some !left) :right (m/some !right)} ... . (if ?sym)) 
          :edges (?true ?false)}
@@ -443,10 +634,7 @@
    "test.png" {:format :png})
   nil)
 
-(dot-jvm/show!
- (dot/dot (dot/digraph) 
-          [
-           [:a :b :c]]))
+
 
 (time
  (dotimes [n 10000]
@@ -461,26 +649,26 @@
      [?x ?y])))
 
 
-(let*
+(let
   [ret__14626__auto__
-   (let*
+   (let
      [TARGET__118096 [1 [2 1]]]
      (if (= (count TARGET__118096) 2)
-       (let*
+       (let
          [TARGET__118096_nth_0__
           (TARGET__118096 0)
           TARGET__118096_nth_1__
           (TARGET__118096 1)]
-         (let*
+         (let
            [?x TARGET__118096_nth_0__]
            (if (vector? TARGET__118096_nth_1__)
              (if (= (count TARGET__118096_nth_1__) 2)
-               (let*
+               (let
                  [TARGET__118096_nth_1___nth_0__
                   (nth TARGET__118096_nth_1__ 0)
                   TARGET__118096_nth_1___nth_1__
                   (nth TARGET__118096_nth_1__ 1)]
-                 (let*
+                 (let
                    [?y TARGET__118096_nth_1___nth_0__]
                    (if (= ?x TARGET__118096_nth_1___nth_1__)
                      [?x ?y]
