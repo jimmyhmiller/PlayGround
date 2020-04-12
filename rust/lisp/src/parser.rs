@@ -1,10 +1,7 @@
-#[macro_use]
-extern crate lazy_static;
 
 use std::fs::File;
 use std::io::BufReader;
 use std::io::Read;
-use std::ops;
 use std::process::abort;
 use std::time::Instant;
 
@@ -26,17 +23,17 @@ struct Tokenizer<'a> {
     temp: Vec<u8>,
 }
 
-lazy_static! {
-    static ref ZERO: u8 = '0' as u8;
-    static ref NINE: u8 = '9' as u8;
-    static ref SPACE: u8 = ' ' as u8;
-    static ref NEW_LINE: u8 = '\n' as u8;
-    static ref COMMA: u8 = ',' as u8;
-    static ref DOUBLE_QUOTE: u8 = '"' as u8;
-    static ref OPEN_PAREN: u8 = '(' as u8;
-    static ref CLOSE_PAREN: u8 = ')' as u8;
-    static ref PERIOD: u8 = '.' as u8;
-}
+
+static ZERO: u8 = '0' as u8;
+static NINE: u8 = '9' as u8;
+static SPACE: u8 = ' ' as u8;
+static NEW_LINE: u8 = '\n' as u8;
+static COMMA: u8 = ',' as u8;
+static DOUBLE_QUOTE: u8 = '"' as u8;
+static OPEN_PAREN: u8 = '(' as u8;
+static CLOSE_PAREN: u8 = ')' as u8;
+static PERIOD: u8 = '.' as u8;
+
 
 impl<'a> Tokenizer<'a> {
     fn new(input: &str) -> Tokenizer {
@@ -59,9 +56,9 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn is_space(&self) -> bool {
-        self.current_byte() == *SPACE
-            || self.current_byte() == *COMMA
-            || self.current_byte() == *NEW_LINE
+        self.current_byte() == SPACE
+            || self.current_byte() == COMMA
+            || self.current_byte() == NEW_LINE
     }
 
     fn at_end(&self) -> bool {
@@ -69,7 +66,7 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn is_quote(&self) -> bool {
-        self.current_byte() == *DOUBLE_QUOTE
+        self.current_byte() == DOUBLE_QUOTE
     }
 
     fn parse_string(&mut self) -> Token<'a> {
@@ -83,11 +80,11 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn is_open_paren(&self) -> bool {
-        self.current_byte() == *OPEN_PAREN
+        self.current_byte() == OPEN_PAREN
     }
 
     fn is_close_paren(&self) -> bool {
-        self.current_byte() == *CLOSE_PAREN
+        self.current_byte() == CLOSE_PAREN
     }
 
     fn consume_spaces(&mut self) -> () {
@@ -97,15 +94,15 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn is_valid_number_char(&mut self) -> bool {
-        self.current_byte() >= *ZERO && self.current_byte() <= *NINE
+        self.current_byte() >= ZERO && self.current_byte() <= NINE
     }
 
     fn parse_number(&mut self) -> Token<'a> {
         let mut is_float = false;
         let start = self.position;
-        while self.is_valid_number_char() || self.current_byte() == *PERIOD {
+        while self.is_valid_number_char() || self.current_byte() == PERIOD {
             // Need to handle making sure there is only one "."
-            if self.current_byte() == *PERIOD {
+            if self.current_byte() == PERIOD {
                 is_float = true;
             }
             self.consume();
@@ -171,6 +168,7 @@ fn read(tokens: Vec<Token>) -> Expr {
     // Need to probably refer to slices of things
     // Like I ended up doing above. But not 100% sure how to do that
     // given the SExpr structure
+    // Maybe I should do linked list of pointers?
     let mut exprs_stack = Vec::with_capacity(tokens.len()); // arbitrary
     let mut current = Vec::with_capacity(10); // arbitrary
 
@@ -208,6 +206,7 @@ fn s_expr_len(x: Expr) -> usize {
 
 #[allow(dead_code)]
 fn parse_file(filename: String) -> () {
+    // I need to get a standard file for this.
     let file = File::open(filename).unwrap();
     let mut expr = String::new();
     let mut buf_reader = BufReader::new(file);

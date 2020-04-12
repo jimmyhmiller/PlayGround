@@ -405,7 +405,7 @@ fn main() {
     // let mut tokenizer = Tokenizer::new("fn fib(n) { 0 => 0; 1 => 1; n => fib(n - 1) + fib(n - 2)}");
     // let mut tokenizer = Tokenizer::new("2 + 3 + 4");
     let mut tokenizer = Tokenizer::new("
-    val x = 2 + 3
+    val x = 2 + 3 * 4
     val y = x + 3
     val z = y + 2
     fn do-stuff(n) {
