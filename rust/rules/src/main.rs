@@ -1,4 +1,5 @@
-
+use std::collections::VecDeque;
+use std::collections::HashMap;
 
 // Need to think about term vs expr?
 // I've come up with phases and ways to match on
@@ -8,14 +9,14 @@
 
 // Should I have a left vs right side pattern?
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 enum Term {
     Literal(String),
     Call(Box<Term>, Vec<Term>),
     Block(Vec<Term>)
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 enum Pattern {
     Literal(String),
     LogicVariable(String),
@@ -23,14 +24,16 @@ enum Pattern {
     Block(Vec<Pattern>)
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct Rule<'a> {
     name: String,
     clauses: Vec<&'a Pattern>,
     // Need scope things here
 }
 
-#[derive(Debug)]
+// In some ways I like phase being one thing here.
+// But maybe the structs should be separate? Really not sure.
+#[derive(Debug, PartialEq, Eq, Hash)]
 enum Phase<'a> {
     Submit {term: &'a Term},
     SelectExpr {term: &'a Term, expr: &'a Term},
@@ -66,8 +69,9 @@ fn matches_all(patterns: & Vec<Pattern>, terms: & Vec<Term>) -> bool {
     true
 }
 
-// Maybe build environment when matching?
-fn matches(clause: & Pattern, term: & Term, ) -> bool {
+// Need some notion of an environment here to have correct semantics
+// for logic variables.
+fn matches(clause: & Pattern, term: & Term) -> bool {
 
     match (clause, term) {
         (Pattern::LogicVariable(_), _) => true,
@@ -98,6 +102,52 @@ fn select_rules<'a>(phase : Phase<'a>, rules: std::vec::Vec<&'a Rule<'a>>) -> Ve
     }
 }
 
+fn make_env<'a>(clause: &'a Pattern, term: &'a Term) -> Option<HashMap<&'a Pattern, &'a Term>> {
+    let mut env : HashMap<&'a Pattern, &'a Term> = HashMap::new();
+    let mut queue : VecDeque<(&'a Pattern, &'a Term)> = VecDeque::new();
+    queue.push_back((clause, term));
+    while !queue.is_empty() {
+        if let Some((clause, term)) = queue.pop_front() {
+            match (clause, term) {
+                // Other places I'm assuming things match.
+                // Maybe I shouldn't?
+                // My match code is broken right now for logic variables
+                (Pattern::LogicVariable(s), x) => {
+                    let val = env.get(&Pattern::LogicVariable(s.to_string()));
+                    if let Some(val) = val {
+                        if *val != x {
+                            return Option::None;
+                        }
+                    }
+                    env.insert(clause, x);
+                }
+                // Have to revisit with repeats
+                (Pattern::Call(f1, args1), Term::Call(f2, args2)) => {
+                    if args1.len() != args2.len() {
+                        return Option::None;
+                    }
+                    queue.push_back((f1, f2));
+                    for i in 0..args1.len() {
+                        queue.push_back((&args1[i], &args2[i]))
+                    }
+                }
+                (Pattern::Block(body1), Term::Block(body2)) => {
+                    // Have to revisit with repeats
+                    if body1.len() != body2.len() {
+                        return Option::None;
+                    }
+                    for i in 0..body1.len() {
+                        queue.push_back((&body1[i], &body2[i]))
+                    }
+                }
+                _ => {}
+            };
+        }
+    };
+    Option::Some(env)
+}
+
+// Need subst next
 
 
 fn main() {
@@ -109,6 +159,9 @@ fn main() {
     let submit = &Phase::Submit{term: term};
     let selected = select_term(submit);
     let rules = select_rules(selected, rules);
-
-    println!("{:?}", rules);
+    if let Phase::SelectRule{expr, clause, term: _, rule: _} = rules[0] {
+        let env = make_env(clause, expr);
+        println!("{:?}", rules);
+        println!("{:?}", env);
+    }
 }
