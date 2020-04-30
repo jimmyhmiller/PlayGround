@@ -52,8 +52,87 @@ impl Expr {
         }
     }
 
+    fn get_num(self) -> Option<i64> {
+        if let Expr::Num(i) = self {
+            Some(i)
+        } else {
+            None
+        }
+    }
 }
 
+
+fn builtins() -> HashMap<&'static str, Box<dyn Fn(Expr) -> InterpreterResult>> {
+
+    // Need to deal with rules for this.
+
+    // Extract this into a pattern?
+    let mut builtin = HashMap::new();
+    let subtract : Box<dyn Fn(Expr) -> InterpreterResult> = box |term: Expr| -> InterpreterResult {
+        let term_clone = term.clone();
+        match term {
+            Expr::Call(box Expr::Symbol(f), args) if f == "-" => {
+                let mut total = 0;
+                for arg in args {
+                    if let Some(num) = arg.get_num() {
+                        total -= num;
+                    } else {
+                        return InterpreterResult::no_change(term_clone)
+                    }
+                }
+                let result = Expr::Num(total);
+                let result_clone = result.clone();
+                InterpreterResult::rewrote(result, term_clone.clone(), result_clone, SUB_RULE)
+            }
+            _ => InterpreterResult::no_change(term_clone)
+        }
+    };
+
+    let plus : Box<dyn Fn(Expr) -> InterpreterResult> = box |term: Expr| -> InterpreterResult {
+        let term_clone = term.clone();
+        match term {
+            Expr::Call(box Expr::Symbol(f), args) if f == "+" => {
+                let mut total = 0;
+                for arg in args {
+                    if let Some(num) = arg.get_num() {
+                        total += num;
+                    } else {
+                        return InterpreterResult::no_change(term_clone)
+                    }
+                }
+                let result = Expr::Num(total);
+                let result_clone = result.clone();
+                InterpreterResult::rewrote(result, term_clone.clone(), result_clone, SUB_RULE)
+            }
+            _ => InterpreterResult::no_change(term_clone)
+        }
+    };
+
+    let multiply : Box<dyn Fn(Expr) -> InterpreterResult> = box |term: Expr| -> InterpreterResult {
+        let term_clone = term.clone();
+        match term {
+            Expr::Call(box Expr::Symbol(f), args) if f == "*" => {
+                let mut total = 0;
+                for arg in args {
+                    if let Some(num) = arg.get_num() {
+                        total *= num;
+                    } else {
+                        return InterpreterResult::no_change(term_clone)
+                    }
+                }
+                let result = Expr::Num(total);
+                let result_clone = result.clone();
+                InterpreterResult::rewrote(result, term_clone.clone(), result_clone, SUB_RULE)
+            }
+            _ => InterpreterResult::no_change(term_clone)
+        }
+    };
+
+    builtin.insert("builtin/-", subtract);
+    builtin.insert("builtin/+", plus);
+    builtin.insert("builtin/*", multiply);
+    builtin
+}
 
 
 impl Into<Expr> for &i64 {
@@ -152,33 +231,46 @@ impl Rule {
             Some(env)
         }
     }
+    fn pretty_print(& self) -> String {
+        format!("{} => {}", self.left.pretty_print(), self.right.pretty_print())
+    }
 }
 
 #[derive(Debug, Clone)]
 enum InterpreterResult {
-    NoChange(Expr),
-    Rewrote(Expr),
+    NoChange{
+        expr: Expr,
+        sub_expr: Expr,
+    },
+    Rewrote{
+        new_expr: Expr,
+        sub_expr: Expr,
+        new_sub_expr: Expr,
+        rule: Rule,
+    },
 }
 
 impl InterpreterResult {
     fn expr(self) -> Expr {
         match self {
-            InterpreterResult::NoChange(e) => e,
-            InterpreterResult::Rewrote(e) => e,
-        }
-    }
-    fn rewrote(& self) -> bool {
-        match self {
-            InterpreterResult::Rewrote(_) => true,
-            InterpreterResult::NoChange(_) => false,
+            InterpreterResult::NoChange{expr, sub_expr: _} => expr,
+            InterpreterResult::Rewrote{new_expr, sub_expr: _, new_sub_expr: _, rule: _} => new_expr,
         }
     }
     fn wrap(& self, expr: Expr) -> InterpreterResult {
-        if self.rewrote() {
-            InterpreterResult::Rewrote(expr)
-        } else {
-            InterpreterResult::NoChange(expr)
+        match self {
+            InterpreterResult::Rewrote{new_expr: _, sub_expr, new_sub_expr, rule} =>
+                InterpreterResult::rewrote(expr, sub_expr.clone(), new_sub_expr.clone(), rule.clone()),
+            InterpreterResult::NoChange{expr: _, sub_expr} => InterpreterResult::NoChange{expr, sub_expr: sub_expr.clone()}
         }
+    }
+    fn rewrote(new_expr: Expr, sub_expr: Expr, new_sub_expr: Expr, rule: Rule) -> InterpreterResult {
+        InterpreterResult::Rewrote{new_expr, sub_expr, new_sub_expr, rule}
+    }
+
+    fn no_change(expr: Expr) -> InterpreterResult {
+        let expr_clone = expr.clone();
+        InterpreterResult::NoChange{expr, sub_expr: expr_clone}
     }
 }
 
@@ -187,6 +279,20 @@ impl InterpreterResult {
 struct Interpreter {
     rules: Vec<Rule>
 }
+
+
+// Placeholders till I figure out what to do
+// with builtins.
+// Probably want to do these just as standard calls.
+// But they are prefixed named somehow?
+const SUB_RULE : Rule = Rule {
+    left: Expr::Undefined,
+    right: Expr::Undefined,
+};
+const MULT_RULE : Rule = Rule {
+    left: Expr::Undefined,
+    right: Expr::Undefined,
+};
 
 
 
@@ -231,14 +337,20 @@ impl Interpreter {
         // Need to handle multiple matches in different scopes
         while result.is_none() && i < self.rules.len() {
             if let Some(env) = &self.rules[i].build_env(e) {
-                result = Some(self.match_rule(&self.rules[i].right, env));
+                result = Some((&self.rules[i], self.match_rule(&self.rules[i].right, env)));
             }
             i += 1;
         }
-        if let Some(expr) = result {
-            InterpreterResult::Rewrote(expr)
+        if let Some((rule, expr)) = result {
+            let expr_clone = expr.clone();
+            InterpreterResult::Rewrote{
+                sub_expr: e.clone(),
+                new_expr: expr,
+                new_sub_expr: expr_clone,
+                rule: rule.clone(),
+            }
         } else {
-            InterpreterResult::NoChange(Expr::Exhausted(box e.clone()))
+            InterpreterResult::no_change(Expr::Exhausted(box e.clone()))
         }
     }
 
@@ -248,17 +360,21 @@ impl Interpreter {
     fn step(&mut self, e : & Expr) -> InterpreterResult {
         let e = e.clone();
         match e {
-            Expr::Undefined => InterpreterResult::NoChange(e),
+            Expr::Undefined => InterpreterResult::no_change(e),
             Expr::Num(_) => self.match_all(&e.de_exhaust()),
-            Expr::Subtract(box Expr::Num(x), box Expr::Num(y)) => InterpreterResult::Rewrote(Expr::Num(x - y)),
-            Expr::Subtract(box x, y @ box Expr::Num(_)) => {
-                let step = self.step(&x);
-                let expr = Expr::Subtract(box step.clone().expr(), y);
-                step.wrap(expr)
+            Expr::Subtract(box Expr::Exhausted(box Expr::Num(x)), box Expr::Exhausted(box Expr::Num(y))) => {
+                let result = Expr::Num(x - y);
+                let result_clone = result.clone();
+                InterpreterResult::rewrote(result, e.clone(), result_clone, SUB_RULE)
             },
-            Expr::Subtract(x @ box Expr::Num(_), box y) => {
+            Expr::Subtract(x @ box Expr::Exhausted(_), box y) => {
                 let step = self.step(&y);
                 let expr = Expr::Subtract(x, box step.clone().expr());
+                step.wrap(expr)
+            },
+            Expr::Subtract(box x, y @ box Expr::Exhausted(_)) => {
+                let step = self.step(&x);
+                let expr = Expr::Subtract(box step.clone().expr(), y);
                 step.wrap(expr)
             },
             Expr::Subtract(box x, y) => {
@@ -266,15 +382,19 @@ impl Interpreter {
                 let expr = Expr::Subtract(box step.clone().expr(), y);
                 step.wrap(expr)
             },
-            Expr::Multiply(box Expr::Num(x), box Expr::Num(y)) => InterpreterResult::Rewrote(Expr::Num(x * y)),
-            Expr::Multiply(box x, y @ box Expr::Num(_)) => {
-                let step = self.step(&x);
-                let expr = Expr::Multiply(box step.clone().expr(), y);
-                step.wrap(expr)
+            Expr::Multiply(box Expr::Exhausted(box Expr::Num(x)), box Expr::Exhausted(box Expr::Num(y))) => {
+                let result = Expr::Num(x * y);
+                let result_clone = result.clone();
+                InterpreterResult::rewrote(result, e.clone(), result_clone, MULT_RULE)
             },
-            Expr::Multiply(x @ box Expr::Num(_), box y) => {
+            Expr::Multiply(x @ box Expr::Exhausted(_), box y) => {
                 let step = self.step(&y);
                 let expr = Expr::Multiply(x, box step.clone().expr());
+                step.wrap(expr)
+            },
+            Expr::Multiply(box x, y @ box Expr::Exhausted(_)) => {
+                let step = self.step(&x);
+                let expr = Expr::Multiply(box step.clone().expr(), y);
                 step.wrap(expr)
             },
             Expr::Multiply(box x, y) => {
@@ -284,7 +404,7 @@ impl Interpreter {
             },
             Expr::Symbol(_) => self.match_all(&e.de_exhaust()),
             Expr::LogicVariable(_) => self.match_all(&e.de_exhaust()),
-            Expr::Exhausted(_) => InterpreterResult::NoChange(e),
+            Expr::Exhausted(_) => InterpreterResult::no_change(e),
             Expr::Call(f @ box Expr::Exhausted(_), mut args) => {
                 if let Some(index) = args.iter().position(|e| {
                     match e {
@@ -308,7 +428,10 @@ impl Interpreter {
     }
 }
 
+
+
 fn main() {
+
     let mut expr : Expr = ("fact", 20).into();
     let rule1 = Rule {
         left: ("fact", 0).into(),
@@ -331,11 +454,12 @@ fn main() {
         let result = interpreter.step(&expr);
         match result.clone() {
             // Gives the idea of phase, but we need to know what subexpression stepped.
-            InterpreterResult::Rewrote(expr2) => {
-                println!("Rewrote {} => {}", expr.pretty_print(), expr2.pretty_print())
-            }
-            InterpreterResult::NoChange(_expr2) => {
-                // println!("NoChange {} => {}", expr.pretty_print(), expr2.pretty_print())
+            InterpreterResult::Rewrote{new_expr, sub_expr, new_sub_expr, rule} => {
+                println!("{} => {}", sub_expr.pretty_print(), new_sub_expr.pretty_print());
+                println!("Rewrote {} => {} via {}", expr.pretty_print(), new_expr.pretty_print(), rule.pretty_print())
+            },
+            InterpreterResult::NoChange{expr: _, sub_expr} => {
+                println!("NoChange {}", sub_expr.pretty_print())
             }
         }
         expr = result.expr();
@@ -343,6 +467,7 @@ fn main() {
     }
     println!("{}", expr.pretty_print());
 }
+
 
 
 // Need to make exhausted be a property
