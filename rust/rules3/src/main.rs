@@ -13,8 +13,6 @@ enum Expr {
     LogicVariable(String),
     Exhausted(Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
-    Subtract(Box<Expr>, Box<Expr>),
-    Multiply(Box<Expr>, Box<Expr>),
 }
 
 impl Expr {
@@ -39,8 +37,6 @@ impl Expr {
         match self {
             Expr::Num(n) => format!("{:?}", n),
             Expr::Symbol(n) => format!("{}", n),
-            Expr::Subtract(x, y) => format!("(- {} {})", x.pretty_print(), y.pretty_print()),
-            Expr::Multiply(x, y) => format!("(* {} {})", x.pretty_print(), y.pretty_print()),
             Expr::LogicVariable(n) => format!("{}", n),
             Expr::Undefined => "Undefined".to_string(),
             Expr::Exhausted(box e) => e.pretty_print(),
@@ -62,77 +58,46 @@ impl Expr {
 }
 
 
-fn builtins() -> HashMap<&'static str, Box<dyn Fn(Expr) -> InterpreterResult>> {
-
-    // Need to deal with rules for this.
-
-    // Extract this into a pattern?
-    let mut builtin = HashMap::new();
-    let subtract : Box<dyn Fn(Expr) -> InterpreterResult> = box |term: Expr| -> InterpreterResult {
-        let term_clone = term.clone();
-        match term {
-            Expr::Call(box Expr::Symbol(f), args) if f == "-" => {
-                let mut total = 0;
-                for arg in args {
-                    if let Some(num) = arg.get_num() {
-                        total -= num;
-                    } else {
-                        return InterpreterResult::no_change(term_clone)
-                    }
-                }
-                let result = Expr::Num(total);
+fn builtins(expr: Expr) -> InterpreterResult {
+    let expr_clone = expr.clone();
+    match expr {
+        Expr::Call(box Expr::Symbol(f), args) if f == "builtin/-" => {
+            let a = args[0].clone().get_num();
+            let b = args[1].clone().get_num();
+            if let (Some(x), Some(y)) = (a,b) {
+                let result = Expr::Num(x - y);
                 let result_clone = result.clone();
-                InterpreterResult::rewrote(result, term_clone.clone(), result_clone, SUB_RULE)
+                InterpreterResult::rewrote(result, expr_clone.clone(), result_clone, SUB_RULE)
+            } else {
+                InterpreterResult::no_change(expr_clone)
             }
-            _ => InterpreterResult::no_change(term_clone)
         }
-    };
-
-    let plus : Box<dyn Fn(Expr) -> InterpreterResult> = box |term: Expr| -> InterpreterResult {
-        let term_clone = term.clone();
-        match term {
-            Expr::Call(box Expr::Symbol(f), args) if f == "+" => {
-                let mut total = 0;
-                for arg in args {
-                    if let Some(num) = arg.get_num() {
-                        total += num;
-                    } else {
-                        return InterpreterResult::no_change(term_clone)
-                    }
-                }
-                let result = Expr::Num(total);
+        Expr::Call(box Expr::Symbol(f), args) if f == "builtin/+" => {
+            let a = args[0].clone().get_num();
+            let b = args[1].clone().get_num();
+            if let (Some(x), Some(y)) = (a,b) {
+                let result = Expr::Num(x + y);
                 let result_clone = result.clone();
-                InterpreterResult::rewrote(result, term_clone.clone(), result_clone, SUB_RULE)
+                InterpreterResult::rewrote(result, expr_clone.clone(), result_clone, SUB_RULE)
+            } else {
+                InterpreterResult::no_change(expr_clone)
             }
-            _ => InterpreterResult::no_change(term_clone)
         }
-    };
-
-    let multiply : Box<dyn Fn(Expr) -> InterpreterResult> = box |term: Expr| -> InterpreterResult {
-        let term_clone = term.clone();
-        match term {
-            Expr::Call(box Expr::Symbol(f), args) if f == "*" => {
-                let mut total = 0;
-                for arg in args {
-                    if let Some(num) = arg.get_num() {
-                        total *= num;
-                    } else {
-                        return InterpreterResult::no_change(term_clone)
-                    }
-                }
-                let result = Expr::Num(total);
+        Expr::Call(box Expr::Symbol(f), args) if f == "builtin/*" => {
+            let a = args[0].clone().get_num();
+            let b = args[1].clone().get_num();
+            if let (Some(x), Some(y)) = (a,b) {
+                let result = Expr::Num(x * y);
                 let result_clone = result.clone();
-                InterpreterResult::rewrote(result, term_clone.clone(), result_clone, SUB_RULE)
+                InterpreterResult::rewrote(result, expr_clone.clone(), result_clone, MULT_RULE)
+            } else {
+                InterpreterResult::no_change(expr_clone)
             }
-            _ => InterpreterResult::no_change(term_clone)
         }
-    };
-
-    builtin.insert("builtin/-", subtract);
-    builtin.insert("builtin/+", plus);
-    builtin.insert("builtin/*", multiply);
-    builtin
+        _ => InterpreterResult::no_change(expr_clone)
+    }
 }
+
 
 
 impl Into<Expr> for &i64 {
@@ -173,14 +138,7 @@ impl<T : Into<Expr>, S : Into<Expr>> Into<Expr> for (T, S) {
 }
 impl<T : Into<Expr>, S : Into<Expr>, R : Into<Expr>> Into<Expr> for (T, S, R) {
     fn into(self) -> Expr {
-        let first = self.0.into();
-        if first == Expr::Symbol("-".to_string()) {
-            Expr::Subtract(box self.1.into(), box self.2.into())
-        } else if first == Expr::Symbol("*".to_string()) {
-            Expr::Multiply(box self.1.into(), box self.2.into())
-        } else {
-            Expr::Call(box first, vec![self.1.into(), self.2.into()])
-        }
+        Expr::Call(box self.0.into(), vec![self.1.into(), self.2.into()])
     }
 }
 
@@ -209,7 +167,7 @@ impl Rule {
                 (Expr::Symbol(ref s1), Expr::Symbol(ref s2)) if s1 == s2 => {},
                 (Expr::Num(ref n1), Expr::Num(ref n2)) if n1 == n2 => {},
                 (Expr::Call(box f1, args1), Expr::Call(box f2, args2)) => {
-                    if args2.len() != args2.len() {
+                    if args1.len() != args2.len() {
                         failed = true;
                     } else {
                         let mut args1_clone = args1.clone();
@@ -308,8 +266,6 @@ impl Interpreter {
         match rhs {
             Expr::Num(_) => rhs.clone(),
             Expr::Symbol(_) => rhs.clone(),
-            Expr::Subtract(x, y) => Expr::Subtract(box self.match_rule(x, env), box self.match_rule(y, env)),
-            Expr::Multiply(x, y) => Expr::Multiply(box self.match_rule(x, env), box self.match_rule(y, env)),
             Expr::LogicVariable(s) => {
                 if let Some(x) = env.get(s) {
                     let y = x.clone();
@@ -362,46 +318,6 @@ impl Interpreter {
         match e {
             Expr::Undefined => InterpreterResult::no_change(e),
             Expr::Num(_) => self.match_all(&e.de_exhaust()),
-            Expr::Subtract(box Expr::Exhausted(box Expr::Num(x)), box Expr::Exhausted(box Expr::Num(y))) => {
-                let result = Expr::Num(x - y);
-                let result_clone = result.clone();
-                InterpreterResult::rewrote(result, e.clone(), result_clone, SUB_RULE)
-            },
-            Expr::Subtract(x @ box Expr::Exhausted(_), box y) => {
-                let step = self.step(&y);
-                let expr = Expr::Subtract(x, box step.clone().expr());
-                step.wrap(expr)
-            },
-            Expr::Subtract(box x, y @ box Expr::Exhausted(_)) => {
-                let step = self.step(&x);
-                let expr = Expr::Subtract(box step.clone().expr(), y);
-                step.wrap(expr)
-            },
-            Expr::Subtract(box x, y) => {
-                let step = self.step(&x);
-                let expr = Expr::Subtract(box step.clone().expr(), y);
-                step.wrap(expr)
-            },
-            Expr::Multiply(box Expr::Exhausted(box Expr::Num(x)), box Expr::Exhausted(box Expr::Num(y))) => {
-                let result = Expr::Num(x * y);
-                let result_clone = result.clone();
-                InterpreterResult::rewrote(result, e.clone(), result_clone, MULT_RULE)
-            },
-            Expr::Multiply(x @ box Expr::Exhausted(_), box y) => {
-                let step = self.step(&y);
-                let expr = Expr::Multiply(x, box step.clone().expr());
-                step.wrap(expr)
-            },
-            Expr::Multiply(box x, y @ box Expr::Exhausted(_)) => {
-                let step = self.step(&x);
-                let expr = Expr::Multiply(box step.clone().expr(), y);
-                step.wrap(expr)
-            },
-            Expr::Multiply(box x, y) => {
-                let step = self.step(&x);
-                let expr = Expr::Multiply(box step.clone().expr(), y);
-                step.wrap(expr)
-            },
             Expr::Symbol(_) => self.match_all(&e.de_exhaust()),
             Expr::LogicVariable(_) => self.match_all(&e.de_exhaust()),
             Expr::Exhausted(_) => InterpreterResult::no_change(e),
@@ -417,8 +333,18 @@ impl Interpreter {
                     args[index] = step.clone().expr();
                     step.wrap(Expr::Call(f, args))
                 } else {
-                    self.match_all(&Expr::Call(f, args).de_exhaust())
+                    let f_clone = f.clone();
+                    if let box Expr::Exhausted(box Expr::Symbol(fn_name)) = f_clone {
+                        if fn_name.starts_with("builtin/") {
+                            builtins(Expr::Call(f, args).de_exhaust())
+                        } else {
+                            self.match_all(&Expr::Call(f, args).de_exhaust())
+                        }
+                    }  else {
+                        self.match_all(&Expr::Call(f, args).de_exhaust())
+                    }
                 }
+
             }
             Expr::Call(box f, args) => {
                 let step = self.step(&f);
@@ -432,7 +358,18 @@ impl Interpreter {
 
 fn main() {
 
-    let mut expr : Expr = ("fact", 20).into();
+    let rule_sub = Rule {
+        left: ("-", "?a", "?b").into(),
+        right: ("builtin/-", "?a", "?b").into()
+    };
+    let rule_plus = Rule {
+        left: ("+", "?a", "?b").into(),
+        right: ("builtin/+", "?a", "?b").into()
+    };
+    let rule_mult = Rule {
+        left: ("*", "?a", "?b").into(),
+        right: ("builtin/*", "?a", "?b").into()
+    };
     let rule1 = Rule {
         left: ("fact", 0).into(),
         right: 1.into()
@@ -442,12 +379,12 @@ fn main() {
         right: ("*", "?n", ("fact", ("-", "?n", 1))).into()
     };
 
-
-    let mut interpreter = Interpreter::new(vec![rule1, rule2]);
+    let mut expr : Expr = ("fact", 20).into();
+    let mut interpreter = Interpreter::new(vec![rule_sub, rule_mult, rule_plus, rule1, rule2]);
     println!("{:?}", expr);
     // let mut fuel = 0;
     while !expr.is_exhausted() {
-        // if fuel > 1000 {
+        // if fuel > 100 {
         //     break;
         // }
         // fuel += 1;
@@ -474,3 +411,4 @@ fn main() {
 // Need to make return from step be an enum
 // Need to handle multiple rules matching in different contexts
 // Need to add matching on phases
+// Need to think about nil/unit
