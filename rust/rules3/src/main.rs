@@ -13,6 +13,7 @@ enum Expr {
     LogicVariable(String),
     Exhausted(Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
+    Map(Vec<(Expr, Expr)>)
 }
 
 impl Expr {
@@ -30,6 +31,7 @@ impl Expr {
         match self {
             Expr::Exhausted(x) => x.de_exhaust(),
             Expr::Call(box f, args) => Expr::Call(box f.de_exhaust(), args.into_iter().map(|x| x.de_exhaust()).collect()),
+            Expr::Map(args) => Expr::Map(args.into_iter().map(|(k, v)| (k.de_exhaust(), v.de_exhaust())).collect()),
             e => e
         }
     }
@@ -44,6 +46,19 @@ impl Expr {
                 let p_f = f.pretty_print();
                 let p_args : Vec<String> = args.into_iter().map(|x| x.pretty_print()).collect();
                 format!("({} {})", p_f, p_args.join(" "))
+            }
+            Expr::Map(entries) => {
+                let mut entries = entries.clone();
+                let mut result = "{".to_string();
+                if entries.is_empty() {
+                    return "{}".to_string();
+                }
+                let (last_key, last_value) = entries.pop().unwrap();
+                for (key, value) in entries {
+                    result = format!("{}{}: {}, ", result, key.pretty_print(), value.pretty_print());
+                }
+                result = format!("{}{}: {}}}", result, last_key.pretty_print(), last_value.pretty_print());
+                result
             }
         }
     }
@@ -136,12 +151,22 @@ impl<T : Into<Expr>, S : Into<Expr>> Into<Expr> for (T, S) {
         Expr::Call(box self.0.into(), vec![self.1.into()])
     }
 }
+
 impl<T : Into<Expr>, S : Into<Expr>, R : Into<Expr>> Into<Expr> for (T, S, R) {
     fn into(self) -> Expr {
         Expr::Call(box self.0.into(), vec![self.1.into(), self.2.into()])
     }
 }
 
+impl<T : Into<Expr>, S : Into<Expr>> Into<Expr> for Vec<(T, S)> {
+    fn into(self) -> Expr {
+        let mut results = Vec::with_capacity(self.len());
+        for (key, value) in self {
+            results.push((key.into(), value.into()));
+        }
+        Expr::Map(results)
+    }
+}
 
 
 #[derive(Debug, Clone)]
@@ -178,6 +203,21 @@ impl Rule {
                         }
                     }
                 }
+                // This is depending on key order which is wrong. Need to fix.
+                (Expr::Map(args1), Expr::Map(args2)) => {
+                    if args1.len() != args2.len() {
+                        failed = true;
+                    } else {
+                        let mut args1_clone = args1.clone();
+                        let mut args2_clone = args2.clone();
+                        for _ in 0..args1.len() {
+                            let (k1, v1) = args1_clone.pop().unwrap();
+                            let (k2, v2) = args2_clone.pop().unwrap();
+                            queue.push_front((k1, k2));
+                            queue.push_front((v1, v2));
+                        }
+                    }
+                }
                 _ => {
                     failed = true;
                 }
@@ -211,15 +251,15 @@ enum InterpreterResult {
 impl InterpreterResult {
     fn expr(self) -> Expr {
         match self {
-            InterpreterResult::NoChange{expr, sub_expr: _} => expr,
-            InterpreterResult::Rewrote{new_expr, sub_expr: _, new_sub_expr: _, rule: _} => new_expr,
+            InterpreterResult::NoChange{expr, ..} => expr,
+            InterpreterResult::Rewrote{new_expr, ..} => new_expr,
         }
     }
     fn wrap(& self, expr: Expr) -> InterpreterResult {
         match self {
-            InterpreterResult::Rewrote{new_expr: _, sub_expr, new_sub_expr, rule} =>
+            InterpreterResult::Rewrote{sub_expr, new_sub_expr, rule, ..} =>
                 InterpreterResult::rewrote(expr, sub_expr.clone(), new_sub_expr.clone(), rule.clone()),
-            InterpreterResult::NoChange{expr: _, sub_expr} => InterpreterResult::NoChange{expr, sub_expr: sub_expr.clone()}
+            InterpreterResult::NoChange{sub_expr, ..} => InterpreterResult::NoChange{expr, sub_expr: sub_expr.clone()}
         }
     }
     fn rewrote(new_expr: Expr, sub_expr: Expr, new_sub_expr: Expr, rule: Rule) -> InterpreterResult {
@@ -262,7 +302,6 @@ impl Interpreter {
     }
 
     fn match_rule(& self, rhs : & Expr, env : & HashMap<String, Expr>) -> Expr {
-
         match rhs {
             Expr::Num(_) => rhs.clone(),
             Expr::Symbol(_) => rhs.clone(),
@@ -283,6 +322,10 @@ impl Interpreter {
             Expr::Call(box f, args) => {
                 let new_args = args.into_iter().map(|x| self.match_rule(x, env)).collect();
                 Expr::Call(box self.match_rule(f, env), new_args)
+            }
+            Expr::Map(args) => {
+                let new_args = args.into_iter().map(|(x, y)| (self.match_rule(x, env), self.match_rule(y, env))).collect();
+                Expr::Map(new_args)
             }
         }
     }
@@ -350,6 +393,27 @@ impl Interpreter {
                 let step = self.step(&f);
                 step.wrap(Expr::Call(box step.clone().expr(), args))
             }
+            Expr::Map(mut args) => {
+                if let Some(index) = args.iter().position(|(k, v)| {
+                    match (k, v) {
+                        (&Expr::Exhausted(_), &Expr::Exhausted(_))  => false,
+                        _ => true,
+                    }
+                }) {
+                    let (k, v) = mem::replace(&mut args[index], (Expr::Undefined, Expr::Undefined));
+                    if let Expr::Exhausted(_) = k {
+                        let step = self.step(&v);
+                        args[index] = (k, step.clone().expr());
+                        step.wrap(Expr::Map(args))
+                    } else {
+                        let step = self.step(&k);
+                        args[index] = (step.clone().expr(), v);
+                        step.wrap(Expr::Map(args))
+                    }
+                } else {
+                    self.match_all(&Expr::Map(args).de_exhaust())
+                }
+            }
         }
     }
 }
@@ -378,16 +442,23 @@ fn main() {
         left: ("fact", "?n").into(),
         right: ("*", "?n", ("fact", ("-", "?n", 1))).into()
     };
+    let rule3 = Rule {
+        left: vec![("stuff", "?x")].into(),
+        right: vec![("thing", "?x")].into(),
+    };
 
-    let mut expr : Expr = ("fact", 20).into();
-    let mut interpreter = Interpreter::new(vec![rule_sub, rule_mult, rule_plus, rule1, rule2]);
+
+    // let mut expr : Expr = ("fact", 20).into();
+    let mut expr : Expr = vec![("stuff", "hello")].into();
+    let mut interpreter = Interpreter::new(vec![rule_sub, rule_mult, rule_plus, rule1, rule2, rule3]);
     println!("{:?}", expr);
-    // let mut fuel = 0;
+    let mut fuel = 0;
     while !expr.is_exhausted() {
-        // if fuel > 100 {
-        //     break;
-        // }
-        // fuel += 1;
+        if fuel > 100 {
+            println!("Ran out of fuel");
+            break;
+        }
+        fuel += 1;
         let result = interpreter.step(&expr);
         match result.clone() {
             // Gives the idea of phase, but we need to know what subexpression stepped.
