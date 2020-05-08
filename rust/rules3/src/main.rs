@@ -1,9 +1,13 @@
 #![feature(box_syntax, box_patterns)]
 #![allow(dead_code)]
 
+mod parser;
+
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::mem;
+
+
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,82 +539,85 @@ fn run_interpreter_loop(expr: Expr, scope: String, interpreters: & HashMap<Strin
 
 fn main() {
 
-    let main_scope = "main".to_string();
-    let rule_sub = Rule {
-        left: ("-", "?a", "?b").into(),
-        right: ("builtin/-", "?a", "?b").into(),
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let rule_plus = Rule {
-        left: ("+", "?a", "?b").into(),
-        right: ("builtin/+", "?a", "?b").into(),
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let rule_mult = Rule {
-        left: ("*", "?a", "?b").into(),
-        right: ("builtin/*", "?a", "?b").into(),
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let rule1 = Rule {
-        left: ("fact", 0).into(),
-        right: 1.into(),
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let rule2 = Rule {
-        left: ("fact", "?n").into(),
-        right: ("*", "?n", ("fact", ("-", "?n", 1))).into(),
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let rule3 = Rule {
-        left: vec![("stuff", "?x")].into(),
-        right: vec![("thing", "?x")].into(),
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let rule4 = Rule {
-        left: vec![("phase", "rewrite"), ("expr", "?x"), ("scope", "main"), ("new_expr", "?y"), ("sub_expr", "?sub"), ("new_sub_expr", "?new_sub")].into(),
-        right: ("builtin/println", ("quote", ("?sub", "=>", "?new_sub"))).into(),
-        in_scope: "main".to_string(),
-        out_scope: "io".to_string(),
-    };
-    let rule5 = Rule {
-        left: vec![("phase", "rewrite"), ("expr", "?expr"), ("scope", "main"), ("new_expr", "?new_expr"), ("sub_expr", "?sub"), ("new_sub_expr", "?new_sub")].into(),
-        right: ("builtin/println", ("quote", ("?expr", "=>", "?new_expr"))).into(),
-        in_scope: "main".to_string(),
-        out_scope: "io".to_string(),
-    };
+    println!("{:?}", parser::parse(parser::tokenize("fib(0)")));
+    // let main_scope = "main".to_string();
+    // let rule_sub = Rule {
+    //     left: ("-", "?a", "?b").into(),
+    //     right: ("builtin/-", "?a", "?b").into(),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "main".to_string(),
+    // };
+    // let rule_plus = Rule {
+    //     left: ("+", "?a", "?b").into(),
+    //     right: ("builtin/+", "?a", "?b").into(),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "main".to_string(),
+    // };
+    // let rule_mult = Rule {
+    //     left: ("*", "?a", "?b").into(),
+    //     right: ("builtin/*", "?a", "?b").into(),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "main".to_string(),
+    // };
+    // let rule1 = Rule {
+    //     left: ("fact", 0).into(),
+    //     right: 1.into(),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "main".to_string(),
+    // };
+    // let rule2 = Rule {
+    //     left: ("fact", "?n").into(),
+    //     right: ("*", "?n", ("fact", ("-", "?n", 1))).into(),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "main".to_string(),
+    // };
+    // let rule3 = Rule {
+    //     left: vec![("stuff", "?x")].into(),
+    //     right: vec![("thing", "?x")].into(),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "main".to_string(),
+    // };
+    // let rule4 = Rule {
+    //     left: vec![("phase", "rewrite"), ("expr", "?x"), ("scope", "main"), ("new_expr", "?y"), ("sub_expr", "?sub"), ("new_sub_expr", "?new_sub")].into(),
+    //     right: ("builtin/println", ("quote", ("?sub", "=>", "?new_sub"))).into(),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "io".to_string(),
+    // };
+    // let rule5 = Rule {
+    //     left: vec![("phase", "rewrite"), ("expr", "?expr"), ("scope", "main"), ("new_expr", "?new_expr"), ("sub_expr", "?sub"), ("new_sub_expr", "?new_sub")].into(),
+    //     right: ("builtin/println", ("quote", ("?expr", "=>", "?new_expr"))).into(),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "io".to_string(),
+    // };
 
 
 
     
-    let mut expr : Expr = ("fact", 20).into();
-    // let mut expr : Expr = vec![("stuff", "hello")].into();
-    let interpreter = Interpreter::new(vec![rule_sub, rule_mult, rule_plus, rule1, rule2, rule3], main_scope);
-    let meta_interpreter = Interpreter::new(vec![rule4, rule5], "meta".to_string());
-    println!("{}", expr.pretty_print());
+    // let mut expr : Expr = ("fact", 20).into();
+    // // let mut expr : Expr = vec![("stuff", "hello")].into();
+    // let interpreter = Interpreter::new(vec![rule_sub, rule_mult, rule_plus, rule1, rule2, rule3], main_scope);
+    // let meta_interpreter = Interpreter::new(vec![rule4, rule5], "meta".to_string());
+    // println!("{}", expr.pretty_print());
 
-    let mut h = HashMap::new();
-    h.insert("main".to_string(), interpreter);
-    h.insert("meta".to_string(), meta_interpreter);
-    h.insert("io".to_string(), Interpreter::new(vec![], "io".to_string()));
+    // let mut h = HashMap::new();
+    // h.insert("main".to_string(), interpreter);
+    // h.insert("meta".to_string(), meta_interpreter);
+    // h.insert("io".to_string(), Interpreter::new(vec![], "io".to_string()));
 
-    while !expr.is_exhausted() {
-        expr = run_interpreter_loop(expr, "main".to_string(), &h);
-    }
+    // while !expr.is_exhausted() {
+    //     expr = run_interpreter_loop(expr, "main".to_string(), &h);
+    // }
    
 
-    println!("{}", expr.pretty_print());
+    // println!("{}", expr.pretty_print());
 }
 
 
 
-// Need to make exhausted be a property
-// Need to make return from step be an enum
-// Need to handle multiple rules matching in different contexts
-// Need to add matching on phases
-// Need to think about nil/unit
+// need to think about nil
+// need to fix map matching
+// need to make a parser
+// need to make a repl
+// need to make rules be matchable
+// need to think about repeats
+// need to make scopes a real thing
