@@ -1,4 +1,5 @@
 
+use super::Expr;
 
 #[derive(Debug)]
 pub enum Token<'a> {
@@ -160,18 +161,6 @@ pub fn tokenize<'a>(text: &'a str) -> Vec<Token<'a>> {
     Tokenizer::new(text).read()
 }
 
-// Copied here so I don't have to reorganize code right now.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Expr {
-    Undefined,
-    Num(i64),
-    Symbol(String),
-    LogicVariable(String),
-    Exhausted(Box<Expr>),
-    Call(Box<Expr>, Vec<Expr>),
-    Map(Vec<(Expr, Expr)>)
-}
 
 pub fn parse(tokens: Vec<Token>) -> Expr {
     let mut exprs_stack = Vec::with_capacity(tokens.len()); // arbitrary
@@ -205,4 +194,8 @@ pub fn parse(tokens: Vec<Token>) -> Expr {
 
     assert_eq!(current.len(), 1);
     current.pop().unwrap()
+}
+
+pub fn read<'a>(expr : &'a str) -> Expr {
+    parse(tokenize(expr))
 }
