@@ -35,6 +35,7 @@ impl<T : Into<Expr>, S : Into<Expr>> Into<Expr> for (T, S) {
     fn into(self) -> Expr {
         let f = self.0.into();
         match f {
+            // Eventually get rid of this
             Expr::Symbol(s) if s == "quote" => Expr::Exhausted(box self.1.into()),
             _ => Expr::Call(box f, vec![self.1.into()])
         }

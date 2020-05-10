@@ -12,7 +12,7 @@ use std::mem;
 
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     Undefined,
     Num(i64),
@@ -23,11 +23,19 @@ pub enum Expr {
     Map(Vec<(Expr, Expr)>)
 }
 
+
 impl Expr {
     fn is_exhausted(& self) -> bool {
         match self {
             Expr::Exhausted(_) => true,
             _ => false
+        }
+    }
+    // really need to change exhausted
+    fn de_exhaust(self) -> Expr {
+        match self {
+            Expr::Exhausted(box x) => x,
+            _ => self
         }
     }
 
@@ -37,7 +45,12 @@ impl Expr {
             Expr::Symbol(n) => n.to_string(),
             Expr::LogicVariable(n) => n.to_string(),
             Expr::Undefined => "Undefined".to_string(),
-            Expr::Exhausted(box e) => e.pretty_print(),
+            Expr::Exhausted(box e) => {
+                match e {
+                    Expr::Call(_, _) => format!("'{}", e.pretty_print()),
+                    _ => e.pretty_print()
+                }
+            },
             Expr::Call(box f, args) => {
                 let p_f = f.pretty_print();
                 let p_args : Vec<String> = args.iter().map(|x| x.pretty_print()).collect();
@@ -174,16 +187,17 @@ impl Rule {
                 }
                 // This is depending on key order which is wrong. Need to fix.
                 (Expr::Map(args1), Expr::Map(args2)) => {
-                    if args1.len() != args2.len() {
-                        failed = true;
-                    } else {
-                        let mut args1_clone = args1.clone();
-                        let mut args2_clone = args2.clone();
-                        for _ in 0..args1.len() {
-                            let (k1, v1) = args1_clone.pop().unwrap();
-                            let (k2, v2) = args2_clone.pop().unwrap();
-                            queue.push_front((k1, k2));
-                            queue.push_front((v1, v2));
+                    // @performance Don't allocate here.
+                    // Maybe there is some temp area? Would that be in interpreter then?
+                    let rules_map : HashMap<Expr, Expr> = args1.into_iter().collect();
+                    let expr_map : HashMap<Expr, Expr> = args2.into_iter().map(|(k, v)| (k.de_exhaust(), v.de_exhaust())).collect();
+                    for (key, value) in rules_map {
+                        // We don't allow logic variables in keys yet.
+                        if let Some(expr_value) = expr_map.get(&key) {
+                            queue.push_front((value, expr_value.clone()))
+                        } else {
+                            failed = true;
+                            break;
                         }
                     }
                 }
@@ -297,7 +311,7 @@ impl Interpreter {
         }
     }
 
-    fn match_rule(& self, rhs : & Expr, env : & HashMap<String, Expr>) -> Expr {
+    fn substitute(& self, rhs : & Expr, env : & HashMap<String, Expr>) -> Expr {
         match rhs {
             Expr::Num(_) => rhs.clone(),
             Expr::Symbol(_) => rhs.clone(),
@@ -312,14 +326,15 @@ impl Interpreter {
                 panic!("Undefined! {:?}", rhs)
             }
             Expr::Exhausted(x) => {
-                Expr::Exhausted(box self.match_rule(x, env))
+                Expr::Exhausted(box self.substitute(x, env))
             }
             Expr::Call(box f, args) => {
-                let new_args = args.iter().map(|x| self.match_rule(x, env)).collect();
-                Expr::Call(box self.match_rule(f, env), new_args)
+                let new_args = args.iter().map(|x| self.substitute(x, env)).collect();
+                Expr::Call(box self.substitute(f, env), new_args)
             }
             Expr::Map(args) => {
-                let new_args = args.iter().map(|(x, y)| (self.match_rule(x, env), self.match_rule(y, env))).collect();
+                
+                let new_args = args.iter().map(|(x, y)| (self.substitute(x, env), self.substitute(y, env))).collect();
                 Expr::Map(new_args)
             }
         }
@@ -332,9 +347,9 @@ impl Interpreter {
         for rule in &self.rules {
             if let Some(env) = rule.build_env(e) {
                 if rule.out_scope == self.scope && main_result.is_none() {
-                    main_result = Some((rule.clone(), self.match_rule(&rule.right, &env)));
+                    main_result = Some((rule.clone(), self.substitute(&rule.right, &env)));
                 } else if rule.out_scope != self.scope {
-                    let new_expr =self.match_rule(&rule.right, &env);
+                    let new_expr = self.substitute(&rule.right, &env);
                     let result = InterpreterResult::Rewrote{
                         sub_expr: e.clone(),
                         new_expr: new_expr.clone(),
