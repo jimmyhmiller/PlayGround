@@ -7,6 +7,14 @@ use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 
+fn sub_min_1(x : u16, y: u16) -> u16 {
+    if x <= 1 {
+        1
+    } else {
+        x - y
+    }
+}
+
 fn main() {
     // Get the standard input stream.
     let stdin = stdin();
@@ -40,18 +48,23 @@ fn main() {
         // Print the key we type...
         match c.unwrap() {
             // Exit.
+            Key::Char('\n') => {
+                line += 1;
+                column = 1;
+                print!("\n\r")
+            },
             Key::Char(c) => print!("{}", c),
             Key::Alt(c) => print!("Alt-{}", c),
             Key::Ctrl(_c) => break,
-            Key::Left => column -= 2,
+            Key::Left => column = sub_min_1(column, 2),
             Key::Right => column += 2,
             Key::Up => {
-                line -= 1;
-                column -= 1
+                line = sub_min_1(line, 1);
+                column = sub_min_1(column, 1)
             }
             Key::Down => {
                 line += 1;
-                column -= 1
+                column = sub_min_1(column, 1)
             }
             _ => print!("Other"),
         }
