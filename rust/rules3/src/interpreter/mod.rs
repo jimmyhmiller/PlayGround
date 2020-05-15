@@ -20,7 +20,8 @@ pub enum Expr {
     LogicVariable(String),
     Exhausted(Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
-    Map(Vec<(Expr, Expr)>)
+    Map(Vec<(Expr, Expr)>),
+    Array(Vec<Expr>),
 }
 
 
@@ -68,6 +69,10 @@ impl Expr {
                 }
                 result = format!("{}{}: {}}}", result, last_key.pretty_print(), last_value.pretty_print());
                 result
+            }
+            Expr::Array(args) => {
+                let p_args : Vec<String> = args.iter().map(|x| x.pretty_print()).collect();
+                format!("[{}]", p_args.join(", "))
             }
         }
     }
@@ -198,6 +203,18 @@ impl Rule {
                         } else {
                             failed = true;
                             break;
+                        }
+                    }
+                }
+                (Expr::Array(args1), Expr::Array(args2)) => {
+                    // Need to get rid of this once we have repeats.
+                    if args1.len() != args2.len() {
+                        failed = true;
+                    } else {
+                        let mut args1_clone = args1.clone();
+                        let mut args2_clone = args2.clone();
+                        for _ in 0..args1.len() {
+                            queue.push_front((args1_clone.pop().unwrap(), args2_clone.pop().unwrap()))
                         }
                     }
                 }
@@ -337,6 +354,10 @@ impl Interpreter {
                 let new_args = args.iter().map(|(x, y)| (self.substitute(x, env), self.substitute(y, env))).collect();
                 Expr::Map(new_args)
             }
+            Expr::Array(args) => {
+                let new_args = args.iter().map(|x| self.substitute(x, env)).collect();
+                Expr::Array(new_args)
+            }
         }
     }
 
@@ -413,7 +434,6 @@ impl Interpreter {
                         self.match_all(&Expr::Call(f, args))
                     }
                 }
-
             }
             Expr::Call(box f, args) => {
                 let step = self.step(&f);
@@ -438,6 +458,21 @@ impl Interpreter {
                     }
                 } else {
                     self.match_all(&Expr::Map(args))
+                }
+            }
+            Expr::Array(mut args) => {
+                if let Some(index) = args.iter().position(|e| {
+                    match e {
+                        Expr::Exhausted(_) => false,
+                        _ => true,
+                    }
+                }) {
+                    let expr = mem::replace(&mut args[index], Expr::Undefined);
+                    let step = self.step(&expr);
+                    args[index] = step.clone().expr();
+                    step.wrap(Expr::Array(args))
+                } else {
+                    self.match_all(&Expr::Array(args))
                 }
             }
         }

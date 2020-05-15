@@ -7,6 +7,8 @@ pub enum Token<'a> {
     CloseParen,
     OpenCurly,
     CloseCurly,
+    OpenBracket,
+    CloseBracket,
     String(&'a str),
     Integer(&'a str),
     Float(&'a str),
@@ -33,6 +35,8 @@ static CLOSE_PAREN: u8 = ')' as u8;
 static PERIOD: u8 = '.' as u8;
 static OPEN_CURLY: u8 = '{' as u8;
 static CLOSE_CURLY: u8 = '}' as u8;
+static OPEN_BRACKET: u8 = '[' as u8;
+static CLOSE_BRACKET: u8 = ']' as u8;
 static COLON: u8 = ':' as u8;
 
 
@@ -96,15 +100,24 @@ impl<'a> Tokenizer<'a> {
     fn is_open_curly(&self) -> bool {
         self.current_byte() == OPEN_CURLY
     }
+
     fn is_close_curly(&self) -> bool {
         self.current_byte() == CLOSE_CURLY
     }
+    fn is_open_bracket(&self) -> bool {
+        self.current_byte() == OPEN_BRACKET
+    }
+    fn is_close_bracket(&self) -> bool {
+        self.current_byte() == CLOSE_BRACKET
+    }
 
-    fn is_bracket(&self) -> bool {
+    fn is_any_brace(&self) -> bool {
         self.is_open_paren() ||
         self.is_close_paren() ||
         self.is_open_curly() ||
-        self.is_close_curly()
+        self.is_close_curly() ||
+        self.is_open_bracket() ||
+        self.is_close_bracket()
     }
 
     fn consume_spaces(&mut self) -> () {
@@ -136,7 +149,7 @@ impl<'a> Tokenizer<'a> {
 
     fn parse_identifier(&mut self) -> Token<'a> {
         let start = self.position;
-        while !self.at_end() && !self.is_space() && !self.is_bracket() {
+        while !self.at_end() && !self.is_space() && !self.is_any_brace() {
             self.consume()
         }
         Token::Symbol(&self.input[start..self.position])
@@ -156,6 +169,12 @@ impl<'a> Tokenizer<'a> {
         } else if self.is_close_curly() {
             self.consume();
             Token::CloseCurly
+        } else if self.is_open_bracket() {
+            self.consume();
+            Token::OpenBracket
+        } else if self.is_close_bracket() {
+            self.consume();
+            Token::CloseBracket
         } else if self.is_valid_number_char() {
             self.parse_number()
         } else if self.is_quote() {
@@ -215,6 +234,15 @@ pub fn parse(tokens: Vec<Token>) -> Expr {
                 // @performance: Do something better than reverse.
                 pairs.reverse();
                 let expr = Expr::Map(pairs);
+                current = exprs_stack.pop().unwrap();
+                current.push(expr);
+            }
+            Token::OpenBracket => {
+                exprs_stack.push(current);
+                current = Vec::with_capacity(10); // arbitrary
+            }
+            Token::CloseBracket => {
+                let expr = Expr::Array(current);
                 current = exprs_stack.pop().unwrap();
                 current.push(expr);
             }
