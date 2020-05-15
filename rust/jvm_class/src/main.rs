@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{BufReader};
 use std::io::prelude::*;
 use std::io;
+use std::str;
 
 // https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html
 // Need to implement the other structs now.
@@ -11,27 +12,99 @@ struct ClassFile {
     minor_version: u16,
     major_version: u16,
     constant_pool_count: u16,
-    constant_pool: Vec<u8>,
+    constant_pool: Vec<Constant>,
     access_flags: u16,
     this_class: u16,
     super_class: u16,
     interfaces_count: u16,
-    interfaces: Vec<u8>,
+    interfaces: Vec<Constant>,
     fields_count: u16,
-    fields: Vec<u8>,
+    fields: Vec<Constant>,
     methods_count: u16,
-    methods: Vec<u8>,
+    methods: Vec<Constant>,
     attributes_count: u16,
-    attributes: Vec<u8>,
+    attributes: Vec<Constant>,
+}
+
+#[derive(Debug)]
+enum Constant {
+    MethodRef{tag: u8, class_index: u16, name_and_type_index: u16},
+    FieldRef{tag: u8, class_index: u16, name_and_type_index: u16},
+    InterfaceMethodRef{tag: u8, class_index: u16, name_and_type_index: u16},
+    String{tag: u8, string_index: u16},
+    Class{tag: u8, name_index: u16},
+    UTF8{tag: u8, length: u16, string: String},
+    NameAndType{tag:u8, name_index: u16, descriptor_index: u16},
+}
+
+fn parse_single_constant(reader: &mut BinaryReader) -> io::Result<Constant> {
+    let tag = reader.read_u8()?;
+    Ok(match tag {
+        1 => {
+            let length = reader.read_u16()?;
+            let mut bytes = vec![0; length as usize];
+            reader.read_exact(&mut bytes)?;
+            let string = str::from_utf8(bytes.as_slice()).unwrap().to_string();
+            Constant::UTF8{tag, length, string}
+        }
+        7 => {
+            let name_index = reader.read_u16()?;
+            Constant::Class{tag, name_index}
+        }
+        8 => {
+            let string_index = reader.read_u16()?;
+            Constant::String{tag, string_index}
+        }
+        9 => {
+            let class_index = reader.read_u16()?;
+            let name_and_type_index = reader.read_u16()?;
+            Constant::FieldRef{tag, class_index, name_and_type_index}
+        },
+        10 => {
+            let class_index = reader.read_u16()?;
+            let name_and_type_index = reader.read_u16()?;
+            Constant::MethodRef{tag, class_index, name_and_type_index}
+        },
+        11 => {
+            let class_index = reader.read_u16()?;
+            let name_and_type_index = reader.read_u16()?;
+            Constant::InterfaceMethodRef{tag, class_index, name_and_type_index}
+        }
+        12 => {
+            let name_index = reader.read_u16()?;
+            let descriptor_index = reader.read_u16()?;
+            Constant::NameAndType{tag, name_index, descriptor_index}
+        }
+        _ => {
+            panic!("Didn't handle {:?}", tag)
+        }
+    })
+}
+
+fn parse_constants(entries: u16, reader: &mut BinaryReader) -> io::Result<Vec<Constant>> {
+    let mut constants = vec![];
+    for _ in 0..entries {
+        constants.push(parse_single_constant(reader)?)
+    }
+    Ok(constants)
 }
 
 
 struct BinaryReader<'a> {
-    reader: &'a mut BufReader<File>,
+    reader: &'a mut dyn Read,
     buffer: Vec<u8>,
 }
 
 impl<'a> BinaryReader<'a> {
+
+    fn read_u8(&mut self) -> io::Result<u8> {
+        let mut limited_reader = self.reader.take(1);
+        limited_reader.read_to_end(&mut self.buffer)?;
+        let bytes = [self.buffer[0]];
+        self.buffer.clear();
+        Ok(u8::from_be_bytes(bytes))
+    }
+
     fn read_u16(&mut self) -> io::Result<u16> {
         // No idea about efficiency here.
         let mut limited_reader = self.reader.take(2);
@@ -48,8 +121,13 @@ impl<'a> BinaryReader<'a> {
         Ok(buffer)
     }
 
+    // I'm sure there is a better way to do these methods.
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         self.reader.read_exact(buf)
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        self.reader.read_to_end(buf)
     }
 }
 
@@ -73,23 +151,38 @@ fn read_class_file() -> io::Result<ClassFile> {
     let major_version = binary_reader.read_u16()?;
 
     let constant_pool_count = binary_reader.read_u16()?;
-    let constant_pool = binary_reader.read_n((constant_pool_count - 1) as u64)?;
+    let constant_pool = parse_constants(constant_pool_count - 1, &mut binary_reader)?;
+
+    println!("Finished constants pool");
 
     let access_flags = binary_reader.read_u16()?;
     let this_class = binary_reader.read_u16()?;
     let super_class = binary_reader.read_u16()?;
 
+    // It looks like interfaces are Constant::Class but not 100% sure. Not interfaces in hello world
+    // Or these might be numbers? 
     let interfaces_count = binary_reader.read_u16()?;
-    let interfaces = binary_reader.read_n(interfaces_count as u64)?;
+    let interfaces = parse_constants(interfaces_count, &mut binary_reader)?;
+    println!("Finished interfaces");
 
-    let fields_count = binary_reader.read_u16()?;
-    let fields = binary_reader.read_n(fields_count as u64)?;
 
-    let methods_count = binary_reader.read_u16()?;
-    let methods = binary_reader.read_n(methods_count as u64)?;
+    // need to parse out fields, methods and attributes next.
 
-    let attributes_count = binary_reader.read_u16()?;
-    let attributes = binary_reader.read_n(attributes_count as u64)?;
+    // let fields_count = binary_reader.read_u16()?;
+    // let fields = parse_constants(fields_count, &mut binary_reader)?;
+    // println!("Finished fields");
+
+    
+    // let methods_count = binary_reader.read_u16()?;
+    // let methods = parse_constants(methods_count, &mut binary_reader)?;
+    // println!("Finished methods");
+
+    // let attributes_count = binary_reader.read_u16()?;
+    // let attributes =  parse_constants(attributes_count, &mut binary_reader)?;
+    // println!("Finished attributes");
+    // let mut buffer = vec![];
+    // binary_reader.reader.read_to_end(&mut buffer)?;
+
 
     Ok(ClassFile {
         minor_version,
@@ -101,12 +194,12 @@ fn read_class_file() -> io::Result<ClassFile> {
         super_class,
         interfaces_count,
         interfaces,
-        fields_count,
-        fields,
-        methods_count,
-        methods,
-        attributes_count,
-        attributes,
+        fields_count: 0,
+        fields: vec![],
+        methods_count: 0,
+        methods: vec![],
+        attributes_count: 0,
+        attributes: vec![],
     })
 }
 
