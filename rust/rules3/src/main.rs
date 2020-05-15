@@ -22,7 +22,11 @@ impl Validator for InputValidator {
     }
 }
 
-
+// General Structure
+// rules : Expr
+// main : Expr
+// meta : Expr
+// io : Expr
 
 
 // Need to figure out name because it is in scope
@@ -105,8 +109,6 @@ fn main() {
     //     interpreter,
     //     expr: Expr::Undefined,
     // };
-
-
 
 
     let meta_interpreter = Interpreter::new(vec![rule4, rule5], "meta".to_string());
