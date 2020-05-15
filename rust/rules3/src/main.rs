@@ -23,11 +23,12 @@ impl Validator for InputValidator {
 }
 
 
-#[derive(Debug, Clone)]
+
 
 // Need to figure out name because it is in scope
 // and intepreter
 // Maybe the interpreter needs to no have rules or name?
+#[derive(Debug, Clone)]
 struct Scope {
     name: String,
     interpreter: Interpreter,
