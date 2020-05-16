@@ -1,6 +1,8 @@
 (ns clojure-asm.core
+  (:require [clj-java-decompiler.core :as decompiler])
   (:import [org.objectweb.asm Opcodes Type ClassWriter]
            [org.objectweb.asm.commons Method GeneratorAdapter]))
+
 
 
 
@@ -47,3 +49,7 @@
 
 (.addSome (Hello2.))
 
+
+
+
+(decompiler/decompile (fn [] (+ 2 2)))
