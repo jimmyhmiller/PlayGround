@@ -32,6 +32,14 @@ impl Expr {
             _ => false
         }
     }
+
+    fn get_symbol(self) -> Option<String> {
+        match self {
+            Expr::Symbol(s) => Some(s),
+            _ => None
+        }
+    }
+
     // really need to change exhausted
     fn de_exhaust(self) -> Expr {
         match self {
@@ -109,7 +117,7 @@ fn builtins(expr: Expr) -> InterpreterResult {
             if let (Some(x), Some(y)) = (a,b) {
                 let result = Expr::Num(x - y);
                 let result_clone = result.clone();
-                InterpreterResult::rewrote(result, expr_clone, result_clone, sub_rule)
+                InterpreterResult::rewrote(result, expr_clone, result_clone, sub_rule, "main".to_string())
             } else {
                 InterpreterResult::no_change(expr_clone)
             }
@@ -120,7 +128,7 @@ fn builtins(expr: Expr) -> InterpreterResult {
             if let (Some(x), Some(y)) = (a,b) {
                 let result = Expr::Num(x + y);
                 let result_clone = result.clone();
-                InterpreterResult::rewrote(result, expr_clone, result_clone, sub_rule)
+                InterpreterResult::rewrote(result, expr_clone, result_clone, sub_rule, "main".to_string())
             } else {
                 InterpreterResult::no_change(expr_clone)
             }
@@ -131,7 +139,7 @@ fn builtins(expr: Expr) -> InterpreterResult {
             if let (Some(x), Some(y)) = (a,b) {
                 let result = Expr::Num(x * y);
                 let result_clone = result.clone();
-                InterpreterResult::rewrote(result, expr_clone, result_clone, mult_rule)
+                InterpreterResult::rewrote(result, expr_clone, result_clone, mult_rule, "main".to_string())
             } else {
                 InterpreterResult::no_change(expr_clone)
             }
@@ -143,14 +151,34 @@ fn builtins(expr: Expr) -> InterpreterResult {
             println!("{}", a.pretty_print());
             // Maybe I need the idea of a void rule?
             // How else am I going to make multiple rules match?
-            InterpreterResult::rewrote(a_clone, expr_clone, a_clone2, mult_rule)
+            InterpreterResult::rewrote(a_clone, expr_clone, a_clone2, mult_rule, "main".to_string())
+        }
+        Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/add-rule" => {
+            let rule = args[0].clone().de_exhaust();
+            InterpreterResult::Rewrote{
+                new_expr: 0.into(),
+                new_sub_expr: 0.into(),
+                sub_expr: expr_clone.clone(),
+                rule: mult_rule.clone(),
+                out_scope: "main".to_string(),
+                side_effects: vec![
+                    InterpreterResult::Rewrote{
+                        new_expr: rule.clone(),
+                        new_sub_expr: rule,
+                        sub_expr: expr_clone,
+                        rule: mult_rule,
+                        out_scope: "rules".to_string(),
+                        side_effects: vec![],
+                    }
+                ]
+            }
         }
         _ => InterpreterResult::no_change(expr_clone)
     }
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub left: Expr,
     pub right: Expr,
@@ -247,6 +275,7 @@ enum InterpreterResult {
         new_sub_expr: Expr,
         rule: Rule,
         side_effects: Vec<InterpreterResult>,
+        out_scope: String,
     },
 }
 
@@ -259,13 +288,13 @@ impl InterpreterResult {
     }
     fn wrap(& self, expr: Expr) -> InterpreterResult {
         match self {
-            InterpreterResult::Rewrote{sub_expr, new_sub_expr, rule, ..} =>
-                InterpreterResult::rewrote(expr, sub_expr.clone(), new_sub_expr.clone(), rule.clone()),
+            InterpreterResult::Rewrote{sub_expr, new_sub_expr, rule, out_scope,..} =>
+                InterpreterResult::rewrote(expr, sub_expr.clone(), new_sub_expr.clone(), rule.clone(), out_scope.clone()),
             InterpreterResult::NoChange{sub_expr, side_effects, ..} => InterpreterResult::NoChange{expr, sub_expr: sub_expr.clone(), side_effects: side_effects.clone()}
         }
     }
-    fn rewrote(new_expr: Expr, sub_expr: Expr, new_sub_expr: Expr, rule: Rule) -> InterpreterResult {
-        InterpreterResult::Rewrote{new_expr, sub_expr, new_sub_expr, rule, side_effects: vec![]}
+    fn rewrote(new_expr: Expr, sub_expr: Expr, new_sub_expr: Expr, rule: Rule, out_scope: String) -> InterpreterResult {
+        InterpreterResult::Rewrote{new_expr, sub_expr, new_sub_expr, rule, side_effects: vec![], out_scope}
     }
 
     fn no_change(expr: Expr) -> InterpreterResult {
@@ -297,13 +326,14 @@ impl InterpreterResult {
         }
     }
 
+    // Probably need to make this Option
     fn get_scope(&self) -> String {
         match self {
-            InterpreterResult::Rewrote{rule, ..} => {
-                rule.out_scope.clone()
+            InterpreterResult::Rewrote{out_scope, ..} => {
+                out_scope.clone()
             },
             InterpreterResult::NoChange{..} => {
-                "main".to_string()
+                "".to_string()
             }
         }
     }
@@ -376,7 +406,8 @@ impl Interpreter {
                         new_expr: new_expr.clone(),
                         new_sub_expr: new_expr.clone(),
                         side_effects: vec![],
-                        rule: rule.clone()
+                        rule: rule.clone(),
+                        out_scope: rule.out_scope.clone()
                     };
                     side_effects.push(result);
                 }
@@ -388,6 +419,7 @@ impl Interpreter {
                 sub_expr: e.clone(),
                 new_expr: expr,
                 new_sub_expr: expr_clone,
+                out_scope: rule.out_scope.clone(),
                 rule,
                 side_effects,
             }
@@ -479,56 +511,153 @@ impl Interpreter {
     }
 }
 
-fn print_result(_expr: &Expr, result: &InterpreterResult) {
-    match result {
-        // Gives the idea of phase, but we need to know what subexpression stepped.
-        InterpreterResult::Rewrote{new_expr: _, sub_expr, new_sub_expr, rule: _, side_effects: _} => {
-            // println!("{} => {}", sub_expr.pretty_print(), new_sub_expr.pretty_print());
-            println!("Rewrote {} => {}", sub_expr.pretty_print(), new_sub_expr.pretty_print());
-        },
-        InterpreterResult::NoChange{expr: _, sub_expr, side_effects: _} => {
-            println!("NoChange {}", sub_expr.pretty_print())
+#[derive(Debug, Clone)]
+pub struct Program {
+    scopes: HashMap<String, Expr>,
+    interpreters: HashMap<String, Interpreter>,
+}
+
+impl Program {
+    // Are rules an expr? 
+    // Or are they are different datatype that we convert for matching?
+    // Or do we provide special rules for matching on rules?
+    pub fn new(rules: Vec<Rule>) -> Program {
+        let mut scopes = HashMap::new();
+        scopes.insert("main".to_string(), Expr::Undefined);
+        scopes.insert("meta".to_string(), Expr::Undefined);
+        scopes.insert("rules".to_string(), Program::make_rules(rules.clone()));
+        scopes.insert("io".to_string(), Expr::Undefined);
+        Program {
+            scopes: scopes,
+            interpreters: Program::make_interpreters(rules),
         }
+    }
+
+
+    fn make_rules(rules: Vec<Rule>) -> Expr {
+        Expr::Array(rules.iter().map(|r| {
+            let rule_clone = r.clone();
+            vec![("left", rule_clone.left), 
+                 ("right", rule_clone.right), 
+                 ("in_scope", rule_clone.in_scope.into()),
+                 ("out_scope", rule_clone.out_scope.into())].into()
+        }).collect())
+    }
+
+
+    fn from_rules_expr(expr: Expr) -> Vec<Rule> {
+        if let Expr::Array(rs) = expr {
+            let mut rules = Vec::with_capacity(rs.len());
+            for rule in rs {
+                if let Expr::Map(rule_expr) = rule {
+                    // Going to depend on order here
+                   rules.push(Rule {
+                        left: rule_expr[0].1.clone(),
+                        right: rule_expr[1].1.clone(),
+                        in_scope: rule_expr[2].1.clone().get_symbol().unwrap(),
+                        out_scope: rule_expr[3].1.clone().get_symbol().unwrap(),
+                    })
+                } else {
+                    panic!("Rule not a map {:?}", rule);
+                }
+            }
+            rules
+        } else {
+            panic!("Rules aren't an array! {:?}", expr);
+        }
+       
+    }
+
+
+    fn make_interpreters(rules: Vec<Rule>) -> HashMap<String, Interpreter> {
+        let mut interpreters: HashMap<String, Interpreter> = HashMap::new();
+        interpreters.insert("main".to_string(), Interpreter::new(vec![], "main".to_string()));
+        interpreters.insert("meta".to_string(), Interpreter::new(vec![], "meta".to_string()));
+        interpreters.insert("rules".to_string(), Interpreter::new(vec![], "rules".to_string()));
+        interpreters.insert("io".to_string(), Interpreter::new(vec![], "io".to_string()));
+        for rule in rules {
+            if interpreters.contains_key(&rule.in_scope) {
+                let interpreter = interpreters.get_mut(&rule.in_scope).unwrap();
+                interpreter.rules.push(rule);
+            } else {
+                let scope = rule.in_scope.clone();
+                interpreters.insert(scope.clone(), Interpreter::new(vec![rule], scope));
+            }
+        }
+        interpreters
+    }
+
+
+    fn run_interpreter_loop(&mut self, scope: String) -> () {
+        let expr = self.scopes.get(&scope).unwrap().clone();
+        let interpreter = self.interpreters.get(&scope).unwrap();
+        let result = interpreter.step(&expr);
+        let meta_expr = result.to_meta_expr(scope.clone(), expr.clone());
+        // Make sure we don't try to meta eval our meta.
+        if scope != "meta" {
+            self.scopes.insert("meta".to_string(), meta_expr);
+            self.eval_scope("meta".to_string());
+        }
+
+
+        // need to handle out_scope properly?
+
+        // meta scope could have replaced our expression.
+        // If that happened, we don't want to override.
+        // Need a better way other than checking equality.
+        if self.scopes.get(&scope).unwrap().clone() != expr {
+            // meta intervened. If that is the case, we don't want to finish
+            // evaling this expression and we don't want to do any side effects.
+            return;
+        }
+        self.scopes.insert(scope.clone(), result.clone().expr());
+
+        
+
+        for side_effect in result.side_effects() {
+            let expr = side_effect.clone().expr();
+            let scope = side_effect.get_scope();
+            if scope == "rules" {
+                // Need to be able to do more than append.
+                if let Expr::Array(current_rules) = self.scopes.get("rules").clone().unwrap() {
+                    let mut current_rules = current_rules.clone();
+                    current_rules.push(expr);
+                    // two places rules live is a bit awkward
+                    self.interpreters = Program::make_interpreters(Program::from_rules_expr(Expr::Array(current_rules.clone())));
+                    self.scopes.insert(scope.clone(), Expr::Array(current_rules));
+                } else {
+                    panic!("Updating rules failed");
+                }
+
+                return;
+            }
+            // I don't think we put no_changes as side-effects, so I'm not worried about no out_scope
+            self.scopes.insert(scope.clone(), expr);
+            self.eval_scope(scope);
+        }
+       
+    }
+
+    pub fn eval_scope(&mut self, scope: String) {
+        while !self.scopes.get(&scope).unwrap().is_exhausted() {
+            self.run_interpreter_loop(scope.clone());
+        }
+    }
+
+    // Maybe scope is passed?
+    pub fn submit(&mut self, expr: Expr) {
+        // Really need to get better at references vs not especially for string.
+        self.scopes.insert("main".to_string(), expr);
+        self.eval_scope("main".to_string());
+    }
+
+
+    pub fn get_main(&self) -> Expr {
+        self.scopes.get("main").unwrap().clone()
     }
 }
 
-fn run_interpreter_loop(expr: Expr, scope: String, interpreters: & HashMap<String, Interpreter>) -> Expr {
-    let mut next_results = VecDeque::new();
 
-    let main = interpreters.get(&scope).unwrap();
-    let first_step = main.step(&expr);
-    let first_step_clone = first_step.clone();
-    let meta_expr = first_step.to_meta_expr(scope, expr);
-    for effect in first_step.side_effects() {
-        next_results.push_back((effect.get_scope(), effect.expr()));
-    }
-    next_results.push_front(("meta".to_string(), meta_expr));
-    
-    while !next_results.is_empty() {
-        let (scope, expr) = next_results.pop_front().unwrap();
-        // Need to deal with scopes that don't exist, or just create them before this loop?
-        let main = interpreters.get(&scope).expect("Didn't have an interpreter for the scope");
-        let main_result = main.step(&expr);
-        let main_expr = main_result.clone().expr();
-        let side_effects = main_result.side_effects();
-        for effect in side_effects {
-            next_results.push_back((effect.get_scope(), effect.expr()));
-        }
-        if !main_expr.is_exhausted() {
-            next_results.push_back((scope, main_expr));
-        }
-    }
-   
-    first_step_clone.expr()
-
-}
-
-pub fn eval(interpreters: & HashMap<String, Interpreter>, mut expr : Expr) -> Expr {
-    while !expr.is_exhausted() {
-        expr = run_interpreter_loop(expr, "main".to_string(), interpreters);
-    }
-    expr
-}
 
 pub fn print(expr : Expr) {
     println!("{}", expr.pretty_print());

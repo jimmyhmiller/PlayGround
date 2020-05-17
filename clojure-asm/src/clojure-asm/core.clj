@@ -4,6 +4,14 @@
            [org.objectweb.asm.commons Method GeneratorAdapter]))
 
 
+;; Simple functional language
+;; Support arithmetic
+;; Support making functions
+;; Support java interop
+;; Support ADTs
+;; Type check it
+;; Support functions
+
 
 
 (def writer (ClassWriter. ClassWriter/COMPUTE_FRAMES))
@@ -52,4 +60,4 @@
 
 
 
-(decompiler/decompile (fn [] (+ 2 2)))
+(decompiler/disassemble (.addSome (Hello2.)))
