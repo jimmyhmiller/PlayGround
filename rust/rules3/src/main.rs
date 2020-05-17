@@ -1,8 +1,6 @@
 #![feature(box_syntax, box_patterns)]
 #![allow(dead_code)]
 
-
-use std::collections::HashMap;
 mod interpreter;
 use interpreter::*;
 use rustyline::error::ReadlineError;
@@ -22,11 +20,7 @@ impl Validator for InputValidator {
     }
 }
 
-// General Structure
-// rules : Expr
-// main : Expr
-// meta : Expr
-// io : Expr
+
 
 
 // Need to figure out name because it is in scope
@@ -85,7 +79,7 @@ fn main() {
             new_sub_expr: ?new_sub
         }"),
         right: ("builtin/println", ("quote", ("?sub", "=>", "?new_sub"))).into(),
-        in_scope: "main".to_string(),
+        in_scope: "meta".to_string(),
         out_scope: "io".to_string(),
     };
     let rule5 = Rule {
@@ -96,29 +90,14 @@ fn main() {
             new_expr: ?new_expr,
         }"),
         right: ("builtin/println", ("quote", ("?expr", "=>", "?new_expr"))).into(),
-        in_scope: "main".to_string(),
+        in_scope: "meta".to_string(),
         out_scope: "io".to_string(),
     };
 
+    let mut program = Program::new(
+        vec![rule_sub, rule_mult, rule_plus, rule1, rule2, rule3, rule4, rule5]
+    );
 
-
-    let interpreter = Interpreter::new(vec![rule_sub, rule_mult, rule_plus, rule1, rule2, rule3], "main".to_string());
-
-    // let main_scope = Scope {
-    //     name: "main".to_string(),
-    //     interpreter,
-    //     expr: Expr::Undefined,
-    // };
-
-
-    let meta_interpreter = Interpreter::new(vec![rule4, rule5], "meta".to_string());
-
-    let mut h = HashMap::new();
-
-
-    h.insert("main".to_string(), interpreter);
-    h.insert("meta".to_string(), meta_interpreter);
-    h.insert("io".to_string(), Interpreter::new(vec![], "io".to_string()));
 
     let validator = InputValidator{ validator: MatchingBracketValidator::new()};
     let mut rl = Editor::new();
@@ -132,7 +111,8 @@ fn main() {
         match readline {
             Ok(line) => {
                 rl.add_history_entry(line.as_str());
-                print(eval(&h, read(line.as_str())));
+                program.submit(read(line.as_ref()));
+                print(program.get_main());
             },
             Err(ReadlineError::Interrupted) => {
                 println!("Exiting");
