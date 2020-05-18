@@ -155,12 +155,9 @@ fn builtins(expr: Expr) -> InterpreterResult {
         }
         Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/add-rule" => {
             let rule = args[0].clone().de_exhaust();
-            InterpreterResult::Rewrote{
-                new_expr: 0.into(),
-                new_sub_expr: 0.into(),
-                sub_expr: expr_clone.clone(),
-                rule: mult_rule.clone(),
-                out_scope: "main".to_string(),
+            InterpreterResult::NoChange{
+                expr: Expr::Exhausted(box expr_clone.clone()),
+                sub_expr: Expr::Exhausted(box expr_clone.clone()),
                 side_effects: vec![
                     InterpreterResult::Rewrote{
                         new_expr: rule.clone(),
@@ -298,6 +295,10 @@ impl InterpreterResult {
     }
 
     fn no_change(expr: Expr) -> InterpreterResult {
+       let expr = match expr {
+            Expr::Exhausted(_) => expr,
+            _ => Expr::Exhausted(box expr)
+        };
         let expr_clone = expr.clone();
         InterpreterResult::NoChange{expr, sub_expr: expr_clone, side_effects: vec![]}
     }
@@ -546,14 +547,15 @@ impl Program {
 
 
     fn from_rules_expr(expr: Expr) -> Vec<Rule> {
+        let expr = expr.de_exhaust();
         if let Expr::Array(rs) = expr {
             let mut rules = Vec::with_capacity(rs.len());
             for rule in rs {
                 if let Expr::Map(rule_expr) = rule {
                     // Going to depend on order here
                    rules.push(Rule {
-                        left: rule_expr[0].1.clone(),
-                        right: rule_expr[1].1.clone(),
+                        left: rule_expr[0].1.clone().de_exhaust(),
+                        right: rule_expr[1].1.clone().de_exhaust(),
                         in_scope: rule_expr[2].1.clone().get_symbol().unwrap(),
                         out_scope: rule_expr[3].1.clone().get_symbol().unwrap(),
                     })
@@ -610,8 +612,22 @@ impl Program {
             // evaling this expression and we don't want to do any side effects.
             return;
         }
-        self.scopes.insert(scope.clone(), result.clone().expr());
 
+        if scope == "rules" {
+            // Need to be able to do more than append.
+            if let Expr::Array(current_rules) = self.scopes.get("rules").clone().unwrap() {
+                let mut current_rules = current_rules.clone();
+                current_rules.push(result.clone().expr());
+                // two places rules live is a bit awkward
+                println!("Updating rules");
+                self.interpreters = Program::make_interpreters(Program::from_rules_expr(Expr::Array(current_rules.clone())));
+                self.scopes.insert(scope.clone(), Expr::Array(current_rules));
+            } else {
+                panic!("Updating rules failed");
+            }
+        } else {
+            self.scopes.insert(scope.clone(), result.clone().expr());
+        }
         
 
         for side_effect in result.side_effects() {
@@ -623,13 +639,15 @@ impl Program {
                     let mut current_rules = current_rules.clone();
                     current_rules.push(expr);
                     // two places rules live is a bit awkward
-                    self.interpreters = Program::make_interpreters(Program::from_rules_expr(Expr::Array(current_rules.clone())));
+                    let rules = Program::from_rules_expr(Expr::Array(current_rules.clone()));
+                    println!("Updating rules {:?}", rules);
+                    self.interpreters = Program::make_interpreters(rules);
                     self.scopes.insert(scope.clone(), Expr::Array(current_rules));
                 } else {
                     panic!("Updating rules failed");
                 }
 
-                return;
+                continue;
             }
             // I don't think we put no_changes as side-effects, so I'm not worried about no out_scope
             self.scopes.insert(scope.clone(), expr);
