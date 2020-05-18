@@ -94,6 +94,30 @@ fn main() {
         out_scope: "io".to_string(),
     };
 
+    
+    // builtin/add-rule(quote({
+    //     left: add-rule({left: ?x, right: ?y})
+    //     right: builtin/add-rule(quote({
+    //         left: ?x,
+    //         right: ?y,
+    //         in_scope: main,
+    //         out_scope: main,
+    //     }))
+    //     in_scope: main,
+    //     out_scope: main,
+    // }))
+    
+    // add-rule(quote({
+    //     left: [?x => ?y]
+    //     right: add-rule(quote({
+    //         left: ?x,
+    //         right: ?y
+    //     })),
+    // }))
+    
+
+
+
     let mut program = Program::new(
         vec![rule_sub, rule_mult, rule_plus, rule1, rule2, rule3, rule4, rule5]
     );
@@ -152,3 +176,5 @@ fn main() {
 // need to consider list of Expr as Expr. Useful for parsing as rules.
 // need to consider if above is correct or if there should be token rules?
 // need to consider if those last two make sense at all.
+// make parser never panic
+// need to figure out how to do macro like things, explicit quoting is not good enough

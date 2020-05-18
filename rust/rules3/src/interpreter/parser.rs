@@ -72,7 +72,7 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn at_end(&self) -> bool {
-        self.input.len() == self.position
+        self.input.len() <= self.position
     }
 
     fn is_quote(&self) -> bool {
@@ -156,7 +156,6 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn parse_single(&mut self) -> Token<'a> {
-        self.consume_spaces();
         let result = if self.is_open_paren() {
             self.consume();
             Token::OpenParen
@@ -188,6 +187,10 @@ impl<'a> Tokenizer<'a> {
     fn read(&mut self) -> Vec<Token<'a>> {
         let mut tokens = Vec::with_capacity(self.input.len());
         while !self.at_end() {
+            self.consume_spaces();
+            if self.at_end() {
+                break;
+            }
             tokens.push(self.parse_single());
         }
         tokens
@@ -267,6 +270,7 @@ pub fn parse(tokens: Vec<Token>) -> Expr {
             x => panic!("Invalid expr {:?}", x)
         };
     }
+    // Fix empty line here
 
     assert_eq!(current.len(), 1);
     current.pop().unwrap()
