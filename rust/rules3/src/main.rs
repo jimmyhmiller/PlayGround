@@ -95,31 +95,32 @@ fn main() {
     //     in_scope: "meta".to_string(),
     //     out_scope: "io".to_string(),
     // };
-
-    
-    // builtin/add-rule(quote({
-    //     left: add-rule({left: ?x, right: ?y})
-    //     right: builtin/add-rule(quote({
-    //         left: ?x,
-    //         right: ?y,
-    //         in_scope: main,
-    //         out_scope: main,
-    //     }))
-    //     in_scope: main,
-    //     out_scope: main,
-    // }))
-    
-    // add-rule(quote({
-    //     left: [?x => ?y]
-    //     right: add-rule(quote({
-    //         left: ?x,
-    //         right: ?y
-    //     })),
-    // }))
-
+   
     /*
+    
     builtin/add-rule(quote({
-        left: {sub_expr: ?x, new_sub_expr: ?y, scope: main},
+        left: add-rule({left: ?x, right: ?y})
+        right: builtin/add-rule(quote({
+            left: ?x,
+            right: ?y,
+            in_scope: main,
+            out_scope: main,
+        }))
+        in_scope: main,
+        out_scope: main,
+    }))
+    
+    add-rule(quote({
+        left: [?x => ?y]
+        right: add-rule(quote({
+            left: ?x,
+            right: ?y
+        })),
+    }))
+
+
+    builtin/add-rule(quote({
+        left: {expr: ?x, new_expr: ?y, scope: main},
         right: do {
             builtin/println(quote(?x) => quote(?y))
             builtin/read-line()
@@ -184,11 +185,7 @@ fn main() {
 
 
 // need to think about nil
-// need to fix map matching
-// need to make rules be matchable
 // need to think about repeats
-// need to make scopes a real thing
-// need to be able to add rules
 // need to be able to add temporary rules
 // need to think about socket/editor support
 // need to think about how to do ffi
@@ -198,9 +195,16 @@ fn main() {
 // need to figure out how rules get stored in rule scope and in interpreter
 // need to add predicates
 // need to consider infix operators.
-// need to consider list of Expr as Expr. Useful for parsing as rules.
+// need to consider list of Expr as Expr. Useful for parsing as rules. Stream?
 // need to consider if above is correct or if there should be token rules?
 // need to consider if those last two make sense at all.
-// make parser never panic
+// need to make parser never panic
 // need to figure out how to do macro like things, explicit quoting is not good enough
-// think about how hygene would work.
+// need to think about how hygene would work.
+// need to think about having a repl scope vs a main scope
+// need to be able to make arbitrary scopes
+// need to add names to rules
+// need to add multiple clauses to rules
+// need to add loading from a file
+// need to add watching a file
+// need to consider adding let
