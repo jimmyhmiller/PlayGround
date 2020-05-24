@@ -9,6 +9,8 @@ use rustyline::validate::{MatchingBracketValidator};
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline_derive::{Completer, Helper, Highlighter, Hinter};
 
+
+
 #[derive(Completer, Helper, Highlighter, Hinter)]
 struct InputValidator {
     validator: MatchingBracketValidator,
@@ -71,28 +73,28 @@ fn main() {
         in_scope: "main".to_string(),
         out_scope: "main".to_string(),
     };
-    let rule4 = Rule {
-        left: read("{
-            phase: rewrite,
-            scope: main,
-            sub_expr: ?sub,
-            new_sub_expr: ?new_sub
-        }"),
-        right: ("builtin/println", ("quote", ("?sub", "=>", "?new_sub"))).into(),
-        in_scope: "meta".to_string(),
-        out_scope: "io".to_string(),
-    };
-    let rule5 = Rule {
-        left: read("{
-            phase: rewrite,
-            scope: main,
-            expr: ?expr,
-            new_expr: ?new_expr,
-        }"),
-        right: ("builtin/println", ("quote", ("?expr", "=>", "?new_expr"))).into(),
-        in_scope: "meta".to_string(),
-        out_scope: "io".to_string(),
-    };
+    // let rule4 = Rule {
+    //     left: read("{
+    //         phase: rewrite,
+    //         scope: main,
+    //         sub_expr: ?sub,
+    //         new_sub_expr: ?new_sub
+    //     }"),
+    //     right: ("builtin/println", ("quote", ("?sub", "=>", "?new_sub"))).into(),
+    //     in_scope: "meta".to_string(),
+    //     out_scope: "io".to_string(),
+    // };
+    // let rule5 = Rule {
+    //     left: read("{
+    //         phase: rewrite,
+    //         scope: main,
+    //         expr: ?expr,
+    //         new_expr: ?new_expr,
+    //     }"),
+    //     right: ("builtin/println", ("quote", ("?expr", "=>", "?new_expr"))).into(),
+    //     in_scope: "meta".to_string(),
+    //     out_scope: "io".to_string(),
+    // };
 
     
     // builtin/add-rule(quote({
@@ -114,12 +116,29 @@ fn main() {
     //         right: ?y
     //     })),
     // }))
-    
+
+    /*
+    builtin/add-rule(quote({
+        left: {sub_expr: ?x, new_sub_expr: ?y, scope: main},
+        right: builtin/println(quote(?x) => quote(?y))
+        in_scope: meta,
+        out_scope: io,
+    }))
+
+    builtin/add-rule(quote({
+        left: {sub_expr: ?x, new_sub_expr: ?y, scope: main},
+        right: builtin/read-line()
+        in_scope: meta,
+        out_scope: io,
+    }))
+   
+    */
+
 
 
 
     let mut program = Program::new(
-        vec![rule_sub, rule_mult, rule_plus, rule1, rule2, rule3, rule4, rule5]
+        vec![rule_sub, rule_mult, rule_plus, rule1, rule2, rule3]
     );
 
 
@@ -136,7 +155,7 @@ fn main() {
             Ok(line) => {
                 rl.add_history_entry(line.as_str());
                 program.submit(read(line.as_ref()));
-                print(program.get_main());
+                print(program.get_main());              
             },
             Err(ReadlineError::Interrupted) => {
                 println!("Exiting");
@@ -178,3 +197,4 @@ fn main() {
 // need to consider if those last two make sense at all.
 // make parser never panic
 // need to figure out how to do macro like things, explicit quoting is not good enough
+// think about how hygene would work.
