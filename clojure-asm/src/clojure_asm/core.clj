@@ -88,7 +88,9 @@
 (add/invoke 2 3)
 
 
-
+;; I should spend some time thinking about what this language should really look like.
+;; I think given the jvm, it shouldn't be too hard to bootstrap the whole thing.
+;; Which would be really really cool.
 
 (comment
   (do
