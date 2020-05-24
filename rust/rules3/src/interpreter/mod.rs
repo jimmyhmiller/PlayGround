@@ -8,6 +8,7 @@ pub use self::parser::read;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::mem;
+use std::io::{self, BufRead};
 
 
 
@@ -145,13 +146,16 @@ fn builtins(expr: Expr) -> InterpreterResult {
             }
         }
         Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/println" => {
-            let a = &args[0].clone();
-            let a_clone = a.clone();
-            let a_clone2 = a.clone();
-            println!("{}", a.pretty_print());
+            let print_string = args.iter().map(|x | x.pretty_print()).collect::<Vec<String>>().join(" ");
+            println!("{}", print_string);
             // Maybe I need the idea of a void rule?
             // How else am I going to make multiple rules match?
-            InterpreterResult::rewrote(a_clone, expr_clone, a_clone2, mult_rule, "main".to_string())
+            InterpreterResult::rewrote( 
+                Expr::Exhausted(box Expr::Undefined), 
+                expr_clone,  
+                Expr::Exhausted(box Expr::Undefined), 
+                mult_rule, 
+                "io".to_string())
         }
         Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/add-rule" => {
             let rule = args[0].clone().de_exhaust();
@@ -170,6 +174,33 @@ fn builtins(expr: Expr) -> InterpreterResult {
                 ]
             }
         }
+        Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), _args) if f == "builtin/read-line" => {
+            let stdin = io::stdin();
+            let mut iterator = stdin.lock().lines();
+            let line = iterator.next().unwrap().unwrap();
+            // Need to handle just whitespace.
+            // Might be nice if I could make the real repl thing here.
+            if line == "" {
+                return InterpreterResult::Rewrote{
+                    new_expr: Expr::Exhausted(box Expr::Undefined),
+                    new_sub_expr: Expr::Exhausted(box Expr::Undefined),
+                    sub_expr: expr_clone,
+                    rule: mult_rule,
+                    out_scope: "io".to_string(),
+                    side_effects: vec![],
+                }
+            }
+            let new_expr = read(line.as_ref());
+            InterpreterResult::Rewrote{
+                new_expr: new_expr.clone(),
+                new_sub_expr: new_expr,
+                sub_expr: expr_clone,
+                rule: mult_rule,
+                out_scope: "rules".to_string(),
+                side_effects: vec![],
+            }
+        }
+        
         _ => InterpreterResult::no_change(expr_clone)
     }
 }
@@ -592,6 +623,7 @@ impl Program {
 
     fn run_interpreter_loop(&mut self, scope: String) -> () {
         let expr = self.scopes.get(&scope).unwrap().clone();
+        // println!("{}: {}", scope, expr.pretty_print());
         let interpreter = self.interpreters.get(&scope).unwrap();
         let result = interpreter.step(&expr);
         let meta_expr = result.to_meta_expr(scope.clone(), expr.clone());
@@ -619,7 +651,7 @@ impl Program {
                 let mut current_rules = current_rules.clone();
                 current_rules.push(result.clone().expr());
                 // two places rules live is a bit awkward
-                println!("Updating rules");
+                // println!("Updating rules");
                 self.interpreters = Program::make_interpreters(Program::from_rules_expr(Expr::Array(current_rules.clone())));
                 self.scopes.insert(scope.clone(), Expr::Array(current_rules));
             } else {
@@ -640,7 +672,7 @@ impl Program {
                     current_rules.push(expr);
                     // two places rules live is a bit awkward
                     let rules = Program::from_rules_expr(Expr::Array(current_rules.clone()));
-                    println!("Updating rules {:?}", rules);
+                    // println!("Updating rules {:?}", rules);
                     self.interpreters = Program::make_interpreters(rules);
                     self.scopes.insert(scope.clone(), Expr::Array(current_rules));
                 } else {
