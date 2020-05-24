@@ -23,6 +23,7 @@ pub enum Expr {
     Call(Box<Expr>, Vec<Expr>),
     Map(Vec<(Expr, Expr)>),
     Array(Vec<Expr>),
+    Do(Vec<Expr>),
 }
 
 
@@ -82,6 +83,15 @@ impl Expr {
             Expr::Array(args) => {
                 let p_args : Vec<String> = args.iter().map(|x| x.pretty_print()).collect();
                 format!("[{}]", p_args.join(", "))
+            }
+            Expr::Do(args) => {
+                let mut result = "do {\n".to_string();
+                for arg in args {
+                    result.push_str(format!("{:ident$}{}\n", "", arg.pretty_print(), ident=4).as_ref());
+                }
+                result.push_str("}");
+                // Should really indent here
+                result
             }
         }
     }
@@ -274,6 +284,18 @@ impl Rule {
                         }
                     }
                 }
+                (Expr::Do(args1), Expr::Do(args2)) => {
+                    // Need to get rid of this once we have repeats.
+                    if args1.len() != args2.len() {
+                        failed = true;
+                    } else {
+                        let mut args1_clone = args1.clone();
+                        let mut args2_clone = args2.clone();
+                        for _ in 0..args1.len() {
+                            queue.push_front((args1_clone.pop().unwrap(), args2_clone.pop().unwrap()))
+                        }
+                    }
+                }
                 _ => {
                     failed = true;
                 }
@@ -420,6 +442,10 @@ impl Interpreter {
                 let new_args = args.iter().map(|x| self.substitute(x, env)).collect();
                 Expr::Array(new_args)
             }
+            Expr::Do(args) => {
+                let new_args = args.iter().map(|x| self.substitute(x, env)).collect();
+                Expr::Do(new_args)
+            }
         }
     }
 
@@ -469,6 +495,7 @@ impl Interpreter {
     // what we need to match on.
     fn step(&self, e : & Expr) -> InterpreterResult {
         let e = e.clone();
+        let e_clone = e.clone();
         match e {
             Expr::Undefined => InterpreterResult::no_change(Expr::Exhausted(box e)),
             Expr::Num(_) => self.match_all(&e),
@@ -537,6 +564,34 @@ impl Interpreter {
                     step.wrap(Expr::Array(args))
                 } else {
                     self.match_all(&Expr::Array(args))
+                }
+            }
+            Expr::Do(mut args) => {
+                if let Some(index) = args.iter().position(|e| {
+                    match e {
+                        Expr::Exhausted(_) => false,
+                        _ => true,
+                    }
+                }) {
+                    let expr = mem::replace(&mut args[index], Expr::Undefined);
+                    let step = self.step(&expr);
+                    args[index] = step.clone().expr();
+                    step.wrap(Expr::Do(args))
+                } else {
+                   match self.match_all(&Expr::Do(args.clone())) {
+                       InterpreterResult::NoChange{..} => {
+                            let dummy_rule = Rule {
+                                left: Expr::Undefined,
+                                right: Expr::Undefined,
+                                in_scope: "main".to_string(),
+                                out_scope: "main".to_string(),
+                            };
+                            // deal with empty do?
+                            let new_expr = args.last().unwrap().clone();
+                            InterpreterResult::rewrote(new_expr.clone(), e_clone.clone(), new_expr, dummy_rule, self.scope.clone())
+                       }
+                       x => x
+                   }
                 }
             }
         }

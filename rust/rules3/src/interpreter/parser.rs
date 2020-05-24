@@ -220,25 +220,34 @@ pub fn parse(tokens: Vec<Token>) -> Expr {
                 current = Vec::with_capacity(10); // arbitrary
             }
             Token::CloseCurly => {
-                let length = current.len();
-                let mut pairs = Vec::with_capacity(length / 2);
-                if length % 2 == 0 {
-                    let mut i = 0;
-                    while i < length {
-                        // println!("i {:?}", current);
-                        let second = current.pop().unwrap();
-                        let first = current.pop().unwrap();
-                        pairs.push((first, second));
-                        i += 2;
-                    }
+                let above = exprs_stack.last();
+                if exprs_stack.len() >= 1 && above.unwrap().len() >= 1 && above.unwrap().last().unwrap() == &Expr::Symbol("do".to_string()) {
+                    let expr = Expr::Do(current);
+                    current = exprs_stack.pop().unwrap();
+                    current.pop();
+                    current.push(expr);
                 } else {
-                    panic!("map not even, maybe want to support this for destructoring/punning?")
+
+                    let length = current.len();
+                    let mut pairs = Vec::with_capacity(length / 2);
+                    if length % 2 == 0 {
+                        let mut i = 0;
+                        while i < length {
+                            // println!("i {:?}", current);
+                            let second = current.pop().unwrap();
+                            let first = current.pop().unwrap();
+                            pairs.push((first, second));
+                            i += 2;
+                        }
+                    } else {
+                        panic!("map not even, maybe want to support this for destructoring/punning?")
+                    }
+                    // @performance: Do something better than reverse.
+                    pairs.reverse();
+                    let expr = Expr::Map(pairs);
+                    current = exprs_stack.pop().unwrap();
+                    current.push(expr);
                 }
-                // @performance: Do something better than reverse.
-                pairs.reverse();
-                let expr = Expr::Map(pairs);
-                current = exprs_stack.pop().unwrap();
-                current.push(expr);
             }
             Token::OpenBracket => {
                 exprs_stack.push(current);

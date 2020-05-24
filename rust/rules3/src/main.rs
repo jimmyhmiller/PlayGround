@@ -120,7 +120,10 @@ fn main() {
     /*
     builtin/add-rule(quote({
         left: {sub_expr: ?x, new_sub_expr: ?y, scope: main},
-        right: builtin/println(quote(?x) => quote(?y))
+        right: do {
+            builtin/println(quote(?x) => quote(?y))
+            builtin/read-line()
+        }
         in_scope: meta,
         out_scope: io,
     }))
@@ -154,6 +157,9 @@ fn main() {
         match readline {
             Ok(line) => {
                 rl.add_history_entry(line.as_str());
+                if line == "" {
+                    continue;
+                }
                 program.submit(read(line.as_ref()));
                 print(program.get_main());              
             },
