@@ -33,7 +33,7 @@
     :var
     (.loadArg ^GeneratorAdapter gen (:index code))
     :math
-    (.math ^GeneratorAdapter gen GeneratorAdapter/ADD Type/INT_TYPE)
+    (.math ^GeneratorAdapter gen (:op code) (:op-type code))
     :return-value
     (.returnValue ^GeneratorAdapter gen)))
 
@@ -91,6 +91,7 @@
 ;; I should spend some time thinking about what this language should really look like.
 ;; I think given the jvm, it shouldn't be too hard to bootstrap the whole thing.
 ;; Which would be really really cool.
+
 
 (comment
   (do
