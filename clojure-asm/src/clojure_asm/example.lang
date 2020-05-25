@@ -1,0 +1,48 @@
+import org.objectweb.asm.commons only (Method, GeneratorAdaptor)
+import org.objectweb.asm only (Opcodes, Type, ClassWriter)
+
+let INIT = Method::getMethod "void <init>()";
+
+fn generate-code!(gen: GeneratorAdaptor, code: Code) -> () {
+    match code {
+        Var{index} => {
+            gen.loadArg(gen, index);
+        }
+        Math{op, op-type} => {
+            gen.math(op, op-type);
+        }
+        ReturnValue => {
+            gen.returnValue();
+        }
+    }
+}
+
+fn generate-default-constructor(writer: ClassWriter) -> () {
+    let gen = GeneratorAdapted::new();
+    gen.visitCode();
+    gen.loadThis();
+    gen.invokeConstructor(Type::getType(Object), INIT);
+    gen.returnValue();
+    gen.endMethod();
+}
+
+fn generate-static-method(writer, name, {args, return-type, code}) {
+    let method = Method::new(name, return-type, args.map(_.type).into_array());
+    let gen = GeneratorAdapter::new(Opscodes::ACC_PUBLIC + Opcodes::ACC_STATIC, method, java::null, java::null, writer);
+    code.forEach(line => generate-code!(gen, line))
+    gen.endMethod();
+}
+
+
+
+struct FnDescription {
+    name: String,
+    args: [{type: Type, name: String}],
+    code: [Code]
+}
+
+enum Code {
+    Var{index: int},
+    Math{op: Opcodes, op-type: Type},
+    ReturnValue
+}
