@@ -33,7 +33,15 @@
     :var
     (.loadArg ^GeneratorAdapter gen (:index code))
     :math
-    (.math ^GeneratorAdapter gen (:op code) (:op-type code))
+    (.math  gen (:op code) (:op-type code))
+    :get-static-field
+    (.getStatic gen (:owner code) (:name code) (:result-type code))
+    :invoke-static
+    (.invokeStatic gen (:owner code) (:method code))
+    :invoke-virtual
+    (.invokeVirtual gen (:owner code) (:method code))
+    :pop
+    (.pop gen)
     :return-value
     (.returnValue ^GeneratorAdapter gen)))
 
@@ -65,18 +73,32 @@
                   (.replace ^String class-name \/ \.) (.toByteArray ^ClassWriter  writer) nil)
     class-name))
 
+;; Maybe something like this for our higher level thing?
+[:invoke "println" [:get-field "java.lang.System" "out"] [:var 1]]
 
 (def fn-example
   {:type :fn
    :name "add"
    :args [{:type Type/INT_TYPE
            :name 'x}
-          {:type Type/INT_TYPE
+          {:type (Type/getType String)
            :name 'y}]
    :code [{:type :var
            :index (int 0)}
+          {:type :get-static-field
+           :owner (Type/getType System)
+           :name "out"
+           :result-type (Type/getType (class System/out))}
           {:type :var
            :index (int 1)}
+          {:type :invoke-virtual
+           :owner (Type/getType (class System/out))
+           :method (Method. "println" Type/VOID_TYPE (into-array Type [(Type/getType String)]))}
+          {:type :var
+           :index (int 1)}
+          {:type :invoke-static
+           :owner (Type/getType Integer)
+           :method (Method. "parseInt" Type/INT_TYPE (into-array Type [(Type/getType String)]))}
           {:type :math
            :op GeneratorAdapter/ADD
            :op-type Type/INT_TYPE}
@@ -85,7 +107,11 @@
 
 (def fn-name (make-fn fn-example))
 
-(add/invoke 2 3)
+(add/invoke 2 "3")
+
+;; Next step is probably to add some layer on top of this one.
+;; Then do the translation.
+
 
 
 ;; I should spend some time thinking about what this language should really look like.
