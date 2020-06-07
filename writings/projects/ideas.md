@@ -30,7 +30,7 @@
   * Over slack
   * Open to pair
   * Need a pair
-* Estimatation Software
+* Estimation Software
   * Resizable rectangles
   * https://www.estigator.com/
   * Tanglejs

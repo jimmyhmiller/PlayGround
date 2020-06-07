@@ -1,0 +1,3 @@
+# Escaping the Tryranny of Asynchronous Programming
+
+As Javascript developers we are at home writing asynchronous code. This journey that was quite difficult. We had to learn all sorts of different mechanisms for achieving our goals without blocking. Perhaps we began with simple callbacks, we adventured out to find Promise, we might have taken a brief tour of generators, and perhaps found our comfort in async/await. And yet, there is one unexplored avenue, one assumption that we do not question, why do we need any of these mechanisms? Couldn't we just write normal, straight forward code like languages that allow blocking? Could we do this while still being asynchronous? In this talk, I will explore one approach dating back to the 1960s that allows us to do exactly that.
