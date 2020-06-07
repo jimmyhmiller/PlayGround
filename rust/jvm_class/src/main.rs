@@ -113,21 +113,10 @@ impl<'a> BinaryReader<'a> {
         self.buffer.clear();
         Ok(u16::from_be_bytes(bytes))
     }
-    fn read_n(&mut self, n : u64) -> io::Result<Vec<u8>> {
-        // No idea about efficiency here.
-        let mut buffer = Vec::with_capacity(n as usize);
-        let mut limited_reader = self.reader.take(n);
-        limited_reader.read_to_end(&mut buffer)?;
-        Ok(buffer)
-    }
 
     // I'm sure there is a better way to do these methods.
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         self.reader.read_exact(buf)
-    }
-
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.reader.read_to_end(buf)
     }
 }
 
@@ -140,8 +129,6 @@ fn read_class_file() -> io::Result<ClassFile> {
         reader: &mut reader,
         buffer: vec![],
     };
-
-
 
     let mut buffer = [0; 4];
     binary_reader.read_exact(&mut buffer)?;

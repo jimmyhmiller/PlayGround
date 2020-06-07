@@ -120,10 +120,9 @@ fn main() {
 
 
     builtin/add-rule(quote({
-        left: {expr: ?x, new_expr: ?y, scope: main},
+        left: {sub_expr: ?x, new_sub_expr: ?y, scope: main},
         right: do {
             builtin/println(quote(?x) => quote(?y))
-            builtin/read-line()
         }
         in_scope: meta,
         out_scope: io,

@@ -26,9 +26,9 @@ fn generate-default-constructor(writer: ClassWriter) -> () {
     gen.endMethod();
 }
 
-fn generate-static-method(writer, name, {args, return-type, code}) {
+fn generate-static-method(writer, name, { {
     let method = Method::new(name, return-type, args.map(_.type).into_array());
-    let gen = GeneratorAdapter::new(Opscodes::ACC_PUBLIC + Opcodes::ACC_STATIC, method, java::null, java::null, writer);
+    let gen = GeneratorAdapter::new(Opscodes::ACC_PUBLIC + Opcodes::ACC_STATIC, method, Java::null, Java::null, writer);
     code.forEach(line => generate-code!(gen, line))
     gen.endMethod();
 }
