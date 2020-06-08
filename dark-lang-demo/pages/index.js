@@ -79,6 +79,7 @@ const HelloWorld = ({ onNext, hasNext, onPrevious, step }) => {
 
 const Greet = ({ onNext, hasNext, onPrevious, step }) => {
   const [result, setResult] = useState();
+  const [name, setName] = useState("");
 
   return (
     <Step
@@ -86,14 +87,19 @@ const Greet = ({ onNext, hasNext, onPrevious, step }) => {
       hasNext={hasNext}
       onNext={onNext}
       onPrevious={onPrevious}
-      title="Dark Lang Demo!!!"
-      text="Welcome to a Dark Lang Demo. To begin we are going to make simple hello world dark route."
-      code={`GET /hello_world => "hello world"`}
+      title="Greeting People"
+      text={
+        <div>
+          <p>We are now going to make an endpoint that will accept the name as a url parameter and greet that person</p>
+          <input type="text" placeholder="name" value={name} onChange={e => setName(e.target.value)} />
+        </div>
+      }
+      code={`GET /greet/${name === "" ? ":name" : name} => "hello ${name === "" ? ":name" : name}"`}
       onClick={({setResult, setSuccess}) => async () => {
           setResult("");
-          const response = await fetch("/api/hello_world");
+          const response = await fetch(`/api/greet/${name}`);
           const body = await response.text();
-          if (body.toLowerCase() === "hello world") {
+          if (body.toLowerCase() === `hello ${name}`) {
             setResult("Success!")
             setSuccess(true)
             return;
