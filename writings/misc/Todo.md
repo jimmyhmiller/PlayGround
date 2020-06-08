@@ -4,7 +4,7 @@
 4. Create ADT representation for j-lang
 5. Create time traveling debugger
 6. If bored work on weather app.
-7. Create dark lang talk (++)
+7. Create dark lang talk (+++)
 8. Work on Escaping the Tyranny of Async Programming Talk (+)
 9. Make rules have names
 10. Make rules removeable.
