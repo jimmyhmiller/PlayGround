@@ -211,6 +211,7 @@ pub fn parse(tokens: Vec<Token>) -> Expr {
             // Token::Symbol(s) if s == "True" => current.push(Expr::Bool(true)),
             // Token::Symbol(s) if s == "False" => current.push(Expr::Bool(false)),
             Token::Symbol(s) if s.starts_with("?") => current.push(Expr::LogicVariable(s.to_string())),
+            Token::Symbol(s) if s.starts_with("@") => current.push(Expr::Scope(s[1..].to_string())),
             Token::Symbol(s) => current.push(Expr::Symbol(s.to_string())),
             Token::Integer(s) => current.push(Expr::Num(s.parse::<i64>().unwrap())),
             // Token::Float(s) => current.push(Expr::Float(s.parse::<f64>().unwrap())),
