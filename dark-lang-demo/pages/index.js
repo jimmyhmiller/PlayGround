@@ -13,10 +13,13 @@ const Step = ({ title, text, code, onClick, onNext, hasNext, step, onPrevious })
           blockquote {
             max-height: 300px;
             overflow: scroll;
+            max-width:700px;
           }
 
           article {
-            min-height: 400px;
+            width: 90vw;
+            max-height: 80vh;
+            max-width: 90vw;
             display: flex;
             flex-direction: column;
           }
@@ -104,7 +107,49 @@ const Greet = ({ onNext, hasNext, onPrevious, step }) => {
             setSuccess(true)
             return;
           }
-          setResult(`Expected "hello world" got "${body}" with status ${response.status}`)
+          setResult(`Expected "hello ${name}" got "${body}" with status ${response.status}`)
+        }
+      }
+    />
+  )
+}
+
+const Echo = ({ onNext, hasNext, onPrevious, step }) => {
+  const [result, setResult] = useState();
+
+  return (
+    <Step
+      step={step}
+      hasNext={hasNext}
+      onNext={onNext}
+      onPrevious={onPrevious}
+      title="Greeting People"
+      text={
+        <div>
+          <p>We are going to now try out a POST method with some JSON</p>
+        </div>
+      }
+      code={`POST /echo => Whatever was passed in the body as json`}
+      onClick={({setResult, setSuccess}) => async () => {
+          let message = {
+            pleaseEchoThisBack: "Echo!"
+          }
+          setResult("");
+          const response = await fetch(`/api/echo`, {
+            method: "POST",
+            body: JSON.stringify(message)
+          });
+          if (!(response.headers.get('content-type') || "").includes("application/json")) {
+            setResult(`Wrong Content-Type: Expected application/json got ${response.headers.get('content-type')}`)
+            return;
+          }
+          const body = await response.json();
+          if (JSON.stringify(body) === JSON.stringify(message)) {
+            setResult("Success!")
+            setSuccess(true)
+            return;
+          }
+          setResult(`Expected ${JSON.stringify(message)} got ${JSON.stringify(body)} with status ${response.status}`)
         }
       }
     />
@@ -112,7 +157,7 @@ const Greet = ({ onNext, hasNext, onPrevious, step }) => {
 }
 
 
-const steps = [HelloWorld, Greet]
+const steps = [HelloWorld, Greet, Echo]
 
 const Demo = () => {
   const [step, setStep] = useState(0);
