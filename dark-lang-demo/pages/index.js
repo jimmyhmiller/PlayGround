@@ -1,6 +1,7 @@
 import Head from 'next/head'
 import { useState } from 'react';
 
+// Need to add a next button and a way to transition between steps
 
 const Step = ({ title, text, code, onClick }) => {
   const [result, setResult] = useState();
