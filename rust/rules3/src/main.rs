@@ -134,6 +134,8 @@ fn main() {
         in_scope: meta,
         out_scope: io,
     }))
+
+    builtin/set-scope(@history, [])
    
     */
 

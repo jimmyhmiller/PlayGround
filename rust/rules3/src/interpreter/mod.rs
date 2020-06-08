@@ -18,6 +18,7 @@ pub enum Expr {
     Undefined,
     Num(i64),
     Symbol(String),
+    Scope(String),
     LogicVariable(String),
     Exhausted(Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
@@ -54,6 +55,7 @@ impl Expr {
         match self {
             Expr::Num(n) => format!("{:?}", n),
             Expr::Symbol(n) => n.to_string(),
+            Expr::Scope(n) => format!("@{:}", n.to_string()),
             Expr::LogicVariable(n) => n.to_string(),
             Expr::Undefined => "Undefined".to_string(),
             Expr::Exhausted(box e) => {
@@ -225,6 +227,16 @@ pub struct Rule {
 }
 
 impl Rule {
+
+    fn noop_rule() -> Rule {
+        Rule {
+            left: Expr::Undefined,
+            right: Expr::Undefined,
+            in_scope: "main".to_string(),
+            out_scope: "main".to_string(),
+        }
+    }
+
     fn build_env(& self, expr : & Expr) -> Option<HashMap<String, Expr>> {
         let mut env : HashMap<String, Expr> = HashMap::new();
         let mut queue = VecDeque::new();
@@ -243,6 +255,8 @@ impl Rule {
                     env.insert(s.to_string(), t.clone());
                 },
                 (Expr::Symbol(ref s1), Expr::Symbol(ref s2)) if s1 == s2 => {},
+                // What does it mean to match on a scope? Probably should think more about this.
+                (Expr::Scope(ref s1), Expr::Scope(ref s2)) if s1 == s2 => {},
                 (Expr::Num(ref n1), Expr::Num(ref n2)) if n1 == n2 => {},
                 (Expr::Call(box f1, args1), Expr::Call(box f2, args2)) => {
                     if args1.len() != args2.len() {
@@ -256,7 +270,6 @@ impl Rule {
                         }
                     }
                 }
-                // This is depending on key order which is wrong. Need to fix.
                 (Expr::Map(args1), Expr::Map(args2)) => {
                     // @performance Don't allocate here.
                     // Maybe there is some temp area? Would that be in interpreter then?
@@ -397,11 +410,12 @@ impl InterpreterResult {
 pub struct Interpreter {
     rules: Vec<Rule>,
     scope: String,
+    scopes: HashMap<String, Expr>,
 }
 
 
 impl Interpreter {
-    pub fn new(rules: Vec<Rule>, scope: String) -> Interpreter {
+    pub fn new(rules: Vec<Rule>, scope: String, scopes: HashMap<String, Expr>,) -> Interpreter {
 
         // When I construct the Interpreter (or add new rules)
         // I can compute what things I care about matching on.
@@ -409,6 +423,7 @@ impl Interpreter {
         Interpreter {
             rules,
             scope,
+            scopes,
         }
     }
 
@@ -416,6 +431,8 @@ impl Interpreter {
         match rhs {
             Expr::Num(_) => rhs.clone(),
             Expr::Symbol(_) => rhs.clone(),
+            // Can we get here with scope? I'm really not sure
+            Expr::Scope(_) => Expr::Undefined,
             Expr::LogicVariable(s) => {
                 if let Some(x) = env.get(s) {
                     x.clone()
@@ -493,13 +510,31 @@ impl Interpreter {
 
     // Really we should be able to understand what our rules do to know
     // what we need to match on.
-    fn step(&self, e : & Expr) -> InterpreterResult {
+    fn step(&self, e : & Expr, previous_scope_value: & Expr) -> InterpreterResult {
         let e = e.clone();
         let e_clone = e.clone();
         match e {
             Expr::Undefined => InterpreterResult::no_change(Expr::Exhausted(box e)),
             Expr::Num(_) => self.match_all(&e),
             Expr::Symbol(_) => self.match_all(&e),
+            // Need to think about what to do when stepping on scope.
+            // This might be the right place to resolve it? 
+            // Is it always exhausted?
+            Expr::Scope(n) if n == self.scope => InterpreterResult::rewrote(
+                Expr::Exhausted(box previous_scope_value.clone()), 
+                e_clone,
+                Expr::Exhausted(box previous_scope_value.clone()),
+                Rule::noop_rule(),
+                self.scope.clone()),
+            Expr::Scope(n) => {
+                let new_expr = self.scopes.get(&n).unwrap();
+                InterpreterResult::rewrote(
+                    Expr::Exhausted(box new_expr.clone()),
+                    e_clone,
+                    Expr::Exhausted(box new_expr.clone()),
+                    Rule::noop_rule(),
+                    self.scope.clone())
+            }
             Expr::LogicVariable(_) => self.match_all(&e),
             Expr::Exhausted(_) => InterpreterResult::no_change(e),
             Expr::Call(f @ box Expr::Exhausted(_), mut args) => {
@@ -510,7 +545,7 @@ impl Interpreter {
                     }
                 }) {
                     let expr = mem::replace(&mut args[index], Expr::Undefined);
-                    let step = self.step(&expr);
+                    let step = self.step(&expr, previous_scope_value);
                     args[index] = step.clone().expr();
                     step.wrap(Expr::Call(f, args))
                 } else {
@@ -527,7 +562,7 @@ impl Interpreter {
                 }
             }
             Expr::Call(box f, args) => {
-                let step = self.step(&f);
+                let step = self.step(&f, previous_scope_value);
                 step.wrap(Expr::Call(box step.clone().expr(), args))
             }
             Expr::Map(mut args) => {
@@ -539,11 +574,11 @@ impl Interpreter {
                 }) {
                     let (k, v) = mem::replace(&mut args[index], (Expr::Undefined, Expr::Undefined));
                     if let Expr::Exhausted(_) = k {
-                        let step = self.step(&v);
+                        let step = self.step(&v, previous_scope_value);
                         args[index] = (k, step.clone().expr());
                         step.wrap(Expr::Map(args))
                     } else {
-                        let step = self.step(&k);
+                        let step = self.step(&k, previous_scope_value);
                         args[index] = (step.clone().expr(), v);
                         step.wrap(Expr::Map(args))
                     }
@@ -559,7 +594,7 @@ impl Interpreter {
                     }
                 }) {
                     let expr = mem::replace(&mut args[index], Expr::Undefined);
-                    let step = self.step(&expr);
+                    let step = self.step(&expr, previous_scope_value);
                     args[index] = step.clone().expr();
                     step.wrap(Expr::Array(args))
                 } else {
@@ -574,21 +609,15 @@ impl Interpreter {
                     }
                 }) {
                     let expr = mem::replace(&mut args[index], Expr::Undefined);
-                    let step = self.step(&expr);
+                    let step = self.step(&expr, previous_scope_value);
                     args[index] = step.clone().expr();
                     step.wrap(Expr::Do(args))
                 } else {
                    match self.match_all(&Expr::Do(args.clone())) {
                        InterpreterResult::NoChange{..} => {
-                            let dummy_rule = Rule {
-                                left: Expr::Undefined,
-                                right: Expr::Undefined,
-                                in_scope: "main".to_string(),
-                                out_scope: "main".to_string(),
-                            };
                             // deal with empty do?
                             let new_expr = args.last().unwrap().clone();
-                            InterpreterResult::rewrote(new_expr.clone(), e_clone.clone(), new_expr, dummy_rule, self.scope.clone())
+                            InterpreterResult::rewrote(new_expr.clone(), e_clone.clone(), new_expr, Rule::noop_rule(), self.scope.clone())
                        }
                        x => x
                    }
@@ -615,8 +644,8 @@ impl Program {
         scopes.insert("rules".to_string(), Program::make_rules(rules.clone()));
         scopes.insert("io".to_string(), Expr::Undefined);
         Program {
-            scopes: scopes,
-            interpreters: Program::make_interpreters(rules),
+            scopes: scopes.clone(),
+            interpreters: Program::make_interpreters(rules, scopes),
         }
     }
 
@@ -657,35 +686,37 @@ impl Program {
     }
 
 
-    fn make_interpreters(rules: Vec<Rule>) -> HashMap<String, Interpreter> {
+    fn make_interpreters(rules: Vec<Rule>, scopes: HashMap<String, Expr>) -> HashMap<String, Interpreter> {
         let mut interpreters: HashMap<String, Interpreter> = HashMap::new();
-        interpreters.insert("main".to_string(), Interpreter::new(vec![], "main".to_string()));
-        interpreters.insert("meta".to_string(), Interpreter::new(vec![], "meta".to_string()));
-        interpreters.insert("rules".to_string(), Interpreter::new(vec![], "rules".to_string()));
-        interpreters.insert("io".to_string(), Interpreter::new(vec![], "io".to_string()));
+        // Need to not be cloning scopes here. That's a really bad idea.
+        interpreters.insert("main".to_string(), Interpreter::new(vec![], "main".to_string(), scopes.clone()));
+        interpreters.insert("meta".to_string(), Interpreter::new(vec![], "meta".to_string(), scopes.clone()));
+        interpreters.insert("rules".to_string(), Interpreter::new(vec![], "rules".to_string(), scopes.clone()));
+        interpreters.insert("io".to_string(), Interpreter::new(vec![], "io".to_string(), scopes.clone()));
         for rule in rules {
             if interpreters.contains_key(&rule.in_scope) {
                 let interpreter = interpreters.get_mut(&rule.in_scope).unwrap();
                 interpreter.rules.push(rule);
             } else {
                 let scope = rule.in_scope.clone();
-                interpreters.insert(scope.clone(), Interpreter::new(vec![rule], scope));
+                interpreters.insert(scope.clone(), Interpreter::new(vec![rule], scope, scopes.clone()));
             }
         }
         interpreters
     }
 
 
-    fn run_interpreter_loop(&mut self, scope: String) -> () {
-        let expr = self.scopes.get(&scope).unwrap().clone();
+    fn run_interpreter_loop(&mut self, scope_entry: & (String, Expr)) -> () {
+        let expr = self.scopes.get(&scope_entry.0).unwrap().clone();
         // println!("{}: {}", scope, expr.pretty_print());
-        let interpreter = self.interpreters.get(&scope).unwrap();
-        let result = interpreter.step(&expr);
-        let meta_expr = result.to_meta_expr(scope.clone(), expr.clone());
+        let interpreter = self.interpreters.get(&scope_entry.0).unwrap();
+        let result = interpreter.step(&expr, &scope_entry.1);
+        let meta_expr = result.to_meta_expr(scope_entry.0.clone(), expr.clone());
         // Make sure we don't try to meta eval our meta.
-        if scope != "meta" {
+        if scope_entry.0 != "meta" {
+            let scope_entry = self.scopes.remove_entry("meta").unwrap();
             self.scopes.insert("meta".to_string(), meta_expr);
-            self.eval_scope("meta".to_string());
+            self.eval_scope(scope_entry);
         }
 
 
@@ -694,26 +725,26 @@ impl Program {
         // meta scope could have replaced our expression.
         // If that happened, we don't want to override.
         // Need a better way other than checking equality.
-        if self.scopes.get(&scope).unwrap().clone() != expr {
+        if self.scopes.get(&scope_entry.0).unwrap().clone() != expr {
             // meta intervened. If that is the case, we don't want to finish
             // evaling this expression and we don't want to do any side effects.
             return;
         }
 
-        if scope == "rules" {
+        if scope_entry.0 == "rules" {
             // Need to be able to do more than append.
             if let Expr::Array(current_rules) = self.scopes.get("rules").clone().unwrap() {
                 let mut current_rules = current_rules.clone();
                 current_rules.push(result.clone().expr());
                 // two places rules live is a bit awkward
                 // println!("Updating rules");
-                self.interpreters = Program::make_interpreters(Program::from_rules_expr(Expr::Array(current_rules.clone())));
-                self.scopes.insert(scope.clone(), Expr::Array(current_rules));
+                self.interpreters = Program::make_interpreters(Program::from_rules_expr(Expr::Array(current_rules.clone())), self.scopes.clone());
+                self.scopes.insert(scope_entry.0.clone(), Expr::Array(current_rules));
             } else {
                 panic!("Updating rules failed");
             }
         } else {
-            self.scopes.insert(scope.clone(), result.clone().expr());
+            self.scopes.insert(scope_entry.0.clone(), result.clone().expr());
         }
         
 
@@ -728,7 +759,7 @@ impl Program {
                     // two places rules live is a bit awkward
                     let rules = Program::from_rules_expr(Expr::Array(current_rules.clone()));
                     // println!("Updating rules {:?}", rules);
-                    self.interpreters = Program::make_interpreters(rules);
+                    self.interpreters = Program::make_interpreters(rules, self.scopes.clone());
                     self.scopes.insert(scope.clone(), Expr::Array(current_rules));
                 } else {
                     panic!("Updating rules failed");
@@ -737,27 +768,31 @@ impl Program {
                 continue;
             }
             // I don't think we put no_changes as side-effects, so I'm not worried about no out_scope
-            // This is probably where I will have to think about @scope annotations.
-            // If we have some expression like append(1, @nums) on the scope @nums. We will be changing,
-            // @nums to be that expression here. So we should probably resolve the current value of the current
-            // scope if it is references inside expr.
+
+            // What do I do about scopes that don't exist?
+            // Also how do I initialize scopes?
+            let scope_entry = self.scopes.remove_entry(&scope).unwrap();
             self.scopes.insert(scope.clone(), expr);
-            self.eval_scope(scope);
+            self.eval_scope(scope_entry);
         }
        
     }
 
-    pub fn eval_scope(&mut self, scope: String) {
-        while !self.scopes.get(&scope).unwrap().is_exhausted() {
-            self.run_interpreter_loop(scope.clone());
+
+
+    pub fn eval_scope(&mut self, scope_entry: (String, Expr)) {
+        let scope = &scope_entry.clone().0;
+        while !self.scopes.get(scope).unwrap().is_exhausted() {
+            self.run_interpreter_loop(&scope_entry);
         }
     }
 
     // Maybe scope is passed?
     pub fn submit(&mut self, expr: Expr) {
         // Really need to get better at references vs not especially for string.
+        let scope_entry = self.scopes.remove_entry("main").unwrap();
         self.scopes.insert("main".to_string(), expr);
-        self.eval_scope("main".to_string());
+        self.eval_scope(scope_entry);
     }
 
 
@@ -771,3 +806,15 @@ impl Program {
 pub fn print(expr : Expr) {
     println!("{}", expr.pretty_print());
 }
+
+
+
+
+// So it seems in order to do the things I need to do, 
+// I have to get rid of interpreter and just use program.
+// I should have realized this. I mean technically I thought about
+// it but I thought that returning results was all I needed, but that
+// definitely isn't the case. Interpreters need access to all the scopes
+// to be able to set values and things.
+// So instead of just a static scope, I will need a current scope.
+// And instead of each interpreter having rules I will need rules by scope.
