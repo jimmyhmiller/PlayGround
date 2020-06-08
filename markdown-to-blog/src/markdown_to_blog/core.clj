@@ -5,7 +5,7 @@
 
 
 (def markdown
-  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/Card Driven Development.md"))
+  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/Building Meander in Meander.md"))
 
 
 (defmulti transform
@@ -44,7 +44,7 @@
 
 (defmethod transform :pre [[_ _ [tag attr source] :as content]]
   (if (not= tag :code)
-    (throw (ex-info "Pre without conde" content))
+    (throw (ex-info "Pre without code" content))
     [(keyword (string/capitalize (:class attr))) {} (str "\n  {`\n" (indent-lines source) "\n  `}\n")]))
 
 (defmethod transform :code [[_ attr body :as content]]
@@ -68,7 +68,8 @@
    (clojure.walk/postwalk transform)
    (hiccup/html)))
 
-(convert-md markdown)
+(println
+ (convert-md markdown))
 
 (comment
   (add-watch (var convert-md)
