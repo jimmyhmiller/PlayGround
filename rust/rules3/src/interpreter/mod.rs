@@ -737,6 +737,10 @@ impl Program {
                 continue;
             }
             // I don't think we put no_changes as side-effects, so I'm not worried about no out_scope
+            // This is probably where I will have to think about @scope annotations.
+            // If we have some expression like append(1, @nums) on the scope @nums. We will be changing,
+            // @nums to be that expression here. So we should probably resolve the current value of the current
+            // scope if it is references inside expr.
             self.scopes.insert(scope.clone(), expr);
             self.eval_scope(scope);
         }
