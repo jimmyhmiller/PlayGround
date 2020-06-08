@@ -10,5 +10,5 @@
 10. Make rules removeable.
 11. Consider doing some file loader
 12. Play with integrations into node/python
-13. Write articles
+13. Write articles (+)
 14. Read
