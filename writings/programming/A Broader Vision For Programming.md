@@ -1,0 +1,4 @@
+# A Broader Vision For Programming
+
+There is a flurry of activity, mostly by academics and hobbyists, exploring the future of programming. These views explorations often follow broad themes. There are those who are interested in broadening who programs or what it means to programs. These include movements like, no-code, low-code and more broadly, end-user programming. There are those who seek to change the tooling around programming, general, ridding our selfs of text files. The most prominent of these are structural editing and visual programming. I find these to incredibly interesting avenues to explore and full of useful lessons. Yet at the same time I don't see them solving the issues I have. In this blogpost I want to talk about the problems I face as engineer and explore some potential solutions.
+
