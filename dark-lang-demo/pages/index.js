@@ -123,7 +123,7 @@ const Echo = ({ onNext, hasNext, onPrevious, step }) => {
       hasNext={hasNext}
       onNext={onNext}
       onPrevious={onPrevious}
-      title="Greeting People"
+      title="Echoing a POST"
       text={
         <div>
           <p>We are going to now try out a POST method with some JSON</p>
@@ -137,7 +137,10 @@ const Echo = ({ onNext, hasNext, onPrevious, step }) => {
           setResult("");
           const response = await fetch(`/api/echo`, {
             method: "POST",
-            body: JSON.stringify(message)
+            body: JSON.stringify(message),
+            headers: {
+              "Content-Type": "application/json"
+            }
           });
           if (!(response.headers.get('content-type') || "").includes("application/json")) {
             setResult(`Wrong Content-Type: Expected application/json got ${response.headers.get('content-type')}`)
@@ -156,8 +159,113 @@ const Echo = ({ onNext, hasNext, onPrevious, step }) => {
   )
 }
 
+const PostMessage = ({ onNext, hasNext, onPrevious, step }) => {
+  const [result, setResult] = useState();
+  const [key, setKey] = useState("");
+  const [message, setMessage] = useState("");
 
-const steps = [HelloWorld, Greet, Echo]
+  return (
+    <Step
+      step={step}
+      hasNext={hasNext}
+      onNext={onNext}
+      onPrevious={onPrevious}
+      title="Saving Some Data"
+      text={
+        <div>
+          <p>Now we want to be able to send a message, with a key and get that message back.</p>
+          <input type="text" placeholder="key" value={key} onChange={e => setKey(e.target.value)} />
+          <input type="text" placeholder="message" value={message} onChange={e => setMessage(e.target.value)} />
+        </div>
+      }
+      code={
+`POST /messages {key, message} => {success: true}
+GET /messages/:key => { message }`}
+      onClick={({setResult, setSuccess}) => async () => {
+          setResult("");
+          const postResponse = await fetch(`/api/messages`, {
+            method: "POST",
+            body: JSON.stringify({key, message}),
+            headers: {
+              "Content-Type": "application/json"
+            }
+          });
+          const postBody = await postResponse.json();
+
+          if (postBody.success !== true) {
+            setResult(`Expected {success: true} got ${postBody} with status ${response.status}`)
+            return;
+          }
+
+          const response = await fetch(`/api/messages/${key}`);
+          if (!(response.headers.get('content-type') || "").includes("application/json")) {
+            setResult(`Wrong Content-Type: Expected application/json got ${response.headers.get('content-type')}`)
+            return;
+          }
+          const body = await response.json();
+          if (body.message === message) {
+            setResult("Success!")
+            setSuccess(true)
+            return;
+          }
+          setResult(`Expected ${message} got ${JSON.stringify(body)} with status ${response.status}`)
+        }
+      }
+    />
+  )
+}
+
+const GetMessages = ({ onNext, hasNext, onPrevious, step }) => {
+  const [result, setResult] = useState();
+  const [messages, setMessages] = useState([]);
+  return (
+    <Step
+      step={step}
+      hasNext={hasNext}
+      onNext={onNext}
+      onPrevious={onPrevious}
+      title="Get Messages"
+      text={
+        <div>
+          <p>Now we want to get a full list of messages</p>
+          <ul>
+            {messages.map((message, i) => {
+              return <li key={i}>{message}</li>
+            })}
+          </ul>
+        </div>
+      }
+      code={`GET /messages => {messages: [...]}`}
+      onClick={({setResult, setSuccess}) => async () => {
+          setResult("");
+
+          const response = await fetch(`/api/messages`);
+          if (!(response.headers.get('content-type') || "").includes("application/json")) {
+            setResult(`Wrong Content-Type: Expected application/json got ${response.headers.get('content-type')}`)
+            return;
+          }
+          const body = await response.json();
+          if (body.messages && body.messages.length) {
+            setMessages(body.messages)
+            setResult("Success!")
+            setSuccess(true)
+            return;
+          }
+          setResult(`Expected an array of messages got ${JSON.stringify(body)} with status ${response.status}`)
+        }
+      }
+    />
+  )
+}
+
+// Need to demo feature flags.
+// Maybe I do that by changing this route return the key as well?
+// I need to demo workers, pusher seems like a good option?
+// Or I could just do something in the background with polling?
+// Maybe I just have some computed property I am constantly polling for.
+// That would definitely be easier.
+
+const steps = [HelloWorld, Greet, Echo, PostMessage, GetMessages]
 
 const Demo = () => {
   const [step, setStep] = useState(0);
