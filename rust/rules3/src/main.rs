@@ -1,5 +1,6 @@
 #![feature(box_syntax, box_patterns)]
-#![allow(dead_code)]
+#![feature(move_ref_pattern)]
+// #![allow(dead_code)]
 
 mod interpreter;
 use interpreter::*;
@@ -22,18 +23,6 @@ impl Validator for InputValidator {
     }
 }
 
-
-
-
-// Need to figure out name because it is in scope
-// and intepreter
-// Maybe the interpreter needs to no have rules or name?
-#[derive(Debug, Clone)]
-struct Scope {
-    name: String,
-    interpreter: Interpreter,
-    expr: Expr,
-}
 
 fn main() {
 
@@ -72,6 +61,12 @@ fn main() {
         right: vec![("thing", "?x")].into(),
         in_scope: "main".to_string(),
         out_scope: "main".to_string(),
+    };
+    let rule4 = Rule {
+        left: "stuff".into(),
+        right: "things".into(),
+        in_scope: "history".to_string(),
+        out_scope: "history".to_string(),
     };
     // let rule4 = Rule {
     //     left: read("{
@@ -120,6 +115,15 @@ fn main() {
 
 
     builtin/add-rule(quote({
+        left: {expr: ?x, new_expr: ?y, scope: main},
+        right: do {
+            builtin/println(quote(?x) => quote(?y))
+        }
+        in_scope: meta,
+        out_scope: io,
+    }))
+
+    builtin/add-rule(quote({
         left: {sub_expr: ?x, new_sub_expr: ?y, scope: main},
         right: do {
             builtin/println(quote(?x) => quote(?y))
@@ -135,6 +139,30 @@ fn main() {
         out_scope: io,
     }))
 
+
+    // Need to either make `and` or `as` so I can match and name
+    builtin/set-scope(quote(@history), [])
+    builtin/add-rule(quote({
+        left: {expr: ?expr, new_expr: ?new_expr, sub_expr: ?sub_expr, new_sub_expr: ?new_sub_expr, scope: main},
+        right: 
+            builtin/set-scope(quote(@history), builtin/push-back(quote({expr: ?expr,
+                                                                  new_expr: ?new_expr,
+                                                                  sub_expr: ?sub_expr,
+                                                                  new_sub_expr: ?new_sub_expr,
+                                                                  scope: main})
+                                                            , @history))
+        in_scope: meta,
+        out_scope: io,
+    }))
+
+    builtin/add-rule(quote({
+        left: test(),
+        right: builtin/set-scope(quote(@history), builtin/push-back({scope: main2}, @history)),
+        in_scope: main,
+        out_scope: main,
+    }))
+
+
     builtin/set-scope(@history, [])
    
     */
@@ -143,7 +171,7 @@ fn main() {
 
 
     let mut program = Program::new(
-        vec![rule_sub, rule_mult, rule_plus, rule1, rule2, rule3]
+        vec![rule_sub, rule_mult, rule_plus, rule1, rule2, rule3, rule4]
     );
 
 
@@ -154,31 +182,56 @@ fn main() {
     // Should I spend time implementing things in it?
     // Or look at doing a socket to editor based thing?
 
-    loop {
-        let readline = rl.readline(">> ");
-        match readline {
-            Ok(line) => {
-                rl.add_history_entry(line.as_str());
-                if line == "" {
-                    continue;
-                }
-                program.submit(read(line.as_ref()));
-                print(program.get_main());              
-            },
-            Err(ReadlineError::Interrupted) => {
-                println!("Exiting");
-                break
-            },
-            Err(ReadlineError::Eof) => {
-                println!("Exiting");
-                break
-            },
-            Err(err) => {
-                println!("Error: {:?}", err);
-                break
-            }
-        }
-    }
+    program.submit(read("builtin/set-scope(quote(@history), [])"));
+    // program.submit(read("    builtin/add-rule(quote({
+    //     left: {expr: ?expr, new_expr: ?new_expr, sub_expr: ?sub_expr, new_sub_expr: ?new_sub_expr, scope: main},
+    //     right: 
+    //         builtin/set-scope(quote(@history), builtin/push-back(quote({expr: ?expr,
+    //                                                               new_expr: ?new_expr,
+    //                                                               sub_expr: ?sub_expr,
+    //                                                               new_sub_expr: ?new_sub_expr,
+    //                                                               scope: main})
+    //                                                         , @history))
+    //     in_scope: meta,
+    //     out_scope: io,
+    // }))"));
+
+    // program.submit(read("builtin/add-rule(quote({
+    //     left: {sub_expr: ?x, new_sub_expr: ?y, scope: history},
+    //     right: do {
+    //         builtin/println(quote(?x) => quote(?y))
+    //     }
+    //     in_scope: meta,
+    //     out_scope: io,
+    // }))"));
+    program.submit(read("fact(2)"));
+    print(program.get_main());
+
+    // loop {
+    //     let readline = rl.readline(">> ");
+    //     match readline {
+    //         Ok(line) => {
+    //             rl.add_history_entry(line.as_str());
+    //             if line == "" {
+    //                 continue;
+    //             }
+    //             program.submit(read(line.as_ref()));
+    //             print(program.get_main());              
+    //         },
+    //         Err(ReadlineError::Interrupted) => {
+    //             println!("Exiting");
+    //             break
+    //         },
+    //         Err(ReadlineError::Eof) => {
+    //             println!("Exiting");
+    //             break
+    //         },
+    //         Err(err) => {
+    //             println!("Error: {:?}", err);
+    //             break
+    //         }
+    //     }
+    // }
 
    
 }
@@ -209,3 +262,9 @@ fn main() {
 // need to add loading from a file
 // need to add watching a file
 // need to consider adding let
+
+
+
+
+// Sooooo
+// I got history working but it is absurdly absurdly slow....

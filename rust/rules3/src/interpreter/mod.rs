@@ -12,7 +12,7 @@ use std::io::{self, BufRead};
 
 
 
-#[allow(dead_code)]
+// #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     Undefined,
@@ -36,6 +36,13 @@ impl Expr {
         }
     }
 
+    fn exhaust(self) -> Expr {
+        match self {
+            Expr::Exhausted(_) => self,
+            _ => Expr::Exhausted(box self)
+        }
+    } 
+
     fn get_symbol(self) -> Option<String> {
         match self {
             Expr::Symbol(s) => Some(s),
@@ -46,7 +53,7 @@ impl Expr {
     // really need to change exhausted
     fn de_exhaust(self) -> Expr {
         match self {
-            Expr::Exhausted(box x) => x,
+            Expr::Exhausted(box x) => x.de_exhaust(),
             _ => self
         }
     }
@@ -67,7 +74,7 @@ impl Expr {
             Expr::Call(box f, args) => {
                 let p_f = f.pretty_print();
                 let p_args : Vec<String> = args.iter().map(|x| x.pretty_print()).collect();
-                format!("({} {})", p_f, p_args.join(" "))
+                format!("{}({})", p_f, p_args.join(" "))
             }
             Expr::Map(entries) => {
                 let mut entries = entries.clone();
@@ -108,114 +115,6 @@ impl Expr {
 }
 
 
-fn builtins(expr: Expr) -> InterpreterResult {
-
-    let sub_rule : Rule = Rule {
-        left: Expr::Undefined,
-        right: Expr::Undefined,
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let mult_rule : Rule = Rule {
-        left: Expr::Undefined,
-        right: Expr::Undefined,
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let expr_clone = expr.clone();
-    match expr {
-        Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/-" => {
-            let a = args[0].clone().get_num();
-            let b = args[1].clone().get_num();
-            if let (Some(x), Some(y)) = (a,b) {
-                let result = Expr::Num(x - y);
-                let result_clone = result.clone();
-                InterpreterResult::rewrote(result, expr_clone, result_clone, sub_rule, "main".to_string())
-            } else {
-                InterpreterResult::no_change(expr_clone)
-            }
-        }
-        Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/+" => {
-            let a = args[0].clone().get_num();
-            let b = args[1].clone().get_num();
-            if let (Some(x), Some(y)) = (a,b) {
-                let result = Expr::Num(x + y);
-                let result_clone = result.clone();
-                InterpreterResult::rewrote(result, expr_clone, result_clone, sub_rule, "main".to_string())
-            } else {
-                InterpreterResult::no_change(expr_clone)
-            }
-        }
-        Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/*" => {
-            let a = args[0].clone().get_num();
-            let b = args[1].clone().get_num();
-            if let (Some(x), Some(y)) = (a,b) {
-                let result = Expr::Num(x * y);
-                let result_clone = result.clone();
-                InterpreterResult::rewrote(result, expr_clone, result_clone, mult_rule, "main".to_string())
-            } else {
-                InterpreterResult::no_change(expr_clone)
-            }
-        }
-        Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/println" => {
-            let print_string = args.iter().map(|x | x.pretty_print()).collect::<Vec<String>>().join(" ");
-            println!("{}", print_string);
-            // Maybe I need the idea of a void rule?
-            // How else am I going to make multiple rules match?
-            InterpreterResult::rewrote( 
-                Expr::Exhausted(box Expr::Undefined), 
-                expr_clone,  
-                Expr::Exhausted(box Expr::Undefined), 
-                mult_rule, 
-                "io".to_string())
-        }
-        Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/add-rule" => {
-            let rule = args[0].clone().de_exhaust();
-            InterpreterResult::NoChange{
-                expr: Expr::Exhausted(box expr_clone.clone()),
-                sub_expr: Expr::Exhausted(box expr_clone.clone()),
-                side_effects: vec![
-                    InterpreterResult::Rewrote{
-                        new_expr: rule.clone(),
-                        new_sub_expr: rule,
-                        sub_expr: expr_clone,
-                        rule: mult_rule,
-                        out_scope: "rules".to_string(),
-                        side_effects: vec![],
-                    }
-                ]
-            }
-        }
-        Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), _args) if f == "builtin/read-line" => {
-            let stdin = io::stdin();
-            let mut iterator = stdin.lock().lines();
-            let line = iterator.next().unwrap().unwrap();
-            // Need to handle just whitespace.
-            // Might be nice if I could make the real repl thing here.
-            if line == "" {
-                return InterpreterResult::Rewrote{
-                    new_expr: Expr::Exhausted(box Expr::Undefined),
-                    new_sub_expr: Expr::Exhausted(box Expr::Undefined),
-                    sub_expr: expr_clone,
-                    rule: mult_rule,
-                    out_scope: "io".to_string(),
-                    side_effects: vec![],
-                }
-            }
-            let new_expr = read(line.as_ref());
-            InterpreterResult::Rewrote{
-                new_expr: new_expr.clone(),
-                new_sub_expr: new_expr,
-                sub_expr: expr_clone,
-                rule: mult_rule,
-                out_scope: "rules".to_string(),
-                side_effects: vec![],
-            }
-        }
-        
-        _ => InterpreterResult::no_change(expr_clone)
-    }
-}
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,232 +304,13 @@ impl InterpreterResult {
         }
     }
 }
-
-#[derive(Debug, Clone)]
-pub struct Interpreter {
-    rules: Vec<Rule>,
-    scope: String,
-    scopes: HashMap<String, Expr>,
-}
-
-
-impl Interpreter {
-    pub fn new(rules: Vec<Rule>, scope: String, scopes: HashMap<String, Expr>,) -> Interpreter {
-
-        // When I construct the Interpreter (or add new rules)
-        // I can compute what things I care about matching on.
-        // So if all my rules are on calls, I can only match on those.
-        Interpreter {
-            rules,
-            scope,
-            scopes,
-        }
-    }
-
-    fn substitute(& self, rhs : & Expr, env : & HashMap<String, Expr>) -> Expr {
-        match rhs {
-            Expr::Num(_) => rhs.clone(),
-            Expr::Symbol(_) => rhs.clone(),
-            // Can we get here with scope? I'm really not sure
-            Expr::Scope(_) => Expr::Undefined,
-            Expr::LogicVariable(s) => {
-                if let Some(x) = env.get(s) {
-                    x.clone()
-                } else {
-                    panic!("Some invalid environment! {} {:?}", s, rhs);
-                }
-            }
-            Expr::Undefined => {
-                panic!("Undefined! {:?}", rhs)
-            }
-            Expr::Exhausted(x) => {
-                Expr::Exhausted(box self.substitute(x, env))
-            }
-            Expr::Call(box f, args) => {
-                let new_args = args.iter().map(|x| self.substitute(x, env)).collect();
-                Expr::Call(box self.substitute(f, env), new_args)
-            }
-            Expr::Map(args) => {
-                
-                let new_args = args.iter().map(|(x, y)| (self.substitute(x, env), self.substitute(y, env))).collect();
-                Expr::Map(new_args)
-            }
-            Expr::Array(args) => {
-                let new_args = args.iter().map(|x| self.substitute(x, env)).collect();
-                Expr::Array(new_args)
-            }
-            Expr::Do(args) => {
-                let new_args = args.iter().map(|x| self.substitute(x, env)).collect();
-                Expr::Do(new_args)
-            }
-        }
-    }
-
-    fn match_all(& self, e : & Expr) -> InterpreterResult {
-        let mut main_result = None;
-        let mut side_effects = vec![];
-        // Need to handle multiple matches in different scopes
-        for rule in &self.rules {
-            if let Some(env) = rule.build_env(e) {
-                if rule.out_scope == self.scope && main_result.is_none() {
-                    main_result = Some((rule.clone(), self.substitute(&rule.right, &env)));
-                } else if rule.out_scope != self.scope {
-                    let new_expr = self.substitute(&rule.right, &env);
-                    let result = InterpreterResult::Rewrote{
-                        sub_expr: e.clone(),
-                        new_expr: new_expr.clone(),
-                        new_sub_expr: new_expr.clone(),
-                        side_effects: vec![],
-                        rule: rule.clone(),
-                        out_scope: rule.out_scope.clone()
-                    };
-                    side_effects.push(result);
-                }
-            }
-        }
-        if let Some((rule, expr)) = main_result {
-            let expr_clone = expr.clone();
-            InterpreterResult::Rewrote{
-                sub_expr: e.clone(),
-                new_expr: expr,
-                new_sub_expr: expr_clone,
-                out_scope: rule.out_scope.clone(),
-                rule,
-                side_effects,
-            }
-        } else {
-            InterpreterResult::NoChange{
-                expr: Expr::Exhausted(box e.clone()),
-                sub_expr: Expr::Exhausted(box e.clone()),
-                side_effects,
-            }
-        }
-    }
-
-
-    // Really we should be able to understand what our rules do to know
-    // what we need to match on.
-    fn step(&self, e : & Expr, previous_scope_value: & Expr) -> InterpreterResult {
-        let e = e.clone();
-        let e_clone = e.clone();
-        match e {
-            Expr::Undefined => InterpreterResult::no_change(Expr::Exhausted(box e)),
-            Expr::Num(_) => self.match_all(&e),
-            Expr::Symbol(_) => self.match_all(&e),
-            // Need to think about what to do when stepping on scope.
-            // This might be the right place to resolve it? 
-            // Is it always exhausted?
-            Expr::Scope(n) if n == self.scope => InterpreterResult::rewrote(
-                Expr::Exhausted(box previous_scope_value.clone()), 
-                e_clone,
-                Expr::Exhausted(box previous_scope_value.clone()),
-                Rule::noop_rule(),
-                self.scope.clone()),
-            Expr::Scope(n) => {
-                let new_expr = self.scopes.get(&n).unwrap();
-                InterpreterResult::rewrote(
-                    Expr::Exhausted(box new_expr.clone()),
-                    e_clone,
-                    Expr::Exhausted(box new_expr.clone()),
-                    Rule::noop_rule(),
-                    self.scope.clone())
-            }
-            Expr::LogicVariable(_) => self.match_all(&e),
-            Expr::Exhausted(_) => InterpreterResult::no_change(e),
-            Expr::Call(f @ box Expr::Exhausted(_), mut args) => {
-                if let Some(index) = args.iter().position(|e| {
-                    match e {
-                        Expr::Exhausted(_) => false,
-                        _ => true,
-                    }
-                }) {
-                    let expr = mem::replace(&mut args[index], Expr::Undefined);
-                    let step = self.step(&expr, previous_scope_value);
-                    args[index] = step.clone().expr();
-                    step.wrap(Expr::Call(f, args))
-                } else {
-                    let f_clone = f.clone();
-                    if let box Expr::Exhausted(box Expr::Symbol(fn_name)) = f_clone {
-                        if fn_name.starts_with("builtin/") {
-                            builtins(Expr::Call(f, args))
-                        } else {
-                            self.match_all(&Expr::Call(f, args))
-                        }
-                    }  else {
-                        self.match_all(&Expr::Call(f, args))
-                    }
-                }
-            }
-            Expr::Call(box f, args) => {
-                let step = self.step(&f, previous_scope_value);
-                step.wrap(Expr::Call(box step.clone().expr(), args))
-            }
-            Expr::Map(mut args) => {
-                if let Some(index) = args.iter().position(|(k, v)| {
-                    match (k, v) {
-                        (&Expr::Exhausted(_), &Expr::Exhausted(_))  => false,
-                        _ => true,
-                    }
-                }) {
-                    let (k, v) = mem::replace(&mut args[index], (Expr::Undefined, Expr::Undefined));
-                    if let Expr::Exhausted(_) = k {
-                        let step = self.step(&v, previous_scope_value);
-                        args[index] = (k, step.clone().expr());
-                        step.wrap(Expr::Map(args))
-                    } else {
-                        let step = self.step(&k, previous_scope_value);
-                        args[index] = (step.clone().expr(), v);
-                        step.wrap(Expr::Map(args))
-                    }
-                } else {
-                    self.match_all(&Expr::Map(args))
-                }
-            }
-            Expr::Array(mut args) => {
-                if let Some(index) = args.iter().position(|e| {
-                    match e {
-                        Expr::Exhausted(_) => false,
-                        _ => true,
-                    }
-                }) {
-                    let expr = mem::replace(&mut args[index], Expr::Undefined);
-                    let step = self.step(&expr, previous_scope_value);
-                    args[index] = step.clone().expr();
-                    step.wrap(Expr::Array(args))
-                } else {
-                    self.match_all(&Expr::Array(args))
-                }
-            }
-            Expr::Do(mut args) => {
-                if let Some(index) = args.iter().position(|e| {
-                    match e {
-                        Expr::Exhausted(_) => false,
-                        _ => true,
-                    }
-                }) {
-                    let expr = mem::replace(&mut args[index], Expr::Undefined);
-                    let step = self.step(&expr, previous_scope_value);
-                    args[index] = step.clone().expr();
-                    step.wrap(Expr::Do(args))
-                } else {
-                   match self.match_all(&Expr::Do(args.clone())) {
-                       InterpreterResult::NoChange{..} => {
-                            // deal with empty do?
-                            let new_expr = args.last().unwrap().clone();
-                            InterpreterResult::rewrote(new_expr.clone(), e_clone.clone(), new_expr, Rule::noop_rule(), self.scope.clone())
-                       }
-                       x => x
-                   }
-                }
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Program {
+    current_rules: Vec<Rule>,
+    current_scope: String,
+    rules_by_scope: HashMap<String, Vec<Rule>>,
     scopes: HashMap<String, Expr>,
-    interpreters: HashMap<String, Interpreter>,
+    previous_scope_value: Expr,
 }
 
 impl Program {
@@ -643,9 +323,13 @@ impl Program {
         scopes.insert("meta".to_string(), Expr::Undefined);
         scopes.insert("rules".to_string(), Program::make_rules(rules.clone()));
         scopes.insert("io".to_string(), Expr::Undefined);
+        let initial_rules = Program::make_rules_by_scope(rules);
         Program {
+            current_rules: initial_rules.get("main").unwrap().to_vec(),
+            current_scope: "main".to_string(),
             scopes: scopes.clone(),
-            interpreters: Program::make_interpreters(rules, scopes),
+            rules_by_scope: initial_rules,
+            previous_scope_value: Expr::Undefined,
         }
     }
 
@@ -685,32 +369,48 @@ impl Program {
        
     }
 
-
-    fn make_interpreters(rules: Vec<Rule>, scopes: HashMap<String, Expr>) -> HashMap<String, Interpreter> {
-        let mut interpreters: HashMap<String, Interpreter> = HashMap::new();
+    fn make_rules_by_scope(rules: Vec<Rule>) -> HashMap<String, Vec<Rule>> {
+        let mut rules_by_scope: HashMap<String, Vec<Rule>> = HashMap::new();
         // Need to not be cloning scopes here. That's a really bad idea.
-        interpreters.insert("main".to_string(), Interpreter::new(vec![], "main".to_string(), scopes.clone()));
-        interpreters.insert("meta".to_string(), Interpreter::new(vec![], "meta".to_string(), scopes.clone()));
-        interpreters.insert("rules".to_string(), Interpreter::new(vec![], "rules".to_string(), scopes.clone()));
-        interpreters.insert("io".to_string(), Interpreter::new(vec![], "io".to_string(), scopes.clone()));
+        rules_by_scope.insert("main".to_string(), vec![]);
+        rules_by_scope.insert("meta".to_string(), vec![]);
+        rules_by_scope.insert("rules".to_string(), vec![]);
+        rules_by_scope.insert("io".to_string(), vec![]);
         for rule in rules {
-            if interpreters.contains_key(&rule.in_scope) {
-                let interpreter = interpreters.get_mut(&rule.in_scope).unwrap();
-                interpreter.rules.push(rule);
+            if rules_by_scope.contains_key(&rule.in_scope) {
+                let scope = rules_by_scope.get_mut(&rule.in_scope).unwrap();
+                scope.push(rule);
             } else {
                 let scope = rule.in_scope.clone();
-                interpreters.insert(scope.clone(), Interpreter::new(vec![rule], scope, scopes.clone()));
+                rules_by_scope.insert(scope.clone(), vec![rule]);
             }
         }
-        interpreters
+        rules_by_scope
     }
+
+    fn set_scope_and_rules(&mut self, scope_entry: (String, Expr)) {
+        // current scope should probably be a ref?
+        self.current_scope = scope_entry.0.clone();
+        self.current_rules = self.rules_by_scope.get(&scope_entry.0).unwrap().clone();
+        self.previous_scope_value = scope_entry.1;
+    } 
+
 
 
     fn run_interpreter_loop(&mut self, scope_entry: & (String, Expr)) -> () {
         let expr = self.scopes.get(&scope_entry.0).unwrap().clone();
-        // println!("{}: {}", scope, expr.pretty_print());
-        let interpreter = self.interpreters.get(&scope_entry.0).unwrap();
-        let result = interpreter.step(&expr, &scope_entry.1);
+        // println!("{}:  {:?}\n{:?}\n\n", self.current_scope, expr, self.current_rules);
+        // if scope_entry.0 == "io" {
+        //     println!("{}", expr.pretty_print());
+        // }
+
+        // let interpreter = self.interpreters.get(&scope_entry.0).unwrap();
+        // Need to handle scope not existing
+        // self.set_scope_and_rules(&scope_entry.0);
+        let result = self.step(&expr);
+
+        // Not a huge fan of this current scope stuff. I also don't
+
         let meta_expr = result.to_meta_expr(scope_entry.0.clone(), expr.clone());
         // Make sure we don't try to meta eval our meta.
         if scope_entry.0 != "meta" {
@@ -718,6 +418,11 @@ impl Program {
             self.scopes.insert("meta".to_string(), meta_expr);
             self.eval_scope(scope_entry);
         }
+
+        // This is an important setting of scope entry, because
+        // otherwise we would be stuck in meta. I ultimately want to
+        // get rid of current scope and rules.
+        self.set_scope_and_rules(scope_entry.clone());
 
 
         // need to handle out_scope properly?
@@ -738,8 +443,10 @@ impl Program {
                 current_rules.push(result.clone().expr());
                 // two places rules live is a bit awkward
                 // println!("Updating rules");
-                self.interpreters = Program::make_interpreters(Program::from_rules_expr(Expr::Array(current_rules.clone())), self.scopes.clone());
-                self.scopes.insert(scope_entry.0.clone(), Expr::Array(current_rules));
+                let new_rules = Program::from_rules_expr(Expr::Array(current_rules.clone()));
+                // self.interpreters = Program::make_interpreters(new_rules, self.scopes.clone());
+                self.rules_by_scope = Program::make_rules_by_scope(new_rules.clone());
+                self.scopes.insert("rules".to_string(), Expr::Array(current_rules.clone()));
             } else {
                 panic!("Updating rules failed");
             }
@@ -757,10 +464,10 @@ impl Program {
                     let mut current_rules = current_rules.clone();
                     current_rules.push(expr);
                     // two places rules live is a bit awkward
-                    let rules = Program::from_rules_expr(Expr::Array(current_rules.clone()));
-                    // println!("Updating rules {:?}", rules);
-                    self.interpreters = Program::make_interpreters(rules, self.scopes.clone());
-                    self.scopes.insert(scope.clone(), Expr::Array(current_rules));
+                    let new_rules = Program::from_rules_expr(Expr::Array(current_rules.clone()));
+                    // This is ugly. Figure out a better way to do all of this rule handling.
+                    self.rules_by_scope = Program::make_rules_by_scope(new_rules);
+                    self.scopes.insert("rules".to_string(), Expr::Array(current_rules.clone()));
                 } else {
                     panic!("Updating rules failed");
                 }
@@ -771,7 +478,7 @@ impl Program {
 
             // What do I do about scopes that don't exist?
             // Also how do I initialize scopes?
-            let scope_entry = self.scopes.remove_entry(&scope).unwrap();
+            let scope_entry = self.scopes.remove_entry(&scope).unwrap_or((scope.clone(), Expr::Undefined));
             self.scopes.insert(scope.clone(), expr);
             self.eval_scope(scope_entry);
         }
@@ -782,6 +489,7 @@ impl Program {
 
     pub fn eval_scope(&mut self, scope_entry: (String, Expr)) {
         let scope = &scope_entry.clone().0;
+        self.set_scope_and_rules(scope_entry.clone());
         while !self.scopes.get(scope).unwrap().is_exhausted() {
             self.run_interpreter_loop(&scope_entry);
         }
@@ -798,6 +506,363 @@ impl Program {
 
     pub fn get_main(&self) -> Expr {
         self.scopes.get("main").unwrap().clone()
+    }
+
+
+
+    fn substitute(& self, rhs : & Expr, env : & HashMap<String, Expr>) -> Expr {
+        match rhs {
+            Expr::Num(_) => rhs.clone(),
+            Expr::Symbol(_) => rhs.clone(),
+            Expr::Scope(n) if n == &self.current_scope => self.previous_scope_value.clone(),
+            Expr::Scope(n) => {
+                if let Some(new_expr) = self.scopes.get(n) {
+                    new_expr.clone()
+                } else {
+                    Expr::Undefined
+                }
+            }
+            Expr::LogicVariable(s) => {
+                if let Some(x) = env.get(s) {
+                    x.clone()
+                } else {
+                    panic!("Some invalid environment! {} {:?}", s, rhs);
+                }
+            }
+            Expr::Undefined => {
+                panic!("Undefined! {:?}", rhs)
+            }
+            Expr::Exhausted(box Expr::Scope(n)) => {
+                Expr::Exhausted(box Expr::Scope(n.clone()))
+            }
+            Expr::Exhausted(x) => {
+                Expr::Exhausted(box self.substitute(x, env))
+            }
+            Expr::Call(box f, args) => {
+                let new_args = args.iter().map(|x| self.substitute(x, env)).collect();
+                Expr::Call(box self.substitute(f, env), new_args)
+            }
+            Expr::Map(args) => {
+                
+                let new_args = args.iter().map(|(x, y)| (self.substitute(x, env), self.substitute(y, env))).collect();
+                Expr::Map(new_args)
+            }
+            Expr::Array(args) => {
+                let new_args = args.iter().map(|x| self.substitute(x, env)).collect();
+                Expr::Array(new_args)
+            }
+            Expr::Do(args) => {
+                let new_args = args.iter().map(|x| self.substitute(x, env)).collect();
+                Expr::Do(new_args)
+            }
+        }
+    }
+
+    fn match_all(& self, e : & Expr) -> InterpreterResult {
+        let mut main_result = None;
+        let mut side_effects = vec![];
+        // Need to handle multiple matches in different scopes
+        for rule in &self.current_rules {
+            if self.current_scope == "meta" {
+                // println!("{:?}, {:?}", rule, e);
+            }
+            if let Some(env) = rule.build_env(e) {
+                if rule.out_scope == self.current_scope && main_result.is_none() {
+                    main_result = Some((rule.clone(), self.substitute(&rule.right, &env)));
+                } else if rule.out_scope != self.current_scope {
+                    let new_expr = self.substitute(&rule.right, &env);
+                    let result = InterpreterResult::Rewrote{
+                        sub_expr: e.clone(),
+                        new_expr: new_expr.clone(),
+                        new_sub_expr: new_expr.clone(),
+                        side_effects: vec![],
+                        rule: rule.clone(),
+                        out_scope: rule.out_scope.clone()
+                    };
+                    side_effects.push(result);
+                }
+            }
+        }
+        if let Some((rule, expr)) = main_result {
+            let expr_clone = expr.clone();
+            InterpreterResult::Rewrote{
+                sub_expr: e.clone(),
+                new_expr: expr,
+                new_sub_expr: expr_clone,
+                out_scope: rule.out_scope.clone(),
+                rule,
+                side_effects,
+            }
+        } else {
+            InterpreterResult::NoChange{
+                expr: e.clone().exhaust(),
+                sub_expr: e.clone().exhaust(),
+                side_effects,
+            }
+        }
+    }
+
+
+    // Really we should be able to understand what our rules do to know
+    // what we need to match on.
+    fn step(&mut self, e : & Expr) -> InterpreterResult {
+        let e = e.clone();
+        // println!("{:?}", e);
+        let e_clone = e.clone();
+        match e {
+            Expr::Undefined => InterpreterResult::no_change(e.exhaust()),
+            Expr::Num(_) => self.match_all(&e),
+            Expr::Symbol(_) => self.match_all(&e),
+            // Need to think about what to do when stepping on scope.
+            // This might be the right place to resolve it? 
+            // Is it always exhausted?
+            Expr::Scope(n) if n == self.current_scope => InterpreterResult::rewrote(
+                self.previous_scope_value.clone().exhaust(), 
+                e_clone,
+                self.previous_scope_value.clone().exhaust(),
+                Rule::noop_rule(),
+                self.current_scope.clone()),
+            Expr::Scope(n) => {
+                // println!("{}", n);
+                if let Some(new_expr) = self.scopes.get(&n) {
+                    // println!("{:?}", new_expr);
+                    InterpreterResult::rewrote(
+                        new_expr.clone().exhaust(),
+                        e_clone,
+                        new_expr.clone().exhaust(),
+                        Rule::noop_rule(),
+                        self.current_scope.clone())
+                } else {
+                    InterpreterResult::no_change(e_clone)
+                }
+            }
+            Expr::LogicVariable(_) => self.match_all(&e),
+            Expr::Exhausted(_) => InterpreterResult::no_change(e),
+            Expr::Call(f @ box Expr::Exhausted(_), mut args) => {
+                if let Some(index) = args.iter().position(|e| {
+                    match e {
+                        Expr::Exhausted(_) => false,
+                        _ => true,
+                    }
+                }) {
+                    let expr = mem::replace(&mut args[index], Expr::Undefined);
+                    let step = self.step(&expr);
+                    args[index] = step.clone().expr();
+                    step.wrap(Expr::Call(f, args))
+                } else {
+                    let f_clone = f.clone();
+                    if let box Expr::Exhausted(box Expr::Symbol(fn_name)) = f_clone {
+                        if fn_name.starts_with("builtin/") {
+                            self.builtins(Expr::Call(f, args))
+                        } else {
+                            self.match_all(&Expr::Call(f, args))
+                        }
+                    }  else {
+                        self.match_all(&Expr::Call(f, args))
+                    }
+                }
+            }
+            Expr::Call(box f, args) => {
+                let step = self.step(&f);
+                step.wrap(Expr::Call(box step.clone().expr(), args))
+            }
+            Expr::Map(mut args) => {
+                if let Some(index) = args.iter().position(|(k, v)| {
+                    match (k, v) {
+                        (&Expr::Exhausted(_), &Expr::Exhausted(_))  => false,
+                        _ => true,
+                    }
+                }) {
+                    let (k, v) = mem::replace(&mut args[index], (Expr::Undefined, Expr::Undefined));
+                    if let Expr::Exhausted(_) = k {
+                        let step = self.step(&v);
+                        args[index] = (k, step.clone().expr());
+                        step.wrap(Expr::Map(args))
+                    } else {
+                        let step = self.step(&k);
+                        args[index] = (step.clone().expr(), v);
+                        step.wrap(Expr::Map(args))
+                    }
+                } else {
+                    self.match_all(&Expr::Map(args))
+                }
+            }
+            Expr::Array(mut args) => {
+                if let Some(index) = args.iter().position(|e| {
+                    match e {
+                        Expr::Exhausted(_) => false,
+                        _ => true,
+                    }
+                }) {
+                    let expr = mem::replace(&mut args[index], Expr::Undefined);
+                    let step = self.step(&expr);
+                    args[index] = step.clone().expr();
+                    step.wrap(Expr::Array(args))
+                } else {
+                    self.match_all(&Expr::Array(args))
+                }
+            }
+            Expr::Do(mut args) => {
+                if let Some(index) = args.iter().position(|e| {
+                    match e {
+                        Expr::Exhausted(_) => false,
+                        _ => true,
+                    }
+                }) {
+                    let expr = mem::replace(&mut args[index], Expr::Undefined);
+                    let step = self.step(&expr);
+                    args[index] = step.clone().expr();
+                    step.wrap(Expr::Do(args))
+                } else {
+                   match self.match_all(&Expr::Do(args.clone())) {
+                       InterpreterResult::NoChange{..} => {
+                            // deal with empty do?
+                            let new_expr = args.last().unwrap().clone();
+                            InterpreterResult::rewrote(new_expr.clone(), e_clone.clone(), new_expr, Rule::noop_rule(), self.current_scope.clone())
+                       }
+                       x => x
+                   }
+                }
+            }
+        }
+    }
+
+    fn builtins(&mut self, expr: Expr) -> InterpreterResult {
+
+        let expr_clone = expr.clone();
+        match expr {
+            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/-" => {
+                let a = args[0].clone().get_num();
+                let b = args[1].clone().get_num();
+                if let (Some(x), Some(y)) = (a,b) {
+                    let result = Expr::Num(x - y);
+                    let result_clone = result.clone();
+                    InterpreterResult::rewrote(result, expr_clone, result_clone, Rule::noop_rule(), self.current_scope.clone())
+                } else {
+                    InterpreterResult::no_change(expr_clone)
+                }
+            }
+            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/+" => {
+                let a = args[0].clone().get_num();
+                let b = args[1].clone().get_num();
+                if let (Some(x), Some(y)) = (a,b) {
+                    let result = Expr::Num(x + y);
+                    let result_clone = result.clone();
+                    InterpreterResult::rewrote(result, expr_clone, result_clone, Rule::noop_rule(), self.current_scope.clone())
+                } else {
+                    InterpreterResult::no_change(expr_clone)
+                }
+            }
+            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/*" => {
+                let a = args[0].clone().get_num();
+                let b = args[1].clone().get_num();
+                if let (Some(x), Some(y)) = (a,b) {
+                    let result = Expr::Num(x * y);
+                    let result_clone = result.clone();
+                    InterpreterResult::rewrote(result, expr_clone, result_clone, Rule::noop_rule(), self.current_scope.clone())
+                } else {
+                    InterpreterResult::no_change(expr_clone)
+                }
+            }
+            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/push-back" => {
+                // Probably don't actually want to de_exhaust here?
+                // Maybe just take one layer off?
+                let expr = args[0].clone().de_exhaust();
+                let array = args[1].clone().de_exhaust();
+                if let Expr::Array(mut array) = array {
+                    array.push(expr);
+                    let result = Expr::Array(array);
+                    let result_clone = result.clone();
+                    InterpreterResult::rewrote(result, expr_clone, result_clone, Rule::noop_rule(), self.current_scope.clone())
+                } else {
+                    InterpreterResult::no_change(expr_clone)
+                }
+            }
+            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/println" => {
+                // println!("{:?}", args);
+                let print_string = args.iter().map(|x | x.pretty_print()).collect::<Vec<String>>().join(" ");
+                println!("{}", print_string);
+                // Maybe I need the idea of a void rule?
+                // How else am I going to make multiple rules match?
+                InterpreterResult::rewrote( 
+                    Expr::Exhausted(box Expr::Undefined), 
+                    expr_clone,  
+                    Expr::Exhausted(box Expr::Undefined), 
+                    Rule::noop_rule(), 
+                    "io".to_string())
+            }
+            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/add-rule" => {
+                let rule = args[0].clone().de_exhaust();
+                InterpreterResult::NoChange{
+                    expr: Expr::Exhausted(box expr_clone.clone()),
+                    sub_expr: Expr::Exhausted(box expr_clone.clone()),
+                    side_effects: vec![
+                        InterpreterResult::Rewrote{
+                            new_expr: rule.clone(),
+                            new_sub_expr: rule,
+                            sub_expr: expr_clone,
+                            rule: Rule::noop_rule(),
+                            out_scope: "rules".to_string(),
+                            side_effects: vec![],
+                        }
+                    ]
+                }
+            }
+            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), _args) if f == "builtin/read-line" => {
+                let stdin = io::stdin();
+                let mut iterator = stdin.lock().lines();
+                let line = iterator.next().unwrap().unwrap();
+                // Need to handle just whitespace.
+                // Might be nice if I could make the real repl thing here.
+                if line == "" {
+                    return InterpreterResult::Rewrote{
+                        new_expr: Expr::Exhausted(box Expr::Undefined),
+                        new_sub_expr: Expr::Exhausted(box Expr::Undefined),
+                        sub_expr: expr_clone,
+                        rule: Rule::noop_rule(),
+                        out_scope: "io".to_string(),
+                        side_effects: vec![],
+                    }
+                }
+                let new_expr = read(line.as_ref());
+                InterpreterResult::Rewrote{
+                    new_expr: new_expr.clone(),
+                    new_sub_expr: new_expr,
+                    sub_expr: expr_clone,
+                    rule: Rule::noop_rule(),
+                    out_scope: "rules".to_string(),
+                    side_effects: vec![],
+                }
+            }
+            
+            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/set-scope" => {
+                let scope = args[0].clone().de_exhaust();
+                let expr = args[1].clone().de_exhaust();
+                
+                if let Expr::Scope(name) = scope {
+
+                    InterpreterResult::Rewrote{
+                        new_expr: Expr::Exhausted(box Expr::Undefined),
+                        new_sub_expr: Expr::Exhausted(box Expr::Undefined),
+                        sub_expr: expr_clone,
+                        rule: Rule::noop_rule(),
+                        out_scope: self.current_scope.clone(),
+                        side_effects: vec![InterpreterResult::Rewrote{
+                            new_expr: expr.clone(),
+                            new_sub_expr: expr,
+                            sub_expr: self.scopes.get(&name).unwrap_or(&Expr::Undefined).clone(),
+                            rule: Rule::noop_rule(),
+                            out_scope: name.clone(),
+                            side_effects: vec![],
+                        }],
+                    }
+                } else {
+                    InterpreterResult::no_change(expr_clone)
+                }
+            }
+            
+            _ => InterpreterResult::no_change(expr_clone)
+        }
     }
 }
 
@@ -818,3 +883,5 @@ pub fn print(expr : Expr) {
 // to be able to set values and things.
 // So instead of just a static scope, I will need a current scope.
 // And instead of each interpreter having rules I will need rules by scope.
+
+// Need to make a vector append.
