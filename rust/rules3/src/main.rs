@@ -1,5 +1,4 @@
 #![feature(box_syntax, box_patterns)]
-#![feature(move_ref_pattern)]
 // #![allow(dead_code)]
 
 mod interpreter;
@@ -183,18 +182,18 @@ fn main() {
     // Or look at doing a socket to editor based thing?
 
     program.submit(read("builtin/set-scope(quote(@history), [])"));
-    // program.submit(read("    builtin/add-rule(quote({
-    //     left: {expr: ?expr, new_expr: ?new_expr, sub_expr: ?sub_expr, new_sub_expr: ?new_sub_expr, scope: main},
-    //     right: 
-    //         builtin/set-scope(quote(@history), builtin/push-back(quote({expr: ?expr,
-    //                                                               new_expr: ?new_expr,
-    //                                                               sub_expr: ?sub_expr,
-    //                                                               new_sub_expr: ?new_sub_expr,
-    //                                                               scope: main})
-    //                                                         , @history))
-    //     in_scope: meta,
-    //     out_scope: io,
-    // }))"));
+    program.submit(read("    builtin/add-rule(quote({
+        left: {expr: ?expr, new_expr: ?new_expr, sub_expr: ?sub_expr, new_sub_expr: ?new_sub_expr, scope: main},
+        right: 
+            builtin/set-scope(quote(@history), builtin/push-back(quote({expr: ?expr,
+                                                                  new_expr: ?new_expr,
+                                                                  sub_expr: ?sub_expr,
+                                                                  new_sub_expr: ?new_sub_expr,
+                                                                  scope: main})
+                                                            , @history))
+        in_scope: meta,
+        out_scope: io,
+    }))"));
 
     // program.submit(read("builtin/add-rule(quote({
     //     left: {sub_expr: ?x, new_sub_expr: ?y, scope: history},
@@ -204,7 +203,7 @@ fn main() {
     //     in_scope: meta,
     //     out_scope: io,
     // }))"));
-    program.submit(read("fact(2)"));
+    program.submit(read("fact(10)"));
     print(program.get_main());
 
     // loop {
@@ -268,3 +267,4 @@ fn main() {
 
 // Sooooo
 // I got history working but it is absurdly absurdly slow....
+// Need to start actually caring about performance and getting rid of clones
