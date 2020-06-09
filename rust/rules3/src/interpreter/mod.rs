@@ -1,3 +1,5 @@
+
+
 pub mod parser;
 mod helpers;
 
@@ -54,6 +56,13 @@ impl Expr {
     fn de_exhaust(self) -> Expr {
         match self {
             Expr::Exhausted(box x) => x.de_exhaust(),
+            _ => self
+        }
+    }
+
+    fn de_exhaust_ref(&self) -> &Expr {
+        match self {
+            Expr::Exhausted(box x) => x,
             _ => self
         }
     }
@@ -136,11 +145,9 @@ impl Rule {
         }
     }
 
-    fn build_env(& self, expr : & Expr) -> Option<HashMap<String, Expr>> {
-        let mut env : HashMap<String, Expr> = HashMap::new();
-        let mut queue = VecDeque::new();
-        let expr_clone = expr.clone();
-        queue.push_front((self.left.clone(), expr_clone));
+    fn build_env<'a>(& self, expr : &'a Expr, mut env : HashMap<String, &'a Expr>) -> Option<HashMap<String, &'a Expr>> {
+        let mut queue: VecDeque<(&Expr, &Expr)> = VecDeque::new();
+        queue.push_front((&self.left, &expr));
         let mut failed = false;
         while !queue.is_empty() && !failed {
             let elem = queue.pop_front().unwrap();
@@ -151,7 +158,7 @@ impl Rule {
                     queue.push_front((x, t));
                 },
                 (Expr::LogicVariable(s), t) => {
-                    env.insert(s.to_string(), t.clone());
+                    env.insert(s.to_string(), t);
                 },
                 (Expr::Symbol(ref s1), Expr::Symbol(ref s2)) if s1 == s2 => {},
                 // What does it mean to match on a scope? Probably should think more about this.
@@ -161,23 +168,19 @@ impl Rule {
                     if args1.len() != args2.len() {
                         failed = true;
                     } else {
-                        let mut args1_clone = args1.clone();
-                        let mut args2_clone = args2.clone();
                         queue.push_front((f1, f2));
-                        for _ in 0..args1.len() {
-                            queue.push_front((args1_clone.pop().unwrap(), args2_clone.pop().unwrap()))
+                        for i in 0..args1.len() {
+                            queue.push_front((&args1[i], &args2[i]))
                         }
                     }
                 }
                 (Expr::Map(args1), Expr::Map(args2)) => {
                     // @performance Don't allocate here.
-                    // Maybe there is some temp area? Would that be in interpreter then?
-                    let rules_map : HashMap<Expr, Expr> = args1.into_iter().collect();
-                    let expr_map : HashMap<Expr, Expr> = args2.into_iter().map(|(k, v)| (k.de_exhaust(), v.de_exhaust())).collect();
-                    for (key, value) in rules_map {
+                    let expr_map : HashMap<&Expr, &Expr> = args2.into_iter().map(|(k, v)| (k.de_exhaust_ref(), v.de_exhaust_ref())).collect();
+                    for (key, value) in args1 {
                         // We don't allow logic variables in keys yet.
                         if let Some(expr_value) = expr_map.get(&key) {
-                            queue.push_front((value, expr_value.clone()))
+                            queue.push_front((value, expr_value))
                         } else {
                             failed = true;
                             break;
@@ -189,10 +192,8 @@ impl Rule {
                     if args1.len() != args2.len() {
                         failed = true;
                     } else {
-                        let mut args1_clone = args1.clone();
-                        let mut args2_clone = args2.clone();
-                        for _ in 0..args1.len() {
-                            queue.push_front((args1_clone.pop().unwrap(), args2_clone.pop().unwrap()))
+                        for i in 0..args1.len() {
+                            queue.push_front((&args1[i], &args2[i]))
                         }
                     }
                 }
@@ -201,10 +202,8 @@ impl Rule {
                     if args1.len() != args2.len() {
                         failed = true;
                     } else {
-                        let mut args1_clone = args1.clone();
-                        let mut args2_clone = args2.clone();
-                        for _ in 0..args1.len() {
-                            queue.push_front((args1_clone.pop().unwrap(), args2_clone.pop().unwrap()))
+                        for i in 0..args1.len() {
+                            queue.push_front((&args1[i], &args2[i]))
                         }
                     }
                 }
@@ -510,7 +509,7 @@ impl Program {
 
 
 
-    fn substitute(& self, rhs : & Expr, env : & HashMap<String, Expr>) -> Expr {
+    fn substitute(& self, rhs : & Expr, env : & HashMap<String, &Expr>) -> Expr {
         match rhs {
             Expr::Num(_) => rhs.clone(),
             Expr::Symbol(_) => rhs.clone(),
@@ -524,7 +523,7 @@ impl Program {
             }
             Expr::LogicVariable(s) => {
                 if let Some(x) = env.get(s) {
-                    x.clone()
+                    x.clone().clone()
                 } else {
                     panic!("Some invalid environment! {} {:?}", s, rhs);
                 }
@@ -566,7 +565,8 @@ impl Program {
             if self.current_scope == "meta" {
                 // println!("{:?}, {:?}", rule, e);
             }
-            if let Some(env) = rule.build_env(e) {
+            let env : HashMap<String, &Expr> = HashMap::new();
+            if let Some(env) = rule.build_env(e, env) {
                 if rule.out_scope == self.current_scope && main_result.is_none() {
                     main_result = Some((rule.clone(), self.substitute(&rule.right, &env)));
                 } else if rule.out_scope != self.current_scope {
@@ -883,5 +883,3 @@ pub fn print(expr : Expr) {
 // to be able to set values and things.
 // So instead of just a static scope, I will need a current scope.
 // And instead of each interpreter having rules I will need rules by scope.
-
-// Need to make a vector append.
