@@ -398,7 +398,7 @@ impl Program {
 
     fn run_interpreter_loop(&mut self, scope_entry: & (String, Expr)) -> () {
         let expr = self.scopes.get(&scope_entry.0).unwrap().clone();
-        // println!("{}:  {:?}\n{:?}\n\n", self.current_scope, expr, self.current_rules);
+        println!("{}", self.current_scope);
         // if scope_entry.0 == "io" {
         //     println!("{}", expr.pretty_print());
         // }

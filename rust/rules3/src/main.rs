@@ -1,4 +1,5 @@
 #![feature(box_syntax, box_patterns)]
+
 // #![allow(dead_code)]
 
 mod interpreter;
@@ -182,7 +183,7 @@ fn main() {
     // Or look at doing a socket to editor based thing?
 
     program.submit(read("builtin/set-scope(quote(@history), [])"));
-    program.submit(read("    builtin/add-rule(quote({
+    program.submit(read("builtin/add-rule(quote({
         left: {expr: ?expr, new_expr: ?new_expr, sub_expr: ?sub_expr, new_sub_expr: ?new_sub_expr, scope: main},
         right: 
             builtin/set-scope(quote(@history), builtin/push-back(quote({expr: ?expr,
@@ -204,6 +205,7 @@ fn main() {
     //     out_scope: io,
     // }))"));
     program.submit(read("fact(10)"));
+    program.submit(read("@history"));
     print(program.get_main());
 
     // loop {
