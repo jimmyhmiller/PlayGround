@@ -177,7 +177,6 @@
     class-name))
 
 
-
 (def struct-example1
   {:type :struct
    :name "Point"
