@@ -10,17 +10,17 @@ enum Expr2 {
     Symbol{val: String, exhausted: bool},
     Scope{val: String, exhausted: bool},
     LogicVariable{val: String,  exhausted: bool},
-    Call{f: Rc<RefCell<Expr2>>, args: RefCell<Vec<Rc<RefCell<Expr2>>>>, exhausted: bool},
-    Map{content: Vec<(Rc<RefCell<Expr2>>, Rc<RefCell<Expr2>>)>, exhausted: bool},
-    Array{content: Rc<RefCell<Vec<Rc<RefCell<Expr2>>>>>, exhausted: bool},
-    Do{exprs: Rc<RefCell<Vec<Rc<RefCell<Expr2>>>>>, exhausted: bool},
+    Call{f: Box<Expr2>, args: Vec<Expr2>, exhausted: bool},
+    Map{content: Vec<(Expr2, Expr2)>, exhausted: bool},
+    Array{content: Vec<Expr2>, exhausted: bool},
+    Do{exprs: Vec<Expr2>, exhausted: bool},
 }
 
 impl Expr2 {
     fn call(f: Expr2, args: Vec<Expr2>) -> Expr2 {
         Expr2::Call{
-            f: Rc::new(RefCell::new(f)), 
-            args: RefCell::new(args.into_iter().map(|x| Rc::new(RefCell::new(x))).collect()),
+            f: box f,
+            args: args,
             exhausted: false,
         }
     }
@@ -57,29 +57,67 @@ impl Expr2 {
 }
 
 
-fn traverse(expr: & Expr2) {
+fn traverse(expr: &mut Expr2) {
     if expr.is_exhausted() {
         return;
     }
     match expr {
+        Expr2::Symbol{..} => {
+            expr.exhaust();
+        }
         Expr2::Call { f, args, .. } => {
-            let x = args.borrow();
-            for i in x.iter() {
-                let mut q = i.borrow_mut();
-                q.exhaust();
+            for i in args {
+                traverse(i);
+                i.exhaust();
             }
+            expr.exhaust();
         }
         _ => {}
 
     }
 }
 
+
+fn build_big_expr(depth: i32) -> Expr2 {
+    let mut i = 0;
+    let mut expr = Expr2::call(Expr2::symbol("bottom"), vec![]);
+    while i < depth {
+       let x =  std::iter::repeat(expr);
+       expr = Expr2::call(Expr2::symbol("call"), x.take(10).collect());
+       i += 1;
+    }
+    expr
+}
+
+fn count_elems(expr: Expr2) -> i64 {
+    let mut i = 0;
+    match expr {
+        Expr2::Symbol{..} => {
+            i += 1;
+        }
+        Expr2::Call { f, args, .. } => {
+            for x in args {
+                i += count_elems(x);
+            }
+            i += 1;
+        }
+        _ => {}
+
+    }
+    i
+}
+
+
 pub fn doit() {
     let s = Rc::new( RefCell::new(Expr2::Symbol{val: "test".to_string(), exhausted: false}));
     let my_expr = Expr2::call(Expr2::symbol("test1"), vec![Expr2::symbol("test2"), Expr2::symbol("test3"), Expr2::symbol("test4")]);
-    print!("{:#?}", my_expr);
-    traverse(&my_expr);
-    print!("{:#?}", my_expr);
+    let mut my_expr2 = Expr2::call(Expr2::symbol("test1"), vec![Expr2::symbol("test2"), Expr2::symbol("test3"), my_expr]);
+    let mut my_expr3 = build_big_expr(4);
+    println!("Finished creating");
+    // print!("{:#?}", my_expr3);
+    traverse(&mut my_expr3);
+    println!("{}", count_elems(my_expr3));
+    // print!("{:#?}", my_expr3);
 }
 
 
@@ -89,3 +127,11 @@ pub fn doit() {
 fn main() {
     doit()
 }
+
+
+// This seems to be much much faster for what I need to do.
+// I should be able to port things over here and get stuff working.
+// I do need to think about when and where I should clone.
+// For example, meta should ideally be a reference. 
+// That is true in general for the expr vs sub_expr split.
+// So I need to keep those things in mind as I build this.
