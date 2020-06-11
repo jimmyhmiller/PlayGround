@@ -40,6 +40,20 @@
     (.invokeStatic gen (:owner code) (:method code))
     :invoke-virtual
     (.invokeVirtual gen (:owner code) (:method code))
+    :invoke-constructor
+    (.invokeConstructor gen (:owner code) (:method code))
+    :new
+    (.newInstance gen (:owner code))
+    :store-local
+    (.storeLocal gen (:index code) (:local-type code))
+    :load-local
+    (.loadLocal gen (:index code) (:local-type code))
+    :push-int
+    (.push gen (int (:value code)))
+    :put-field
+    (.putField gen (:owner code) (:name code) (:field-type code))
+    :dup
+    (.dup gen)
     :pop
     (.pop gen)
     :return-value
@@ -61,10 +75,13 @@
     (run! (fn [line] (generate-code! gen line)) code)
     (.endMethod ^GeneratorAdapter gen)))
 
+(defn initialize-class [^ClassWriter writer class-name]
+  (.visit writer Opcodes/V1_8 Opcodes/ACC_PUBLIC class-name nil "java/lang/Object" nil))
+
 (defn make-fn [fn-description]
   (let [class-name (:name fn-description)
         writer (ClassWriter. ClassWriter/COMPUTE_FRAMES)]
-    (.visit ^ClassWriter writer Opcodes/V1_8 Opcodes/ACC_PUBLIC class-name nil "java/lang/Object" nil)
+    (initialize-class writer class-name)
     (generate-default-constructor writer)
     (generate-static-method writer "invoke" fn-description)
     (.visitEnd writer)
@@ -76,12 +93,92 @@
 (defn resolve-type-of-field [[_ class field]]
   (Type/getType ^java.lang.Class (.getGenericType (.getDeclaredField (Class/forName class) field)))) 
 
+(comment
+  (.visitField writer Opcodes/ACC_PUBLIC "tag" (.getDescriptor Type/INT_TYPE) nil (int 0))
+  (.visitEnd writer))
+
+
+
+(defn make-variant-factory [^ClassWriter writer class-name [i {:keys [name]}]]
+  (let [method (Method. name (Type/getObjectType class-name) (into-array Type []))
+        gen (GeneratorAdapter. (int (+ Opcodes/ACC_PUBLIC Opcodes/ACC_STATIC)) method nil nil writer)]
+    (run! (fn [line] (generate-code! gen line))
+          [{:type :new
+            :owner (Type/getObjectType class-name)}
+           {:type :dup}
+           {:type :invoke-constructor
+            :owner (Type/getObjectType class-name)
+            :method INIT}
+           {:type :store-local
+            :index (int 0)
+            :local-type  (Type/getObjectType class-name)}
+           {:type :load-local
+            :index (into 0)
+            :local-type  (Type/getObjectType class-name)}
+           {:type :push-int
+            :value (int i)}
+           {:type :put-field
+            :name "tag"
+            :owner (Type/getObjectType class-name)
+            :field-type Type/INT_TYPE}
+           {:type :load-local
+            :index (into 0)
+            :local-type (Type/getObjectType class-name)}
+           {:type :return-value}])
+    (.endMethod ^GeneratorAdapter gen)))
+
+(defn make-variant-factories [^ClassWriter writer class-name variants]
+  (run! (partial make-variant-factory writer class-name) (map-indexed vector variants)))
+
+
+(defn make-adt [{:keys [name variants]}]
+  (let [class-name name
+        writer (ClassWriter. ClassWriter/COMPUTE_FRAMES)]
+    (initialize-class writer class-name)
+    (generate-default-constructor writer)
+    (.visitField writer Opcodes/ACC_PUBLIC "tag" (.getDescriptor Type/INT_TYPE) nil (int 0))
+    (.visitEnd writer)
+    (make-variant-factories writer class-name variants)
+    (.defineClass ^clojure.lang.DynamicClassLoader 
+                  (clojure.lang.DynamicClassLoader.)
+                  (.replace ^String class-name \/ \.) (.toByteArray ^ClassWriter  writer) nil)
+    class-name))
+
+
+
+(def adt-example1
+  {:type :adt
+   :name "Color"
+   :variants [{:name "Blue"}
+              {:name "Green"}
+              {:name "Yellow"}]})
+
+(make-adt adt-example1)
+
+;; Next I need to allow variants to have fields and make classes for them.
+;; Then I need to make this factory methods take those classes
+;; After that I need to think about constructor/matching, structs, and interop
+
+
+
+
+(.tag (Color/Yellow))
+
+
+[:adt :Color
+ [:Blue]
+ [:Green]
+ [:Yellow]]
+
 
 (defn resolve-type [expr]
   (case expr
     :string (Type/getType String)
     :void Type/VOID_TYPE
-    (println expr)))
+    :int Type/INT_TYPE
+    :long Type/LONG_TYPE
+    ;; need to add handling Class
+    (throw (ex-info "Unknown type" {:expr expr}))))
 
 (defn build-method [[_ {:keys [args name return]} & code]]
   {:type :fn
@@ -137,6 +234,8 @@
 ;; Maybe something like this for our higher level thing
 [:method "add2" [x :string] :void
  [:println :java.lang.System/out x :void]]
+
+
 
 (add2/invoke "Hello!")
 
@@ -231,3 +330,6 @@
 
 
   (decompiler/disassemble (.addSome (Hello2.))))
+
+(require '[clj-java-decompiler.core :as decompiler])
+(decompiler/disassemble (Color.))
