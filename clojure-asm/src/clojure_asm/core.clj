@@ -157,18 +157,39 @@
 
 ;; Next I need to allow variants to have fields and make classes for them.
 ;; Then I need to make this factory methods take those classes
-;; After that I need to think about constructor/matching, structs, and interop
-
-
-
+;; After that I need to think about constructor/matching, and interop
 
 (.tag (Color/Yellow))
 
+(defn make-struct-field [^ClassWriter writer {:keys [name type]}]
+  (.visitField writer Opcodes/ACC_PUBLIC name (.getDescriptor ^Type type) nil nil)
+  (.visitEnd writer))
 
-[:adt :Color
- [:Blue]
- [:Green]
- [:Yellow]]
+(defn make-struct [{:keys [name fields]}]
+  (let [class-name name
+        writer (ClassWriter. ClassWriter/COMPUTE_FRAMES)]
+    (initialize-class writer class-name)
+    (generate-default-constructor writer)
+    (run! (partial make-struct-field writer) fields)
+    (.defineClass ^clojure.lang.DynamicClassLoader 
+                  (clojure.lang.DynamicClassLoader.)
+                  (.replace ^String class-name \/ \.) (.toByteArray ^ClassWriter  writer) nil)
+    class-name))
+
+
+
+(def struct-example1
+  {:type :struct
+   :name "Point"
+   :fields [{:name "x"
+             :type Type/INT_TYPE}
+            {:name "y"
+             :type Type/INT_TYPE}]})
+
+(make-struct struct-example1)
+
+
+
 
 
 (defn resolve-type [expr]
