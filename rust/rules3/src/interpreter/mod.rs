@@ -496,7 +496,7 @@ impl Program {
         // Need to handle scope not existing
         // self.set_scope_and_rules(&scope_entry.0);
         let result = self.step(&expr);
-        println!("{}: {:?}", self.current_scope, result);
+        // println!("{}: {:?}", self.current_scope, result);
         
 
         // Not a huge fan of this current scope stuff. I also don't
