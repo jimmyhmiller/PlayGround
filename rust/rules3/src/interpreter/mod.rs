@@ -2,10 +2,13 @@
 
 pub mod parser;
 mod helpers;
+mod retry;
+
 
 pub use self::parser::parse;
 pub use self::parser::tokenize;
 pub use self::parser::read;
+pub use self::retry::doit;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -33,6 +36,7 @@ pub enum Expr {
 impl Expr {
     fn is_exhausted(& self) -> bool {
         match self {
+            Expr::Symbol(n) if n.starts_with("builtin") => true,
             Expr::Exhausted(_) => true,
             _ => false
         }
@@ -276,12 +280,12 @@ impl InterpreterResult {
     fn to_meta_expr(&self, scope: String, expr: Expr) -> Expr {
         match self {
             InterpreterResult::Rewrote{new_expr, new_sub_expr, sub_expr, ..} => {
-                let meta_expr : Expr = vec![("phase", ("quote", "rewrite".into())),
-                                            ("expr", ("quote", expr)),
-                                            ("scope", ("quote", scope.into())),
-                                            ("new_expr", ("quote", new_expr.clone())),
-                                            ("sub_expr", ("quote", sub_expr.clone())),
-                                            ("new_sub_expr", ("quote", new_sub_expr.clone()))].into();
+                let meta_expr : Expr = vec![(("quote", "phase"), ("quote", "rewrite".into())),
+                                            (("quote", "expr"), ("quote", expr)),
+                                            (("quote", "scope"), ("quote", scope.into())),
+                                            (("quote", "new_expr"), ("quote", new_expr.clone())),
+                                            (("quote", "sub_expr"), ("quote", sub_expr.clone())),
+                                            (("quote", "new_sub_expr"), ("quote", new_sub_expr.clone()))].into();
                 meta_expr
             },
             InterpreterResult::NoChange{..} => {
@@ -398,7 +402,6 @@ impl Program {
 
     fn run_interpreter_loop(&mut self, scope_entry: & (String, Expr)) -> () {
         let expr = self.scopes.get(&scope_entry.0).unwrap().clone();
-        println!("{}", self.current_scope);
         // if scope_entry.0 == "io" {
         //     println!("{}", expr.pretty_print());
         // }
@@ -407,21 +410,24 @@ impl Program {
         // Need to handle scope not existing
         // self.set_scope_and_rules(&scope_entry.0);
         let result = self.step(&expr);
+        // println!("{}: {:?}", self.current_scope, result);
+        
 
         // Not a huge fan of this current scope stuff. I also don't
+        if let InterpreterResult::Rewrote{..} = result {
+            let meta_expr = result.to_meta_expr(scope_entry.0.clone(), expr.clone());
+            // Make sure we don't try to meta eval our meta.
+            if scope_entry.0 != "meta" {
+                let scope_entry = self.scopes.remove_entry("meta").unwrap();
+                self.scopes.insert("meta".to_string(), meta_expr);
+                self.eval_scope(scope_entry);
+            }
 
-        let meta_expr = result.to_meta_expr(scope_entry.0.clone(), expr.clone());
-        // Make sure we don't try to meta eval our meta.
-        if scope_entry.0 != "meta" {
-            let scope_entry = self.scopes.remove_entry("meta").unwrap();
-            self.scopes.insert("meta".to_string(), meta_expr);
-            self.eval_scope(scope_entry);
+            // This is an important setting of scope entry, because
+            // otherwise we would be stuck in meta. I ultimately want to
+            // get rid of current scope and rules.
+            self.set_scope_and_rules(scope_entry.clone());
         }
-
-        // This is an important setting of scope entry, because
-        // otherwise we would be stuck in meta. I ultimately want to
-        // get rid of current scope and rules.
-        self.set_scope_and_rules(scope_entry.clone());
 
 
         // need to handle out_scope properly?
@@ -638,27 +644,26 @@ impl Program {
             }
             Expr::LogicVariable(_) => self.match_all(&e),
             Expr::Exhausted(_) => InterpreterResult::no_change(e),
-            Expr::Call(f @ box Expr::Exhausted(_), mut args) => {
-                if let Some(index) = args.iter().position(|e| {
-                    match e {
-                        Expr::Exhausted(_) => false,
-                        _ => true,
-                    }
-                }) {
+            Expr::Call(f , mut args) if f.is_exhausted() => {
+                if let Some(index) = args.iter().position(|e| !e.is_exhausted()) {
                     let expr = mem::replace(&mut args[index], Expr::Undefined);
                     let step = self.step(&expr);
                     args[index] = step.clone().expr();
                     step.wrap(Expr::Call(f, args))
                 } else {
                     let f_clone = f.clone();
-                    if let box Expr::Exhausted(box Expr::Symbol(fn_name)) = f_clone {
-                        if fn_name.starts_with("builtin/") {
-                            self.builtins(Expr::Call(f, args))
-                        } else {
+                    
+                    match f_clone {
+                        box Expr::Exhausted(_) => {
                             self.match_all(&Expr::Call(f, args))
                         }
-                    }  else {
-                        self.match_all(&Expr::Call(f, args))
+                        // We would only get here because builtin/something symbols
+                        // are considered exhausted
+                        box Expr::Symbol(_) => {
+                            self.builtins(Expr::Call(f, args))
+                        }
+                        _ => self.match_all(&Expr::Call(f, args))
+
                     }
                 }
             }
@@ -667,12 +672,7 @@ impl Program {
                 step.wrap(Expr::Call(box step.clone().expr(), args))
             }
             Expr::Map(mut args) => {
-                if let Some(index) = args.iter().position(|(k, v)| {
-                    match (k, v) {
-                        (&Expr::Exhausted(_), &Expr::Exhausted(_))  => false,
-                        _ => true,
-                    }
-                }) {
+                if let Some(index) = args.iter().position(|(k, v)| !k.is_exhausted() || !v.is_exhausted()) {
                     let (k, v) = mem::replace(&mut args[index], (Expr::Undefined, Expr::Undefined));
                     if let Expr::Exhausted(_) = k {
                         let step = self.step(&v);
@@ -688,12 +688,7 @@ impl Program {
                 }
             }
             Expr::Array(mut args) => {
-                if let Some(index) = args.iter().position(|e| {
-                    match e {
-                        Expr::Exhausted(_) => false,
-                        _ => true,
-                    }
-                }) {
+                if let Some(index) = args.iter().position(|e| !e.is_exhausted()) {
                     let expr = mem::replace(&mut args[index], Expr::Undefined);
                     let step = self.step(&expr);
                     args[index] = step.clone().expr();
@@ -703,12 +698,7 @@ impl Program {
                 }
             }
             Expr::Do(mut args) => {
-                if let Some(index) = args.iter().position(|e| {
-                    match e {
-                        Expr::Exhausted(_) => false,
-                        _ => true,
-                    }
-                }) {
+                if let Some(index) = args.iter().position(|e| !e.is_exhausted()) {
                     let expr = mem::replace(&mut args[index], Expr::Undefined);
                     let step = self.step(&expr);
                     args[index] = step.clone().expr();
@@ -731,7 +721,7 @@ impl Program {
 
         let expr_clone = expr.clone();
         match expr {
-            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/-" => {
+            Expr::Call(box Expr::Symbol(f), args) if f == "builtin/-" => {
                 let a = args[0].clone().get_num();
                 let b = args[1].clone().get_num();
                 if let (Some(x), Some(y)) = (a,b) {
@@ -742,7 +732,7 @@ impl Program {
                     InterpreterResult::no_change(expr_clone)
                 }
             }
-            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/+" => {
+            Expr::Call(box Expr::Symbol(f), args) if f == "builtin/+" => {
                 let a = args[0].clone().get_num();
                 let b = args[1].clone().get_num();
                 if let (Some(x), Some(y)) = (a,b) {
@@ -753,7 +743,7 @@ impl Program {
                     InterpreterResult::no_change(expr_clone)
                 }
             }
-            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/*" => {
+            Expr::Call(box Expr::Symbol(f), args) if f == "builtin/*" => {
                 let a = args[0].clone().get_num();
                 let b = args[1].clone().get_num();
                 if let (Some(x), Some(y)) = (a,b) {
@@ -764,7 +754,7 @@ impl Program {
                     InterpreterResult::no_change(expr_clone)
                 }
             }
-            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/push-back" => {
+            Expr::Call(box Expr::Symbol(f), args) if f == "builtin/push-back" => {
                 // Probably don't actually want to de_exhaust here?
                 // Maybe just take one layer off?
                 let expr = args[0].clone().de_exhaust();
@@ -778,7 +768,7 @@ impl Program {
                     InterpreterResult::no_change(expr_clone)
                 }
             }
-            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/println" => {
+            Expr::Call(box Expr::Symbol(f), args) if f == "builtin/println" => {
                 // println!("{:?}", args);
                 let print_string = args.iter().map(|x | x.pretty_print()).collect::<Vec<String>>().join(" ");
                 println!("{}", print_string);
@@ -791,7 +781,7 @@ impl Program {
                     Rule::noop_rule(), 
                     "io".to_string())
             }
-            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/add-rule" => {
+            Expr::Call(box Expr::Symbol(f), args) if f == "builtin/add-rule" => {
                 let rule = args[0].clone().de_exhaust();
                 InterpreterResult::NoChange{
                     expr: Expr::Exhausted(box expr_clone.clone()),
@@ -808,7 +798,7 @@ impl Program {
                     ]
                 }
             }
-            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), _args) if f == "builtin/read-line" => {
+            Expr::Call(box Expr::Symbol(f), _args) if f == "builtin/read-line" => {
                 let stdin = io::stdin();
                 let mut iterator = stdin.lock().lines();
                 let line = iterator.next().unwrap().unwrap();
@@ -835,7 +825,7 @@ impl Program {
                 }
             }
             
-            Expr::Call(box Expr::Exhausted(box Expr::Symbol(f)), args) if f == "builtin/set-scope" => {
+            Expr::Call(box Expr::Symbol(f), args) if f == "builtin/set-scope" => {
                 let scope = args[0].clone().de_exhaust();
                 let expr = args[1].clone().de_exhaust();
                 
