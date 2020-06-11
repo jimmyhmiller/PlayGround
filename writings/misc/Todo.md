@@ -1,7 +1,7 @@
 1. Publish meander blog post (Finished!)
 2. Allow creation of new scopes (Finished)
 3. Create higher level ast for j-lang (++)
-4. Create ADT representation for j-lang (+++)
+4. Create ADT representation for j-lang (++++)
 5. Create time traveling debugger (+++++)
 6. If bored work on weather app.
 7. Create dark lang talk (+++)
