@@ -7,5 +7,5 @@
 7. Create dark lang talk (+++)
 8. Work on Escaping the Tyranny of Async Programming Talk (+)
 9. Reimplement the mutable version of interpreter (+)
-10. Write articles (+)
+10. Write articles (+++)
 11. Read (++)
