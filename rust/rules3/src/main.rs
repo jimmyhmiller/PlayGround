@@ -186,7 +186,8 @@ fn main() {
     program.submit(read("builtin/add-rule(quote({
         left: {expr: ?expr, new_expr: ?new_expr, sub_expr: ?sub_expr, new_sub_expr: ?new_sub_expr, scope: main},
         right: 
-            builtin/set-scope(quote(@history), builtin/push-back(quote({expr: ?expr,
+            builtin/set-scope(quote(@history), builtin/push-back(quote({
+                                                                  expr: ?expr,
                                                                   new_expr: ?new_expr,
                                                                   sub_expr: ?sub_expr,
                                                                   new_sub_expr: ?new_sub_expr,
@@ -204,9 +205,11 @@ fn main() {
     //     in_scope: meta,
     //     out_scope: io,
     // }))"));
-    program.submit(read("fact(10)"));
-    program.submit(read("@history"));
-    print(program.get_main());
+    // program.submit(read("fact(10)"));
+    // program.submit(read("@history"));
+    // print(program.get_main());
+
+    doit();
 
     // loop {
     //     let readline = rl.readline(">> ");

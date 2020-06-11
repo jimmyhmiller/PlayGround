@@ -33,7 +33,7 @@
     :var
     (.loadArg ^GeneratorAdapter gen (:index code))
     :math
-    (.math  gen (:op code) (:op-type code))
+    (.math gen (:op code) (:op-type code))
     :get-static-field
     (.getStatic gen (:owner code) (:name code) (:result-type code))
     :invoke-static
@@ -73,8 +73,74 @@
                   (.replace ^String class-name \/ \.) (.toByteArray ^ClassWriter  writer) nil)
     class-name))
 
-;; Maybe something like this for our higher level thing?
-[:invoke "println" [:get-field "java.lang.System" "out"] [:var 1]]
+(defn resolve-type-of-field [[_ class field]]
+  (Type/getType ^java.lang.Class (.getGenericType (.getDeclaredField (Class/forName class) field)))) 
+
+
+(defn resolve-type [expr]
+  (case expr
+    :string (Type/getType String)
+    :void Type/VOID_TYPE
+    (println expr)))
+
+(defn build-method [[_ {:keys [args name return]} & code]]
+  {:type :fn
+   :name name
+   :args (mapv (fn [[name type]] {:type (resolve-type type)
+                                  :name name}) args)
+   :code (build-method-code args code)
+   :return-type (resolve-type return)})
+
+(defn build-method-code 
+  ([args code]
+   (build-method-code args code ()))
+  ([args code stack]
+   (if (empty? code)
+     (mapv :code (reverse stack))
+     (recur args
+            (rest code)
+            (cons
+             (let [expr (first code)]
+               (case (first expr)
+                 :var {:code {:type :var
+                              :index (int (second expr))}
+                       :type (resolve-type (second (nth args (second expr))))}
+                 
+                 :get-static-field (let [type (resolve-type-of-field expr)] 
+                                     {:code {:type :get-static-field
+                                             :owner (Type/getType (Class/forName (second expr)))
+                                             :name (nth expr 2)
+                                             :result-type type}
+                                      :type type})
+                 :invoke-virtual (let [{:keys [type args name]} (second expr)] 
+                                   {:code
+                                    {:type :invoke-virtual
+                                     :owner (:type (nth stack args))
+                                     :method (Method. name 
+                                                      (resolve-type type)
+                                                      (into-array Type (map :type (take args stack))))}
+                                    :type (resolve-type type)})
+                 :return-value {:code {:type :return-value}}))
+             stack)))))
+
+
+(def example
+  [:method {:name "add2" :args [['x :string]] :return :void}
+   [:get-static-field "java.lang.System" "out"]
+   [:var (int 0)]
+   [:invoke-virtual {:name "println" :type :void :args 1}]
+   [:return-value]])
+
+
+(make-fn (build-method example))
+
+;; Maybe something like this for our higher level thing
+[:method "add2" [x :string] :void
+ [:println :java.lang.System/out x :void]]
+
+(add2/invoke "Hello!")
+
+(resolve-type :void)
 
 (def fn-example
   {:type :fn
