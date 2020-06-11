@@ -80,9 +80,11 @@ pub fn doit() {
     print!("{:#?}", my_expr);
     traverse(&my_expr);
     print!("{:#?}", my_expr);
-
 }
 
+
+// Before I know if this is really good enough I need to try out doing a bunch 
+// rewrites and see if it can handle the performance.
 
 fn main() {
     doit()
