@@ -205,11 +205,11 @@ fn main() {
     //     in_scope: meta,
     //     out_scope: io,
     // }))"));
-    // program.submit(read("fact(10)"));
-    // program.submit(read("@history"));
-    // print(program.get_main());
-
-    doit();
+    program.submit(read("fact(1)"));
+    
+    // program.submit(read("@main"));
+    program.submit(read("@history"));
+    print(program.get_main());
 
     // loop {
     //     let readline = rl.readline(">> ");

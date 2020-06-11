@@ -149,7 +149,7 @@ impl Rule {
         }
     }
 
-    fn build_env<'a>(& self, expr : &'a Expr, mut env : HashMap<String, &'a Expr>) -> Option<HashMap<String, &'a Expr>> {
+    fn matches<'a>(& self, expr : &'a Expr) -> bool {
         let mut queue: VecDeque<(&Expr, &Expr)> = VecDeque::new();
         queue.push_front((&self.left, &expr));
         let mut failed = false;
@@ -162,7 +162,7 @@ impl Rule {
                     queue.push_front((x, t));
                 },
                 (Expr::LogicVariable(s), t) => {
-                    env.insert(s.to_string(), t);
+                    
                 },
                 (Expr::Symbol(ref s1), Expr::Symbol(ref s2)) if s1 == s2 => {},
                 // What does it mean to match on a scope? Probably should think more about this.
@@ -171,6 +171,7 @@ impl Rule {
                 (Expr::Call(box f1, args1), Expr::Call(box f2, args2)) => {
                     if args1.len() != args2.len() {
                         failed = true;
+                        break;
                     } else {
                         queue.push_front((f1, f2));
                         for i in 0..args1.len() {
@@ -195,6 +196,7 @@ impl Rule {
                     // Need to get rid of this once we have repeats.
                     if args1.len() != args2.len() {
                         failed = true;
+                        break;
                     } else {
                         for i in 0..args1.len() {
                             queue.push_front((&args1[i], &args2[i]))
@@ -205,6 +207,7 @@ impl Rule {
                     // Need to get rid of this once we have repeats.
                     if args1.len() != args2.len() {
                         failed = true;
+                        break;
                     } else {
                         for i in 0..args1.len() {
                             queue.push_front((&args1[i], &args2[i]))
@@ -213,6 +216,81 @@ impl Rule {
                 }
                 _ => {
                     failed = true;
+                    break;
+                }
+            };
+        };
+        failed
+    }
+
+    fn build_env<'a>(& self, expr : &'a Expr, mut env : HashMap<String, &'a Expr>) -> Option<HashMap<String, &'a Expr>> {
+        let mut queue: VecDeque<(&Expr, &Expr)> = VecDeque::new();
+        queue.push_front((&self.left, &expr));
+        let mut failed = false;
+        while !queue.is_empty() && !failed {
+            let elem = queue.pop_front().unwrap();
+            match elem {
+                // Need to handle non-linear
+
+                (x, Expr::Exhausted(box t)) => {
+                    queue.push_front((x, t));
+                },
+                (Expr::LogicVariable(s), t) => {
+                    env.insert(s.to_string(), t);
+                },
+                (Expr::Symbol(ref s1), Expr::Symbol(ref s2)) if s1 == s2 => {},
+                // What does it mean to match on a scope? Probably should think more about this.
+                (Expr::Scope(ref s1), Expr::Scope(ref s2)) if s1 == s2 => {},
+                (Expr::Num(ref n1), Expr::Num(ref n2)) if n1 == n2 => {},
+                (Expr::Call(box f1, args1), Expr::Call(box f2, args2)) => {
+                    if args1.len() != args2.len() {
+                        failed = true;
+                        break;
+                    } else {
+                        queue.push_front((f1, f2));
+                        for i in 0..args1.len() {
+                            queue.push_front((&args1[i], &args2[i]))
+                        }
+                    }
+                }
+                (Expr::Map(args1), Expr::Map(args2)) => {
+                    // @performance Don't allocate here.
+                    let expr_map : HashMap<&Expr, &Expr> = args2.into_iter().map(|(k, v)| (k.de_exhaust_ref(), v.de_exhaust_ref())).collect();
+                    for (key, value) in args1 {
+                        // We don't allow logic variables in keys yet.
+                        if let Some(expr_value) = expr_map.get(&key) {
+                            queue.push_front((value, expr_value))
+                        } else {
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+                (Expr::Array(args1), Expr::Array(args2)) => {
+                    // Need to get rid of this once we have repeats.
+                    if args1.len() != args2.len() {
+                        failed = true;
+                        break;
+                    } else {
+                        for i in 0..args1.len() {
+                            queue.push_front((&args1[i], &args2[i]))
+                        }
+                    }
+                }
+                (Expr::Do(args1), Expr::Do(args2)) => {
+                    // Need to get rid of this once we have repeats.
+                    if args1.len() != args2.len() {
+                        failed = true;
+                        break;
+                    } else {
+                        for i in 0..args1.len() {
+                            queue.push_front((&args1[i], &args2[i]))
+                        }
+                    }
+                }
+                _ => {
+                    failed = true;
+                    break;
                 }
             };
         };
@@ -401,7 +479,15 @@ impl Program {
 
 
     fn run_interpreter_loop(&mut self, scope_entry: & (String, Expr)) -> () {
-        let expr = self.scopes.get(&scope_entry.0).unwrap().clone();
+        let mut expr = self.scopes.get(&scope_entry.0).unwrap().clone();
+        if scope_entry.0 != "rules"  && scope_entry.0 != "meta" {
+            self.exhaust_stuff(&mut expr);
+        }
+
+        if expr.is_exhausted() {
+            return;
+        }
+        // println!("{:?}", expr);
         // if scope_entry.0 == "io" {
         //     println!("{}", expr.pretty_print());
         // }
@@ -410,7 +496,7 @@ impl Program {
         // Need to handle scope not existing
         // self.set_scope_and_rules(&scope_entry.0);
         let result = self.step(&expr);
-        // println!("{}: {:?}", self.current_scope, result);
+        println!("{}: {:?}", self.current_scope, result);
         
 
         // Not a huge fan of this current scope stuff. I also don't
@@ -427,19 +513,20 @@ impl Program {
             // otherwise we would be stuck in meta. I ultimately want to
             // get rid of current scope and rules.
             self.set_scope_and_rules(scope_entry.clone());
+            // meta scope could have replaced our expression.
+            // If that happened, we don't want to override.
+            // Need a better way other than checking equality.
+            // if self.scopes.get(&scope_entry.0).unwrap().clone() != expr {
+            //     // meta intervened. If that is the case, we don't want to finish
+            //     // evaling this expression and we don't want to do any side effects.
+            //     return;
+            // }
         }
 
 
         // need to handle out_scope properly?
 
-        // meta scope could have replaced our expression.
-        // If that happened, we don't want to override.
-        // Need a better way other than checking equality.
-        if self.scopes.get(&scope_entry.0).unwrap().clone() != expr {
-            // meta intervened. If that is the case, we don't want to finish
-            // evaling this expression and we don't want to do any side effects.
-            return;
-        }
+
 
         if scope_entry.0 == "rules" {
             // Need to be able to do more than append.
@@ -563,6 +650,15 @@ impl Program {
         }
     }
 
+    fn matches_any(& self, e: & Expr) -> bool {
+        for rule in &self.current_rules {
+            if rule.matches(e) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn match_all(& self, e : & Expr) -> InterpreterResult {
         let mut main_result = None;
         let mut side_effects = vec![];
@@ -609,6 +705,34 @@ impl Program {
     }
 
 
+    pub fn exhaust_stuff(& self, expr: &mut Expr) {
+        // need to do this recursively
+        match expr {
+            Expr::Undefined if !self.matches_any(expr) => {
+                *expr = Expr::Exhausted(box expr.clone())
+            }
+            Expr::Num(_) if !self.matches_any(expr) => {
+                *expr = Expr::Exhausted(box expr.clone())
+            }
+            Expr::Symbol(_) if !self.matches_any(expr) => {
+                *expr = Expr::Exhausted(box expr.clone())
+            }
+            Expr::LogicVariable(_) if !self.matches_any(expr) => {
+                *expr = Expr::Exhausted(box expr.clone())
+            },
+            Expr::Map(_) if !self.matches_any(expr) => {
+                *expr = Expr::Exhausted(box expr.clone())
+            }
+            Expr::Array(_) if !self.matches_any(expr) => {
+                *expr = Expr::Exhausted(box expr.clone())
+            }
+            Expr::Do(_) if !self.matches_any(expr) => {
+                *expr = Expr::Exhausted(box expr.clone())
+            }
+            _ => {}
+        }
+    }
+
     // Really we should be able to understand what our rules do to know
     // what we need to match on.
     fn step(&mut self, e : & Expr) -> InterpreterResult {
@@ -644,7 +768,7 @@ impl Program {
             }
             Expr::LogicVariable(_) => self.match_all(&e),
             Expr::Exhausted(_) => InterpreterResult::no_change(e),
-            Expr::Call(f , mut args) if f.is_exhausted() => {
+            Expr::Call(f, mut args) if f.is_exhausted() => {
                 if let Some(index) = args.iter().position(|e| !e.is_exhausted()) {
                     let expr = mem::replace(&mut args[index], Expr::Undefined);
                     let step = self.step(&expr);
@@ -652,7 +776,6 @@ impl Program {
                     step.wrap(Expr::Call(f, args))
                 } else {
                     let f_clone = f.clone();
-                    
                     match f_clone {
                         box Expr::Exhausted(_) => {
                             self.match_all(&Expr::Call(f, args))
