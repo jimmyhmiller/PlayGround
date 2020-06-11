@@ -135,3 +135,12 @@ fn main() {
 // For example, meta should ideally be a reference. 
 // That is true in general for the expr vs sub_expr split.
 // So I need to keep those things in mind as I build this.
+
+
+// Think about making exhausting O(1) in many cases.
+// For example, what if we built up a struct where there was a bool
+// for each type of value in the ast? Then, we could look at the rules
+// and see what they match on at the top level. If there is a catch all,
+// we know every thing will match. If there isn't and there are for example,
+// only rules for Call, we can exhaust everything without doing any lookups
+// over the rules.
