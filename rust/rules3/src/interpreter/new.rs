@@ -1,5 +1,8 @@
 use std::time::{Instant};
 use std::fmt::Debug;
+use std::collections::HashMap;
+
+type Index = usize;
 
 #[derive(Debug, Clone)]
 struct Node<T>  where T: Clone {
@@ -55,13 +58,36 @@ struct Meta {
     new_sub_expr: Index,
 }
 
+// Allocates and uses more storage than I technically need.
+// But I doubt this will ever be the bottleneck.
+struct Interner {
+    lookup: HashMap<String, Index>,
+    storage: Vec<String>
+}
+
+impl Interner {
+    fn intern(&mut self, symbol : &str) -> Index {
+        if let Some(index) = self.lookup.get(symbol) {
+            return *index
+        }
+        let index = self.storage.len();
+        self.lookup.insert(symbol.to_string(), index);
+        self.storage.push(symbol.to_string());
+        index
+    }
+
+    fn lookup(&self, index: Index) -> Option<&String> {
+        self.storage.get(index)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Forest<T> where T : Clone {
     arena: Vec<Node<T>>,
     current_index: usize,
 }
 
-type Index = usize;
+
 
 impl<T> Forest<T> where T : Clone + Debug {
     fn insert_root(&mut self, t: T) -> Index {
@@ -140,6 +166,7 @@ impl<T> Forest<T> where T : Clone + Debug {
         }
     }
 
+    // Might need to do this for a list of indexes?
     fn garbage_collect(&mut self, index: Index) {
         let mut forest = Forest {
             arena: vec![],
@@ -249,9 +276,29 @@ pub fn run_new() {
 
 
     
-
+    // Silly litle trick that does speed things up.
     std::thread::spawn(move || drop(f));
 
 
 
 }
+
+
+// I need to hook up the parser to these trees.
+// I need to process rules
+// I need to do an precompute for exhaustion.
+// Then I could either exhaust as I parse, or exhaust across the whole tree in linear time.
+// I need to get basic evaluation working. Starting at the left most node.
+// Can I keep track of that node as I parse? So then there is no traversing?
+// If so, can I really keep track of the left most node? What about keeping track
+// of only the nodes that aren't obviously exhausted?
+// I need to think about patterns of rules that create new nodes vs using existing ones.
+// I need to create built in rules.
+// I need to think about whether I need need an environment for logic variables.
+// If things are left linear, then a logic variable just means reference this node.
+// If things aren't left linear I would need node equality (will need that eventually anyways.)
+// One obvious optimization for equality would be to do graph reduction, but that complicates things.
+// Can I reduce rules into some form of bytecode?
+// Am I that far way from a compiler? Can I eliminate these vectors of children a the nodes?
+// Is there a good model of stack computation to be had here?
+
