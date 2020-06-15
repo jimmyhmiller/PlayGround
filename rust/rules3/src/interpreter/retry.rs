@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 use std::time::{Instant};
-use std::thread;
-use std::mem;
-use std::collections::VecDeque;
+// use std::thread;
+// use std::mem;
+// use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Expr {
@@ -190,9 +190,7 @@ impl<'a> Interpreter<'a> {
             self.scopes.insert(scope, expr);
             return;
         }
-        let mut queue = VecDeque::new();
-        // queue.push_front(&mut expr);
-        // let mut e = queue.pop_front().unwrap();
+
         match expr {
             Expr::Undefined => {}
             Expr::Num { val, exhausted } => {

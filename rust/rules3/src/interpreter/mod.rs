@@ -3,12 +3,14 @@
 pub mod parser;
 mod helpers;
 mod retry;
+mod new;
 
 
 pub use self::parser::parse;
 pub use self::parser::tokenize;
 pub use self::parser::read;
 pub use self::retry::doit;
+pub use self::new::run_new;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
