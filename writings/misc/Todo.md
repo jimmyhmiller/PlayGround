@@ -6,6 +6,7 @@
 6. If bored work on weather app.
 7. Create dark lang talk (+++)
 8. Work on Escaping the Tyranny of Async Programming Talk (+)
-9. Reimplement the mutable version of interpreter (+)
+9. Reimplement the mutable version of interpreter (++++)
+10 Reimplement area version of the interpreter (++)
 10. Write articles (+++)
 11. Read (++)

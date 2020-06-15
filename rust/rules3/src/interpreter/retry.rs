@@ -277,7 +277,7 @@ fn count_elems(expr: & Expr) -> i64 {
 
 pub fn doit() {
     let now = Instant::now();
-    let mut my_expr3 = build_big_expr(1);
+    // let mut my_expr3 = build_big_expr(1);
     println!("{}", now.elapsed().as_millis());
     println!("Finished creating");
     let now = Instant::now();
