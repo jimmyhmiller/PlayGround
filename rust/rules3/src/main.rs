@@ -26,48 +26,48 @@ impl Validator for InputValidator {
 
 fn main() {
 
-    let rule_sub = Rule {
-        left: read("-(?a ?b)"),
-        right: read("builtin/-(?a ?b)"),
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let rule_plus = Rule {
-        left: read("+(?a ?b)"),
-        right: read("builtin/+(?a ?b)"),
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let rule_mult = Rule {
-        left: ("*", "?a", "?b").into(),
-        right: ("builtin/*", "?a", "?b").into(),
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let rule1 = Rule {
-        left: ("fact", 0).into(),
-        right: 1.into(),
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let rule2 = Rule {
-        left: read("fact(?n)"),
-        right: read("*(?n fact(-(?n 1)))"),
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let rule3 = Rule {
-        left: vec![("stuff", "?x")].into(),
-        right: vec![("thing", "?x")].into(),
-        in_scope: "main".to_string(),
-        out_scope: "main".to_string(),
-    };
-    let rule4 = Rule {
-        left: "stuff".into(),
-        right: "things".into(),
-        in_scope: "history".to_string(),
-        out_scope: "history".to_string(),
-    };
+    // let rule_sub = Rule {
+    //     left: read("-(?a ?b)"),
+    //     right: read("builtin/-(?a ?b)"),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "main".to_string(),
+    // };
+    // let rule_plus = Rule {
+    //     left: read("+(?a ?b)"),
+    //     right: read("builtin/+(?a ?b)"),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "main".to_string(),
+    // };
+    // let rule_mult = Rule {
+    //     left: ("*", "?a", "?b").into(),
+    //     right: ("builtin/*", "?a", "?b").into(),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "main".to_string(),
+    // };
+    // let rule1 = Rule {
+    //     left: ("fact", 0).into(),
+    //     right: 1.into(),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "main".to_string(),
+    // };
+    // let rule2 = Rule {
+    //     left: read("fact(?n)"),
+    //     right: read("*(?n fact(-(?n 1)))"),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "main".to_string(),
+    // };
+    // let rule3 = Rule {
+    //     left: vec![("stuff", "?x")].into(),
+    //     right: vec![("thing", "?x")].into(),
+    //     in_scope: "main".to_string(),
+    //     out_scope: "main".to_string(),
+    // };
+    // let rule4 = Rule {
+    //     left: "stuff".into(),
+    //     right: "things".into(),
+    //     in_scope: "history".to_string(),
+    //     out_scope: "history".to_string(),
+    // };
     // let rule4 = Rule {
     //     left: read("{
     //         phase: rewrite,
@@ -170,9 +170,9 @@ fn main() {
 
 
 
-    let mut program = Program::new(
-        vec![rule_sub, rule_mult, rule_plus, rule1, rule2, rule3, rule4]
-    );
+    // let mut program = Program::new(
+    //     vec![rule_sub, rule_mult, rule_plus, rule1, rule2, rule3, rule4]
+    // );
 
 
     let validator = InputValidator{ validator: MatchingBracketValidator::new()};
@@ -182,20 +182,20 @@ fn main() {
     // Should I spend time implementing things in it?
     // Or look at doing a socket to editor based thing?
 
-    program.submit(read("builtin/set-scope(quote(@history), [])"));
-    program.submit(read("builtin/add-rule(quote({
-        left: {expr: ?expr, new_expr: ?new_expr, sub_expr: ?sub_expr, new_sub_expr: ?new_sub_expr, scope: main},
-        right: 
-            builtin/set-scope(quote(@history), builtin/push-back(quote({
-                                                                  expr: ?expr,
-                                                                  new_expr: ?new_expr,
-                                                                  sub_expr: ?sub_expr,
-                                                                  new_sub_expr: ?new_sub_expr,
-                                                                  scope: main})
-                                                            , @history))
-        in_scope: meta,
-        out_scope: io,
-    }))"));
+    // program.submit(read("builtin/set-scope(quote(@history), [])"));
+    // program.submit(read("builtin/add-rule(quote({
+    //     left: {expr: ?expr, new_expr: ?new_expr, sub_expr: ?sub_expr, new_sub_expr: ?new_sub_expr, scope: main},
+    //     right: 
+    //         builtin/set-scope(quote(@history), builtin/push-back(quote({
+    //                                                               expr: ?expr,
+    //                                                               new_expr: ?new_expr,
+    //                                                               sub_expr: ?sub_expr,
+    //                                                               new_sub_expr: ?new_sub_expr,
+    //                                                               scope: main})
+    //                                                         , @history))
+    //     in_scope: meta,
+    //     out_scope: io,
+    // }))"));
 
     // program.submit(read("builtin/add-rule(quote({
     //     left: {sub_expr: ?x, new_sub_expr: ?y, scope: history},
@@ -207,7 +207,8 @@ fn main() {
     // }))"));
     // program.submit(read("fact(1)"));
     
-    doit();
+    // doit();
+    run_new()
     // // program.submit(read("@main"));
     // program.submit(read("@history"));
     // print(program.get_main());
