@@ -30,7 +30,7 @@
 
 (defn generate-code! [^GeneratorAdapter gen {:keys [type] :as code}]
   (case type
-    :var
+    :arg
     (.loadArg ^GeneratorAdapter gen (:index code))
     :math
     (.math gen (:op code) (:op-type code))
@@ -93,79 +93,15 @@
 (defn resolve-type-of-field [[_ class field]]
   (Type/getType ^java.lang.Class (.getGenericType (.getDeclaredField (Class/forName class) field)))) 
 
-(comment
-  (.visitField writer Opcodes/ACC_PUBLIC "tag" (.getDescriptor Type/INT_TYPE) nil (int 0))
-  (.visitEnd writer))
 
 
 
-(defn make-variant-factory [^ClassWriter writer class-name [i {:keys [name]}]]
-  (let [method (Method. name (Type/getObjectType class-name) (into-array Type []))
-        gen (GeneratorAdapter. (int (+ Opcodes/ACC_PUBLIC Opcodes/ACC_STATIC)) method nil nil writer)]
-    (run! (fn [line] (generate-code! gen line))
-          [{:type :new
-            :owner (Type/getObjectType class-name)}
-           {:type :dup}
-           {:type :invoke-constructor
-            :owner (Type/getObjectType class-name)
-            :method INIT}
-           {:type :store-local
-            :index (int 0)
-            :local-type  (Type/getObjectType class-name)}
-           {:type :load-local
-            :index (into 0)
-            :local-type  (Type/getObjectType class-name)}
-           {:type :push-int
-            :value (int i)}
-           {:type :put-field
-            :name "tag"
-            :owner (Type/getObjectType class-name)
-            :field-type Type/INT_TYPE}
-           {:type :load-local
-            :index (into 0)
-            :local-type (Type/getObjectType class-name)}
-           {:type :return-value}])
-    (.endMethod ^GeneratorAdapter gen)))
-
-(defn make-variant-factories [^ClassWriter writer class-name variants]
-  (run! (partial make-variant-factory writer class-name) (map-indexed vector variants)))
-
-
-(defn make-adt [{:keys [name variants]}]
-  (let [class-name name
-        writer (ClassWriter. ClassWriter/COMPUTE_FRAMES)]
-    (initialize-class writer class-name)
-    (generate-default-constructor writer)
-    (.visitField writer Opcodes/ACC_PUBLIC "tag" (.getDescriptor Type/INT_TYPE) nil (int 0))
-    (.visitEnd writer)
-    (make-variant-factories writer class-name variants)
-    (.defineClass ^clojure.lang.DynamicClassLoader 
-                  (clojure.lang.DynamicClassLoader.)
-                  (.replace ^String class-name \/ \.) (.toByteArray ^ClassWriter  writer) nil)
-    class-name))
-
-
-
-(def adt-example1
-  {:type :adt
-   :name "Color"
-   :variants [{:name "Blue"}
-              {:name "Green"}
-              {:name "Yellow"}]})
-
-(make-adt adt-example1)
-
-;; Next I need to allow variants to have fields and make classes for them.
-;; Then I need to make this factory methods take those classes
-;; After that I need to think about constructor/matching, and interop
-
-(.tag (Color/Yellow))
 
 (defn make-struct-field [^ClassWriter writer {:keys [name type]}]
-  (.visitField writer Opcodes/ACC_PUBLIC name (.getDescriptor ^Type type) nil nil)
-  (.visitEnd writer))
+  (let [field (.visitField writer Opcodes/ACC_PUBLIC name (.getDescriptor ^Type type) nil nil)]
+    (.visitEnd field)))
 
-(defn make-struct [{:keys [name fields]}]
+(defn make-struct [{:keys [name fields] :as data}]
   (let [class-name name
         writer (ClassWriter. ClassWriter/COMPUTE_FRAMES)]
     (initialize-class writer class-name)
@@ -177,6 +113,100 @@
     class-name))
 
 
+(defn make-variant-factory [^ClassWriter writer class-name [i {:keys [name fields] :as data}]]
+  (let [struct nil #_(when fields (make-struct data))
+        field-name (.toLowerCase ^String name)
+        method (Method. name
+                        (Type/getObjectType class-name)
+                        (into-array Type (if fields [(Type/getObjectType name)] [])))
+        _ (when fields 
+            (doto (.visitField writer 
+                               Opcodes/ACC_PUBLIC field-name (.getDescriptor(Type/getObjectType name))
+                               nil 
+                               nil)
+              .visitEnd))
+        gen (GeneratorAdapter. (int (+ Opcodes/ACC_PUBLIC Opcodes/ACC_STATIC)) method nil nil writer)
+         local (if fields (int 1) (int 0))]
+    (.visitCode gen)
+    (run! (fn [line] (generate-code! gen line))
+          (concat
+           [{:type :new
+             :owner (Type/getObjectType class-name)}
+            ;; replace with dup2x
+            {:type :dup}
+            {:type :dup}
+            {:type :invoke-constructor
+             :owner (Type/getObjectType class-name)
+             :method INIT}
+            {:type :store-local
+             :index local
+             :local-type (Type/getObjectType class-name)}
+            {:type :load-local
+             :index local
+             :local-type (Type/getObjectType class-name)}
+            {:type :push-int
+             :value (int i)}
+            {:type :put-field
+             :name "tag"
+             :owner (Type/getObjectType class-name)
+             :field-type Type/INT_TYPE}]
+           (when fields 
+             [{:type :arg
+               :index (int 0)}
+              {:type :put-field
+               :name field-name
+               :owner (Type/getObjectType class-name)
+               :field-type (Type/getObjectType name)}])
+           [{:type :load-local
+             :index local
+             :local-type (Type/getObjectType class-name)}
+            {:type :return-value}]))
+    (.endMethod ^GeneratorAdapter gen)))
+
+(defn make-variant-factories [^ClassWriter writer class-name variants]
+  (run! (partial make-variant-factory writer class-name) (map-indexed vector variants)))
+
+
+
+
+(defn make-adt [{:keys [name variants]}]
+  (let [class-name name
+        writer (ClassWriter. ClassWriter/COMPUTE_FRAMES)]
+    (initialize-class writer class-name)
+    (generate-default-constructor writer)
+    (.visitField writer Opcodes/ACC_PUBLIC "tag" (.getDescriptor Type/INT_TYPE) nil nil)
+    (make-variant-factories writer class-name variants)
+    (.defineClass ^clojure.lang.DynamicClassLoader 
+                  (clojure.lang.DynamicClassLoader.)
+                  (.replace ^String class-name \/ \.) (.toByteArray ^ClassWriter  writer) nil)
+    class-name))
+
+
+;; Okay, no I need to make my structs have better constructors.
+
+(def adt-example1
+  {:type :adt
+   :name "Color"
+   :variants [{:name "Blue"
+               :fields [{:name "favorite"
+                         :type Type/BOOLEAN_TYPE}]}
+              {:name "Green"}
+              {:name "Yellow"}]})
+
+(make-adt adt-example1)
+
+
+
+;; Next I need to allow variants to have fields and make classes for them.
+;; Then I need to make this factory methods take those classes
+;; After that I need to think about constructor/matching, and interop
+
+
+
+(.favorite (.blue (Color/Blue (Blue.))))
+
+
+
 (def struct-example1
   {:type :struct
    :name "Point"
@@ -185,7 +215,7 @@
             {:name "y"
              :type Type/INT_TYPE}]})
 
-(make-struct struct-example1)
+(make-struct (ClassWriter. ClassWriter/COMPUTE_FRAMES) struct-example1)
 
 
 
@@ -197,6 +227,7 @@
     :void Type/VOID_TYPE
     :int Type/INT_TYPE
     :long Type/LONG_TYPE
+    :bool Type/BOOLEAN_TYPE
     ;; need to add handling Class
     (throw (ex-info "Unknown type" {:expr expr}))))
 
@@ -219,7 +250,7 @@
             (cons
              (let [expr (first code)]
                (case (first expr)
-                 :var {:code {:type :var
+                 :arg {:code {:type :arg
                               :index (int (second expr))}
                        :type (resolve-type (second (nth args (second expr))))}
                  
@@ -244,7 +275,7 @@
 (def example
   [:method {:name "add2" :args [['x :string]] :return :void}
    [:get-static-field "java.lang.System" "out"]
-   [:var (int 0)]
+   [:arg (int 0)]
    [:invoke-virtual {:name "println" :type :void :args 1}]
    [:return-value]])
 
@@ -268,18 +299,18 @@
            :name 'x}
           {:type (Type/getType String)
            :name 'y}]
-   :code [{:type :var
+   :code [{:type :arg
            :index (int 0)}
           {:type :get-static-field
            :owner (Type/getType System)
            :name "out"
            :result-type (Type/getType (class System/out))}
-          {:type :var
+          {:type :arg
            :index (int 1)}
           {:type :invoke-virtual
            :owner (Type/getType (class System/out))
            :method (Method. "println" Type/VOID_TYPE (into-array Type [(Type/getType String)]))}
-          {:type :var
+          {:type :arg
            :index (int 1)}
           {:type :invoke-static
            :owner (Type/getType Integer)
@@ -352,4 +383,8 @@
   (decompiler/disassemble (.addSome (Hello2.))))
 
 (require '[clj-java-decompiler.core :as decompiler])
-(decompiler/disassemble (Color.))
+
+
+(def x "test")
+
+(decompiler/disassemble (.toLowerCase x))
