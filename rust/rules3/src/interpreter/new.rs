@@ -340,6 +340,13 @@ struct Program {
     main: RootedForest<Expr>,
     io: RootedForest<Expr>,
     // rules vs rules_forest is a bit awkward. Need to consider it.
+    // In fact in general I'm not sure about how rules should be stored.
+    // Doing a linear match of them is the obvious, but wrong thing.
+    // A list of clause indexes could be a good first start. 
+    // Maybe I shouldn't have the Rule Type that I have now and instead
+    // actually represent the rules in the forest. Then I can keep a list
+    // of clauses by type. So I immediately know which clauses I care about.
+    // but I also get the clause rule relationship for free. Sounds like a good idea.
     rules: Vec<Rule>,
     rule_forest: RootedForest<Expr>,
     symbols: Interner,
@@ -364,4 +371,5 @@ struct Program {
 // Can I reduce rules into some form of bytecode?
 // Am I that far way from a compiler? Can I eliminate these vectors of children a the nodes?
 // Is there a good model of stack computation to be had here?
+// Need to add builtin symbols/rules
 
