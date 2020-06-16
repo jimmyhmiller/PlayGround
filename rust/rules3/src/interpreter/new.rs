@@ -28,26 +28,17 @@ enum Expr {
     Quote,
 }
 
-// Before I've had it so that clauses are in scopes.
-// but really that is a matter of their content.
-// they can even match with multiple scopes.
-// So I think that will be changed with Expr, 
-// not clause or rule.
+// Basic idea here is that rules are represented in a forest.
+// There is a Rule node which has as its children many clauses.
+// Clauses then have as children left and right.
+// Maybe I should have these just as a struct instead? But this
+// does give me some nice things for uniformity.
 #[derive(Debug, Clone)]
-struct Clause {
-    left: Index,
-    right: Index
-}
-
-
-#[derive(Debug, Clone)]
-struct Rule {
-    name: Index,
-    // This is really a set but it will probably be small so vec is fine?
-    // Also, the scopes here are really derived from the clauses,
-    // but not having to check each clause just makes sense.
-    scopes: Vec<Index>, 
-    clauses: Vec<Clause>,
+enum Rule {
+    Rule{name: Index, scopes: Vec<Index>},
+    Clause,
+    Left(Expr),
+    Right(Expr),
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +58,13 @@ struct Interner {
 }
 
 impl Interner {
+    fn new() -> Interner {
+        Interner {
+            lookup: HashMap::new(),
+            storage: vec![],
+        }
+    }
+
     fn intern(&mut self, symbol : &str) -> Index {
         if let Some(index) = self.lookup.get(symbol) {
             return *index
@@ -91,6 +89,14 @@ struct Forest<T> where T : Clone {
 
 
 impl<T> Forest<T> where T : Clone + Debug {
+
+    fn new() -> Forest<T> {
+        Forest {
+            arena: vec![],
+            current_index: 0,
+        }
+    }
+
     fn insert_root(&mut self, t: T) -> Index {
         let index = self.next_index();
         let n = Node {
@@ -140,7 +146,7 @@ impl<T> Forest<T> where T : Clone + Debug {
     }
     fn print_tree_inner(&self, node: &Node<T>, prefix: String, last: bool) {
         let current_prefix = if last { "`- " } else { "|- " };
-        println!("{}{}{:?}", prefix, current_prefix, node.val);
+        println!("{}{}{:?} {}", prefix, current_prefix, node.val, node.exhausted);
 
         let child_prefix = if last { "   " } else { "|  " };
         let prefix = prefix + child_prefix;
@@ -154,31 +160,45 @@ impl<T> Forest<T> where T : Clone + Debug {
             }
         }
     }
-    fn copy_tree_helper(&self, node_index: Index, parent_index: Option<Index>, forest: &mut Forest<T>) {
+    fn copy_tree_helper(&self, mut sub_index: Index, node_index: Index, parent_index: Option<Index>, forest: &mut Forest<T>) -> Option<Index> {
         if let Some(node) = self.get(node_index) {
             let new_index = if let Some(parent_index) = parent_index {
                 forest.insert(node.val.clone(), parent_index)
             } else {
-                Some(node_index)
+                // If there is no parent it is the root which is always 0.
+                Some(0)
             };
-            for child_index in node.children.clone() {
-                self.copy_tree_helper(child_index, new_index, forest)
+            if node_index == sub_index {
+                if let Some(i) = new_index {
+                    sub_index = i;
+                }
             }
+            for child_index in node.children.clone() {
+                if let Some(i) = self.copy_tree_helper(sub_index, child_index, new_index, forest) {
+                    sub_index = i;
+                }
+            }
+            Some(sub_index)
+        } else {
+            None
         }
     }
 
     // Might need to do this for a list of indexes?
-    fn garbage_collect(&mut self, index: Index) {
+    fn garbage_collect(&mut self, index: Index, sub_index: Index) -> Option<Index> {
         let mut forest = Forest {
             arena: vec![],
             current_index: 0,
         };
 
+        let mut result_index = None;
         if let Some(node) = self.get(index) {
             let root = forest.insert_root(node.val.clone());
-            self.copy_tree_helper(root, None, &mut forest);
+            result_index = self.copy_tree_helper(sub_index, index, None, &mut forest);
         }
-        *self = forest
+        *self = forest;
+        result_index
+
     }
 
     // https://vallentin.dev/2019/05/14/pretty-print-tree
@@ -189,146 +209,118 @@ impl<T> Forest<T> where T : Clone + Debug {
 
     }
 
-    /// Returns new Index of node modified and its new root.
-    fn persistent_change(&mut self, t : T, index: Index) -> Option<(Index, Index)> {
+    fn persistent_change(&mut self, t : T, index: Index) {
 
-        let mut node = self.get(index)?.clone();
-        node.val = t;
-
-        let mut child_index = node.child_index;
-        let mut parent_index = node.parent;
-        let mut new_index = self.next_index();
-        let original_index = new_index;
-
-        node.index = new_index;
-        self.arena.push(node);
-        // If this element doesn't have any parent,
-        // it is the root and we need to return it.
-        let mut last_parent = new_index;
-        while let (Some(index), Some(child_index_value)) = (parent_index, child_index) {
-            let new_parent_index = self.next_index();
-            let mut parent = self.get(index)?.clone();
-            
-            parent.index = new_parent_index;
-            parent.children[child_index_value] = new_index;
-            last_parent = new_parent_index;
-            
-            parent_index = parent.parent;
-            child_index = parent.child_index;
-            new_index = parent.index;
-
-            self.arena.push(parent);
-
+        // Need to capture location of old node we copied.
+        if let Some(node) = self.arena.get_mut(index) {
+            node.val = t;
+            let node_clone = node.clone();
+            self.insert_node(node_clone);
         }
-        Some((original_index, last_parent))
+
     }
+
 }
 
 #[derive(Debug, Clone)]
 struct RootedForest<T> where T : Clone {
     root: Index,
+    focus: Index,
     forest: Forest<T>,
 }
 
 
 impl<T> RootedForest<T> where T : Clone + Debug {
 
+    fn new() -> RootedForest<T> {
+        RootedForest {
+            root: 0,
+            focus: 0,
+            forest: Forest::new(),
+        }
+    }
+
+    // I should probably cache this root?
+    // I can easily do this if changing root
+    // goes through some method.
     fn get_root(&self) -> Option<&Node<T>> {
         self.forest.get(self.root)
     }
 
+    fn exhaust_focus(&mut self) {
+        if let Some(node) = self.forest.arena.get_mut(self.focus) {
+            node.exhausted = true
+        }
+    }
+
+    fn get_focus(&self) -> Option<&Node<T>> {
+        self.forest.get(self.focus)
+    }
+    
     fn get(&self, index: Index) -> Option<&Node<T>> {
         self.forest.get(index)
     }
 
+    // I could cache this?
+    fn root_is_exhausted(&self) -> bool {
+        let root = self.get_root();
+        root.is_none() || root.unwrap().exhausted
+    }
+
+    fn focus_is_exhausted(&self) -> bool {
+        let focus = self.get_focus();
+        focus.is_none() || focus.unwrap().exhausted
+    }
+
+    fn get_focus_parent(&self) -> Option<Index> {
+        self.get_focus().and_then(|x| x.parent)
+    }
+
+    fn move_focus_if_exhausted(&mut self) {
+    }
+
     /// Should move to the next expr that needs evaluation
     fn move_to_next_expr(&mut self) {
+        let mut fuel = 0;
         loop {
-            if let Some(root) = self.get_root() {
-                if root.exhausted || root.children.len() == 0 {
+            // fuel += 1;
+            // if fuel > 100 {
+            //     break;
+            // }
+            if self.root_is_exhausted() {
+                return
+            }
+            if self.focus_is_exhausted() {
+                if let Some(index) = self.get_focus_parent() {
+                    // println!("Moving to parent");
+                    self.focus = index;
+                    continue;
+                } else {
+                    return
+                }
+            }
+            if let Some(focus) = self.get_focus() {
+                if focus.children.len() == 0 {
                     return
                 }
 
-                for child in root.children.iter() {
+                let mut all_children_exhausted = true;
+                for child in focus.children.iter() {
                     if let Some(c) = self.get(*child) {
                         if !c.exhausted {
-                            self.root = *child;
+                            self.focus = *child;
+                            all_children_exhausted = false;
                             break;
                         }
                     }
+                }
+                if all_children_exhausted {
+                    break;
                 }
             }
         }
     }
 }
-
-
-pub fn run_new() {
-
-
-    let mut f = Forest::<Expr> {
-        arena: Vec::with_capacity(2),
-        current_index: 0,
-    };
-    let now = Instant::now();
-    let depth = 10;
-    let width = 10;
-    // let root = f.insert_root(Expr::Call);
-    // let mut p = root;
-    // for _ in 0..depth {
-    //     if let Some(index) = f.insert(Expr::Symbol(0), p) {
-    //         p = index;
-    //         for _ in 0..width{
-    //             f.insert(Expr::Symbol(0), p);
-    //         }
-    //     }
-    // }
-    // println!("{}", now.elapsed().as_millis());
-    let mut r = RootedForest::<Expr> {
-        forest: f,
-        root: 0,
-    };
-
-    let n1 = r.forest.insert_root(Expr::Call);
-    let n2 = r.forest.insert(Expr::Call, n1);
-    let n3 = r.forest.insert(Expr::Symbol(0), n2.unwrap());
-    r.forest.insert(Expr::Symbol(1), n2.unwrap());
-    r.forest.insert(Expr::Symbol(1), n2.unwrap());
-    r.forest.insert(Expr::Symbol(1), n2.unwrap());
-    r.forest.insert(Expr::Symbol(1), n2.unwrap());
-    let n4 = r.forest.insert(Expr::Symbol(1), n3.unwrap());
-    let n5 = r.forest.insert(Expr::Num(2), n4.unwrap());
-
-    r.forest.print_tree(0);
-    r.move_to_next_expr();
-    println!("{:?}", r.get_root());
-
-    // let now = Instant::now();
-
-    // let mut result = f.persistent_change(Expr::Symbol(1), depth*width);
-    // for _ in 0..100000 {
-    //     result = f.persistent_change(Expr::Symbol(1), depth*width);
-    // }
-    // println!("{}", now.elapsed().as_millis());
-    
-    // let now = Instant::now();
-    // if let Some((node, root)) = result {
-    //     // println!("length: {}, {}, {:#?}", f.arena.len(), node, f.get(root));
-
-    //     // println!("{}", root);
-    //     // f.print_tree(root);
-    //     println!("{}", f.arena.len());
-    //     f.garbage_collect(root);
-    //     println!("{}", f.arena.len());
-    // }
-    // println!("{}", now.elapsed().as_millis());
-    // f.print_tree(root);
-    
-    // Silly litle trick that does speed things up.
-    std::thread::spawn(move || drop(r));
-
-}
-
 
 #[derive(Debug, Clone)]
 struct Program {
@@ -339,20 +331,129 @@ struct Program {
     // But it seems worthwhile to bring them to the top level.
     main: RootedForest<Expr>,
     io: RootedForest<Expr>,
-    // rules vs rules_forest is a bit awkward. Need to consider it.
-    // In fact in general I'm not sure about how rules should be stored.
-    // Doing a linear match of them is the obvious, but wrong thing.
-    // A list of clause indexes could be a good first start. 
-    // Maybe I shouldn't have the Rule Type that I have now and instead
-    // actually represent the rules in the forest. Then I can keep a list
-    // of clauses by type. So I immediately know which clauses I care about.
-    // but I also get the clause rule relationship for free. Sounds like a good idea.
-    rules: Vec<Rule>,
-    rule_forest: RootedForest<Expr>,
+    // We will need some structure for the preprocessed rules.
+    // Like keeping a list of clauses by scope and type.
+    rules: RootedForest<Rule>,
     symbols: Interner,
     scopes: HashMap<Index, RootedForest<Expr>>,
 }
 
+
+impl Program {
+
+    fn new() -> Program {
+        Program {
+            meta: Meta {
+                original_expr: 0,
+                original_sub_expr: 0,
+                new_expr: 0,
+                new_sub_expr: 0,
+            },
+            main: RootedForest::new(),
+            io: RootedForest::new(),
+            rules: RootedForest::new(),
+            symbols: Interner::new(),
+            scopes: HashMap::new(),
+        }
+    }
+
+    fn rewrite(scope: &mut RootedForest<Expr>) {
+        if let Some(focus) = scope.get_focus() {
+            match focus.val {
+                Expr::Symbol(0) => {
+                    scope.forest.persistent_change(Expr::Symbol(1),scope.focus);
+                }
+               _ => {
+                //    println!("Exhausting");
+                   scope.exhaust_focus()
+               }
+            }
+        } else {
+            scope.exhaust_focus();
+        }
+    }
+
+    // Making this work for main right now even though
+    // we actually need multiple scopes.
+    fn step(&mut self) {
+        let scope = &mut self.main;
+        scope.move_to_next_expr();
+        if scope.root_is_exhausted() {
+            return
+        }
+        // rewrite should return old node location.
+        // meta needs to change.
+        Program::rewrite(scope)
+        // if let Some((sub, root)) = Program::rewrite(scope) {
+        //     let meta = Meta{
+        //         original_expr: scope.root,
+        //         original_sub_expr: scope.focus,
+        //         new_expr: root,
+        //         new_sub_expr: sub
+        //     };
+        //     let new_focus = scope.forest.garbage_collect(root, sub);
+        //     scope.root = 0;
+        //     if let Some(focus) = new_focus {
+        //         scope.focus = focus;
+        //     }
+        //     // What do we do if this is false??
+        // } else {
+        //     scope.exhaust_focus();
+        // }
+    }
+
+    fn full_step(&mut self) {
+        let mut fuel = 0;
+        while !self.main.root_is_exhausted() {
+            // fuel +=1;
+            // if fuel > 3000 {
+            //     println!("break");
+            //     break;
+            // }
+            self.step();
+        }
+    }
+}
+
+
+
+
+
+pub fn run_new() {
+
+    let mut program = Program::new();
+    let f = &mut program.main.forest;
+    let now = Instant::now();
+    let depth = 20;
+    let width = 20;
+    let root = f.insert_root(Expr::Call);
+    let mut p = root;
+    for _ in 0..depth {
+        if let Some(index) = f.insert(Expr::Symbol(0), p) {
+            p = index;
+            for _ in 0..width{
+                f.insert(Expr::Symbol(0), p);
+            }
+        }
+    }
+    println!("{}", now.elapsed().as_millis());
+
+
+    // if let Some((focus, root)) = program.main.forest.persistent_change(Expr::Symbol(2), n4.unwrap()) {
+    //     let result = program.main.forest.garbage_collect(root, focus);
+    //     println!("{}: {:?}", root, result);
+    // }
+    let now = Instant::now();
+    program.full_step();
+    println!("{}", now.elapsed().as_millis());
+    println!("{} {}", program.main.root, program.main.forest.arena.len());
+    // program.main.forest.print_tree(program.main.root);
+
+
+    // Silly litle trick that does speed things up.
+    // std::thread::spawn(move || drop(program));
+
+}
 
 // I need to hook up the parser to these trees.
 // I need to process rules
@@ -373,3 +474,10 @@ struct Program {
 // Is there a good model of stack computation to be had here?
 // Need to add builtin symbols/rules
 
+
+
+// Write old node to new part of arena
+// Mutate existing node.
+// Then meta returns a Tree. A Tree has a reference to an arena.
+// I can pass the old and new node index to this tree that says, if someone
+// looksup this node, then I return the other one.
