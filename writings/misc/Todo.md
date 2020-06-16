@@ -7,6 +7,6 @@
 7. Create dark lang talk (+++)
 8. Work on Escaping the Tyranny of Async Programming Talk (+)
 9. Reimplement the mutable version of interpreter (Finished - because it doesn't work)
-10 Reimplement arena version of the interpreter (++++)
+10 Reimplement arena version of the interpreter (+++++)
 10. Write articles (++++)
 11. Read (++)
