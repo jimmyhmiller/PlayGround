@@ -60,6 +60,7 @@ struct Meta {
 
 // Allocates and uses more storage than I technically need.
 // But I doubt this will ever be the bottleneck.
+#[derive(Debug, Clone)]
 struct Interner {
     lookup: HashMap<String, Index>,
     storage: Vec<String>
@@ -223,6 +224,43 @@ impl<T> Forest<T> where T : Clone + Debug {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RootedForest<T> where T : Clone {
+    root: Index,
+    forest: Forest<T>,
+}
+
+
+impl<T> RootedForest<T> where T : Clone + Debug {
+
+    fn get_root(&self) -> Option<&Node<T>> {
+        self.forest.get(self.root)
+    }
+
+    fn get(&self, index: Index) -> Option<&Node<T>> {
+        self.forest.get(index)
+    }
+
+    /// Should move to the next expr that needs evaluation
+    fn move_to_next_expr(&mut self) {
+        loop {
+            if let Some(root) = self.get_root() {
+                if root.exhausted || root.children.len() == 0 {
+                    return
+                }
+
+                for child in root.children.iter() {
+                    if let Some(c) = self.get(*child) {
+                        if !c.exhausted {
+                            self.root = *child;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 
 pub fn run_new() {
@@ -235,52 +273,77 @@ pub fn run_new() {
     let now = Instant::now();
     let depth = 10;
     let width = 10;
-    let root = f.insert_root(Expr::Call);
-    let mut p = root;
-    for _ in 0..depth {
-        if let Some(index) = f.insert(Expr::Symbol(0), p) {
-            p = index;
-            for _ in 0..width{
-                f.insert(Expr::Symbol(0), p);
-            }
-        }
-    }
+    // let root = f.insert_root(Expr::Call);
+    // let mut p = root;
+    // for _ in 0..depth {
+    //     if let Some(index) = f.insert(Expr::Symbol(0), p) {
+    //         p = index;
+    //         for _ in 0..width{
+    //             f.insert(Expr::Symbol(0), p);
+    //         }
+    //     }
+    // }
     // println!("{}", now.elapsed().as_millis());
+    let mut r = RootedForest::<Expr> {
+        forest: f,
+        root: 0,
+    };
 
-    // let n1 = f.insert_root(Expr::Call);
-    // let n2 = f.insert(Expr::Symbol(0), n1);
-    // let n3 = f.insert(Expr::Call, n1);
-    // let n4 = f.insert(Expr::Symbol(1), n3);
-    // let n5 = f.insert(Expr::Num(2), n4);
+    let n1 = r.forest.insert_root(Expr::Call);
+    let n2 = r.forest.insert(Expr::Call, n1);
+    let n3 = r.forest.insert(Expr::Symbol(0), n2.unwrap());
+    r.forest.insert(Expr::Symbol(1), n2.unwrap());
+    r.forest.insert(Expr::Symbol(1), n2.unwrap());
+    r.forest.insert(Expr::Symbol(1), n2.unwrap());
+    r.forest.insert(Expr::Symbol(1), n2.unwrap());
+    let n4 = r.forest.insert(Expr::Symbol(1), n3.unwrap());
+    let n5 = r.forest.insert(Expr::Num(2), n4.unwrap());
 
-    let now = Instant::now();
+    r.forest.print_tree(0);
+    r.move_to_next_expr();
+    println!("{:?}", r.get_root());
 
-    let mut result = f.persistent_change(Expr::Symbol(1), depth*width);
-    for _ in 0..100000 {
-        result = f.persistent_change(Expr::Symbol(1), depth*width);
-    }
-    println!("{}", now.elapsed().as_millis());
+    // let now = Instant::now();
+
+    // let mut result = f.persistent_change(Expr::Symbol(1), depth*width);
+    // for _ in 0..100000 {
+    //     result = f.persistent_change(Expr::Symbol(1), depth*width);
+    // }
+    // println!("{}", now.elapsed().as_millis());
     
-    let now = Instant::now();
-    if let Some((node, root)) = result {
-        // println!("length: {}, {}, {:#?}", f.arena.len(), node, f.get(root));
+    // let now = Instant::now();
+    // if let Some((node, root)) = result {
+    //     // println!("length: {}, {}, {:#?}", f.arena.len(), node, f.get(root));
 
-        // println!("{}", root);
-        // f.print_tree(root);
-        println!("{}", f.arena.len());
-        f.garbage_collect(root);
-        println!("{}", f.arena.len());
-    }
-    println!("{}", now.elapsed().as_millis());
+    //     // println!("{}", root);
+    //     // f.print_tree(root);
+    //     println!("{}", f.arena.len());
+    //     f.garbage_collect(root);
+    //     println!("{}", f.arena.len());
+    // }
+    // println!("{}", now.elapsed().as_millis());
     // f.print_tree(root);
-
-
     
     // Silly litle trick that does speed things up.
-    std::thread::spawn(move || drop(f));
+    std::thread::spawn(move || drop(r));
+
+}
 
 
-
+#[derive(Debug, Clone)]
+struct Program {
+    // Can we rewrite meta? We can match on meta and rewrite else where.
+    // But what would it mean to rewrite meta?
+    meta: Meta,
+    // Technically these chould just be in the hashmap.
+    // But it seems worthwhile to bring them to the top level.
+    main: RootedForest<Expr>,
+    io: RootedForest<Expr>,
+    // rules vs rules_forest is a bit awkward. Need to consider it.
+    rules: Vec<Rule>,
+    rule_forest: RootedForest<Expr>,
+    symbols: Interner,
+    scopes: HashMap<Index, RootedForest<Expr>>,
 }
 
 
