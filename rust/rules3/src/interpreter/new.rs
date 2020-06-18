@@ -252,6 +252,8 @@ impl<T> RootedForest<T> where T : Clone + Debug {
             node.exhausted = true
         }
     }
+    // @personal
+    // Testing my notes system
 
     fn get_focus(&self) -> Option<&Node<T>> {
         self.forest.get(self.focus)
