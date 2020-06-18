@@ -113,6 +113,10 @@
     class-name))
 
 
+;; @personal make-variant-factory
+;; The conditionality here makes sense but it is also ugly.
+;; And should I consider making the code higher level?
+
 (defn make-variant-factory [^ClassWriter writer class-name [i {:keys [name fields] :as data}]]
   (let [struct nil #_(when fields (make-struct data))
         field-name (.toLowerCase ^String name)
