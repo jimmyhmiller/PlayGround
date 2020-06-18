@@ -5,51 +5,17 @@ use std::collections::HashMap;
 type Index = usize;
 
 #[derive(Debug, Clone)]
-struct Node<T> where T: Clone {
+struct Node<T>  where T: Clone {
     index: usize,
+    child_index: Option<usize>,
     val: T,
     parent: Option<usize>,
-    child: Option<usize>,
-    left: Option<usize>,
-    right: Option<usize>,
+    children: Vec<usize>,
     exhausted: bool,
 }
 
-impl<T> Copy for Node<T> where T : Copy {}
 
-
-struct ChildrenIter<'a, T> where T: Clone {
-    forest: &'a Forest<T>,
-    parent: &'a Node<T>,
-    current_node: Option<&'a Node<T>>,
-}
-
-impl<'a, T> Iterator for ChildrenIter<'a, T> where T: Clone + Debug {
-    type Item = &'a Node<T>;
-    
-    fn next(&mut self) -> Option<<Self as Iterator>::Item> { 
-        if self.parent.child.is_none() {
-            return None;
-        }
-        if self.current_node.is_none() {
-            let node = self.forest.get(self.parent.child.unwrap()).unwrap();
-            self.current_node = Some(node);
-            self.current_node
-        } else {
-            let current_node = self.current_node.unwrap();
-            if current_node.right.is_none() {
-                return None
-            }
-            let node = self.forest.get(current_node.right.unwrap()).unwrap();
-            self.current_node = Some(node);
-            self.current_node
-        }
-    }
-}
-
-
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Expr {
     Call,
     Symbol(Index),
@@ -131,23 +97,14 @@ impl<T> Forest<T> where T : Clone + Debug {
         }
     }
 
-    fn children<'a>(&'a self, parent: &'a Node<T>) -> ChildrenIter<'a, T> {
-        ChildrenIter {
-            forest: self,
-            parent,
-            current_node: None,
-        }
-    }
-
     fn insert_root(&mut self, t: T) -> Index {
         let index = self.next_index();
         let n = Node {
             index,
+            child_index: None,
             val: t,
             parent: None,
-            child: None,
-            left: None,
-            right: None,
+            children: vec![],
             exhausted: false
         };
         self.arena.push(n);
@@ -160,39 +117,20 @@ impl<T> Forest<T> where T : Clone + Debug {
         index
     }
 
-    fn insert_child(&mut self, parent: & Node<T>, sibling_index: Index) {
-        let mut last_child = None;
-        let mut children_iter = self.children(parent);
-        while let Some(child) = children_iter.next() {
-            last_child = Some(child);
-        }
-        let index = last_child.unwrap().index;
-        if let Some(last_child) = self.arena.get_mut(index) {
-            last_child.right = Some(sibling_index);
-        }
-    }
-
     // What if parent doesn't exist?
-    fn insert(&mut self, t: T, parent_index: Index) -> Option<Index> {
+    fn insert(&mut self, t: T, parent: Index) -> Option<Index> {
         let index = self.next_index();
-        let mut parent = self.arena.get_mut(parent_index)?;
-        if parent.child.is_none() {
-            parent.child = Some(index);
-        } else {
-            let parent = parent.clone();
-            self.insert_child(& parent, index);
-        }
-
+        let p = self.arena.get_mut(parent)?;
+        p.children.push(index);
+        let child_index = (&*p).children.len() - 1;
         self.arena.push(Node {
             index,
+            child_index: Some(child_index),
             val: t,
-            parent: Some(parent_index),
-            child: None,
-            left: None,
-            right: None,
+            parent: Some(parent),
+            children: vec![],
             exhausted: false
         });
-
         Some(index)
     }
 
@@ -206,7 +144,22 @@ impl<T> Forest<T> where T : Clone + Debug {
     fn get(&self, index: Index) -> Option<&Node<T>> {
         self.arena.get(index)
     }
+    fn print_tree_inner(&self, node: &Node<T>, prefix: String, last: bool) {
+        let current_prefix = if last { "`- " } else { "|- " };
+        println!("{}{}{:?} {}", prefix, current_prefix, node.val, node.exhausted);
 
+        let child_prefix = if last { "   " } else { "|  " };
+        let prefix = prefix + child_prefix;
+        if !node.children.is_empty() {
+            let last_child = node.children.len() - 1;
+
+            for (i, child_index) in node.children.iter().enumerate() {
+                if let Some(child) = self.get(*child_index) {
+                    self.print_tree_inner(&child, prefix.to_string(), i == last_child);
+                }
+            }
+        }
+    }
     fn copy_tree_helper(&self, mut sub_index: Index, node_index: Index, parent_index: Option<Index>, forest: &mut Forest<T>) -> Option<Index> {
         if let Some(node) = self.get(node_index) {
             let new_index = if let Some(parent_index) = parent_index {
@@ -220,19 +173,9 @@ impl<T> Forest<T> where T : Clone + Debug {
                     sub_index = i;
                 }
             }
-            if let Some(child_index) = node.child {
+            for child_index in node.children.clone() {
                 if let Some(i) = self.copy_tree_helper(sub_index, child_index, new_index, forest) {
                     sub_index = i;
-                }
-                if let Some(mut child) = self.get(child_index) {
-                    while let Some(sibling_index) = child.right {
-                        if let Some(i) = self.copy_tree_helper(sub_index, sibling_index, new_index, forest) {
-                            sub_index = i;
-                        }
-                        if let Some(sibling) = self.get(child_index) {
-                            child = sibling;
-                        }
-                    }
                 }
             }
             Some(sub_index)
@@ -258,20 +201,6 @@ impl<T> Forest<T> where T : Clone + Debug {
 
     }
 
-    fn print_tree_inner(&self, node: &Node<T>, prefix: String, last: bool) {
-        let current_prefix = if last { "`- " } else { "|- " };
-        println!("{}{}{:?} {}", prefix, current_prefix, node.val, node.exhausted);
-
-        let child_prefix = if last { "   " } else { "|  " };
-        let prefix = prefix + child_prefix;
-
-        let children : Vec<&Node<T>> = self.children(node).collect();
-
-        for (i, child) in children.iter().enumerate() {
-            self.print_tree_inner(&child, prefix.to_string(), i == children.len() - 1);
-        }
-    }
-
     // https://vallentin.dev/2019/05/14/pretty-print-tree
     fn print_tree(&self, index: Index) {
         if let Some(node) = self.get(index) {
@@ -285,8 +214,8 @@ impl<T> Forest<T> where T : Clone + Debug {
         // Need to capture location of old node we copied.
         if let Some(node) = self.arena.get_mut(index) {
             node.val = t;
-            // let node_clone = node.clone();
-            // self.insert_node(node_clone);
+            let node_clone = node.clone();
+            self.insert_node(node_clone);
         }
 
     }
@@ -352,8 +281,12 @@ impl<T> RootedForest<T> where T : Clone + Debug {
 
     /// Should move to the next expr that needs evaluation
     fn move_to_next_expr(&mut self) {
-        // let mut fuel = 0;
+        let mut fuel = 0;
         loop {
+            // fuel += 1;
+            // if fuel > 100 {
+            //     break;
+            // }
             if self.root_is_exhausted() {
                 return
             }
@@ -367,17 +300,19 @@ impl<T> RootedForest<T> where T : Clone + Debug {
                 }
             }
             if let Some(focus) = self.get_focus() {
-                if focus.child.is_none() {
+                if focus.children.len() == 0 {
                     return
                 }
 
                 let mut all_children_exhausted = true;
-                for child in  self.forest.children(focus) {
-                    if !child.exhausted {
-                        self.focus = child.index;
-                        all_children_exhausted = false;
-                        break;
-                    } 
+                for child in focus.children.iter() {
+                    if let Some(c) = self.get(*child) {
+                        if !c.exhausted {
+                            self.focus = *child;
+                            all_children_exhausted = false;
+                            break;
+                        }
+                    }
                 }
                 if all_children_exhausted {
                     break;
@@ -471,7 +406,7 @@ impl Program {
         let mut fuel = 0;
         while !self.main.root_is_exhausted() {
             // fuel +=1;
-            // if fuel > 30 {
+            // if fuel > 3000 {
             //     println!("break");
             //     break;
             // }
@@ -509,11 +444,7 @@ pub fn run_new() {
     //     println!("{}: {:?}", root, result);
     // }
     let now = Instant::now();
-    // println!("{:#?}", program.main.forest.arena);
-    // program.main.forest.print_tree(program.main.root);
     program.full_step();
-    // let x : Vec<& Node<Expr>> = program.main.forest.arena.iter().filter(|x| x.exhausted == false).collect();
-    // println!("not exhausted {}", x.len());
     println!("{}", now.elapsed().as_millis());
     println!("{} {}", program.main.root, program.main.forest.arena.len());
     // program.main.forest.print_tree(program.main.root);
@@ -523,8 +454,6 @@ pub fn run_new() {
     // std::thread::spawn(move || drop(program));
 
 }
-
-fn main() {}
 
 // I need to hook up the parser to these trees.
 // I need to process rules
