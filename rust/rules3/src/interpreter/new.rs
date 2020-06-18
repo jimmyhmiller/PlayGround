@@ -5,17 +5,20 @@ use std::collections::HashMap;
 type Index = usize;
 
 #[derive(Debug, Clone)]
-struct Node<T>  where T: Clone {
+struct Node<T>  where T: Clone{
     index: usize,
-    child_index: Option<usize>,
     val: T,
     parent: Option<usize>,
-    children: Vec<usize>,
+    child: Option<usize>,
+    left: Option<usize>,
+    right: Option<usize>,
     exhausted: bool,
 }
 
+impl<T> Copy for Node<T> where T : Copy {}
 
-#[derive(Debug, Clone)]
+
+#[derive(Debug, Clone, Copy)]
 enum Expr {
     Call,
     Symbol(Index),
@@ -101,10 +104,11 @@ impl<T> Forest<T> where T : Clone + Debug {
         let index = self.next_index();
         let n = Node {
             index,
-            child_index: None,
             val: t,
             parent: None,
-            children: vec![],
+            child: None,
+            left: None,
+            right: None,
             exhausted: false
         };
         self.arena.push(n);
@@ -117,20 +121,52 @@ impl<T> Forest<T> where T : Clone + Debug {
         index
     }
 
+    fn insert_child(&mut self, parent: & Node<T>, sibling_index: Index) {
+        if let Some(child_index) = parent.child {
+            if let Some(mut child) = self.get(child_index) {
+                // let mut fuel = 0;
+                while let Some(sibling) = child.right {
+                    // println!("{:?} {:?}", child.index, sibling);
+                    // fuel += 1;
+                    // if fuel > 10 {
+                    //     println!("Fuel! {:?}", child);
+                    //     break;
+                    // }
+                    if let Some(node) = self.get(sibling) {
+                        child = node;
+                    } else {
+                        panic!("Some sibling doesn't exist");
+                    }
+                    
+                }
+                if let Some(node) = self.arena.get_mut(child_index) {
+                    node.right = Some(sibling_index);
+                }
+            }
+        }
+    }
+
     // What if parent doesn't exist?
-    fn insert(&mut self, t: T, parent: Index) -> Option<Index> {
+    fn insert(&mut self, t: T, parent_index: Index) -> Option<Index> {
         let index = self.next_index();
-        let p = self.arena.get_mut(parent)?;
-        p.children.push(index);
-        let child_index = (&*p).children.len() - 1;
+        let mut parent = self.arena.get_mut(parent_index)?;
+        if parent.child.is_none() {
+            parent.child = Some(index);
+        } else {
+            let parent = parent.clone();
+            self.insert_child(& parent, index);
+        }
+
         self.arena.push(Node {
             index,
-            child_index: Some(child_index),
             val: t,
-            parent: Some(parent),
-            children: vec![],
+            parent: Some(parent_index),
+            child: None,
+            left: None,
+            right: None,
             exhausted: false
         });
+
         Some(index)
     }
 
@@ -144,22 +180,7 @@ impl<T> Forest<T> where T : Clone + Debug {
     fn get(&self, index: Index) -> Option<&Node<T>> {
         self.arena.get(index)
     }
-    fn print_tree_inner(&self, node: &Node<T>, prefix: String, last: bool) {
-        let current_prefix = if last { "`- " } else { "|- " };
-        println!("{}{}{:?} {}", prefix, current_prefix, node.val, node.exhausted);
 
-        let child_prefix = if last { "   " } else { "|  " };
-        let prefix = prefix + child_prefix;
-        if !node.children.is_empty() {
-            let last_child = node.children.len() - 1;
-
-            for (i, child_index) in node.children.iter().enumerate() {
-                if let Some(child) = self.get(*child_index) {
-                    self.print_tree_inner(&child, prefix.to_string(), i == last_child);
-                }
-            }
-        }
-    }
     fn copy_tree_helper(&self, mut sub_index: Index, node_index: Index, parent_index: Option<Index>, forest: &mut Forest<T>) -> Option<Index> {
         if let Some(node) = self.get(node_index) {
             let new_index = if let Some(parent_index) = parent_index {
@@ -173,9 +194,19 @@ impl<T> Forest<T> where T : Clone + Debug {
                     sub_index = i;
                 }
             }
-            for child_index in node.children.clone() {
+            if let Some(child_index) = node.child {
                 if let Some(i) = self.copy_tree_helper(sub_index, child_index, new_index, forest) {
                     sub_index = i;
+                }
+                if let Some(mut child) = self.get(child_index) {
+                    while let Some(sibling_index) = child.right {
+                        if let Some(i) = self.copy_tree_helper(sub_index, sibling_index, new_index, forest) {
+                            sub_index = i;
+                        }
+                        if let Some(sibling) = self.get(child_index) {
+                            child = sibling;
+                        }
+                    }
                 }
             }
             Some(sub_index)
@@ -199,6 +230,30 @@ impl<T> Forest<T> where T : Clone + Debug {
         *self = forest;
         result_index
 
+    }
+
+    fn print_tree_inner(&self, node: &Node<T>, prefix: String, last: bool) {
+        let current_prefix = if last { "`- " } else { "|- " };
+        println!("{}{}{:?} {}", prefix, current_prefix, node.val, node.exhausted);
+
+        let child_prefix = if last { "   " } else { "|  " };
+        let prefix = prefix + child_prefix;
+
+        // Should consider making a iter method for children
+        if node.child.is_some() {
+
+            if let Some(mut child) = self.get(node.child.unwrap()) {
+                while child.right.is_some() {
+                    self.print_tree_inner(&child, prefix.to_string(), false);
+                    if let Some(sibling) = self.get(child.right.unwrap()) {
+                        child = sibling
+                    } else {
+                        panic!(format!("We have a node with a right that doesn't exist {:?}", node));
+                    } 
+                }
+                self.print_tree_inner(&child, prefix.to_string(), true);
+            }
+        }
     }
 
     // https://vallentin.dev/2019/05/14/pretty-print-tree
@@ -283,10 +338,10 @@ impl<T> RootedForest<T> where T : Clone + Debug {
     fn move_to_next_expr(&mut self) {
         let mut fuel = 0;
         loop {
-            // fuel += 1;
-            // if fuel > 100 {
-            //     break;
-            // }
+            fuel += 1;
+            if fuel > 10 {
+                return;
+            }
             if self.root_is_exhausted() {
                 return
             }
@@ -300,17 +355,26 @@ impl<T> RootedForest<T> where T : Clone + Debug {
                 }
             }
             if let Some(focus) = self.get_focus() {
-                if focus.children.len() == 0 {
+                if focus.child.is_none() {
                     return
                 }
 
+                // This isn't right yet. We aren skipping some nodes.
                 let mut all_children_exhausted = true;
-                for child in focus.children.iter() {
-                    if let Some(c) = self.get(*child) {
-                        if !c.exhausted {
-                            self.focus = *child;
+                if let Some(child_index) = focus.child {
+                    if let Some(mut child) = self.get(child_index) {
+                        while child.exhausted {
+                            if let Some(right_index) = child.right {
+                                if let Some(sibling) = self.get(right_index) {
+                                    child = sibling;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        if !child.exhausted {
+                            self.focus = child.index;
                             all_children_exhausted = false;
-                            break;
                         }
                     }
                 }
@@ -405,11 +469,11 @@ impl Program {
     fn full_step(&mut self) {
         let mut fuel = 0;
         while !self.main.root_is_exhausted() {
-            // fuel +=1;
-            // if fuel > 3000 {
-            //     println!("break");
-            //     break;
-            // }
+            fuel +=1;
+            if fuel > 30 {
+                println!("break");
+                break;
+            }
             self.step();
         }
     }
@@ -424,8 +488,8 @@ pub fn run_new() {
     let mut program = Program::new();
     let f = &mut program.main.forest;
     let now = Instant::now();
-    let depth = 20;
-    let width = 20;
+    let depth = 30;
+    let width = 30;
     let root = f.insert_root(Expr::Call);
     let mut p = root;
     for _ in 0..depth {
@@ -444,16 +508,22 @@ pub fn run_new() {
     //     println!("{}: {:?}", root, result);
     // }
     let now = Instant::now();
+    // println!("{:#?}", program.main.forest.arena);
+    // program.main.forest.print_tree(program.main.root);
     program.full_step();
+    let x : Vec<& Node<Expr>> = program.main.forest.arena.iter().filter(|x| x.exhausted == false).collect();
+    println!("not exhausted {}", x.len());
     println!("{}", now.elapsed().as_millis());
     println!("{} {}", program.main.root, program.main.forest.arena.len());
-    // program.main.forest.print_tree(program.main.root);
+    program.main.forest.print_tree(program.main.root);
 
 
     // Silly litle trick that does speed things up.
     // std::thread::spawn(move || drop(program));
 
 }
+
+fn main() {}
 
 // I need to hook up the parser to these trees.
 // I need to process rules
