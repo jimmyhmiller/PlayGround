@@ -252,8 +252,6 @@ impl<T> RootedForest<T> where T : Clone + Debug {
             node.exhausted = true
         }
     }
-    // @personal
-    // Testing my notes system
 
     fn get_focus(&self) -> Option<&Node<T>> {
         self.forest.get(self.focus)
@@ -263,7 +261,10 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         self.forest.get(index)
     }
 
-    // I could cache this?
+    // Could I cache this?
+    // Trying to cache the root is actually harder than it seems.
+    // I would need to store a reference in the struct.
+    // But that reference needs a lifetime.
     fn root_is_exhausted(&self) -> bool {
         let root = self.get_root();
         root.is_none() || root.unwrap().exhausted
@@ -278,8 +279,6 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         self.get_focus().and_then(|x| x.parent)
     }
 
-    fn move_focus_if_exhausted(&mut self) {
-    }
 
     /// Should move to the next expr that needs evaluation
     fn move_to_next_expr(&mut self) {
