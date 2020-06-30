@@ -4,6 +4,7 @@ pub mod parser;
 mod helpers;
 mod retry;
 mod new;
+mod arm;
 
 
 pub use self::parser::parse;
@@ -11,6 +12,7 @@ pub use self::parser::tokenize;
 pub use self::parser::read;
 pub use self::retry::doit;
 pub use self::new::run_new;
+pub use self::arm::main_arm;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;

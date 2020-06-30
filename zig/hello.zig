@@ -21,20 +21,34 @@ pub fn main() !void {
         .right = null,
     };
     // Need to understand pointers better for this part.
-    var parent: *Node = &root;
+    // I need to allocate, I'm pretty sure.
+    var parent: **Node = &(&root);
     var i: usize = 0;
-    while (i < 20) {
+    while (i < 2) {
         i += 1;
         var child = Node{
             .val = i,
-            .parent = parent,
+            .parent = parent.*,
             .child = null,
             .left = null,
             .right = null,
         };
-        parent.child = &child;
-        parent = &child;
+        parent.*.child = &child;
+        parent.* = &child;
     }
+
+    // var child = Node{
+    //     .val = 1,
+    //     .parent = &(parent.*),
+    //     .child = null,
+    //     .left = null,
+    //     .right = null,
+    // };
+    // parent.child = &child;
     const stdout = std.io.getStdOut().outStream();
-    try stdout.print("{}\n", .{root});
+    while (root.child) |child_node| {
+        try stdout.print("{}\n", .{root.val});
+        root = child_node.*;
+    }
+    try stdout.print("{}\n", .{root.val});
 }

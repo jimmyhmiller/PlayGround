@@ -282,7 +282,7 @@ impl<T> RootedForest<T> where T : Clone + Debug {
 
     /// Should move to the next expr that needs evaluation
     fn move_to_next_expr(&mut self) {
-        let mut fuel = 0;
+        // let mut fuel = 0;
         loop {
             // fuel += 1;
             // if fuel > 100 {
@@ -404,7 +404,7 @@ impl Program {
     }
 
     fn full_step(&mut self) {
-        let mut fuel = 0;
+        // let mut fuel = 0;
         while !self.main.root_is_exhausted() {
             // fuel +=1;
             // if fuel > 3000 {

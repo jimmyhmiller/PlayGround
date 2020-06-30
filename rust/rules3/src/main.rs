@@ -208,7 +208,8 @@ fn main() {
     // program.submit(read("fact(1)"));
     
     // doit();
-    run_new()
+    // run_new();
+    main_arm();
     // // program.submit(read("@main"));
     // program.submit(read("@history"));
     // print(program.get_main());
