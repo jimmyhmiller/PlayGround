@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::hash::{Hash};
+
 
 #[derive(Debug, Clone)]
 enum Op<T> {
@@ -24,18 +27,21 @@ struct Machine<T> {
     argument_stack: Vec<T>,
     control_stack: Vec<T>,
     traversal_stack: Vec<T>,
-    executable_stack: Vec<T>,
-    // code_table: HashTable<T, Vec<Op>>
+    executable_stack: Vec<Op<T>>,
+    code_table: HashMap<T, Vec<Op<T>>>
 }
 
-impl<T> Machine<T> where T: PartialEq + Eq {
+impl<T> Machine<T> where T: PartialEq + Eq + Hash + Clone {
     fn step(&mut self, op: Op<T>) {
         match op {
             Op::Match(g, h) => {
                 if let Some(elem) = self.argument_stack.last_mut() {
                     if *elem == g {
                         self.argument_stack.remove(self.argument_stack.len() - 1);
-                        // self.executable_stack()
+                        for op in self.code_table.get(&h).unwrap() {
+                            // This might be backwards
+                            self.executable_stack.push(op.clone());
+                        }
                     }
                 }
             }
