@@ -1,8 +1,8 @@
-global start
+global _main
 extern _printf
 
 section .text
-start:
+_main:
   push    rbx ; something said I need to do this on mac, not sure 
  
   mov     r15,  0  ; sum

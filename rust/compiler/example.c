@@ -1,3 +1,6 @@
+#include <stdio.h>
 int main() {
-    return 1 + 2;
+    int x = 17;
+    printf("%d\n", x);
+    return 0;
 }
