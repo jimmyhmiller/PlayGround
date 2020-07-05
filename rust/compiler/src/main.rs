@@ -10,19 +10,26 @@ enum Register {
     RBX,
     RAX,
     RDI,
+    RSI,
     R9,
+    DerefData(String),
     Const(usize),
 }
 
 enum Op {
     Push(Register),
     Mov(Register, Register),
+    Lea(Register, Register),
     Pop(Register),
     Ret,
     SysCall,
     Label(String),
     Section(String),
     Global(String),
+    Call(String),
+    DefaultRel,
+    Db(String),
+    Extern(String),
 }
 
 trait Emittable {
@@ -53,8 +60,16 @@ impl Emittable for Register {
             Register::RDI => {
                 buffer.push_str("rdi");
             }
+            Register::RSI => {
+                buffer.push_str("rsi");
+            }
             Register::Const(x) => {
                 buffer.push_str(x.to_string().as_str());
+            }
+            Register::DerefData(label) => {
+                buffer.push_str("[");
+                buffer.push_str(label);
+                buffer.push_str("]");
             }
         }
     }
@@ -69,6 +84,12 @@ impl Emittable for Op {
             }
             Op::Mov(a, b) => {
                 buffer.push_str("mov "); 
+                a.emit(buffer);
+                buffer.push_str(", ");
+                b.emit(buffer);
+            }
+            Op::Lea(a, b) => {
+                buffer.push_str("lea "); 
                 a.emit(buffer);
                 buffer.push_str(", ");
                 b.emit(buffer);
@@ -89,10 +110,27 @@ impl Emittable for Op {
                 buffer.push_str("section .");
                 buffer.push_str(title);
             }
+            Op::Extern(label) => {
+                buffer.push_str("extern ");
+                buffer.push_str(label);
+            }
             Op::Global(label) => {
                 buffer.push_str("global ");
                 buffer.push_str(label);
                 buffer.push('\n');
+            }
+            Op::Call(label) => {
+                buffer.push_str("call "); 
+                buffer.push_str(label);
+            }
+            Op::DefaultRel => {
+                buffer.push_str("default rel");
+            } 
+            Op::Db(data) => {
+                let bytes : Vec<String> = data.chars().map(|c| (c as u32).to_string()).collect();
+                buffer.push_str("db ");
+                buffer.push_str(&bytes.join(", ").to_string());
+                buffer.push_str(", 0");
             }
             SysCall => {
                 buffer.push_str("syscall"); 
@@ -102,6 +140,10 @@ impl Emittable for Op {
     }
 }
 
+
+
+// fn generate_function(name: String, instructions: Vec<Op>)
+
 use Op::*;
 use Register::*;
 
@@ -109,16 +151,33 @@ fn main() -> std::io::Result<()> {
     let buffer = &mut "".to_string();
     let instructions = [
         Global("_main".to_string()),
+        Extern("_printf".to_string()),
+        Extern("_exit".to_string()),
+        Section("data".to_string()),
+        Label("format".to_string()),
+        DefaultRel,
+        Db("Hello %d\n".to_string()),
         Section("text".to_string()),
         Label("_main".to_string()),
+        Call("main".to_string()),
+        Label("exit".to_string()),
+        Mov(RDI, Const(0)),
+        // Guessing this has to do with alignment?
+        // Need to understand that more.
+        Push(RBP),
+        Call("_exit".to_string()),
+        Label("main".to_string()),
+        Push(RBP),
         Mov(RBP, RSP),
         Mov(RAX, Const(17)),
+        Lea(RDI, DerefData("format".to_string())),
+        Mov(RSI, RAX),
         Push(RAX),
-        Label("exit".to_string()),
-        Pop(R9),
-        Mov(RAX, Const(0x2000001)),
-        Mov(RDI, R9),
-        SysCall
+        Mov(RAX, Const(0)),
+        Call("_printf".to_string()),
+        Pop(RAX),
+        Pop(RBP),
+        Ret,
     ];
     for instruction in instructions.iter() {
         instruction.emit(buffer);
@@ -146,9 +205,7 @@ fn main() -> std::io::Result<()> {
 
     println!("{:?}", result2);
             
-    let result3 = Command::new("./run_prog")
-            .output().unwrap().status.code();
-
-    println!("{:?}", result3);
+    let result3 = Command::new("./run_prog").output().unwrap();
+    println!("{:?} {:?}", String::from_utf8_lossy(&result3.stdout), result3.status.code());
     Ok(())
 }
