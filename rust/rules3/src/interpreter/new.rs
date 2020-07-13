@@ -5,7 +5,7 @@ use std::collections::HashMap;
 type Index = usize;
 
 #[derive(Debug, Clone)]
-struct Node<T>  where T: Clone {
+pub struct Node<T>  where T: Clone {
     index: usize,
     child_index: Option<usize>,
     val: T,
@@ -16,7 +16,7 @@ struct Node<T>  where T: Clone {
 
 
 #[derive(Debug, Clone)]
-enum Expr {
+pub enum Expr {
     Call,
     Symbol(Index),
     Scope(Index),
@@ -34,7 +34,7 @@ enum Expr {
 // Maybe I should have these just as a struct instead? But this
 // does give me some nice things for uniformity.
 #[derive(Debug, Clone)]
-enum Rule {
+pub enum Rule {
     Rule{name: Index, scopes: Vec<Index>},
     Clause,
     Left(Expr),
@@ -42,7 +42,7 @@ enum Rule {
 }
 
 #[derive(Debug, Clone)]
-struct Meta {
+pub struct Meta {
     original_expr: Index,
     original_sub_expr: Index,
     new_expr: Index,
@@ -52,7 +52,7 @@ struct Meta {
 // Allocates and uses more storage than I technically need.
 // But I doubt this will ever be the bottleneck.
 #[derive(Debug, Clone)]
-struct Interner {
+pub struct Interner {
     lookup: HashMap<String, Index>,
     storage: Vec<String>
 }
@@ -81,7 +81,7 @@ impl Interner {
 }
 
 #[derive(Debug, Clone)]
-struct Forest<T> where T : Clone {
+pub struct Forest<T> where T : Clone {
     arena: Vec<Node<T>>,
     current_index: usize,
 }
@@ -144,7 +144,8 @@ impl<T> Forest<T> where T : Clone + Debug {
     fn get(&self, index: Index) -> Option<&Node<T>> {
         self.arena.get(index)
     }
-    fn print_tree_inner(&self, node: &Node<T>, prefix: String, last: bool) {
+
+    pub fn print_tree_inner(&self, node: &Node<T>, prefix: String, last: bool) {
         let current_prefix = if last { "`- " } else { "|- " };
         println!("{}{}{:?} {}", prefix, current_prefix, node.val, node.exhausted);
 
@@ -202,7 +203,7 @@ impl<T> Forest<T> where T : Clone + Debug {
     }
 
     // https://vallentin.dev/2019/05/14/pretty-print-tree
-    fn print_tree(&self, index: Index) {
+    pub fn print_tree(&self, index: Index) {
         if let Some(node) = self.get(index) {
             self.print_tree_inner(node, "".to_string(), true)
         }
@@ -223,10 +224,10 @@ impl<T> Forest<T> where T : Clone + Debug {
 }
 
 #[derive(Debug, Clone)]
-struct RootedForest<T> where T : Clone {
-    root: Index,
-    focus: Index,
-    forest: Forest<T>,
+pub struct RootedForest<T> where T : Clone {
+    pub root: Index,
+    pub focus: Index,
+    pub forest: Forest<T>,
 }
 
 
@@ -253,6 +254,44 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         }
     }
 
+
+    pub fn insert_child(&mut self, t : T) -> Option<Index> {
+        // I could exhaust here if I did this
+        //  from program and new things about rules.
+        self.forest.insert(t, self.focus)
+    }
+
+    pub fn make_last_child_focus(&mut self) {
+        if let Some(parent) = self.get_focus_parent() {
+            if let Some(node) = self.forest.get(parent) {
+                if let Some(last_child) = node.children.last() {
+                    // I could keep track of last inserted,
+                    // or I could assume it is last index
+                    self.focus = *last_child;
+                }
+            }
+        }
+    }
+    pub fn make_parent_focus(&mut self) {
+        if let Some(parent) = self.get_focus_parent() {
+            self.focus = parent;
+        }
+    }
+
+    pub fn swap_and_insert(&mut self, t: T) {
+        if let Some(node) = self.forest.arena.get_mut(self.focus) {
+            let node_value = node.val.clone();
+            node.val = t;
+            self.insert_child(node_value);
+        }
+    }
+
+    pub fn insert_root(&mut self, t: T) {
+        let root = self.forest.insert_root(t);
+        self.root = root;
+        self.focus = root;
+    }
+
     fn get_focus(&self) -> Option<&Node<T>> {
         self.forest.get(self.focus)
     }
@@ -275,7 +314,7 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         focus.is_none() || focus.unwrap().exhausted
     }
 
-    fn get_focus_parent(&self) -> Option<Index> {
+    pub fn get_focus_parent(&self) -> Option<Index> {
         self.get_focus().and_then(|x| x.parent)
     }
 
@@ -324,25 +363,25 @@ impl<T> RootedForest<T> where T : Clone + Debug {
 }
 
 #[derive(Debug, Clone)]
-struct Program {
+pub struct Program {
     // Can we rewrite meta? We can match on meta and rewrite else where.
     // But what would it mean to rewrite meta?
-    meta: Meta,
+    pub meta: Meta,
     // Technically these chould just be in the hashmap.
     // But it seems worthwhile to bring them to the top level.
-    main: RootedForest<Expr>,
-    io: RootedForest<Expr>,
+    pub main: RootedForest<Expr>,
+    pub io: RootedForest<Expr>,
     // We will need some structure for the preprocessed rules.
     // Like keeping a list of clauses by scope and type.
-    rules: RootedForest<Rule>,
-    symbols: Interner,
-    scopes: HashMap<Index, RootedForest<Expr>>,
+    pub rules: RootedForest<Rule>,
+    pub symbols: Interner,
+    pub scopes: HashMap<Index, RootedForest<Expr>>,
 }
 
 
 impl Program {
 
-    fn new() -> Program {
+    pub fn new() -> Program {
         Program {
             meta: Meta {
                 original_expr: 0,
@@ -403,7 +442,7 @@ impl Program {
         // }
     }
 
-    fn full_step(&mut self) {
+    pub fn full_step(&mut self) {
         // let mut fuel = 0;
         while !self.main.root_is_exhausted() {
             // fuel +=1;
@@ -420,41 +459,7 @@ impl Program {
 
 
 
-pub fn run_new() {
 
-    let mut program = Program::new();
-    let f = &mut program.main.forest;
-    let now = Instant::now();
-    let depth = 2000;
-    let width = 2000;
-    let root = f.insert_root(Expr::Call);
-    let mut p = root;
-    for _ in 0..depth {
-        if let Some(index) = f.insert(Expr::Symbol(0), p) {
-            p = index;
-            for _ in 0..width{
-                f.insert(Expr::Symbol(0), p);
-            }
-        }
-    }
-    println!("{}", now.elapsed().as_millis());
-
-
-    // if let Some((focus, root)) = program.main.forest.persistent_change(Expr::Symbol(2), n4.unwrap()) {
-    //     let result = program.main.forest.garbage_collect(root, focus);
-    //     println!("{}: {:?}", root, result);
-    // }
-    let now = Instant::now();
-    program.full_step();
-    println!("{}", now.elapsed().as_millis());
-    println!("{} {}", program.main.root, program.main.forest.arena.len());
-    // program.main.forest.print_tree(program.main.root);
-
-
-    // Silly litle trick that does speed things up.
-    // std::thread::spawn(move || drop(program));
-
-}
 
 // I need to hook up the parser to these trees.
 // I need to process rules
@@ -482,3 +487,18 @@ pub fn run_new() {
 // Then meta returns a Tree. A Tree has a reference to an arena.
 // I can pass the old and new node index to this tree that says, if someone
 // looksup this node, then I return the other one.
+
+
+
+
+
+// submit expr to main
+// find the first reducible expr
+// if not matches exhaust.
+// if match:
+    // check against meta
+    // if meta match assign first half meta
+    // based on structure of rule vs subtree insert/mutate
+    // fill out second half of meta
+    // eval meta
+    // eval any side-effects
