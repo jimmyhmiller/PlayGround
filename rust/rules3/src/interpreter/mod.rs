@@ -5,14 +5,17 @@ mod helpers;
 mod retry;
 mod new;
 mod arm;
+mod parser2;
+mod new_main;
 
 
 pub use self::parser::parse;
 pub use self::parser::tokenize;
 pub use self::parser::read;
 pub use self::retry::doit;
-pub use self::new::run_new;
+pub use self::new_main::run_new;
 pub use self::arm::main_arm;
+pub use self::parser2::read_new;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
