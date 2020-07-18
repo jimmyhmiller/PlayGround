@@ -1,6 +1,6 @@
 
 
-use super::new::{Expr, RootedForest};
+use super::new::{Expr, RootedForest, Interner};
 
 #[derive(Debug)]
 pub enum Token<'a> {
@@ -203,13 +203,13 @@ pub fn tokenize<'a>(text: &'a str) -> Vec<Token<'a>> {
 }
 
 // Need to handle quote here.
-pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>) {
+pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, interner: &mut Interner) {
     let mut is_root = true;
     for token in tokens {
         match token {
             Token::String(_) => {}
             Token::Integer(s) => {
-                let expr = Expr::Num(s.parse::<usize>().unwrap());
+                let expr = Expr::Num(s.parse::<isize>().unwrap());
                 if is_root {
                     rooted_forest.insert_root(expr);
                     is_root = false;
@@ -220,7 +220,7 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>) {
             Token::Float(_) => {}
             Token::Symbol(s) => {
                 // Need to intern strings
-                let interned_index = 0;
+                let interned_index = interner.intern(s);
                 let expr = Expr::Symbol(interned_index);
                 if is_root {
                     rooted_forest.insert_root(expr);
@@ -248,6 +248,6 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>) {
     }
 }
 
-pub fn read_new<'a>(expr : &'a str, rooted_forest : &mut RootedForest<Expr>) {
-    parse_new(tokenize(expr), rooted_forest)
+pub fn read_new<'a>(expr : &'a str, rooted_forest : &mut RootedForest<Expr>, interner: &mut Interner) {
+    parse_new(tokenize(expr), rooted_forest, interner)
 }
