@@ -21,7 +21,7 @@ pub enum Expr {
     Symbol(Index),
     Scope(Index),
     LogicVariable(Index),
-    Num(usize),
+    Num(isize),
     Do,
     Array,
     Map, // How do I do this one? I guess its children are just even?
@@ -65,7 +65,7 @@ impl Interner {
         }
     }
 
-    fn intern(&mut self, symbol : &str) -> Index {
+    pub fn intern(&mut self, symbol : &str) -> Index {
         if let Some(index) = self.lookup.get(symbol) {
             return *index
         }
@@ -75,7 +75,7 @@ impl Interner {
         index
     }
 
-    fn lookup(&self, index: Index) -> Option<&String> {
+    pub fn lookup(&self, index: Index) -> Option<&String> {
         self.storage.get(index)
     }
 }
@@ -145,9 +145,9 @@ impl<T> Forest<T> where T : Clone + Debug {
         self.arena.get(index)
     }
 
-    pub fn print_tree_inner(&self, node: &Node<T>, prefix: String, last: bool) {
+    pub fn print_tree_inner<F>(&self, node: &Node<T>, prefix: String, last: bool, formatter: &F) where F : Fn(&T) -> String {
         let current_prefix = if last { "`- " } else { "|- " };
-        println!("{}{}{:?} {}", prefix, current_prefix, node.val, node.exhausted);
+        println!("{}{}{} {}", prefix, current_prefix, formatter(&node.val), node.exhausted);
 
         let child_prefix = if last { "   " } else { "|  " };
         let prefix = prefix + child_prefix;
@@ -156,11 +156,19 @@ impl<T> Forest<T> where T : Clone + Debug {
 
             for (i, child_index) in node.children.iter().enumerate() {
                 if let Some(child) = self.get(*child_index) {
-                    self.print_tree_inner(&child, prefix.to_string(), i == last_child);
+                    self.print_tree_inner(&child, prefix.to_string(), i == last_child, formatter);
                 }
             }
         }
     }
+
+        // https://vallentin.dev/2019/05/14/pretty-print-tree
+        pub fn print_tree<F>(&self, index: Index, formatter: F) where F : Fn(&T) -> String {
+            if let Some(node) = self.get(index) {
+                self.print_tree_inner(node, "".to_string(), true, &formatter)
+            }
+    
+        }
     fn copy_tree_helper(&self, mut sub_index: Index, node_index: Index, parent_index: Option<Index>, forest: &mut Forest<T>) -> Option<Index> {
         if let Some(node) = self.get(node_index) {
             let new_index = if let Some(parent_index) = parent_index {
@@ -202,13 +210,6 @@ impl<T> Forest<T> where T : Clone + Debug {
 
     }
 
-    // https://vallentin.dev/2019/05/14/pretty-print-tree
-    pub fn print_tree(&self, index: Index) {
-        if let Some(node) = self.get(index) {
-            self.print_tree_inner(node, "".to_string(), true)
-        }
-
-    }
 
     fn persistent_change(&mut self, t : T, index: Index) {
 
@@ -219,6 +220,12 @@ impl<T> Forest<T> where T : Clone + Debug {
             self.insert_node(node_clone);
         }
 
+    }
+
+    fn clear_children(&mut self, index: Index) {
+        if let Some(node) = self.arena.get_mut(index) {
+            node.children.clear();
+        }
     }
 
 }
@@ -279,9 +286,16 @@ impl<T> RootedForest<T> where T : Clone + Debug {
     }
 
     pub fn swap_and_insert(&mut self, t: T) {
-        if let Some(node) = self.forest.arena.get_mut(self.focus) {
+        if let Some(node) = self.forest.arena.get(self.focus) {
+            let index = if node.children.len() > 0 {
+                *node.children.last().unwrap()
+            } else {
+                self.focus
+            };
+            let mut node = self.forest.arena.get_mut(index).unwrap();
             let node_value = node.val.clone();
             node.val = t;
+            self.focus = index;
             self.insert_child(node_value);
         }
     }
@@ -362,6 +376,35 @@ impl<T> RootedForest<T> where T : Clone + Debug {
     }
 }
 
+
+impl RootedForest<Expr> {
+    fn is_call(&self) -> bool {
+        if let Some(Node{val: Expr::Call, ..}) = self.get_focus() {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn get_child_nums_binary(&self) -> Option<(Index, isize, isize)> {
+        if let Some(Node{val: Expr::Call, children, ..}) = self.get_focus() {
+            if !children.len() == 3 {
+                return None;
+            }
+            match self.get(*children.get(0).unwrap()).unwrap() {
+                Node{val: Expr::Symbol(i), ..} => {
+                    let two_children = (self.get(*children.get(1).unwrap()),self.get(*children.get(2).unwrap()));
+                    if let (Some(Node{val: Expr::Num(x), ..}), Some(Node{val: Expr::Num(y), ..})) = two_children {
+                        return Some((*i, *x, *y));
+                    }
+                },
+                _ => return None
+            }
+        }
+        None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
     // Can we rewrite meta? We can match on meta and rewrite else where.
@@ -382,6 +425,12 @@ pub struct Program {
 impl Program {
 
     pub fn new() -> Program {
+
+        let mut interner = Interner::new();
+        interner.intern("builtin/+");
+        interner.intern("builtin/-");
+        interner.intern("builtin/*");
+        interner.intern("builtin/div");
         Program {
             meta: Meta {
                 original_expr: 0,
@@ -392,21 +441,55 @@ impl Program {
             main: RootedForest::new(),
             io: RootedForest::new(),
             rules: RootedForest::new(),
-            symbols: Interner::new(),
+            symbols: interner,
             scopes: HashMap::new(),
         }
+    }
+
+    pub fn pretty_print_main(&self) {
+        self.main.forest.print_tree(self.main.root, |expr| {
+            match expr {
+                Expr::Symbol(index) => {
+                    let value = self.symbols.lookup(*index).unwrap().clone();
+                    if value.len() == 1 && !value.chars().next().unwrap().is_alphanumeric() {
+                        format!("({})", value)
+                    } else {
+                        value
+                    }
+                }
+                _ => format!("{:?}", expr)
+            }
+        })
     }
 
     fn rewrite(scope: &mut RootedForest<Expr>) {
         if let Some(focus) = scope.get_focus() {
             match focus.val {
-                Expr::Symbol(0) => {
-                    scope.forest.persistent_change(Expr::Symbol(1),scope.focus);
+                Expr::Call => {
+                    if let Some((symbol_index, x, y)) = scope.get_child_nums_binary() {
+                        if symbol_index > 4 {
+                            scope.exhaust_focus(); 
+                        } else {
+                            // These are implicit right now based on the
+                            // order I inserted them in the constructor.
+                            let val = match symbol_index {
+                                0 => Expr::Num(x + y),
+                                1 => Expr::Num(x - y),
+                                2 => Expr::Num(x * y),
+                                3 => Expr::Num(x / y),
+                                _ => panic!("Not possible because of if above.")
+                            };
+                            scope.forest.persistent_change(val, scope.focus);
+                            scope.forest.clear_children(scope.focus);
+                        }
+                    } else {
+                        scope.exhaust_focus();
+                    }
                 }
-               _ => {
-                //    println!("Exhausting");
-                   scope.exhaust_focus()
-               }
+                _ => {
+                    // println!("Exhausting");
+                    scope.exhaust_focus()
+                }
             }
         } else {
             scope.exhaust_focus();
