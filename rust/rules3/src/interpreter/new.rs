@@ -230,6 +230,12 @@ impl<T> Forest<T> where T : Clone + Debug {
 
 }
 
+
+pub struct Cursor<'a, T> where T : Clone {
+    pub focus: &'a Node<T>,
+    pub focus_parent: &'a Node<T>,
+    pub child_index: Index,
+}
 #[derive(Debug, Clone)]
 pub struct RootedForest<T> where T : Clone {
     pub root: Index,
@@ -246,13 +252,6 @@ impl<T> RootedForest<T> where T : Clone + Debug {
             focus: 0,
             forest: Forest::new(),
         }
-    }
-
-    // I should probably cache this root?
-    // I can easily do this if changing root
-    // goes through some method.
-    fn get_root(&self) -> Option<&Node<T>> {
-        self.forest.get(self.root)
     }
 
     fn exhaust_focus(&mut self) {
@@ -306,6 +305,13 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         self.focus = root;
     }
 
+    // I should probably cache this root?
+    // I can easily do this if changing root
+    // goes through some method.
+    fn get_root(&self) -> Option<&Node<T>> {
+        self.forest.get(self.root)
+    }
+
     fn get_focus(&self) -> Option<&Node<T>> {
         self.forest.get(self.focus)
     }
@@ -332,9 +338,35 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         self.get_focus().and_then(|x| x.parent)
     }
 
+    // This might just be a bad idea.
+    fn next_expr_top_down<'a>(&'a self, cursor: Cursor<'a, T>) -> Cursor<'a, T> {
+        // Need to change this so parent is an Option
+        // Also, if I cursor with two things, how do I know they have the same structure?
+        // Do I need to encode the step they took as well?
+        // Or maybe I shouldn't do this cursory thing but actually just do a recursive
+        // step on each thing?
+        // I'm really not sure.
+        if let Some(child_position) = cursor.focus_parent.children.get(cursor.child_index + 1) {
+            let new_focus = self.get(*child_position).unwrap();
+            Cursor{
+                focus_parent: cursor.focus_parent,
+                focus: new_focus,
+                child_index: cursor.child_index + 1,
+            }
+        } else if cursor.focus.children.len() > 0 {
+            let new_focus = self.get(*cursor.focus.children.get(0).unwrap()).unwrap();
+            Cursor{
+                focus_parent: cursor.focus_parent,
+                focus: new_focus,
+                child_index: 0,
+            }
+        } else {
+         cursor
+        }
+    }
 
     /// Should move to the next expr that needs evaluation
-    fn move_to_next_expr(&mut self) {
+    fn move_to_next_reducible_expr(&mut self) {
         // let mut fuel = 0;
         loop {
             // fuel += 1;
@@ -421,6 +453,77 @@ pub struct Program {
     pub scopes: HashMap<Index, RootedForest<Expr>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReadOnlyRootedForest<'a, T> where T : Clone + Debug {
+    pub root: Index,
+    pub focus: Index,
+    pub forest: &'a Forest<T>,
+}
+
+impl<'a, T> ReadOnlyRootedForest<'a, T> where T : Clone + Debug {
+    fn from_rooted_forest(rooted_forest : &'a RootedForest<T>) -> ReadOnlyRootedForest<'a, T>  {
+        ReadOnlyRootedForest{
+            root: rooted_forest.root,
+            focus: rooted_forest.focus,
+            forest: &rooted_forest.forest,
+        }
+    }
+
+    fn from_forest(root: Index, focus: Index, forest : &'a Forest<T>) -> ReadOnlyRootedForest<'a, T>  {
+        ReadOnlyRootedForest{
+            root,
+            focus,
+            forest,
+        }
+    }
+
+    // I should probably cache this root?
+    // I can easily do this if changing root
+    // goes through some method.
+    fn get_root(&self) -> Option<&Node<T>> {
+        self.forest.get(self.root)
+    }
+
+    fn get_focus(&self) -> Option<&Node<T>> {
+        self.forest.get(self.focus)
+    }
+    
+    fn get(&self, index: Index) -> Option<&Node<T>> {
+        self.forest.get(index)
+    }
+
+    // Could I cache this?
+    // Trying to cache the root is actually harder than it seems.
+    // I would need to store a reference in the struct.
+    // But that reference needs a lifetime.
+    fn root_is_exhausted(&self) -> bool {
+        let root = self.get_root();
+        root.is_none() || root.unwrap().exhausted
+    }
+
+    fn focus_is_exhausted(&self) -> bool {
+        let focus = self.get_focus();
+        focus.is_none() || focus.unwrap().exhausted
+    }
+
+    pub fn get_focus_parent(&self) -> Option<Index> {
+        self.get_focus().and_then(|x| x.parent)
+    }
+
+    pub fn move_focus(&mut self, focus: Index) {
+        self.focus = focus;
+    }
+}
+
+// To do some matches, I probably just want to do a queue and 
+// go through the nodes pushing all the children in the same order.
+// I can check the length of the children
+// Of course once I have repeats that will be more complicated.
+// But I don't keep track of anywhere I am, so I don't need to mess around
+// with the focus. I will need the focus to establish where to look,
+// but that might/probably will be separate.
+// The read only rooted tree could be good for that or could be unnecessary.
+
 
 impl Program {
 
@@ -500,7 +603,7 @@ impl Program {
     // we actually need multiple scopes.
     fn step(&mut self) {
         let scope = &mut self.main;
-        scope.move_to_next_expr();
+        scope.move_to_next_reducible_expr();
         if scope.root_is_exhausted() {
             return
         }
