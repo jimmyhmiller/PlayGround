@@ -15,7 +15,7 @@ pub struct Node<T>  where T: Clone {
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Call,
     Symbol(Index),
@@ -268,6 +268,18 @@ impl<T> RootedForest<T> where T : Clone + Debug {
     }
 
     pub fn make_last_child_focus(&mut self) {
+        let mut new_focus = None;
+        if let Some(node) = self.get_focus() {
+            if let Some(index) = node.children.last() {
+                new_focus = Some(*index);
+            }
+        }
+        if let Some(new_focus) = new_focus {
+            self.move_focus(new_focus);
+        }
+    }
+
+    pub fn make_last_sibling_focus(&mut self) {
         if let Some(parent) = self.get_focus_parent() {
             if let Some(node) = self.forest.get(parent) {
                 if let Some(last_child) = node.children.last() {
@@ -365,6 +377,10 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         }
     }
 
+    pub fn move_focus(&mut self, focus: Index) {
+        self.focus = focus;
+    }
+
     /// Should move to the next expr that needs evaluation
     fn move_to_next_reducible_expr(&mut self) {
         // let mut fuel = 0;
@@ -419,22 +435,25 @@ impl RootedForest<Expr> {
     }
 
     fn get_child_nums_binary(&self) -> Option<(Index, isize, isize)> {
-        if let Some(Node{val: Expr::Call, children, ..}) = self.get_focus() {
-            if !children.len() == 3 {
+
+        let focus = self.get_focus()?;
+        if focus.children.len() != 3 {
+            return None;
+        }
+        let node = self.get(*focus.children.get(0)?)?;
+        match node {
+            Node{val: Expr::Symbol(i), ..} => {
+                let second_child = self.get(*focus.children.get(1)?)?;
+                let third_child = self.get(*focus.children.get(2)?)?;
+                if let (Node{val: Expr::Num(x), ..}, Node{val: Expr::Num(y), ..}) = (second_child, third_child) {
+                    return Some((*i, *x, *y));
+                }
                 return None;
             }
-            match self.get(*children.get(0).unwrap()).unwrap() {
-                Node{val: Expr::Symbol(i), ..} => {
-                    let two_children = (self.get(*children.get(1).unwrap()),self.get(*children.get(2).unwrap()));
-                    if let (Some(Node{val: Expr::Num(x), ..}), Some(Node{val: Expr::Num(y), ..})) = two_children {
-                        return Some((*i, *x, *y));
-                    }
-                },
-                _ => return None
-            }
+            _ => return None
         }
-        None
     }
+
 }
 
 #[derive(Debug, Clone)]
@@ -534,6 +553,7 @@ impl Program {
         interner.intern("builtin/-");
         interner.intern("builtin/*");
         interner.intern("builtin/div");
+        interner.intern("fact");
         Program {
             meta: Meta {
                 original_expr: 0,
@@ -565,15 +585,13 @@ impl Program {
         })
     }
 
-    fn rewrite(scope: &mut RootedForest<Expr>) {
+    fn rewrite(scope: &mut RootedForest<Expr>) -> Option<()> {
         if let Some(focus) = scope.get_focus() {
             match focus.val {
                 Expr::Call => {
                     if let Some((symbol_index, x, y)) = scope.get_child_nums_binary() {
-                        if symbol_index > 4 {
-                            scope.exhaust_focus(); 
-                        } else {
-                            // These are implicit right now based on the
+                        if symbol_index < 4 {
+                           // These are implicit right now based on the
                             // order I inserted them in the constructor.
                             let val = match symbol_index {
                                 0 => Expr::Num(x + y),
@@ -584,10 +602,49 @@ impl Program {
                             };
                             scope.forest.persistent_change(val, scope.focus);
                             scope.forest.clear_children(scope.focus);
+                            return None;
                         }
-                    } else {
+                    } 
+                    //
+                    let index = focus.children.get(0)?;
+                    let node = scope.get(*index)?;
+                    if node.val != Expr::Symbol(4) {
+                        println!("Not fact! {:?}", node.val);
                         scope.exhaust_focus();
+                        return None;
                     }
+                    let arg_index = focus.children.get(1)?;
+                    let arg_node = scope.get(*arg_index)?;
+                    match arg_node.val {
+                        Expr::Num(0) => {
+                            scope.forest.persistent_change(Expr::Num(1), scope.focus);
+                            scope.forest.clear_children(scope.focus);
+                            return None;
+                        }
+                        // *(?n fact(-(?n 1)))
+                        Expr::Num(x) => {
+                            // This is a noop change but copies the node so I can mess with the children
+                            scope.forest.persistent_change(Expr::Call, scope.focus);
+                            scope.forest.clear_children(scope.focus);
+                            scope.insert_child(Expr::Symbol(2));
+                            scope.insert_child(Expr::Num(x));
+                            scope.insert_child(Expr::Call);
+                            scope.make_last_child_focus();
+                            scope.insert_child(Expr::Symbol(4));
+                            scope.insert_child(Expr::Call);
+                            scope.make_last_child_focus();
+                            scope.insert_child(Expr::Symbol(1));
+                            scope.insert_child(Expr::Num(x));
+                            scope.insert_child(Expr::Num(1));
+                            return None;
+                        }
+
+
+                        _ => {
+                        }
+                    }
+                    
+                    scope.exhaust_focus();
                 }
                 _ => {
                     // println!("Exhausting");
@@ -597,6 +654,7 @@ impl Program {
         } else {
             scope.exhaust_focus();
         }
+        None
     }
 
     // Making this work for main right now even though
@@ -609,7 +667,7 @@ impl Program {
         }
         // rewrite should return old node location.
         // meta needs to change.
-        Program::rewrite(scope)
+        Program::rewrite(scope);
         // if let Some((sub, root)) = Program::rewrite(scope) {
         //     let meta = Meta{
         //         original_expr: scope.root,
