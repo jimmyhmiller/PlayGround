@@ -17,6 +17,8 @@ pub fn run_new() {
     // }
     let now = Instant::now();
     program.full_step();
+    program.main.garbage_collect();
+    // println!("{:?}", program.main.forest.arena.len());
     println!("{:?}", now.elapsed().as_micros());
     program.pretty_print_main();
     // println!("{:?}", program.main);

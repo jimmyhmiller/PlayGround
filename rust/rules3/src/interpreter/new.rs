@@ -82,7 +82,7 @@ impl Interner {
 
 #[derive(Debug, Clone)]
 pub struct Forest<T> where T : Clone {
-    arena: Vec<Node<T>>,
+    pub arena: Vec<Node<T>>,
     current_index: usize,
 }
 
@@ -97,7 +97,7 @@ impl<T> Forest<T> where T : Clone + Debug {
         }
     }
 
-    fn insert_root(&mut self, t: T) -> Index {
+    fn insert_root(&mut self, t: T, exhausted: bool) -> Index {
         let index = self.next_index();
         let n = Node {
             index,
@@ -105,7 +105,7 @@ impl<T> Forest<T> where T : Clone + Debug {
             val: t,
             parent: None,
             children: vec![],
-            exhausted: false
+            exhausted,
         };
         self.arena.push(n);
         index
@@ -118,7 +118,7 @@ impl<T> Forest<T> where T : Clone + Debug {
     }
 
     // What if parent doesn't exist?
-    fn insert(&mut self, t: T, parent: Index) -> Option<Index> {
+    fn insert(&mut self, t: T, parent: Index, exhausted: bool) -> Option<Index> {
         let index = self.next_index();
         let p = self.arena.get_mut(parent)?;
         p.children.push(index);
@@ -129,7 +129,7 @@ impl<T> Forest<T> where T : Clone + Debug {
             val: t,
             parent: Some(parent),
             children: vec![],
-            exhausted: false
+            exhausted,
         });
         Some(index)
     }
@@ -172,7 +172,7 @@ impl<T> Forest<T> where T : Clone + Debug {
     fn copy_tree_helper(&self, mut sub_index: Index, node_index: Index, parent_index: Option<Index>, forest: &mut Forest<T>) -> Option<Index> {
         if let Some(node) = self.get(node_index) {
             let new_index = if let Some(parent_index) = parent_index {
-                forest.insert(node.val.clone(), parent_index)
+                forest.insert(node.val.clone(), parent_index, node.exhausted)
             } else {
                 // If there is no parent it is the root which is always 0.
                 Some(0)
@@ -194,6 +194,7 @@ impl<T> Forest<T> where T : Clone + Debug {
     }
 
     // Might need to do this for a list of indexes?
+    // sub_index is basically focus. I maybe don't need it?
     fn garbage_collect(&mut self, index: Index, sub_index: Index) -> Option<Index> {
         let mut forest = Forest {
             arena: vec![],
@@ -202,7 +203,7 @@ impl<T> Forest<T> where T : Clone + Debug {
 
         let mut result_index = None;
         if let Some(node) = self.get(index) {
-            let root = forest.insert_root(node.val.clone());
+            let root = forest.insert_root(node.val.clone(), node.exhausted);
             result_index = self.copy_tree_helper(sub_index, index, None, &mut forest);
         }
         *self = forest;
@@ -264,7 +265,7 @@ impl<T> RootedForest<T> where T : Clone + Debug {
     pub fn insert_child(&mut self, t : T) -> Option<Index> {
         // I could exhaust here if I did this
         //  from program and new things about rules.
-        self.forest.insert(t, self.focus)
+        self.forest.insert(t, self.focus, false)
     }
 
     pub fn make_last_child_focus(&mut self) {
@@ -312,7 +313,7 @@ impl<T> RootedForest<T> where T : Clone + Debug {
     }
 
     pub fn insert_root(&mut self, t: T) {
-        let root = self.forest.insert_root(t);
+        let root = self.forest.insert_root(t, false);
         self.root = root;
         self.focus = root;
     }
@@ -421,6 +422,14 @@ impl<T> RootedForest<T> where T : Clone + Debug {
                 }
             }
         }
+    }
+
+    pub fn garbage_collect(&mut self) {
+        if let Some(new_focus) = self.forest.garbage_collect(self.root, self.focus) {
+            self.root = 0;
+            self.focus = new_focus;
+        }
+
     }
 }
 
@@ -586,6 +595,9 @@ impl Program {
     }
 
     fn rewrite(scope: &mut RootedForest<Expr>) -> Option<()> {
+        // This all needs refactoring, but it is nice to see factorial
+        // working with this code base. I need to do meta eval stuff and see
+        // how fast we still are. But so far, speed is much better.
         if let Some(focus) = scope.get_focus() {
             match focus.val {
                 Expr::Call => {
@@ -695,6 +707,7 @@ impl Program {
             //     break;
             // }
             self.step();
+
         }
     }
 }
