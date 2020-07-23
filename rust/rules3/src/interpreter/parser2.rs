@@ -204,6 +204,7 @@ pub fn tokenize<'a>(text: &'a str) -> Vec<Token<'a>> {
 
 // Need to handle quote here.
 pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, interner: &mut Interner) {
+    // Need to figure out a much better way than this silly root thing.
     let mut is_root = true;
     for token in tokens {
         match token {
@@ -221,7 +222,12 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, in
             Token::Symbol(s) => {
                 // Need to intern strings
                 let interned_index = interner.intern(s);
-                let expr = Expr::Symbol(interned_index);
+                let expr = if s == "do" {
+                    Expr::Do 
+                } else {
+                    Expr::Symbol(interned_index)
+                };
+
                 if is_root {
                     rooted_forest.insert_root(expr);
                     is_root = false;
@@ -240,9 +246,30 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, in
             Token::CloseParen => {
                 rooted_forest.make_parent_focus();
             }
-            Token::OpenCurly => {}
-            Token::CloseCurly => {}
-            Token::OpenBracket => {}
+            Token::OpenCurly => {
+                let focus_val = rooted_forest.get_focus_val();
+                if focus_val.is_some() && focus_val.unwrap() != &Expr::Do {
+                    if is_root {
+                        is_root = false;
+                        rooted_forest.insert_root(Expr::Map);
+                    } else {
+                        rooted_forest.insert_child(Expr::Map);
+                        rooted_forest.make_last_child_focus();
+                    }
+                }
+            }
+            Token::CloseCurly => {
+                rooted_forest.make_parent_focus();
+            }
+            Token::OpenBracket => {
+                if is_root {
+                    is_root = false;
+                    rooted_forest.insert_root(Expr::Array);
+                } else {
+                    rooted_forest.insert_child(Expr::Array);
+                    rooted_forest.make_last_child_focus();
+                }
+            }
             Token::CloseBracket => {}
         }
     }

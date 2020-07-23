@@ -328,6 +328,9 @@ impl<T> RootedForest<T> where T : Clone + Debug {
     fn get_focus(&self) -> Option<&Node<T>> {
         self.forest.get(self.focus)
     }
+    pub fn get_focus_val(&self) -> Option<&T> {
+        self.forest.get(self.focus).map(|x| &x.val)
+    }
     
     fn get(&self, index: Index) -> Option<&Node<T>> {
         self.forest.get(index)
@@ -349,6 +352,11 @@ impl<T> RootedForest<T> where T : Clone + Debug {
 
     pub fn get_focus_parent(&self) -> Option<Index> {
         self.get_focus().and_then(|x| x.parent)
+    }
+    pub fn get_focus_parent_val(&self) -> Option<&T> {
+        self.get_focus_parent()
+            .and_then(|x| self.get(x))
+            .map(|x| &x.val)
     }
 
     // This might just be a bad idea.
@@ -376,6 +384,12 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         } else {
          cursor
         }
+    }
+
+
+    pub fn replace_focus_val(&mut self, t : T) {
+        let index = self.focus;
+        let node = self.forest.arena.get_mut(index);
     }
 
     pub fn move_focus(&mut self, focus: Index) {
@@ -481,67 +495,7 @@ pub struct Program {
     pub scopes: HashMap<Index, RootedForest<Expr>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ReadOnlyRootedForest<'a, T> where T : Clone + Debug {
-    pub root: Index,
-    pub focus: Index,
-    pub forest: &'a Forest<T>,
-}
 
-impl<'a, T> ReadOnlyRootedForest<'a, T> where T : Clone + Debug {
-    fn from_rooted_forest(rooted_forest : &'a RootedForest<T>) -> ReadOnlyRootedForest<'a, T>  {
-        ReadOnlyRootedForest{
-            root: rooted_forest.root,
-            focus: rooted_forest.focus,
-            forest: &rooted_forest.forest,
-        }
-    }
-
-    fn from_forest(root: Index, focus: Index, forest : &'a Forest<T>) -> ReadOnlyRootedForest<'a, T>  {
-        ReadOnlyRootedForest{
-            root,
-            focus,
-            forest,
-        }
-    }
-
-    // I should probably cache this root?
-    // I can easily do this if changing root
-    // goes through some method.
-    fn get_root(&self) -> Option<&Node<T>> {
-        self.forest.get(self.root)
-    }
-
-    fn get_focus(&self) -> Option<&Node<T>> {
-        self.forest.get(self.focus)
-    }
-    
-    fn get(&self, index: Index) -> Option<&Node<T>> {
-        self.forest.get(index)
-    }
-
-    // Could I cache this?
-    // Trying to cache the root is actually harder than it seems.
-    // I would need to store a reference in the struct.
-    // But that reference needs a lifetime.
-    fn root_is_exhausted(&self) -> bool {
-        let root = self.get_root();
-        root.is_none() || root.unwrap().exhausted
-    }
-
-    fn focus_is_exhausted(&self) -> bool {
-        let focus = self.get_focus();
-        focus.is_none() || focus.unwrap().exhausted
-    }
-
-    pub fn get_focus_parent(&self) -> Option<Index> {
-        self.get_focus().and_then(|x| x.parent)
-    }
-
-    pub fn move_focus(&mut self, focus: Index) {
-        self.focus = focus;
-    }
-}
 
 // To do some matches, I probably just want to do a queue and 
 // go through the nodes pushing all the children in the same order.
