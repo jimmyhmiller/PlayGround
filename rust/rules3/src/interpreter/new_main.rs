@@ -10,7 +10,7 @@ pub fn run_new() {
     let m = &mut program.main;
     
     
-    read_new("fact(20)", m, &mut program.symbols);
+    read_new("[{type rule, clauses: [{left: 1, right: 3}]}]", m, &mut program.symbols);
     // if let Some((focus, root)) = program.main.forest.persistent_change(Expr::Symbol(2), n4.unwrap()) {
     //     let result = program.main.forest.garbage_collect(root, focus);
     //     println!("{}: {:?}", root, result);
