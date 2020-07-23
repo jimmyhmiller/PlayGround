@@ -224,6 +224,12 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, in
                 let interned_index = interner.intern(s);
                 let expr = if s == "do" {
                     Expr::Do 
+                } else if s.starts_with("?") {
+                    Expr::LogicVariable(interned_index)
+                } else if s.starts_with("@") {
+                    Expr::Scope(interned_index)
+                } else if s == "quote" {
+                    Expr::Quote
                 } else {
                     Expr::Symbol(interned_index)
                 };
@@ -236,11 +242,13 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, in
                 }
             }
             Token::OpenParen => {
-                // need to insert call.
-                // But the call is the parent of the last
-                // expression parsed.
-                // Or do I want to just switch back to a lisp?
-                rooted_forest.swap_and_insert(Expr::Call);
+                // Need to fix quote
+                let last_inserted = rooted_forest.get_last_inserted_val();
+                if last_inserted == Some(&Expr::Quote) {
+                    rooted_forest.make_last_child_focus();
+                } else {
+                    rooted_forest.swap_and_insert(Expr::Call);
+                }
                 
             }
             Token::CloseParen => {
@@ -248,7 +256,7 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, in
             }
             Token::OpenCurly => {
                 let focus_val = rooted_forest.get_focus_val();
-                if focus_val.is_some() && focus_val.unwrap() != &Expr::Do {
+                if focus_val != Some(&Expr::Do) {
                     if is_root {
                         is_root = false;
                         rooted_forest.insert_root(Expr::Map);

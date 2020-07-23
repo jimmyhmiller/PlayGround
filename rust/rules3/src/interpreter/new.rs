@@ -297,12 +297,22 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         }
     }
 
+    pub fn get_last_inserted_val(&self) -> Option<&T> {
+        let node = self.forest.arena.get(self.focus)?;
+        let index = if node.children.len() > 0 {
+            *node.children.last().unwrap()
+        } else {
+            self.focus
+        };
+        self.get(index).map(|x| &x.val)
+    }
+
     pub fn swap_and_insert(&mut self, t: T) {
         if let Some(node) = self.forest.arena.get(self.focus) {
             let index = if node.children.len() > 0 {
                 *node.children.last().unwrap()
             } else {
-                self.focus
+                self.focus  
             };
             let mut node = self.forest.arena.get_mut(index).unwrap();
             let node_value = node.val.clone();
@@ -325,7 +335,7 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         self.forest.get(self.root)
     }
 
-    fn get_focus(&self) -> Option<&Node<T>> {
+    pub fn get_focus(&self) -> Option<&Node<T>> {
         self.forest.get(self.focus)
     }
     pub fn get_focus_val(&self) -> Option<&T> {
@@ -575,7 +585,6 @@ impl Program {
                     let index = focus.children.get(0)?;
                     let node = scope.get(*index)?;
                     if node.val != Expr::Symbol(4) {
-                        println!("Not fact! {:?}", node.val);
                         scope.exhaust_focus();
                         return None;
                     }
