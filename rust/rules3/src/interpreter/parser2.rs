@@ -242,10 +242,9 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, in
                 }
             }
             Token::OpenParen => {
-                // Need to fix quote
                 let last_inserted = rooted_forest.get_last_inserted_val();
                 if last_inserted == Some(&Expr::Quote) {
-                    rooted_forest.make_last_child_focus();
+                    rooted_forest.make_last_inserted_focus();
                 } else {
                     rooted_forest.swap_and_insert(Expr::Call);
                 }
@@ -278,7 +277,9 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, in
                     rooted_forest.make_last_child_focus();
                 }
             }
-            Token::CloseBracket => {}
+            Token::CloseBracket => {
+                rooted_forest.make_parent_focus();
+            }
         }
     }
 }
