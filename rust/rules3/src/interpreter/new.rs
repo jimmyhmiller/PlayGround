@@ -151,19 +151,20 @@ impl<T> Forest<T> where T : Clone + Debug {
         }
     }
 
-        // https://vallentin.dev/2019/05/14/pretty-print-tree
-        pub fn print_tree<F>(&self, index: Index, formatter: F) where F : Fn(&T) -> String {
-            if let Some(node) = self.get(index) {
-                self.print_tree_inner(node, "".to_string(), true, &formatter)
-            }
-    
+    // https://vallentin.dev/2019/05/14/pretty-print-tree
+    pub fn print_tree<F>(&self, index: Index, formatter: F) where F : Fn(&T) -> String {
+        if let Some(node) = self.get(index) {
+            self.print_tree_inner(node, "".to_string(), true, &formatter)
         }
+
+    }
+    
     fn copy_tree_helper(&self, mut sub_index: Index, node_index: Index, parent_index: Option<Index>, forest: &mut Forest<T>) -> Option<Index> {
         if let Some(node) = self.get(node_index) {
             let new_index = if let Some(parent_index) = parent_index {
                 forest.insert(node.val.clone(), parent_index, node.exhausted)
             } else {
-                // If there is no parent it is the root which is always 0.
+                forest.insert_root(node.val.clone(), node.exhausted);
                 Some(0)
             };
             if node_index == sub_index {
@@ -182,6 +183,41 @@ impl<T> Forest<T> where T : Clone + Debug {
         }
     }
 
+    fn copy_tree_helper_f<F>(&self, from_index: Index, current_index: Index, parent_index: Option<Index>, rooted_forest: &mut RootedForest<T>, index_f : & F)
+    where F : Fn(&T) -> Option<Index> {
+        if let Some(node) = self.get(current_index) {
+            let node = if let Some(new_index) = index_f(&node.val) {
+                rooted_forest.get(new_index).unwrap().clone()
+            } else {
+                node.clone()
+            };
+
+
+            let new_parent_index = if from_index == current_index {
+                // I don't understand this. I thought I did.
+                // The idea here is that the first call shouldn't do anything.
+                // I thought I could just set this to parent_index,
+                // but that doesn't work even though when this function is called,
+                // the value of parent index is rooted_forest.focus
+                // This might only work in some weird case and actually fail otherwise.
+                Some(rooted_forest.focus)
+            } else if parent_index.is_none() {
+                // println!("No parent {:?}", node.val);
+                let new_root = rooted_forest.forest.insert_root(node.val, node.exhausted);
+                rooted_forest.root = new_root;
+                rooted_forest.focus = new_root;
+                Some(new_root)
+            } else {
+                // println!("Parent {:?}", node.val);
+                rooted_forest.forest.insert(node.val, parent_index.unwrap(), node.exhausted)
+            };
+
+            for child_index in node.children.clone() {
+                self.copy_tree_helper_f(from_index, child_index, new_parent_index, rooted_forest, index_f);
+            }
+        }
+    }
+
     // Might need to do this for a list of indexes?
     // sub_index is basically focus. I maybe don't need it?
     fn garbage_collect(&mut self, index: Index, sub_index: Index) -> Option<Index> {
@@ -192,7 +228,6 @@ impl<T> Forest<T> where T : Clone + Debug {
 
         let mut result_index = None;
         if let Some(node) = self.get(index) {
-            let root = forest.insert_root(node.val.clone(), node.exhausted);
             result_index = self.copy_tree_helper(sub_index, index, None, &mut forest);
         }
         *self = forest;
@@ -505,6 +540,11 @@ impl RootedForest<Expr> {
 
 
 }
+#[derive(Debug, Clone)]
+pub struct Clause {
+    pub left: Index,
+    pub right: Index,
+}
 
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -520,6 +560,7 @@ pub struct Program {
     pub rules: RootedForest<Expr>,
     pub symbols: Interner,
     pub scopes: HashMap<Index, RootedForest<Expr>>,
+    pub clause_indexes: Vec<Clause>,
 }
 
 
@@ -556,6 +597,7 @@ impl Program {
             rules: RootedForest::new(),
             symbols: interner,
             scopes: HashMap::new(),
+            clause_indexes: Vec::new(),
         }
     }
 
@@ -576,7 +618,6 @@ impl Program {
                     env.insert(*l_index, expr_index);
                 }
                 (Node{ val: l_val, children: l_children, ..}, Node{ val: e_val, children: e_children, ..}) => {
-                    println!("Here {:?} {:?}", l_val, e_val);
                     if l_val != e_val {
                         failed = true;
                         break;
@@ -621,10 +662,72 @@ impl Program {
         self.pretty_print_scope(&self.main)
     }
 
-    fn rewrite(scope: &mut RootedForest<Expr>) -> Option<()> {
+    pub fn substitute(mut scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: HashMap<Index, Index>) {
+        let right = rule_scope.get(right_index).unwrap().clone();
+        let right_replace = match right.val {
+            Expr::LogicVariable(index) => {
+                scope.get(*env.get(&index).unwrap()).unwrap().clone().val
+            }
+            val => val
+        };
+        let node = scope.get_focus().unwrap();
+        let parent = node.parent.clone();
+
+        scope.forest.persistent_change(right_replace, scope.focus);
+        let focus = scope.forest.arena.get_mut(scope.focus).unwrap();
+        focus.children.clear();
+        rule_scope.forest.copy_tree_helper_f(right_index, right_index, parent, &mut scope, & |val| {
+            match val {
+                Expr::LogicVariable(index) => {
+                    Some(*env.get(&index).unwrap())
+                }
+                _ => None
+            }
+        });
+       
+    }
+
+    // What I really want to is to pass the scope as a value, 
+    // but then I am borrowing self multiple times. I am going to instead have this stupid
+    // janking indexing thing.
+    pub fn rewrite(&mut self, scope_index: Index) -> Option<()> {
+
+        let rules = &self.rules;
+        let scope = match scope_index {
+            0 => &self.main,
+            1 => &self.io,
+            2 => &self.rules,
+            _ => self.scopes.get(&scope_index).unwrap()
+        };
         // This all needs refactoring, but it is nice to see factorial
         // working with this code base. I need to do meta eval stuff and see
         // how fast we still are. But so far, speed is much better.
+
+        let mut matching_rule = None;
+        for Clause{left,right} in &self.clause_indexes {
+            let env = self.build_env(scope, *left, scope.focus);
+            if env.is_none() { continue };
+            // Need some notion of output scopes
+            matching_rule = Some((*right, env.unwrap()));
+            break;
+        };
+
+        let scope = match scope_index {
+            0 => &mut self.main,
+            1 => &mut self.io,
+            // 2 => &mut self.rules,
+            _ => self.scopes.get_mut(&scope_index).unwrap()
+        };
+
+
+        if let Some((right, env)) = matching_rule {
+            Program::substitute(scope, rules, right, env);
+            return None
+        }
+
+
+
+
         if let Some(focus) = scope.get_focus() {
             match focus.val {
                 Expr::Call => {
@@ -643,44 +746,8 @@ impl Program {
                             scope.forest.clear_children(scope.focus);
                             return None;
                         }
-                    } 
-                    //
-                    // let index = focus.children.get(0)?;
-                    // let node = scope.get(*index)?;
-                    // if node.val != Expr::Symbol(4) {
-                    //     scope.exhaust_focus();
-                    //     return None;
-                    // }
-                    // let arg_index = focus.children.get(1)?;
-                    // let arg_node = scope.get(*arg_index)?;
-                    // match arg_node.val {
-                    //     Expr::Num(0) => {
-                    //         scope.forest.persistent_change(Expr::Num(1), scope.focus);
-                    //         scope.forest.clear_children(scope.focus);
-                    //         return None;
-                    //     }
-                    //     // *(?n fact(-(?n 1)))
-                    //     Expr::Num(x) => {
-                    //         // This is a noop change but copies the node so I can mess with the children
-                    //         scope.forest.persistent_change(Expr::Call, scope.focus);
-                    //         scope.forest.clear_children(scope.focus);
-                    //         scope.insert_child(Expr::Symbol(2));
-                    //         scope.insert_child(Expr::Num(x));
-                    //         scope.insert_child(Expr::Call);
-                    //         scope.make_last_child_focus();
-                    //         scope.insert_child(Expr::Symbol(4));
-                    //         scope.insert_child(Expr::Call);
-                    //         scope.make_last_child_focus();
-                    //         scope.insert_child(Expr::Symbol(1));
-                    //         scope.insert_child(Expr::Num(x));
-                    //         scope.insert_child(Expr::Num(1));
-                    //         return None;
-                    //     }
-
-
-                    //     _ => {
-                    //     }
-                    // }
+                    }
+                    
                     
                     scope.exhaust_focus();
                 }
@@ -705,7 +772,7 @@ impl Program {
         }
         // rewrite should return old node location.
         // meta needs to change.
-        Program::rewrite(scope);
+        self.rewrite(0);
         // if let Some((sub, root)) = Program::rewrite(scope) {
         //     let meta = Meta{
         //         original_expr: scope.root,
@@ -728,11 +795,12 @@ impl Program {
         // let mut fuel = 0;
         while !self.main.root_is_exhausted() {
             // fuel +=1;
-            // if fuel > 3000 {
+            // if fuel > 100 {
             //     println!("break");
             //     break;
             // }
             self.step();
+            // self.pretty_print_main();
 
         }
     }
