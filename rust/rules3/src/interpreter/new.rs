@@ -1,6 +1,7 @@
 use std::time::{Instant};
 use std::fmt::Debug;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 
 type Index = usize;
 
@@ -28,18 +29,6 @@ pub enum Expr {
     Quote,
 }
 
-// Basic idea here is that rules are represented in a forest.
-// There is a Rule node which has as its children many clauses.
-// Clauses then have as children left and right.
-// Maybe I should have these just as a struct instead? But this
-// does give me some nice things for uniformity.
-#[derive(Debug, Clone)]
-pub enum Rule {
-    Rule{name: Index, scopes: Vec<Index>},
-    Clause,
-    Left(Expr),
-    Right(Expr),
-}
 
 #[derive(Debug, Clone)]
 pub struct Meta {
@@ -147,7 +136,7 @@ impl<T> Forest<T> where T : Clone + Debug {
 
     pub fn print_tree_inner<F>(&self, node: &Node<T>, prefix: String, last: bool, formatter: &F) where F : Fn(&T) -> String {
         let current_prefix = if last { "`- " } else { "|- " };
-        println!("{}{}{} {}", prefix, current_prefix, formatter(&node.val), node.exhausted);
+        println!("{}{}{} {} {}", prefix, current_prefix, formatter(&node.val), node.index, node.exhausted);
 
         let child_prefix = if last { "   " } else { "|  " };
         let prefix = prefix + child_prefix;
@@ -307,6 +296,17 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         self.get(index).map(|x| &x.val)
     }
 
+    pub fn make_last_inserted_focus(&mut self) {
+        if let Some(node) = self.forest.arena.get(self.focus) {
+            let index = if node.children.len() > 0 {
+                *node.children.last().unwrap()
+            } else {
+                self.focus
+            };
+            self.focus = index;
+        }
+    }
+
     pub fn swap_and_insert(&mut self, t: T) {
         if let Some(node) = self.forest.arena.get(self.focus) {
             let index = if node.children.len() > 0 {
@@ -406,48 +406,6 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         self.focus = focus;
     }
 
-    /// Should move to the next expr that needs evaluation
-    fn move_to_next_reducible_expr(&mut self) {
-        // let mut fuel = 0;
-        loop {
-            // fuel += 1;
-            // if fuel > 100 {
-            //     break;
-            // }
-            if self.root_is_exhausted() {
-                return
-            }
-            if self.focus_is_exhausted() {
-                if let Some(index) = self.get_focus_parent() {
-                    // println!("Moving to parent");
-                    self.focus = index;
-                    continue;
-                } else {
-                    return
-                }
-            }
-            if let Some(focus) = self.get_focus() {
-                if focus.children.len() == 0 {
-                    return
-                }
-
-                let mut all_children_exhausted = true;
-                for child in focus.children.iter() {
-                    if let Some(c) = self.get(*child) {
-                        if !c.exhausted {
-                            self.focus = *child;
-                            all_children_exhausted = false;
-                            break;
-                        }
-                    }
-                }
-                if all_children_exhausted {
-                    break;
-                }
-            }
-        }
-    }
-
     pub fn garbage_collect(&mut self) {
         if let Some(new_focus) = self.forest.garbage_collect(self.root, self.focus) {
             self.root = 0;
@@ -487,6 +445,65 @@ impl RootedForest<Expr> {
         }
     }
 
+    pub fn focus_is_quote(&self) -> bool {
+        let focus = self.get_focus();
+        focus.is_none() || focus.unwrap().val == Expr::Quote
+    }
+
+    pub fn pretty_print_tree(&self) {
+
+        self.forest.print_tree(self.root, |expr| {
+            match expr {
+                _ => format!("{:?}", expr)
+            }
+        })
+    }
+
+       /// Should move to the next expr that needs evaluation
+       fn move_to_next_reducible_expr(&mut self) {
+        // let mut fuel = 0;
+        loop {
+            // fuel += 1;
+            // if fuel > 100 {
+            //     break;
+            // }
+            if self.root_is_exhausted() {
+                return
+            }
+            // The addition of quote here makes it so that everything below
+            // a quote is not exhausted. Is that the correct behavior? Not sure.
+            if self.focus_is_exhausted() || self.focus_is_quote() {
+                if let Some(index) = self.get_focus_parent() {
+                    // println!("Moving to parent");
+                    self.focus = index;
+                    continue;
+                } else {
+                    return
+                }
+            }
+            if let Some(focus) = self.get_focus() {
+                if focus.children.len() == 0 {
+                    return
+                }
+
+                let mut all_children_exhausted = true;
+                for child in focus.children.iter() {
+                    if let Some(c) = self.get(*child) {
+                        if !c.exhausted {
+                            self.focus = *child;
+                            all_children_exhausted = false;
+                            break;
+                        }
+                    }
+                }
+                if all_children_exhausted {
+                    break;
+                }
+            }
+        }
+    }
+
+
 }
 
 #[derive(Debug, Clone)]
@@ -500,7 +517,7 @@ pub struct Program {
     pub io: RootedForest<Expr>,
     // We will need some structure for the preprocessed rules.
     // Like keeping a list of clauses by scope and type.
-    pub rules: RootedForest<Rule>,
+    pub rules: RootedForest<Expr>,
     pub symbols: Interner,
     pub scopes: HashMap<Index, RootedForest<Expr>>,
 }
@@ -542,10 +559,52 @@ impl Program {
         }
     }
 
-    pub fn pretty_print_main(&self) {
-        self.main.forest.print_tree(self.main.root, |expr| {
+    // I want to minimize allocation here, so I might look at having
+    // some object that will give me new environments and keep them around
+    // so I don't have to allocate and deallocate a new one everytime.
+    // Also will allocate the queue at a higher level instead of each function call.
+    pub fn build_env(&self, scope: &RootedForest<Expr>, left_hand_index : Index, expr_index : Index) -> Option<HashMap<Index, Index>> {
+        let mut env = HashMap::new();
+        let mut queue: VecDeque<(Index, Index)> = VecDeque::new();
+        queue.push_front((left_hand_index, expr_index));
+        let mut failed = false;
+        while !queue.is_empty() && !failed {
+            let (left_hand_index, expr_index) = queue.pop_front().unwrap();
+            let elems = (self.rules.get(left_hand_index)?, scope.get(expr_index)?);
+            match elems {
+                (Node{ val: Expr::LogicVariable(l_index), ..}, _) => {
+                    env.insert(*l_index, expr_index);
+                }
+                (Node{ val: l_val, children: l_children, ..}, Node{ val: e_val, children: e_children, ..}) => {
+                    println!("Here {:?} {:?}", l_val, e_val);
+                    if l_val != e_val {
+                        failed = true;
+                        break;
+                    }
+                    // Children length will have to change once repeats exist.
+                    if l_children.len() != e_children.len() {
+                        failed = true;
+                        break;
+                    }
+                    for i in 0..l_children.len() {
+                        queue.push_front((*l_children.get(i)?, *e_children.get(i)?))
+                    }
+                }
+            }
+
+        };
+
+        if failed {
+            None
+        } else {
+            Some(env)
+        }
+    }
+
+    pub fn pretty_print_scope(&self, scope : &RootedForest<Expr>) {
+        scope.forest.print_tree(scope.root, |expr| {
             match expr {
-                Expr::Symbol(index) => {
+                Expr::Symbol(index) | Expr::LogicVariable(index) | Expr::Scope(index) => {
                     let value = self.symbols.lookup(*index).unwrap().clone();
                     if value.len() == 1 && !value.chars().next().unwrap().is_alphanumeric() {
                         format!("({})", value)
@@ -556,6 +615,10 @@ impl Program {
                 _ => format!("{:?}", expr)
             }
         })
+    }
+
+    pub fn pretty_print_main(&self) {
+        self.pretty_print_scope(&self.main)
     }
 
     fn rewrite(scope: &mut RootedForest<Expr>) -> Option<()> {
@@ -582,42 +645,42 @@ impl Program {
                         }
                     } 
                     //
-                    let index = focus.children.get(0)?;
-                    let node = scope.get(*index)?;
-                    if node.val != Expr::Symbol(4) {
-                        scope.exhaust_focus();
-                        return None;
-                    }
-                    let arg_index = focus.children.get(1)?;
-                    let arg_node = scope.get(*arg_index)?;
-                    match arg_node.val {
-                        Expr::Num(0) => {
-                            scope.forest.persistent_change(Expr::Num(1), scope.focus);
-                            scope.forest.clear_children(scope.focus);
-                            return None;
-                        }
-                        // *(?n fact(-(?n 1)))
-                        Expr::Num(x) => {
-                            // This is a noop change but copies the node so I can mess with the children
-                            scope.forest.persistent_change(Expr::Call, scope.focus);
-                            scope.forest.clear_children(scope.focus);
-                            scope.insert_child(Expr::Symbol(2));
-                            scope.insert_child(Expr::Num(x));
-                            scope.insert_child(Expr::Call);
-                            scope.make_last_child_focus();
-                            scope.insert_child(Expr::Symbol(4));
-                            scope.insert_child(Expr::Call);
-                            scope.make_last_child_focus();
-                            scope.insert_child(Expr::Symbol(1));
-                            scope.insert_child(Expr::Num(x));
-                            scope.insert_child(Expr::Num(1));
-                            return None;
-                        }
+                    // let index = focus.children.get(0)?;
+                    // let node = scope.get(*index)?;
+                    // if node.val != Expr::Symbol(4) {
+                    //     scope.exhaust_focus();
+                    //     return None;
+                    // }
+                    // let arg_index = focus.children.get(1)?;
+                    // let arg_node = scope.get(*arg_index)?;
+                    // match arg_node.val {
+                    //     Expr::Num(0) => {
+                    //         scope.forest.persistent_change(Expr::Num(1), scope.focus);
+                    //         scope.forest.clear_children(scope.focus);
+                    //         return None;
+                    //     }
+                    //     // *(?n fact(-(?n 1)))
+                    //     Expr::Num(x) => {
+                    //         // This is a noop change but copies the node so I can mess with the children
+                    //         scope.forest.persistent_change(Expr::Call, scope.focus);
+                    //         scope.forest.clear_children(scope.focus);
+                    //         scope.insert_child(Expr::Symbol(2));
+                    //         scope.insert_child(Expr::Num(x));
+                    //         scope.insert_child(Expr::Call);
+                    //         scope.make_last_child_focus();
+                    //         scope.insert_child(Expr::Symbol(4));
+                    //         scope.insert_child(Expr::Call);
+                    //         scope.make_last_child_focus();
+                    //         scope.insert_child(Expr::Symbol(1));
+                    //         scope.insert_child(Expr::Num(x));
+                    //         scope.insert_child(Expr::Num(1));
+                    //         return None;
+                    //     }
 
 
-                        _ => {
-                        }
-                    }
+                    //     _ => {
+                    //     }
+                    // }
                     
                     scope.exhaust_focus();
                 }
