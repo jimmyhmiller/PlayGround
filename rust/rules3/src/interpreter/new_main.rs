@@ -9,7 +9,7 @@ pub fn run_new() {
     let now = Instant::now();
     let mut program = Program::new();
     // Need to set this non-manually
-    program.clause_indexes = vec![Clause{left: 14, right: 18}, Clause{left: 21, right: 25},];
+    // program.clause_indexes = vec![Clause{left: 14, right: 18}, Clause{left: 21, right: 25},];
     let main = &mut program.main;
     let rules = &mut program.rules;
     
@@ -30,11 +30,15 @@ pub fn run_new() {
         ]
     }])", rules, &mut program.symbols);
 
+    
+
     read_new("fact(20)", main, &mut program.symbols);
     // if let Some((focus, root)) = program.main.forest.persistent_change(Expr::Symbol(2), n4.unwrap()) {
     //     let result = program.main.forest.garbage_collect(root, focus);
     //     println!("{}: {:?}", root, result);
     // }
+    program.set_clause_indexes();
+    // println!("{:?}", program.clause_indexes);
     program.full_step();
     // program.rewrite(0);
 

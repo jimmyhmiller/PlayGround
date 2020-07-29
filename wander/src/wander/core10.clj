@@ -7,6 +7,21 @@
             [meander.match.epsilon :as match]
             [clojure.string :as string]))
 
+
+
+(def body2 [1 2 3 '=> nil
+            5 6 '=> nil
+            8 '=> nil])
+(m/rewrite body2
+  [!xs ..!n '=> !vs ...]
+  [[!xs ..!n] !vs ...])
+
+
+(m/rewrite body2
+    [] []
+    [!xs ... '=> ?v & (m/cata !more)]
+    [[!xs ... ?v] . !more ...])
+
 (def test [[1] [2] [3]])
 (m/match test
   [(m/and (m/pred sequential?) (m/pred (p every? sequential?)) ?int-vars-vectors)]
@@ -28,6 +43,19 @@ in    [?x ?y ?z]))
 
    ))
 
+(clojure.string/split "asdf,asdf" #",")
+
+(m/rewrite ["ad,sf" 1 "asd,fa,sdf" 2 3]
+  [(m/if (m/pred string?)
+     (m/app #(clojure.string/split % #",") [!xs ...])
+     !xs) ...]
+  [!xs ...])
+
+(map (fn [x]
+       (or
+        (and (string? x) (clojure.string/split x #","))
+        x))
+     ["ad,sf" 1 "asd,fa,sdf" 2 3])
 
 
 
@@ -1591,6 +1619,32 @@ nil         ;;; Works as expected
   (m/seqable (m/seqable !xs) ...)
   !xs)
 
+(def query {:source {:scope {:type "apps" :apps "thing" :stuff 2} :more-stuff 3} :things 5})
+
+(m/rewrite query
+  {:source {:scope {:type "apps" :apps (m/some ?apps) & ?scope-rest} & ?source-rest} & ?rest}
+  {& ?rest
+   :source 
+   {& ?source-rest
+    :scope 
+    {& ?scope-rest
+     :type "apps"
+     :apps ?apps
+     :segment-query {:where {:op "in"
+                             :args [{:path ["event-attr" "appKey"]}
+                                    {:op "UNNEST" :args [{:op "ARRAY" :args ?apps}]}]}}}}})
+
+
+  (m/rewrite query
+    {:source {:scope {:type "apps" :apps (m/some ?apps) & ?scope-rest} & ?source-rest} & ?rest}
+    {:source {:scope {:type          "apps"
+                      :apps          ?apps
+                      :segment-query {:where {:op   "in"
+                                              :args [{:path ["event-attr" "appKey"]}
+                                                     {:op "UNNEST" :args [{:op "ARRAY" :args ?apps}]}]}}
+                      &              ?scope-rest}
+              &      ?source-rest}
+     &       ?rest})
 
 
 
@@ -1601,3 +1655,60 @@ nil         ;;; Works as expected
 (m/match nil
   (m/seqable)
   nil)
+
+
+
+(defn oprmbinds-mk [a_arg]
+  (let
+   [extractPrmVal   (fn [m k d] (get m k d))]
+    (m/rewrite
+     a_arg
+
+     (:makeparmbinds ?valmap [{(m/or :name :fldname) (m/and !prmn1 !prmn2 !prmn3)
+                               :ctype                {:ctuid !prmctuid}} ...])
+     (m/map-of !prmn1  {:prmName   !prmn2
+                        :prmCtuid !prmctuid
+                        :prmBind   (m/app extractPrmVal ?valmap !prmn3 :prmbnd-none)})
+     
+        
+
+     ?x [:MISSING ?x])))
+
+
+(defn oprmbinds-mk [a_arg]
+  (m/rewrite a_arg
+    (:makeparmbinds ?valmap [{(m/or :name :fldname) (m/and !prmn1 !prmn2 !prmn3)
+                              :ctype                {:ctuid !prmctuid}} ...])
+
+    (m/map-of !prmn1  {:prmName  !prmn2
+                       :prmCtuid !prmctuid
+                       :prmBind  (m/app ?valmap !prmn3 :prmbnd-none)})))
+
+
+
+(defn oprmbinds-mk2 [a_arg]
+ 
+  (m/rewrites a_arg
+
+    (:makeparmbinds {?param ?val} (m/scan {(m/or :name :fldname) ?param 
+                                           :ctype {:ctuid ?prmctuid}}))
+    [?param {:prmName ?param
+             :prmCtuid ?prmctuid
+             :prmBind ?val}]
+
+    (:makeparmbinds {?param nil}
+                    (m/scan {(m/or :name :fldname) ?param 
+                             :ctype {:ctuid ?prmctuid}}))
+    [?param {:prmName ?param
+             :prmCtuid ?prmctuid
+             :prmBind :prmbnd-none}]))
+
+
+(oprmbinds-mk2
+ '(:makeparmbinds {:a :b :c :d} 
+                  [{:name :c
+                    :ctype {:ctuid 1}}
+                   {:name :a
+                    :ctype {:ctuid 2}}
+                   {:name :e
+                    :ctype {:ctuid 2}}]))
