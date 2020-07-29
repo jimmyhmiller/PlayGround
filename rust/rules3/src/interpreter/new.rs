@@ -601,6 +601,47 @@ impl Program {
         }
     }
 
+    pub fn set_clause_indexes(&mut self) {
+        let mut clauses_by_parent : HashMap<usize, (Option<usize>, Option<usize>)> = HashMap::new();
+        let left = Expr::Symbol(self.symbols.intern("left"));
+        let right = Expr::Symbol(self.symbols.intern("right"));
+
+        // WARNING I assumming that that the index of a clause always is one index
+        // after the left or right symbol. I can't think of a case where that is violated right now.
+        // but there is definitely no guaranteee about that in general. So if weird things are happening
+        // with rules I might want to check this.
+        for node in &self.rules.forest.arena {
+            // println!("{:?} {:?} {:?}", node.val, left, right);
+            if node.val == left {
+                let parent_index = node.parent.unwrap();
+                let val = clauses_by_parent.get_mut(&parent_index);
+                if let Some(entry) = val {
+                    entry.0 = Some(node.index + 1)
+                } else {
+                    clauses_by_parent.insert(parent_index, (Some(node.index + 1), None));
+                }
+            }
+            if node.val == right {
+                let parent_index = node.parent.unwrap();
+                let val = clauses_by_parent.get_mut(&parent_index);
+                if let Some(entry) = val {
+                    entry.1 = Some(node.index + 1)
+                } else {
+                    clauses_by_parent.insert(parent_index, (None, Some(node.index + 1)));
+                }
+            }
+        }
+        self.clause_indexes = clauses_by_parent
+            .values()
+            .map(|(left, right)| {
+                Clause{
+                    left: left.unwrap(),
+                    right: right.unwrap(),
+                }
+            })
+            .collect();
+    }
+
     // I want to minimize allocation here, so I might look at having
     // some object that will give me new environments and keep them around
     // so I don't have to allocate and deallocate a new one everytime.
