@@ -240,13 +240,16 @@ impl<T> Forest<T> where T : Clone + Debug {
     }
 
 
-    fn persistent_change(&mut self, t : T, index: Index) {
+    // Returns old nodes new location
+    fn persistent_change(&mut self, t : T, index: Index) -> Option<Index> {
 
         // Need to capture location of old node we copied.
         if let Some(node) = self.arena.get_mut(index) {
             node.val = t;
             let node_clone = node.clone();
-            self.insert_node(node_clone);
+            Some(self.insert_node(node_clone))
+        } else {
+            None
         }
 
     }
@@ -654,7 +657,6 @@ impl Program {
                     next_is_clauses = false;
                     for clause_index in &node.children {
                         let clause = self.rules.get(*clause_index)?;
-                        // println!("Clause {:?}", clause);
                         clauses.push(Clause{
                             left: *clause.children.get(1)?,
                             right: *clause.children.get(3)?,
@@ -736,7 +738,8 @@ impl Program {
         self.pretty_print_scope(&self.main)
     }
 
-    pub fn substitute(mut scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: HashMap<Index, Index>) {
+    // Returns old nodes new location
+    pub fn substitute(mut scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: HashMap<Index, Index>) -> Option<Index> {
         let right = rule_scope.get(right_index).unwrap().clone();
         let right_replace = match right.val {
             Expr::LogicVariable(index) => {
@@ -747,7 +750,7 @@ impl Program {
         let node = scope.get_focus().unwrap();
         let parent = node.parent.clone();
 
-        scope.forest.persistent_change(right_replace, scope.focus);
+        let result = scope.forest.persistent_change(right_replace, scope.focus);
         let focus = scope.forest.arena.get_mut(scope.focus).unwrap();
         focus.children.clear();
         rule_scope.forest.copy_tree_helper_f(right_index, right_index, parent, &mut scope, & |val| {
@@ -758,6 +761,11 @@ impl Program {
                 _ => None
             }
         });
+
+        // What about the root? Does it actually matter or just the focus?
+        // I do need to know the root for meta evaluation, but root should only
+        // change here if the focus is the root. Or at least I think so.
+        result
        
     }
 
@@ -783,6 +791,11 @@ impl Program {
         // working with this code base. I need to do meta eval stuff and see
         // how fast we still are. But so far, speed is much better.
 
+        let original_root = scope.root;
+        let original_sub_expr = scope.focus;
+
+        // We first check if there is a matching rule.
+        // We really need to handle meta stuff here.
         let mut matching_rule = None;
         for Clause{left,right, in_scopes, ..} in &self.clause_indexes {
             if !in_scopes.contains(&scope_symbol_index) { continue };
@@ -804,12 +817,33 @@ impl Program {
 
 
         if let Some((right, env)) = matching_rule {
-            Program::substitute(scope, rules, right, env);
+            let old_focus_new_location = Program::substitute(scope, rules, right, env)?;
+            let meta_original_root = if scope.focus == scope.root { old_focus_new_location } else { scope.root };
+            let meta_original_focus = old_focus_new_location;
+            let meta = Meta {
+                original_expr: meta_original_root,
+                original_sub_expr: meta_original_focus,
+                new_expr: scope.root,
+                new_sub_expr: scope.focus,
+            };
+            // We need to now try to match on meta.
+            // We need some tree we can do a build_env on.
+            // So the basic idea is we have a tree that is the shape of meta above.
+            // but those indexes really dereference to the scope we are meta evaling on.
+            // So we need a get_method but we also need to be doing something like get_children.
+            // But the get_children can't be on a node, they need to be on the forest itself.
+            // That way when code asks for the children we can intercept that call and
+            // check if the node is a parent of our meta nodes and return the correct thing.
+            // Otherwise we'd have to have a full copy of the tress which would be crazy.
+            // So I either need an interface for build_env or I need to mutate the scope and just
+            // add these metaoverrides to it. The latter might be the quickest change.
+
+
             return None
         }
 
-
-
+        // Then we check if there is a builtin rule.
+        // Also need to handle meta stuff here.
 
         if let Some(focus) = scope.get_focus() {
             match focus.val {
@@ -835,7 +869,6 @@ impl Program {
                     scope.exhaust_focus();
                 }
                 _ => {
-                    // println!("Exhausting");
                     scope.exhaust_focus()
                 }
             }
@@ -857,30 +890,13 @@ impl Program {
         // rewrite should return old node location.
         // meta needs to change.
         self.rewrite(0);
-        // if let Some((sub, root)) = Program::rewrite(scope) {
-        //     let meta = Meta{
-        //         original_expr: scope.root,
-        //         original_sub_expr: scope.focus,
-        //         new_expr: root,
-        //         new_sub_expr: sub
-        //     };
-        //     let new_focus = scope.forest.garbage_collect(root, sub);
-        //     scope.root = 0;
-        //     if let Some(focus) = new_focus {
-        //         scope.focus = focus;
-        //     }
-        //     // What do we do if this is false??
-        // } else {
-        //     scope.exhaust_focus();
-        // }
-        
     }
 
     pub fn full_step(&mut self) {
         // let mut fuel = 0;
         // println!("Full step");
         // self.rules.pretty_print_tree();
-        println!("{:?}", self.clause_indexes);
+        // println!("{:?}", self.clause_indexes);
         while !self.main.root_is_exhausted() {
             // fuel +=1;
             // if fuel > 100 {
