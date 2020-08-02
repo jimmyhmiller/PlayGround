@@ -67,6 +67,10 @@ impl Interner {
     pub fn lookup(&self, index: Index) -> Option<&String> {
         self.storage.get(index)
     }
+
+    pub fn get_index(&self, symbol : &str) -> Option<&Index> {
+        self.lookup.get(symbol)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -542,6 +546,8 @@ impl RootedForest<Expr> {
 }
 #[derive(Debug, Clone)]
 pub struct Clause {
+    pub in_scopes: Vec<Index>,
+    pub out_scopes: Vec<Index>,
     pub left: Index,
     pub right: Index,
 }
@@ -579,12 +585,15 @@ impl Program {
 
     pub fn new() -> Program {
 
-        let mut interner = Interner::new();
-        interner.intern("builtin/+");
-        interner.intern("builtin/-");
-        interner.intern("builtin/*");
-        interner.intern("builtin/div");
-        interner.intern("fact");
+        let mut symbols = Interner::new();
+        symbols.intern("builtin/+");
+        symbols.intern("builtin/-");
+        symbols.intern("builtin/*");
+        symbols.intern("builtin/div");
+        symbols.intern("fact");
+        symbols.intern("@main");
+        symbols.intern("@io");
+        symbols.intern("@rules");
         Program {
             meta: Meta {
                 original_expr: 0,
@@ -595,51 +604,75 @@ impl Program {
             main: RootedForest::new(),
             io: RootedForest::new(),
             rules: RootedForest::new(),
-            symbols: interner,
+            symbols: symbols,
             scopes: HashMap::new(),
             clause_indexes: Vec::new(),
         }
     }
 
-    pub fn set_clause_indexes(&mut self) {
-        let mut clauses_by_parent : HashMap<usize, (Option<usize>, Option<usize>)> = HashMap::new();
-        let left = Expr::Symbol(self.symbols.intern("left"));
-        let right = Expr::Symbol(self.symbols.intern("right"));
-
-        // WARNING I assumming that that the index of a clause always is one index
-        // after the left or right symbol. I can't think of a case where that is violated right now.
-        // but there is definitely no guaranteee about that in general. So if weird things are happening
-        // with rules I might want to check this.
-        for node in &self.rules.forest.arena {
-            // println!("{:?} {:?} {:?}", node.val, left, right);
-            if node.val == left {
-                let parent_index = node.parent.unwrap();
-                let val = clauses_by_parent.get_mut(&parent_index);
-                if let Some(entry) = val {
-                    entry.0 = Some(node.index + 1)
-                } else {
-                    clauses_by_parent.insert(parent_index, (Some(node.index + 1), None));
-                }
-            }
-            if node.val == right {
-                let parent_index = node.parent.unwrap();
-                let val = clauses_by_parent.get_mut(&parent_index);
-                if let Some(entry) = val {
-                    entry.1 = Some(node.index + 1)
-                } else {
-                    clauses_by_parent.insert(parent_index, (None, Some(node.index + 1)));
-                }
+    fn construct_scopes(&self, scope_attribute_index : Index) -> Option<Vec<Index> >{
+        let array = self.rules.get(scope_attribute_index)?;
+        let mut results = Vec::with_capacity(array.children.len());
+        for index in &array.children {
+            if let Expr::Scope(i) = self.rules.get(*index)?.val {
+                results.push(i)
             }
         }
-        self.clause_indexes = clauses_by_parent
-            .values()
-            .map(|(left, right)| {
-                Clause{
-                    left: left.unwrap(),
-                    right: right.unwrap(),
+
+        Some(results)
+    }
+
+    // So as I add rules I could totally index incrementally by keeping the last index
+    // of how far I indexed and then only indexing more from there.
+    pub fn set_clause_indexes(&mut self) -> Option<()> {
+        // This is returning option of void because I'm tired of not being able to use ?.
+        let in_scope_symbol = Expr::Symbol(*self.symbols.get_index("in_scopes")?);
+        let out_scope_symbol = Expr::Symbol(*self.symbols.get_index("out_scopes")?);
+        let clauses_symbol = Expr::Symbol(*self.symbols.get_index("clauses")?);
+
+        // The rules are quoted so it is two levels deep.
+        // Need to make better things for traversing.
+        let rules = &self.rules.get(*self.rules.get_root()?.children.get(0)?)?.children;
+
+        let mut clauses : Vec<Clause> = vec![];
+        for rule_index in rules {
+            let rule = self.rules.get(*rule_index)?;
+            let mut in_scope_index = None;
+            let mut out_scope_index = None;
+            // This is super ugly. But it kind of makes sense?
+            let mut next_is_clauses = false;
+            for attribute_index in &rule.children {
+                let node = self.rules.get(*attribute_index)?;
+                // Right now I'm kind of assuming these come before clauses
+                if node.val == in_scope_symbol {
+                    in_scope_index = Some(attribute_index + 1);
+                };
+                if node.val == out_scope_symbol {
+                    out_scope_index = Some(attribute_index + 1);
+                };
+                if next_is_clauses {
+                    next_is_clauses = false;
+                    for clause_index in &node.children {
+                        let clause = self.rules.get(*clause_index)?;
+                        // println!("Clause {:?}", clause);
+                        clauses.push(Clause{
+                            left: *clause.children.get(1)?,
+                            right: *clause.children.get(3)?,
+                            // need to construct these from the indexes
+                            in_scopes: self.construct_scopes(in_scope_index?)?,
+                            out_scopes: self.construct_scopes(out_scope_index?)?,
+                        });
+                    }
                 }
-            })
-            .collect();
+                if node.val == clauses_symbol {
+                    next_is_clauses = true;
+                }
+
+            }
+        }
+        self.clause_indexes = clauses;
+
+        Some(())
     }
 
     // I want to minimize allocation here, so I might look at having
@@ -740,12 +773,19 @@ impl Program {
             2 => &self.rules,
             _ => self.scopes.get(&scope_index).unwrap()
         };
+        let scope_symbol_index = match scope_index {
+            0 => &self.symbols.get_index("@main").unwrap(),
+            1 => &self.symbols.get_index("@io").unwrap(),
+            2 => &self.symbols.get_index("@rules").unwrap(),
+            _ => &scope_index
+        };
         // This all needs refactoring, but it is nice to see factorial
         // working with this code base. I need to do meta eval stuff and see
         // how fast we still are. But so far, speed is much better.
 
         let mut matching_rule = None;
-        for Clause{left,right} in &self.clause_indexes {
+        for Clause{left,right, in_scopes, ..} in &self.clause_indexes {
+            if !in_scopes.contains(&scope_symbol_index) { continue };
             let env = self.build_env(scope, *left, scope.focus);
             if env.is_none() { continue };
             // Need some notion of output scopes
@@ -756,6 +796,8 @@ impl Program {
         let scope = match scope_index {
             0 => &mut self.main,
             1 => &mut self.io,
+            // I can do rules here because it is already borrowed.
+            // Going to have to figure that out.
             // 2 => &mut self.rules,
             _ => self.scopes.get_mut(&scope_index).unwrap()
         };
@@ -806,6 +848,7 @@ impl Program {
     // Making this work for main right now even though
     // we actually need multiple scopes.
     fn step(&mut self) {
+        // println!("step");
         let scope = &mut self.main;
         scope.move_to_next_reducible_expr();
         if scope.root_is_exhausted() {
@@ -830,10 +873,14 @@ impl Program {
         // } else {
         //     scope.exhaust_focus();
         // }
+        
     }
 
     pub fn full_step(&mut self) {
         // let mut fuel = 0;
+        // println!("Full step");
+        // self.rules.pretty_print_tree();
+        println!("{:?}", self.clause_indexes);
         while !self.main.root_is_exhausted() {
             // fuel +=1;
             // if fuel > 100 {
