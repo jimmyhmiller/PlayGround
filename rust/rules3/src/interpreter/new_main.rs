@@ -18,7 +18,8 @@ pub fn run_new() {
     read_new("quote([{
         type: rule,
         name: fact,
-        scopes: [@main]
+        in_scopes: [@main],
+        out_scopes: [@main],
         clauses: [
             {
                 left: fact(0),
