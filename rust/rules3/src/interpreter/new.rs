@@ -31,11 +31,11 @@ pub enum Expr {
 
 
 #[derive(Debug, Clone)]
-pub struct Meta {
-    original_expr: Index,
-    original_sub_expr: Index,
-    new_expr: Index,
-    new_sub_expr: Index,
+pub struct Meta<T> where T : Debug + Clone {
+    original_expr: T,
+    original_sub_expr: T,
+    new_expr: T,
+    new_sub_expr: T,
 }
 
 // Allocates and uses more storage than I technically need.
@@ -276,6 +276,83 @@ pub struct RootedForest<T> where T : Clone {
 }
 
 
+pub trait ForestLike<T> where T : Clone + Debug {
+    fn get_children(&self, index: Index) -> Option<&Vec<Index>>;
+    fn get(&self, index: Index) -> Option<&Node<T>>;
+}
+
+
+
+
+impl<T> ForestLike<T> for RootedForest<T> where T : Clone + Debug {
+    fn get_children(&self, index: Index) -> Option<&Vec<Index>> {
+        self.get(index).map(|x | &x.children)
+    }
+
+    fn get(&self, index: Index) -> Option<&Node<T>> {
+        self.forest.get(index)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetaForest<T> where T : Clone + Debug {
+    pub rooted_forest: RootedForest<T>,
+    pub meta: Meta<Index>,
+    pub meta_parents: Meta<Index>,
+    pub meta_index_start: Index,
+    pub meta_nodes: Vec<Node<T>>,
+    pub meta_children: Meta<Vec<Index>>,
+}
+
+// So what I'm thinking is that the meta is going to go on the end
+// I won't actually add it just virtually
+
+// What does it mean to mutate meta? Does it mean mutating the actual scope?
+// If I get to the point of mutating meta, I could track the offset of the meta
+// information and if you are past the meta_index_start subtract the length
+// of meta to find the underlying data.
+
+
+// Need to build up all these structures so they give coherent answers
+impl ForestLike<Expr> for MetaForest<Expr> {
+    fn get_children(&self, index: Index) -> Option<&Vec<Index>> {
+        if index == self.meta_parents.original_expr {
+            Some(&self.meta_children.original_expr)
+        } else if index == self.meta_parents.new_expr {
+            Some(&self.meta_children.new_expr)
+        } else if index == self.meta_parents.original_sub_expr {
+            Some(&self.meta_children.original_sub_expr)
+        } else if index == self.meta_parents.new_sub_expr {
+            Some(&self.meta_children.new_sub_expr)
+        } else if index >= self.meta_index_start {
+            let offset = index - self.meta_index_start;
+            match offset {
+                2 => self.get_children(self.meta.original_expr),
+                4 => self.get_children(self.meta.original_sub_expr),
+                6 => self.get_children(self.meta.new_expr),
+                8 => self.get_children(self.meta.new_sub_expr),
+                _ => None
+            }
+        } else {
+            self.rooted_forest.get(index).map(|x | &x.children)
+        }
+    }
+
+    fn get(&self, index: Index) -> Option<&Node<Expr>> {
+        if index >= self.meta_index_start {
+            let offset = index - self.meta_index_start;
+            if offset <= 8 {
+                self.meta_nodes.get(offset)  
+            } else {
+                panic!("Asking for meta that is too big");
+            }
+        } else {
+            self.rooted_forest.forest.get(index)
+        }
+    }
+}
+
+
 impl<T> RootedForest<T> where T : Clone + Debug {
 
     fn new() -> RootedForest<T> {
@@ -291,6 +368,7 @@ impl<T> RootedForest<T> where T : Clone + Debug {
             node.exhausted = true
         }
     }
+
 
 
     pub fn insert_child(&mut self, t : T) -> Option<Index> {
@@ -382,10 +460,6 @@ impl<T> RootedForest<T> where T : Clone + Debug {
     }
     pub fn get_focus_val(&self) -> Option<&T> {
         self.forest.get(self.focus).map(|x| &x.val)
-    }
-    
-    fn get(&self, index: Index) -> Option<&Node<T>> {
-        self.forest.get(index)
     }
 
     // Could I cache this?
@@ -559,7 +633,7 @@ pub struct Clause {
 pub struct Program {
     // Can we rewrite meta? We can match on meta and rewrite else where.
     // But what would it mean to rewrite meta?
-    pub meta: Meta,
+    pub meta: Meta<Index>,
     // Technically these chould just be in the hashmap.
     // But it seems worthwhile to bring them to the top level.
     pub main: RootedForest<Expr>,
@@ -681,7 +755,7 @@ impl Program {
     // some object that will give me new environments and keep them around
     // so I don't have to allocate and deallocate a new one everytime.
     // Also will allocate the queue at a higher level instead of each function call.
-    pub fn build_env(&self, scope: &RootedForest<Expr>, left_hand_index : Index, expr_index : Index) -> Option<HashMap<Index, Index>> {
+    pub fn build_env(&self, scope: &dyn ForestLike<Expr>, left_hand_index : Index, expr_index : Index) -> Option<HashMap<Index, Index>> {
         let mut env = HashMap::new();
         let mut queue: VecDeque<(Index, Index)> = VecDeque::new();
         queue.push_front((left_hand_index, expr_index));
@@ -693,7 +767,9 @@ impl Program {
                 (Node{ val: Expr::LogicVariable(l_index), ..}, _) => {
                     env.insert(*l_index, expr_index);
                 }
-                (Node{ val: l_val, children: l_children, ..}, Node{ val: e_val, children: e_children, ..}) => {
+                (Node{ val: l_val, index: l_index, ..}, Node{ val: e_val, index: e_index, ..}) => {
+                    let l_children = self.rules.get_children(*l_index)?;
+                    let e_children = scope.get_children(*e_index)?;
                     if l_val != e_val {
                         failed = true;
                         break;
