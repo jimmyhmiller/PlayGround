@@ -275,7 +275,7 @@ pub struct RootedForest<T> where T : Clone {
     pub forest: Forest<T>,
 }
 
-
+// Probably going to need to extend this to have root and focus
 pub trait ForestLike<T> where T : Clone + Debug {
     fn get_children(&self, index: Index) -> Option<&Vec<Index>>;
     fn get(&self, index: Index) -> Option<&Node<T>>;
@@ -304,6 +304,17 @@ pub struct MetaForest<T> where T : Clone + Debug {
     pub meta_children: Meta<Vec<Index>>,
 }
 
+// Node{
+//     val: Expr::Map, 
+//     index: self.meta_index_start, 
+//     child_index: None, 
+//     parent: None,
+//     exhausted: true,
+//     children: vec!
+// }
+// I could actually make meta_nodes a real forest
+// and just insert a bunch of things. Might work better?
+
 // So what I'm thinking is that the meta is going to go on the end
 // I won't actually add it just virtually
 
@@ -326,12 +337,10 @@ impl ForestLike<Expr> for MetaForest<Expr> {
             Some(&self.meta_children.new_sub_expr)
         } else if index >= self.meta_index_start {
             let offset = index - self.meta_index_start;
-            match offset {
-                2 => self.get_children(self.meta.original_expr),
-                4 => self.get_children(self.meta.original_sub_expr),
-                6 => self.get_children(self.meta.new_expr),
-                8 => self.get_children(self.meta.new_sub_expr),
-                _ => None
+            if offset <= 8 {
+                self.meta_nodes.get(offset).map(|x | &x.children)
+            } else {
+                panic!("Asking for meta_children that is too big");
             }
         } else {
             self.rooted_forest.get(index).map(|x | &x.children)
