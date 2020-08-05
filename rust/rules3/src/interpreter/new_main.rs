@@ -31,9 +31,8 @@ pub fn run_new() {
         ]
     }])", rules, &mut program.symbols);
 
-    
 
-    read_new("fact(1)", main, &mut program.symbols);
+    read_new("fact(20)", main, &mut program.symbols);
     // if let Some((focus, root)) = program.main.forest.persistent_change(Expr::Symbol(2), n4.unwrap()) {
     //     let result = program.main.forest.garbage_collect(root, focus);
     //     println!("{}: {:?}", root, result);
@@ -59,3 +58,16 @@ pub fn run_new() {
     // std::thread::spawn(move || drop(program));
 
 }
+
+
+
+
+
+
+// I have basically a graph because of parent pointers.
+// That means I can't really make a persistent data structure.
+// But what if everything kept a version and nodes kept a map of versions to old values?
+// Then I could get to a node and look up any version of that node.
+// That way I can have pointers in other scopes that know the scope they came from and the version
+// of the node they are looking for.
+// GC gets a bit harder, but totally solvable.
