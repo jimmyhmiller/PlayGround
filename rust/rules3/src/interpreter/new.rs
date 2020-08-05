@@ -134,35 +134,6 @@ impl<T> Forest<T> where T : Clone + Debug {
         index
     }
 
-    fn get(&self, index: Index) -> Option<&Node<T>> {
-        self.arena.get(index)
-    }
-
-    pub fn print_tree_inner<F>(&self, node: &Node<T>, prefix: String, last: bool, formatter: &F) where F : Fn(&T) -> String {
-        let current_prefix = if last { "`- " } else { "|- " };
-        println!("{}{}{} {} {}", prefix, current_prefix, formatter(&node.val), node.index, node.exhausted);
-
-        let child_prefix = if last { "   " } else { "|  " };
-        let prefix = prefix + child_prefix;
-        if !node.children.is_empty() {
-            let last_child = node.children.len() - 1;
-
-            for (i, child_index) in node.children.iter().enumerate() {
-                if let Some(child) = self.get(*child_index) {
-                    self.print_tree_inner(&child, prefix.to_string(), i == last_child, formatter);
-                }
-            }
-        }
-    }
-
-    // https://vallentin.dev/2019/05/14/pretty-print-tree
-    pub fn print_tree<F>(&self, index: Index, formatter: F) where F : Fn(&T) -> String {
-        if let Some(node) = self.get(index) {
-            self.print_tree_inner(node, "".to_string(), true, &formatter)
-        }
-
-    }
-    
     fn copy_tree_helper(&self, mut sub_index: Index, node_index: Index, parent_index: Option<Index>, forest: &mut Forest<T>) -> Option<Index> {
         if let Some(node) = self.get(node_index) {
             let new_index = if let Some(parent_index) = parent_index {
@@ -279,6 +250,32 @@ pub struct RootedForest<T> where T : Clone {
 pub trait ForestLike<T> where T : Clone + Debug {
     fn get_children(&self, index: Index) -> Option<&Vec<Index>>;
     fn get(&self, index: Index) -> Option<&Node<T>>;
+    
+    fn print_tree_inner<F>(&self, node: &Node<T>, prefix: String, last: bool, formatter: &F) where F : Fn(&T) -> String {
+        let current_prefix = if last { "`- " } else { "|- " };
+        println!("{}{}{} {} {}", prefix, current_prefix, formatter(&node.val), node.index, node.exhausted);
+
+        let child_prefix = if last { "   " } else { "|  " };
+        let prefix = prefix + child_prefix;
+        let children = self.get_children(node.index).unwrap();
+        if !children.is_empty() {
+            let last_child = children.len() - 1;
+
+            for (i, child_index) in children.iter().enumerate() {
+                if let Some(child) = self.get(*child_index) {
+                    self.print_tree_inner(&child, prefix.to_string(), i == last_child, formatter);
+                }
+            }
+        }
+    }
+
+    // https://vallentin.dev/2019/05/14/pretty-print-tree
+    fn print_tree<F>(&self, index: Index, formatter: F) where F : Fn(&T) -> String {
+        if let Some(node) = self.get(index) {
+            self.print_tree_inner(node, "".to_string(), true, &formatter)
+        }
+    }
+    
 }
 
 
@@ -294,14 +291,73 @@ impl<T> ForestLike<T> for RootedForest<T> where T : Clone + Debug {
     }
 }
 
+impl<T> ForestLike<T> for Forest<T> where T : Clone + Debug {
+    fn get_children(&self, index: Index) -> Option<&Vec<Index>> {
+        self.get(index).map(|x | &x.children)
+    }
+
+    fn get(&self, index: Index) -> Option<&Node<T>> {
+        self.arena.get(index)
+    }
+}
+
+
 #[derive(Debug, Clone)]
-pub struct MetaForest<T> where T : Clone + Debug {
-    pub rooted_forest: RootedForest<T>,
+pub struct MetaForest<'a, T> where T : Clone + Debug {
+    pub rooted_forest: &'a RootedForest<T>,
     pub meta: Meta<Index>,
-    pub meta_parents: Meta<Index>,
+    pub meta_parents: Meta<Option<Index>>,
     pub meta_index_start: Index,
-    pub meta_nodes: Vec<Node<T>>,
-    pub meta_children: Meta<Vec<Index>>,
+    pub meta_nodes: RootedForest<T>
+}
+
+
+impl<'a> MetaForest<'a, Expr> {
+
+    fn new(meta: Meta<Index>, rooted_forest: &'a RootedForest<Expr>) -> MetaForest<Expr> {
+        MetaForest {
+            meta,
+            rooted_forest,
+            meta_parents: Meta { original_expr: None, original_sub_expr: None, new_expr: None, new_sub_expr: None},
+            meta_index_start: 0,
+            meta_nodes: RootedForest::new(),
+        }
+    }
+
+    pub fn setup(&mut self, meta : Meta<Index>, symbols: & Interner) {
+
+        let original_expr = self.rooted_forest.get(meta.original_expr);
+        let original_sub_expr =self.rooted_forest.get(meta.original_sub_expr);
+        let new_expr = self.rooted_forest.get(meta.new_expr);
+        let new_sub_expr =  self.rooted_forest.get(meta.new_sub_expr);
+        self.meta_parents = Meta {
+            original_expr: original_expr.and_then(|x| x.parent),
+            original_sub_expr: original_sub_expr.and_then(|x| x.parent),
+            new_expr: new_expr.and_then(|x| x.parent),
+            new_sub_expr: new_expr.and_then(|x| x.parent),
+        };
+        self.meta = meta;
+        self.meta_index_start = self.rooted_forest.forest.arena.len();
+        // I'm really not sure about all of this.
+        // It definitely doesn't feel right.
+        self.meta_nodes.insert_root(Expr::Map);
+        self.meta_nodes.insert_child(Expr::Symbol(*symbols.get_index("original_expr").unwrap()));
+        let root = self.meta_nodes.forest.arena.get_mut(self.meta_nodes.root).unwrap();
+        root.children.push(2);
+        self.meta_nodes.forest.insert_node(original_expr.unwrap().clone());
+        self.meta_nodes.insert_child(Expr::Symbol(*symbols.get_index("original_sub_expr").unwrap()));
+        let root = self.meta_nodes.forest.arena.get_mut(self.meta_nodes.root).unwrap();
+        root.children.push(4);
+        self.meta_nodes.forest.insert_node(original_sub_expr.unwrap().clone());
+        self.meta_nodes.insert_child(Expr::Symbol(*symbols.get_index("new_expr").unwrap()));
+        let root = self.meta_nodes.forest.arena.get_mut(self.meta_nodes.root).unwrap();
+        root.children.push(6);
+        self.meta_nodes.forest.insert_node(new_expr.unwrap().clone());
+        self.meta_nodes.insert_child(Expr::Symbol(*symbols.get_index("new_sub_expr").unwrap()));
+        let root = self.meta_nodes.forest.arena.get_mut(self.meta_nodes.root).unwrap();
+        root.children.push(8);
+        self.meta_nodes.forest.insert_node(new_sub_expr.unwrap().clone());
+    }
 }
 
 // Node{
@@ -325,16 +381,16 @@ pub struct MetaForest<T> where T : Clone + Debug {
 
 
 // Need to build up all these structures so they give coherent answers
-impl ForestLike<Expr> for MetaForest<Expr> {
+impl<'a> ForestLike<Expr> for MetaForest<'a, Expr> {
     fn get_children(&self, index: Index) -> Option<&Vec<Index>> {
-        if index == self.meta_parents.original_expr {
-            Some(&self.meta_children.original_expr)
-        } else if index == self.meta_parents.new_expr {
-            Some(&self.meta_children.new_expr)
-        } else if index == self.meta_parents.original_sub_expr {
-            Some(&self.meta_children.original_sub_expr)
-        } else if index == self.meta_parents.new_sub_expr {
-            Some(&self.meta_children.new_sub_expr)
+        if Some(index) == self.meta_parents.original_expr {
+            self.meta_nodes.get(2).map(|x| &x.children)
+        } else if Some(index) == self.meta_parents.original_sub_expr {
+            self.meta_nodes.get(4).map(|x| &x.children)
+        } else if Some(index) == self.meta_parents.new_expr {
+            self.meta_nodes.get(6).map(|x| &x.children)
+        } else if Some(index) == self.meta_parents.new_sub_expr {
+            self.meta_nodes.get(8).map(|x| &x.children)
         } else if index >= self.meta_index_start {
             let offset = index - self.meta_index_start;
             if offset <= 8 {
@@ -680,13 +736,18 @@ impl Program {
         symbols.intern("@main");
         symbols.intern("@io");
         symbols.intern("@rules");
+        symbols.intern("original_expr");
+        symbols.intern("original_sub_expr");
+        symbols.intern("new_expr");
+        symbols.intern("new_sub_expr");
+        let meta = Meta {
+            original_expr: 0,
+            original_sub_expr: 0,
+            new_expr: 0,
+            new_sub_expr: 0,
+        };
         Program {
-            meta: Meta {
-                original_expr: 0,
-                original_sub_expr: 0,
-                new_expr: 0,
-                new_sub_expr: 0,
-            },
+            meta: meta.clone(),
             main: RootedForest::new(),
             io: RootedForest::new(),
             rules: RootedForest::new(),
@@ -764,7 +825,7 @@ impl Program {
     // some object that will give me new environments and keep them around
     // so I don't have to allocate and deallocate a new one everytime.
     // Also will allocate the queue at a higher level instead of each function call.
-    pub fn build_env(&self, scope: &dyn ForestLike<Expr>, left_hand_index : Index, expr_index : Index) -> Option<HashMap<Index, Index>> {
+    pub fn build_env(&self, scope: &impl ForestLike<Expr>, left_hand_index : Index, expr_index : Index) -> Option<HashMap<Index, Index>> {
         let mut env = HashMap::new();
         let mut queue: VecDeque<(Index, Index)> = VecDeque::new();
         queue.push_front((left_hand_index, expr_index));
@@ -911,6 +972,23 @@ impl Program {
                 new_expr: scope.root,
                 new_sub_expr: scope.focus,
             };
+            let mut meta_forest = MetaForest::new(self.meta.clone(), scope);
+            let symbols = &self.symbols;
+            meta_forest.setup(meta, symbols);
+            // Not right yet. But a start
+            meta_forest.print_tree(scope.forest.arena.len(), |expr| {
+                match expr {
+                    Expr::Symbol(index) | Expr::LogicVariable(index) | Expr::Scope(index) => {
+                        let value = symbols.lookup(*index).unwrap().clone();
+                        if value.len() == 1 && !value.chars().next().unwrap().is_alphanumeric() {
+                            format!("({})", value)
+                        } else {
+                            value
+                        }
+                    }
+                    _ => format!("{:?}", expr)
+                }
+            });
             // We need to now try to match on meta.
             // We need some tree we can do a build_env on.
             // So the basic idea is we have a tree that is the shape of meta above.
