@@ -308,19 +308,22 @@ pub struct MetaForest<'a, T> where T : Clone + Debug {
     pub meta: Meta<Index>,
     pub meta_parents: Meta<Option<Index>>,
     pub meta_index_start: Index,
-    pub meta_nodes: RootedForest<T>
+    pub meta_nodes: RootedForest<T>,
 }
 
 
 impl<'a> MetaForest<'a, Expr> {
 
     fn new(meta: Meta<Index>, rooted_forest: &'a RootedForest<Expr>) -> MetaForest<Expr> {
+        let meta_index_start = rooted_forest.forest.arena.len();
+        let mut meta_nodes = RootedForest::new();
+        meta_nodes.forest.current_index = meta_index_start;
         MetaForest {
             meta,
             rooted_forest,
             meta_parents: Meta { original_expr: None, original_sub_expr: None, new_expr: None, new_sub_expr: None},
-            meta_index_start: 0,
-            meta_nodes: RootedForest::new(),
+            meta_index_start,
+            meta_nodes: meta_nodes,
         }
     }
 
@@ -337,26 +340,31 @@ impl<'a> MetaForest<'a, Expr> {
             new_sub_expr: new_expr.and_then(|x| x.parent),
         };
         self.meta = meta;
-        self.meta_index_start = self.rooted_forest.forest.arena.len();
         // I'm really not sure about all of this.
         // It definitely doesn't feel right.
         self.meta_nodes.insert_root(Expr::Map);
+        // I've messed with the index here. Need to fix it back to 0.
+        self.meta_nodes.root = 0;
+        self.meta_nodes.focus = 0;
         self.meta_nodes.insert_child(Expr::Symbol(*symbols.get_index("original_expr").unwrap()));
-        let root = self.meta_nodes.forest.arena.get_mut(self.meta_nodes.root).unwrap();
-        root.children.push(2);
+        let root = self.meta_nodes.forest.arena.get_mut(self.meta_nodes.root ).unwrap();
+        root.children.push(self.meta_index_start + 2);
         self.meta_nodes.forest.insert_node(original_expr.unwrap().clone());
         self.meta_nodes.insert_child(Expr::Symbol(*symbols.get_index("original_sub_expr").unwrap()));
         let root = self.meta_nodes.forest.arena.get_mut(self.meta_nodes.root).unwrap();
-        root.children.push(4);
+        root.children.push(self.meta_index_start + 4);
         self.meta_nodes.forest.insert_node(original_sub_expr.unwrap().clone());
         self.meta_nodes.insert_child(Expr::Symbol(*symbols.get_index("new_expr").unwrap()));
         let root = self.meta_nodes.forest.arena.get_mut(self.meta_nodes.root).unwrap();
-        root.children.push(6);
+        root.children.push(self.meta_index_start + 6);
         self.meta_nodes.forest.insert_node(new_expr.unwrap().clone());
         self.meta_nodes.insert_child(Expr::Symbol(*symbols.get_index("new_sub_expr").unwrap()));
         let root = self.meta_nodes.forest.arena.get_mut(self.meta_nodes.root).unwrap();
-        root.children.push(8);
+        root.children.push(self.meta_index_start + 8);
         self.meta_nodes.forest.insert_node(new_sub_expr.unwrap().clone());
+        // let new_children = self.meta_nodes.get_root().unwrap().children.iter().map(|i| i + self.meta_index_start).collect();
+        // let root = self.meta_nodes.forest.arena.get_mut(self.meta_nodes.root).unwrap();
+        // root.children = new_children;
     }
 }
 
@@ -972,23 +980,27 @@ impl Program {
                 new_expr: scope.root,
                 new_sub_expr: scope.focus,
             };
+            // I've got meta starting to work :)
+            // Need to make it work with builtin rules below.
+            // Also should be capturing the clause that matched.
             let mut meta_forest = MetaForest::new(self.meta.clone(), scope);
             let symbols = &self.symbols;
             meta_forest.setup(meta, symbols);
+            // println!("{:?}", meta_forest.get_children(scope.forest.arena.len()));
             // Not right yet. But a start
-            meta_forest.print_tree(scope.forest.arena.len(), |expr| {
-                match expr {
-                    Expr::Symbol(index) | Expr::LogicVariable(index) | Expr::Scope(index) => {
-                        let value = symbols.lookup(*index).unwrap().clone();
-                        if value.len() == 1 && !value.chars().next().unwrap().is_alphanumeric() {
-                            format!("({})", value)
-                        } else {
-                            value
-                        }
-                    }
-                    _ => format!("{:?}", expr)
-                }
-            });
+            // meta_forest.print_tree(scope.forest.arena.len(), |expr| {
+            //     match expr {
+            //         Expr::Symbol(index) | Expr::LogicVariable(index) | Expr::Scope(index) => {
+            //             let value = symbols.lookup(*index).unwrap().clone();
+            //             if value.len() == 1 && !value.chars().next().unwrap().is_alphanumeric() {
+            //                 format!("({})", value)
+            //             } else {
+            //                 value
+            //             }
+            //         }
+            //         _ => format!("{:?}", expr)
+            //     }
+            // });
             // We need to now try to match on meta.
             // We need some tree we can do a build_env on.
             // So the basic idea is we have a tree that is the shape of meta above.
