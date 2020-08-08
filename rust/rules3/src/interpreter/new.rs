@@ -277,6 +277,83 @@ pub trait ForestLike<T> where T : Clone + Debug {
     }
     
 }
+// Maybe this should string build instead of print?
+fn print_expr_inner(forest : &impl ForestLike<Expr>, node: &Node<Expr>, formatter: &impl FormatExpr) {
+    match &node.val {
+        Expr::Call => {
+            let children = forest.get_children(node.index).unwrap();
+            let mut is_first = true;
+            let last_child = children.len() - 1;
+            for (i, child_index) in children.iter().enumerate() {
+                print_expr_inner(forest, forest.get(*child_index).unwrap(), formatter);
+                if is_first {
+                    print!("(");
+                    is_first = false;
+                } else if i == last_child {
+                    print!(")");
+                } else {
+                    print!(", ");
+                }
+            }
+        }
+        Expr::Array => {
+            let children = forest.get_children(node.index).unwrap();
+            let mut is_first = true;
+            let last_child = children.len() - 1;
+            for (i, child_index) in children.iter().enumerate() {
+                print_expr_inner(forest, forest.get(*child_index).unwrap(), formatter);
+                if is_first {
+                    print!("[");
+                    is_first = false;
+                } else if i == last_child {
+                    print!("]");
+                } else {
+                    print!(", ");
+                }
+            }
+        }
+        Expr::Map => {
+            let children = forest.get_children(node.index).unwrap();
+            let mut is_first = true;
+            let last_child = children.len() - 1;
+            for (i, child_index) in children.iter().enumerate() {
+                print_expr_inner(forest, forest.get(*child_index).unwrap(), formatter);
+                if is_first {
+                    print!("{{");
+                    is_first = false;
+                } else if i == last_child {
+                    print!("}}");
+                } else if i % 2 == 0 {
+                    print!(", ");
+                } else {
+                    print!(": ");
+                }
+            }
+        }
+        Expr::Quote => {
+            print!("'");
+            let children = forest.get_children(node.index).unwrap();
+            for (i, child_index) in children.iter().enumerate() {
+                print_expr_inner(forest, forest.get(*child_index).unwrap(), formatter);
+            }
+        }
+        x => {
+            print!("{}", formatter.format_expr(&x));
+            let children = forest.get_children(node.index).unwrap();
+            for (i, child_index) in children.iter().enumerate() {
+                print_expr_inner(forest, forest.get(*child_index).unwrap(), formatter);
+            }
+        }
+    }
+}
+
+pub fn print_expr(forest : &impl ForestLike<Expr>, index: Index, formatter: &impl FormatExpr) {
+    if let Some(node) = forest.get(index) {
+        print_expr_inner(forest, node, formatter);
+
+        println!("");
+    }
+}
 
 
 
@@ -314,32 +391,34 @@ pub struct MetaForest<'a, T> where T : Clone + Debug {
 
 impl<'a> MetaForest<'a, Expr> {
 
-    fn new(meta: Meta<Index>, rooted_forest: &'a RootedForest<Expr>) -> MetaForest<Expr> {
+    fn new(meta: Meta<Index>, rooted_forest: &'a RootedForest<Expr>, symbols: & Interner) -> MetaForest<'a, Expr> {
         let meta_index_start = rooted_forest.forest.arena.len();
         let mut meta_nodes = RootedForest::new();
         meta_nodes.forest.current_index = meta_index_start;
-        MetaForest {
+        let mut meta_forest: MetaForest<'a, Expr> = MetaForest {
             meta,
             rooted_forest,
             meta_parents: Meta { original_expr: None, original_sub_expr: None, new_expr: None, new_sub_expr: None},
             meta_index_start,
             meta_nodes: meta_nodes,
-        }
+        };
+
+        meta_forest.setup(symbols);
+        meta_forest
     }
 
-    pub fn setup(&mut self, meta : Meta<Index>, symbols: & Interner) {
+    pub fn setup(&mut self, symbols: & Interner) {
 
-        let original_expr = self.rooted_forest.get(meta.original_expr);
-        let original_sub_expr =self.rooted_forest.get(meta.original_sub_expr);
-        let new_expr = self.rooted_forest.get(meta.new_expr);
-        let new_sub_expr =  self.rooted_forest.get(meta.new_sub_expr);
+        let original_expr = self.rooted_forest.get(self.meta.original_expr);
+        let original_sub_expr =self.rooted_forest.get(self.meta.original_sub_expr);
+        let new_expr = self.rooted_forest.get(self.meta.new_expr);
+        let new_sub_expr =  self.rooted_forest.get(self.meta.new_sub_expr);
         self.meta_parents = Meta {
             original_expr: original_expr.and_then(|x| x.parent),
             original_sub_expr: original_sub_expr.and_then(|x| x.parent),
             new_expr: new_expr.and_then(|x| x.parent),
             new_sub_expr: new_expr.and_then(|x| x.parent),
         };
-        self.meta = meta;
         // I'm really not sure about all of this.
         // It definitely doesn't feel right.
         self.meta_nodes.insert_root(Expr::Map);
@@ -720,6 +799,28 @@ pub struct Program {
 }
 
 
+pub trait FormatExpr {
+    fn format_expr(&self, expr: &Expr) -> String {
+        format!("{:?}", expr)
+    }
+}
+
+impl FormatExpr for Interner {
+    fn format_expr(&self, expr: &Expr) -> String {
+        match expr {
+            Expr::Symbol(index) | Expr::LogicVariable(index) | Expr::Scope(index) => {
+                let value = self.lookup(*index).unwrap().clone();
+                if value.len() == 1 && !value.chars().next().unwrap().is_alphanumeric() {
+                    format!("({})", value)
+                } else {
+                    value
+                }
+            }
+            _ => format!("{:?}", expr)
+        }
+    }
+}
+
 
 // To do some matches, I probably just want to do a queue and 
 // go through the nodes pushing all the children in the same order.
@@ -732,6 +833,7 @@ pub struct Program {
 
 
 impl Program {
+    
 
     pub fn new() -> Program {
 
@@ -744,6 +846,7 @@ impl Program {
         symbols.intern("@main");
         symbols.intern("@io");
         symbols.intern("@rules");
+        symbols.intern("@meta");
         symbols.intern("original_expr");
         symbols.intern("original_sub_expr");
         symbols.intern("new_expr");
@@ -873,6 +976,7 @@ impl Program {
     }
 
     pub fn pretty_print_scope(&self, scope : &RootedForest<Expr>) {
+        // Need to refactor to use some non closure formatter like I did with FormatExpr
         scope.forest.print_tree(scope.root, |expr| {
             match expr {
                 Expr::Symbol(index) | Expr::LogicVariable(index) | Expr::Scope(index) => {
@@ -929,6 +1033,9 @@ impl Program {
     pub fn rewrite(&mut self, scope_index: Index) -> Option<()> {
 
         let rules = &self.rules;
+
+        // Need to figure out a better way to make scope be borrowed 
+        // mutably then switch back to immutable
         let scope = match scope_index {
             0 => &self.main,
             1 => &self.io,
@@ -983,24 +1090,26 @@ impl Program {
             // I've got meta starting to work :)
             // Need to make it work with builtin rules below.
             // Also should be capturing the clause that matched.
-            let mut meta_forest = MetaForest::new(self.meta.clone(), scope);
+            let scope = match scope_index {
+                0 => &self.main,
+                1 => &self.io,
+                2 => &self.rules,
+                _ => self.scopes.get(&scope_index).unwrap()
+            };
             let symbols = &self.symbols;
-            meta_forest.setup(meta, symbols);
-            // println!("{:?}", meta_forest.get_children(scope.forest.arena.len()));
-            // Not right yet. But a start
-            // meta_forest.print_tree(scope.forest.arena.len(), |expr| {
-            //     match expr {
-            //         Expr::Symbol(index) | Expr::LogicVariable(index) | Expr::Scope(index) => {
-            //             let value = symbols.lookup(*index).unwrap().clone();
-            //             if value.len() == 1 && !value.chars().next().unwrap().is_alphanumeric() {
-            //                 format!("({})", value)
-            //             } else {
-            //                 value
-            //             }
-            //         }
-            //         _ => format!("{:?}", expr)
-            //     }
-            // });
+            let meta_scope_index = &self.symbols.get_index("@meta").unwrap();
+            let meta_forest = MetaForest::new(self.meta.clone(), scope, symbols);
+            // print_expr(&meta_forest, meta_forest.meta_index_start, symbols);
+            let mut matching_rule = None;
+            for Clause{left,right, in_scopes, ..} in &self.clause_indexes {
+                if !in_scopes.contains(&meta_scope_index) { continue };
+                let env = self.build_env(&meta_forest, *left, meta_forest.meta_index_start);
+                if env.is_none() { continue };
+                // Need some notion of output scopes
+                matching_rule = Some((*right, env.unwrap()));
+                break;
+            };
+            println!("{:?}", matching_rule);
             // We need to now try to match on meta.
             // We need some tree we can do a build_env on.
             // So the basic idea is we have a tree that is the shape of meta above.
@@ -1034,8 +1143,25 @@ impl Program {
                                 3 => Expr::Num(x / y),
                                 _ => panic!("Not possible because of if above.")
                             };
-                            scope.forest.persistent_change(val, scope.focus);
+                            let old_focus_new_location = scope.forest.persistent_change(val, scope.focus)?;
                             scope.forest.clear_children(scope.focus);
+
+                            let meta_original_root = if scope.focus == scope.root { old_focus_new_location } else { scope.root };
+                            let meta_original_focus = old_focus_new_location;
+                            let meta = Meta {
+                                original_expr: meta_original_root,
+                                original_sub_expr: meta_original_focus,
+                                new_expr: scope.root,
+                                new_sub_expr: scope.focus,
+                            };
+                            // I've got meta starting to work :)
+                            // Need to make it work with builtin rules below.
+                            // Also should be capturing the clause that matched.
+                            let symbols = &self.symbols;
+                            let meta_forest = MetaForest::new(self.meta.clone(), scope, symbols);
+                            // print_expr(&meta_forest,scope.forest.arena.len()+6, symbols);
+                            
+
                             return None;
                         }
                     }

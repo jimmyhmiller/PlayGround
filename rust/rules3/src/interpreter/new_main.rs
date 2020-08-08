@@ -29,6 +29,17 @@ pub fn run_new() {
                 right: builtin/*(?n fact(builtin/-(?n 1)))
             },
         ]
+    }, {
+        type: rule,
+        name: meta,
+        in_scopes: [@meta],
+        out_scopes: [@io],
+        clauses: [
+            {
+                left: ?x,
+                right: println(?x)
+            }
+        ]
     }])", rules, &mut program.symbols);
 
 
