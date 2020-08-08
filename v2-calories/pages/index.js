@@ -173,13 +173,13 @@ const AddEntry = ({ summary }) => {
   )
 }
 
+// I stopped using this for a while the 47000 is a little hack to reset things.
 const Summary = ({ summary }) => {
   return (
     <ul>
       <li>Remaining: {summary["remaining"]}</li>
-      <li>Extra One Pound: {summary["extraOnePound"]}</li>
+      <li>Extra One Pound: {summary["extraOnePound"] - 47000}</li>
       <li>Extra Two Pounds: {summary["extraTwoPounds"]}</li>
-      <li>Extra Two Original: {summary["extraTwoOriginal"]}</li>
       <li>Pounds: {summary["pounds"]}</li>
       <li>Pounds By Weeks: {summary["projectedLoss"]}</li>
       <li>Days: {summary["days"]}</li>
