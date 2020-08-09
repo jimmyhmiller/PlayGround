@@ -1027,10 +1027,85 @@ impl Program {
        
     }
 
+    pub fn find_matching_rules(&self, scope_symbol_index: Index, expr_index: Index, scope: &impl ForestLike<Expr>) -> Option<Vec<(usize,HashMap<Index, Index>)>> {
+        let mut matching_rules = vec![];
+        for Clause{left,right, in_scopes, ..} in &self.clause_indexes {
+            if !in_scopes.contains(&scope_symbol_index) { continue };
+            let env = self.build_env(scope, *left, expr_index);
+            if env.is_none() { continue };
+            matching_rules.push((*right, env.unwrap()));
+            break;
+
+            // Need to check outscope and do side effects here.
+            // The first element of the vector will be our main rule
+            // and then the rest will be side effects.
+        };
+
+        if matching_rules.is_empty() {
+            None
+        } else {
+            Some(matching_rules)
+        }
+        
+    }
+
+    pub fn build_meta_forest(&self, scope_index: Index, meta_original_focus: Index, meta_original_root: Index, scope_root: Index, scope_focus: Index) -> MetaForest<Expr>{
+        let meta = Meta {
+            original_expr: meta_original_root,
+            original_sub_expr: meta_original_focus,
+            new_expr: scope_root,
+            new_sub_expr: scope_focus,
+        };
+        // I've got meta starting to work :)
+        
+        // Need to make it work with builtin rules below.
+        // Also should be capturing the clause that matched.
+        let scope = match scope_index {
+            0 => &self.main,
+            1 => &self.io,
+            2 => &self.rules,
+            _ => self.scopes.get(&scope_index).unwrap()
+        };
+        let symbols = &self.symbols;
+        let meta_scope_index = self.symbols.get_index("@meta").unwrap();
+        let meta_forest = MetaForest::new(self.meta.clone(), scope, symbols);
+        meta_forest
+    }
+
+    pub fn handle_builtin_rules(scope: &mut RootedForest<Expr>) -> Option<(Index, Index)> {
+        if let Some(focus) = scope.get_focus() {
+            match focus.val {
+                Expr::Call => {
+                    if let Some((symbol_index, x, y)) = scope.get_child_nums_binary() {
+                        if symbol_index < 4 {
+                           // These are implicit right now based on the
+                            // order I inserted them in the constructor.
+                            let val = match symbol_index {
+                                0 => Expr::Num(x + y),
+                                1 => Expr::Num(x - y),
+                                2 => Expr::Num(x * y),
+                                3 => Expr::Num(x / y),
+                                _ => panic!("Not possible because of if above.")
+                            };
+                            let meta_original_focus = scope.forest.persistent_change(val, scope.focus)?;
+                            let meta_original_root = if scope.focus == scope.root { meta_original_focus } else { scope.root };
+                            scope.forest.clear_children(scope.focus);
+                            return Some((meta_original_focus, meta_original_root))
+                        }
+                    }
+                    return None
+                }
+                _ => return None
+            }
+        }
+        None
+    }
+
     // What I really want to is to pass the scope as a value, 
     // but then I am borrowing self multiple times. I am going to instead have this stupid
     // janking indexing thing.
     pub fn rewrite(&mut self, scope_index: Index) -> Option<()> {
+
 
         let rules = &self.rules;
 
@@ -1048,157 +1123,76 @@ impl Program {
             2 => &self.symbols.get_index("@rules").unwrap(),
             _ => &scope_index
         };
-        // This all needs refactoring, but it is nice to see factorial
-        // working with this code base. I need to do meta eval stuff and see
-        // how fast we still are. But so far, speed is much better.
 
         let original_root = scope.root;
         let original_sub_expr = scope.focus;
+        let matching_rules = self.find_matching_rules(*scope_symbol_index, scope.focus, scope);
+        let matching_rule = matching_rules
+            // the vect is never empty. The value will be None.
+            .map(|mut rules| rules.remove(0));
 
-        // We first check if there is a matching rule.
-        // We really need to handle meta stuff here.
-        let mut matching_rule = None;
-        for Clause{left,right, in_scopes, ..} in &self.clause_indexes {
-            if !in_scopes.contains(&scope_symbol_index) { continue };
-            let env = self.build_env(scope, *left, scope.focus);
-            if env.is_none() { continue };
-            // Need some notion of output scopes
-            matching_rule = Some((*right, env.unwrap()));
-            break;
-        };
+        // This is one thing I don't like about rust. I have to make these
+        // variable or else self is now borrowed both mutabily and immutabily.
+        let scope_root = scope.root;
+        let scope_focus = scope.focus;
 
-        let scope = match scope_index {
-            0 => &mut self.main,
-            1 => &mut self.io,
-            // I can do rules here because it is already borrowed.
-            // Going to have to figure that out.
-            // 2 => &mut self.rules,
-            _ => self.scopes.get_mut(&scope_index).unwrap()
-        };
-
-
-        if let Some((right, env)) = matching_rule {
-            let old_focus_new_location = Program::substitute(scope, rules, right, env)?;
-            let meta_original_root = if scope.focus == scope.root { old_focus_new_location } else { scope.root };
-            let meta_original_focus = old_focus_new_location;
-            let meta = Meta {
-                original_expr: meta_original_root,
-                original_sub_expr: meta_original_focus,
-                new_expr: scope.root,
-                new_sub_expr: scope.focus,
-            };
-            // I've got meta starting to work :)
-            // Need to make it work with builtin rules below.
-            // Also should be capturing the clause that matched.
+        let meta_info =  if let Some((right, env)) = matching_rule {
             let scope = match scope_index {
-                0 => &self.main,
-                1 => &self.io,
-                2 => &self.rules,
-                _ => self.scopes.get(&scope_index).unwrap()
+                0 => &mut self.main,
+                1 => &mut self.io,
+                // I can do rules here because it is already borrowed.
+                // Going to have to figure that out.
+                // 2 => &mut self.rules,
+                _ => self.scopes.get_mut(&scope_index).unwrap()
             };
-            let symbols = &self.symbols;
-            let meta_scope_index = &self.symbols.get_index("@meta").unwrap();
-            let meta_forest = MetaForest::new(self.meta.clone(), scope, symbols);
-            // print_expr(&meta_forest, meta_forest.meta_index_start, symbols);
-            let mut matching_rule = None;
-            for Clause{left,right, in_scopes, ..} in &self.clause_indexes {
-                if !in_scopes.contains(&meta_scope_index) { continue };
-                let env = self.build_env(&meta_forest, *left, meta_forest.meta_index_start);
-                if env.is_none() { continue };
-                // Need some notion of output scopes
-                matching_rule = Some((*right, env.unwrap()));
-                break;
-            };
-            println!("{:?}", matching_rule);
-            // We need to now try to match on meta.
-            // We need some tree we can do a build_env on.
-            // So the basic idea is we have a tree that is the shape of meta above.
-            // but those indexes really dereference to the scope we are meta evaling on.
-            // So we need a get_method but we also need to be doing something like get_children.
-            // But the get_children can't be on a node, they need to be on the forest itself.
-            // That way when code asks for the children we can intercept that call and
-            // check if the node is a parent of our meta nodes and return the correct thing.
-            // Otherwise we'd have to have a full copy of the tress which would be crazy.
-            // So I either need an interface for build_env or I need to mutate the scope and just
-            // add these metaoverrides to it. The latter might be the quickest change.
-
-
-            return None
-        }
-
-        // Then we check if there is a builtin rule.
-        // Also need to handle meta stuff here.
-
-        if let Some(focus) = scope.get_focus() {
-            match focus.val {
-                Expr::Call => {
-                    if let Some((symbol_index, x, y)) = scope.get_child_nums_binary() {
-                        if symbol_index < 4 {
-                           // These are implicit right now based on the
-                            // order I inserted them in the constructor.
-                            let val = match symbol_index {
-                                0 => Expr::Num(x + y),
-                                1 => Expr::Num(x - y),
-                                2 => Expr::Num(x * y),
-                                3 => Expr::Num(x / y),
-                                _ => panic!("Not possible because of if above.")
-                            };
-                            let old_focus_new_location = scope.forest.persistent_change(val, scope.focus)?;
-                            scope.forest.clear_children(scope.focus);
-
-                            let meta_original_root = if scope.focus == scope.root { old_focus_new_location } else { scope.root };
-                            let meta_original_focus = old_focus_new_location;
-                            let meta = Meta {
-                                original_expr: meta_original_root,
-                                original_sub_expr: meta_original_focus,
-                                new_expr: scope.root,
-                                new_sub_expr: scope.focus,
-                            };
-                            // I've got meta starting to work :)
-                            // Need to make it work with builtin rules below.
-                            // Also should be capturing the clause that matched.
-                            let symbols = &self.symbols;
-                            let meta_forest = MetaForest::new(self.meta.clone(), scope, symbols);
-                            // print_expr(&meta_forest,scope.forest.arena.len()+6, symbols);
-                            
-
-                            // Can I get rid of some of this code/deduplicate it?
-                            // This is getting crazy.
-                            let scope = match scope_index {
-                                0 => &self.main,
-                                1 => &self.io,
-                                2 => &self.rules,
-                                _ => self.scopes.get(&scope_index).unwrap()
-                            };
-
-                            let meta_scope_index = &self.symbols.get_index("@meta").unwrap();
-                            let meta_forest = MetaForest::new(self.meta.clone(), scope, symbols);
-                            // print_expr(&meta_forest, meta_forest.meta_index_start, symbols);
-                            let mut matching_rule = None;
-                            for Clause{left,right, in_scopes, ..} in &self.clause_indexes {
-                                if !in_scopes.contains(&meta_scope_index) { continue };
-                                let env = self.build_env(&meta_forest, *left, meta_forest.meta_index_start);
-                                if env.is_none() { continue };
-                                // Need some notion of output scopes
-                                matching_rule = Some((*right, env.unwrap()));
-                                break;
-                            };
-                            println!("{:?}", matching_rule);
-
-                            return None;
-                        }
-                    }
-                    
-                    
-                    scope.exhaust_focus();
-                }
-                _ => {
-                    scope.exhaust_focus()
-                }
-            }
+    
+            let meta_original_focus = Program::substitute(scope, rules, right, env)?;
+            let meta_original_root = if scope.focus == scope.root { meta_original_focus } else { scope.root };
+            Some((meta_original_focus, meta_original_root))
         } else {
+            let scope = match scope_index {
+                0 => &mut self.main,
+                1 => &mut self.io,
+                // I can do rules here because it is already borrowed.
+                // Going to have to figure that out.
+                // 2 => &mut self.rules,
+                _ => self.scopes.get_mut(&scope_index).unwrap()
+            };
+    
+            let result = Program::handle_builtin_rules(scope);
+            scope.exhaust_focus();
+            result
+        };
+
+        if let Some((meta_original_focus, meta_original_root)) = meta_info {
+
+            let meta_forest = self.build_meta_forest(
+                scope_index,
+                meta_original_focus,
+                meta_original_root,
+                scope_root, 
+                scope_focus,
+            );
+            let meta_scope_index = self.symbols.get_index("@meta").unwrap();
+            let matching_rules = self.find_matching_rules(*meta_scope_index, meta_forest.meta_index_start, &meta_forest);
+            let matching_rule = matching_rules
+                // the vect is never empty. The value will be None.
+                .map(|mut rules| rules.remove(0));
+
+            println!("{:?}", matching_rule);
+        } else {
+            // Need to figure out how to not duplicate these scopes.
+            let scope = match scope_index {
+                0 => &mut self.main,
+                1 => &mut self.io,
+                // I can do rules here because it is already borrowed.
+                // Going to have to figure that out.
+                // 2 => &mut self.rules,
+                _ => self.scopes.get_mut(&scope_index).unwrap()
+            };
             scope.exhaust_focus();
         }
+       
         None
     }
 
