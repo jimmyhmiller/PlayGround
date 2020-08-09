@@ -1162,6 +1162,29 @@ impl Program {
                             // print_expr(&meta_forest,scope.forest.arena.len()+6, symbols);
                             
 
+                            // Can I get rid of some of this code/deduplicate it?
+                            // This is getting crazy.
+                            let scope = match scope_index {
+                                0 => &self.main,
+                                1 => &self.io,
+                                2 => &self.rules,
+                                _ => self.scopes.get(&scope_index).unwrap()
+                            };
+
+                            let meta_scope_index = &self.symbols.get_index("@meta").unwrap();
+                            let meta_forest = MetaForest::new(self.meta.clone(), scope, symbols);
+                            // print_expr(&meta_forest, meta_forest.meta_index_start, symbols);
+                            let mut matching_rule = None;
+                            for Clause{left,right, in_scopes, ..} in &self.clause_indexes {
+                                if !in_scopes.contains(&meta_scope_index) { continue };
+                                let env = self.build_env(&meta_forest, *left, meta_forest.meta_index_start);
+                                if env.is_none() { continue };
+                                // Need some notion of output scopes
+                                matching_rule = Some((*right, env.unwrap()));
+                                break;
+                            };
+                            println!("{:?}", matching_rule);
+
                             return None;
                         }
                     }
