@@ -1160,7 +1160,6 @@ impl Program {
             };
     
             let result = Program::handle_builtin_rules(scope);
-            scope.exhaust_focus();
             result
         };
 
@@ -1190,6 +1189,7 @@ impl Program {
                 // 2 => &mut self.rules,
                 _ => self.scopes.get_mut(&scope_index).unwrap()
             };
+            // No rules matched, so we exhaust
             scope.exhaust_focus();
         }
        
