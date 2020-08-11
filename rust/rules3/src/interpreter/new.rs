@@ -158,11 +158,56 @@ impl<T> Forest<T> where T : Clone + Debug {
         }
     }
 
-    fn copy_tree_helper_f<F>(&self, from_index: Index, current_index: Index, parent_index: Option<Index>, rooted_forest: &mut RootedForest<T>, index_f : & F)
+    fn copy_tree_helper_f_other<F>(&self, from_index: Index, current_index: Index, parent_index: Option<Index>, from_forest: &impl ForestLike<T>, to_forest: &mut RootedForest<T>, index_f : & F)
+    where F : Fn(&T) -> Option<Index> {
+        if let Some(node) = self.get(current_index) {
+            let index = index_f(&node.val);
+
+            let node = if index.is_some() {
+                from_forest.get(index.unwrap()).unwrap().clone()
+            } else {
+                node.clone()
+            };
+
+            let new_parent_index = if from_index == current_index {
+                // I don't understand this. I thought I did.
+                // The idea here is that the first call shouldn't do anything.
+                // I thought I could just set this to parent_index,
+                // but that doesn't work even though when this function is called,
+                // the value of parent index is rooted_forest.focus
+                // This might only work in some weird case and actually fail otherwise.
+                Some(to_forest.focus)
+            } else if parent_index.is_none() {
+                // println!("No parent {:?}", node.val);
+                let new_root = to_forest.forest.insert_root(node.val, node.exhausted);
+                to_forest.root = new_root;
+                to_forest.focus = new_root;
+                Some(new_root)
+            } else {
+                // println!("Parent {:?}", node.val);
+                to_forest.forest.insert(node.val, parent_index.unwrap(), node.exhausted)
+            };
+
+            let children = if index.is_some() {
+                from_forest.get_children(index.unwrap())
+            } else {
+                self.get_children(node.index)
+            };
+
+            if children.is_none() {
+                return;
+            }
+            for child_index in children.unwrap() {
+                self.copy_tree_helper_f_other(from_index, *child_index, new_parent_index, from_forest, to_forest, index_f);
+            }
+        }
+    }
+    fn copy_tree_helper_f<F>(&self, from_index: Index, current_index: Index, parent_index: Option<Index>, forest: &mut RootedForest<T>, index_f : & F)
     where F : Fn(&T) -> Option<Index> {
         if let Some(node) = self.get(current_index) {
             let node = if let Some(new_index) = index_f(&node.val) {
-                rooted_forest.get(new_index).unwrap().clone()
+                // println!("{:?} {:?} {:?}", new_index, current_index, rooted_forest);
+                forest.get(new_index).unwrap().clone()
             } else {
                 node.clone()
             };
@@ -175,20 +220,20 @@ impl<T> Forest<T> where T : Clone + Debug {
                 // but that doesn't work even though when this function is called,
                 // the value of parent index is rooted_forest.focus
                 // This might only work in some weird case and actually fail otherwise.
-                Some(rooted_forest.focus)
+                Some(forest.focus)
             } else if parent_index.is_none() {
                 // println!("No parent {:?}", node.val);
-                let new_root = rooted_forest.forest.insert_root(node.val, node.exhausted);
-                rooted_forest.root = new_root;
-                rooted_forest.focus = new_root;
+                let new_root = forest.forest.insert_root(node.val, node.exhausted);
+                forest.root = new_root;
+                forest.focus = new_root;
                 Some(new_root)
             } else {
                 // println!("Parent {:?}", node.val);
-                rooted_forest.forest.insert(node.val, parent_index.unwrap(), node.exhausted)
+                forest.forest.insert(node.val, parent_index.unwrap(), node.exhausted)
             };
 
             for child_index in node.children.clone() {
-                self.copy_tree_helper_f(from_index, child_index, new_parent_index, rooted_forest, index_f);
+                self.copy_tree_helper_f(from_index, child_index, new_parent_index, forest, index_f);
             }
         }
     }
@@ -250,6 +295,8 @@ pub struct RootedForest<T> where T : Clone {
 pub trait ForestLike<T> where T : Clone + Debug {
     fn get_children(&self, index: Index) -> Option<&Vec<Index>>;
     fn get(&self, index: Index) -> Option<&Node<T>>;
+    fn get_focus_node(&self) -> Option<&Node<T>>;
+    fn get_focus(&self) -> Index;
     
     fn print_tree_inner<F>(&self, node: &Node<T>, prefix: String, last: bool, formatter: &F) where F : Fn(&T) -> String {
         let current_prefix = if last { "`- " } else { "|- " };
@@ -366,8 +413,18 @@ impl<T> ForestLike<T> for RootedForest<T> where T : Clone + Debug {
     fn get(&self, index: Index) -> Option<&Node<T>> {
         self.forest.get(index)
     }
-}
 
+    fn get_focus_node(&self) -> Option<&Node<T>> {
+        self.forest.get(self.focus)
+    }
+
+    fn get_focus(&self) -> Index {
+        self.focus
+    }
+
+    
+}
+// This is wrong now that I added focus, but is it used?
 impl<T> ForestLike<T> for Forest<T> where T : Clone + Debug {
     fn get_children(&self, index: Index) -> Option<&Vec<Index>> {
         self.get(index).map(|x | &x.children)
@@ -375,6 +432,14 @@ impl<T> ForestLike<T> for Forest<T> where T : Clone + Debug {
 
     fn get(&self, index: Index) -> Option<&Node<T>> {
         self.arena.get(index)
+    }
+
+    fn get_focus_node(&self) -> Option<&Node<T>> {
+        None
+    }
+
+    fn get_focus(&self) -> Index {
+        0
     }
 }
 
@@ -496,11 +561,20 @@ impl<'a> ForestLike<Expr> for MetaForest<'a, Expr> {
             if offset <= 8 {
                 self.meta_nodes.get(offset)  
             } else {
+                println!("{:?}, {:?}", self.meta_index_start, index);
                 panic!("Asking for meta that is too big");
             }
         } else {
             self.rooted_forest.forest.get(index)
         }
+    }
+
+    fn get_focus_node(&self) -> Option<&Node<Expr>> {
+        self.rooted_forest.get_focus_node()
+    }
+
+    fn get_focus(&self) -> Index {
+        self.rooted_forest.get_focus()
     }
 }
 
@@ -531,7 +605,7 @@ impl<T> RootedForest<T> where T : Clone + Debug {
 
     pub fn make_last_child_focus(&mut self) {
         let mut new_focus = None;
-        if let Some(node) = self.get_focus() {
+        if let Some(node) = self.get_focus_node() {
             if let Some(index) = node.children.last() {
                 new_focus = Some(*index);
             }
@@ -607,9 +681,7 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         self.forest.get(self.root)
     }
 
-    pub fn get_focus(&self) -> Option<&Node<T>> {
-        self.forest.get(self.focus)
-    }
+
     pub fn get_focus_val(&self) -> Option<&T> {
         self.forest.get(self.focus).map(|x| &x.val)
     }
@@ -624,12 +696,12 @@ impl<T> RootedForest<T> where T : Clone + Debug {
     }
 
     fn focus_is_exhausted(&self) -> bool {
-        let focus = self.get_focus();
+        let focus = self.get_focus_node();
         focus.is_none() || focus.unwrap().exhausted
     }
 
     pub fn get_focus_parent(&self) -> Option<Index> {
-        self.get_focus().and_then(|x| x.parent)
+        self.get_focus_node().and_then(|x| x.parent)
     }
     pub fn get_focus_parent_val(&self) -> Option<&T> {
         self.get_focus_parent()
@@ -686,7 +758,7 @@ impl<T> RootedForest<T> where T : Clone + Debug {
 
 impl RootedForest<Expr> {
     fn is_call(&self) -> bool {
-        if let Some(Node{val: Expr::Call, ..}) = self.get_focus() {
+        if let Some(Node{val: Expr::Call, ..}) = self.get_focus_node() {
             true
         } else {
             false
@@ -695,7 +767,7 @@ impl RootedForest<Expr> {
 
     fn get_child_nums_binary(&self) -> Option<(Index, isize, isize)> {
 
-        let focus = self.get_focus()?;
+        let focus = self.get_focus_node()?;
         if focus.children.len() != 3 {
             return None;
         }
@@ -714,7 +786,7 @@ impl RootedForest<Expr> {
     }
 
     pub fn focus_is_quote(&self) -> bool {
-        let focus = self.get_focus();
+        let focus = self.get_focus_node();
         focus.is_none() || focus.unwrap().val == Expr::Quote
     }
 
@@ -749,7 +821,7 @@ impl RootedForest<Expr> {
                     return
                 }
             }
-            if let Some(focus) = self.get_focus() {
+            if let Some(focus) = self.get_focus_node() {
                 if focus.children.len() == 0 {
                     return
                 }
@@ -779,6 +851,12 @@ pub struct Clause {
     pub out_scopes: Vec<Index>,
     pub left: Index,
     pub right: Index,
+}
+#[derive(Debug, Clone)]
+pub struct MatchingClause {
+    pub out_scope: Index,
+    pub rule_index: Index,
+    pub environment: HashMap<Index, Index>,
 }
 
 #[derive(Debug, Clone)]
@@ -857,7 +935,7 @@ impl Program {
             new_expr: 0,
             new_sub_expr: 0,
         };
-        Program {
+        let mut program = Program {
             meta: meta.clone(),
             main: RootedForest::new(),
             io: RootedForest::new(),
@@ -865,7 +943,14 @@ impl Program {
             symbols: symbols,
             scopes: HashMap::new(),
             clause_indexes: Vec::new(),
-        }
+        };
+
+        // Hack to make it so there is always a root.
+        program.main.insert_root(Expr::Num(0));
+        program.io.insert_root(Expr::Num(0));
+        program.rules.insert_root(Expr::Num(0));
+        program
+        
     }
 
     fn construct_scopes(&self, scope_attribute_index : Index) -> Option<Vec<Index> >{
@@ -996,8 +1081,7 @@ impl Program {
         self.pretty_print_scope(&self.main)
     }
 
-    // Returns old nodes new location
-    pub fn substitute(mut scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: HashMap<Index, Index>) -> Option<Index> {
+    pub fn substitute(scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: HashMap<Index, Index>) -> Option<Index> {
         let right = rule_scope.get(right_index).unwrap().clone();
         let right_replace = match right.val {
             Expr::LogicVariable(index) => {
@@ -1005,13 +1089,13 @@ impl Program {
             }
             val => val
         };
-        let node = scope.get_focus().unwrap();
+        let node = scope.get_focus_node().unwrap();
         let parent = node.parent.clone();
 
         let result = scope.forest.persistent_change(right_replace, scope.focus);
         let focus = scope.forest.arena.get_mut(scope.focus).unwrap();
         focus.children.clear();
-        rule_scope.forest.copy_tree_helper_f(right_index, right_index, parent, &mut scope, & |val| {
+        rule_scope.forest.copy_tree_helper_f(right_index, right_index, parent, scope, & |val| {
             match val {
                 Expr::LogicVariable(index) => {
                     Some(*env.get(&index).unwrap())
@@ -1027,13 +1111,67 @@ impl Program {
        
     }
 
-    pub fn find_matching_rules(&self, scope_symbol_index: Index, expr_index: Index, scope: &impl ForestLike<Expr>) -> Option<Vec<(usize,HashMap<Index, Index>)>> {
+    // Need to rewrite this from scratch
+    // The basic idea is we have an environment that maps from lvr to in_scope.
+    // We have a rule that is its own tree. And now we want to copy nodes either
+    // from the rule or the in_scope if that is what they refer to.
+    pub fn substitute_other(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: HashMap<Index, Index>) -> Option<Index> {
+        println!("here");
+        let right = rule_scope.get(right_index).unwrap().clone();
+        let right_replace = match right.val {
+            Expr::LogicVariable(index) => {
+                in_scope.get(*env.get(&index).unwrap()).unwrap().clone().val
+            }
+            val => val
+        };
+        let node = in_scope.get_focus_node().unwrap();
+        let parent = node.parent.clone();
+
+        let result = out_scope.forest.persistent_change(right_replace, in_scope.get_focus());
+        let focus = out_scope.forest.arena.get_mut(out_scope.focus).unwrap();
+        focus.children.clear();
+        rule_scope.forest.copy_tree_helper_f_other(right_index, right_index, parent, in_scope, out_scope, & |val| {
+            match val {
+                Expr::LogicVariable(index) => {
+                    if let Some(val) = env.get(&index) {
+                        Some(*val)
+                    } else {
+                        None
+                    }
+                }
+                _ => None
+            }
+        });
+
+        // What about the root? Does it actually matter or just the focus?
+        // I do need to know the root for meta evaluation, but root should only
+        // change here if the focus is the root. Or at least I think so.
+        result
+       
+    }
+
+    // Needs to return output scope
+    pub fn find_matching_rules(&self, scope_symbol_index: Index, expr_index: Index, scope: &impl ForestLike<Expr>) -> (Option<MatchingClause>, Vec<MatchingClause>) {
         let mut matching_rules = vec![];
-        for Clause{left,right, in_scopes, ..} in &self.clause_indexes {
+        let mut matching_rule = None;
+        for Clause{left,right, in_scopes, out_scopes} in &self.clause_indexes {
             if !in_scopes.contains(&scope_symbol_index) { continue };
             let env = self.build_env(scope, *left, expr_index);
             if env.is_none() { continue };
-            matching_rules.push((*right, env.unwrap()));
+
+            let clause = MatchingClause {
+                // Right now we are assuming a singular out scope.
+                // In general, I need to think about rules with multiple scopes.
+                out_scope: *out_scopes.first().unwrap(),
+                environment: env.unwrap(),
+                rule_index: *right
+            };
+            if matching_rule.is_none() && *out_scopes.first().unwrap() == scope_symbol_index {
+                matching_rule = Some(clause)
+            } else {
+                matching_rules.push(clause);
+            }
+            
             break;
 
             // Need to check outscope and do side effects here.
@@ -1041,11 +1179,7 @@ impl Program {
             // and then the rest will be side effects.
         };
 
-        if matching_rules.is_empty() {
-            None
-        } else {
-            Some(matching_rules)
-        }
+        (matching_rule, matching_rules)
         
     }
 
@@ -1073,7 +1207,7 @@ impl Program {
     }
 
     pub fn handle_builtin_rules(scope: &mut RootedForest<Expr>) -> Option<(Index, Index)> {
-        if let Some(focus) = scope.get_focus() {
+        if let Some(focus) = scope.get_focus_node() {
             match focus.val {
                 Expr::Call => {
                     if let Some((symbol_index, x, y)) = scope.get_child_nums_binary() {
@@ -1111,6 +1245,9 @@ impl Program {
 
         // Need to figure out a better way to make scope be borrowed 
         // mutably then switch back to immutable
+
+        // Need to figure out this weird indexing nonsense here.
+        // Need a good way to lookup scopes by symbol.
         let scope = match scope_index {
             0 => &self.main,
             1 => &self.io,
@@ -1126,17 +1263,15 @@ impl Program {
 
         let original_root = scope.root;
         let original_sub_expr = scope.focus;
-        let matching_rules = self.find_matching_rules(*scope_symbol_index, scope.focus, scope);
-        let matching_rule = matching_rules
-            // the vect is never empty. The value will be None.
-            .map(|mut rules| rules.remove(0));
+        let (matching_rule, side_effects) = self.find_matching_rules(*scope_symbol_index, scope.focus, scope);
+
 
         // This is one thing I don't like about rust. I have to make these
         // variable or else self is now borrowed both mutabily and immutabily.
         let scope_root = scope.root;
         let scope_focus = scope.focus;
 
-        let meta_info =  if let Some((right, env)) = matching_rule {
+        let meta_info =  if let Some(MatchingClause{environment: env, rule_index: right, out_scope}) = matching_rule {
             let scope = match scope_index {
                 0 => &mut self.main,
                 1 => &mut self.io,
@@ -1173,12 +1308,27 @@ impl Program {
                 scope_focus,
             );
             let meta_scope_index = self.symbols.get_index("@meta").unwrap();
-            let matching_rules = self.find_matching_rules(*meta_scope_index, meta_forest.meta_index_start, &meta_forest);
-            let matching_rule = matching_rules
-                // the vect is never empty. The value will be None.
-                .map(|mut rules| rules.remove(0));
+            let (matching_rule, side_effects) = self.find_matching_rules(*meta_scope_index, meta_forest.meta_index_start, &meta_forest);
 
-            println!("{:?}", matching_rule);
+            let meta = meta_forest.meta;
+            // println!("{:?}", matching_rule);
+            for effect in side_effects {
+                let effect_scope = effect.out_scope;
+
+                // This is terrible but how else do I ensure I am not borrowing the same scope twice?
+                let (scope, out_scope) = match (scope_index, effect_scope) {
+                    (0, 6) => (&self.main, &mut self.io),
+                    (1, 7) => (&self.io, &mut self.main),
+                    _ => panic!("Figure out how to do dynamic scopes here"),
+                };
+
+                let meta_forest = MetaForest::new(meta.clone(), scope, &self.symbols);
+                
+                // Have to rewrite this.
+                // Program::substitute_other(&meta_forest, out_scope, &self.rules, effect.rule_index, effect.environment);
+
+            }
+            // println!("{:?}", matching_rule);
         } else {
             // Need to figure out how to not duplicate these scopes.
             let scope = match scope_index {
