@@ -1389,7 +1389,7 @@ impl Program {
                     _ => panic!("Figure out how to do dynamic scopes here"),
                 };
 
-                // So something is happening here where all my expresions are Num(0).
+                // So something is happening here where all my map values are Num(0).
                 // I need to figure that out and fix it.
                 let meta_forest = MetaForest::new(meta.clone(), scope, &self.symbols);
                 
