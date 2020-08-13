@@ -134,25 +134,26 @@ impl<T> Forest<T> where T : Clone + Debug {
         index
     }
 
-    fn copy_tree_helper(&self, mut sub_index: Index, node_index: Index, parent_index: Option<Index>, forest: &mut Forest<T>) -> Option<Index> {
-        if let Some(node) = self.get(node_index) {
-            let new_index = if let Some(parent_index) = parent_index {
+    // focus_index is here so you can keep your focus after the tree is copied.
+    fn copy_tree_helper(&self, mut focus_index: Index, from_index: Index, into_parent_index: Option<Index>, forest: &mut Forest<T>) -> Option<Index> {
+        if let Some(node) = self.get(from_index) {
+            let new_index = if let Some(parent_index) = into_parent_index {
                 forest.insert(node.val.clone(), parent_index, node.exhausted)
             } else {
                 forest.insert_root(node.val.clone(), node.exhausted);
                 Some(0)
             };
-            if node_index == sub_index {
+            if from_index == focus_index {
                 if let Some(i) = new_index {
-                    sub_index = i;
+                    focus_index = i;
                 }
             }
             for child_index in node.children.clone() {
-                if let Some(i) = self.copy_tree_helper(sub_index, child_index, new_index, forest) {
-                    sub_index = i;
+                if let Some(i) = self.copy_tree_helper(focus_index, child_index, new_index, forest) {
+                    focus_index = i;
                 }
             }
-            Some(sub_index)
+            Some(focus_index)
         } else {
             None
         }
@@ -322,6 +323,29 @@ pub trait ForestLike<T> where T : Clone + Debug {
             self.print_tree_inner(node, "".to_string(), true, &formatter)
         }
     }
+
+    fn copy_tree_helper(&self, mut focus_index: Index, from_index: Index, into_parent_index: Option<Index>, forest: &mut Forest<T>) -> Option<Index> {
+        if let Some(node) = self.get(from_index) {
+            let new_index = if let Some(parent_index) = into_parent_index {
+                forest.insert(node.val.clone(), parent_index, node.exhausted)
+            } else {
+                Some(forest.insert_root(node.val.clone(), node.exhausted))
+            };
+            if from_index == focus_index {
+                if let Some(i) = new_index {
+                    focus_index = i;
+                }
+            }
+            for child_index in self.get_children(node.index).unwrap() {
+                if let Some(i) = self.copy_tree_helper(focus_index, *child_index, new_index, forest) {
+                    focus_index = i;
+                }
+            }
+            Some(focus_index)
+        } else {
+            None
+        }
+    }
     
 }
 // Maybe this should string build instead of print?
@@ -345,37 +369,31 @@ fn print_expr_inner(forest : &impl ForestLike<Expr>, node: &Node<Expr>, formatte
         }
         Expr::Array => {
             let children = forest.get_children(node.index).unwrap();
-            let mut is_first = true;
             let last_child = children.len() - 1;
+            print!("[");
             for (i, child_index) in children.iter().enumerate() {
                 print_expr_inner(forest, forest.get(*child_index).unwrap(), formatter);
-                if is_first {
-                    print!("[");
-                    is_first = false;
-                } else if i == last_child {
+                 if i == last_child {
                     print!("]");
                 } else {
                     print!(", ");
                 }
             }
+            print!("]");
         }
         Expr::Map => {
             let children = forest.get_children(node.index).unwrap();
-            let mut is_first = true;
             let last_child = children.len() - 1;
+            print!("{{");
             for (i, child_index) in children.iter().enumerate() {
                 print_expr_inner(forest, forest.get(*child_index).unwrap(), formatter);
-                if is_first {
-                    print!("{{");
-                    is_first = false;
-                } else if i == last_child {
-                    print!("}}");
-                } else if i % 2 == 0 {
-                    print!(", ");
-                } else {
+                if i % 2 == 0 {
                     print!(": ");
+                } else if i != last_child {
+                    print!(", ");
                 }
             }
+            print!("}}");
         }
         Expr::Quote => {
             print!("'");
@@ -486,7 +504,7 @@ impl<'a> MetaForest<'a, Expr> {
         };
         // I'm really not sure about all of this.
         // It definitely doesn't feel right.
-        self.meta_nodes.insert_root(Expr::Map);
+        let location = self.meta_nodes.insert_root(Expr::Map);
         // I've messed with the index here. Need to fix it back to 0.
         self.meta_nodes.root = 0;
         self.meta_nodes.focus = 0;
@@ -570,11 +588,11 @@ impl<'a> ForestLike<Expr> for MetaForest<'a, Expr> {
     }
 
     fn get_focus_node(&self) -> Option<&Node<Expr>> {
-        self.rooted_forest.get_focus_node()
+        self.get(self.meta_index_start)
     }
 
     fn get_focus(&self) -> Index {
-        self.rooted_forest.get_focus()
+        self.meta_index_start
     }
 }
 
@@ -1111,6 +1129,55 @@ impl Program {
        
     }
 
+    pub fn get_node_for_substitution(right: &Node<Expr>, in_scope: &impl ForestLike<Expr>, env: &HashMap<Index, Index>) -> Option<Node<Expr>> {
+        match &right.val {
+            Expr::LogicVariable(index) => {
+                Some(in_scope.get(*env.get(&index)?)?.clone())
+            }
+            _ => None
+        }
+    }
+    pub fn get_value_for_substitution(right: &Node<Expr>, rule_scope: &RootedForest<Expr>, in_scope: &impl ForestLike<Expr>, env: &HashMap<Index, Index>) -> Expr {
+        match &right.val {
+            Expr::LogicVariable(index) => {
+                in_scope.get(*env.get(&index).unwrap()).unwrap().clone().val
+            }
+            val => val.clone()
+        }
+    }
+
+    pub fn substitute_other2_helper(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: &HashMap<Index, Index>, new_node_index : Index) -> Option<()> {
+        for child_index in rule_scope.get_children(right_index)? {
+            let node = rule_scope.get(*child_index)?;
+            let new_val = Program::get_value_for_substitution( node, rule_scope, in_scope, &env);
+            let new_node_index = out_scope.forest.insert(new_val, new_node_index, node.exhausted)?;
+            Program::substitute_other2_helper(in_scope, out_scope, rule_scope, *child_index, &env, new_node_index);
+        }
+
+        None
+    }
+
+    pub fn substitute_other2(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: HashMap<Index, Index>) -> Option<Index> {
+        let node = rule_scope.get(right_index)?;
+        let new_node = Program::get_node_for_substitution(node, in_scope, &env);
+        // let val = if new_node.is_some() { new_node.as_ref()?.clone().val } else { node.clone().val};
+        // let new_root_index = out_scope.forest.insert_root(val, false);
+        // out_scope.focus = new_root_index;
+        // out_scope.root = new_root_index;
+        if new_node.is_some() {
+            let index = new_node?.index;
+            let new_location = in_scope.copy_tree_helper(index, index, None, &mut out_scope.forest)?;
+            out_scope.focus = new_location;
+            out_scope.root = new_location;
+        }
+        // find their val
+        // add them to this tree
+        // while preserving the structure they had in right.
+
+        None
+
+    }
+
     // Need to rewrite this from scratch
     // The basic idea is we have an environment that maps from lvr to in_scope.
     // We have a rule that is its own tree. And now we want to copy nodes either
@@ -1127,7 +1194,7 @@ impl Program {
         let node = in_scope.get_focus_node().unwrap();
         let parent = node.parent.clone();
 
-        let result = out_scope.forest.persistent_change(right_replace, in_scope.get_focus());
+        let result = out_scope.forest.persistent_change(right_replace, out_scope.get_focus());
         let focus = out_scope.forest.arena.get_mut(out_scope.focus).unwrap();
         focus.children.clear();
         rule_scope.forest.copy_tree_helper_f_other(right_index, right_index, parent, in_scope, out_scope, & |val| {
@@ -1322,10 +1389,15 @@ impl Program {
                     _ => panic!("Figure out how to do dynamic scopes here"),
                 };
 
+                // So something is happening here where all my expresions are Num(0).
+                // I need to figure that out and fix it.
                 let meta_forest = MetaForest::new(meta.clone(), scope, &self.symbols);
                 
                 // Have to rewrite this.
-                // Program::substitute_other(&meta_forest, out_scope, &self.rules, effect.rule_index, effect.environment);
+                Program::substitute_other2(&meta_forest, out_scope, &self.rules, effect.rule_index, effect.environment);
+                // print_expr(out_scope, out_scope.root, &self.symbols);
+                meta_forest.print_tree(meta_forest.get_focus(), |x| format!("{:?}", x));
+                print_expr(&meta_forest, meta_forest.get_focus(), &self.symbols);
 
             }
             // println!("{:?}", matching_rule);
