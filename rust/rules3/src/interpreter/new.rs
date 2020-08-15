@@ -1183,7 +1183,7 @@ impl Program {
     // We have a rule that is its own tree. And now we want to copy nodes either
     // from the rule or the in_scope if that is what they refer to.
     pub fn substitute_other(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: HashMap<Index, Index>) -> Option<Index> {
-        println!("here");
+        // println!("here");
         let right = rule_scope.get(right_index).unwrap().clone();
         let right_replace = match right.val {
             Expr::LogicVariable(index) => {
@@ -1269,7 +1269,7 @@ impl Program {
         };
         let symbols = &self.symbols;
         let meta_scope_index = self.symbols.get_index("@meta").unwrap();
-        let meta_forest = MetaForest::new(self.meta.clone(), scope, symbols);
+        let meta_forest = MetaForest::new(meta.clone(), scope, symbols);
         meta_forest
     }
 
@@ -1366,14 +1366,14 @@ impl Program {
         };
 
         if let Some((meta_original_focus, meta_original_root)) = meta_info {
-
             let meta_forest = self.build_meta_forest(
                 scope_index,
                 meta_original_focus,
                 meta_original_root,
-                scope_root, 
+                scope_root,
                 scope_focus,
             );
+            
             let meta_scope_index = self.symbols.get_index("@meta").unwrap();
             let (matching_rule, side_effects) = self.find_matching_rules(*meta_scope_index, meta_forest.meta_index_start, &meta_forest);
 
@@ -1393,11 +1393,9 @@ impl Program {
                 // I need to figure that out and fix it.
                 let meta_forest = MetaForest::new(meta.clone(), scope, &self.symbols);
                 
-                // Have to rewrite this.
+
                 Program::substitute_other2(&meta_forest, out_scope, &self.rules, effect.rule_index, effect.environment);
-                // print_expr(out_scope, out_scope.root, &self.symbols);
-                meta_forest.print_tree(meta_forest.get_focus(), |x| format!("{:?}", x));
-                print_expr(&meta_forest, meta_forest.get_focus(), &self.symbols);
+                print_expr(&self.io, self.io.get_focus(), &self.symbols);
 
             }
             // println!("{:?}", matching_rule);
