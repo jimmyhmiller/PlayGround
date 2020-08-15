@@ -37,7 +37,7 @@ pub fn run_new() {
         clauses: [
             {
                 left: ?x,
-                right: ?x
+                right: println(?x)
             }
         ]
     }])", rules, &mut program.symbols);

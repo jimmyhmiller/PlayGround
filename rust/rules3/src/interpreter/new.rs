@@ -354,7 +354,7 @@ fn print_expr_inner(forest : &impl ForestLike<Expr>, node: &Node<Expr>, formatte
         Expr::Call => {
             let children = forest.get_children(node.index).unwrap();
             let mut is_first = true;
-            let last_child = children.len() - 1;
+            let last_child = children.len().saturating_sub(1);
             for (i, child_index) in children.iter().enumerate() {
                 print_expr_inner(forest, forest.get(*child_index).unwrap(), formatter);
                 if is_first {
@@ -1157,22 +1157,35 @@ impl Program {
         None
     }
 
-    pub fn substitute_other2(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: HashMap<Index, Index>) -> Option<Index> {
+    pub fn substitute_other2(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: &HashMap<Index, Index>, is_root: bool) -> Option<Index> {
         let node = rule_scope.get(right_index)?;
         let new_node = Program::get_node_for_substitution(node, in_scope, &env);
-        // let val = if new_node.is_some() { new_node.as_ref()?.clone().val } else { node.clone().val};
-        // let new_root_index = out_scope.forest.insert_root(val, false);
-        // out_scope.focus = new_root_index;
-        // out_scope.root = new_root_index;
+
+        // Not sure if this should be root or focus?
+        let parent_index = if is_root { None } else { Some(out_scope.focus) };
         if new_node.is_some() {
             let index = new_node?.index;
-            let new_location = in_scope.copy_tree_helper(index, index, None, &mut out_scope.forest)?;
+            let new_location = in_scope.copy_tree_helper(index, index, parent_index, &mut out_scope.forest)?;
             out_scope.focus = new_location;
-            out_scope.root = new_location;
+            if is_root {
+                out_scope.root = new_location;
+            }
+        } else {
+            if is_root {
+                out_scope.insert_root(node.val.clone());
+            } else {
+                out_scope.insert_child(node.val.clone());
+            }
         }
-        // find their val
-        // add them to this tree
-        // while preserving the structure they had in right.
+        for child_index in rule_scope.get_children(right_index)?  {
+            Program::substitute_other2(in_scope, out_scope, rule_scope, *child_index, env, false);
+        }
+
+        // We changed the focus as we were going down the tree,
+        // but we need to reset it to our root.
+        if is_root {
+            out_scope.focus = out_scope.root;
+        }
 
         None
 
@@ -1394,7 +1407,7 @@ impl Program {
                 let meta_forest = MetaForest::new(meta.clone(), scope, &self.symbols);
                 
 
-                Program::substitute_other2(&meta_forest, out_scope, &self.rules, effect.rule_index, effect.environment);
+                Program::substitute_other2(&meta_forest, out_scope, &self.rules, effect.rule_index, &effect.environment, true);
                 print_expr(&self.io, self.io.get_focus(), &self.symbols);
 
             }
