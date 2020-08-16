@@ -1,4 +1,3 @@
-use std::time::{Instant};
 use std::fmt::Debug;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -640,17 +639,6 @@ impl<T> RootedForest<T> where T : Clone + Debug {
         }
     }
 
-    pub fn make_last_sibling_focus(&mut self) {
-        if let Some(parent) = self.get_focus_parent() {
-            if let Some(node) = self.forest.get(parent) {
-                if let Some(last_child) = node.children.last() {
-                    // I could keep track of last inserted,
-                    // or I could assume it is last index
-                    self.focus = *last_child;
-                }
-            }
-        }
-    }
     pub fn make_parent_focus(&mut self) {
         if let Some(parent) = self.get_focus_parent() {
             self.focus = parent;
@@ -728,44 +716,6 @@ impl<T> RootedForest<T> where T : Clone + Debug {
     pub fn get_focus_parent(&self) -> Option<Index> {
         self.get_focus_node().and_then(|x| x.parent)
     }
-    pub fn get_focus_parent_val(&self) -> Option<&T> {
-        self.get_focus_parent()
-            .and_then(|x| self.get(x))
-            .map(|x| &x.val)
-    }
-
-    // This might just be a bad idea.
-    fn next_expr_top_down<'a>(&'a self, cursor: Cursor<'a, T>) -> Cursor<'a, T> {
-        // Need to change this so parent is an Option
-        // Also, if I cursor with two things, how do I know they have the same structure?
-        // Do I need to encode the step they took as well?
-        // Or maybe I shouldn't do this cursory thing but actually just do a recursive
-        // step on each thing?
-        // I'm really not sure.
-        if let Some(child_position) = cursor.focus_parent.children.get(cursor.child_index + 1) {
-            let new_focus = self.get(*child_position).unwrap();
-            Cursor{
-                focus_parent: cursor.focus_parent,
-                focus: new_focus,
-                child_index: cursor.child_index + 1,
-            }
-        } else if cursor.focus.children.len() > 0 {
-            let new_focus = self.get(*cursor.focus.children.get(0).unwrap()).unwrap();
-            Cursor{
-                focus_parent: cursor.focus_parent,
-                focus: new_focus,
-                child_index: 0,
-            }
-        } else {
-         cursor
-        }
-    }
-
-
-    pub fn replace_focus_val(&mut self, t : T) {
-        let index = self.focus;
-        let node = self.forest.arena.get_mut(index);
-    }
 
     pub fn move_focus(&mut self, focus: Index) {
         self.focus = focus;
@@ -782,13 +732,6 @@ impl<T> RootedForest<T> where T : Clone + Debug {
 
 
 impl RootedForest<Expr> {
-    fn is_call(&self) -> bool {
-        if let Some(Node{val: Expr::Call, ..}) = self.get_focus_node() {
-            true
-        } else {
-            false
-        }
-    }
 
     fn get_child_nums_binary(&self) -> Option<(Index, isize, isize)> {
 
@@ -1145,27 +1088,9 @@ impl Program {
             _ => None
         }
     }
-    pub fn get_value_for_substitution(right: &Node<Expr>, rule_scope: &RootedForest<Expr>, in_scope: &impl ForestLike<Expr>, env: &HashMap<Index, Index>) -> Expr {
-        match &right.val {
-            Expr::LogicVariable(index) => {
-                in_scope.get(*env.get(&index).unwrap()).unwrap().clone().val
-            }
-            val => val.clone()
-        }
-    }
 
-    pub fn substitute_other2_helper(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: &HashMap<Index, Index>, new_node_index : Index) -> Option<()> {
-        for child_index in rule_scope.get_children(right_index)? {
-            let node = rule_scope.get(*child_index)?;
-            let new_val = Program::get_value_for_substitution( node, rule_scope, in_scope, &env);
-            let new_node_index = out_scope.forest.insert(new_val, new_node_index, node.exhausted)?;
-            Program::substitute_other2_helper(in_scope, out_scope, rule_scope, *child_index, &env, new_node_index);
-        }
 
-        None
-    }
-
-    pub fn substitute_other2(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: &HashMap<Index, Index>, parent_index: Option<Index>) -> Option<Index> {
+    pub fn subsitute(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: &HashMap<Index, Index>, parent_index: Option<Index>) -> Option<Index> {
         let node = rule_scope.get(right_index)?;
         let new_node = Program::get_node_for_substitution(node, in_scope, &env);
 
@@ -1187,7 +1112,7 @@ impl Program {
             }
         };
         for child_index in rule_scope.get_children(right_index)?  {
-            Program::substitute_other2(in_scope, out_scope, rule_scope, *child_index, env, Some(new_location));
+            Program::subsitute(in_scope, out_scope, rule_scope, *child_index, env, Some(new_location));
         }
 
         // We changed the focus as we were going down the tree,
@@ -1198,45 +1123,6 @@ impl Program {
 
         None
 
-    }
-
-    // Need to rewrite this from scratch
-    // The basic idea is we have an environment that maps from lvr to in_scope.
-    // We have a rule that is its own tree. And now we want to copy nodes either
-    // from the rule or the in_scope if that is what they refer to.
-    pub fn substitute_other(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: HashMap<Index, Index>) -> Option<Index> {
-        // println!("here");
-        let right = rule_scope.get(right_index).unwrap().clone();
-        let right_replace = match right.val {
-            Expr::LogicVariable(index) => {
-                in_scope.get(*env.get(&index).unwrap()).unwrap().clone().val
-            }
-            val => val
-        };
-        let node = in_scope.get_focus_node().unwrap();
-        let parent = node.parent.clone();
-
-        let result = out_scope.forest.persistent_change(right_replace, out_scope.get_focus());
-        let focus = out_scope.forest.arena.get_mut(out_scope.focus).unwrap();
-        focus.children.clear();
-        rule_scope.forest.copy_tree_helper_f_other(right_index, right_index, parent, in_scope, out_scope, & |val| {
-            match val {
-                Expr::LogicVariable(index) => {
-                    if let Some(val) = env.get(&index) {
-                        Some(*val)
-                    } else {
-                        None
-                    }
-                }
-                _ => None
-            }
-        });
-
-        // What about the root? Does it actually matter or just the focus?
-        // I do need to know the root for meta evaluation, but root should only
-        // change here if the focus is the root. Or at least I think so.
-        result
-       
     }
 
     // Needs to return output scope
@@ -1343,35 +1229,6 @@ impl Program {
         
     }
 
-    pub fn handle_builtin_rules(scope: &mut RootedForest<Expr>) -> Option<(Index, Index)> {
-        if let Some(focus) = scope.get_focus_node() {
-            match focus.val {
-                Expr::Call => {
-                    if let Some((symbol_index, x, y)) = scope.get_child_nums_binary() {
-                        if symbol_index < 4 {
-                           // These are implicit right now based on the
-                            // order I inserted them in the constructor.
-                            let val = match symbol_index {
-                                0 => Expr::Num(x + y),
-                                1 => Expr::Num(x - y),
-                                2 => Expr::Num(x * y),
-                                3 => Expr::Num(x / y),
-                                _ => panic!("Not possible because of if above.")
-                            };
-                            let meta_original_focus = scope.forest.persistent_change(val, scope.focus)?;
-                            let meta_original_root = if scope.focus == scope.root { meta_original_focus } else { scope.root };
-                            scope.forest.clear_children(scope.focus);
-                            return Some((meta_original_focus, meta_original_root))
-                        }
-                    }
-                    return None
-                }
-                _ => return None
-            }
-        }
-        None
-    }
-
     // What I really want to is to pass the scope as a value, 
     // but then I am borrowing self multiple times. I am going to instead have this stupid
     // janking indexing thing.
@@ -1402,6 +1259,7 @@ impl Program {
         let original_sub_expr = scope.focus;
         let (matching_rule, side_effects) = self.find_matching_rules(*scope_symbol_index, scope.focus, scope);
 
+        // need to do something with side_effects
 
         // This is one thing I don't like about rust. I have to make these
         // variable or else self is now borrowed both mutabily and immutabily.
@@ -1456,7 +1314,7 @@ impl Program {
                 let meta_forest = MetaForest::new(meta.clone(), scope, &self.symbols);
                 
 
-                Program::substitute_other2(&meta_forest, out_scope, &self.rules, effect.rule_index, &effect.environment, None);
+                Program::subsitute(&meta_forest, out_scope, &self.rules, effect.rule_index, &effect.environment, None);
                 let new_scope_index = match effect_scope {
                     6 => 1,
                     7 => 0,

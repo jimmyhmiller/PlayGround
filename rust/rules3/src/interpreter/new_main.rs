@@ -55,6 +55,7 @@ pub fn run_new() {
 
 
     program.main.garbage_collect();
+    program.io.garbage_collect();
     // println!("{:?}", program.main.forest.arena.len());
     program.pretty_print_main();
     // println!("{:?}",program.main.get_focus());

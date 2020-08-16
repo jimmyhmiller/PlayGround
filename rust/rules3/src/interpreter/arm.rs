@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::hash::{Hash};
 use std::io::{self, BufRead};
 
+// Fun experiment with abstract rewriting machine. Not actually used.
 
 #[derive(Debug, Clone)]
 enum Op<T> {
