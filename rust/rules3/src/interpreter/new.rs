@@ -259,16 +259,10 @@ impl<T> Forest<T> where T : Clone + Debug {
 
     // Returns old nodes new location
     fn persistent_change(&mut self, t : T, index: Index) -> Option<Index> {
-
-        // Need to capture location of old node we copied.
-        if let Some(node) = self.arena.get_mut(index) {
-            node.val = t;
-            let node_clone = node.clone();
-            Some(self.insert_node(node_clone))
-        } else {
-            None
-        }
-
+        let node = self.arena.get_mut(index)?;
+        let node_clone = node.clone();
+        node.val = t;
+        Some(self.insert_node(node_clone))
     }
 
     fn clear_children(&mut self, index: Index) {
@@ -298,6 +292,7 @@ pub trait ForestLike<T> where T : Clone + Debug {
     fn get(&self, index: Index) -> Option<&Node<T>>;
     fn get_focus_node(&self) -> Option<&Node<T>>;
     fn get_focus(&self) -> Index;
+    fn get_root(&self) -> Index;
     
     fn print_tree_inner<F>(&self, node: &Node<T>, prefix: String, last: bool, formatter: &F) where F : Fn(&T) -> String {
         let current_prefix = if last { "`- " } else { "|- " };
@@ -440,6 +435,10 @@ impl<T> ForestLike<T> for RootedForest<T> where T : Clone + Debug {
         self.focus
     }
 
+    fn get_root(&self) -> Index {
+        self.root
+    }
+
     
 }
 // This is wrong now that I added focus, but is it used?
@@ -457,6 +456,10 @@ impl<T> ForestLike<T> for Forest<T> where T : Clone + Debug {
     }
 
     fn get_focus(&self) -> Index {
+        0
+    }
+
+    fn get_root(&self) -> Index {
         0
     }
 }
@@ -592,6 +595,10 @@ impl<'a> ForestLike<Expr> for MetaForest<'a, Expr> {
     }
 
     fn get_focus(&self) -> Index {
+        self.meta_index_start
+    }
+
+    fn get_root(&self) -> Index {
         self.meta_index_start
     }
 }
@@ -1078,9 +1085,10 @@ impl Program {
         }
     }
 
-    pub fn pretty_print_scope(&self, scope : &RootedForest<Expr>) {
+    pub fn pretty_print_scope(&self, scope : &impl ForestLike<Expr>) {
         // Need to refactor to use some non closure formatter like I did with FormatExpr
-        scope.forest.print_tree(scope.root, |expr| {
+        let index = scope.get_focus();
+        scope.print_tree(index, |expr| {
             match expr {
                 Expr::Symbol(index) | Expr::LogicVariable(index) | Expr::Scope(index) => {
                     let value = self.symbols.lookup(*index).unwrap().clone();
@@ -1157,28 +1165,29 @@ impl Program {
         None
     }
 
-    pub fn substitute_other2(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: &HashMap<Index, Index>, is_root: bool) -> Option<Index> {
+    pub fn substitute_other2(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: &HashMap<Index, Index>, parent_index: Option<Index>) -> Option<Index> {
         let node = rule_scope.get(right_index)?;
         let new_node = Program::get_node_for_substitution(node, in_scope, &env);
 
+        let is_root = parent_index.is_none();
         // Not sure if this should be root or focus?
-        let parent_index = if is_root { None } else { Some(out_scope.focus) };
-        if new_node.is_some() {
+        let new_location = if new_node.is_some() {
             let index = new_node?.index;
             let new_location = in_scope.copy_tree_helper(index, index, parent_index, &mut out_scope.forest)?;
-            out_scope.focus = new_location;
             if is_root {
                 out_scope.root = new_location;
             }
+            new_location
         } else {
             if is_root {
                 out_scope.insert_root(node.val.clone());
+                out_scope.root
             } else {
-                out_scope.insert_child(node.val.clone());
+                out_scope.forest.insert(node.val.clone(), parent_index?, false)?
             }
-        }
+        };
         for child_index in rule_scope.get_children(right_index)?  {
-            Program::substitute_other2(in_scope, out_scope, rule_scope, *child_index, env, false);
+            Program::substitute_other2(in_scope, out_scope, rule_scope, *child_index, env, Some(new_location));
         }
 
         // We changed the focus as we were going down the tree,
@@ -1286,6 +1295,54 @@ impl Program {
         meta_forest
     }
 
+    pub fn handle_builtin(&mut self, scope_index: Index) -> Option<(Index, Index)> {
+        let scope = match scope_index {
+            0 => &mut self.main,
+            1 => &mut self.io,
+            2 => &mut self.rules,
+            _ => self.scopes.get_mut(&scope_index).unwrap()
+        };
+
+        let node = scope.get_focus_node()?;
+        if node.val != Expr::Call { return None };
+        let children = scope.get_children(node.index)?;
+        let first_child = scope.get(*children.first()?)?;
+        if let Expr::Symbol(symbol_index) = first_child.val {
+            let symbol_value = self.symbols.lookup(symbol_index)?;
+            match symbol_value.as_str() {
+                "builtin/println" => {
+                    print_expr(scope, *children.get(1)?, &self.symbols);
+                    scope.exhaust_focus();
+                    // Returning none here might not be the right option.
+                    // That means we can't meta on a print statement, which seems wrong.
+                    // But I also don't currently rewrite it. Need to revisit.
+                    return None
+                },
+                _ => {
+                    if let Some((symbol_index, x, y)) = scope.get_child_nums_binary() {
+                        if symbol_index < 4 {
+                           // These are implicit right now based on the
+                            // order I inserted them in the constructor.
+                            let val = match symbol_index {
+                                0 => Expr::Num(x + y),
+                                1 => Expr::Num(x - y),
+                                2 => Expr::Num(x * y),
+                                3 => Expr::Num(x / y),
+                                _ => panic!("Not possible because of if above.")
+                            };
+                            let meta_original_focus = scope.forest.persistent_change(val, scope.focus)?;
+                            let meta_original_root = if scope.focus == scope.root { meta_original_focus } else { scope.root };
+                            scope.forest.clear_children(scope.focus);
+                            return Some((meta_original_focus, meta_original_root))
+                        }
+                    }
+                }
+            }
+        };
+        None
+        
+    }
+
     pub fn handle_builtin_rules(scope: &mut RootedForest<Expr>) -> Option<(Index, Index)> {
         if let Some(focus) = scope.get_focus_node() {
             match focus.val {
@@ -1365,16 +1422,8 @@ impl Program {
             let meta_original_root = if scope.focus == scope.root { meta_original_focus } else { scope.root };
             Some((meta_original_focus, meta_original_root))
         } else {
-            let scope = match scope_index {
-                0 => &mut self.main,
-                1 => &mut self.io,
-                // I can do rules here because it is already borrowed.
-                // Going to have to figure that out.
-                // 2 => &mut self.rules,
-                _ => self.scopes.get_mut(&scope_index).unwrap()
-            };
     
-            let result = Program::handle_builtin_rules(scope);
+            let result = self.handle_builtin(scope_index);
             result
         };
 
@@ -1392,7 +1441,7 @@ impl Program {
 
             let meta = meta_forest.meta;
             // println!("{:?}", matching_rule);
-            for effect in side_effects {
+            for effect in &side_effects {
                 let effect_scope = effect.out_scope;
 
                 // This is terrible but how else do I ensure I am not borrowing the same scope twice?
@@ -1407,8 +1456,14 @@ impl Program {
                 let meta_forest = MetaForest::new(meta.clone(), scope, &self.symbols);
                 
 
-                Program::substitute_other2(&meta_forest, out_scope, &self.rules, effect.rule_index, &effect.environment, true);
-                print_expr(&self.io, self.io.get_focus(), &self.symbols);
+                Program::substitute_other2(&meta_forest, out_scope, &self.rules, effect.rule_index, &effect.environment, None);
+                let new_scope_index = match effect_scope {
+                    6 => 1,
+                    7 => 0,
+                    _ => panic!("I really need to figure this indexing crap out"),
+                };
+                // println!("new_scope_index {}", new_scope_index);
+                self.rewrite(new_scope_index);
 
             }
             // println!("{:?}", matching_rule);

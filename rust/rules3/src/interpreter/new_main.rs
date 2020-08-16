@@ -37,12 +37,12 @@ pub fn run_new() {
         clauses: [
             {
                 left: ?x,
-                right: println(?x)
+                right: builtin/println(quote(?x))
             }
         ]
     }])", rules, &mut program.symbols);
 
-
+    
     read_new("fact(20)", main, &mut program.symbols);
     // if let Some((focus, root)) = program.main.forest.persistent_change(Expr::Symbol(2), n4.unwrap()) {
     //     let result = program.main.forest.garbage_collect(root, focus);
