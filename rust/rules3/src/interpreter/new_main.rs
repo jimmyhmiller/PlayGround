@@ -31,8 +31,8 @@ pub fn run_new() {
         ]
     }, {
         type: rule,
-        name: meta,
-        in_scopes: [@meta],
+        name: main-rule,
+        in_scopes: [@main],
         out_scopes: [@io],
         clauses: [
             {
