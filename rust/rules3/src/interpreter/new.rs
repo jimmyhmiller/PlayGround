@@ -584,6 +584,10 @@ impl<'a> ForestLike<Expr> for MetaForest<'a, Expr> {
                 println!("{:?}, {:?}", self.meta_index_start, index);
                 panic!("Asking for meta that is too big");
             }
+        } else if index == self.meta.new_expr {
+            self.rooted_forest.forest.get(self.meta.original_expr)
+        } else if index == self.meta.new_sub_expr {
+            self.rooted_forest.forest.get(self.meta.original_sub_expr)
         } else {
             self.rooted_forest.forest.get(index)
         }
@@ -842,6 +846,10 @@ pub struct Program {
     pub symbols: Interner,
     pub scopes: HashMap<Index, RootedForest<Expr>>,
     pub clause_indexes: Vec<Clause>,
+    pub main_scope_index: Index,
+    pub meta_scope_index: Index,
+    pub rules_scope_index: Index,
+    pub io_scope_index: Index,
 }
 
 
@@ -878,6 +886,54 @@ impl FormatExpr for Interner {
 // The read only rooted tree could be good for that or could be unnecessary.
 
 
+
+
+
+// These macros exist to appease the borrow checker. Can't extract them
+// out into functions, but as macros the borrow check understands what is happening.
+macro_rules! get_scope_mut_for_index {
+    ($program:expr, $scope_index:expr) => {
+        if $scope_index == $program.main_scope_index {
+            &mut $program.main
+        } else if $scope_index == $program.io_scope_index {
+            &mut $program.io
+        }  else if $scope_index == $program.rules_scope_index {
+            &mut $program.rules
+        } else if $program.scopes.contains_key(&$scope_index) {
+            $program.scopes.get_mut(&$scope_index).unwrap()
+        } else {
+            panic!("Scope does not exist");
+        }
+    };
+}
+
+macro_rules! get_scope_mut_for_index_no_rules {
+    ($program:expr, $scope_index:expr) => {
+        if $scope_index == $program.main_scope_index {
+            &mut $program.main
+        } else if $scope_index == $program.io_scope_index {
+            &mut $program.io
+        } else if $program.scopes.contains_key(&$scope_index) {
+            $program.scopes.get_mut(&$scope_index).unwrap()
+        } else {
+            panic!("Scope does not exist");
+        }
+    };
+}
+
+macro_rules! get_scope_pairs {
+    ($program:expr, $scope_index:expr, $effect_index:expr) => {
+        if $scope_index == $program.main_scope_index && $effect_index == $program.io_scope_index {
+            (&$program.main, &mut $program.io)
+        } else if $scope_index == $program.io_scope_index && $effect_index == $program.main_scope_index {
+            (&$program.io, &mut $program.main)
+        } else {
+            panic!("Pair scopes incomplete. Also, have no idea how to extend it any not anger the borrow checker.");
+        };
+    };
+}
+
+
 impl Program {
     
 
@@ -889,10 +945,10 @@ impl Program {
         symbols.intern("builtin/*");
         symbols.intern("builtin/div");
         symbols.intern("fact");
-        symbols.intern("@main");
-        symbols.intern("@io");
-        symbols.intern("@rules");
-        symbols.intern("@meta");
+        let main_scope_index = symbols.intern("@main");
+        let io_scope_index = symbols.intern("@io");
+        let rules_scope_index = symbols.intern("@rules");
+        let meta_scope_index = symbols.intern("@meta");
         symbols.intern("original_expr");
         symbols.intern("original_sub_expr");
         symbols.intern("new_expr");
@@ -911,6 +967,10 @@ impl Program {
             symbols: symbols,
             scopes: HashMap::new(),
             clause_indexes: Vec::new(),
+            main_scope_index,
+            meta_scope_index,
+            io_scope_index,
+            rules_scope_index,
         };
 
         // Hack to make it so there is always a root.
@@ -1050,7 +1110,7 @@ impl Program {
         self.pretty_print_scope(&self.main)
     }
 
-    pub fn substitute(scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: HashMap<Index, Index>) -> Option<Index> {
+    pub fn substitute(scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: &HashMap<Index, Index>) -> Option<Index> {
         let right = rule_scope.get(right_index).unwrap().clone();
         let right_replace = match right.val {
             Expr::LogicVariable(index) => {
@@ -1090,7 +1150,7 @@ impl Program {
     }
 
 
-    pub fn subsitute(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: &HashMap<Index, Index>, parent_index: Option<Index>) -> Option<Index> {
+    pub fn transfer_and_substitute(in_scope: &impl ForestLike<Expr>, out_scope: &mut RootedForest<Expr>, rule_scope: &RootedForest<Expr>, right_index: Index, env: &HashMap<Index, Index>, parent_index: Option<Index>) -> Option<Index> {
         let node = rule_scope.get(right_index)?;
         let new_node = Program::get_node_for_substitution(node, in_scope, &env);
 
@@ -1112,7 +1172,7 @@ impl Program {
             }
         };
         for child_index in rule_scope.get_children(right_index)?  {
-            Program::subsitute(in_scope, out_scope, rule_scope, *child_index, env, Some(new_location));
+            Program::transfer_and_substitute(in_scope, out_scope, rule_scope, *child_index, env, Some(new_location));
         }
 
         // We changed the focus as we were going down the tree,
@@ -1141,13 +1201,13 @@ impl Program {
                 environment: env.unwrap(),
                 rule_index: *right
             };
-            if matching_rule.is_none() && *out_scopes.first().unwrap() == scope_symbol_index {
+            let out_scope_matches = *out_scopes.first().unwrap() == scope_symbol_index;
+            if matching_rule.is_none() && out_scope_matches {
                 matching_rule = Some(clause)
-            } else {
+            } else if !out_scope_matches {
                 matching_rules.push(clause);
             }
             
-            break;
 
             // Need to check outscope and do side effects here.
             // The first element of the vector will be our main rule
@@ -1169,12 +1229,7 @@ impl Program {
         
         // Need to make it work with builtin rules below.
         // Also should be capturing the clause that matched.
-        let scope = match scope_index {
-            0 => &self.main,
-            1 => &self.io,
-            2 => &self.rules,
-            _ => self.scopes.get(&scope_index).unwrap()
-        };
+        let scope = self.get_scope_ref_from_index(scope_index);
         let symbols = &self.symbols;
         let meta_scope_index = self.symbols.get_index("@meta").unwrap();
         let meta_forest = MetaForest::new(meta.clone(), scope, symbols);
@@ -1182,13 +1237,7 @@ impl Program {
     }
 
     pub fn handle_builtin(&mut self, scope_index: Index) -> Option<(Index, Index)> {
-        let scope = match scope_index {
-            0 => &mut self.main,
-            1 => &mut self.io,
-            2 => &mut self.rules,
-            _ => self.scopes.get_mut(&scope_index).unwrap()
-        };
-
+        let scope = get_scope_mut_for_index!(self, scope_index);
         let node = scope.get_focus_node()?;
         if node.val != Expr::Call { return None };
         let children = scope.get_children(node.index)?;
@@ -1229,6 +1278,26 @@ impl Program {
         
     }
 
+    pub fn get_scope_ref_from_index(&self, scope_index: Index) -> &RootedForest<Expr> {
+        // Need to figure out how to deal with meta since it isn't really a scope in the 
+        // tradtional sense of the term.
+        if scope_index == self.main_scope_index {
+            &self.main
+        } else if scope_index == self.io_scope_index {
+            &self.io
+        }  else if scope_index == self.rules_scope_index {
+            &self.rules
+        } else if self.scopes.contains_key(&scope_index) {
+            self.scopes.get(&scope_index).unwrap()
+        } else {
+            panic!("Scope does not exist");
+        }
+    }
+
+    pub fn get_scope_index_for_scope_name(&self, scope_name: &str) -> Index {
+        *self.symbols.get_index(scope_name).unwrap()
+    }
+
     // What I really want to is to pass the scope as a value, 
     // but then I am borrowing self multiple times. I am going to instead have this stupid
     // janking indexing thing.
@@ -1242,45 +1311,25 @@ impl Program {
 
         // Need to figure out this weird indexing nonsense here.
         // Need a good way to lookup scopes by symbol.
-        let scope = match scope_index {
-            0 => &self.main,
-            1 => &self.io,
-            2 => &self.rules,
-            _ => self.scopes.get(&scope_index).unwrap()
-        };
-        let scope_symbol_index = match scope_index {
-            0 => &self.symbols.get_index("@main").unwrap(),
-            1 => &self.symbols.get_index("@io").unwrap(),
-            2 => &self.symbols.get_index("@rules").unwrap(),
-            _ => &scope_index
-        };
-
+        let scope = self.get_scope_ref_from_index(scope_index);
         let original_root = scope.root;
         let original_sub_expr = scope.focus;
-        let (matching_rule, side_effects) = self.find_matching_rules(*scope_symbol_index, scope.focus, scope);
+        let (matching_rule, original_side_effects) = self.find_matching_rules(scope_index, scope.focus, scope);
 
-        // need to do something with side_effects
+       
 
         // This is one thing I don't like about rust. I have to make these
         // variable or else self is now borrowed both mutabily and immutabily.
         let scope_root = scope.root;
         let scope_focus = scope.focus;
 
-        let meta_info =  if let Some(MatchingClause{environment: env, rule_index: right, out_scope}) = matching_rule {
-            let scope = match scope_index {
-                0 => &mut self.main,
-                1 => &mut self.io,
-                // I can do rules here because it is already borrowed.
-                // Going to have to figure that out.
-                // 2 => &mut self.rules,
-                _ => self.scopes.get_mut(&scope_index).unwrap()
-            };
+        let meta_info =  if let Some(MatchingClause{environment: env, rule_index: right, out_scope}) = &matching_rule {
+            let scope = get_scope_mut_for_index_no_rules!(self, scope_index);
     
-            let meta_original_focus = Program::substitute(scope, rules, right, env)?;
+            let meta_original_focus = Program::substitute(scope, rules, *right, env)?;
             let meta_original_root = if scope.focus == scope.root { meta_original_focus } else { scope.root };
             Some((meta_original_focus, meta_original_root))
         } else {
-    
             let result = self.handle_builtin(scope_index);
             result
         };
@@ -1300,44 +1349,51 @@ impl Program {
             let meta = meta_forest.meta;
             // println!("{:?}", matching_rule);
             for effect in &side_effects {
-                let effect_scope = effect.out_scope;
+                let effect_index = effect.out_scope;
 
-                // This is terrible but how else do I ensure I am not borrowing the same scope twice?
-                let (scope, out_scope) = match (scope_index, effect_scope) {
-                    (0, 6) => (&self.main, &mut self.io),
-                    (1, 7) => (&self.io, &mut self.main),
-                    _ => panic!("Figure out how to do dynamic scopes here"),
-                };
+                let symbols = &self.symbols;
+                let rules = &self.rules;
+                let (scope, out_scope) = get_scope_pairs!(self, scope_index, effect_index);
+
 
                 // So something is happening here where all my map values are Num(0).
                 // I need to figure that out and fix it.
-                let meta_forest = MetaForest::new(meta.clone(), scope, &self.symbols);
-                
+                let meta_forest = MetaForest::new(meta.clone(), scope, symbols);
 
-                Program::subsitute(&meta_forest, out_scope, &self.rules, effect.rule_index, &effect.environment, None);
-                let new_scope_index = match effect_scope {
-                    6 => 1,
-                    7 => 0,
-                    _ => panic!("I really need to figure this indexing crap out"),
-                };
+                Program::transfer_and_substitute(&meta_forest, out_scope, rules, effect.rule_index, &effect.environment, None);
+
                 // println!("new_scope_index {}", new_scope_index);
-                self.rewrite(new_scope_index);
+                self.rewrite(effect_index);
 
             }
             // println!("{:?}", matching_rule);
-        } else {
-            // Need to figure out how to not duplicate these scopes.
-            let scope = match scope_index {
-                0 => &mut self.main,
-                1 => &mut self.io,
-                // I can do rules here because it is already borrowed.
-                // Going to have to figure that out.
-                // 2 => &mut self.rules,
-                _ => self.scopes.get_mut(&scope_index).unwrap()
+        } 
+
+        if let Some((meta_original_focus, meta_original_root)) = meta_info {
+            let meta = Meta {
+                original_expr: meta_original_root,
+                original_sub_expr: meta_original_focus,
+                new_expr: scope_root,
+                new_sub_expr: scope_focus,
             };
+            
+            for effect in &original_side_effects {
+                let rules = &self.rules;
+                let symbols = &self.symbols;
+                let (scope, out_scope) = get_scope_pairs!(self, scope_index, effect.out_scope);
+                let meta_forest = MetaForest::new(meta.clone(), scope, symbols);
+                Program::transfer_and_substitute(&meta_forest, out_scope, rules, effect.rule_index, &effect.environment, None);
+                self.rewrite(effect.out_scope);
+            }
+        }
+        
+        if meta_info.is_none() {
+            // Need to figure out how to not duplicate these scopes.
+            let scope = get_scope_mut_for_index!(self, scope_index);
             // No rules matched, so we exhaust
             scope.exhaust_focus();
         }
+
        
         None
     }
@@ -1353,7 +1409,7 @@ impl Program {
         }
         // rewrite should return old node location.
         // meta needs to change.
-        self.rewrite(0);
+        self.rewrite(self.get_scope_index_for_scope_name("@main"));
     }
 
     pub fn full_step(&mut self) {
