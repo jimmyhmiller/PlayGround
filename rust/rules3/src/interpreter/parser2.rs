@@ -1,6 +1,6 @@
 
 
-use super::new::{Expr, RootedForest, Interner};
+use super::new::{Expr, Forest, Interner};
 
 #[derive(Debug)]
 pub enum Token<'a> {
@@ -203,7 +203,7 @@ pub fn tokenize<'a>(text: &'a str) -> Vec<Token<'a>> {
 }
 
 // Need to handle quote here.
-pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, interner: &mut Interner) {
+pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut Forest<Expr>, interner: &mut Interner) {
     // Need to figure out a much better way than this silly root thing.
     let mut is_root = true;
     for token in tokens {
@@ -212,7 +212,7 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, in
             Token::Integer(s) => {
                 let expr = Expr::Num(s.parse::<isize>().unwrap());
                 if is_root {
-                    rooted_forest.insert_root(expr);
+                    rooted_forest.insert_root_val(expr);
                     is_root = false;
                 } else {
                     rooted_forest.insert_child(expr);
@@ -235,7 +235,7 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, in
                 };
 
                 if is_root {
-                    rooted_forest.insert_root(expr);
+                    rooted_forest.insert_root_val(expr);
                     is_root = false;
                 } else {
                     rooted_forest.insert_child(expr);
@@ -258,7 +258,7 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, in
                 if focus_val != Some(&Expr::Do) {
                     if is_root {
                         is_root = false;
-                        rooted_forest.insert_root(Expr::Map);
+                        rooted_forest.insert_root_val(Expr::Map);
                     } else {
                         rooted_forest.insert_child(Expr::Map);
                         rooted_forest.make_last_child_focus();
@@ -271,7 +271,7 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, in
             Token::OpenBracket => {
                 if is_root {
                     is_root = false;
-                    rooted_forest.insert_root(Expr::Array);
+                    rooted_forest.insert_root_val(Expr::Array);
                 } else {
                     rooted_forest.insert_child(Expr::Array);
                     rooted_forest.make_last_child_focus();
@@ -284,6 +284,6 @@ pub fn parse_new(tokens: Vec<Token>, rooted_forest : &mut RootedForest<Expr>, in
     }
 }
 
-pub fn read_new<'a>(expr : &'a str, rooted_forest : &mut RootedForest<Expr>, interner: &mut Interner) {
+pub fn read_new<'a>(expr : &'a str, rooted_forest : &mut Forest<Expr>, interner: &mut Interner) {
     parse_new(tokenize(expr), rooted_forest, interner)
 }
