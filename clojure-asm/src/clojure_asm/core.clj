@@ -1,11 +1,13 @@
  (ns clojure-asm.core
-   (:import (org.objectweb.asm Opcodes Type ClassWriter)
-            (org.objectweb.asm.commons Method GeneratorAdapter)))
+   (:import [org.objectweb.asm Opcodes Type ClassWriter]
+            [org.objectweb.asm.commons Method GeneratorAdapter]))
+
 
 
 (set! *warn-on-reflection* true)
 
 
+;; IMPORTANT!
 ;; For some reason my repl is messing up in this file but if I run 
 ;; (ns clojure-asm.core) manually in the repl it starts working?
 
@@ -118,9 +120,8 @@
 ;; And should I consider making the code higher level?
 
 (defn make-variant-factory [^ClassWriter writer class-name [i {:keys [name fields] :as data}]]
-  (let [struct nil #_(when fields (make-struct data))
-        field-name (.toLowerCase ^String name)
-        method (Method. name
+  (let [field-name (.toLowerCase ^String name)
+        method (Method. field-name
                         (Type/getObjectType class-name)
                         (into-array Type (if fields [(Type/getObjectType name)] [])))
         _ (when fields 
@@ -179,6 +180,7 @@
     (initialize-class writer class-name)
     (generate-default-constructor writer)
     (.visitField writer Opcodes/ACC_PUBLIC "tag" (.getDescriptor Type/INT_TYPE) nil nil)
+    (run! make-struct variants)
     (make-variant-factories writer class-name variants)
     (.defineClass ^clojure.lang.DynamicClassLoader 
                   (clojure.lang.DynamicClassLoader.)
@@ -207,7 +209,7 @@
 
 
 
-(.favorite (.blue (Color/Blue (Blue.))))
+(.favorite (.blue (Color/blue (Blue.))))
 
 
 
@@ -219,10 +221,9 @@
             {:name "y"
              :type Type/INT_TYPE}]})
 
-(make-struct (ClassWriter. ClassWriter/COMPUTE_FRAMES) struct-example1)
+(make-struct struct-example1)
 
-
-
+(.y (Point.))
 
 
 (defn resolve-type [expr]
@@ -234,14 +235,6 @@
     :bool Type/BOOLEAN_TYPE
     ;; need to add handling Class
     (throw (ex-info "Unknown type" {:expr expr}))))
-
-(defn build-method [[_ {:keys [args name return]} & code]]
-  {:type :fn
-   :name name
-   :args (mapv (fn [[name type]] {:type (resolve-type type)
-                                  :name name}) args)
-   :code (build-method-code args code)
-   :return-type (resolve-type return)})
 
 (defn build-method-code 
   ([args code]
@@ -275,6 +268,14 @@
                  :return-value {:code {:type :return-value}}))
              stack)))))
 
+
+(defn build-method [[_ {:keys [args name return]} & code]]
+  {:type :fn
+   :name name
+   :args (mapv (fn [[name type]] {:type (resolve-type type)
+                                  :name name}) args)
+   :code (build-method-code args code)
+   :return-type (resolve-type return)})
 
 (def example
   [:method {:name "add2" :args [['x :string]] :return :void}
@@ -384,7 +385,7 @@
   (Hello2/addSome (int 1) (int 3))
 
 
-  (decompiler/disassemble (.addSome (Hello2.))))
+  (decompiler/disassemble (Hello2/addSome (int 1) (int 3))))
 
 (require '[clj-java-decompiler.core :as decompiler])
 
