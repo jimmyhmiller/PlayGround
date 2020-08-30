@@ -32,12 +32,12 @@ pub fn run_new() {
     }, {
         type: rule,
         name: main-rule,
-        in_scopes: [@main],
+        in_scopes: [@meta],
         out_scopes: [@io],
         clauses: [
             {
-                left: ?x,
-                right: builtin/println(quote(?x))
+                left: {original_expr: ?x, new_expr: ?y},
+                right: builtin/println(quote([?x => ?y]))
             }
         ]
     }])", rules, &mut program.symbols);

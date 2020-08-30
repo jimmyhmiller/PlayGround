@@ -1061,6 +1061,24 @@ impl Program {
                 (Node{ val: Expr::LogicVariable(l_index), ..}, _) => {
                     env.insert(*l_index, expr_index);
                 }
+
+                (Node {val: Expr::Map, index: l_index, ..}, Node{ val: Expr::Map, index: e_index, ..}) => {
+                    let l_children = self.rules.get_children(*l_index)?;
+                    let e_children = scope.get_children(*e_index)?;
+                    for i in (0..l_children.len()).step_by(2) {
+                        for j in (0..e_children.len()).step_by(2) {
+
+                            let i_index = *l_children.get(i)?;
+                            let j_index = *e_children.get(j)?;
+                            // This is a suboptimal way of doing these things.
+                            // TODO: Make better
+                            if self.rules.get(i_index)?.val == scope.get(j_index)?.val {
+                                // println!("{:?}, {:?}", self.rules.get(i_index)?.val, scope.get(j_index)?.val);
+                                queue.push_front((*l_children.get(i+1)?, *e_children.get(j+1)?));
+                            }
+                        }
+                    }
+                },
                 (Node{ val: l_val, index: l_index, ..}, Node{ val: e_val, index: e_index, ..}) => {
                     let l_children = self.rules.get_children(*l_index)?;
                     let e_children = scope.get_children(*e_index)?;
@@ -1069,6 +1087,10 @@ impl Program {
                         break;
                     }
                     // Children length will have to change once repeats exist.
+                    // Children length is also wrong for maps.
+                    // In general, I need to handle maps differently.
+                    // Really this representation is just wrong for maps,
+                    // but I will probably ignore that for now.
                     if l_children.len() != e_children.len() {
                         failed = true;
                         break;
