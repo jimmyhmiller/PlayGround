@@ -1,6 +1,5 @@
 const { promisify }  = require("util");
 const exec = promisify(require("child_process").exec);
-const parseDiff = require('parse-diff');
 const gitDiffParser = require('git-diff-parser');
 const { flatMap, some } = require("lodash");
 const { file: tempFile } = require("tmp-promise");
@@ -23,11 +22,20 @@ const getFilePatch = async (fileName) => {
   const strippedFile = fileContents
     // Think about windows new lines?
     .split("\n")
-    .reduce(({personal, lines}, line) => {
+    .reduce(({personal, lines, prefix}, line) => {
       if (personal) {
-        return {personal: !(line.trim() === ""), lines}
+        const stayPersonal = line.trim().substring(0, prefix.length) === prefix;
+        return {
+          personal: stayPersonal,
+          lines: stayPersonal ? lines : lines.concat([line]),
+          prefix: stayPersonal ? prefix : undefined,
+        }
       } else if (line.includes("@personal")) {
-        return {personal: true, lines}
+        return {
+          personal: true,
+          lines,
+          prefix: line.substring(0, line.indexOf("@personal")).trim()
+        }
       } else {
         return {personal: false, lines: lines.concat([line])}
       }
@@ -38,9 +46,12 @@ const getFilePatch = async (fileName) => {
   await writeFile(oldPath, strippedFile);
     const result = await exec(`git diff ${oldPath} ${path}`)
       .catch(x => x.stdout);
+  // Need to write this to some home directory location
   await writeFile(`${root}/test.patch`, result);
 
-  await writeFile(oldPath, fileContents);
+  await writeFile(oldPath, strippedFile);
+  // console.log("not actually changing files");
+  // await writeFile(oldPath, fileContents);
 
   // console.log(strippedFile);
   cleanup();
@@ -61,17 +72,19 @@ const main = async () => {
     .map(getFilePatch)
 
 
-  // Copy files to tmp
-  // Make copy and remove @personal notes
-  // Record patch
+
+
+
   // Edit patch to be about same file at root of git
   // Save patch
   // Now we can check later if the patch would apply cleanly.
   // If so, the note is still valid for current commit,
   // if not, the note is on old commit
-
-
   // Need to save date and time.
+  
+  // to identify repo I could either
+  // 1 just do directory (kind of stinks)
+  // 2 `git rev-list --parents HEAD | tail -1`
 
 }
 

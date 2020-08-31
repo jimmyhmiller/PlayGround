@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::hash::{Hash};
-use std::io::{self, BufRead};
+use std::io::{self};
 
 // Fun experiment with abstract rewriting machine. Not actually used.
-
 #[derive(Debug, Clone)]
 enum Op<T> {
     Match(T, T),
