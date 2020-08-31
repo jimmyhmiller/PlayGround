@@ -72,7 +72,7 @@ For my tiny example performance was pretty good. There was some math I was doing
 
 My collision detection and "fixing" were terrible. The idea was that an entity would decide what to do when objects collided with it. For example, our player is always falling, but the ground is constantly moving him back to the top. This makes movement feel very awkward, but it also makes has bugs when it comes to platforms. If you jump just right at the edge of a platform, you will be catapaulted in the air.
 
-Not quite bad, but it is interesting to see that this project is implemented an Om, a hot clojurescript framework that died a while back. Om.next was supposed to revitalize it but that never came about. Its spiritual successor, fulcro, has continued developing, but doesn't have much usage.
+Not quite bad, but it is interesting to see that this project is implemented in Om, a hot clojurescript framework that died a while back. Om.next was supposed to revitalize it but that never came about. Its spiritual successor, fulcro, has continued developing, but doesn't have much usage.
 
 ## Ways to Make This Better
 
