@@ -12,6 +12,7 @@ pub fn run_new() {
     // program.clause_indexes = vec![Clause{left: 14, right: 18}, Clause{left: 21, right: 25},];
     let main = &mut program.main;
     let rules = &mut program.rules;
+    let interner = &mut program.symbols;
     
     // read_new("[{type rule, name: fact, scope @main, clauses: [{left: fact(0), right: 1}, {left: fact(?n), right:*(?n, fact(-(?n 1)))}]}]", m, &mut program.symbols);
     // read_new("quote(fact(1))", m, &mut program.symbols);
@@ -40,19 +41,26 @@ pub fn run_new() {
                 right: builtin/println(quote([?x => ?y]))
             }
         ]
-    }])", rules, &mut program.symbols);
+    }])", rules, interner);
 
+    program.set_clause_indexes();
+    let main = &mut program.main;
+    let interner = &mut program.symbols;
     
-    read_new("fact(20)", main, &mut program.symbols);
+    read_new("builtin/add-rule(quote({type: rule, name: double, in_scopes: [@main], out_scopes: [@main], clauses: [{left: double(?x), right: builtin/*(2, ?x)}]}))", main, interner);
     // if let Some((focus, root)) = program.main.forest.persistent_change(Expr::Symbol(2), n4.unwrap()) {
     //     let result = program.main.forest.garbage_collect(root, focus);
     //     println!("{}: {:?}", root, result);
     // }
-    program.set_clause_indexes();
     // println!("{:?}", program.clause_indexes);
     program.full_step();
     // program.rewrite(0);
 
+    let main = &mut program.main;
+    let interner = &mut program.symbols;
+
+    read_new("double(2)", main, interner);
+    program.full_step();
 
     program.main.garbage_collect_self();
     program.io.garbage_collect_self();
