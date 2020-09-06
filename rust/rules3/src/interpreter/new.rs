@@ -535,6 +535,17 @@ impl<T> Forest<T> where T : Clone + Debug {
             self.move_focus(new_focus);
         }
     }
+    pub fn make_first_child_focus(&mut self) {
+        let mut new_focus = None;
+        if let Some(node) = self.get_focus_node() {
+            if let Some(index) = node.children.first() {
+                new_focus = Some(*index);
+            }
+        }
+        if let Some(new_focus) = new_focus {
+            self.move_focus(new_focus);
+        }
+    }
 
     pub fn make_parent_focus(&mut self) {
         if let Some(parent) = self.get_focus_parent() {
@@ -678,8 +689,10 @@ impl Forest<Expr> {
             // The addition of quote here makes it so that everything below
             // a quote is not exhausted. Is that the correct behavior? Not sure.
             if self.focus_is_exhausted() || self.focus_is_quote() {
+                // noop if exhausted, exhausts quote otherwise;
+                self.exhaust_focus();
                 if let Some(index) = self.get_focus_parent() {
-                    // println!("Moving to parent");
+                    // println!("Moving to parent {:?}", self.get_focus_node());
                     self.focus = index;
                     continue;
                 } else {
@@ -795,6 +808,20 @@ macro_rules! get_scope_mut_for_index_no_rules {
             &mut $program.io
         } else if $program.scopes.contains_key(&$scope_index) {
             $program.scopes.get_mut(&$scope_index).unwrap()
+        } else {
+            panic!("Scope does not exist");
+        }
+    };
+}
+
+macro_rules! get_scope_for_index_no_rules {
+    ($program:expr, $scope_index:expr) => {
+        if $scope_index == $program.main_scope_index {
+            & $program.main
+        } else if $scope_index == $program.io_scope_index {
+            & $program.io
+        } else if $program.scopes.contains_key(&$scope_index) {
+            $program.scopes.get(&$scope_index).unwrap()
         } else {
             panic!("Scope does not exist");
         }
@@ -1153,13 +1180,25 @@ impl Program {
                     return None
                 },
                 "builtin/add-rule" => {
+                    scope.exhaust_focus();
+                    // moves me to the quote.
+                    scope.make_last_child_focus();
+                    // moves to the content on the quote
+                    scope.make_first_child_focus();
                     let rules = &mut self.rules;
-                    let outer_quote = *rules.get_children(rules.root)?.first()?;
-                    let array = *rules.get_children(outer_quote)?.first()?;
+                    // moves to the array
+                    rules.make_first_child_focus();
+                    let array = rules.get_focus();
+                    let scope = get_scope_for_index_no_rules!(self, scope_index);
+
                     // Need to actually add a rule
                     // This means copying some tree into the rules
                     // adding a new child node to the array of rules
                     // and reindexing clauses
+
+                    // focus_index tells me where the stuff ended up. I don't care about that.
+                    // Also this is just a weird function.
+                    scope.copy_tree_helper(array, scope.get_focus(), Some(array), rules);
 
                     // Maybe if I created builtin append that would be easier? Maybe?
                     self.set_clause_indexes();
@@ -1209,7 +1248,6 @@ impl Program {
     }
 
     pub fn rewrite(&mut self, scope_index: Index) -> Option<()> {
-
 
         let rules = &self.rules;
 
@@ -1310,18 +1348,18 @@ impl Program {
     pub fn full_step(&mut self) {
         // let mut fuel = 0;
         // println!("Full step");
-        // self.rules.pretty_print_tree();
-        // println!("{:?}", self.clause_indexes);
         while !self.main.root_is_exhausted() {
+            // self.pretty_print_main();
             // fuel +=1;
             // if fuel > 100 {
-            //     println!("break");
-            //     break;
+                // println!("break");
+                // break;
             // }
             self.step();
-            // self.pretty_print_main();
 
         }
+        // self.pretty_print_scope(&self.rules);
+        // println!("{:?}", self.clause_indexes);
     }
 }
 
