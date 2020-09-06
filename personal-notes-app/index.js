@@ -3,8 +3,9 @@ const exec = promisify(require("child_process").exec);
 const gitDiffParser = require('git-diff-parser');
 const { flatMap, some } = require("lodash");
 const { file: tempFile } = require("tmp-promise");
-const readFile = promisify(require('fs').readFile);
-const writeFile = promisify(require('fs').writeFile);
+const {readFile, writeFile, mkdir} = require('fs/promises');
+const homedir = require('os').homedir();
+const pathLib = require('path');
 
 
 const getGitRoot = async () => {
@@ -43,13 +44,25 @@ const getFilePatch = async (fileName) => {
     .lines
     .join("\n");
 
-  await writeFile(oldPath, strippedFile);
-    const result = await exec(`git diff ${oldPath} ${path}`)
-      .catch(x => x.stdout);
-  // Need to write this to some home directory location
-  await writeFile(`${root}/test.patch`, result);
+  const result = await exec(`git diff ${oldPath} ${path}`)
+    .catch(x => x.stdout);
+
+  const cleanedPatch = result
+    .replace(new RegExp(path, 'g'), oldPath)
+    .replace(new RegExp(root, 'g'), "");
+
+  // This structure is a bit much, but maybe makes sense?
+  // I will have to try things out a bit.
+  // I will definitely have to figure out the right patch granularity.
+  // What if some comments can apply and others can't?
+  const pathMinusHome = root.replace(`${homedir}/`, "");
+  console.log(`${homedir}/.personal_notes/${pathMinusHome}/${pathLib.dirname(fileName)}`);
+  await mkdir(`${homedir}/.personal_notes/${pathMinusHome}/${pathLib.dirname(fileName)}`, {recursive: true})
+  await writeFile(`${homedir}/.personal_notes/${pathMinusHome}/${fileName}.patch`, cleanedPatch);
+
 
   await writeFile(oldPath, strippedFile);
+
   // console.log("not actually changing files");
   // await writeFile(oldPath, fileContents);
 
@@ -83,8 +96,15 @@ const main = async () => {
   // Need to save date and time.
   
   // to identify repo I could either
-  // 1 just do directory (kind of stinks)
+  // 1 just do directory (useful for patches)
   // 2 `git rev-list --parents HEAD | tail -1`
+
+
+  // Need to think about granularity when it comes to storing patches
+  // Also have to think about patch order.
+  // Can a patch not apply because I applied a different note patch?
+  // Maybe it is a patch for filename and you can't make new patches
+  // if you didn't first turn on personal? Or something like that?
 
 }
 

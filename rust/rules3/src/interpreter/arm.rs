@@ -3,6 +3,8 @@ use std::hash::{Hash};
 use std::io::{self};
 
 // Fun experiment with abstract rewriting machine. Not actually used.
+// @personal
+// test
 #[derive(Debug, Clone)]
 enum Op<T> {
     Match(T, T),
