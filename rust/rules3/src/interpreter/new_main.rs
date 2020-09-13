@@ -59,7 +59,7 @@ pub fn run_new() {
     let main = &mut program.main;
     let interner = &mut program.symbols;
 
-    read_new("double(2)", main, interner);
+    read_new("fact(20)", main, interner);
     program.full_step();
 
     program.main.garbage_collect_self();

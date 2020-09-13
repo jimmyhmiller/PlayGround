@@ -1712,3 +1712,50 @@ nil         ;;; Works as expected
                     :ctype {:ctuid 2}}
                    {:name :e
                     :ctype {:ctuid 2}}]))
+
+(require '[clojure.walk :as walk])
+
+(walk/postwalk 
+ (fn [x]
+   (m/rewrite x
+     (m/map-of (m/keyword !ks) !vs)
+     (m/map-of (m/keyword "bar" !ks) !vs)
+     
+     ?x ?x))
+ {:foo 1
+  :boo [{:abc true}]})
+
+
+(m/rewrite {:foo 1 :boo 3}
+  (m/map-of (m/keyword !ks) !vs)
+  (m/map-of (m/keyword "bar" !ks) !vs))
+
+(m/rewrite {:x 2 :y 3}
+  (m/map-of (m/keyword !ks) !vs)
+  (m/map-of (m/keyword "bar" !ks) !vs))
+
+
+((r/top-down
+  (r/rewrite 
+   (m/map-of (m/keyword !ks) !vs)
+   (m/map-of (m/keyword "bar" !ks) !vs)
+   ?x ?x))
+
+ {:foo 1
+  :boo [{:abc true}]})
+
+(def example 
+  {:type "thing"
+   :stuff {:type "stuff"
+           :a 3
+           :foo {:type "foo"
+                 :c 5}}
+   :b 3})
+
+(m/rewrite example
+  {:type ?type
+   & (m/map-of (m/keyword !ks)  !vs)}
+  {:type ?type
+   & (m/map-of (m/keyword ?type !ks) (m/cata !vs))}
+
+  ?x ?x)
