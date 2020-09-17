@@ -169,7 +169,7 @@ fn main() -> std::io::Result<()> {
         Label("main".to_string()),
         Push(RBP),
         Mov(RBP, RSP),
-        Mov(RAX, Const(17)),
+        Mov(RAX, Const(19)),
         Lea(RDI, DerefData("format".to_string())),
         Mov(RSI, RAX),
         Push(RAX),
@@ -194,9 +194,15 @@ fn main() -> std::io::Result<()> {
 
     println!("{:?}", result1);
 
-    let result2 = Command::new("ld")
+    let dylib_path = std::str::from_utf8(Command::new("xcrun")
+        .args(&["-sdk", "macosx", "--show-sdk-path"])
+        .output()?.stdout.as_slice()).unwrap().to_string();
+
+    let result2 = Command::new("/usr/bin/ld")
             .arg("-macosx_version_min")
             .arg("10.15.0")
+            .arg("-syslibroot")
+            .arg(dylib_path.trim())
             .arg("-lSystem")
             .arg("-o")
             .arg("run_prog")
