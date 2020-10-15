@@ -7,27 +7,31 @@ import map from 'lodash.map';
 import range from 'lodash.range';
 import random from 'random-seed';
 import Head from 'next/head'
+import * as localForage from 'localforage';
  
 const useLocalStorage = (key) => {
+  const [value, setValue] = useState([]);
+  const [offset, setOffset] = useState( 0);
 
-  const initialValue = process.browser && window.localStorage[key] && JSON.parse(localStorage[key])
-  // ugly hard coded value
-  const initialOffset = parseInt(process.browser && window.localStorage["offset"] || 0, 10);
-
-  const [value, setValue] = useState(initialValue);
-  const [offset, setOffset] = useState(initialOffset);
+  useEffect(() => {
+    (async () => {
+        const initialValue = await localForage.getItem(key);
+        const initialOffset = await localForage.getItem("offset");
+        setValue(initialValue)
+        setOffset(initialOffset)
+    })()
+  }, [])
 
   useEffect(() => {
     if (key && value) {
-      window.localStorage[key] = JSON.stringify(value);
-
+      localForage.setItem(key, value);
     }
   }, [key, value])
 
 
   useEffect(() => {
     if (key && value) {
-      window.localStorage["offset"] = JSON.stringify(offset);
+      localForage.setItem("offset", offset);
     }
   }, [offset])
 
@@ -48,6 +52,10 @@ const useFetchPaginate = (initial, endpoint, count, initialOffset, f) => {
         })
         .then(resp => {
           if (resp.status === 401 && !window.location.toString().includes("oauth")) {
+            if (window.location.toString().includes("localhost")) {
+              console.log("Set the Auth Token!");
+              return
+            }
             window.location = "/api/oauth"
           }
           else if (resp.status !== 200) {
@@ -61,6 +69,7 @@ const useFetchPaginate = (initial, endpoint, count, initialOffset, f) => {
             setData(data.concat(newData));
             setOffset(offset + count);
           } else {
+            setData(data.concat(newData));
             setOffset(offset + newData.length);
             setComplete(true);
           }
@@ -98,8 +107,8 @@ const inspect = (comp) => (props) => {
   </>
 }
 
-const Small = ({ children }) =>
-  <small style={{fontSize: 11, color: "gray", paddingLeft: 5, paddingRight: 5}}>
+const Small = ({ children, style={}, ...props }) =>
+  <small {...props} style={{fontSize: 11, color: "gray", paddingLeft: 5, paddingRight: 5, ...style}}>
     {children}
   </small>
 
@@ -136,27 +145,40 @@ const siteName = ({ resolved_url, given_url, domain_metadata }) =>
   (given_url && new URL(given_url).hostname) ||
   "WHAT?"
 
+const sendAction = ({ action, item_id }) => {
+  return fetch(`/api/actions?action=${action}&item_id=${item_id}`, {
+    credentials: "same-origin"
+  })
+}
+
 const Item = ({ onClick, tags, excerpt, given_url, resolved_url, domain_metadata, ...props }) =>
-    <>
-      <li>
-        <ItemTitle excerpt={excerpt} {...props} resolved_url={resolved_url} />
-        {" "}(<a href={resolved_url}>{siteName({ resolved_url, domain_metadata, given_url })} </a>)
+  <>
 
-        <ArticleInfo {...props} />
+    <li>
+      <ItemTitle excerpt={excerpt} {...props} resolved_url={resolved_url} />
+      {" "}(<a href={resolved_url}>{siteName({ resolved_url, domain_metadata, given_url })} </a>)
 
-        <Conditional exists={tags}>
-          <div style={{padding:0, marginTop:-5, fontSize: 11, color: "gray"}}>
-            tags: {tags && Object.keys(tags).join(", ")}
-          </div>
-        </Conditional>
+      <ArticleInfo {...props} />
+      <Small
+        className="hover">
+        <a style={{cursor:"pointer"}} onClick={(e) => { e.preventDefault(); sendAction({item_id: props.item_id, action: "archive"})}}>
+      ✓
+      </a>
+      </Small>
 
-        <Conditional exists={excerpt}>
-          <div style={{width: 600, paddingTop: 10, paddingLeft: 10, fontSize: 13, color: "gray"}}>
-            {excerpt}
-          </div>
-        </Conditional>
-      </li>
-    </>
+      <Conditional exists={tags}>
+        <div style={{padding:0, marginTop:-5, fontSize: 11, color: "gray"}}>
+          tags: {tags && Object.keys(tags).join(", ")}
+        </div>
+      </Conditional>
+
+      <Conditional exists={excerpt}>
+        <div style={{width: 600, paddingTop: 10, paddingLeft: 10, fontSize: 13, color: "gray"}}>
+          {excerpt}
+        </div>
+      </Conditional>
+    </li>
+  </>
 
 const totalWords = (items) =>
   items.reduce((total, item) => total + parseInt(item.word_count || 0, 10), 0)
@@ -227,6 +249,19 @@ const Experiment1 = ({ items }) => {
 }
 
 
+const Experiment2 = ({ items }) => {
+  const filteredItems = items.filter(item => item.tags && item.tags.muse);
+  return (
+    <>
+      <h1 style={{marginTop: 0}}>Pocket App</h1>
+      <ul>
+        {filteredItems.map(item => <Item key={item.item_id} {...item} />)}
+      </ul>
+    </>
+  )
+}
+
+
 const App = () => {
 
   const items = orderBy(
@@ -242,15 +277,28 @@ const App = () => {
         <title>Pocket App</title>
         <link href="https://unpkg.com/superstylin@1.0.3/src/index.css" rel="stylesheet" />
       </Head>
+       <style jsx global>{`
+          .hover {
+            opacity: 0;
+          }
+          .hover:hover {
+            opacity: 1;
+          }
+        `}
+      </style>
       <div>
         <Selector onClick={() => setView("all")} text="All" />
         <Selector onClick={() => setView("experiment1")} text="Experiment 1" />
+        <Selector onClick={() => setView("muse")} text="Muse" />
       </div>
       <View name="all" selectedView={selectedView}>
         <AllItems items={items} />
       </View>
       <View name="experiment1" selectedView={selectedView}>
         <Experiment1 items={items} />
+      </View>
+      <View name="muse" selectedView={selectedView}>
+        <Experiment2 items={items} />
       </View>
     </>
   ) 

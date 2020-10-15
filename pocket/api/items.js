@@ -14,7 +14,8 @@ const getItems = async ({ accessToken: access_token, count=100, offset=0 }) => {
     access_token,
     count,
     offset,
-    detailType: "complete"
+    detailType: "complete",
+    sort: "oldest",
   })
   return response.data;
 }
