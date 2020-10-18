@@ -1,0 +1,7 @@
+{
+    "body": "<h1>test</h1>",
+    "headers": {
+        "Content-Type": "text/html"
+    },
+    "build": "module.exports = ({ body, ...rest }) => ({...rest,body: body.toUpperCase()})"
+}
