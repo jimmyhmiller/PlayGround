@@ -4,9 +4,7 @@ const util = require("util");
 const { send, json } = require('micro')
 
 
-// Need a runtime equivilent to on build
 // Need predicate based ways of transforming
-// Should make api endpoints work next
 // Need a way of referring to other urls for functions
 // Need a way to add packages
 // Need a way to execute things that aren't js (Bootstrap that?)
@@ -33,23 +31,39 @@ const addResource = ({ url, payload }) => {
   resources[url] = payload;
 }
 
+const executeResource = async (req, res, resource) => {
+  const handler = eval(`
+      module = {};
+      ${resource.execute}
+      module
+    `)
+  const result = await handler.exports(req, res, resource);
+  return result;
+}
+
 const handler = async (req, res) => {
 
-  if (req.method === "POST") {
+  if (req.method === "POST" && !resources.hasOwnProperty(req.url)) {
     const body = await json(req);
     addResource({url: req.url, payload: body})
     send(res, 201, resources);
     return;
   }
-
-  const { headers, body } = resources[req.url] || {};
-  if (!body) {
+  if (!resources.hasOwnProperty(req.url)) {
     send(res, 404, {status: "Not Found"})
     return;
   }
+  const resource = resources[req.url] || {};
+  const { headers, body, execute } = resource;
+
 
   for ([key, value] of Object.entries(headers || {})) {
     res.setHeader(key, value);
+  }
+
+  if (execute) {
+    const result = await executeResource(req, res, resource);
+    return result;
   }
   return body;
 }
