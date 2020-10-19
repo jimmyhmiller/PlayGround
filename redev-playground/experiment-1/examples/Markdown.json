@@ -1,0 +1,7 @@
+{
+    "body": "# Test",
+    "headers": {
+        "Content-Type": "text/html"
+    },
+    "build": "module.exports = ({ body, headers, ...rest }) => {    var md = require('markdown-it')();    return {    ...rest,    headers: {        ...headers,        'ContentType': 'text/html'    },    body: md.render(body)    }}"
+}
