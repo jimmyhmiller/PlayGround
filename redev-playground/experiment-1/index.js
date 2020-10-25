@@ -15,14 +15,17 @@ const resources = {
     headers: { "Content-Type": "text/html" },
     body: "<h1>Hello World!</h1>",
   },
+  "/_meta": {
+    "execute": "module.exports = async (req, res) => resources"
+  }
 };
 
 
 const addResource = ({ url, payload }) => {
-  if (payload.build) {
+  if (payload.onBuild) {
     const result = eval(`
       module = {};
-      ${payload.build}
+      ${payload.onBuild}
       module
     `);
     const f = result.exports;
@@ -43,9 +46,9 @@ const executeResource = async (req, res, resource) => {
 
 const handler = async (req, res) => {
 
-  if (req.method === "POST" && !resources.hasOwnProperty(req.url)) {
+  if (req.method === "POST" && req.url === "/routes") {
     const body = await json(req);
-    addResource({url: req.url, payload: body})
+    addResource({url: body.url, payload: body})
     send(res, 201, resources);
     return;
   }

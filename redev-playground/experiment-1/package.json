@@ -1,5 +1,5 @@
 {
-  "name": "experiment-1",
+  "name": "redev",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -11,6 +11,12 @@
   "license": "ISC",
   "dependencies": {
     "micro": "^9.3.4",
-    "micro-dev": "^3.0.0"
+    "micro-dev": "^3.0.0",
+    "mime-types": "^2.1.27",
+    "node-fetch": "^2.6.1",
+    "yargs": "^16.1.0"
+  },
+  "bin": {
+    "redev": "./cli.js"
   }
 }
