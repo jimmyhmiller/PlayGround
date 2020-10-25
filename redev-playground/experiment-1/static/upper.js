@@ -1,0 +1,1 @@
+module.exports = ({ body, ...rest }) => ({...rest,body: body.toUpperCase()})

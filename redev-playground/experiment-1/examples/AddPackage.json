@@ -1,4 +1,5 @@
 {
+    "url": "/api/npm",
     "execute": "module.exports = async (req, res) => {  const util = require('util');  const exec = util.promisify(require('child_process').exec);  const body = await json(req);  const { stdout, stderr } = await exec(`npm install ${body.package}`);  return { stdout, stderr }}"
 }
 
