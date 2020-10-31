@@ -1,68 +1,116 @@
+use std::collections::VecDeque;
 use std::{thread::sleep, time::{Duration, SystemTime}};
 use euclid::Angle;
 use font_kit::{family_name::FamilyName, properties::Properties, source::SystemSource};
 use mini_gl_fb::glutin::VirtualKeyCode;
 use raqote::{DrawOptions, DrawTarget, PathBuilder, Point, SolidSource, Source, Transform};
-const WIDTH: usize = 1000;
-const HEIGHT: usize = 1000;
+const WIDTH: usize = 800;
+const HEIGHT: usize = 800;
 
+
+#[derive(Debug)]
+enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Debug)]
+struct Coord {
+    x: isize,
+    y: isize,
+}
+
+#[derive(Debug)]
+struct Snake {
+    heading: Direction,
+    body: VecDeque<Coord>,
+}
+
+fn draw_filled_tile(dt: &mut DrawTarget, coord: &Coord, tile_size: (usize, usize)) {
+    let mut pb = PathBuilder::new();
+    pb.rect(coord.x as f32 * tile_size.0 as f32, coord.y as f32 * tile_size.1 as f32, tile_size.0 as f32, tile_size.1 as f32);
+    let path = pb.finish();
+    dt.fill(&path, &Source::Solid(SolidSource::from_unpremultiplied_argb(0xff, 0, 0xff, 0)), &DrawOptions::new());
+}
+
+fn move_snake(snake: &mut Snake, grid_size: (usize, usize)) {
+    match snake.heading {
+        Direction::Left => {
+            snake.body.pop_back();
+            let front = snake.body.pop_front().unwrap();
+            let new_front = Coord {x: (front.x - 1).rem_euclid(grid_size.0 as isize), y: front.y};
+            snake.body.push_front(front);
+            snake.body.push_front(new_front);
+        }
+        Direction::Right => {
+            snake.body.pop_back();
+            let front = snake.body.pop_front().unwrap();
+            let new_front = Coord {x: (front.x + 1).rem_euclid(grid_size.0 as isize), y: front.y};
+            snake.body.push_front(front);
+            snake.body.push_front(new_front);
+        }
+        Direction::Up => {
+            snake.body.pop_back();
+            let front = snake.body.pop_front().unwrap();
+            let new_front = Coord {x: front.x, y: (front.y + 1).rem_euclid(grid_size.1 as isize)};
+            snake.body.push_front(front);
+            snake.body.push_front(new_front);
+        }
+        Direction::Down => {
+            snake.body.pop_back();
+            let front = snake.body.pop_front().unwrap();
+            let new_front = Coord {x: front.x, y: (front.y - 1).rem_euclid(grid_size.1 as isize)};
+            snake.body.push_front(front);
+            snake.body.push_front(new_front);
+        }
+    }
+}
 
 fn main() {
     let mut fb = mini_gl_fb::gotta_go_fast("Hello world!", WIDTH as f64, HEIGHT as f64);
 
 
-    let font = SystemSource::new()
-            .select_best_match(&[FamilyName::SansSerif], &Properties::new())
-            .unwrap()
-            .load()
-            .unwrap();
-    let mut dt = DrawTarget::new(WIDTH as i32, HEIGHT as i32);
-    let mut x_velocity : f32 = 0.;
-    let mut y_velocity : f32 = 5.;
-    let mut rect_x = 0.;
-    let mut rect_y = 0.;
-    let rect_size = 50.;
-    let mut events: Vec<&str> = vec![];
+    let grid_size = (50,50);
+    let tile_size = (WIDTH/grid_size.0, HEIGHT/grid_size.1);
+    let mut snake = Snake {
+        heading: Direction::Up,
+        body: VecDeque::new(),
+    };
 
+    snake.body.push_back(Coord { x: 10, y: 48});
+    snake.body.push_back(Coord { x: 10, y: 49});
+    let mut dt = DrawTarget::new(WIDTH as i32, HEIGHT as i32);
+
+   
     // Got it drawing, but it is upside down :(
 
     fb.glutin_handle_basic_input(|fb, input| {
-        if input.key_is_down(VirtualKeyCode::Left) && events.last().unwrap_or(&"nope") != &"left" {
-            events.push("left");
-        }
-        if input.key_is_down(VirtualKeyCode::Right) && events.last().unwrap_or(&"nope") != &"right" {
-            events.push("right");
-        }
-        if input.key_is_down(VirtualKeyCode::Up) && events.last().unwrap_or(&"nope") != &"up" {
-            events.push("up");
-        }
-        if input.key_is_down(VirtualKeyCode::Down) && events.last().unwrap_or(&"nope") != &"down" {
-            events.push("down");
-        }
 
+        if input.key_is_down(VirtualKeyCode::Up) {
+            snake.heading = Direction::Up
+        }
+        if input.key_is_down(VirtualKeyCode::Down) {
+            snake.heading = Direction::Down
+        }
+        if input.key_is_down(VirtualKeyCode::Left) {
+            snake.heading = Direction::Left
+        }
+        if input.key_is_down(VirtualKeyCode::Right) {
+            snake.heading = Direction::Right
+        }
         dt.clear(SolidSource::from_unpremultiplied_argb(0xff, 0xff, 0xff, 0xff));
-        let pos_string = format!("{:}", "test");
-        dt.draw_text(&font, 
-            36., 
-            &pos_string, 
-            Point::new(0., 500.),
-            &Source::Solid(SolidSource::from_unpremultiplied_argb(0xff, 0, 0, 0)),
-            &DrawOptions::new(),
-        );
-        // y_velocity = y_velocity.min(10. as f32);
-        // x_velocity = x_velocity.min(10. as f32);
+        for tile in &snake.body {
+            draw_filled_tile(&mut dt, tile, tile_size);
+        }
+        // println!("{:?}", snake);
+       
 
-        rect_x += x_velocity as f32;
-        rect_y += y_velocity as f32;
-        rect_x = rect_x.rem_euclid(WIDTH as f32);
-        rect_y = rect_y.rem_euclid(HEIGHT as f32);
-        let mut pb = PathBuilder::new();
-        pb.rect(rect_x, rect_y, rect_size, rect_size);
-        let path = pb.finish();
-        dt.fill(&path, &Source::Solid(SolidSource::from_unpremultiplied_argb(0xff, 0, 0xff, 0)), &DrawOptions::new());
         fb.update_buffer(&dt.get_data());
         fb.redraw();
-        sleep(Duration::from_millis(16));
+        move_snake(&mut snake, grid_size);
+        sleep(Duration::from_millis(32));
         true
     });
 }
