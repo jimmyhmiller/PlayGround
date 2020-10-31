@@ -334,6 +334,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ea835d29036a4087793836fa931b08837ad5e957da9e23886b29586fb9b6650"
 
 [[package]]
+name = "drawing"
+version = "0.1.0"
+dependencies = [
+ "euclid",
+ "font-kit",
+ "mini_gl_fb",
+ "raqote",
+]
+
+[[package]]
 name = "dwrote"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -916,16 +926,6 @@ dependencies = [
  "png",
  "sw-composite",
  "typed-arena",
-]
-
-[[package]]
-name = "raqote-examples"
-version = "0.1.0"
-dependencies = [
- "euclid",
- "font-kit",
- "mini_gl_fb",
- "raqote",
 ]
 
 [[package]]
