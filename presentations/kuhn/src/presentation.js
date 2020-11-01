@@ -137,6 +137,10 @@ export default () =>
       <Point text="Imperative - Algol/C" />
     </Points>
 
+    <QuoteSlide
+      color="blue"
+      text=" It became the exemplar of the new computing, in part, because we were actually trying for a qualitative shift in belief structures — a new Kuhnian paradigm..." />
+
     <Headline
       color="cyan"
       textAlign="left"
@@ -198,7 +202,6 @@ export default () =>
       text="Programming as Theory Building"
       subtext="Peter Naur (1985)" />
 
-
     <QuoteSlide 
       color="blue"
       text="We will misunderstand the difficulties that arise and our attempts to overcome them will give rise to conflicts and frustrations." />
@@ -223,6 +226,43 @@ export default () =>
       color="cyan"
       textAlign="left"
       text="Rewrites as Paradigm Change" />
+
+    <Points title="Philosophical Influences">
+      <Point text="Turing/Church: Hilberts MetaMathematics" />
+      <Point text="Russell: Theory of Types" />
+      <Point text="Carnap: The Logical Syntax of Language" />
+    </Points>
+
+    <Points title="Philosophical Influences">
+      <Point text="SmallTalk: Leibniz's Monads" />
+      <Point text="Quine: Referential Transparency" />
+      <Point text="Joseph Halpern: Reasoning About Knowledge" />
+      <Point text="John McCarthy: Elephant 2000" />
+    </Points>
+
+    <Points title="Conceptual Engineering">
+      <Point text="Sally Haslanger" />
+      <Point text="Herman Cappelen" />
+      <Point text="David Chalmers" />
+    </Points>
+
+    <Headline
+      textAlign="left"
+      size={3}
+      subtextSize={4}
+      text="Patterns of Intention"
+      subtext="Michael Baxandall (1987)" />
+
+    <Points title="Abstraction">
+      <Point text="Implementation as Semantic Interpretation - William J. Rapaport" />
+      <Point text="Making Things Up - Karen Bennett" />
+    </Points>
+
+
+    <Headline
+      color="cyan"
+      textAlign="left"
+      text="Reflecting" />
 
 
 
