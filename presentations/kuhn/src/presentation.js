@@ -42,12 +42,15 @@ export default () =>
       text="Paradigms Without Progress"
       subtext="Kuhnian Reflections on Programming Practice" />
 
-
     <Headline
       color="green"
       textAlign="left"
       text="Interminable Debates" />
 
+    <Headline
+      color="green"
+      textAlign="left"
+      text="Programming Paradigms" />
 
     <Headline
       color="blue"
@@ -69,12 +72,34 @@ export default () =>
       text="The Structure of Scientific Revolutions"
       subtext="Thomas S. Kuhn (1962)" />
 
+    <Headline
+      color="yellow"
+      textAlign="left"
+      text="Are Programming Paradigms Kuhnian Paradigms?" />
+
+
+    <Headline
+      color="green"
+      textAlign="left"
+      text="What can we learn from Philosophy?" />
+
+
     <Points title="Outline">
       <Point text="Kuhnian Paradigms" />
       <Point text="Peter Naur" />
       <Point text="Other Contributions" />
       <Point text="The Future" />
     </Points>
+
+    <Headline
+      color="green"
+      textAlign="left"
+      text="Disclaimers" />
+
+    <Headline
+      color="red"
+      textAlign="left"
+      text="Kuhn" />
 
     <Headline
       color="cyan"
@@ -84,7 +109,6 @@ export default () =>
 
     <Points title="Paradigm">
       <Point text="Ontology" />
-      <Point text="Theory" />
       <Point text="Methods" />
       <Point text="Standards" />
       <Point text="Values" />
@@ -166,6 +190,12 @@ export default () =>
       <Point text="Caloric" />
     </Points>
 
+    <Points title="Problems in Programming">
+      <Point text="Monads" />
+      <Point text="Programming without Objects" />
+      <Point text="Values" />
+    </Points>
+
     <Headline
       color="cyan"
       textAlign="left"
@@ -227,6 +257,7 @@ export default () =>
       textAlign="left"
       text="Rewrites as Paradigm Change" />
 
+
     <Points title="Philosophical Influences">
       <Point text="Turing/Church: Hilberts MetaMathematics" />
       <Point text="Russell: Theory of Types" />
@@ -239,6 +270,11 @@ export default () =>
       <Point text="Joseph Halpern: Reasoning About Knowledge" />
       <Point text="John McCarthy: Elephant 2000" />
     </Points>
+
+    <Headline
+      color="cyan"
+      textAlign="left"
+      text="Analytic Philosophy" />
 
     <Points title="Conceptual Engineering">
       <Point text="Sally Haslanger" />
