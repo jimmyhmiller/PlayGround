@@ -1,11 +1,9 @@
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::{thread::sleep, time::{Duration, SystemTime}};
-use euclid::Angle;
+use std::{thread::sleep, time::{Duration}};
 use rand::Rng;
-use font_kit::{family_name::FamilyName, properties::Properties, source::SystemSource};
 use mini_gl_fb::glutin::VirtualKeyCode;
-use raqote::{DrawOptions, DrawTarget, PathBuilder, Point, SolidSource, Source, Transform};
+use raqote::{DrawOptions, DrawTarget, PathBuilder, SolidSource, Source};
 const WIDTH: usize = 800;
 const HEIGHT: usize = 800;
 
@@ -86,7 +84,7 @@ fn init_snake(x: isize, y: isize, grid_size: (usize, usize)) -> Snake {
     s
 }
 
-fn draw_food(dt: &mut DrawTarget, coord: &Coord, tile_size: (usize, usize), grid_size: (usize, usize)) {
+fn draw_food(dt: &mut DrawTarget, coord: &Coord, tile_size: (usize, usize)) {
     draw_filled_tile(dt, &coord, tile_size, SolidSource::from_unpremultiplied_argb(0xff, 0xff, 0, 0))
 }
 
@@ -149,7 +147,7 @@ fn main() {
         for tile in &snake.body {
             draw_filled_tile(&mut dt, tile, tile_size, snake_color);
         }
-        draw_food(&mut dt, &food_location, tile_size, grid_size);
+        draw_food(&mut dt, &food_location, tile_size);
        
 
         fb.update_buffer(&dt.get_data());
