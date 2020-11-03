@@ -236,16 +236,16 @@ export default () =>
       color="blue"
       text="We will misunderstand the difficulties that arise and our attempts to overcome them will give rise to conflicts and frustrations." />
 
+    <QuoteSlide
+      color="blue"
+      text="A main claim of the Theory Building View of programming is that an essential part of any program, the theory of it, is something that could not conceivably be expressed, but is inextricably bound to human beings" />
+
     <Headline
       textAlign="left"
       size={3}
       subtextSize={4}
       text="The Concept of Mind"
       subtext="Gilbert Ryle (1949)" />
-
-    <QuoteSlide
-      color="blue"
-      text="A main claim of the Theory Building View of programming is that an essential part of any program, the theory of it, is something that could not conceivably be expressed, but is inextricably bound to human beings" />
 
     <Headline
       color="cyan"
