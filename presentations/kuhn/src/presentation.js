@@ -77,7 +77,6 @@ export default () =>
       textAlign="left"
       text="Are Programming Paradigms Kuhnian Paradigms?" />
 
-
     <Headline
       color="green"
       textAlign="left"
@@ -92,11 +91,6 @@ export default () =>
     </Points>
 
     <Headline
-      color="green"
-      textAlign="left"
-      text="Disclaimers" />
-
-    <Headline
       color="red"
       textAlign="left"
       text="Kuhn" />
@@ -105,16 +99,6 @@ export default () =>
       color="cyan"
       textAlign="left"
       text="The March of Progress" />
-
-
-    <Points title="Paradigm">
-      <Point text="Ontology" />
-      <Point text="Methods" />
-      <Point text="Standards" />
-      <Point text="Values" />
-      <Point text="Relevant Problems" />
-      <Point text="Acceptable Solutions" />
-    </Points>
 
     <Headline
       color="cyan"
@@ -136,18 +120,26 @@ export default () =>
       textAlign="left"
       text="Revolution" />
 
-
     <Headline
       color="cyan"
       textAlign="left"
       text="Breaking Down A Paradigm" />
 
+    <Points title="Paradigm">
+      <Point text="Ontology" />
+      <Point text="Methods" />
+      <Point text="Standards" />
+      <Point text="Values" />
+      <Point text="Relevant Problems" />
+      <Point text="Acceptable Solutions" />
+    </Points>
+
     <Headline
       color="cyan"
       textAlign="left"
-      text="Examplar" />
+      text="Exemplar" />
 
-    <Points title="Exemplar Science">
+    <Points title="Science Exemplars">
       <Point text="Aristotle's Physics" />
       <Point text="Newton's Principia Mathematica" />
       <Point text="Darwin's Origin of Species" />
@@ -156,9 +148,9 @@ export default () =>
     </Points>
 
     <Points title="Exemplar Programming">
-      <Point text="OOP - Smalltalk/Java" />
-      <Point text="FP - Lisp/Haskell" />
-      <Point text="Imperative - Algol/C" />
+      <Point text="OOP - Smalltalk" />
+      <Point text="FP - Lisp" />
+      <Point text="Imperative - C" />
     </Points>
 
     <QuoteSlide
@@ -201,11 +193,10 @@ export default () =>
       textAlign="left"
       text="Progress" />
 
-
     <Headline
       color="cyan"
       textAlign="left"
-      text="Are Programming Paradigms Kuhnian?" />
+      text="Are Programming Paradigms Kuhnian Paradigms?" />
 
     <Headline
       color="cyan"
@@ -224,6 +215,11 @@ export default () =>
       textAlign="left"
       text="What Have We Learned?" />
 
+
+    <Headline
+      color="cyan"
+      textAlign="left"
+      text="Finding Paradigms in Programming" />
 
     <Headline
       textAlign="left"
@@ -247,15 +243,19 @@ export default () =>
       text="The Concept of Mind"
       subtext="Gilbert Ryle (1949)" />
 
-    <Headline
-      color="cyan"
-      textAlign="left"
-      text="Knowing How vs Knowing That" />
+    <QuoteSlide 
+      color="blue"
+      text="To be a Newtonian was not just to say what Newton had said, but also to say and do what Newton would have said and done." />
 
     <Headline
       color="cyan"
       textAlign="left"
       text="Rewrites as Paradigm Change" />
+
+    <Headline
+      color="cyan"
+      textAlign="left"
+      text="Influences" />
 
 
     <Points title="Philosophical Influences">
@@ -274,13 +274,7 @@ export default () =>
     <Headline
       color="cyan"
       textAlign="left"
-      text="Analytic Philosophy" />
-
-    <Points title="Conceptual Engineering">
-      <Point text="Sally Haslanger" />
-      <Point text="Herman Cappelen" />
-      <Point text="David Chalmers" />
-    </Points>
+      text="Exploring Further" />
 
     <Headline
       textAlign="left"
@@ -288,6 +282,13 @@ export default () =>
       subtextSize={4}
       text="Patterns of Intention"
       subtext="Michael Baxandall (1987)" />
+
+    <Points title="Conceptual Engineering">
+      <Point text="Sally Haslanger" />
+      <Point text="Herman Cappelen" />
+      <Point text="David Chalmers" />
+    </Points>
+
 
     <Points title="Abstraction">
       <Point text="Implementation as Semantic Interpretation - William J. Rapaport" />
