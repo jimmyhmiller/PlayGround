@@ -51,7 +51,7 @@ export const theme = createTheme({
   base1: "#93a1a1",
   base2: "#eee8d5",
   base3: "#fdf6e3",
-  yellow: "#b58900",
+  yellow: "#d4a701",
   orange: "#cb4b16",
   red: "#dc322f",
   magenta: "#d33682",
@@ -140,7 +140,7 @@ export const Points = withSlide(({ children, color, title, size=3, styleContaine
   </div>
 )
 
-export const QuoteSlide = withSlide(({ text, color }) =>
+export const QuoteSlide = withSlide(({ text, color="yellow" }) =>
   <BlockQuote>
     <Quote textColor={color}>{text}</Quote>
   </BlockQuote>
@@ -158,14 +158,24 @@ export const Subtitle = ({ color="blue", caps, size=5, text, ...props }) =>
     {text}
   </Heading>
 
-export const Headline = withSlide(({ color="magenta", size=2, text, subtext, subtextSize, subtextCaps, textAlign="center", caps=true }) =>
+const headlineColors = [
+  "yellow",
+  "red",
+  "magenta",
+  "blue",
+  "cyan",
+  "green",
+]
+
+
+export const Headline = withSlide(({ color, size=2, text, subtext, subtextSize, subtextCaps, textAlign="center", caps=true, slideIndex }) =>
   <div>
     <Heading 
       textAlign={textAlign}
       size={size} 
       caps={caps} 
       lineHeight={1} 
-      textColor={color}
+      textColor={color || slideIndex ? headlineColors[slideIndex % headlineColors.length] : "magenta"}
     >
       {text}
     </Heading>

@@ -21,14 +21,11 @@ import {
 // Require CSS
 require('normalize.css');
 
-const images = {
-  me: require("./images/me.jpg"),
-  falcon: require("./images/falcon.jpg"),
-};
 
-
-preloader(images);
 require("./langs")
+
+
+
 
 
 
@@ -43,17 +40,14 @@ export default () =>
       subtext="Kuhnian Reflections on Programming Practice" />
 
     <Headline
-      color="green"
       textAlign="left"
       text="Interminable Debates" />
 
     <Headline
-      color="green"
       textAlign="left"
       text="Programming Paradigms" />
 
     <Headline
-      color="blue"
       textAlign="left"
       text="Meta" />
 
@@ -73,12 +67,10 @@ export default () =>
       subtext="Thomas S. Kuhn (1962)" />
 
     <Headline
-      color="yellow"
       textAlign="left"
       text="Are Programming Paradigms Kuhnian Paradigms?" />
 
     <Headline
-      color="green"
       textAlign="left"
       text="What can we learn from Philosophy?" />
 
@@ -91,42 +83,19 @@ export default () =>
     </Points>
 
     <Headline
-      color="red"
       textAlign="left"
       text="Kuhn" />
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="The March of Progress" />
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="How Science Really Progresses" />
 
-    <Headline
-      color="cyan"
-      textAlign="left"
-      text="Normal Science" />
-
-    <Headline
-      color="cyan"
-      textAlign="left"
-      text="Crisis" />
-
-    <Headline
-      color="cyan"
-      textAlign="left"
-      text="Revolution" />
-
-    <Headline
-      color="cyan"
-      textAlign="left"
-      text="Breaking Down A Paradigm" />
-
     <Points title="Paradigm">
-      <Point text="Ontology" />
+      <Point text="What Exists" />
       <Point text="Methods" />
       <Point text="Standards" />
       <Point text="Values" />
@@ -135,7 +104,24 @@ export default () =>
     </Points>
 
     <Headline
-      color="cyan"
+      textAlign="left"
+      text="Normal Science" />
+
+    <Headline
+      textAlign="left"
+      text="Crisis" />
+
+    <Headline
+      textAlign="left"
+      text="Revolution" />
+
+    <Headline
+      textAlign="left"
+      text="Breaking Down A Paradigm" />
+
+
+
+    <Headline
       textAlign="left"
       text="Exemplar" />
 
@@ -154,25 +140,20 @@ export default () =>
     </Points>
 
     <QuoteSlide
-      color="blue"
       text=" It became the exemplar of the new computing, in part, because we were actually trying for a qualitative shift in belief structures — a new Kuhnian paradigm..." />
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="Incommensurability" />
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="Having No Common Measure" />
 
     <QuoteSlide 
-      color="blue"
       text="No neutral algorithm for theory choice, no systematic decision procedure which... must lead each individual in the group to the same decision." />
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="Difficulties Communicating" />
 
@@ -189,17 +170,14 @@ export default () =>
     </Points>
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="Progress" />
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="Are Programming Paradigms Kuhnian Paradigms?" />
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="Pre-paradigm" />
 
@@ -211,13 +189,11 @@ export default () =>
       subtext="Tomas Petricek (2016)" />
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="What Have We Learned?" />
 
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="Finding Paradigms in Programming" />
 
@@ -229,11 +205,9 @@ export default () =>
       subtext="Peter Naur (1985)" />
 
     <QuoteSlide 
-      color="blue"
       text="We will misunderstand the difficulties that arise and our attempts to overcome them will give rise to conflicts and frustrations." />
 
     <QuoteSlide
-      color="blue"
       text="A main claim of the Theory Building View of programming is that an essential part of any program, the theory of it, is something that could not conceivably be expressed, but is inextricably bound to human beings" />
 
     <Headline
@@ -244,22 +218,19 @@ export default () =>
       subtext="Gilbert Ryle (1949)" />
 
     <QuoteSlide 
-      color="blue"
       text="To be a Newtonian was not just to say what Newton had said, but also to say and do what Newton would have said and done." />
 
     <Headline
-      color="cyan"
       textAlign="left"
-      text="Rewrites as Paradigm Change" />
+      text="Rewrites as Paradigm Shifts" />
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="Influences" />
 
 
     <Points title="Philosophical Influences">
-      <Point text="Turing/Church: Hilberts MetaMathematics" />
+      <Point text="Turing/Church: Hilbert's MetaMathematics" />
       <Point text="Russell: Theory of Types" />
       <Point text="Carnap: The Logical Syntax of Language" />
     </Points>
@@ -272,7 +243,6 @@ export default () =>
     </Points>
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="Exploring Further" />
 
@@ -297,7 +267,6 @@ export default () =>
 
 
     <Headline
-      color="cyan"
       textAlign="left"
       text="Reflecting" />
 
