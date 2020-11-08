@@ -1,6 +1,0 @@
-# Conceptual Engineering
-
-Naming things is one of the hardest things to do in software. Why? Is it because all the names have been taken? Is it becasue we are trying to get at some essence that our words need to capture? (Like some sort of fantasy magic system.) Perhaps at times we feel both of these things. But I think that the difficulties we feel naming things stems from an unexpressed anxiety. Deep down we understand that naming is more than assigning a word to a value. When we are naming things, we aren't just deciding what something is, instead we are asking the question of what something should be.
-
-Taking this normative stance, this view that we aren't merely trying to explain concepts, but trying to ask the question of what our concepts ought to be is called Conceptual Engineering. Conceptual Engineering here should be understood to include both working to change the meaning of existing concepts (re-engingeering) and creating new concepts for a given purpose (de novo engineering). Naming things is hard because in doing so, we no deep down that we are advocating for this concept. We are putting our weight behind this new concept, or in the redefinition (expansion or contraction) of an existing concept. This is a heavy burden to carry.
-
