@@ -129,7 +129,7 @@ export default () =>
       <Point text="Aristotle's Physics" />
       <Point text="Newton's Principia Mathematica" />
       <Point text="Darwin's Origin of Species" />
-      <Point text="Maxwells's Equations" />
+      <Point text="Maxwell's Equations" />
       <Point text="Einstein's Special Relativity" />
     </Points>
 
