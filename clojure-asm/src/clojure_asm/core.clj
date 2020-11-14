@@ -123,15 +123,15 @@
   (let [field-name (.toLowerCase ^String name)
         method (Method. field-name
                         (Type/getObjectType class-name)
-                        (into-array Type (if fields [(Type/getObjectType name)] [])))
-        _ (when fields 
-            (doto (.visitField writer 
-                               Opcodes/ACC_PUBLIC field-name (.getDescriptor(Type/getObjectType name))
-                               nil 
+                        (into-array Type (map :type fields)))
+        _ (doseq [{:keys [name ^Type type]} fields]
+            (doto (.visitField writer
+                               Opcodes/ACC_PUBLIC name (.getDescriptor type)
+                               nil
                                nil)
-              .visitEnd))
+            .visitEnd))
         gen (GeneratorAdapter. (int (+ Opcodes/ACC_PUBLIC Opcodes/ACC_STATIC)) method nil nil writer)
-         local (if fields (int 1) (int 0))]
+        local (if fields (int 1) (int 0))]
     (.visitCode gen)
     (run! (fn [line] (generate-code! gen line))
           (concat
@@ -155,13 +155,14 @@
              :name "tag"
              :owner (Type/getObjectType class-name)
              :field-type Type/INT_TYPE}]
-           (when fields 
-             [{:type :arg
-               :index (int 0)}
-              {:type :put-field
-               :name field-name
-               :owner (Type/getObjectType class-name)
-               :field-type (Type/getObjectType name)}])
+           (mapcat (fn [[i field]]
+                     [{:type :arg
+                       :index (int i)}
+                      {:type :put-field
+                       :name (:name field)
+                       :owner (Type/getObjectType class-name)
+                       :field-type (:type field)}])
+                   (map-indexed vector fields))
            [{:type :load-local
              :index local
              :local-type (Type/getObjectType class-name)}
@@ -188,7 +189,7 @@
     class-name))
 
 
-;; Okay, no I need to make my structs have better constructors.
+;; Okay, now I need to make my structs have better constructors.
 
 (def adt-example1
   {:type :adt
@@ -196,11 +197,12 @@
    :variants [{:name "Blue"
                :fields [{:name "favorite"
                          :type Type/BOOLEAN_TYPE}]}
-              {:name "Green"}
+              {:name "Green"
+               :fields [{:name "isGreen"
+                         :type Type/BOOLEAN_TYPE}]}
               {:name "Yellow"}]})
 
 (make-adt adt-example1)
-
 
 
 ;; Next I need to allow variants to have fields and make classes for them.
@@ -209,8 +211,13 @@
 
 
 
-(.favorite (.blue (Color/blue (Blue.))))
+(.tag (Color/blue false))
 
+
+Color/blue
+
+(.tag
+  (Color/green false))
 
 
 (def struct-example1
