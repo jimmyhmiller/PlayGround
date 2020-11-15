@@ -4,8 +4,8 @@ use std::{thread::sleep, time::{Duration}};
 use rand::Rng;
 use mini_gl_fb::glutin::VirtualKeyCode;
 use raqote::{DrawOptions, DrawTarget, PathBuilder, SolidSource, Source};
-const WIDTH: usize = 800;
-const HEIGHT: usize = 800;
+const WIDTH: usize = 600;
+const HEIGHT: usize = 600;
 
 
 #[derive(Debug, PartialEq, Eq)]
@@ -45,10 +45,10 @@ fn add_one_heading(heading: &Direction, coord: &Coord, grid_size: (usize, usize)
             Coord {x: (coord.x + 1).rem_euclid(grid_size.0 as isize), y: coord.y}
         }
         Direction::Up => {
-            Coord {x: coord.x, y: (coord.y + 1).rem_euclid(grid_size.1 as isize)}
+            Coord {x: coord.x, y: (coord.y - 1).rem_euclid(grid_size.1 as isize)}
         }
         Direction::Down => {
-            Coord {x: coord.x, y: (coord.y - 1).rem_euclid(grid_size.1 as isize)}
+            Coord {x: coord.x, y: (coord.y + 1).rem_euclid(grid_size.1 as isize)}
         }
     }
 }
@@ -101,15 +101,13 @@ fn main() {
 
     let mut is_start = true;
 
-    let grid_size = (25,25);
+    let grid_size = (20,20);
     let tile_size = (WIDTH/grid_size.0, HEIGHT/grid_size.1);
     let mut snake = init_snake(12, 12, grid_size);
     let mut food_location = gen_food_location(grid_size);
 
     let mut dt = DrawTarget::new(WIDTH as i32, HEIGHT as i32);
 
-   
-    // Got it drawing, but it is upside down :(
 
     fb.glutin_handle_basic_input(|fb, input| {
 
@@ -148,11 +146,20 @@ fn main() {
             draw_filled_tile(&mut dt, tile, tile_size, snake_color);
         }
         draw_food(&mut dt, &food_location, tile_size);
-       
 
-        fb.update_buffer(&dt.get_data());
+        let data = dt.get_data_mut();
+        // invert the image because our canvas library and bytebuffer disagree.
+        for x in 0..WIDTH {
+            for y in 0..HEIGHT/2 {
+                data.swap(x+y*WIDTH, x+(HEIGHT-1-y)*WIDTH);
+            }
+        }
+        fb.update_buffer(data);
         fb.redraw();
-        sleep(Duration::from_millis(64));
+        // Need to do framerate stuff better.
+        // Movement should be framerate independent and I should only be sleeping
+        // as long as I need to fill the remaining frame.
+        sleep(Duration::from_millis(32));
         true
     });
 }
