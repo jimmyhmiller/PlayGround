@@ -5,7 +5,7 @@
 
 
 (def markdown
-  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/Building Meander in Meander.md"))
+  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/Conceptual Engineering Take Three.md"))
 
 
 (defmulti transform
