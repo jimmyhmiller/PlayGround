@@ -149,7 +149,11 @@ const StateEditor = ({ name, code, components, setComponents, setAppState }) => 
   </div>
 );
 
-const defaultReducerCode = (props) => `(state, ${props && props.length > 0  ? "{ " + props.join(", ") + " }" : "_"}) => ({
+const codeToDestructure = (props, placeholder="_", rest="") => {
+  return props && props.length > 0  ? "{ " + props.join(", ") + rest + " }" : placeholder
+}
+
+const defaultReducerCode = (appState, props) => `(${codeToDestructure(Object.keys(appState), "state", ", ...state")}, ${codeToDestructure(props)}) => ({
   ...state,
 
 })`
@@ -219,7 +223,7 @@ const constructState = (componentCode, stateComponentCode = "{}") => {
   }
 };
 
-const extractActions = code => {
+const extractActions = (appState, code) => {
   const propsRegex = /([a-z]+)(:|,| |})/g
   return [...code.matchAll(/Actions\.([a-zA-Z_0-9]+)(\(.*\))?/g)]
     .map(x => {
@@ -228,7 +232,7 @@ const extractActions = code => {
       return {
         actionType: x[1],
         props: props,
-        code: defaultReducerCode(props),
+        code: defaultReducerCode(appState, props),
       }
     })
 };
@@ -258,7 +262,11 @@ const Home = () => {
   const [actionCreators, setActionCreators] = useState();
   const [components, setComponents] = useState({Main: {code: "Hello World", name: "Main",  type: "component"}});
   const [debouncedComponents] = useDebounce(components, 200)
-  const [Element, setElement] = useState(() => () => null);
+  const [Element, setElementOld] = useState(() => () => null);
+  const setElement = (...args) => {
+    console.log("setElement!", ...args);
+    setElementOld(...args);
+  }
 
   const setAppState = (stateValue) => dispatch({type: "SET_STATE", payload: stateValue})
 
@@ -281,7 +289,7 @@ const Home = () => {
     const stateValue = constructState(code, components["State"] && components["State"]["code"]);
     const formattedCode = JSON.stringify(stateValue, null, 1);
 
-    const extractedActions = extractActions(code);
+    const extractedActions = extractActions(appState, code);
 
     const additionalActions = extractedActions
       .filter(action => !actions[action.actionType] || actions[action.actionType] && actions[action.actionType].props && actions[action.actionType].props.length < action.props.length)
@@ -293,7 +301,7 @@ const Home = () => {
     const inCodeActions = new Set(Object.values(extractedActions).map(a => a.actionType))
 
     setActions((actions) => ({
-      ...Object.fromEntries(Object.entries(actions).filter(([_, {code, actionType, props}]) => code !== defaultReducerCode(props) || inCodeActions.has(actionType))),
+      ...Object.fromEntries(Object.entries(actions).filter(([_, {code, actionType, props}]) => code !== defaultReducerCode(appState, props) || inCodeActions.has(actionType))),
       ...additionalActions,
     }))
 
@@ -335,10 +343,11 @@ const Home = () => {
 
   useEffect(() => {
     try {
+      console.log("effect triggered");
       renderElementAsync({ code: wrapCode(components), scope: {React, useState, State: appState, Actions: actionCreators} }, 
-        (elem) => setElement((_) => elem), e => console.error(e));
+        (elem) => console.log("HERE!") || setElement((_) => elem), e => console.error(e, "thing"));
     } catch (e) {
-      console.error(e)
+      console.error(e, "stuff")
     }
   }, [debouncedComponents, appState])
 
