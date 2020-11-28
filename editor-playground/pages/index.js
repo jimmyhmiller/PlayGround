@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useReducer } from "react";
+import React, { useState, useEffect, useReducer, useCallback } from "react";
 import Head from "next/head";
 import { useDebounce } from 'use-debounce';
 
@@ -228,7 +228,6 @@ const extractActions = (appState, code) => {
   return [...code.matchAll(/Actions\.([a-zA-Z_0-9]+)(\(.*\))?/g)]
     .map(x => {
       const props = [...x[0].matchAll(propsRegex)].map(x => x[1]);
-      console.log(x[0], props)
       return {
         actionType: x[1],
         props: props,
@@ -262,11 +261,7 @@ const Home = () => {
   const [actionCreators, setActionCreators] = useState();
   const [components, setComponents] = useState({Main: {code: "Hello World", name: "Main",  type: "component"}});
   const [debouncedComponents] = useDebounce(components, 200)
-  const [Element, setElementOld] = useState(() => () => null);
-  const setElement = (...args) => {
-    console.log("setElement!", ...args);
-    setElementOld(...args);
-  }
+  const [Element, setElement] = useState(() => () => null);
 
   const setAppState = (stateValue) => dispatch({type: "SET_STATE", payload: stateValue})
 
@@ -292,7 +287,7 @@ const Home = () => {
     const extractedActions = extractActions(appState, code);
 
     const additionalActions = extractedActions
-      .filter(action => !actions[action.actionType] || actions[action.actionType] && actions[action.actionType].props && actions[action.actionType].props.length < action.props.length)
+      .filter(action => !actions[action.actionType] || actions[action.actionType] && actions[action.actionType].props && actions[action.actionType].props !== action.props)
       .reduce((obj, action) => ({
         ...obj,
         [action.actionType]: action,
@@ -344,10 +339,16 @@ const Home = () => {
   useEffect(() => {
     try {
       console.log("effect triggered");
-      renderElementAsync({ code: wrapCode(components), scope: {React, useState, State: appState, Actions: actionCreators} }, 
-        (elem) => console.log("HERE!") || setElement((_) => elem), e => console.error(e, "thing"));
+      renderElementAsync({ code: wrapCode(components), scope: {React, useState, useEffect, State: appState, Actions: actionCreators} }, 
+        // Probably a race condition with this error? 
+        // But in general, it should render and then as it is rendering,
+        // if there is an error this would be called.
+        // It would be better if this library would only call on a fully successful render.
+        // Not sure how to accomplish that at the moment.
+        // Tried a useEffect, but that still got called even when its children errored.
+        (elem) => setElement((_) => elem), e => { console.error(e, "error rendering"); setElement((_) => Element)});
     } catch (e) {
-      console.error(e, "stuff")
+      console.error(e, "error in the rendering function")
     }
   }, [debouncedComponents, appState])
 
@@ -363,7 +364,7 @@ const Home = () => {
         `}
       </style>
       <Head>
-        <title>Home</title>
+        <title>Redux Like Editor</title>
       </Head>
 
       <div style={{display: "flex", flexDirection: "row"}}>
