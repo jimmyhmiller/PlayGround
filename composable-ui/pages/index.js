@@ -38,10 +38,10 @@ const ComponentBorder = ({ children, selected, hide, name }) =>
     </div>
 
 const Greet = ({ InputComponent, onChange, selected }) => {
-  const [value, setValue] = useInput("Some Name", onChange);
+  const [value, setValue] = useInput("placeholder", onChange);
   useEffect(() => {
     if (onChange) {
-      onChange(`Hello ${value}`)
+      onChange(<>Hello {value}</>)
     }
   }, [value])
 
@@ -54,17 +54,17 @@ const Greet = ({ InputComponent, onChange, selected }) => {
 }
 
 const Large = ({ InputComponent, onChange, selected }) => {
-  const [value, setValue] = useInput("Large Text", onChange);
+  const [value, setValue] = useInput("placeholder", onChange);
   useEffect(() => {
     if (onChange) {
-      onChange(<h1>{value}</h1>)
+      onChange(<h1 style={{display: "inline"}}>{value}</h1>)
     }
   }, [value])
 
   return (
     <ComponentBorder selected={selected} hide={!!onChange}>
       {InputComponent && <InputComponent onChange={setValue} />}
-      {onChange ? null : <h1>{value}</h1>}
+      {onChange ? null : <h1 style={{display: "inline"}}>{value}</h1>}
     </ComponentBorder>
   )
 }
@@ -72,7 +72,7 @@ const Large = ({ InputComponent, onChange, selected }) => {
 
 
 const Blue = ({ InputComponent, onChange, selected }) => {
-  const [value, setValue] = useInput("Blue Text", onChange);
+  const [value, setValue] = useInput("placeholder", onChange);
   useEffect(() => {
     if (onChange) {
       onChange(<span style={{color: "blue"}}>{value}</span>)
@@ -88,7 +88,7 @@ const Blue = ({ InputComponent, onChange, selected }) => {
 }
 
 const ComposeOutputs = (Output1, Output2) => ({ InputComponent, onChange, selected }) => {
-  const FirstComp = useRef(({onChange}) => <Output1 InputComponent={InputComponent} onChange={onChange} />)
+  const FirstComp = useRef(({onChange}) => <Output1 InputComponent={InputComponent} onChange={onChange} />);
   return (
     <Output2 InputComponent={FirstComp.current} onChange={onChange} selected={selected} />
   )
@@ -96,12 +96,14 @@ const ComposeOutputs = (Output1, Output2) => ({ InputComponent, onChange, select
 
 const GreetLarge = ComposeOutputs(ComposeOutputs(Greet, Large), Blue);
 
-const Home = () => {
-  const [components, setComponents] = useState({
+const initComponents = {
     greet: {component: Greet}, 
     large: {component: Large}, 
     blue: {component: Blue},
-  })
+  }
+
+const Home = () => {
+  const [components, setComponents] = useState(initComponents)
 
   const [selected, setSelected] = useState(null);
 
@@ -123,10 +125,12 @@ const Home = () => {
   return (
     <div>
       <Head>
-        <title>Home</title>
+        <title>Compose Components</title>
         <link rel="icon" href="/favicon.ico" />
       </Head>
       <h1>Compose Components</h1>
+      <p>Command click to select components and compose them</p>
+      <button onClick={_ => setComponents(initComponents)}>Reset</button>
       {Object.entries(components).map(
         ([key, value]) => (
           <div key={key} onClick={composeUp({key})}>
