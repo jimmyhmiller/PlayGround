@@ -140,7 +140,7 @@ const reducer = (state, { type, ...action }) => {
             id: state.id,
           }
           // maybe don't want this behavior?
-          if (rightEnd && right[0].type === action.key) {
+          if (rightEnd && right[0] && right[0].type === action.key) {
             return {
               ...state,
               cursor: [state.cursor[0]+1, 1]
@@ -176,48 +176,63 @@ const reducer = (state, { type, ...action }) => {
             }
           }
         }
-        // Need to make these use cursor position
+        // backspace isn't quite right right
         case "Backspace": {
           action.event.preventDefault();
           if (state.nodes.length === 0) {
             break;
           }
-          const newNodes = [...state.nodes];
-          const node = newNodes.pop();
+          const [left, right] = splitAtCursor(state);
+          const node = left.pop();
           let extraNodes;
           if (node.text.length === 1) {
             extraNodes = [];
           } else {
-            node.text = node.text.substring(0, node.text.length-1);
-            node.type = inferType(newNodes, node);
+            const leftText = node.text.substring(0, state.cursor[1]-1)
+            const rightText = node.text.substring(state.cursor[1]);
+            node.text = `${leftText}${rightText}`
+            node.type = inferType(state.nodes, node);
             extraNodes = [node];
           }
+
+          const isLastNode = state.cursor[0] - 1 < 0
+          const characterIndex = isLastNode ? 0 : state.nodes[state.cursor[0] - 1].text.length
           return {
             ...state,
-            nodes: newNodes.concat([...extraNodes])
+            cursor: [
+              extraNodes.length >= 1 ? state.cursor[0] : Math.max(state.cursor[0] - 1, 0),
+              extraNodes.length >= 1 ? Math.max(state.cursor[1] - 1, 0) : characterIndex
+            ],
+            nodes: left.concat([...extraNodes, ...right])
           }
         }
         default: {
-          const newNodes = [...state.nodes];
-          newNodes.pop(); // get rid of cursor in a dumb way need to actually care about location
-          if (newNodes.length === 0) {
-            newNodes.push({type: "unknown", text: "", id: state.id})
+          const [left, right] = splitAtCursor(state);
+          if (left.length === 0 && right.length === 0) {
+            left.push({type: "unknown", text: "", id: state.id})
           }
-          let node = newNodes.pop();
+          let node = left.pop();
+          let addedNewNode = false;
           if (node.type === "whitespace" || node.type === "newline") {
-            newNodes.push(node);
+            left.push(node);
+            addedNewNode = true;
             node = {type: "unknown", text: "", id: state.id};
           }
-          node.text += action.key
+          const leftText = node.text.substring(0, state.cursor[1])
+          const rightText = node.text.substring(state.cursor[1]);
+          node.text = `${leftText}${action.key}${rightText}`
           // Need to think about context here and if the node should
           // really be inserted in an unknown state.
           // Cursor management is going to be really important going forward.
-          node.type = inferType(newNodes, node);
+          node.type = inferType(state.nodes, node);
           return {
             ...state,
+            cursor: [
+               addedNewNode ? state.cursor[0] + 1 : state.cursor[0],
+               addedNewNode ? 1 : state.cursor[1] + 1
+            ], 
             id: state.id + 1,
-            nodes: newNodes
-              .concat([node])
+            nodes: left.concat([node, ...right])
           }
         }
       }
@@ -234,6 +249,7 @@ const reducer = (state, { type, ...action }) => {
 
 // Up Next:
 // Actually handle cursor position
+// Need to make nodes for reasons other than space :)
 // Decide on a language I am supporting
 // Show node types and make things configurable
 // Support errors
@@ -248,12 +264,15 @@ const reducer = (state, { type, ...action }) => {
 // Need to have nice debugging of state of the editor
 
 
+// Need better bounds checking!
+
+
 
 
 // Needs lots of clean up
 const calculateCursorPosition = ({ nodes, cursor: [cursorNode, cursorIndex], charWidth, nodePaddingX,  charHeight, offsetX, offsetY, nodePaddingY }) => {
-  if (cursorNode >= nodes.length) {
-    return [cursorNode, cursorIndex]
+  if (nodes.length <= 0) {
+    return [offsetX, offsetY]
   }
   const node = nodes[cursorNode];
   const currentIsNewline = node.type === "newline";
