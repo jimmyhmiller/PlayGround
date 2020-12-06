@@ -1,7 +1,10 @@
 import Head from 'next/head'
 import { useState, useReducer, useEffect, useMemo } from 'react';
 
- const colors = {
+// This is in the write ugly code to get something working phase.
+
+
+const colors = {
   "let": "#2aa198",
   "identifier": "#859900",
   "integer": "#b58900",
@@ -126,11 +129,18 @@ const reducer = (state, { type, ...action }) => {
         case "Escape": {
           return state
         }
-        case " ": {
+        case " ":
+        case "Enter": {
           const [left, right] = splitAtCursor(state);
           const rightEnd = atEndOfNodeRight(state);
           const leftEnd = atEndOfNodeLeft(state);
-          if (rightEnd && right[0].type === "whitespace") {
+          const newNode = { 
+            type: action.key === " " ? "whitespace" : "newline",
+            text: action.key === " " ? " " : "\n",
+            id: state.id,
+          }
+          // maybe don't want this behavior?
+          if (rightEnd && right[0].type === action.key) {
             return {
               ...state,
               cursor: [state.cursor[0]+1, 1]
@@ -140,40 +150,33 @@ const reducer = (state, { type, ...action }) => {
               ...state,
                id: state.id + 1,
               cursor: [state.cursor[0]+1, 1],
-              nodes: left.concat([{ type: "whitespace", text: " ", id: state.id}, ...right])
+              nodes: left.concat([newNode, ...right])
             }
           } else if (leftEnd) {
             return {
               ...state,
                id: state.id + 1,
               cursor: [state.cursor[0], 1],
-              nodes: [{ type: "whitespace", text: " ", id: state.id}].concat([...left, ...right])
+              nodes: [newNode].concat([...left, ...right])
             }
           } else {
             const node = left.pop();
             const leftNode = {...node}
             const rightNode = {...node};
             leftNode.text = node.text.substring(0, state.cursor[1])
+            leftNode.type = inferType(state.nodes, leftNode);
             rightNode.text = node.text.substring(state.cursor[1]);
+            rightNode.type = inferType(state.nodes, rightNode);
             rightNode.id = state.id;
             return {
               ...state,
                id: state.id + 2,
               cursor: [state.cursor[0]+1, 1],
-              nodes: left.concat([leftNode, { type: "whitespace", text: " ", id: state.id +1 }, rightNode, ...right])
+              nodes: left.concat([leftNode, { ...newNode, id: state.id +1 }, rightNode, ...right])
             }
           }
         }
-
-        // All of these need to use our cursor position
-        case "Enter": {
-          return {
-            ...state,
-            id: state.id + 1,
-            nodes: state.nodes
-              .concat([{ type: "newline", text: "\n", id: state.id }])
-          }
-        }
+        // Need to make these use cursor position
         case "Backspace": {
           action.event.preventDefault();
           if (state.nodes.length === 0) {
