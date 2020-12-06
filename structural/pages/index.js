@@ -1,7 +1,7 @@
 import Head from 'next/head'
-import { useState, useReducer, useEffect } from 'react';
+import { useState, useReducer, useEffect, useMemo } from 'react';
 
-const colors = {
+ const colors = {
   "let": "#2aa198",
   "identifier": "#859900",
   "integer": "#b58900",
@@ -18,6 +18,9 @@ const defaultColor = "#000000";
 // $cyan:      #2aa198;
 // $green:     #859900;
 
+const hasPadding = ({ type }) => 
+ type !== "whitespace" && type !== "newline" && type !== "cursor";
+
 const Node = ({ text, type }) => {
   const hasBorder = type !== "whitespace" && type !== "newline" && type !== "cursor";
   const color = colors[type] || defaultColor;
@@ -25,7 +28,7 @@ const Node = ({ text, type }) => {
     <span 
       style={{
         color: color,
-        padding: hasBorder ? 3 : undefined,
+        padding: hasPadding({ type }) ? 3 : undefined,
         border: hasBorder ? `solid 1px ${color}` : undefined,
       }}
       className={type === "cursor" ? "cursor" : undefined}>
@@ -46,7 +49,7 @@ const inferType = (nodes, currentNode) => {
     return "let"
   } else if (!isNaN(parseInt(currentNode.text, 10))) {
     return "integer"
-  } else if (currentNode.text.match(/[A-Za-z=\-+&|\/\?][A-Za-z=\-+&|\/\?0-9]?/)) {
+  } else if (currentNode.text.match(/^[A-Za-z=\-+&|\/\?][A-Za-z&|\/\?0-9]*$/)) {
     return "identifier"
   }
   else {
@@ -54,11 +57,68 @@ const inferType = (nodes, currentNode) => {
   }
 }
 
+
+const splitAtCursor = ({nodes, cursor}) => {
+  const newNodes = [...nodes];
+  return [newNodes.slice(0, cursor[0] + 1), newNodes.slice(cursor[0]+1)]
+}
+
+const atEndOfNodeRight = ({nodes, cursor}) => {
+  const [cursorNode, cursorIndex] = cursor;
+  const node = nodes[cursorNode];
+  return node.text.length < cursorIndex + 1
+}
+
+const atEndOfNodeLeft = ({nodes, cursor}) => {
+  const [cursorNode, cursorIndex] = cursor;
+  const node = nodes[cursorNode];
+  return cursorIndex - 1 < 0;
+}
+
+
 const reducer = (state, { type, ...action }) => {
-  console.log({ type, ...action })
+
   switch (type) {
     case "press": {
       switch (action.key) {
+        case "ArrowRight": {
+          const [cursorNode, cursorIndex] = state.cursor;
+          if (cursorNode + 1 >= state.nodes.length) {
+            break;
+          }
+          const node = state.nodes[cursorNode];
+          const atNodeEnd = node.text.length < cursorIndex + 1;
+          // console.log(atNodeEnd, cursorNode, cursorIndex, node.text.length)
+          return {
+            ...state,
+            // need to handle moving new lines
+            // need to handle moving nodes
+            cursor: [
+              atNodeEnd ? cursorNode + 1 : cursorNode,
+              atNodeEnd ? 1 : cursorIndex + 1
+            ]
+          }
+        }
+        case "ArrowLeft": {
+          const nodes = state.nodes;
+          const [cursorNode, cursorIndex] = state.cursor;
+          const node = state.nodes[cursorNode];
+          const atNodeEnd = cursorNode === 0 ? cursorIndex <= 0 : cursorIndex - 1 <= 0;
+          if (atNodeEnd && cursorNode - 1 < 0) {
+            break;
+          }
+          // console.log(atNodeEnd, cursorNode, cursorIndex, node.text.length)
+          return {
+            ...state,
+            cursor: [
+              atNodeEnd ? cursorNode - 1 : cursorNode,
+              atNodeEnd ? nodes[cursorNode - 1].text.length : cursorIndex - 1
+            ]
+          }
+        }
+
+        // Need to do up and down.
+
         case "Shift":
         case "Meta":
         case "Control":
@@ -67,33 +127,59 @@ const reducer = (state, { type, ...action }) => {
           return state
         }
         case " ": {
-          return {
-            ...state,
-            id: state.id + 1,
-            nodes: state.nodes
-              .filter(x => x.type !=="cursor")
-              .concat([{ type: "whitespace", text: " ", id: state.id }, 
-                       { type: "cursor", id: -1}])
+          const [left, right] = splitAtCursor(state);
+          const rightEnd = atEndOfNodeRight(state);
+          const leftEnd = atEndOfNodeLeft(state);
+          if (rightEnd && right[0].type === "whitespace") {
+            return {
+              ...state,
+              cursor: [state.cursor[0]+1, 1]
+            }
+          } else if (rightEnd) {
+            return {
+              ...state,
+               id: state.id + 1,
+              cursor: [state.cursor[0]+1, 1],
+              nodes: left.concat([{ type: "whitespace", text: " ", id: state.id}, ...right])
+            }
+          } else if (leftEnd) {
+            return {
+              ...state,
+               id: state.id + 1,
+              cursor: [state.cursor[0], 1],
+              nodes: [{ type: "whitespace", text: " ", id: state.id}].concat([...left, ...right])
+            }
+          } else {
+            const node = left.pop();
+            const leftNode = {...node}
+            const rightNode = {...node};
+            leftNode.text = node.text.substring(0, state.cursor[1])
+            rightNode.text = node.text.substring(state.cursor[1]);
+            rightNode.id = state.id;
+            return {
+              ...state,
+               id: state.id + 2,
+              cursor: [state.cursor[0]+1, 1],
+              nodes: left.concat([leftNode, { type: "whitespace", text: " ", id: state.id +1 }, rightNode, ...right])
+            }
           }
         }
+
+        // All of these need to use our cursor position
         case "Enter": {
           return {
             ...state,
             id: state.id + 1,
             nodes: state.nodes
-              .filter(x => x.type !== "cursor")
-              .concat([{ type: "newline", text: "\n", id: state.id }, 
-                       { type: "cursor", id: -1}])
+              .concat([{ type: "newline", text: "\n", id: state.id }])
           }
         }
         case "Backspace": {
           action.event.preventDefault();
-          // We have a cursor so it is 1 not 0
-          if (state.nodes.length === 1) {
+          if (state.nodes.length === 0) {
             break;
           }
           const newNodes = [...state.nodes];
-          newNodes.pop(); // get rid of cursor in a dumb way need to actually care about location
           const node = newNodes.pop();
           let extraNodes;
           if (node.text.length === 1) {
@@ -105,7 +191,7 @@ const reducer = (state, { type, ...action }) => {
           }
           return {
             ...state,
-            nodes: newNodes.concat([...extraNodes, { type: "cursor", id: -1}])
+            nodes: newNodes.concat([...extraNodes])
           }
         }
         default: {
@@ -128,7 +214,7 @@ const reducer = (state, { type, ...action }) => {
             ...state,
             id: state.id + 1,
             nodes: newNodes
-              .concat([node, { type: "cursor", id: -1}])
+              .concat([node])
           }
         }
       }
@@ -156,12 +242,43 @@ const reducer = (state, { type, ...action }) => {
 // Think about selection
 // Think about layout
 
+// Need to have nice debugging of state of the editor
 
+
+
+
+// Needs lots of clean up
+const calculateCursorPosition = ({ nodes, cursor: [cursorNode, cursorIndex], charWidth, nodePaddingX,  charHeight, offsetX, offsetY, nodePaddingY }) => {
+  if (cursorNode >= nodes.length) {
+    return [cursorNode, cursorIndex]
+  }
+  const node = nodes[cursorNode];
+  const currentIsNewline = node.type === "newline";
+  const halfPadding = nodePaddingX/2
+  const padding = !currentIsNewline && hasPadding(node) ? halfPadding : 0;
+  let x = 0
+  let y = 0
+  for (let i = 0; i < cursorNode; i++) {
+    if (nodes[i].type === "newline") {
+      y += charHeight + nodePaddingY
+      x = 0;
+    } else if (!currentIsNewline) {
+      x += (nodes[i].text.length * charWidth) + (hasPadding(nodes[i]) ? nodePaddingX : 0)
+    }
+  }
+  x += currentIsNewline ? offsetX : offsetX + padding + (cursorIndex * charWidth);
+  y += offsetY + (currentIsNewline ? charHeight + nodePaddingY : 0);
+  return [x, y]
+}
 
 const Home = () => {
   useKeyPress(e => dispatch({type: "press", key: e.key, event: e}));
+  const [offsetX, offsetY] = [8, 24];
+  const [charWidth, charHeight] = [12, 20.5]
+  const [nodePaddingX, nodePaddingY] = [8, 14.5];
   const [state, dispatch] = useReducer(reducer, {
     id: 15,
+    cursor: [0, 0],
     nodes: [
       { type: "let", text: "let", id: 0 },
       { type: "whitespace", text: " ", id: 1 },
@@ -178,14 +295,29 @@ const Home = () => {
       { type: "identifier", text: "=", id: 12 },
       { type: "whitespace", text: " ", id: 13 },
       { type: "integer", text: "3", id: 14 },
-      { type: "cursor", id: -1},
-      
     ],
   });
+  const [cursorX, cursorY] = useMemo(
+    () =>
+      calculateCursorPosition({
+        nodes: state.nodes,
+        cursor: state.cursor,
+        charWidth,
+        charHeight,
+        offsetX,
+        offsetY,
+        nodePaddingX,
+        nodePaddingY,
+      }),
+    [state.nodes, state.cursor, offsetX, offsetY, charWidth, charHeight, nodePaddingX, nodePaddingY]
+  );
   return (
-    <pre>
-      {state.nodes.map(({text, id, type}) => <Node text={text} id={id} type={type} key={id} />)}
-    </pre>
+    <>
+      <span className="cursor" style={{position: "absolute", top: cursorY, left: cursorX, height: charHeight}} />
+      <pre>
+        {state.nodes.map(({text, id, type}) => <Node text={text} id={id} type={type} key={id} />)}
+      </pre>
+    </>
   )
 }
 
