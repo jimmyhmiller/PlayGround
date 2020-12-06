@@ -129,7 +129,7 @@ const Home = () => {
         <link rel="icon" href="/favicon.ico" />
       </Head>
       <h1>Compose Components</h1>
-      <p>Command click to select components and compose them</p>
+      <p>Command click to select components and compose them (order does matter so play around)</p>
       <button onClick={_ => setComponents(initComponents)}>Reset</button>
       {Object.entries(components).map(
         ([key, value]) => (
