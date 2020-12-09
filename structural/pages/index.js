@@ -260,6 +260,7 @@ const reducer = (state, { type, ...action }) => {
 // Think about invisible things like , and how to deal with that and space
 // Think about selection
 // Think about layout
+// Think about autocomplete
 
 // Need to have nice debugging of state of the editor
 

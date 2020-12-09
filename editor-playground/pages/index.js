@@ -2,27 +2,11 @@ import React, { useState, useEffect, useReducer, useCallback } from "react";
 import Head from "next/head";
 import { useDebounce } from 'use-debounce';
 
+// Fast refresh was too buggy.
+// I need to focus on some code clean up
+// but probably should make delete and example first
+// Should you be allowed to delete referenced components?
 
-// This fast refresh stuff is cool. But might be too error prone.
-// Might need to change back to the hackier way.
-
-
-// This is the beginning of geting fast refresh to work.
-// If I paste that second if statement below and 
-// change Thing to return something else,
-// then I can actually get a fast refresh working in the browser
-// by calling window.refresh()
-// I should be able to get this hooked up to my render stuff
-// and then I can fast refresh my components and actually
-// have them keep hook state and things like that.
-if (process.env.NODE_ENV !== 'production' && typeof window !== 'undefined') {
-  const runtime = require('react-refresh/runtime');
-  const { stopReportingRuntimeErrors } = require("react-error-overlay");
-  stopReportingRuntimeErrors();
-  window.runtime = runtime;
-  window.refresh = runtime.performReactRefresh;
-  runtime.injectIntoGlobalHook(window);
-}
 
 import {
   Editor,
@@ -30,7 +14,7 @@ import {
 } from "react-live";
 
 const extractComponents = (code) => {
-  const compRegex = /<([A-Z][a-zA-Z0-9]+).*\/?>?/g
+  const compRegex = /<([A-Z][a-zA-Z0-9]*).*\/?>?/g
   const propsRegex = /([A-Za-z]+)=/g
   return [...code.matchAll(compRegex)]
     .map(x => ({
@@ -38,31 +22,25 @@ const extractComponents = (code) => {
       props: [...x[0].matchAll(propsRegex)].map(x => x[1])
     }))
  }
- const genSym = (() => {
-   let i = 0;
-   return (prefix) => { i += 1; return `${prefix || "var"}_${i}`}
- })()
 
 const makeComponent = ({ name, code, props }) => {
   const [pre, post] = splitCodeSections(code)
   const hooks = post ? pre : "";
   const result = post !== undefined ? post : pre;
   // Need to figure out hook signatures
-  const sig = genSym("sig")
   return `
-  const ${sig} = window.runtime.createSignatureFunctionForTransform();
   const ${name} = (${props && props.length > 0  ? "{ " + props.join(", ") + " }" : "props"}) => {
-    ${sig}();
     ${hooks}
     return <>${result}</>
   }
-  ${sig}(${name}, "", null, null)
-  window.runtime.register(${name}, "jimmy/${name}")
   `
 }
 
 const makeComponents = (components) =>
-  Object.values(components).filter(c => c.type === "component").map(makeComponent).join("\n");
+  Object.values(components)
+    .filter(c => c.type === "component")
+    .map(makeComponent)
+    .join("\n");
 
 // Hack to play with the concept
 const splitCodeSections = (code) => code.split("--")
@@ -252,6 +230,10 @@ const defaultReducer = (state, action={}) => {
   return state;
 }
 
+const filterObject = (object, f) => {
+  return Object.fromEntries(Object.entries(object).filter(([k, v]) => f(k, v)))
+}
+
 const Home = () => {
   const [reducers, setReducers] = useState({});
   const [reducer, setReducer] = useState(() => defaultReducer);
@@ -259,7 +241,7 @@ const Home = () => {
   const [actions, setActions] = useState([]);
   const [actionCreators, setActionCreators] = useState();
   const [components, setComponents] = useState({Main: {code: "Hello World", name: "Main",  type: "component"}});
-  const [debouncedComponents] = useDebounce(components, 0)
+  const [debouncedComponents] = useDebounce(components, 200)
   const [Element, setElement] = useState(() => () => null);
   const [firstRender, setFirstRender] = useState(true);
 
@@ -279,6 +261,7 @@ const Home = () => {
   }, [actions])
 
   useEffect(() => {
+    // Maybe split some things out here?
     const code = extractAllCode(components)
 
     const stateValue = constructState(code, components["State"] && components["State"]["code"]);
@@ -296,44 +279,38 @@ const Home = () => {
     const inCodeActions = new Set(Object.values(extractedActions).map(a => a.actionType))
 
     setActions((actions) => ({
-      ...Object.fromEntries(Object.entries(actions).filter(([_, {code, actionType, props}]) => code !== defaultReducerCode(appState, props) || inCodeActions.has(actionType))),
+      ...filterObject(actions, (_,  {code, actionType, props}) => code !== defaultReducerCode(appState, props) || inCodeActions.has(actionType)),
       ...additionalActions,
     }))
+    const isValidState = Object.keys(stateValue).length > 0 && (!components["State"] || JSON.stringify(stateValue, null, 1) !== components["State"]["code"])
 
-    if (Object.keys(stateValue).length > 0 && (!components["State"] || JSON.stringify(stateValue, null, 1) !== components["State"]["code"])) {
+    const stateComponent = {
+      code: JSON.stringify(stateValue, null, 1),
+      name: "State",
+      type: "state",
+    }
+
+    if (isValidState) {
       setAppState(stateValue)
-      setComponents((components) => ({
+      setComponents(components => ({
         ...components,
-        State: {
-          code: JSON.stringify(stateValue, null, 1),
-          name: "State",
-          type: "state",
-        },
+        State: stateComponent
       }))
     }
 
+    // still ugly
     const comps = extractComponents(code);
+    const inComps = new Set(Object.values(comps).map(c => c.name).concat("Main"))
+    const newComps = comps.filter(c => components[c.name] === undefined);
+    const notMentioned = Object.entries(components).filter(([_, {name, code, type}]) => !inComps.has(name) && type === "component");
 
-    const inComps = new Set(Object.values(comps).map(c => c.name))
-
-    // This is terrible. Need to fix up
-    comps.forEach(c => {
-      if (!components[c.name]) {
-        setComponents((components) => ({
-          ...Object.fromEntries(Object.entries(components).filter(([_, {code, name}]) => code !== name || inComps.has(name))),
-          [c.name]: {code: c.name, name: c.name, type: "component", props: c.props},
-        }))
-      }
-      if (components[c.name] && components[c.name].props.length < c.props.length) {
-          setComponents((components) => ({
-          ...components,
-          [c.name]: {
-            ...components[c.name],
-            props: c.props
-          },
-        }))
-      }
-    })
+    if (newComps.length > 0 || notMentioned.length > 0) {
+      setComponents(components => ({
+        ...filterObject(components, (_, {name, code}) => (code !== name && code !== "") || inComps.has(name)),
+        ...Object.fromEntries(newComps.map(c => [c.name, {code: c.name, name: c.name, type: "component", props: c.props}])),
+      }))
+    }
+   
 
   }, [components])
 
@@ -348,18 +325,11 @@ const Home = () => {
         // Not sure how to accomplish that at the moment.
         // Tried a useEffect, but that still got called even when its children errored.
          (elem) => {
-           if (firstRender) {
-              setElement((_) => elem)
-              setFirstRender(false)
-            } else {
-              setTimeout(() => window.refresh(), 0);
-            }
-           
+          setElement((_) => elem)
          },
           e => { 
             console.error(e, "error rendering");
-            // Need to figure out how to make fast refresh use the old code here.
-            window.refresh();
+            setElement((_) => Element)
           });
     } catch (e) {
       console.error(e, "error in the rendering function")
