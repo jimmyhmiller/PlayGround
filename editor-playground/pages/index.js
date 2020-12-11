@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useReducer, useCallback } from "react";
+import React, { useState, useEffect, useReducer, useCallback, useMemo } from "react";
 import Head from "next/head";
 import { useDebounce } from 'use-debounce';
 
@@ -6,6 +6,11 @@ import { useDebounce } from 'use-debounce';
 // I need to focus on some code clean up
 // but probably should make delete and example first
 // Should you be allowed to delete referenced components?
+
+// Without fast refresh, my hooks lose their state
+// I could probably fix this on my own?
+// I could pass my own hook and save off their state and restore it.
+// Just do this for each component and I would be fine.
 
 
 import {
@@ -15,7 +20,7 @@ import {
 
 const extractComponents = (code) => {
   const compRegex = /<([A-Z][a-zA-Z0-9]*).*\/?>?/g
-  const propsRegex = /([A-Za-z]+)=/g
+  const propsRegex = /( [A-Za-z]+)=?/g
   return [...code.matchAll(compRegex)]
     .map(x => ({
       name: x[1],
@@ -115,7 +120,6 @@ const StateEditor = ({ name, code, components, setComponents, setAppState }) => 
         const code = extractAllCode(components)
         const stateValue = constructState(code, value);
         const formattedCode = JSON.stringify(stateValue, null, 1);
-
         // Basically this is checking if the state is valid.
         if (Object.keys(stateValue).length > 0) {
           setAppState(stateValue)
@@ -143,9 +147,10 @@ const codeToDestructure = (props, placeholder="_", rest="") => {
 const defaultReducerCode = (appState, props) =>
 `(${codeToDestructure(Object.keys(appState), "state", ", ...state")}, ${codeToDestructure(props)}) => ({
   ...state,
+
 })`
 
-const ReducerEditor = ({ code, setReducers, actionType, setActions }) => (
+const ReducerEditor = ({ code, actionType, setActions }) => (
   <GenericEditor
     code={code}
     backgroundColor={"rgb(42, 47, 56)"}
@@ -163,10 +168,6 @@ const ReducerEditor = ({ code, setReducers, actionType, setActions }) => (
               }
               return reducer(state, action)
             }
-            setReducers(reducers => ({
-              ...reducers,
-              [actionType]: discriminatingReducer
-            }))
           } catch (e) {
             console.error(e)
           }
@@ -234,31 +235,69 @@ const filterObject = (object, f) => {
   return Object.fromEntries(Object.entries(object).filter(([k, v]) => f(k, v)))
 }
 
-const Home = () => {
-  const [reducers, setReducers] = useState({});
-  const [reducer, setReducer] = useState(() => defaultReducer);
+const ReduxIde = ({ initialComponents, initialActions }) => {
+
+  const [components, setComponents] = useState(initialComponents || {Main: {code: "Hello World", name: "Main",  type: "component"}});
+  const [actions, setActions] = useState(initialActions || {});
+
+  useEffect(() => {
+    const code = extractAllCode(components)
+    const stateValue = constructState(code, components["State"] && components["State"]["code"]);
+    setAppState(stateValue)
+  }, [])
+
+
+  const reducers = useMemo(() => {
+    return Object.values(actions).reduce((reducers, {actionType, code}) => {
+      try {
+        const reducer = eval(code);
+        const discriminatingReducer = (f) => (state, action) => {
+          if (action.type !== actionType) {
+            return f(state, action)
+          }
+          return reducer(state, action)
+        }
+        return {
+            ...reducers,
+            [actionType]: discriminatingReducer
+          }
+      }
+      catch (e) {
+         console.error(e, actionType)
+        return reducers
+      }
+    }, {})
+
+  }, [actions])
+
+
+  const reducer = useMemo(() => {
+    return Object.values(reducers).reduce((f, g) => g(f), defaultReducer)
+  }, [reducers]);
+
+  const actionCreators = useMemo(() => {
+    return Object.values(actions).reduce((actionObj, {actionType}) => ({
+      ...actionObj,
+      [actionType]: (args) => dispatch({type: actionType, ...args})
+    }), {})
+  }, [actions])
+
   const [appState, dispatch] = useReducer(reducer, {});
-  const [actions, setActions] = useState([]);
-  const [actionCreators, setActionCreators] = useState();
-  const [components, setComponents] = useState({Main: {code: "Hello World", name: "Main",  type: "component"}});
+
+
   const [debouncedComponents] = useDebounce(components, 200)
   const [Element, setElement] = useState(() => () => null);
-  const [firstRender, setFirstRender] = useState(true);
 
   const setAppState = (stateValue) => dispatch({type: "SET_STATE", payload: stateValue})
 
-  useEffect(() => {
-    setReducer(() => Object.values(reducers).reduce((f, g) => g(f), defaultReducer))
-  }, [reducers])
 
-  useEffect(() => {
-    setActionCreators(
-      Object.values(actions).reduce((actionObj, {actionType}) => ({
-        ...actionObj,
-        [actionType]: (args) => dispatch({type: actionType, ...args})
-      }), {})
-    )
-  }, [actions])
+
+  const snapshotState = useCallback(() => {
+    console.log(JSON.stringify({ components, actions }))
+  }, [components])
+
+
+
 
   useEffect(() => {
     // Maybe split some things out here?
@@ -302,12 +341,14 @@ const Home = () => {
     const comps = extractComponents(code);
     const inComps = new Set(Object.values(comps).map(c => c.name).concat("Main"))
     const newComps = comps.filter(c => components[c.name] === undefined);
+    const modifiedComps = comps.filter(c => components[c.name] && JSON.stringify(components[c.name].props) !== JSON.stringify(c.props))
     const notMentioned = Object.entries(components).filter(([_, {name, code, type}]) => !inComps.has(name) && type === "component");
 
-    if (newComps.length > 0 || notMentioned.length > 0) {
+    if (newComps.length > 0 || notMentioned.length > 0 || modifiedComps.length > 0) {
       setComponents(components => ({
         ...filterObject(components, (_, {name, code}) => (code !== name && code !== "") || inComps.has(name)),
         ...Object.fromEntries(newComps.map(c => [c.name, {code: c.name, name: c.name, type: "component", props: c.props}])),
+        ...Object.fromEntries(modifiedComps.map(c => [c.name, {...components[c.name], ...c}])),
       }))
     }
    
@@ -352,7 +393,7 @@ const Home = () => {
       </Head>
 
       <div style={{display: "flex", flexDirection: "row"}}>
-
+        {false && <button onClick={_ => snapshotState()}>Snapshot</button>}
         <div style={{width: "45vw", height: "95vh", overflow: "scroll"}}>
 
           {Object.values(components).filter(c => c.type === "component").map(({ code, name, props }) =>
@@ -363,7 +404,6 @@ const Home = () => {
             <ReducerEditor
               actionType={actionType}
               code={code}
-              setReducers={setReducers}
               setActions={setActions} />
           )}
 
@@ -387,4 +427,4 @@ const Home = () => {
   );
 };
 
-export default Home;
+export default ReduxIde;
