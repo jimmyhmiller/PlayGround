@@ -386,6 +386,11 @@ const ReduxIde = ({ initialComponents, initialActions }) => {
             color: #fff;
             font-family: sans-serif;
           }
+          a {
+            color: #fff;
+            text-decoration: none;
+            cursor: pointer;
+          }
         `}
       </style>
       <Head>

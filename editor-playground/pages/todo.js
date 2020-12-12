@@ -14,7 +14,7 @@ const todo = {
       props: [],
     },
     Todos: {
-      code: "<ul>\n  {State.todos.map(({id, item}) => <li>{item}</li>)}\n</ul>",
+      code: "<ul>\n  {State.todos.map(({id, item}) => <li key={id}>{item}</li>)}\n</ul>",
       name: "Todos",
       type: "component",
       props: [],
