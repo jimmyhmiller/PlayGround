@@ -18,7 +18,6 @@
             :type [:-> [:-> :int :int] [:-> :int :int]]
             :ctx {:fn-nested true}}]
 
-
    [:check
     {:val '(f x),
      :type :int,
