@@ -1,7 +1,9 @@
 (ns lwjgl.main
   (:require
-   [nrepl.server :as nrepl])
+   [nrepl.server :as nrepl]
+   [cider.nrepl :as cider.nrepl])
   (:import
+   [java.nio DoubleBuffer]
    [org.jetbrains.skija
     Font
     FontStyle
@@ -26,10 +28,26 @@
 (def text-font-36 (Font. ^Typeface text-face-bold (float 36)))
 
 
-(defn draw [^Canvas canvas]
+
+(def last-position (atom {:x 100 :y 100}))
+
+
+
+(defn draw [window ^Canvas canvas]
   (.clear canvas (color 0xFF002b36))
   (let [paint (doto (Paint.) (.setColor (color 0xFFfdf6e3)))]
-    (.drawString canvas "(defn double [x] (* x 2))" 100 100 text-font-36 paint)
+    (if (not (zero? (GLFW/glfwGetMouseButton window GLFW/GLFW_MOUSE_BUTTON_1)))
+      (let [xarr (double-array [0]) 
+            yarr (double-array [0])]
+        (GLFW/glfwGetCursorPos (long window) xarr yarr)
+        (reset! last-position {:x (* 2 (aget xarr 0)) :y (* 2 (aget yarr 0)) })
+        (.drawString canvas "double : Int -> Int" 
+                     (* 2 (aget xarr 0)) (* 2 (aget yarr 0))
+                     text-font-36 paint))
+      (let [{:keys [x y]} @last-position]
+        (.drawString canvas "double : Int -> Int" 
+                     x y
+                     text-font-36 paint)))
     ))
 
 
@@ -49,6 +67,11 @@
 ;; Need to listen for events
 
 
+
+
+(comment
+  (GLFW/glfwSetCursor (long 1) (long 2)))
+
 (defn -main [& args]
   (.set (GLFWErrorCallback/createPrint System/err))
   (GLFW/glfwInit)
@@ -57,16 +80,23 @@
   (let [width 1024
         height 768
         window (GLFW/glfwCreateWindow width height "Skija LWJGL Demo" MemoryUtil/NULL MemoryUtil/NULL)]
+    (def window window)
     (GLFW/glfwMakeContextCurrent window)
     (GLFW/glfwSwapInterval 1)
-   
+
+    (GLFW/glfwSetInputMode window GLFW/GLFW_CURSOR GLFW/GLFW_CURSOR_NORMAL)
+    (GLFW/glfwSetCursor window (GLFW/glfwCreateStandardCursor GLFW/GLFW_CROSSHAIR_CURSOR))
+    (GLFW/glfwGetMouseButton window GLFW/GLFW_MOUSE_BUTTON_1)
+    
     (GLFW/glfwShowWindow window)  
     (GL/createCapabilities)
+
+  
 
     (doto (Thread. #(clojure.main/main))
       (.start))
 
-    (nrepl/start-server :port 7888)
+    (nrepl/start-server :port 7888 :handler cider.nrepl/cider-nrepl-handler)
     (println "nREPL server started at locahost:7888")
 
     (let [dimensions (atom {:width width :height height})
@@ -87,7 +117,7 @@
             (when (not (GLFW/glfwWindowShouldClose window))
               (.clear canvas (color 0xFFFFFFFF))
               (let [layer (.save canvas)]
-                (#'draw canvas)
+                (#'draw window canvas)
                 (.restoreToCount canvas layer))
               (.flush context)
               (GLFW/glfwSwapBuffers window)
@@ -105,3 +135,6 @@
 
 (comment
   (reset! lwjgl.main/*rect-color (lwjgl.main/color 0xFF33CC33)))
+
+
+
