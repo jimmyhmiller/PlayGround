@@ -1,27 +1,42 @@
+use std::collections::VecDeque;
 use std::process::Command;
 use std::fs::File;
 use std::io::prelude::{Write};
 
-// Come up with better name
+
+// https://en.wikipedia.org/wiki/X86_calling_conventions#x86-64_calling_conventions
+// If the callee wishes to use registers RBX, RSP, RBP, and R12–R15,
+// it must restore their original values before returning control to
+// the caller. All other registers must be saved by the caller if
+// it wishes to preserve their values.
+
+#[allow(dead_code)]
+#[derive(Debug)]
 enum Register {
     RBP,
     RSP,
-    EAX,
     RBX,
     RAX,
     RDI,
     RSI,
     R9,
+    EAX,
     DerefData(String),
-    Const(usize),
+    Const(i64),
+    StackPointerOffset(i64)
 }
 
+#[allow(dead_code)]
+#[derive(Debug)]
 enum Op {
     Push(Register),
     Mov(Register, Register),
     Lea(Register, Register),
     Pop(Register),
     Ret,
+    Inc(Register),
+    Add(Register, Register),
+    Sub(Register, Register),
     SysCall,
     Label(String),
     Section(String),
@@ -71,6 +86,13 @@ impl Emittable for Register {
                 buffer.push_str(label);
                 buffer.push_str("]");
             }
+            Register::StackPointerOffset(offset) => {
+                buffer.push_str("qword ");
+                buffer.push_str("[");
+                buffer.push_str("rbp");
+                buffer.push_str(&offset.to_string());
+                buffer.push_str("]");
+            }
         }
     }
 }
@@ -84,6 +106,22 @@ impl Emittable for Op {
             }
             Op::Mov(a, b) => {
                 buffer.push_str("mov "); 
+                a.emit(buffer);
+                buffer.push_str(", ");
+                b.emit(buffer);
+            }
+            Op::Inc(a) => {
+                buffer.push_str("inc "); 
+                a.emit(buffer);
+            }
+            Op::Add(a, b) => {
+                buffer.push_str("add "); 
+                a.emit(buffer);
+                buffer.push_str(", ");
+                b.emit(buffer);
+            }
+            Op::Sub(a, b) => {
+                buffer.push_str("sub "); 
                 a.emit(buffer);
                 buffer.push_str(", ");
                 b.emit(buffer);
@@ -142,14 +180,48 @@ impl Emittable for Op {
 
 
 
+
 // fn generate_function(name: String, instructions: Vec<Op>)
 
 use Op::*;
 use Register::*;
 
+#[allow(dead_code)]
+#[derive(Debug)]
+enum Lang {
+    Int(i64),
+    Plus,
+}
+
+#[allow(dead_code)]
+fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
+    let mut instructions : VecDeque<Op> = VecDeque::new();
+    let mut offset : i64 = 0;
+    offset -= 8;
+    instructions.push_front(Mov(StackPointerOffset(offset), Const(0)));
+    for e in lang {
+        match e {
+            Lang::Int(i) => {
+                offset -= 8;
+                instructions.push_back(Mov(StackPointerOffset(offset), Const(i)));
+            },
+            Lang::Plus => {
+                // super inefficient
+                instructions.push_back(Mov(RAX, Const(0)));
+                instructions.push_back(Add(RAX, StackPointerOffset(offset+8)));
+                instructions.push_back(Add(RAX, StackPointerOffset(offset)));
+                offset += 8;
+                instructions.push_back(Mov(StackPointerOffset(offset), RAX));
+            },
+        }
+    }
+    instructions.push_front(Sub(RSP, Const(offset.abs())));
+    return instructions;
+}
+
 fn main() -> std::io::Result<()> {
     let buffer = &mut "".to_string();
-    let instructions = [
+    let mut instructions = vec![
         Global("_main".to_string()),
         Extern("_printf".to_string()),
         Extern("_exit".to_string()),
@@ -162,23 +234,47 @@ fn main() -> std::io::Result<()> {
         Call("main".to_string()),
         Label("exit".to_string()),
         Mov(RDI, Const(0)),
-        // Guessing this has to do with alignment?
-        // Need to understand that more.
+        // So I knew that things had to be aligned.
+        // But I had thought it was 16 bit alignment.
+        // When it was 16 BYTE alignment. Which means
+        // 128 bit alignment. 
+        // So when you do call, you push the return address
+        // onto the stack. Which means you are always
+        // aligned on 8 bytes instead of 16.
+        // So before another call you need an odd number
+        // of pushes.
+        // This is really annoying and weird. Will have to
+        // figure out how to deal with this.
         Push(RBP),
         Call("_exit".to_string()),
         Label("main".to_string()),
         Push(RBP),
         Mov(RBP, RSP),
-        Mov(RAX, Const(19)),
+    ];
+    let add_things = to_asm(vec![
+        Lang::Int(20),
+        Lang::Int(2),
+        Lang::Plus,
+        Lang::Int(3),
+        Lang::Plus,
+        Lang::Int(30),
+        Lang::Plus,
+    ]);
+
+    let mut end = vec![
         Lea(RDI, DerefData("format".to_string())),
         Mov(RSI, RAX),
         Push(RAX),
         Mov(RAX, Const(0)),
         Call("_printf".to_string()),
         Pop(RAX),
+        Mov(RSP, RBP),
         Pop(RBP),
         Ret,
     ];
+    instructions.append(&mut add_things.into_iter().collect());
+    instructions.append(&mut end);
+
     for instruction in instructions.iter() {
         instruction.emit(buffer);
     }
