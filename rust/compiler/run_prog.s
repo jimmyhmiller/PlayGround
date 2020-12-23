@@ -20,24 +20,27 @@ call _exit
 main:
 push rbp
 mov rbp, rsp
-sub rsp, 16
+sub rsp, 32
 mov qword [rbp-8], 0
-mov qword [rbp-16], 20
-mov qword [rbp-24], 2
+mov rax, 0
+mov qword [rbp-16], 3
+
+loop:
+mov qword [rbp-24], 20
+mov rdi, qword [rbp-16]
+cmp qword [rbp-24], rdi
+mov qword [rbp-24], rcx
+mov rcx, qword [rbp-24]
+je done
+mov qword [rbp-24], 1
 mov rax, 0
 add rax, qword [rbp-16]
 add rax, qword [rbp-24]
 mov qword [rbp-16], rax
-mov qword [rbp-24], 3
-mov rax, 0
-add rax, qword [rbp-16]
-add rax, qword [rbp-24]
-mov qword [rbp-16], rax
-mov qword [rbp-24], 30
-mov rax, 0
-add rax, qword [rbp-16]
-add rax, qword [rbp-24]
-mov qword [rbp-16], rax
+jmp loop
+
+done:
+mov rax, qword [rbp-16]
 lea rdi, [format]
 mov rsi, rax
 push rax
