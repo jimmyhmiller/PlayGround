@@ -296,7 +296,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
 
 fn main() -> std::io::Result<()> {
     let buffer = &mut "".to_string();
-    let mut instructions = vec![
+    let mut prelude = vec![
         Global("_main".to_string()),
         Extern("_printf".to_string()),
         Extern("_exit".to_string()),
@@ -327,7 +327,7 @@ fn main() -> std::io::Result<()> {
         Mov(RBP, RSP),
     ];
 
-    let add_things = to_asm(vec![
+    let main = to_asm(vec![
         Lang::Int(0),
         Lang::Label("loop".to_string()),
         Lang::Int(21),
@@ -340,19 +340,19 @@ fn main() -> std::io::Result<()> {
         Lang::Label("done".to_string()),
     ]);
 
-
-
-    let mut end = vec![
+    let mut postlude = vec![
         Mov(RSP, RBP),
         Pop(RBP),
         Ret,
     ];
-    instructions.append(&mut add_things.into_iter().collect());
-    instructions.append(&mut end);
+    prelude.append(&mut main.into_iter().collect());
+    prelude.append(&mut postlude);
+    let instructions = prelude;
 
     for instruction in instructions.iter() {
         instruction.emit(buffer);
     }
+
     println!("{}", buffer);
     let mut file = File::create("run_prog.s")?;
     file.write_all(buffer.as_bytes())?;
