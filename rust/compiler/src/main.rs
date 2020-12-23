@@ -21,9 +21,11 @@ enum Register {
     RSI,
     RCX,
     R9,
+    R15,
     EAX,
     DerefData(String),
     Const(i64),
+    Deref(Box<Register>, i64),
     StackPointerOffset(i64)
 }
 
@@ -65,6 +67,9 @@ impl Emittable for Register {
             Register::R9 => {
                 buffer.push_str("r9");
             }
+            Register::R15 => {
+                buffer.push_str("r15");
+            }
             Register::RAX => {
                 buffer.push_str("rax");
             }
@@ -92,6 +97,20 @@ impl Emittable for Register {
             Register::DerefData(label) => {
                 buffer.push_str("[");
                 buffer.push_str(label);
+                buffer.push_str("]");
+            }
+            Register::Deref(register, offset) => {
+                buffer.push_str("qword ");
+                buffer.push_str("[");
+                register.emit(buffer);
+                // don't do anything if 0
+                if *offset > 0 {
+                    buffer.push_str("+");
+                    buffer.push_str(&offset.to_string());
+                } else if *offset < 0 {
+                    buffer.push_str("-");
+                    buffer.push_str(&offset.to_string());
+                }
                 buffer.push_str("]");
             }
             Register::StackPointerOffset(offset) => {
@@ -228,6 +247,8 @@ enum Lang {
     JumpNotEqual(String),
     Jump(String),
     Print,
+    Store(i64),
+    Read(i64),
 }
 
 #[allow(dead_code)]
@@ -284,6 +305,17 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 instructions.push_back(Call("_printf".to_string()));
                 instructions.push_back(Pop(RAX));
             }
+            Lang::Read(index) => {
+                offset -= 8;
+                max_offset = offset;
+                instructions.push_back(Mov(RDI, Deref(Box::new(R15), index*8)));
+                instructions.push_back(Mov(StackPointerOffset(offset), RDI));
+            }
+            // Should store pop?
+            Lang::Store(index) => {
+                instructions.push_back(Mov(RDI, StackPointerOffset(offset)));
+                instructions.push_back(Mov(Deref(Box::new(R15), index*8), RDI));
+            }
         }
     }
 
@@ -299,6 +331,7 @@ fn main() -> std::io::Result<()> {
     let mut prelude = vec![
         Global("_main".to_string()),
         Extern("_printf".to_string()),
+        Extern("_malloc".to_string()),
         Extern("_exit".to_string()),
         Section("data".to_string()),
         Label("format".to_string()),
@@ -323,11 +356,16 @@ fn main() -> std::io::Result<()> {
         Push(RBP),
         Call("_exit".to_string()),
         Label("main".to_string()),
+        Mov(RDI, Const(8*1000)),
+        Call("_malloc".to_string()),
+        Mov(R15, RAX),
         Push(RBP),
         Mov(RBP, RSP),
     ];
 
     let main = to_asm(vec![
+        Lang::Int(42),
+        Lang::Store(0),
         Lang::Int(0),
         Lang::Label("loop".to_string()),
         Lang::Int(21),
@@ -338,6 +376,8 @@ fn main() -> std::io::Result<()> {
         Lang::Plus,
         Lang::Jump("loop".to_string()),
         Lang::Label("done".to_string()),
+        Lang::Read(0),
+        Lang::Print,
     ]);
 
     let mut postlude = vec![
