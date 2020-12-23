@@ -227,6 +227,7 @@ enum Lang {
     JumpEqual(String),
     JumpNotEqual(String),
     Jump(String),
+    Print,
 }
 
 #[allow(dead_code)]
@@ -275,6 +276,14 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
             Lang::Jump(label) => {
                 instructions.push_back(Jmp(label));
             }
+            Lang::Print => {
+                instructions.push_back(Lea(RDI, DerefData("format".to_string())));
+                instructions.push_back(Mov(RSI, StackPointerOffset(offset)));
+                instructions.push_back(Push(RAX));
+                instructions.push_back(Mov(RAX, Const(0)));
+                instructions.push_back(Call("_printf".to_string()));
+                instructions.push_back(Pop(RAX));
+            }
         }
     }
 
@@ -294,7 +303,7 @@ fn main() -> std::io::Result<()> {
         Section("data".to_string()),
         Label("format".to_string()),
         DefaultRel,
-        Db("Hello %d\n".to_string()),
+        Db("%d\n".to_string()),
         Section("text".to_string()),
         Label("_main".to_string()),
         Call("main".to_string()),
@@ -317,12 +326,14 @@ fn main() -> std::io::Result<()> {
         Push(RBP),
         Mov(RBP, RSP),
     ];
+
     let add_things = to_asm(vec![
-        Lang::Int(3),
+        Lang::Int(0),
         Lang::Label("loop".to_string()),
-        Lang::Int(20),
+        Lang::Int(21),
         Lang::Equal,
         Lang::JumpEqual("done".to_string()),
+        Lang::Print,
         Lang::Int(1),
         Lang::Plus,
         Lang::Jump("loop".to_string()),
@@ -332,12 +343,6 @@ fn main() -> std::io::Result<()> {
 
 
     let mut end = vec![
-        Lea(RDI, DerefData("format".to_string())),
-        Mov(RSI, RAX),
-        Push(RAX),
-        Mov(RAX, Const(0)),
-        Call("_printf".to_string()),
-        Pop(RAX),
         Mov(RSP, RBP),
         Pop(RBP),
         Ret,
@@ -378,6 +383,6 @@ fn main() -> std::io::Result<()> {
     println!("{:?}", result2);
             
     let result3 = Command::new("./run_prog").output().unwrap();
-    println!("{:?} {:?}", String::from_utf8_lossy(&result3.stdout), result3.status.code());
+    println!("{} {:?}", String::from_utf8_lossy(&result3.stdout), result3.status.code());
     Ok(())
 }
