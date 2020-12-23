@@ -19,6 +19,7 @@ enum Register {
     RAX,
     RDI,
     RSI,
+    RCX,
     R9,
     EAX,
     DerefData(String),
@@ -37,6 +38,10 @@ enum Op {
     Inc(Register),
     Add(Register, Register),
     Sub(Register, Register),
+    Cmp(Register, Register),
+    Je(String),
+    Jne(String),
+    Jmp(String),
     SysCall,
     Label(String),
     Section(String),
@@ -77,6 +82,9 @@ impl Emittable for Register {
             }
             Register::RSI => {
                 buffer.push_str("rsi");
+            }
+            Register::RCX => {
+                buffer.push_str("rcx");
             }
             Register::Const(x) => {
                 buffer.push_str(x.to_string().as_str());
@@ -126,11 +134,29 @@ impl Emittable for Op {
                 buffer.push_str(", ");
                 b.emit(buffer);
             }
+            Op::Cmp(a, b) => {
+                buffer.push_str("cmp "); 
+                a.emit(buffer);
+                buffer.push_str(", ");
+                b.emit(buffer);
+            }
             Op::Lea(a, b) => {
                 buffer.push_str("lea "); 
                 a.emit(buffer);
                 buffer.push_str(", ");
                 b.emit(buffer);
+            }
+            Op::Je(label) => {
+                buffer.push_str("je ");
+                buffer.push_str(label); 
+            }
+            Op::Jne(label) => {
+                buffer.push_str("jne ");
+                buffer.push_str(label); 
+            }
+            Op::Jmp(label) => {
+                buffer.push_str("jmp ");
+                buffer.push_str(label); 
             }
             Op::Pop(r) => {
                 buffer.push_str("pop "); 
@@ -186,23 +212,38 @@ impl Emittable for Op {
 use Op::*;
 use Register::*;
 
+
+// Need to add print to this language
+// Need to add a few more operators
+// Then I need to make a little higher level language
+// that compiles to this language.
 #[allow(dead_code)]
 #[derive(Debug)]
 enum Lang {
     Int(i64),
     Plus,
+    Label(String),
+    Equal,
+    JumpEqual(String),
+    JumpNotEqual(String),
+    Jump(String),
 }
 
 #[allow(dead_code)]
 fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
     let mut instructions : VecDeque<Op> = VecDeque::new();
     let mut offset : i64 = 0;
+    // Max here is a bit weird because it is negative
+    let mut max_offset : i64 = 0;
+
     offset -= 8;
+    instructions.push_front(Mov(RAX, Const(0)));
     instructions.push_front(Mov(StackPointerOffset(offset), Const(0)));
     for e in lang {
         match e {
             Lang::Int(i) => {
                 offset -= 8;
+                max_offset = offset;
                 instructions.push_back(Mov(StackPointerOffset(offset), Const(i)));
             },
             Lang::Plus => {
@@ -213,9 +254,34 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 offset += 8;
                 instructions.push_back(Mov(StackPointerOffset(offset), RAX));
             },
+            Lang::Label(name) => {
+                instructions.push_back(Label(name));
+            },
+            Lang::Equal => {
+                instructions.push_back(Mov(RDI, StackPointerOffset(offset + 8)));
+                instructions.push_back(Cmp(StackPointerOffset(offset), RDI));
+                instructions.push_back(Mov(StackPointerOffset(offset), RCX));
+            },
+            Lang::JumpEqual(label)=> {
+                instructions.push_back(Mov(RCX, StackPointerOffset(offset)));
+                offset += 8;
+                instructions.push_back(Je(label)); 
+            }
+            Lang::JumpNotEqual(label) => {
+                instructions.push_back(Mov(RCX, StackPointerOffset(offset)));
+                offset += 8;
+                instructions.push_back(Jne(label));
+            }
+            Lang::Jump(label) => {
+                instructions.push_back(Jmp(label));
+            }
         }
     }
-    instructions.push_front(Sub(RSP, Const(offset.abs())));
+
+    // floor because it is negative
+    let reserved_space = (max_offset as f64/16.0).floor() as i64 * 16;
+    instructions.push_front(Sub(RSP, Const(reserved_space.abs())));
+    instructions.push_back(Mov(RAX, StackPointerOffset(offset)));
     return instructions;
 }
 
@@ -252,14 +318,18 @@ fn main() -> std::io::Result<()> {
         Mov(RBP, RSP),
     ];
     let add_things = to_asm(vec![
-        Lang::Int(20),
-        Lang::Int(2),
-        Lang::Plus,
         Lang::Int(3),
+        Lang::Label("loop".to_string()),
+        Lang::Int(20),
+        Lang::Equal,
+        Lang::JumpEqual("done".to_string()),
+        Lang::Int(1),
         Lang::Plus,
-        Lang::Int(30),
-        Lang::Plus,
+        Lang::Jump("loop".to_string()),
+        Lang::Label("done".to_string()),
     ]);
+
+
 
     let mut end = vec![
         Lea(RDI, DerefData("format".to_string())),
