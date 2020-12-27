@@ -37,17 +37,14 @@ ret
 start:
 push rbp
 mov rbp, rsp
-sub rsp, 40
-; Int 42
-mov qword [rbp-8], 42
-mov rdi, qword [rbp-8]
-mov qword [r15], rdi
+; Reserving args space
+add rsp, -24
 ; Pushing arg 0 with value Const(0)
 mov rdi, 0
-mov qword [rsp], rdi
+mov qword [rsp+8], rdi
 ; Pushing arg 1 with value Const(20)
 mov rdi, 20
-mov qword [rsp+8], rdi
+mov qword [rsp+16], rdi
 call body
 leave
 ret
@@ -55,14 +52,14 @@ ret
 body:
 push rbp
 mov rbp, rsp
-sub rsp, 24
+sub rsp, 16
 ; Get Arg 0
-mov rdi, qword [rbp+16]
+mov rdi, qword [rbp+24]
 mov qword [rbp-8], rdi
 
 loop:
 ; Get Arg 1
-mov rdi, qword [rbp+24]
+mov rdi, qword [rbp+32]
 mov qword [rbp-16], rdi
 mov rdi, qword [rbp-8]
 cmp qword [rbp-16], rdi
@@ -72,10 +69,8 @@ je done
 lea rdi, [format]
 mov rsi, qword [rbp-8]
 push rax
-push rax
 mov rax, 0
 call _printf
-pop rax
 pop rax
 ; Int 1
 mov qword [rbp-16], 1
@@ -86,13 +81,6 @@ mov qword [rbp-8], rax
 jmp loop
 
 done:
-mov rdi, qword [r15]
-mov qword [rbp-16], rdi
-lea rdi, [format]
-mov rsi, qword [rbp-16]
-push rax
-mov rax, 0
-call _printf
-pop rax
 leave
 ret
+mov rax, qword [rbp-8]
