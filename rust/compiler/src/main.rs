@@ -26,7 +26,8 @@ enum Register {
     DerefData(String),
     Const(i64),
     Deref(Box<Register>, i64),
-    StackPointerOffset(i64)
+    StackPointerOffset(i64),
+    StackBaseOffset(i64),
 }
 
 #[allow(dead_code)]
@@ -36,6 +37,7 @@ enum Op {
     Mov(Register, Register),
     Lea(Register, Register),
     Pop(Register),
+    Leave,
     Ret,
     Inc(Register),
     Add(Register, Register),
@@ -52,6 +54,7 @@ enum Op {
     DefaultRel,
     Db(String),
     Extern(String),
+    Comment(String),
 }
 
 trait Emittable {
@@ -116,8 +119,25 @@ impl Emittable for Register {
             Register::StackPointerOffset(offset) => {
                 buffer.push_str("qword ");
                 buffer.push_str("[");
+                buffer.push_str("rsp");
+                if *offset > 0 {
+                    buffer.push_str("+");
+                    buffer.push_str(&offset.to_string());
+                } else if *offset < 0 {
+                    buffer.push_str(&offset.to_string());
+                }
+                buffer.push_str("]");
+            }
+            Register::StackBaseOffset(offset) => {
+                buffer.push_str("qword ");
+                buffer.push_str("[");
                 buffer.push_str("rbp");
-                buffer.push_str(&offset.to_string());
+                if *offset > 0 {
+                    buffer.push_str("+");
+                    buffer.push_str(&offset.to_string());
+                } else if *offset < 0 {
+                    buffer.push_str(&offset.to_string());
+                }
                 buffer.push_str("]");
             }
         }
@@ -184,6 +204,9 @@ impl Emittable for Op {
             Op::Ret => {
                 buffer.push_str("ret"); 
             }
+            Op::Leave => {
+                buffer.push_str("leave"); 
+            }
             Op::Label(label) => {
                 buffer.push('\n');
                 buffer.push_str(label);
@@ -215,8 +238,12 @@ impl Emittable for Op {
                 buffer.push_str(&bytes.join(", ").to_string());
                 buffer.push_str(", 0");
             }
-            SysCall => {
+            Op::SysCall => {
                 buffer.push_str("syscall"); 
+            }
+            Op::Comment(comment) => {
+                buffer.push_str("; ");
+                buffer.push_str(comment);
             }
         }
         buffer.push('\n');
@@ -232,15 +259,43 @@ use Op::*;
 use Register::*;
 
 
+
+// I'm transitioning from a generic stack machine to thinking
+// about function calls and how to properly have locals and things
+// like that. So I am allowing myself a way to refer to things
+// on the stack in this general way, but also to have args and locals.
+// Right now I am assuming that args are on the stack,
+// but with this setup, I could put the args on registers like the c abi
+// expects, which would be more performant.
+#[allow(dead_code)]
+#[derive(Debug)]
+enum Location {
+    // Nth element from top of stack
+    Stack(i64),
+    // Nth element above base stack pointer
+    // TODO: Probably change to registers
+    Arg(i64),
+    // Nth element below base stack pointer
+    Local(i64),
+    // Not actually a location, just the value
+    Const(i64),
+}
+
 // Need to add print to this language
 // Need to add a few more operators
 // Then I need to make a little higher level language
 // that compiles to this language.
+// Need to add functions and function calls
 #[allow(dead_code)]
 #[derive(Debug)]
 enum Lang {
     Int(i64),
     Plus,
+    GetArg(i64),
+    SetArg(i64, Location),
+    GetLocal(i64),
+    SetLocal(i64, Location),
+    Add(Location, Location),
     Label(String),
     Equal,
     JumpEqual(String),
@@ -249,80 +304,189 @@ enum Lang {
     Print,
     Store(i64),
     Read(i64),
+    Func(String),
+    FuncEnd,
+    Call(String),
+
 }
 
+
+// Need to think about values on the stack from a call, vs locals on the stack.
+// Maybe I have the base point vs the stack pointer?
+// This is where liveness analysis could make things faster
+fn loc_to_register(location: Location, current_offset: i64) -> Register {
+    match location {
+        Location::Stack(i) => StackBaseOffset(current_offset + i * 8),
+        // Plus 2 because of the return value and base pointer
+        // if we weren't aligned, we push another
+        Location::Arg(i) => {
+            let alignment_factor = if current_offset % 16 == 0 { 1 } else { 0 };
+            StackBaseOffset((i + 2) * 8)
+        },
+        Location::Local(i) => StackBaseOffset(i * -8),
+        Location::Const(i) => Const(i),
+    }
+}
+
+
+
+
 #[allow(dead_code)]
+#[allow(unused_variables)]
 fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
+
+
+
     let mut instructions : VecDeque<Op> = VecDeque::new();
+    macro_rules! comment {
+        ( $($x:expr),+ ) => {
+            instructions.push_back(Comment(format!($($x),+)));
+        }
+    }
+    macro_rules! back {
+        ( $x:expr ) => {
+            instructions.push_back($x);
+        }
+    }
     let mut offset : i64 = 0;
     // Max here is a bit weird because it is negative
     let mut max_offset : i64 = 0;
+    let mut args = 0;
+    let mut current_function_start = 0;
+    let mut args_start : i64 = -1;
+
+    // Consider a macro??
+    // Seems weird, but it worked well for me before.
+    // Really takes the ugliness out of some of this code.
+    // Is it worth it though?
 
     offset -= 8;
-    instructions.push_front(Mov(RAX, Const(0)));
-    instructions.push_front(Mov(StackPointerOffset(offset), Const(0)));
     for e in lang {
         match e {
+            Lang::GetArg(i) => {
+                offset -= 8;
+                max_offset = offset;
+                comment!("Get Arg {}", i);
+                back!(Mov(RDI, loc_to_register(Location::Arg(i), offset)));
+                back!(Mov(StackBaseOffset(offset), RDI));
+            },
+            Lang::SetArg(i, location) => {
+                args += 1;
+                comment!("Pushing arg {} with value {:?}", i, location);
+                back!(Mov(RDI, loc_to_register(location, offset)));
+                back!(Mov(StackPointerOffset(i * 8), RDI));
+            }
+            Lang::GetLocal(i) => {
+                offset -= 8;
+                max_offset = offset;
+                comment!("Get Local {}", i);
+                back!(Mov(RDI, loc_to_register(Location::Local(i), offset)));
+                back!(Mov(StackBaseOffset(offset), RDI));
+            },
+            Lang::SetLocal(i, location) => {
+                
+            }
+            Lang::Func(name) => {
+                back!(Label(name));
+                back!(Push(RBP));
+                back!(Mov(RBP, RSP));
+                offset = 0;
+                max_offset = 0;
+                current_function_start = instructions.len();
+            },
+            Lang::FuncEnd => {
+                // floor because it is negative
+                let reserved_space = (max_offset as f64/16.0).floor() as i64 * 16 - 8;
+                if reserved_space != 0 {
+                    instructions.insert(current_function_start, Sub(RSP, Const(reserved_space.abs())));
+                }
+                back!(Leave);
+                back!(Ret);
+            },
+            Lang::Call(name) => {
+                offset -= 8 * args;
+                max_offset = offset;
+                back!(Call(name));
+            },
             Lang::Int(i) => {
                 offset -= 8;
                 max_offset = offset;
-                instructions.push_back(Mov(StackPointerOffset(offset), Const(i)));
+                comment!("Int {}", i);
+                back!(Mov(StackBaseOffset(offset), Const(i)));
             },
             Lang::Plus => {
-                // super inefficient
-                instructions.push_back(Mov(RAX, Const(0)));
-                instructions.push_back(Add(RAX, StackPointerOffset(offset+8)));
-                instructions.push_back(Add(RAX, StackPointerOffset(offset)));
+                comment!("Plus");
+                back!(Mov(RAX, StackBaseOffset(offset+8)));
+                back!(Add(RAX, StackBaseOffset(offset)));
                 offset += 8;
-                instructions.push_back(Mov(StackPointerOffset(offset), RAX));
+                back!(Mov(StackBaseOffset(offset), RAX));
             },
             Lang::Label(name) => {
-                instructions.push_back(Label(name));
+                back!(Label(name));
             },
             Lang::Equal => {
-                instructions.push_back(Mov(RDI, StackPointerOffset(offset + 8)));
-                instructions.push_back(Cmp(StackPointerOffset(offset), RDI));
-                instructions.push_back(Mov(StackPointerOffset(offset), RCX));
+                back!(Mov(RDI, StackBaseOffset(offset + 8)));
+                back!(Cmp(StackBaseOffset(offset), RDI));
+                back!(Mov(StackBaseOffset(offset), RCX));
             },
             Lang::JumpEqual(label)=> {
-                instructions.push_back(Mov(RCX, StackPointerOffset(offset)));
+                back!(Mov(RCX, StackBaseOffset(offset)));
                 offset += 8;
-                instructions.push_back(Je(label)); 
+                back!(Je(label)); 
             }
             Lang::JumpNotEqual(label) => {
-                instructions.push_back(Mov(RCX, StackPointerOffset(offset)));
+                back!(Mov(RCX, StackBaseOffset(offset)));
                 offset += 8;
-                instructions.push_back(Jne(label));
+                back!(Jne(label));
             }
             Lang::Jump(label) => {
-                instructions.push_back(Jmp(label));
+                back!(Jmp(label));
             }
             Lang::Print => {
-                instructions.push_back(Lea(RDI, DerefData("format".to_string())));
-                instructions.push_back(Mov(RSI, StackPointerOffset(offset)));
-                instructions.push_back(Push(RAX));
-                instructions.push_back(Mov(RAX, Const(0)));
-                instructions.push_back(Call("_printf".to_string()));
-                instructions.push_back(Pop(RAX));
+                back!(Lea(RDI, DerefData("format".to_string())));
+                back!(Mov(RSI, StackBaseOffset(offset)));
+                back!(Push(RAX));
+                // have better way to deal with alignment
+                if offset % 16 != 0 {
+                   back!(Push(RAX));  
+                }
+                back!(Mov(RAX, Const(0)));
+                back!(Call("_printf".to_string()));
+                back!(Pop(RAX));
+                if offset % 16 != 0 {
+                   back!(Pop(RAX));  
+                }
             }
             Lang::Read(index) => {
                 offset -= 8;
                 max_offset = offset;
-                instructions.push_back(Mov(RDI, Deref(Box::new(R15), index*8)));
-                instructions.push_back(Mov(StackPointerOffset(offset), RDI));
+                back!(Mov(RDI, Deref(Box::new(R15), index*8)));
+                back!(Mov(StackBaseOffset(offset), RDI));
             }
             // Should store pop?
             Lang::Store(index) => {
-                instructions.push_back(Mov(RDI, StackPointerOffset(offset)));
-                instructions.push_back(Mov(Deref(Box::new(R15), index*8), RDI));
+                back!(Mov(RDI, StackBaseOffset(offset)));
+                back!(Mov(Deref(Box::new(R15), index*8), RDI));
+            }
+            Lang::Add(loc1, loc2) => {
+                comment!("Add {:?}, {:?}", loc1, loc2);
+                back!(Mov(RAX, loc_to_register(loc1, offset)));
+                back!(Add(RAX, loc_to_register(loc2, offset)));
+                offset += 8;
+                back!(Mov(StackBaseOffset(offset), RAX));
             }
         }
     }
 
-    // floor because it is negative
-    let reserved_space = (max_offset as f64/16.0).floor() as i64 * 16;
-    instructions.push_front(Sub(RSP, Const(reserved_space.abs())));
-    instructions.push_back(Mov(RAX, StackPointerOffset(offset)));
+    // Think about the fact that we are pushing here.
+    // We push in the reverse order of what we want to run.
+
+    // if args != 0 {
+    //     instructions.push_front(Mov(RSP, RBP));
+    //     // ceil because it is positive
+    // }
+
+    // instructions.push_back(Mov(RAX, StackBaseOffset(offset)));
     return instructions;
 }
 
@@ -357,33 +521,53 @@ fn main() -> std::io::Result<()> {
         Call("_exit".to_string()),
         Label("main".to_string()),
         Mov(RDI, Const(8*1000)),
-        Call("_malloc".to_string()),
-        Mov(R15, RAX),
         Push(RBP),
         Mov(RBP, RSP),
+
+        Comment("Push to align stack".to_string()),
+        Push(RBP),
+        Call("_malloc".to_string()),
+        Pop(RBP),
+        // Should probably be in bss or something?
+        Mov(R15, RAX),
+        Comment("Push to align stack".to_string()),
+        Push(RBP),
+        Call("start".to_string()),
+        Pop(RBP),
+        Leave,
+        Ret,
     ];
 
     let main = to_asm(vec![
+        Lang::Func("start".to_string()),
         Lang::Int(42),
         Lang::Store(0),
-        Lang::Int(0),
+        Lang::SetArg(0, Location::Const(0)),
+        Lang::SetArg(1, Location::Const(20)),
+        Lang::Call("body".to_string()),
+        Lang::FuncEnd,
+
+
+        Lang::Func("body".to_string()),
+        Lang::GetArg(0),
         Lang::Label("loop".to_string()),
-        Lang::Int(21),
+        Lang::GetArg(1),
         Lang::Equal,
         Lang::JumpEqual("done".to_string()),
         Lang::Print,
         Lang::Int(1),
-        Lang::Plus,
+        Lang::Add(Location::Stack(1), Location::Stack(0)),
         Lang::Jump("loop".to_string()),
         Lang::Label("done".to_string()),
         Lang::Read(0),
         Lang::Print,
+        Lang::FuncEnd,
     ]);
 
     let mut postlude = vec![
-        Mov(RSP, RBP),
-        Pop(RBP),
-        Ret,
+        // Mov(RSP, RBP),
+        // Pop(RBP),
+        // Ret,
     ];
     prelude.append(&mut main.into_iter().collect());
     prelude.append(&mut postlude);
