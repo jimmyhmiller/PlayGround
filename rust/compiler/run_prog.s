@@ -49,6 +49,23 @@ mov rdi, 0
 ; Pushing arg 1 with value Const(20)
 mov rsi, 20
 call body
+add rsp, -8
+mov qword [rsp], rax
+; Print!
+mov r9, qword [rsp]
+push rdi
+push rsi
+lea rdi, [format]
+mov rsi, r9
+push rax
+push rax
+mov rax, 0
+call _printf
+pop rax
+pop rax
+pop rsi
+pop rdi
+mov rax, qword [rsp]
 leave
 ret
 
@@ -104,5 +121,6 @@ pop rax
 pop rax
 pop rsi
 pop rdi
+mov rax, qword [rsp]
 leave
 ret
