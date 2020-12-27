@@ -285,6 +285,15 @@ enum Location {
     Const(i64),
 }
 
+impl Location {
+    fn is_stack(&self) -> bool {
+        match self {
+            Location::Stack(_) => true,
+            _ => false
+        }
+    }
+}
+
 // Need to add print to this language
 // Need to add a few more operators
 // Then I need to make a little higher level language
@@ -320,14 +329,14 @@ enum Lang {
 // Need to think about values on the stack from a call, vs locals on the stack.
 // Maybe I have the base point vs the stack pointer?
 // This is where liveness analysis could make things faster
-fn loc_to_register(location: Location, _current_offset: i64) -> Register {
+fn loc_to_register(location: & Location, _current_offset: i64) -> Register {
     match location {
         Location::Stack(i) => StackPointerOffset(i * 8),
         // Plus 2 because of the return value and base pointer
         // if we weren't aligned, we push another
-        Location::Arg(i) => ARGUMENT_REGISTERS[i as usize].clone(),
+        Location::Arg(i) => ARGUMENT_REGISTERS[*i as usize].clone(),
         Location::Local(i) => StackBaseOffset(i * -8),
-        Location::Const(i) => Const(i),
+        Location::Const(i) => Const(*i),
     }
 }
 
@@ -400,7 +409,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
             Lang::GetLocal(i) => {
                 move_stack_pointer!();
                 comment!("Get Local {}", i);
-                back!(Mov(R9, loc_to_register(Location::Local(i), offset)));
+                back!(Mov(R9, loc_to_register(&Location::Local(i), offset)));
                 back!(Mov(StackPointerOffset(0), R9));
             },
             Lang::SetLocal(i, location) => {
@@ -426,7 +435,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 fix_alignment!();
                 // move_stack_pointer!(1);
                 let i = 0;
-                back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(arg1, offset)));
+                back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(&arg1, offset)));
                 // back!(Mov(StackPointerOffset(i * 8), RDI));
                 back!(Call(name));
                 offset = 0;
@@ -437,12 +446,12 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 // move_stack_pointer!(2);
 
                 let i = 0;
-                back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(arg1, offset)));
+                back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(&arg1, offset)));
                 // back!(Mov(StackPointerOffset(i * 8), RDI));
 
                 let i = 1;
                 comment!("Pushing arg {} with value {:?}", i, arg2);
-                back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(arg2, offset)));
+                back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(&arg2, offset)));
                 // back!(Mov(StackPointerOffset(i * 8), RDI));
                 back!(Call(name));
                 offset = 0;
@@ -514,9 +523,11 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
             }
             Lang::Add(loc1, loc2) => {
                 comment!("Add {:?}, {:?}", loc1, loc2);
-                back!(Mov(RAX, loc_to_register(loc1, offset)));
-                back!(Add(RAX, loc_to_register(loc2, offset)));
-                move_stack_pointer!(-1);
+                back!(Mov(RAX, loc_to_register(&loc1, offset)));
+                back!(Add(RAX, loc_to_register(&loc2, offset)));
+                if loc1.is_stack() && loc2.is_stack() {
+                    move_stack_pointer!(-1);
+                }
                 back!(Mov(StackPointerOffset(0), RAX));
             }
         }
@@ -583,19 +594,12 @@ fn main() -> std::io::Result<()> {
         Lang::FuncEnd,
 
         Lang::Func("body".to_string()),
-        // This causes a segfault. Need to fix.
-        // alignment?
-
-        Lang::Int(42),
         Lang::GetArg(0),
         Lang::Label("loop".to_string()),
         Lang::GetArg(1),
-        // Lang::Equal,
-        // Lang::Print,
         Lang::JumpEqual("done".to_string()),
         Lang::Print,
-        Lang::Add(Location::Stack(1), Location::Const(1)),
-        // Lang::Print,
+        Lang::Add(Location::Stack(0), Location::Const(1)),
         Lang::Jump("loop".to_string()),
         Lang::Label("done".to_string()),
         Lang::Read(0),
