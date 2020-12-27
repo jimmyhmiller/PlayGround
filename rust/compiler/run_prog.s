@@ -43,12 +43,11 @@ mov qword [rsp], 42
 ; Store 0
 mov r9, qword [rsp]
 mov qword [r15], r9
-; Arg 0 with value Const(0)
+; Arg 0 with value Const(1)
+mov rdi, 1
 push rbp
-mov rdi, 0
-; Pushing arg 1 with value Const(20)
-mov rsi, 20
-call body
+call fib
+pop rbp
 add rsp, -8
 mov qword [rsp], rax
 ; Print!
@@ -69,58 +68,60 @@ mov rax, qword [rsp]
 leave
 ret
 
-body:
+fib:
 push rbp
 mov rbp, rsp
 ; Get Arg 0
 add rsp, -8
 mov qword [rsp], rdi
 
-loop:
-; Get Arg 1
+loop_fib:
+; Int 0
 add rsp, -8
-mov qword [rsp], rsi
+mov qword [rsp], 0
 ; Jump Equal
 mov r9, qword [rsp]
 add rsp, 8
 cmp qword [rsp], r9
-je done
-; Print!
-mov r9, qword [rsp]
-push rdi
-push rsi
-lea rdi, [format]
-mov rsi, r9
-push rax
-mov rax, 0
-call _printf
-pop rax
-pop rsi
-pop rdi
-; Add Stack(0), Const(1)
-mov rax, qword [rsp]
-add rax, 1
-mov qword [rsp], rax
-jmp loop
-
-done:
+je done_fib
+; Int 1
 add rsp, -8
-mov r9, qword [r15]
-mov qword [rsp], r9
-; Print!
+mov qword [rsp], 1
+; Jump Equal
 mov r9, qword [rsp]
-push rdi
-push rsi
-lea rdi, [format]
-mov rsi, r9
-push rax
-push rax
-mov rax, 0
-call _printf
-pop rax
-pop rax
-pop rsi
-pop rdi
+add rsp, 8
+cmp qword [rsp], r9
+je done_fib
+; Add Arg(0), Const(-1)
+mov rax, rdi
+add rax, -1
+mov qword [rsp], rax
+; Arg 0 with value Stack(0)
+mov rdi, qword [rsp]
+push rbp
+call fib
+pop rbp
+add rsp, -8
+mov qword [rsp], rax
+; Add Arg(0), Const(-2)
+mov rax, rdi
+add rax, -2
+mov qword [rsp], rax
+; Arg 0 with value Stack(0)
+mov rdi, qword [rsp]
+call fib
+add rsp, -8
+mov qword [rsp], rax
+; Add Stack(0), Stack(1)
+mov rax, qword [rsp]
+add rax, qword [rsp+8]
+add rsp, 8
+mov qword [rsp], rax
+
+done_fib:
+; Int 1
+add rsp, -8
+mov qword [rsp], 1
 mov rax, qword [rsp]
 leave
 ret
