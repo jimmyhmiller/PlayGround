@@ -55,9 +55,6 @@ ret
 body:
 push rbp
 mov rbp, rsp
-; Int 42
-add rsp, -8
-mov qword [rsp], 42
 ; Get Arg 0
 add rsp, -8
 mov qword [rsp], rdi
@@ -78,20 +75,14 @@ push rsi
 lea rdi, [format]
 mov rsi, r9
 push rax
-push rax
 mov rax, 0
 call _printf
 pop rax
-pop rax
 pop rsi
 pop rdi
-; Int 1
-add rsp, -8
-mov qword [rsp], 1
-; Add Stack(1), Stack(0)
-mov rax, qword [rsp+8]
-add rax, qword [rsp]
-add rsp, 8
+; Add Stack(0), Const(1)
+mov rax, qword [rsp]
+add rax, 1
 mov qword [rsp], rax
 jmp loop
 
@@ -106,8 +97,10 @@ push rsi
 lea rdi, [format]
 mov rsi, r9
 push rax
+push rax
 mov rax, 0
 call _printf
+pop rax
 pop rax
 pop rsi
 pop rdi
