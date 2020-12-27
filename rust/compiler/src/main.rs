@@ -378,14 +378,18 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
     }
 
     macro_rules! fix_alignment {
-        ( $n:expr ) => {
+        ( $n:expr ) => {{
             let new_offset = offset + -8 * $n;
             if new_offset % 16 != 0 {
                 back!(Push(RBP));
+                offset -= 8;
+                true
+            } else {
+                false
             }
-        };
+        }};
         () => {
-            fix_alignment!(0);
+            fix_alignment!(0)
         }
     }
     // Max here is a bit weird because it is negative
@@ -398,7 +402,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
     // Is it worth it though?
 
     for e in lang {
-        println!("offset: {}", offset);
+        println!("e: {:?}, offset: {}", e, offset);
         match e {
             Lang::GetArg(i) => {
                 comment!("Get Arg {}", i);
@@ -427,25 +431,31 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 back!(Ret);
             },
             Lang::Call0(name) => {
-                fix_alignment!();
+                let fixed = fix_alignment!();
                 back!(Call(name));
-                move_stack_pointer!();
+                if fixed {
+                    offset -= 8;
+                    back!(Pop(RBP));
+                }
                 move_stack_pointer!();
                 back!(Mov(StackPointerOffset(0), RAX));
             },
             Lang::Call1(name, arg1) => {
                 comment!("Arg {} with value {:?}", 0, arg1);
-                fix_alignment!();
                 // move_stack_pointer!(1);
                 let i = 0;
                 back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(&arg1, offset)));
                 // back!(Mov(StackPointerOffset(i * 8), RDI));
+                let fixed = fix_alignment!();
                 back!(Call(name));
+                if fixed {
+                    offset -= 8;
+                    back!(Pop(RBP));
+                }
                 move_stack_pointer!();
                 back!(Mov(StackPointerOffset(0), RAX));            },
             Lang::Call2(name, arg1, arg2) => {
                 comment!("Arg {} with value {:?}", 0, arg1);
-                fix_alignment!();
                 // move_stack_pointer!(2);
 
                 let i = 0;
@@ -456,7 +466,12 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 comment!("Pushing arg {} with value {:?}", i, arg2);
                 back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(&arg2, offset)));
                 // back!(Mov(StackPointerOffset(i * 8), RDI));
+                let fixed = fix_alignment!();
                 back!(Call(name));
+                if fixed {
+                    offset -= 8;
+                    back!(Pop(RBP));
+                }
                 move_stack_pointer!();
                 back!(Mov(StackPointerOffset(0), RAX));
             },
@@ -499,16 +514,16 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 back!(Lea(RDI, DerefData("format".to_string())));
                 back!(Mov(RSI, R9));
                 back!(Push(RAX));
-                // Do I have to do two passes
-                // Or somehow do this dynamically?
-                if offset % 16 == 0 {
+                // We just did three pushes hence 3.
+                // Can of course simplify, but for clairity leaving it.
+                if (offset + 8*3) % 16 != 0 {
                    back!(Push(RAX));  
                 }
                 // Printf cares about rax for some weird reason
                 back!(Mov(RAX, Const(0)));
                 back!(Call("_printf".to_string()));
                 back!(Pop(RAX));
-                if offset % 16 == 0 {
+                if (offset + 8*3) % 16 != 0 {
                    back!(Pop(RAX));  
                 }
                 back!(Pop(RSI));
@@ -535,6 +550,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 back!(Mov(StackPointerOffset(0), RAX));
             }
         }
+        println!("offset after: {}", offset);
     }
 
     return instructions;
@@ -594,21 +610,41 @@ fn main() -> std::io::Result<()> {
         Lang::Func("start".to_string()),
         Lang::Int(42),
         Lang::Store(0),
-        Lang::Call2("body".to_string(), Location::Const(0), Location::Const(20)),
+        // Lang::Call2("body".to_string(), Location::Const(0), Location::Const(20)),
+        Lang::Call1("fib".to_string(), Location::Const(1)),
         Lang::Print,
         Lang::FuncEnd,
 
-        Lang::Func("body".to_string()),
+        // Lang::Func("body".to_string()),
+        // Lang::GetArg(0),
+        // Lang::Label("loop".to_string()),
+        // Lang::GetArg(1),
+        // Lang::JumpEqual("done".to_string()),
+        // Lang::Print,
+        // Lang::Add(Location::Stack(0), Location::Const(1)),
+        // Lang::Jump("loop".to_string()),
+        // Lang::Label("done".to_string()),
+        // Lang::Read(0),
+        // Lang::Print,
+        // Lang::FuncEnd,
+
+// Not yet working
+        Lang::Func("fib".to_string()),
         Lang::GetArg(0),
-        Lang::Label("loop".to_string()),
-        Lang::GetArg(1),
-        Lang::JumpEqual("done".to_string()),
-        Lang::Print,
-        Lang::Add(Location::Stack(0), Location::Const(1)),
-        Lang::Jump("loop".to_string()),
-        Lang::Label("done".to_string()),
-        Lang::Read(0),
-        Lang::Print,
+        Lang::Label("loop_fib".to_string()),
+        Lang::Int(0),
+        Lang::JumpEqual("done_fib".to_string()),
+        Lang::Int(1),
+        Lang::JumpEqual("done_fib".to_string()),
+        Lang::Add(Location::Arg(0), Location::Const(-1)),
+        Lang::Call1("fib".to_string(), Location::Stack(0)),
+        Lang::Add(Location::Arg(0), Location::Const(-2)),
+        Lang::Call1("fib".to_string(), Location::Stack(0)),
+        Lang::Add(Location::Stack(0), Location::Stack(1)),
+
+
+        Lang::Label("done_fib".to_string()),
+        Lang::Int(1),
         Lang::FuncEnd,
     ]);
     prelude.append(&mut main.into_iter().collect());
