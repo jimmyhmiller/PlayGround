@@ -441,12 +441,16 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
             Lang::Print => {
                 back!(Lea(RDI, DerefData("format".to_string())));
                 back!(Mov(RSI, StackBaseOffset(offset)));
+                back!(Push(RAX));
                 // have better way to deal with alignment
-                if offset % 16 == 0 {
+                if offset % 16 != 0 {
                    back!(Push(RAX));  
                 }
+                // Printf cares about rax for some weird reason
+                back!(Mov(RAX, Const(0)));
                 back!(Call("_printf".to_string()));
-                if offset % 16 == 0 {
+                back!(Pop(RAX));
+                if offset % 16 != 0 {
                    back!(Pop(RAX));  
                 }
             }
