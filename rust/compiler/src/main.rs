@@ -292,12 +292,11 @@ enum Lang {
     Int(i64),
     Plus,
     GetArg(i64),
-    SetArg(i64, Location),
     GetLocal(i64),
     SetLocal(i64, Location),
     Add(Location, Location),
     Label(String),
-    Equal,
+    // Equal,
     JumpEqual(String),
     JumpNotEqual(String),
     Jump(String),
@@ -306,7 +305,10 @@ enum Lang {
     Read(i64),
     Func(String),
     FuncEnd,
-    Call(String),
+    // i64 is the number of arguments
+    Call0(String),
+    Call1(String, Location),
+    Call2(String, Location, Location),
 
 }
 
@@ -314,9 +316,9 @@ enum Lang {
 // Need to think about values on the stack from a call, vs locals on the stack.
 // Maybe I have the base point vs the stack pointer?
 // This is where liveness analysis could make things faster
-fn loc_to_register(location: Location, current_offset: i64) -> Register {
+fn loc_to_register(location: Location, _current_offset: i64) -> Register {
     match location {
-        Location::Stack(i) => StackBaseOffset(current_offset + i * 8),
+        Location::Stack(i) => StackPointerOffset(i * 8),
         // Plus 2 because of the return value and base pointer
         // if we weren't aligned, we push another
         Location::Arg(i) => StackBaseOffset((i + 2) * 8),
@@ -345,39 +347,56 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
             instructions.push_back($x);
         }
     }
+
+    
+
     let mut offset : i64 = 0;
+
+    macro_rules! move_stack_pointer {
+        ( $n:expr ) => {
+            offset -= $n * 8;
+            // max_offset = offset;
+            back!(Add(RSP, Const($n * -8)));
+        };
+        () => {
+           move_stack_pointer!(1);
+        }
+    }
+
+    macro_rules! fix_alignment {
+        ( $n:expr ) => {
+            let new_offset = offset + -8 * $n;
+            if new_offset % 16 != 0 {
+                back!(Push(RBP));
+            }
+        };
+        () => {
+            fix_alignment!(0);
+        }
+    }
     // Max here is a bit weird because it is negative
-    let mut max_offset : i64 = 0;
-    let mut args = 0;
-    let mut current_function_start = 0;
+    // let mut max_offset : i64 = 0;
+    // let args = 0;
 
     // Consider a macro??
     // Seems weird, but it worked well for me before.
     // Really takes the ugliness out of some of this code.
     // Is it worth it though?
 
-    offset -= 8;
     for e in lang {
+        println!("offset: {}", offset);
         match e {
             Lang::GetArg(i) => {
-                offset -= 8;
-                max_offset = offset;
+                move_stack_pointer!();
                 comment!("Get Arg {}", i);
                 back!(Mov(RDI, loc_to_register(Location::Arg(i), offset)));
-                back!(Mov(StackBaseOffset(offset), RDI));
+                back!(Mov(StackPointerOffset(0), RDI));
             },
-            Lang::SetArg(i, location) => {
-                args += 1;
-                comment!("Pushing arg {} with value {:?}", i, location);
-                back!(Mov(RDI, loc_to_register(location, offset)));
-                back!(Mov(StackPointerOffset(i * 8), RDI));
-            }
             Lang::GetLocal(i) => {
-                offset -= 8;
-                max_offset = offset;
+                move_stack_pointer!();
                 comment!("Get Local {}", i);
                 back!(Mov(RDI, loc_to_register(Location::Local(i), offset)));
-                back!(Mov(StackBaseOffset(offset), RDI));
+                back!(Mov(StackPointerOffset(0), RDI));
             },
             Lang::SetLocal(i, location) => {
                 
@@ -387,105 +406,113 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 back!(Push(RBP));
                 back!(Mov(RBP, RSP));
                 offset = 0;
-                max_offset = 0;
-                current_function_start = instructions.len();
             },
             Lang::FuncEnd => {
-                // floor because it is negative
-                let reserved_space = (max_offset as f64/16.0).floor() as i64 * 16 - 8;
-                if reserved_space != 0 {
-                    instructions.insert(current_function_start, Sub(RSP, Const(reserved_space.abs())));
-                }
                 back!(Leave);
                 back!(Ret);
             },
-            Lang::Call(name) => {
-                offset -= 8 * args;
-                max_offset = offset;
+            Lang::Call0(name) => {
+                fix_alignment!();
                 back!(Call(name));
+                offset = 0;
+            },
+            Lang::Call1(name, arg1) => {
+                fix_alignment!(1);
+                move_stack_pointer!(1);
+                let i = 0;
+                comment!("Pushing arg {} with value {:?}", i, arg1);
+                back!(Mov(RDI, loc_to_register(arg1, offset)));
+                back!(Mov(StackPointerOffset(i * 8), RDI));
+                back!(Call(name));
+                offset = 0;
+            },
+            Lang::Call2(name, arg1, arg2) => {
+                fix_alignment!(2);
+                move_stack_pointer!(2);
+
+                let i = 0;
+                comment!("Pushing arg {} with value {:?}", i, arg1);
+                back!(Mov(RDI, loc_to_register(arg1, offset)));
+                back!(Mov(StackPointerOffset(i * 8), RDI));
+
+                let i = 1;
+                comment!("Pushing arg {} with value {:?}", i, arg2);
+                back!(Mov(RDI, loc_to_register(arg2, offset)));
+                back!(Mov(StackPointerOffset(i * 8), RDI));
+                back!(Call(name));
+                offset = 0;
             },
             Lang::Int(i) => {
-                offset -= 8;
-                max_offset = offset;
+                move_stack_pointer!();
                 comment!("Int {}", i);
-                back!(Mov(StackBaseOffset(offset), Const(i)));
+                back!(Mov(StackPointerOffset(0), Const(i)));
             },
             Lang::Plus => {
                 comment!("Plus");
-                back!(Mov(RAX, StackBaseOffset(offset+8)));
-                back!(Add(RAX, StackBaseOffset(offset)));
-                offset += 8;
-                back!(Mov(StackBaseOffset(offset), RAX));
+                back!(Mov(RAX, StackPointerOffset(-8)));
+                back!(Add(RAX, StackPointerOffset(0)));
+                move_stack_pointer!(-1);
+                back!(Mov(StackPointerOffset(0), RAX));
             },
             Lang::Label(name) => {
                 back!(Label(name));
             },
-            Lang::Equal => {
-                back!(Mov(RDI, StackBaseOffset(offset + 8)));
-                back!(Cmp(StackBaseOffset(offset), RDI));
-                back!(Mov(StackBaseOffset(offset), RCX));
-            },
             Lang::JumpEqual(label)=> {
-                back!(Mov(RCX, StackBaseOffset(offset)));
-                offset += 8;
+                back!(Mov(RDI, StackPointerOffset(-8)));
+                move_stack_pointer!(-1);
+                back!(Cmp(StackPointerOffset(-8), RDI));
                 back!(Je(label)); 
             }
             Lang::JumpNotEqual(label) => {
-                back!(Mov(RCX, StackBaseOffset(offset)));
-                offset += 8;
-                back!(Jne(label));
+                back!(Mov(RDI, StackPointerOffset(-8)));
+                move_stack_pointer!(-1);
+                back!(Cmp(StackPointerOffset(-8), RDI));
+                back!(Jne(label)); 
             }
             Lang::Jump(label) => {
                 back!(Jmp(label));
             }
             Lang::Print => {
                 back!(Lea(RDI, DerefData("format".to_string())));
-                back!(Mov(RSI, StackBaseOffset(offset)));
+                back!(Mov(RSI, StackPointerOffset(0)));
                 back!(Push(RAX));
-                // have better way to deal with alignment
-                if offset % 16 != 0 {
+                // Do I have to do two passes
+                // Or somehow do this dynamically?
+                if offset % 16 == 0 {
                    back!(Push(RAX));  
                 }
                 // Printf cares about rax for some weird reason
                 back!(Mov(RAX, Const(0)));
                 back!(Call("_printf".to_string()));
                 back!(Pop(RAX));
-                if offset % 16 != 0 {
+                if offset % 16 == 0 {
                    back!(Pop(RAX));  
                 }
             }
             Lang::Read(index) => {
-                offset -= 8;
-                max_offset = offset;
+                move_stack_pointer!();
                 back!(Mov(RDI, Deref(Box::new(R15), index*8)));
-                back!(Mov(StackBaseOffset(offset), RDI));
+                back!(Mov(StackPointerOffset(0), RDI));
             }
             // Should store pop?
             Lang::Store(index) => {
-                back!(Mov(RDI, StackBaseOffset(offset)));
+                back!(Mov(RDI, StackPointerOffset(0)));
                 back!(Mov(Deref(Box::new(R15), index*8), RDI));
             }
             Lang::Add(loc1, loc2) => {
                 comment!("Add {:?}, {:?}", loc1, loc2);
                 back!(Mov(RAX, loc_to_register(loc1, offset)));
                 back!(Add(RAX, loc_to_register(loc2, offset)));
-                offset += 8;
-                back!(Mov(StackBaseOffset(offset), RAX));
+                move_stack_pointer!(-1);
+                back!(Mov(StackPointerOffset(0), RAX));
             }
         }
     }
 
-    // Think about the fact that we are pushing here.
-    // We push in the reverse order of what we want to run.
-
-    // if args != 0 {
-    //     instructions.push_front(Mov(RSP, RBP));
-    //     // ceil because it is positive
-    // }
-
-    // instructions.push_back(Mov(RAX, StackBaseOffset(offset)));
     return instructions;
 }
+
+// Figure out how to reduce changes to rsp
 
 fn main() -> std::io::Result<()> {
     let buffer = &mut "".to_string();
@@ -539,38 +566,31 @@ fn main() -> std::io::Result<()> {
         Lang::Func("start".to_string()),
         Lang::Int(42),
         Lang::Store(0),
-        Lang::SetArg(0, Location::Const(0)),
-        Lang::SetArg(1, Location::Const(20)),
-        Lang::Call("body".to_string()),
+        Lang::Call2("body".to_string(), Location::Const(0), Location::Const(20)),
         Lang::FuncEnd,
-
 
         Lang::Func("body".to_string()),
         // This causes a segfault. Need to fix.
         // alignment?
-        // Lang::Int(42),
+
+        Lang::Int(42),
         Lang::GetArg(0),
         Lang::Label("loop".to_string()),
         Lang::GetArg(1),
-        Lang::Equal,
+        // Lang::Equal,
+        // Lang::Print,
         Lang::JumpEqual("done".to_string()),
         Lang::Print,
         Lang::Int(1),
         Lang::Add(Location::Stack(1), Location::Stack(0)),
+        // Lang::Print,
         Lang::Jump("loop".to_string()),
         Lang::Label("done".to_string()),
         Lang::Read(0),
         Lang::Print,
         Lang::FuncEnd,
     ]);
-
-    let mut postlude = vec![
-        // Mov(RSP, RBP),
-        // Pop(RBP),
-        // Ret,
-    ];
     prelude.append(&mut main.into_iter().collect());
-    prelude.append(&mut postlude);
     let instructions = prelude;
 
     for instruction in instructions.iter() {
