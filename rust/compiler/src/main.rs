@@ -548,7 +548,7 @@ fn main() -> std::io::Result<()> {
         Lang::Func("body".to_string()),
         // This causes a segfault. Need to fix.
         // alignment?
-        // Lang::Int(42),
+        Lang::Int(42),
         Lang::GetArg(0),
         Lang::Label("loop".to_string()),
         Lang::GetArg(1),
