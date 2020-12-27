@@ -319,10 +319,7 @@ fn loc_to_register(location: Location, current_offset: i64) -> Register {
         Location::Stack(i) => StackBaseOffset(current_offset + i * 8),
         // Plus 2 because of the return value and base pointer
         // if we weren't aligned, we push another
-        Location::Arg(i) => {
-            let alignment_factor = if current_offset % 16 == 0 { 1 } else { 0 };
-            StackBaseOffset((i + 2) * 8)
-        },
+        Location::Arg(i) => StackBaseOffset((i + 2) * 8),
         Location::Local(i) => StackBaseOffset(i * -8),
         Location::Const(i) => Const(i),
     }
@@ -353,7 +350,6 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
     let mut max_offset : i64 = 0;
     let mut args = 0;
     let mut current_function_start = 0;
-    let mut args_start : i64 = -1;
 
     // Consider a macro??
     // Seems weird, but it worked well for me before.
@@ -549,6 +545,9 @@ fn main() -> std::io::Result<()> {
 
 
         Lang::Func("body".to_string()),
+        // This causes a segfault. Need to fix.
+        // alignment?
+        // Lang::Int(42),
         Lang::GetArg(0),
         Lang::Label("loop".to_string()),
         Lang::GetArg(1),
