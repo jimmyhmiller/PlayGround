@@ -37,19 +37,17 @@ ret
 start:
 push rbp
 mov rbp, rsp
-add rsp, -8
 ; Int 42
+add rsp, -8
 mov qword [rsp], 42
-mov rdi, qword [rsp]
-mov qword [r15], rdi
+; Store 0
+mov r9, qword [rsp]
+mov qword [r15], r9
+; Arg 0 with value Const(0)
 push rbp
-add rsp, -16
-; Pushing arg 0 with value Const(0)
 mov rdi, 0
-mov qword [rsp], rdi
 ; Pushing arg 1 with value Const(20)
-mov rdi, 20
-mov qword [rsp+8], rdi
+mov rsi, 20
 call body
 leave
 ret
@@ -57,33 +55,38 @@ ret
 body:
 push rbp
 mov rbp, rsp
-add rsp, -8
 ; Int 42
-mov qword [rsp], 42
 add rsp, -8
+mov qword [rsp], 42
 ; Get Arg 0
-mov rdi, qword [rbp+16]
+add rsp, -8
 mov qword [rsp], rdi
 
 loop:
-add rsp, -8
 ; Get Arg 1
-mov rdi, qword [rbp+24]
-mov qword [rsp], rdi
-mov rdi, qword [rsp-8]
+add rsp, -8
+mov qword [rsp], rsi
+; Jump Equal
+mov r9, qword [rsp]
 add rsp, 8
-cmp qword [rsp-8], rdi
+cmp qword [rsp], r9
 je done
+; Print!
+mov r9, qword [rsp]
+push rdi
+push rsi
 lea rdi, [format]
-mov rsi, qword [rsp]
+mov rsi, r9
 push rax
 push rax
 mov rax, 0
 call _printf
 pop rax
 pop rax
-add rsp, -8
+pop rsi
+pop rdi
 ; Int 1
+add rsp, -8
 mov qword [rsp], 1
 ; Add Stack(1), Stack(0)
 mov rax, qword [rsp+8]
@@ -94,13 +97,19 @@ jmp loop
 
 done:
 add rsp, -8
-mov rdi, qword [r15]
-mov qword [rsp], rdi
+mov r9, qword [r15]
+mov qword [rsp], r9
+; Print!
+mov r9, qword [rsp]
+push rdi
+push rsi
 lea rdi, [format]
-mov rsi, qword [rsp]
+mov rsi, r9
 push rax
 mov rax, 0
 call _printf
 pop rax
+pop rsi
+pop rdi
 leave
 ret

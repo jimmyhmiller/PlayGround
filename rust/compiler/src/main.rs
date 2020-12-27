@@ -11,12 +11,13 @@ use std::io::prelude::{Write};
 // it wishes to preserve their values.
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Register {
     RBP,
     RSP,
     RBX,
     RAX,
+    RDX,
     RDI,
     RSI,
     RCX,
@@ -66,6 +67,9 @@ impl Emittable for Register {
         match self {
             Register::RBX => {
                 buffer.push_str("rbx");
+            }
+            Register::RDX => {
+                buffer.push_str("rdx");
             }
             Register::R9 => {
                 buffer.push_str("r9");
@@ -321,13 +325,14 @@ fn loc_to_register(location: Location, _current_offset: i64) -> Register {
         Location::Stack(i) => StackPointerOffset(i * 8),
         // Plus 2 because of the return value and base pointer
         // if we weren't aligned, we push another
-        Location::Arg(i) => StackBaseOffset((i + 2) * 8),
+        Location::Arg(i) => ARGUMENT_REGISTERS[i as usize].clone(),
         Location::Local(i) => StackBaseOffset(i * -8),
         Location::Const(i) => Const(i),
     }
 }
 
 
+const ARGUMENT_REGISTERS: [Register; 4] = [RDI, RSI, RDX, RCX];
 
 
 #[allow(dead_code)]
@@ -387,16 +392,16 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
         println!("offset: {}", offset);
         match e {
             Lang::GetArg(i) => {
-                move_stack_pointer!();
                 comment!("Get Arg {}", i);
-                back!(Mov(RDI, loc_to_register(Location::Arg(i), offset)));
-                back!(Mov(StackPointerOffset(0), RDI));
+                move_stack_pointer!();
+                // back!(Mov(RDI, loc_to_register(Location::Arg(i), offset)));
+                back!(Mov(StackPointerOffset(0), ARGUMENT_REGISTERS[i as usize].clone()));
             },
             Lang::GetLocal(i) => {
                 move_stack_pointer!();
                 comment!("Get Local {}", i);
-                back!(Mov(RDI, loc_to_register(Location::Local(i), offset)));
-                back!(Mov(StackPointerOffset(0), RDI));
+                back!(Mov(R9, loc_to_register(Location::Local(i), offset)));
+                back!(Mov(StackPointerOffset(0), R9));
             },
             Lang::SetLocal(i, location) => {
                 
@@ -417,34 +422,34 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 offset = 0;
             },
             Lang::Call1(name, arg1) => {
-                fix_alignment!(1);
-                move_stack_pointer!(1);
+                comment!("Arg {} with value {:?}", 0, arg1);
+                fix_alignment!();
+                // move_stack_pointer!(1);
                 let i = 0;
-                comment!("Pushing arg {} with value {:?}", i, arg1);
-                back!(Mov(RDI, loc_to_register(arg1, offset)));
-                back!(Mov(StackPointerOffset(i * 8), RDI));
+                back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(arg1, offset)));
+                // back!(Mov(StackPointerOffset(i * 8), RDI));
                 back!(Call(name));
                 offset = 0;
             },
             Lang::Call2(name, arg1, arg2) => {
-                fix_alignment!(2);
-                move_stack_pointer!(2);
+                comment!("Arg {} with value {:?}", 0, arg1);
+                fix_alignment!();
+                // move_stack_pointer!(2);
 
                 let i = 0;
-                comment!("Pushing arg {} with value {:?}", i, arg1);
-                back!(Mov(RDI, loc_to_register(arg1, offset)));
-                back!(Mov(StackPointerOffset(i * 8), RDI));
+                back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(arg1, offset)));
+                // back!(Mov(StackPointerOffset(i * 8), RDI));
 
                 let i = 1;
                 comment!("Pushing arg {} with value {:?}", i, arg2);
-                back!(Mov(RDI, loc_to_register(arg2, offset)));
-                back!(Mov(StackPointerOffset(i * 8), RDI));
+                back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(arg2, offset)));
+                // back!(Mov(StackPointerOffset(i * 8), RDI));
                 back!(Call(name));
                 offset = 0;
             },
             Lang::Int(i) => {
-                move_stack_pointer!();
                 comment!("Int {}", i);
+                move_stack_pointer!();
                 back!(Mov(StackPointerOffset(0), Const(i)));
             },
             Lang::Plus => {
@@ -458,23 +463,28 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 back!(Label(name));
             },
             Lang::JumpEqual(label)=> {
-                back!(Mov(RDI, StackPointerOffset(-8)));
+                comment!("Jump Equal");
+                back!(Mov(R9, StackPointerOffset(0)));
                 move_stack_pointer!(-1);
-                back!(Cmp(StackPointerOffset(-8), RDI));
+                back!(Cmp(StackPointerOffset(0), R9));
                 back!(Je(label)); 
             }
             Lang::JumpNotEqual(label) => {
-                back!(Mov(RDI, StackPointerOffset(-8)));
+                back!(Mov(R9, StackPointerOffset(0)));
                 move_stack_pointer!(-1);
-                back!(Cmp(StackPointerOffset(-8), RDI));
+                back!(Cmp(StackPointerOffset(0), R9));
                 back!(Jne(label)); 
             }
             Lang::Jump(label) => {
                 back!(Jmp(label));
             }
             Lang::Print => {
+                comment!("Print!");
+                back!(Mov(R9, StackPointerOffset(0)));
+                back!(Push(RDI));
+                back!(Push(RSI));
                 back!(Lea(RDI, DerefData("format".to_string())));
-                back!(Mov(RSI, StackPointerOffset(0)));
+                back!(Mov(RSI, R9));
                 back!(Push(RAX));
                 // Do I have to do two passes
                 // Or somehow do this dynamically?
@@ -488,16 +498,19 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 if offset % 16 == 0 {
                    back!(Pop(RAX));  
                 }
+                back!(Pop(RSI));
+                back!(Pop(RDI));
             }
             Lang::Read(index) => {
                 move_stack_pointer!();
-                back!(Mov(RDI, Deref(Box::new(R15), index*8)));
-                back!(Mov(StackPointerOffset(0), RDI));
+                back!(Mov(R9, Deref(Box::new(R15), index*8)));
+                back!(Mov(StackPointerOffset(0), R9));
             }
             // Should store pop?
             Lang::Store(index) => {
-                back!(Mov(RDI, StackPointerOffset(0)));
-                back!(Mov(Deref(Box::new(R15), index*8), RDI));
+                comment!("Store {}", index);
+                back!(Mov(R9, StackPointerOffset(0)));
+                back!(Mov(Deref(Box::new(R15), index*8), R9));
             }
             Lang::Add(loc1, loc2) => {
                 comment!("Add {:?}, {:?}", loc1, loc2);
