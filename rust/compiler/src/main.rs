@@ -422,13 +422,16 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 offset = 0;
             },
             Lang::FuncEnd => {
+                back!(Mov(RAX, StackPointerOffset(0)));
                 back!(Leave);
                 back!(Ret);
             },
             Lang::Call0(name) => {
                 fix_alignment!();
                 back!(Call(name));
-                offset = 0;
+                move_stack_pointer!();
+                move_stack_pointer!();
+                back!(Mov(StackPointerOffset(0), RAX));
             },
             Lang::Call1(name, arg1) => {
                 comment!("Arg {} with value {:?}", 0, arg1);
@@ -438,8 +441,8 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(&arg1, offset)));
                 // back!(Mov(StackPointerOffset(i * 8), RDI));
                 back!(Call(name));
-                offset = 0;
-            },
+                move_stack_pointer!();
+                back!(Mov(StackPointerOffset(0), RAX));            },
             Lang::Call2(name, arg1, arg2) => {
                 comment!("Arg {} with value {:?}", 0, arg1);
                 fix_alignment!();
@@ -454,7 +457,8 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(&arg2, offset)));
                 // back!(Mov(StackPointerOffset(i * 8), RDI));
                 back!(Call(name));
-                offset = 0;
+                move_stack_pointer!();
+                back!(Mov(StackPointerOffset(0), RAX));
             },
             Lang::Int(i) => {
                 comment!("Int {}", i);
@@ -591,6 +595,7 @@ fn main() -> std::io::Result<()> {
         Lang::Int(42),
         Lang::Store(0),
         Lang::Call2("body".to_string(), Location::Const(0), Location::Const(20)),
+        Lang::Print,
         Lang::FuncEnd,
 
         Lang::Func("body".to_string()),
