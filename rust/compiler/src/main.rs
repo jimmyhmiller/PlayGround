@@ -318,6 +318,7 @@ enum Lang {
     Read(i64),
     Func(String),
     FuncEnd,
+    Pop,
     // i64 is the number of arguments
     Call0(String),
     Call1(String, Location),
@@ -417,7 +418,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 back!(Mov(StackPointerOffset(0), R9));
             },
             Lang::SetLocal(i, location) => {
-                
+                // TODO fill out
             }
             Lang::Func(name) => {
                 back!(Label(name));
@@ -444,16 +445,23 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 comment!("Arg {} with value {:?}", 0, arg1);
                 // move_stack_pointer!(1);
                 let i = 0;
-                back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(&arg1, offset)));
+                let reg = &ARGUMENT_REGISTERS[i as usize];
+                back!(Mov(R9, loc_to_register(&arg1, offset)));
+                back!(Push(reg.clone()));
+                offset -= 8;
+                back!(Mov(reg.clone(), R9));
                 // back!(Mov(StackPointerOffset(i * 8), RDI));
                 let fixed = fix_alignment!();
                 back!(Call(name));
                 if fixed {
-                    offset -= 8;
+                    offset += 8;
                     back!(Pop(RBP));
                 }
+                back!(Pop(reg.clone()));
+                offset += 8;
                 move_stack_pointer!();
-                back!(Mov(StackPointerOffset(0), RAX));            },
+                back!(Mov(StackPointerOffset(0), RAX)); 
+            },
             Lang::Call2(name, arg1, arg2) => {
                 comment!("Arg {} with value {:?}", 0, arg1);
                 // move_stack_pointer!(2);
@@ -545,9 +553,16 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 back!(Mov(RAX, loc_to_register(&loc1, offset)));
                 back!(Add(RAX, loc_to_register(&loc2, offset)));
                 if loc1.is_stack() && loc2.is_stack() {
+                    move_stack_pointer!(-2);
+                } else if loc1.is_stack() || loc2.is_stack()  {
                     move_stack_pointer!(-1);
+                } else {
+                     move_stack_pointer!();
                 }
                 back!(Mov(StackPointerOffset(0), RAX));
+            }
+            Lang::Pop => {
+                move_stack_pointer!(-1);
             }
         }
         println!("offset after: {}", offset);
@@ -610,41 +625,43 @@ fn main() -> std::io::Result<()> {
         Lang::Func("start".to_string()),
         Lang::Int(42),
         Lang::Store(0),
-        // Lang::Call2("body".to_string(), Location::Const(0), Location::Const(20)),
-        Lang::Call1("fib".to_string(), Location::Const(1)),
+        Lang::Call1("fib".to_string(), Location::Const(40)),
         Lang::Print,
         Lang::FuncEnd,
 
-        // Lang::Func("body".to_string()),
-        // Lang::GetArg(0),
-        // Lang::Label("loop".to_string()),
-        // Lang::GetArg(1),
-        // Lang::JumpEqual("done".to_string()),
-        // Lang::Print,
-        // Lang::Add(Location::Stack(0), Location::Const(1)),
-        // Lang::Jump("loop".to_string()),
-        // Lang::Label("done".to_string()),
-        // Lang::Read(0),
-        // Lang::Print,
-        // Lang::FuncEnd,
+        Lang::Func("printit".to_string()),
+        Lang::GetArg(0),
+        Lang::Print,
+        Lang::FuncEnd,
 
-// Not yet working
         Lang::Func("fib".to_string()),
         Lang::GetArg(0),
-        Lang::Label("loop_fib".to_string()),
+
         Lang::Int(0),
-        Lang::JumpEqual("done_fib".to_string()),
+        Lang::JumpEqual("done_fib_0".to_string()),
+        Lang::GetArg(0),
         Lang::Int(1),
-        Lang::JumpEqual("done_fib".to_string()),
+        Lang::JumpEqual("done_fib_1".to_string()),
+
         Lang::Add(Location::Arg(0), Location::Const(-1)),
+
         Lang::Call1("fib".to_string(), Location::Stack(0)),
+
         Lang::Add(Location::Arg(0), Location::Const(-2)),
         Lang::Call1("fib".to_string(), Location::Stack(0)),
-        Lang::Add(Location::Stack(0), Location::Stack(1)),
 
+        Lang::Add(Location::Stack(0), Location::Stack(2)),
 
-        Lang::Label("done_fib".to_string()),
+        Lang::Jump("fib_totally_done".to_string()),
+
+        Lang::Label("done_fib_0".to_string()),
+        Lang::Int(0),
+        Lang::Jump("fib_totally_done".to_string()),
+        Lang::Label("done_fib_1".to_string()),
         Lang::Int(1),
+        Lang::Jump("fib_totally_done".to_string()),
+
+        Lang::Label("fib_totally_done".to_string()),
         Lang::FuncEnd,
     ]);
     prelude.append(&mut main.into_iter().collect());
