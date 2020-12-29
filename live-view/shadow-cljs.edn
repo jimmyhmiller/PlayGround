@@ -1,0 +1,17 @@
+;; shadow-cljs configuration
+{:source-paths
+ ["src/dev"
+  "src/main"
+  "src/test"]
+
+ :dev-http {8080 "public"}
+
+ :dependencies
+ [[juji/editscript "0.5.3"]
+  [crate "0.2.5"]]
+
+ :builds
+ {:frontend
+  {:target :browser
+   :modules {:main {:entries [live-view.core]
+                    :exports-var live-view.core/create-renderer}}}}}
