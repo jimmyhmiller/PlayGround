@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::process::Command;
 use std::fs::File;
@@ -294,6 +295,139 @@ impl Location {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+enum Expr {
+    Function1(String, String, Box<Expr>),
+    If(Box<Expr>, Box<Expr>, Box<Expr>),
+    Equals(Box<Expr>, Box<Expr>),
+    Var(String),
+    Let(String, Box<Expr>),
+    Int(i64),
+    Return(Box<Expr>),
+    Print(Box<Expr>),
+    // While
+    Call1(String, Box<Expr>),
+    Add(Box<Expr>, Box<Expr>),
+    Sub(Box<Expr>, Box<Expr>)
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+enum ExprOrLang {
+    IsLang(Lang),
+    IsExpr(Expr),
+}
+
+
+
+#[allow(dead_code)]
+#[allow(unused_variables)]
+fn expr_to_lang(expr: Expr) -> Vec<Lang> {
+    let mut queue : VecDeque<ExprOrLang> = VecDeque::new();
+    let mut instructions : Vec<Lang> = vec![];
+    // Need to do scopes properly
+    let mut label_index = 0;
+    let mut environment : HashMap<String, i64> = HashMap::new();
+    queue.push_front(ExprOrLang::IsExpr(expr));
+    while !(queue.is_empty()) {
+        match queue.pop_front().unwrap() {
+            ExprOrLang::IsLang(l) => { instructions.push(l) }
+            ExprOrLang::IsExpr(expr) => {
+                 match &expr {
+                    Expr::Function1(name, arg, body) => {
+                        environment.clear();
+                        instructions.push(Lang::Func(name.to_string()));
+                        environment.insert(arg.to_string(), 0);
+                        queue.push_front(ExprOrLang::IsExpr((**body).clone()));
+                    },
+                    Expr::If(pred, then, otherwise) => {
+                        label_index +=1;
+                        // backwards order because push_front
+                        queue.push_front(ExprOrLang::IsExpr((**then).clone()));
+                        // Need to have a counter for new labels scoped to function
+                        queue.push_front(ExprOrLang::IsLang(Lang::Label(format!("then{}", label_index))));
+                        queue.push_front(ExprOrLang::IsExpr((**otherwise).clone()));
+                        queue.push_front(ExprOrLang::IsLang(Lang::JumpEqual(format!("then{}", label_index))));
+                        queue.push_front(ExprOrLang::IsExpr((**pred).clone()));
+                    },
+                    // This only works in if for right now.
+                    // Need to make this better and actually have booleans
+                    Expr::Equals(v1, v2) => {
+                         // backwards order because push_front
+                        queue.push_front(ExprOrLang::IsExpr((**v2).clone()));
+                        queue.push_front(ExprOrLang::IsExpr((**v1).clone()));
+                    },
+                    Expr::Add(v1, v2) => {
+                         // backwards order because push_front
+                        queue.push_front(ExprOrLang::IsLang(Lang::Add(Location::Stack(1), Location::Stack(0))));
+                        queue.push_front(ExprOrLang::IsExpr((**v2).clone()));
+                        queue.push_front(ExprOrLang::IsExpr((**v1).clone()));
+                    },
+                    Expr::Sub(v1, v2) => {
+                        // backwards order because push_front
+                        queue.push_front(ExprOrLang::IsLang(Lang::Sub(Location::Stack(1), Location::Stack(0))));
+                        queue.push_front(ExprOrLang::IsExpr((**v2).clone()));
+                        queue.push_front(ExprOrLang::IsExpr((**v1).clone()));
+                    },
+                    Expr::Var(s) => {
+                        match environment.get(s) {
+                            // This is wrong I don't distinguish between locals
+                            // or args. Need to do that.
+                            Some(n) => instructions.push(Lang::GetArg(*n)),
+                            None => panic!("Variable not found {}", s),
+                        }
+                    },
+                    Expr::Let(_, _) => {},
+                    Expr::Int(n) => {
+                        instructions.push(Lang::Int(*n));
+                    },
+                    Expr::Return(e) => {
+                        // backwards order because push_front
+                        queue.push_front(ExprOrLang::IsLang(Lang::FuncEnd));
+                        queue.push_front(ExprOrLang::IsExpr((**e).clone()));
+                    },
+                    Expr::Print(e) => {
+                        // backwards order because push_front
+                        queue.push_front(ExprOrLang::IsLang(Lang::Print));
+                        queue.push_front(ExprOrLang::IsExpr((**e).clone()));
+                    },
+                    Expr::Call1(name, arg) => {
+                        queue.push_front(ExprOrLang::IsLang(Lang::Call1(name.to_string(), Location::Stack(0))));
+                        queue.push_front(ExprOrLang::IsExpr((**arg).clone()));
+                    }
+                };
+            }
+        }
+       
+    }
+
+    return instructions;
+}
+
+
+// function fib(x) {
+//     if (x == 0) {
+//         return 0
+//     } else {
+//         return 1;
+//     }
+// }
+
+
+// Func(fib)
+// Arg(0),
+// Const(0),
+// JumpEqual,
+// Const(1)
+// FuncEnd
+// fib_then_1:
+// Const(0)
+// FuncEnd
+
+
+
+
 // Need to add print to this language
 // Need to add a few more operators
 // Then I need to make a little higher level language
@@ -308,6 +442,7 @@ enum Lang {
     GetLocal(i64),
     SetLocal(i64, Location),
     Add(Location, Location),
+    Sub(Location, Location),
     Label(String),
     // Equal,
     JumpEqual(String),
@@ -403,7 +538,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
     // Is it worth it though?
 
     for e in lang {
-        println!("e: {:?}, offset: {}", e, offset);
+        // println!("e: {:?}, offset: {}", e, offset);
         match e {
             Lang::GetArg(i) => {
                 comment!("Get Arg {}", i);
@@ -459,7 +594,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 }
                 back!(Pop(reg.clone()));
                 offset += 8;
-                move_stack_pointer!();
+                // move_stack_pointer!(2);
                 back!(Mov(StackPointerOffset(0), RAX)); 
             },
             Lang::Call2(name, arg1, arg2) => {
@@ -552,9 +687,18 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 comment!("Add {:?}, {:?}", loc1, loc2);
                 back!(Mov(RAX, loc_to_register(&loc1, offset)));
                 back!(Add(RAX, loc_to_register(&loc2, offset)));
-                if loc1.is_stack() && loc2.is_stack() {
-                    move_stack_pointer!(-2);
-                } else if loc1.is_stack() || loc2.is_stack()  {
+                if loc1.is_stack() || loc2.is_stack()  {
+                    move_stack_pointer!(-1);
+                } else {
+                     move_stack_pointer!();
+                }
+                back!(Mov(StackPointerOffset(0), RAX));
+            }
+            Lang::Sub(loc1, loc2) => {
+                comment!("Sub {:?}, {:?}", loc1, loc2);
+                back!(Mov(RAX, loc_to_register(&loc1, offset)));
+                back!(Sub(RAX, loc_to_register(&loc2, offset)));
+                if loc1.is_stack() || loc2.is_stack()  {
                     move_stack_pointer!(-1);
                 } else {
                      move_stack_pointer!();
@@ -574,6 +718,84 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
 // Figure out how to reduce changes to rsp
 
 fn main() -> std::io::Result<()> {
+
+    macro_rules! lang {
+        ((defn $name:ident[$arg:ident] 
+            $body:tt
+         )) => {
+            Expr::Function1(stringify!($name).to_string(), stringify!($arg).to_string(),
+                Box::new(lang!($body)))
+        };
+        ((if (= $arg:ident $val:expr)
+            $result1:tt
+            $result2:tt
+        )) => {
+            Expr::If(Box::new(
+                    Expr::Equals(
+                        Box::new(Expr::Var(stringify!($arg).to_string())),
+                        Box::new(Expr::Int($val)))),
+                    Box::new(Expr::Return(Box::new(lang!($result1)))),
+                    Box::new(Expr::Return(Box::new(lang!($result2)))))
+        };
+        ((+ $arg1:tt $arg2:tt)) => {
+            Expr::Add(Box::new(lang!($arg1)),
+                      Box::new(lang!($arg2)))
+        };
+        ((- $arg1:tt $arg2:tt)) => {
+            Expr::Sub(Box::new(lang!($arg1)),
+                      Box::new(lang!($arg2)))
+        };
+        (($f:ident $arg:tt)) => {
+            Expr::Call1(stringify!($f).to_string(), Box::new(lang!($arg)))
+        };
+        ($int:literal) => {
+            Expr::Int($int)
+        };
+        (($int:literal)) => {
+            Expr::Int($int)
+        };
+        ($var:ident) => {
+            Expr::Var(stringify!($var).to_string())
+        }
+    }
+
+    let prog = lang! {
+
+        (defn fibonacci [n]
+          (if (= n 0)
+            0
+            (if (= n 1) 
+              1
+              (+ (fibonacci (- n 1)) 
+                 (fibonacci (- n 2))))))
+
+    };
+    println!("{:#?}", prog);
+
+    // let prog = Expr::Function1("identity".to_string(), "x".to_string(), Box::new(
+    //     Expr::If(Box::new(Expr::Equals(Box::new(Expr::Var("x".to_string())), 
+    //                           Box::new(Expr::Int(42)))),
+    //             Box::new(Expr::Return(Box::new(Expr::Add(Box::new(Expr::Int(12)), Box::new(Expr::Int(4)))))),
+    //             Box::new(Expr::Return(Box::new(Expr::Call1("identity".to_string(),
+    //                                                         Box::new(Expr::Int(42)))))))));
+    
+
+
+
+    // let prog = Expr::Function1("fibonacci".to_string(), "n".to_string(), Box::new(
+    //             Expr::If(Box::new(Expr::Equals(Box::new(Expr::Var("n".to_string())),
+    //                                            Box::new(Expr::Int(0)))),
+    //                     Box::new(Expr::Return(Box::new(Expr::Int(0)))),
+    //                     Box::new(Expr::If(Box::new(Expr::Equals(Box::new(Expr::Var("n".to_string())),
+    //                                                    Box::new(Expr::Int(1)))),
+    //                         Box::new(Expr::Return(Box::new(Expr::Int(1)))),
+    //                         Box::new(Expr::Return(Box::new(Expr::Add(Box::new(Expr::Call1("fibonacci".to_string(),
+    //                                                                 Box::new(Expr::Add(Box::new(Expr::Var("n".to_string())), Box::new(Expr::Int(-1)))))),
+    //                                            Box::new(Expr::Call1("fibonacci".to_string(),
+    //                                                                 Box::new(Expr::Add(Box::new(Expr::Var("n".to_string())), Box::new(Expr::Int(-2)))))))))))))));
+
+    // println!("{:#?}", prog);
+
     let buffer = &mut "".to_string();
     let mut prelude = vec![
         Global("_main".to_string()),
@@ -623,51 +845,57 @@ fn main() -> std::io::Result<()> {
 
     let main = to_asm(vec![
         Lang::Func("start".to_string()),
-        Lang::Int(42),
-        Lang::Store(0),
-        Lang::Call1("fib".to_string(), Location::Const(40)),
+        // Lang::Int(42),
+        // Lang::Store(0),
+        // Lang::Call1("fib".to_string(), Location::Const(40)),
+        // Lang::Print,
+        Lang::Call1("fibonacci".to_string(), Location::Const(40)),
         Lang::Print,
         Lang::FuncEnd,
 
-        Lang::Func("printit".to_string()),
-        Lang::GetArg(0),
-        Lang::Print,
-        Lang::FuncEnd,
+        // Lang::Func("printit".to_string()),
+        // Lang::GetArg(0),
+        // Lang::Print,
+        // Lang::FuncEnd,
 
-        Lang::Func("fib".to_string()),
-        Lang::GetArg(0),
+        // Lang::Func("fib".to_string()),
+        // Lang::GetArg(0),
 
-        Lang::Int(0),
-        Lang::JumpEqual("done_fib_0".to_string()),
-        Lang::GetArg(0),
-        Lang::Int(1),
-        Lang::JumpEqual("done_fib_1".to_string()),
+        // Lang::Int(0),
+        // Lang::JumpEqual("done_fib_0".to_string()),
+        // Lang::GetArg(0),
+        // Lang::Int(1),
+        // Lang::JumpEqual("done_fib_1".to_string()),
 
-        Lang::Add(Location::Arg(0), Location::Const(-1)),
+        // Lang::Add(Location::Arg(0), Location::Const(-1)),
 
-        Lang::Call1("fib".to_string(), Location::Stack(0)),
+        // Lang::Call1("fib".to_string(), Location::Stack(0)),
 
-        Lang::Add(Location::Arg(0), Location::Const(-2)),
-        Lang::Call1("fib".to_string(), Location::Stack(0)),
+        // Lang::Add(Location::Arg(0), Location::Const(-2)),
+        // Lang::Call1("fib".to_string(), Location::Stack(0)),
 
-        Lang::Add(Location::Stack(0), Location::Stack(2)),
+        // Lang::Add(Location::Stack(0), Location::Stack(1)),
 
-        Lang::Jump("fib_totally_done".to_string()),
+        // Lang::FuncEnd,
 
-        Lang::Label("done_fib_0".to_string()),
-        Lang::Int(0),
-        Lang::Jump("fib_totally_done".to_string()),
-        Lang::Label("done_fib_1".to_string()),
-        Lang::Int(1),
-        Lang::Jump("fib_totally_done".to_string()),
+        // Lang::Label("done_fib_1".to_string()),
+        // Lang::Int(1),
+        // Lang::FuncEnd,
 
-        Lang::Label("fib_totally_done".to_string()),
-        Lang::FuncEnd,
+        // Lang::Label("done_fib_0".to_string()),
+        // Lang::Int(0),
+        // Lang::FuncEnd,
+
+        // Lang::Label("fib_totally_done".to_string()),
+        // Lang::FuncEnd,
     ]);
     prelude.append(&mut main.into_iter().collect());
+    prelude.append(&mut to_asm(expr_to_lang(prog)).into_iter().collect());
     let instructions = prelude;
 
+
     for instruction in instructions.iter() {
+        println!("{:?}", instruction);
         instruction.emit(buffer);
     }
 
