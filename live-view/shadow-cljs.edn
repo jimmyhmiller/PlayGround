@@ -12,6 +12,6 @@
 
  :builds
  {:frontend
-  {:target :browser
-   :modules {:main {:entries [live-view.core]
-                    :exports-var live-view.core/create-renderer}}}}}
+  {:target :node-library
+   :exports-var live-view.core/create-renderer
+   :output-to "out/index.js"}}}
