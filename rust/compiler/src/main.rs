@@ -406,25 +406,6 @@ fn expr_to_lang(expr: Expr) -> Vec<Lang> {
 }
 
 
-// function fib(x) {
-//     if (x == 0) {
-//         return 0
-//     } else {
-//         return 1;
-//     }
-// }
-
-
-// Func(fib)
-// Arg(0),
-// Const(0),
-// JumpEqual,
-// Const(1)
-// FuncEnd
-// fib_then_1:
-// Const(0)
-// FuncEnd
-
 
 
 
@@ -538,12 +519,10 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
     // Is it worth it though?
 
     for e in lang {
-        // println!("e: {:?}, offset: {}", e, offset);
         match e {
             Lang::GetArg(i) => {
                 comment!("Get Arg {}", i);
                 move_stack_pointer!();
-                // back!(Mov(RDI, loc_to_register(Location::Arg(i), offset)));
                 back!(Mov(StackPointerOffset(0), ARGUMENT_REGISTERS[i as usize].clone()));
             },
             Lang::GetLocal(i) => {
@@ -578,14 +557,14 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
             },
             Lang::Call1(name, arg1) => {
                 comment!("Arg {} with value {:?}", 0, arg1);
-                // move_stack_pointer!(1);
+
                 let i = 0;
                 let reg = &ARGUMENT_REGISTERS[i as usize];
                 back!(Mov(R9, loc_to_register(&arg1, offset)));
                 back!(Push(reg.clone()));
                 offset -= 8;
                 back!(Mov(reg.clone(), R9));
-                // back!(Mov(StackPointerOffset(i * 8), RDI));
+
                 let fixed = fix_alignment!();
                 back!(Call(name));
                 if fixed {
@@ -594,21 +573,17 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 }
                 back!(Pop(reg.clone()));
                 offset += 8;
-                // move_stack_pointer!(2);
                 back!(Mov(StackPointerOffset(0), RAX)); 
             },
             Lang::Call2(name, arg1, arg2) => {
                 comment!("Arg {} with value {:?}", 0, arg1);
-                // move_stack_pointer!(2);
 
                 let i = 0;
                 back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(&arg1, offset)));
-                // back!(Mov(StackPointerOffset(i * 8), RDI));
 
                 let i = 1;
                 comment!("Pushing arg {} with value {:?}", i, arg2);
                 back!(Mov(ARGUMENT_REGISTERS[i as usize].clone(), loc_to_register(&arg2, offset)));
-                // back!(Mov(StackPointerOffset(i * 8), RDI));
                 let fixed = fix_alignment!();
                 back!(Call(name));
                 if fixed {
@@ -709,7 +684,6 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 move_stack_pointer!(-1);
             }
         }
-        println!("offset after: {}", offset);
     }
 
     return instructions;
@@ -751,9 +725,6 @@ fn main() -> std::io::Result<()> {
         ($int:literal) => {
             Expr::Int($int)
         };
-        (($int:literal)) => {
-            Expr::Int($int)
-        };
         ($var:ident) => {
             Expr::Var(stringify!($var).to_string())
         }
@@ -772,29 +743,6 @@ fn main() -> std::io::Result<()> {
     };
     println!("{:#?}", prog);
 
-    // let prog = Expr::Function1("identity".to_string(), "x".to_string(), Box::new(
-    //     Expr::If(Box::new(Expr::Equals(Box::new(Expr::Var("x".to_string())), 
-    //                           Box::new(Expr::Int(42)))),
-    //             Box::new(Expr::Return(Box::new(Expr::Add(Box::new(Expr::Int(12)), Box::new(Expr::Int(4)))))),
-    //             Box::new(Expr::Return(Box::new(Expr::Call1("identity".to_string(),
-    //                                                         Box::new(Expr::Int(42)))))))));
-    
-
-
-
-    // let prog = Expr::Function1("fibonacci".to_string(), "n".to_string(), Box::new(
-    //             Expr::If(Box::new(Expr::Equals(Box::new(Expr::Var("n".to_string())),
-    //                                            Box::new(Expr::Int(0)))),
-    //                     Box::new(Expr::Return(Box::new(Expr::Int(0)))),
-    //                     Box::new(Expr::If(Box::new(Expr::Equals(Box::new(Expr::Var("n".to_string())),
-    //                                                    Box::new(Expr::Int(1)))),
-    //                         Box::new(Expr::Return(Box::new(Expr::Int(1)))),
-    //                         Box::new(Expr::Return(Box::new(Expr::Add(Box::new(Expr::Call1("fibonacci".to_string(),
-    //                                                                 Box::new(Expr::Add(Box::new(Expr::Var("n".to_string())), Box::new(Expr::Int(-1)))))),
-    //                                            Box::new(Expr::Call1("fibonacci".to_string(),
-    //                                                                 Box::new(Expr::Add(Box::new(Expr::Var("n".to_string())), Box::new(Expr::Int(-2)))))))))))))));
-
-    // println!("{:#?}", prog);
 
     let buffer = &mut "".to_string();
     let mut prelude = vec![
@@ -845,49 +793,10 @@ fn main() -> std::io::Result<()> {
 
     let main = to_asm(vec![
         Lang::Func("start".to_string()),
-        // Lang::Int(42),
-        // Lang::Store(0),
-        // Lang::Call1("fib".to_string(), Location::Const(40)),
-        // Lang::Print,
         Lang::Call1("fibonacci".to_string(), Location::Const(40)),
         Lang::Print,
         Lang::FuncEnd,
 
-        // Lang::Func("printit".to_string()),
-        // Lang::GetArg(0),
-        // Lang::Print,
-        // Lang::FuncEnd,
-
-        // Lang::Func("fib".to_string()),
-        // Lang::GetArg(0),
-
-        // Lang::Int(0),
-        // Lang::JumpEqual("done_fib_0".to_string()),
-        // Lang::GetArg(0),
-        // Lang::Int(1),
-        // Lang::JumpEqual("done_fib_1".to_string()),
-
-        // Lang::Add(Location::Arg(0), Location::Const(-1)),
-
-        // Lang::Call1("fib".to_string(), Location::Stack(0)),
-
-        // Lang::Add(Location::Arg(0), Location::Const(-2)),
-        // Lang::Call1("fib".to_string(), Location::Stack(0)),
-
-        // Lang::Add(Location::Stack(0), Location::Stack(1)),
-
-        // Lang::FuncEnd,
-
-        // Lang::Label("done_fib_1".to_string()),
-        // Lang::Int(1),
-        // Lang::FuncEnd,
-
-        // Lang::Label("done_fib_0".to_string()),
-        // Lang::Int(0),
-        // Lang::FuncEnd,
-
-        // Lang::Label("fib_totally_done".to_string()),
-        // Lang::FuncEnd,
     ]);
     prelude.append(&mut main.into_iter().collect());
     prelude.append(&mut to_asm(expr_to_lang(prog)).into_iter().collect());
@@ -895,7 +804,6 @@ fn main() -> std::io::Result<()> {
 
 
     for instruction in instructions.iter() {
-        println!("{:?}", instruction);
         instruction.emit(buffer);
     }
 
