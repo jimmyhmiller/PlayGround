@@ -2,41 +2,68 @@
   (:require [morphdom]
             [editscript.core :as editscript]
             [editscript.edit :as edit]
-            [crate.core :as crate]
-            [cognitect.transit :as transit]))
+            [cognitect.transit :as transit]
+            [hipo.core :as hipo]
+            [goog.object]))
 
 
+(defn hipo-options [ws]
+  {:attribute-handlers [{:target {:attr "onchange"}
+                         :fn (fn [node a b [action payload]]
+                               (.addEventListener node
+                                                  "input"
+                                                  (fn [e]
+                                                    (let [writer (transit/writer :json)]
+                                                      (.send ws 
+                                                             (transit/write 
+                                                              writer
+                                                              [action (assoc (or payload {}) :value (.-value (.-target e)))]))))))}
+                         {:target {:attr "onsubmit"}
+                         :fn (fn [node a b val]
+                               (.addEventListener node
+                                                 "submit"
+                                                (fn [e] 
+                                                  (.preventDefault e)
+                                                  (let [writer (transit/writer :json)]
+                                                    (.send ws (transit/write writer val))))))}
+                        {:target {:attr "onclick"}
+                         :fn (fn [node a b val]
+                               (.addEventListener node
+                                                 "click"
+                                                (fn [e] 
+                                                  (.preventDefault e)
+                                                  (let [writer (transit/writer :json)]
+                                                    (.send ws (transit/write writer val))))))}
+                        ;; The builtin style handler uses
+                        ;; aset which doesn't work for objects now
+                        {:target {:attr "style"} 
+                         :fn (fn [node _ _ styles] 
+                               (doseq [[k v] styles]
+                                 (goog.object/set (.-style ^js/HTMLElement node)
+                                                  (name k) v)))}]})
 
-(defn apply-morphdom-patch [node current-hiccup patch]
+
+(defn apply-patch [node current-hiccup patch]
   (let [new-hiccup (editscript/patch current-hiccup (edit/edits->script patch ))]
-    (morphdom
+    (hipo/reconciliate!
      node
-     (crate/html new-hiccup)
-
-     #js {:onBeforeElUpdated (fn [from to]
-                               (cond 
-                                 (and
-                                  (= (.-tagName to) "INPUT")
-                                  (not (.-value (.-attributes to))))
-                                 false
-
-                                 :else true))})
+     new-hiccup)
    
     new-hiccup))
 
-(defn create-renderer [dom-node]
+(defn create-renderer [dom-node ws]
   (let [dom-node (atom dom-node)
         virtual-dom (atom nil)]
     (fn [data]
       (let [current-vdom @virtual-dom]
         (case (:type data)
           :patch (if current-vdom
-                   (reset! virtual-dom (apply-morphdom-patch @dom-node current-vdom (:value data)))
+                   (reset! virtual-dom (apply-patch @dom-node current-vdom (:value data)))
                    {:type :error
                     :reason :no-state})
           :init (do
                   (reset! virtual-dom (:value data))
-                  (let [node (crate/html (:value data))]
+                  (let [node (hipo/create (:value data) (hipo-options ws))]
                     (.replaceWith @dom-node node)
                     (reset! dom-node node))))))))
 
@@ -46,11 +73,12 @@
 
 
 
+
 (defn init []
-  (let [renderer (create-renderer js/document.body)
-      ws (js/WebSocket. "ws://localhost:50505/loc/")]
+  (let [ws (js/WebSocket. "ws://localhost:50505/loc/")
+        renderer (create-renderer js/document.body ws)]
   (set! (.-onopen ws) (fn [] (.send ws "init")))
   (set! (.-onmessage ws) (fn [e] (let [reader (transit/reader :json)]
                                    (let [payload (transit/read reader (.-data e))]
-                                     (prn payload)
+                                     #_(prn payload)
                                      (renderer payload)))))))
