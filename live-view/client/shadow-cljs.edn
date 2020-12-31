@@ -1,0 +1,20 @@
+;; shadow-cljs configuration
+{:source-paths
+ ["src/dev"
+  "src/main"
+  "src/test"]
+
+ :dev-http {8080 "public"}
+
+ :dependencies
+ [[juji/editscript "0.5.3"]
+  [crate "0.2.5"]
+  [com.cognitect/transit-cljs "0.8.264"]]
+
+ :builds
+ {:frontend {:target :browser
+             :modules {:main {:init-fn live-view.core/init}}}
+  :package
+  {:target :node-library
+   :exports-var live-view.core/create-renderer
+   :output-to "out/index.js"}}}
