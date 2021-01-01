@@ -5,56 +5,12 @@
             [cognitect.transit :as transit])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream]))
 
-(def state (atom {:name "No One"
-                  :input-value ""
-                  :items []}))
 
-(comment
+;; Metadata per connection
+;; Filtering Broadcast
+;; LifeCycle Handlers
+;; Routing
 
-  (swap! state assoc :name "Jimmy!")
-  (swap! state assoc :items [])
-
-
-
-  (def process
-    (future
-      (let [items (map (fn [x]
-                         (str "item" x))
-                       (range 0 5000))]
-        (loop [offset 0]
-          (if (>= offset 5000)
-            (recur 0)
-            (do
-              (Thread/sleep 16)
-              (swap! state assoc :items (take 50 (drop offset items)))
-              (recur (inc offset))))))))
-
-
-
-  (future-cancel process)
-)
-
-
-
-
-(comment
-  
-  (loop []
-    (doseq [i (concat (range 0 500 1)  (range 500 0 -1))]
-      #_(Thread/sleep 16)
-      (swap! state assoc :left (str i "px")))
-    (recur)))
-
-
-(defn view [{:keys [name input-value items]}]
-  [:body [:h1 {:style {:color "green"}} "Hello " name]
-   [:form {:onsubmit [:test]}
-    [:input {:value input-value
-             :onchange [:input-change {}]}]
-    [:button {:type "submit"} "test"]]
-   [:ul
-    (for [item items]
-      [:li item])]])
 
 
 (defn send-transit! [ws payload]
@@ -79,60 +35,129 @@
         reader (transit/reader in :json)]
     (transit/read reader)))
 
-(def clients (atom []))
 
-(add-watch state :send-websocket
-           (fn [_ _ old-value new-value]
-             (let [patch (edit/get-edits (editscript/diff (view old-value) (view new-value)))
-                   out (ByteArrayOutputStream. 4096)
-                   writer (transit/writer out :json)]
-               (transit/write writer {:type :patch
-                                      :value patch})
-               (doseq [ws @clients]
-                 ;; Super important to pass this empty map
-                 ;; it is the callback handlers. Otherwise
-                 ;; we are calling send synchronously.
-                 (jetty/send! ws (.toString out) {})))))
-
-
+(defn update-view-and-send-patch [view state internal-state-atom]
+  (let [new-view-state (view state)
+        patch (edit/get-edits (editscript/diff (:view-state @internal-state-atom) new-view-state))
+        _ (swap! internal-state-atom assoc :view-state new-view-state)
+        out (ByteArrayOutputStream. 4096)
+        writer (transit/writer out :json)]
+    (transit/write writer {:type :patch
+                           :value patch})
+    (doseq [ws (:clients @internal-state-atom)]
+      ;; Super important to pass this empty map
+      ;; it is the callback handlers. Otherwise
+      ;; we are calling send synchronously.
+      (jetty/send! ws (.toString out) {}))))
 
 
-
-(defn ws-handler [on-event]
+(defn make-ws-handler [internal-state-atom on-event]
   {:on-connect (fn [ws]
                  (println "connect")
-                 (swap! clients conj ws))
+                 (swap! internal-state-atom update :clients conj ws))
    :on-error (fn [ws e] (println "error" e))
    :on-close (fn [ws status-code reason]
-               (swap! clients #(filterv (fn [x] (not= ws x)) %))
+               (swap! internal-state-atom update :clients #(filterv (fn [x] (not= ws x)) %))
                (println "close"))
-   :on-text (fn [ws text-message] 
-              
+   :on-text (fn [ws text-message]
               (if (= text-message "init")
                 (send-transit! ws {:type :init
-                                   :value (view @state)})
+                                   :value (:view-state @internal-state-atom)})
                 (on-event (read-transit text-message))))
    :on-bytes (fn [ws bytes offset len] (println "bytes" bytes) )
    :on-ping (fn [ws bytebuffer] (println "ping") )
    :on-pong (fn [ws bytebuffer] (println "pong"))} )
 
 
+;; TODO: Need to break things apart so you can run this on your own server
+;; TODO: Need to have options like port
+(defn start-live-view-server [state view event-handler]
+  (let [internal-state (atom {:clients []
+                              :view-state nil})]
+    (swap! internal-state assoc :view-state (view @state))
+    (when (var? view)
+      (add-watch view :view-updated 
+                  (fn [_ _ _ new-view-fn]
+                    (update-view-and-send-patch new-view-fn @state internal-state))))
+    (add-watch state :send-websocket
+               (fn [_ _ _ state]
+                 (update-view-and-send-patch view state internal-state)))
+
+    
+    ;; Is there a performance penalty for the way I am doing the dynamic things here?
+    ;; TODO: Need to actualy serve the client side page here.
+    (jetty/run-jetty (fn [req] {:body "It Works"})
+                     {:websockets {"/loc" (fn [_req]
+                                            (#'make-ws-handler internal-state event-handler))}
+                      :port 50505
+                      :join? false}))
+  )
+
+
+
+
+(def state (atom {:name "No One"
+                  :input-value ""
+                  :items []
+                  :actions []}))
+
+
+(comment
+
+  (swap! state assoc :name "Jimmy!")
+  (swap! state assoc :items [])
+
+  (swap! state assoc :actions [])
+
+
+  (def process
+    (future
+      (let [items (map (fn [x]
+                         (str "item" x))
+                       (range 0 5000))]
+        (loop [offset 0]
+          (if (>= offset 5000)
+            (recur 0)
+            (do
+              (Thread/sleep 16)
+              (swap! state assoc :items (take 50 (drop offset items)))
+              (recur (inc offset))))))))
+
+
+
+  (future-cancel process)
+)
+
+;; Updating view can cause some state issues
+;; TODO: FIX
+(defn view [{:keys [name input-value items actions]}]
+  [:body
+   [:h1 {:style {:color "green"}} "Hello " name]
+   [:form {:onsubmit [:submit {}]}
+    [:input {:value input-value
+             :onchange [:input-change {}]}]
+    [:button {:type "submit"} "Submit"]
+    [:button {:type "button" :onclick [:clear {}]} "Clear"]]
+   [:ul
+    (for [item actions]
+      [:li (prn-str item)])]
+   [:ul
+    (for [item items]
+      [:li item])]])
+
 
 (defn handle-event [[action payload]]
-  #_(println [action payload])
+  (swap! state update :actions conj [action payload])
   (case action
-    :test (when (not (empty? (:input-value @state))) 
+    :submit (when (not (empty? (:input-value @state))) 
             (dosync (swap! state update :items conj (:input-value @state))
                     (swap! state assoc :input-value "")))
     :input-change (swap! state assoc :input-value (:value payload))
+    :clear (swap! state assoc :items [] :actions [])
     (prn [action payload])))
 
-(defn app [req]
-  {:body "It works!"})
 
-(def server (jetty/run-jetty app {:websockets {"/loc" (ws-handler handle-event)}
-                                  :port 50505
-                                  :join? false}))
+(def server (start-live-view-server state #'view #'handle-event))
 
 (comment
   (.stop server))
