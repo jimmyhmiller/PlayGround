@@ -7,6 +7,8 @@
             [goog.object]))
 
 
+;; Doesn't look like event handlers are being set if the view changes.
+;; Need to look into that.
 (defn hipo-options [ws]
   {:attribute-handlers [{:target {:attr "onchange"}
                          :fn (fn [node a b [action payload]]
