@@ -470,6 +470,7 @@ enum Lang {
     Read(i64),
     Func(String),
     FuncEnd,
+    // Need to have a location version of SetReturn
     SetReturn,
     Pop,
     // i64 is the number of arguments
