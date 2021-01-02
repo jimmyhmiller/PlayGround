@@ -45,9 +45,9 @@ push rbp
 call fibonacci
 pop rbp
 pop rdi
-mov qword [rsp], rax
+mov qword [rbp], rax
 ; Print!
-mov r9, qword [rsp]
+mov r9, qword [rbp]
 push rdi
 push rsi
 lea rdi, [format]
@@ -60,97 +60,80 @@ pop rax
 pop rax
 pop rsi
 pop rdi
-mov rax, qword [rsp]
 leave
 ret
 
 fibonacci:
 push rbp
 mov rbp, rsp
+sub rsp, 48
 ; Get Arg 0
-add rsp, -8
-mov qword [rsp], rdi
+mov qword [rbp-8], rdi
 ; Int 0
-add rsp, -8
-mov qword [rsp], 0
+mov qword [rbp-16], 0
 ; Jump Equal
-mov r9, qword [rsp]
-add rsp, 8
-cmp qword [rsp], r9
+mov r9, qword [rbp-16]
+cmp qword [rbp-8], r9
 je then1
 ; Get Arg 0
-add rsp, -8
-mov qword [rsp], rdi
+mov qword [rbp-16], rdi
 ; Int 1
-add rsp, -8
-mov qword [rsp], 1
+mov qword [rbp-24], 1
 ; Jump Equal
-mov r9, qword [rsp]
-add rsp, 8
-cmp qword [rsp], r9
+mov r9, qword [rbp-24]
+cmp qword [rbp-16], r9
 je then2
 ; Get Arg 0
-add rsp, -8
-mov qword [rsp], rdi
-; Int 1
-add rsp, -8
-mov qword [rsp], 1
-; Sub Stack(1), Stack(0)
-mov rax, qword [rsp+8]
-sub rax, qword [rsp]
-add rsp, 8
-mov qword [rsp], rax
+mov qword [rbp-24], rdi
+; Sub Stack(0), Const(1)
+mov r9, qword [rbp-24]
+sub r9, 1
+mov qword [rbp-24], r9
 ; Arg 0 with value Stack(0)
-mov r9, qword [rsp]
-push rdi
-mov rdi, r9
-call fibonacci
-pop rdi
-mov qword [rsp], rax
-; Get Arg 0
-add rsp, -8
-mov qword [rsp], rdi
-; Int 2
-add rsp, -8
-mov qword [rsp], 2
-; Sub Stack(1), Stack(0)
-mov rax, qword [rsp+8]
-sub rax, qword [rsp]
-add rsp, 8
-mov qword [rsp], rax
-; Arg 0 with value Stack(0)
-mov r9, qword [rsp]
+mov r9, qword [rbp-24]
 push rdi
 mov rdi, r9
 push rbp
 call fibonacci
 pop rbp
 pop rdi
-mov qword [rsp], rax
-; Add Stack(1), Stack(0)
-mov rax, qword [rsp+8]
-add rax, qword [rsp]
-add rsp, 8
-mov qword [rsp], rax
-mov rax, qword [rsp]
-leave
-ret
+mov qword [rbp-24], rax
+; Get Arg 0
+mov qword [rbp-32], rdi
+; Sub Stack(0), Const(2)
+mov r9, qword [rbp-32]
+sub r9, 2
+mov qword [rbp-32], r9
+; Arg 0 with value Stack(0)
+mov r9, qword [rbp-32]
+push rdi
+mov rdi, r9
+push rbp
+call fibonacci
+pop rbp
+pop rdi
+mov qword [rbp-32], rax
+; Add Stack(1), ReturnRegister
+mov r9, qword [rbp-24]
+add r9, rax
+mov qword [rbp-32], r9
+mov rax, qword [rbp-32]
+jmp fibonacci_exit
 
 then2:
 ; Int 1
-add rsp, -8
-mov qword [rsp], 1
-mov rax, qword [rsp]
-leave
-ret
-mov rax, qword [rsp]
-leave
-ret
+mov qword [rbp-40], 1
+mov rax, qword [rbp-40]
+jmp fibonacci_exit
+mov rax, qword [rbp-40]
+jmp fibonacci_exit
 
 then1:
 ; Int 0
-add rsp, -8
-mov qword [rsp], 0
-mov rax, qword [rsp]
+mov qword [rbp-48], 0
+mov rax, qword [rbp-48]
+jmp fibonacci_exit
+
+fibonacci_exit:
 leave
 ret

@@ -273,7 +273,7 @@ use Register::*;
 // but with this setup, I could put the args on registers like the c abi
 // expects, which would be more performant.
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum Location {
     // Nth element from top of stack
     Stack(i64),
@@ -282,6 +282,7 @@ enum Location {
     Arg(i64),
     // Nth element below base stack pointer
     Local(i64),
+    ReturnRegister,
     // Not actually a location, just the value
     Const(i64),
 }
@@ -329,17 +330,50 @@ fn expr_to_lang(expr: Expr) -> Vec<Lang> {
     // Need to do scopes properly
     let mut label_index = 0;
     let mut environment : HashMap<String, i64> = HashMap::new();
+    // This could be wrong. Only really dealing with one function right now
+    let mut current_func_name = "".to_string();
     queue.push_front(ExprOrLang::IsExpr(expr));
     while !(queue.is_empty()) {
         match queue.pop_front().unwrap() {
-            ExprOrLang::IsLang(l) => { instructions.push(l) }
+            ExprOrLang::IsLang(l) => {
+                match (&l, &instructions.pop()) {
+                    (Lang::Sub(Location::Stack(n), Location::Stack(0)), Some(Lang::Int(m))) => {
+                        instructions.push(Lang::Sub(Location::Stack(n-1), Location::Const(*m)))
+                    }
+                    (Lang::Add(Location::Stack(n), Location::Stack(0)), Some(Lang::Int(m))) => {
+                        instructions.push(Lang::Add(Location::Stack(n-1), Location::Const(*m)))
+                    }
+                    (Lang::Add(s, Location::Stack(0)), Some(c@Lang::Call1(_, _))) => {
+                        instructions.push(c.clone());
+                        instructions.push(Lang::Add(*s, Location::ReturnRegister))
+                    }
+                    (Lang::Sub(s, Location::Stack(0)), Some(c@Lang::Call1(_, _))) => {
+                        instructions.push(c.clone());
+                        instructions.push(Lang::Sub(*s, Location::ReturnRegister))
+                    }
+                    (Lang::Call1(f, Location::Stack(0)), Some(Lang::Int(n))) => {
+                        instructions.push(Lang::Call1(f.to_string(), Location::Const(*n)))
+                    }
+                    (_, last_instruction) => {
+                        println!("instructions {:?}\n{:?}",  last_instruction, l);
+                        if last_instruction.is_some() {
+                             instructions.push(last_instruction.as_ref().unwrap().clone());
+                        }
+                        instructions.push(l)
+                    }
+                }
+
+            }
             ExprOrLang::IsExpr(expr) => {
                  match &expr {
                     Expr::Function1(name, arg, body) => {
+                        current_func_name = name.to_string();
                         environment.clear();
                         instructions.push(Lang::Func(name.to_string()));
                         environment.insert(arg.to_string(), 0);
                         queue.push_front(ExprOrLang::IsExpr((**body).clone()));
+                        queue.push_back(ExprOrLang::IsLang(Lang::Label(format!("{}_exit", name))));
+                        queue.push_back(ExprOrLang::IsLang(Lang::FuncEnd));
                     },
                     Expr::If(pred, then, otherwise) => {
                         label_index +=1;
@@ -359,7 +393,7 @@ fn expr_to_lang(expr: Expr) -> Vec<Lang> {
                         queue.push_front(ExprOrLang::IsExpr((**v1).clone()));
                     },
                     Expr::Add(v1, v2) => {
-                         // backwards order because push_front
+                        // backwards order because push_front
                         queue.push_front(ExprOrLang::IsLang(Lang::Add(Location::Stack(1), Location::Stack(0))));
                         queue.push_front(ExprOrLang::IsExpr((**v2).clone()));
                         queue.push_front(ExprOrLang::IsExpr((**v1).clone()));
@@ -384,7 +418,8 @@ fn expr_to_lang(expr: Expr) -> Vec<Lang> {
                     },
                     Expr::Return(e) => {
                         // backwards order because push_front
-                        queue.push_front(ExprOrLang::IsLang(Lang::FuncEnd));
+                        queue.push_front(ExprOrLang::IsLang(Lang::Jump(format!("{}_exit", current_func_name))));
+                        queue.push_front(ExprOrLang::IsLang(Lang::SetReturn));
                         queue.push_front(ExprOrLang::IsExpr((**e).clone()));
                     },
                     Expr::Print(e) => {
@@ -415,10 +450,9 @@ fn expr_to_lang(expr: Expr) -> Vec<Lang> {
 // that compiles to this language.
 // Need to add functions and function calls
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Lang {
     Int(i64),
-    Plus,
     GetArg(i64),
     GetLocal(i64),
     SetLocal(i64, Location),
@@ -426,6 +460,8 @@ enum Lang {
     Sub(Location, Location),
     Label(String),
     // Equal,
+    // Need to convert jump equal to location version
+    // JumpEqualL(String, Location, Location),
     JumpEqual(String),
     JumpNotEqual(String),
     Jump(String),
@@ -434,6 +470,7 @@ enum Lang {
     Read(i64),
     Func(String),
     FuncEnd,
+    SetReturn,
     Pop,
     // i64 is the number of arguments
     Call0(String),
@@ -446,14 +483,13 @@ enum Lang {
 // Need to think about values on the stack from a call, vs locals on the stack.
 // Maybe I have the base point vs the stack pointer?
 // This is where liveness analysis could make things faster
-fn loc_to_register(location: & Location, _current_offset: i64) -> Register {
+fn loc_to_register(location: & Location, current_offset: i64) -> Register {
     match location {
-        Location::Stack(i) => StackPointerOffset(i * 8),
-        // Plus 2 because of the return value and base pointer
-        // if we weren't aligned, we push another
+        Location::Stack(i) => StackBaseOffset(current_offset + i * 8),
         Location::Arg(i) => ARGUMENT_REGISTERS[*i as usize].clone(),
         Location::Local(i) => StackBaseOffset(i * -8),
         Location::Const(i) => Const(*i),
+        Location::ReturnRegister => RAX,
     }
 }
 
@@ -482,12 +518,26 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
     
 
     let mut offset : i64 = 0;
+    let mut _max_offset = 0;
+    let mut _function_start_index : usize = 0;
+    // Need to implement allocating stack at the beginning.
+    // That means I need to keep track of how much stack I use.
+    // And I need to allocate that at the beginning of the function.
+    // Right now I generate multiple returns. Which does kind of complicate
+    // the way I track the stack.
+    // Maybe don't do that?
+
+    // If I don't, then I can keep track of max_offset
+    // make sure that it is a multple of 16, then all my calls
+    // will be aligned and I can reference things offset from the base pointer.
 
     macro_rules! move_stack_pointer {
         ( $n:expr ) => {
             offset -= $n * 8;
-            // max_offset = offset;
-            back!(Add(RSP, Const($n * -8)));
+            if ($n > 0) {
+                _max_offset = offset;
+            }
+            // back!(Add(RSP, Const($n * -8)));
         };
         () => {
            move_stack_pointer!(1);
@@ -496,40 +546,35 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
 
     macro_rules! fix_alignment {
         ( $n:expr ) => {{
-            let new_offset = offset + -8 * $n;
-            if new_offset % 16 != 0 {
-                back!(Push(RBP));
-                offset -= 8;
-                true
-            } else {
-                false
-            }
+            false
+            // let new_offset = offset + -8 * $n;
+            // if new_offset % 16 != 0 {
+            //     back!(Push(RBP));
+            //     offset -= 8;
+            //     true
+            // } else {
+            //     false
+            // }
         }};
         () => {
             fix_alignment!(0)
         }
     }
-    // Max here is a bit weird because it is negative
-    // let mut max_offset : i64 = 0;
-    // let args = 0;
 
-    // Consider a macro??
-    // Seems weird, but it worked well for me before.
-    // Really takes the ugliness out of some of this code.
-    // Is it worth it though?
-
+    // Consider keeping track of where last value is.
+    // If we know that stack(0) is really r9, then let's use that.
     for e in lang {
         match e {
             Lang::GetArg(i) => {
                 comment!("Get Arg {}", i);
                 move_stack_pointer!();
-                back!(Mov(StackPointerOffset(0), ARGUMENT_REGISTERS[i as usize].clone()));
+                back!(Mov(StackBaseOffset(offset), ARGUMENT_REGISTERS[i as usize].clone()));
             },
             Lang::GetLocal(i) => {
                 move_stack_pointer!();
                 comment!("Get Local {}", i);
                 back!(Mov(R9, loc_to_register(&Location::Local(i), offset)));
-                back!(Mov(StackPointerOffset(0), R9));
+                back!(Mov(StackBaseOffset(offset), R9));
             },
             Lang::SetLocal(i, location) => {
                 // TODO fill out
@@ -538,10 +583,19 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 back!(Label(name));
                 back!(Push(RBP));
                 back!(Mov(RBP, RSP));
+                _function_start_index = instructions.len();
                 offset = 0;
+                _max_offset = 0;
             },
+            Lang::SetReturn => {
+                back!(Mov(RAX, StackBaseOffset(offset)));
+            }
             Lang::FuncEnd => {
-                back!(Mov(RAX, StackPointerOffset(0)));
+                let reserved_stack = ((_max_offset as f64 /16.0).floor() as i64).abs() * 16;
+                if reserved_stack != 0 {
+                    instructions.insert(_function_start_index, Sub(RSP, Register::Const(reserved_stack)));
+                }
+                _max_offset = 0;
                 back!(Leave);
                 back!(Ret);
             },
@@ -553,7 +607,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                     back!(Pop(RBP));
                 }
                 move_stack_pointer!();
-                back!(Mov(StackPointerOffset(0), RAX));
+                back!(Mov(StackBaseOffset(offset), RAX));
             },
             Lang::Call1(name, arg1) => {
                 comment!("Arg {} with value {:?}", 0, arg1);
@@ -565,15 +619,12 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 offset -= 8;
                 back!(Mov(reg.clone(), R9));
 
-                let fixed = fix_alignment!();
+                back!(Push(RBP));
                 back!(Call(name));
-                if fixed {
-                    offset += 8;
-                    back!(Pop(RBP));
-                }
+                back!(Pop(RBP));
                 back!(Pop(reg.clone()));
                 offset += 8;
-                back!(Mov(StackPointerOffset(0), RAX)); 
+                back!(Mov(StackBaseOffset(offset), RAX)); 
             },
             Lang::Call2(name, arg1, arg2) => {
                 comment!("Arg {} with value {:?}", 0, arg1);
@@ -591,34 +642,27 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                     back!(Pop(RBP));
                 }
                 move_stack_pointer!();
-                back!(Mov(StackPointerOffset(0), RAX));
+                back!(Mov(StackBaseOffset(offset), RAX));
             },
             Lang::Int(i) => {
                 comment!("Int {}", i);
                 move_stack_pointer!();
-                back!(Mov(StackPointerOffset(0), Const(i)));
-            },
-            Lang::Plus => {
-                comment!("Plus");
-                back!(Mov(RAX, StackPointerOffset(-8)));
-                back!(Add(RAX, StackPointerOffset(0)));
-                move_stack_pointer!(-1);
-                back!(Mov(StackPointerOffset(0), RAX));
+                back!(Mov(StackBaseOffset(offset), Const(i)));
             },
             Lang::Label(name) => {
                 back!(Label(name));
             },
             Lang::JumpEqual(label)=> {
                 comment!("Jump Equal");
-                back!(Mov(R9, StackPointerOffset(0)));
+                back!(Mov(R9, StackBaseOffset(offset)));
                 move_stack_pointer!(-1);
-                back!(Cmp(StackPointerOffset(0), R9));
+                back!(Cmp(StackBaseOffset(offset), R9));
                 back!(Je(label)); 
             }
             Lang::JumpNotEqual(label) => {
-                back!(Mov(R9, StackPointerOffset(0)));
+                back!(Mov(R9, StackBaseOffset(offset)));
                 move_stack_pointer!(-1);
-                back!(Cmp(StackPointerOffset(0), R9));
+                back!(Cmp(StackBaseOffset(offset), R9));
                 back!(Jne(label)); 
             }
             Lang::Jump(label) => {
@@ -626,7 +670,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
             }
             Lang::Print => {
                 comment!("Print!");
-                back!(Mov(R9, StackPointerOffset(0)));
+                back!(Mov(R9, StackBaseOffset(offset)));
                 back!(Push(RDI));
                 back!(Push(RSI));
                 back!(Lea(RDI, DerefData("format".to_string())));
@@ -634,6 +678,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 back!(Push(RAX));
                 // We just did three pushes hence 3.
                 // Can of course simplify, but for clairity leaving it.
+                 // Not sure about this code now.
                 if (offset + 8*3) % 16 != 0 {
                    back!(Push(RAX));  
                 }
@@ -641,6 +686,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 back!(Mov(RAX, Const(0)));
                 back!(Call("_printf".to_string()));
                 back!(Pop(RAX));
+                // Not sure about this code now.
                 if (offset + 8*3) % 16 != 0 {
                    back!(Pop(RAX));  
                 }
@@ -650,35 +696,39 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
             Lang::Read(index) => {
                 move_stack_pointer!();
                 back!(Mov(R9, Deref(Box::new(R15), index*8)));
-                back!(Mov(StackPointerOffset(0), R9));
+                back!(Mov(StackBaseOffset(offset), R9));
             }
             // Should store pop?
             Lang::Store(index) => {
                 comment!("Store {}", index);
-                back!(Mov(R9, StackPointerOffset(0)));
+                back!(Mov(R9, StackBaseOffset(offset)));
                 back!(Mov(Deref(Box::new(R15), index*8), R9));
             }
             Lang::Add(loc1, loc2) => {
                 comment!("Add {:?}, {:?}", loc1, loc2);
-                back!(Mov(RAX, loc_to_register(&loc1, offset)));
-                back!(Add(RAX, loc_to_register(&loc2, offset)));
-                if loc1.is_stack() || loc2.is_stack()  {
+                back!(Mov(R9, loc_to_register(&loc1, offset)));
+                back!(Add(R9, loc_to_register(&loc2, offset)));
+                if loc1.is_stack() && loc2.is_stack()  {
                     move_stack_pointer!(-1);
+                } else if loc1.is_stack() || loc2.is_stack()  {
+                    // don't move stack
                 } else {
                      move_stack_pointer!();
                 }
-                back!(Mov(StackPointerOffset(0), RAX));
+                back!(Mov(StackBaseOffset(offset), R9));
             }
             Lang::Sub(loc1, loc2) => {
                 comment!("Sub {:?}, {:?}", loc1, loc2);
-                back!(Mov(RAX, loc_to_register(&loc1, offset)));
-                back!(Sub(RAX, loc_to_register(&loc2, offset)));
-                if loc1.is_stack() || loc2.is_stack()  {
+                back!(Mov(R9, loc_to_register(&loc1, offset)));
+                back!(Sub(R9, loc_to_register(&loc2, offset)));
+                if loc1.is_stack() && loc2.is_stack()  {
                     move_stack_pointer!(-1);
+                } else if loc1.is_stack() || loc2.is_stack()  {
+                    // don't move stack
                 } else {
                      move_stack_pointer!();
                 }
-                back!(Mov(StackPointerOffset(0), RAX));
+                back!(Mov(StackBaseOffset(offset), R9));
             }
             Lang::Pop => {
                 move_stack_pointer!(-1);
