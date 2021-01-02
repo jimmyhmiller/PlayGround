@@ -44,26 +44,31 @@
         writer (transit/writer out :json)]
     (transit/write writer {:type :patch
                            :value patch})
-    (doseq [ws (:clients @internal-state-atom)]
+    (doseq [[ws _] (:clients @internal-state-atom)]
       ;; Super important to pass this empty map
       ;; it is the callback handlers. Otherwise
       ;; we are calling send synchronously.
       (jetty/send! ws (.toString out) {}))))
 
 
+
 (defn make-ws-handler [internal-state-atom on-event]
   {:on-connect (fn [ws]
                  (println "connect")
-                 (swap! internal-state-atom update :clients conj ws))
+                 (swap! internal-state-atom update :clients assoc ws {:metadata {}}))
    :on-error (fn [ws e] (println "error" e))
    :on-close (fn [ws status-code reason]
-               (swap! internal-state-atom update :clients #(filterv (fn [x] (not= ws x)) %))
+               (swap! internal-state-atom update :clients dissoc ws)
                (println "close"))
    :on-text (fn [ws text-message]
               (if (= text-message "init")
                 (send-transit! ws {:type :init
                                    :value (:view-state @internal-state-atom)})
-                (on-event (read-transit text-message))))
+                (on-event {:ws ws
+                           :action (read-transit text-message)
+                           :current-state @state
+                           :state-atom state
+                           :internal-state-atom internal-state-atom})))
    :on-bytes (fn [ws bytes offset len] (println "bytes" bytes) )
    :on-ping (fn [ws bytebuffer] (println "ping") )
    :on-pong (fn [ws bytebuffer] (println "pong"))} )
@@ -72,18 +77,18 @@
 ;; TODO: Need to break things apart so you can run this on your own server
 ;; TODO: Need to have options like port
 (defn start-live-view-server [state view event-handler]
-  (let [internal-state (atom {:clients []
+  (let [internal-state (atom {:clients {}
                               :view-state nil})]
     (swap! internal-state assoc :view-state (view @state))
     (when (var? view)
-      (add-watch view :view-updated 
+      (add-watch view :view-updated
                   (fn [_ _ _ new-view-fn]
                     (update-view-and-send-patch new-view-fn @state internal-state))))
     (add-watch state :send-websocket
                (fn [_ _ _ state]
                  (update-view-and-send-patch view state internal-state)))
 
-    
+
     ;; Is there a performance penalty for the way I am doing the dynamic things here?
     ;; TODO: Need to actualy serve the client side page here.
     (jetty/run-jetty (fn [req] {:body "It Works"})
@@ -130,7 +135,7 @@
 
 ;; Updating view can cause some state issues
 ;; TODO: FIX
-(defn view [{:keys [name input-value items actions]}]
+(defn view [{:keys [name input-value items actions :live]}]
   [:body
    [:h1 {:style {:color "green"}} "Hello " name]
    [:form {:onsubmit [:submit {}]}
@@ -146,15 +151,16 @@
       [:li item])]])
 
 
-(defn handle-event [[action payload]]
-  (swap! state update :actions conj [action payload])
-  (case action
-    :submit (when (not (empty? (:input-value @state))) 
-            (dosync (swap! state update :items conj (:input-value @state))
-                    (swap! state assoc :input-value "")))
-    :input-change (swap! state assoc :input-value (:value payload))
-    :clear (swap! state assoc :items [] :actions [])
-    (prn [action payload])))
+(defn handle-event [{:keys [action internal-state]}]
+  (let [[type payload] action]
+    (swap! state update :actions conj action)
+    (case type
+      :submit (when (not (empty? (:input-value @state)))
+                (dosync (swap! state update :items conj (:input-value @state))
+                        (swap! state assoc :input-value "")))
+      :input-change (swap! state assoc :input-value (:value payload))
+      :clear (swap! state assoc :items [] :actions [])
+      (prn action))))
 
 
 (def server (start-live-view-server state #'view #'handle-event))
