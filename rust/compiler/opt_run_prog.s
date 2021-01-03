@@ -38,8 +38,9 @@ start:
 push rbp
 mov rbp, rsp
 ; Arg 0 with value Const(40)
+mov r9, 40
 push rdi
-mov rdi, 40
+mov rdi, r9
 push rbp
 call fibonacci
 pop rbp
@@ -65,55 +66,35 @@ ret
 fibonacci:
 push rbp
 mov rbp, rsp
-sub rsp, 16
-; Jump Equal
-mov r9, rdi
-cmp r9, 0
-je then1
-; Jump Equal
-mov r9, rdi
-cmp r9, 1
-je then2
-; Sub Arg(0), Const(1)
-mov r9, rdi
-sub r9, 1
-mov qword [rbp-8], r9
-; Arg 0 with value Stack(0)
-push rdi
-mov rdi, qword [rbp-8]
-push rbp
-call fibonacci
-pop rbp
-pop rdi
-mov qword [rbp-8], rax
-; Sub Arg(0), Const(2)
-mov r9, rdi
-sub r9, 2
-mov qword [rbp-16], r9
-; Arg 0 with value Stack(0)
-push rdi
-mov rdi, qword [rbp-16]
-push rbp
-call fibonacci
-pop rbp
-pop rdi
-mov qword [rbp-16], rax
-; Add Stack(1), Stack(0)
-mov r9, qword [rbp-8]
-add r9, qword [rbp-16]
-mov qword [rbp-8], r9
-mov rax, qword [rbp-8]
-jmp fibonacci_exit
-
-then2:
-mov rax, 1
-jmp fibonacci_exit
-mov rax, qword [rbp-8]
-jmp fibonacci_exit
-
-then1:
+sub rsp, 32
+; Get Arg 0
+mov qword [rbp-8], rdi
+; Int 0
+cmp qword [rbp-8], 0
+jne then1
 mov rax, 0
 jmp fibonacci_exit
+then1:
+cmp qword [rbp-8], 1
+jne body
+mov rax, 1
+jmp fibonacci_exit
+body:
+mov r9, rdi
+sub r9, 1
+mov rdi, r9
+call fibonacci
+mov qword [rbp-16], rax
+mov r9, qword [rbp-8]
+sub r9, 2
+mov rdi, r9
+call fibonacci
+; Add Stack(1), ReturnRegister
+mov r9, qword [rbp-16]
+add r9, rax
+mov rax, r9
+jmp fibonacci_exit
+
 
 fibonacci_exit:
 leave

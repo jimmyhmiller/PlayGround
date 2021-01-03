@@ -37,50 +37,99 @@ ret
 start:
 push rbp
 mov rbp, rsp
-; Reserving args space
-add rsp, -24
-; Pushing arg 0 with value Const(0)
-mov rdi, 0
-mov qword [rsp+8], rdi
-; Pushing arg 1 with value Const(20)
-mov rdi, 20
-mov qword [rsp+16], rdi
-call body
-leave
-ret
-
-body:
+; Arg 0 with value Const(40)
+mov r9, 40
+push rdi
+mov rdi, r9
 push rbp
-mov rbp, rsp
-sub rsp, 16
-; Get Arg 0
-mov rdi, qword [rbp+24]
-mov qword [rbp-8], rdi
-
-loop:
-; Get Arg 1
-mov rdi, qword [rbp+32]
-mov qword [rbp-16], rdi
-mov rdi, qword [rbp-8]
-cmp qword [rbp-16], rdi
-mov qword [rbp-16], rcx
-mov rcx, qword [rbp-16]
-je done
+call fibonacci
+pop rbp
+pop rdi
+mov qword [rbp], rax
+; Print!
+mov r9, qword [rbp]
+push rdi
+push rsi
 lea rdi, [format]
-mov rsi, qword [rbp-8]
+mov rsi, r9
+push rax
 push rax
 mov rax, 0
 call _printf
 pop rax
-; Int 1
-mov qword [rbp-16], 1
-; Add Stack(1), Stack(0)
-mov rax, qword [rbp-8]
-add rax, qword [rbp-16]
-mov qword [rbp-8], rax
-jmp loop
-
-done:
+pop rax
+pop rsi
+pop rdi
 leave
 ret
-mov rax, qword [rbp-8]
+
+fibonacci:
+push rbp
+mov rbp, rsp
+sub rsp, 48
+; Get Arg 0
+mov qword [rbp-8], rdi
+; Int 0
+mov qword [rbp-16], 0
+; Jump Equal
+mov r9, qword [rbp-16]
+cmp qword [rbp-8], r9
+je then1
+; Get Arg 0
+mov qword [rbp-16], rdi
+; Int 1
+mov qword [rbp-24], 1
+; Jump Equal
+mov r9, qword [rbp-24]
+cmp qword [rbp-16], r9
+je then2
+; Sub Arg(0), Const(1)
+mov r9, rdi
+sub r9, 1
+mov qword [rbp-24], r9
+; Arg 0 with value Stack(0)
+mov r9, qword [rbp-24]
+push rdi
+mov rdi, r9
+push rbp
+call fibonacci
+pop rbp
+pop rdi
+mov qword [rbp-24], rax
+; Sub Arg(0), Const(2)
+mov r9, rdi
+sub r9, 2
+mov qword [rbp-32], r9
+; Arg 0 with value Stack(0)
+mov r9, qword [rbp-32]
+push rdi
+mov rdi, r9
+push rbp
+call fibonacci
+pop rbp
+pop rdi
+mov qword [rbp-32], rax
+; Add Stack(1), ReturnRegister
+mov r9, qword [rbp-24]
+add r9, rax
+mov qword [rbp-32], r9
+mov rax, qword [rbp-32]
+jmp fibonacci_exit
+
+then2:
+; Int 1
+mov qword [rbp-40], 1
+mov rax, qword [rbp-40]
+jmp fibonacci_exit
+mov rax, qword [rbp-40]
+jmp fibonacci_exit
+
+then1:
+; Int 0
+mov qword [rbp-48], 0
+mov rax, qword [rbp-48]
+jmp fibonacci_exit
+
+fibonacci_exit:
+leave
+ret

@@ -5,6 +5,12 @@ use std::fs::File;
 use std::io::prelude::{Write};
 
 
+// Can I do a "stack" machine where the first n values of the stack are registers?
+
+
+
+
+
 // https://en.wikipedia.org/wiki/X86_calling_conventions#x86-64_calling_conventions
 // If the callee wishes to use registers RBX, RSP, RBP, and R12–R15,
 // it must restore their original values before returning control to
@@ -285,6 +291,7 @@ enum Location {
     ReturnRegister,
     // Not actually a location, just the value
     Const(i64),
+    PlaceHolder,
 }
 
 impl Location {
@@ -320,127 +327,143 @@ enum ExprOrLang {
     IsExpr(Expr),
 }
 
+#[allow(dead_code)]
+#[derive(Debug)]
+enum QueueVals {
+    Lang(Lang),
+    Expr(Expr),
+    Location(Location),
+}
 
 
 #[allow(dead_code)]
 #[allow(unused_variables)]
 fn expr_to_lang(expr: Expr) -> Vec<Lang> {
-    let mut queue : VecDeque<ExprOrLang> = VecDeque::new();
+    let mut queue : VecDeque<QueueVals> = VecDeque::new();
+    let mut location_queue = vec![];
     let mut instructions : Vec<Lang> = vec![];
     // Need to do scopes properly
     let mut label_index = 0;
     let mut environment : HashMap<String, i64> = HashMap::new();
     // This could be wrong. Only really dealing with one function right now
     let mut current_func_name = "".to_string();
-    queue.push_front(ExprOrLang::IsExpr(expr));
+    queue.push_front(QueueVals::Expr(expr));
     while !(queue.is_empty()) {
         match queue.pop_front().unwrap() {
-            ExprOrLang::IsLang(l) => {
-                match (&l, &instructions.pop()) {
-                    (Lang::Sub(Location::Stack(n), Location::Stack(0)), Some(Lang::Int(m))) => {
-                        instructions.push(Lang::Sub(Location::Stack(n-1), Location::Const(*m)))
+            QueueVals::Lang(l) => {
+                match l {
+                    Lang::Add(Location::PlaceHolder, Location::PlaceHolder) => {
+                        // backwards order because push_front
+                        let loc1 = location_queue.pop().unwrap_or(Location::Stack(0));
+                        let loc2 = location_queue.pop().unwrap_or(Location::Stack(1));
+                        queue.push_front(QueueVals::Lang(Lang::Add(loc2, loc1)));
+                    },
+                    Lang::Sub(Location::PlaceHolder, Location::PlaceHolder) => {
+                        // backwards order because push_front
+                        let second_arg = location_queue.pop().unwrap();
+                        let first_arg = location_queue.pop().unwrap();
+                        queue.push_front(QueueVals::Lang(Lang::Sub(first_arg, second_arg)));
+                    },
+                    Lang::JumpEqualL(label, Location::PlaceHolder, Location::PlaceHolder) => {
+                        // backwards order because push_front
+                        let second_arg = location_queue.pop().unwrap();
+                        let first_arg = location_queue.pop().unwrap();
+                        queue.push_front(QueueVals::Lang(Lang::JumpEqualL(label, first_arg, second_arg)));
+                    },
+                    Lang::SetReturnL(Location::PlaceHolder) => {
+                        let loc1 = location_queue.pop().unwrap_or(Location::Stack(0));
+                        queue.push_front(QueueVals::Lang(Lang::SetReturnL(loc1)));
                     }
-                    (Lang::Add(Location::Stack(n), Location::Stack(0)), Some(Lang::Int(m))) => {
-                        instructions.push(Lang::Add(Location::Stack(n-1), Location::Const(*m)))
-                    }
-                    (Lang::Add(s, Location::Stack(0)), Some(c@Lang::Call1(_, _))) => {
-                        instructions.push(c.clone());
-                        instructions.push(Lang::Add(*s, Location::ReturnRegister))
-                    }
-                    (Lang::Sub(s, Location::Stack(0)), Some(c@Lang::Call1(_, _))) => {
-                        instructions.push(c.clone());
-                        instructions.push(Lang::Sub(*s, Location::ReturnRegister))
-                    }
-                    (Lang::Call1(f, Location::Stack(0)), Some(Lang::Int(n))) => {
-                        instructions.push(Lang::Call1(f.to_string(), Location::Const(*n)))
-                    }
-                    (_, last_instruction) => {
-                        println!("instructions {:?}\n{:?}",  last_instruction, l);
-                        if last_instruction.is_some() {
-                             instructions.push(last_instruction.as_ref().unwrap().clone());
-                        }
+                    _ => {
                         instructions.push(l)
                     }
                 }
-
             }
-            ExprOrLang::IsExpr(expr) => {
+            QueueVals::Location(l) => {
+                location_queue.push(l);
+            },
+            QueueVals::Expr(expr) => {
                  match &expr {
                     Expr::Function1(name, arg, body) => {
                         current_func_name = name.to_string();
                         environment.clear();
                         instructions.push(Lang::Func(name.to_string()));
                         environment.insert(arg.to_string(), 0);
-                        queue.push_front(ExprOrLang::IsExpr((**body).clone()));
-                        queue.push_back(ExprOrLang::IsLang(Lang::Label(format!("{}_exit", name))));
-                        queue.push_back(ExprOrLang::IsLang(Lang::FuncEnd));
+                        queue.push_front(QueueVals::Expr((**body).clone()));
+                        queue.push_back(QueueVals::Lang(Lang::Label(format!("{}_exit", name))));
+                        queue.push_back(QueueVals::Lang(Lang::FuncEnd));
                     },
                     Expr::If(pred, then, otherwise) => {
                         label_index +=1;
                         // backwards order because push_front
-                        queue.push_front(ExprOrLang::IsExpr((**then).clone()));
+                        queue.push_front(QueueVals::Expr((**then).clone()));
                         // Need to have a counter for new labels scoped to function
-                        queue.push_front(ExprOrLang::IsLang(Lang::Label(format!("then{}", label_index))));
-                        queue.push_front(ExprOrLang::IsExpr((**otherwise).clone()));
-                        queue.push_front(ExprOrLang::IsLang(Lang::JumpEqual(format!("then{}", label_index))));
-                        queue.push_front(ExprOrLang::IsExpr((**pred).clone()));
+                        queue.push_front(QueueVals::Lang(Lang::Label(format!("then{}", label_index))));
+                        queue.push_front(QueueVals::Expr((**otherwise).clone()));
+                        queue.push_front(QueueVals::Lang(Lang::JumpEqualL(format!("then{}", label_index), Location::PlaceHolder, Location::PlaceHolder)));
+                        queue.push_front(QueueVals::Expr((**pred).clone()));
                     },
                     // This only works in if for right now.
                     // Need to make this better and actually have booleans
                     Expr::Equals(v1, v2) => {
                          // backwards order because push_front
-                        queue.push_front(ExprOrLang::IsExpr((**v2).clone()));
-                        queue.push_front(ExprOrLang::IsExpr((**v1).clone()));
+                        queue.push_front(QueueVals::Expr((**v2).clone()));
+                        queue.push_front(QueueVals::Expr((**v1).clone()));
                     },
                     Expr::Add(v1, v2) => {
                         // backwards order because push_front
-                        queue.push_front(ExprOrLang::IsLang(Lang::Add(Location::Stack(1), Location::Stack(0))));
-                        queue.push_front(ExprOrLang::IsExpr((**v2).clone()));
-                        queue.push_front(ExprOrLang::IsExpr((**v1).clone()));
+                        queue.push_front(QueueVals::Lang(Lang::Add(Location::PlaceHolder, Location::PlaceHolder)));
+                        queue.push_front(QueueVals::Expr((**v2).clone()));
+                        queue.push_front(QueueVals::Expr((**v1).clone()));
                     },
                     Expr::Sub(v1, v2) => {
                         // backwards order because push_front
-                        queue.push_front(ExprOrLang::IsLang(Lang::Sub(Location::Stack(1), Location::Stack(0))));
-                        queue.push_front(ExprOrLang::IsExpr((**v2).clone()));
-                        queue.push_front(ExprOrLang::IsExpr((**v1).clone()));
+                        queue.push_front(QueueVals::Lang(Lang::Sub(Location::PlaceHolder, Location::PlaceHolder)));
+                        queue.push_front(QueueVals::Expr((**v2).clone()));
+                        queue.push_front(QueueVals::Expr((**v1).clone()));
                     },
                     Expr::Var(s) => {
                         match environment.get(s) {
                             // This is wrong I don't distinguish between locals
                             // or args. Need to do that.
-                            Some(n) => instructions.push(Lang::GetArg(*n)),
+                            Some(n) => queue.push_front(QueueVals::Location(Location::Arg(*n))),
                             None => panic!("Variable not found {}", s),
                         }
                     },
                     Expr::Let(_, _) => {},
                     Expr::Int(n) => {
-                        instructions.push(Lang::Int(*n));
+                        queue.push_front(QueueVals::Location(Location::Const(*n)));
                     },
                     Expr::Return(e) => {
                         // backwards order because push_front
-                        queue.push_front(ExprOrLang::IsLang(Lang::Jump(format!("{}_exit", current_func_name))));
-                        queue.push_front(ExprOrLang::IsLang(Lang::SetReturn));
-                        queue.push_front(ExprOrLang::IsExpr((**e).clone()));
+                        queue.push_front(QueueVals::Lang(Lang::Jump(format!("{}_exit", current_func_name))));
+                        queue.push_front(QueueVals::Lang(Lang::SetReturnL(Location::PlaceHolder)));
+                        queue.push_front(QueueVals::Expr((**e).clone()));
                     },
                     Expr::Print(e) => {
                         // backwards order because push_front
-                        queue.push_front(ExprOrLang::IsLang(Lang::Print));
-                        queue.push_front(ExprOrLang::IsExpr((**e).clone()));
+                        queue.push_front(QueueVals::Lang(Lang::Print));
+                        queue.push_front(QueueVals::Expr((**e).clone()));
                     },
                     Expr::Call1(name, arg) => {
-                        queue.push_front(ExprOrLang::IsLang(Lang::Call1(name.to_string(), Location::Stack(0))));
-                        queue.push_front(ExprOrLang::IsExpr((**arg).clone()));
+                        queue.push_front(QueueVals::Lang(Lang::Call1(name.to_string(), Location::Stack(0))));
+                        queue.push_front(QueueVals::Expr((**arg).clone()));
+
+                        // Maybe call shouldn't push to the stack?
+                        // Maybe we should never implictly use the stack?
+                        // What about making something a local?
                     }
                 };
             }
         }
-       
     }
 
-    return instructions;
+    for instruction in &instructions {
+        println!("{:?}", instruction);
+    }
+
+    instructions
 }
-
-
 
 
 
@@ -461,7 +484,7 @@ enum Lang {
     Label(String),
     // Equal,
     // Need to convert jump equal to location version
-    // JumpEqualL(String, Location, Location),
+    JumpEqualL(String, Location, Location),
     JumpEqual(String),
     JumpNotEqual(String),
     Jump(String),
@@ -472,6 +495,7 @@ enum Lang {
     FuncEnd,
     // Need to have a location version of SetReturn
     SetReturn,
+    SetReturnL(Location),
     Pop,
     // i64 is the number of arguments
     Call0(String),
@@ -491,9 +515,32 @@ fn loc_to_register(location: & Location, current_offset: i64) -> Register {
         Location::Local(i) => StackBaseOffset(i * -8),
         Location::Const(i) => Const(*i),
         Location::ReturnRegister => RAX,
+        Location::PlaceHolder => unimplemented!("Got placeholder value!"),
     }
 }
 
+
+
+// Don't do unnecessary pushing/loading
+// Change up if format to not jump as much
+// Optimize get arg to not be on stack
+//
+// ; Get Arg 0
+// mov qword [rbp-16], rdi
+// ; Sub Stack(0), Const(1)
+// mov r9, qword [rbp-16]
+//
+//
+// Save args to stack
+// Given that, we don't need to save args before calls
+//
+//
+// Get rid of unneceassry stack pushes
+//
+// mov qword [rbp-16], r9
+// ; Arg 0 with value Stack(0)
+// mov r9, qword [rbp-16]
+// mov rdi, r9
 
 const ARGUMENT_REGISTERS: [Register; 4] = [RDI, RSI, RDX, RCX];
 
@@ -591,6 +638,9 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
             Lang::SetReturn => {
                 back!(Mov(RAX, StackBaseOffset(offset)));
             }
+            Lang::SetReturnL(loc) => {
+                back!(Mov(RAX, loc_to_register(&loc, offset)));
+            }
             Lang::FuncEnd => {
                 let reserved_stack = ((_max_offset as f64 /16.0).floor() as i64).abs() * 16;
                 if reserved_stack != 0 {
@@ -615,11 +665,9 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
 
                 let i = 0;
                 let reg = &ARGUMENT_REGISTERS[i as usize];
-                back!(Mov(R9, loc_to_register(&arg1, offset)));
                 back!(Push(reg.clone()));
+                back!(Mov(reg.clone(), loc_to_register(&arg1, offset)));
                 offset -= 8;
-                back!(Mov(reg.clone(), R9));
-
                 back!(Push(RBP));
                 back!(Call(name));
                 back!(Pop(RBP));
@@ -653,6 +701,7 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
             Lang::Label(name) => {
                 back!(Label(name));
             },
+
             Lang::JumpEqual(label)=> {
                 comment!("Jump Equal");
                 back!(Mov(R9, StackBaseOffset(offset)));
@@ -731,11 +780,18 @@ fn to_asm(lang: Vec<Lang>) -> VecDeque<Op> {
                 }
                 back!(Mov(StackBaseOffset(offset), R9));
             }
+            Lang::JumpEqualL(label, loc1, loc2) => {
+                comment!("Jump Equal");
+                back!(Mov(R9, loc_to_register(&loc1, offset)));
+                back!(Cmp(R9, loc_to_register(&loc2, offset)));
+                back!(Je(label)); 
+            }
             Lang::Pop => {
                 move_stack_pointer!(-1);
             }
         }
     }
+
 
     return instructions;
 }
@@ -849,6 +905,8 @@ fn main() -> std::io::Result<()> {
         Lang::FuncEnd,
 
     ]);
+    println!("\n\n\n\nHERE");
+    println!("\n\n\n\n");
     prelude.append(&mut main.into_iter().collect());
     prelude.append(&mut to_asm(expr_to_lang(prog)).into_iter().collect());
     let instructions = prelude;
