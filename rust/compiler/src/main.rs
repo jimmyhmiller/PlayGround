@@ -6,7 +6,7 @@ use std::io::prelude::{Write};
 
 
 // Can I do a "stack" machine where the first n values of the stack are registers?
-
+// So if I output stack(0), that really means r12 or something?
 
 
 
