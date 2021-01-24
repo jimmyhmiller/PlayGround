@@ -1,49 +1,52 @@
 
-use dynasmrt::x64::Assembler;
-use std::ops::Deref;
-use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 
-use std::{io, slice, mem};
-use std::io::Write;
+use std::ops::Deref;
+use dynasmrt::DynasmApi;
+use dynasmrt::x64::Assembler;
+use dynasmrt::AssemblyOffset;
+use dynasmrt::{dynasm, Pointer};
+
+use std::{mem};
+
 
 #[derive(Debug)]
 struct Compiler {
-    assembler: Assembler
+    code: Assembler,
+    stubs: Assembler,
 }
 
 impl Compiler {
     #[allow(dead_code, unused_variables)]
-    pub extern "C" fn add_more_than_once(&mut self, i : i32) {
-        println!("{:?} {}", self, i);
-        let here = self.assembler.offset();
-        if i <= 0 {
-            println!("path");
-            dynasm!(self.assembler
-                // ; add rsp, BYTE 0x28
-                ; mov r9, 10
+
+    // Instead of assuming I know where that code was,
+    // I can get passed the pointer to that code. (or maybe the offset?)
+    // Use that the base pointer, I can find our offset.
+    // if the code is on the frontier, we can do fall through
+    // optimizations.
+    // Need to go back and look at how others are doing this.
+    // In order to add more stubs here I think I need to do
+    // alter uncommitted.
+    // The only problem there is I'm not sure if this idea plays
+    // nice with gcing our stubs.
+    // Because we make a call, the code is executing.
+    // I'm not quite sure how to get around that yet.
+
+    pub extern "C" fn the_answer(&mut self) -> *const u8 {
+        println!("Call to compiler");
+        let offset = self.code.offset();
+        self.code.alter(|op| {
+            op.goto(AssemblyOffset(offset.0 - 10));
+            dynasm!(op
                 ; mov rax, 42
                 ; ret
             );
-             println!("path done");
-        } else {
-            dynasm!(self.assembler
-                ; add r9, 1
-            );
-        }
-        println!("Here2");
-        let _ = self.assembler.commit().unwrap();
-        let reader =  self.assembler.reader();
+            op.check(offset).unwrap();
+        }).unwrap();
+        let reader = self.code.reader();
         let lock = reader.lock();
         let buf = lock.deref();
-        println!("Here3");
-
-        let hello_fn: extern "C" fn() -> i32 = unsafe { mem::transmute(buf.ptr(here)) };
-        drop(lock);
-        println!("Here4");
-        println!("returned {}", hello_fn());
-        println!("Here5");
-        
-        return;
+        let ptr = buf.ptr(AssemblyOffset(offset.0 - 10));
+        return ptr;
     }
 }
 
@@ -52,29 +55,45 @@ impl Compiler {
 
 fn main() {
     let mut compiler = Compiler{
-        assembler: dynasmrt::x64::Assembler::new().unwrap(),
+        code: dynasmrt::x64::Assembler::new().unwrap(),
+        stubs: dynasmrt::x64::Assembler::new().unwrap(),
     };
-
-    let printit = compiler.assembler.offset();
-    dynasm!(compiler.assembler
-        ; .arch x64
-        ; mov r9, 42
-        ; mov rax, 32
-        ; mov rsi, 0
-        ; mov rax, QWORD Compiler::add_more_than_once as _
+    let here = compiler.stubs.offset();
+    dynasm!(compiler.stubs
+        ; mov rax, QWORD Compiler::the_answer as _
         ; sub rsp, BYTE 0x28
         ; call rax
         ; add rsp, BYTE 0x28
+        ; jmp rax
+     );
+
+    compiler.stubs.commit().unwrap();
+    let reader = compiler.stubs.reader();
+    let lock = reader.lock();
+    let buf = lock.deref();
+    let ptr = buf.ptr(here);
+    drop(lock);
+
+    let main = compiler.code.offset();
+    dynasm!(compiler.code
+        ; .arch x64
+        ; mov rax, QWORD Pointer!(ptr)
+        // ; mov rdi, compiler.code.offset().0 as _
+        ; jmp rax
+        ; mov rax, 56
         ; ret
     );
-    let _ = compiler.assembler.commit().unwrap();
-    let reader = compiler.assembler.reader();
+
+    compiler.code.commit().unwrap();
+    let reader = compiler.code.reader();
     let lock = reader.lock();
     let buf = lock.deref();
 
-    let hello_fn: extern "C" fn(&mut Compiler) -> i32 = unsafe { mem::transmute(buf.ptr(printit)) };
+    let hello_fn: extern "C" fn(&mut Compiler) -> i32 = unsafe { mem::transmute(buf.ptr(main)) };
     drop(lock);
 
+    // Second time we will not compile back into the compiler
     println!("{}", hello_fn(&mut compiler));
-    println!("here exit");
+    println!("{}", hello_fn(&mut compiler));
+    println!("exit");
 }
