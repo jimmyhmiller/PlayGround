@@ -1,6 +1,5 @@
 (ns live-view.core
-  (:require [morphdom]
-            [editscript.core :as editscript]
+  (:require [editscript.core :as editscript]
             [editscript.edit :as edit]
             [cognitect.transit :as transit]
             [hipo.core :as hipo]
@@ -20,22 +19,22 @@
                                                              (transit/write 
                                                               writer
                                                               [action (assoc (or payload {}) :value (.-value (.-target e)))]))))))}
-                         {:target {:attr "onsubmit"}
+                        {:target {:attr "onsubmit"}
                          :fn (fn [node a b val]
                                (.addEventListener node
-                                                 "submit"
-                                                (fn [e] 
-                                                  (.preventDefault e)
-                                                  (let [writer (transit/writer :json)]
-                                                    (.send ws (transit/write writer val))))))}
+                                                  "submit"
+                                                  (fn [e] 
+                                                    (.preventDefault e)
+                                                    (let [writer (transit/writer :json)]
+                                                      (.send ws (transit/write writer val))))))}
                         {:target {:attr "onclick"}
                          :fn (fn [node a b val]
                                (.addEventListener node
-                                                 "click"
-                                                (fn [e] 
-                                                  (.preventDefault e)
-                                                  (let [writer (transit/writer :json)]
-                                                    (.send ws (transit/write writer val))))))}
+                                                  "click"
+                                                  (fn [e] 
+                                                    (.preventDefault e)
+                                                    (let [writer (transit/writer :json)]
+                                                      (.send ws (transit/write writer val))))))}
                         ;; The builtin style handler uses
                         ;; aset which doesn't work for objects now
                         {:target {:attr "style"} 

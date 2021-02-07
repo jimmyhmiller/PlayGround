@@ -69,8 +69,8 @@
                                    :value (:view-state @internal-state-atom)})
                 (on-event {:ws ws
                            :action (read-transit text-message)
-                           :current-state @state
-                           :state-atom state
+                           :current-state @internal-state-atom
+                           :state-atom internal-state-atom
                            :internal-state-atom internal-state-atom})))
    :on-bytes (fn [ws bytes offset len] (println "bytes" bytes) )
    :on-ping (fn [ws bytebuffer] (println "ping") )
@@ -131,7 +131,7 @@
 
 (defn handle-event [{:keys [action internal-state]}]
   (let [[type payload] action]
-    (swap! state update :actions conj action)
+    #_(swap! state update :actions conj action)
     (case type
       :submit (when (not (empty? (:input-value @state)))
                 (dosync (swap! state update :items conj (:input-value @state))
