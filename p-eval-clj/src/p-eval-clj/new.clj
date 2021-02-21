@@ -218,4 +218,4 @@
 
 (p-eval (analyze '(let* [x 2] (let* [y 3] (+ (+ x y) z)))))
 
-(collect-defs (analyze-many '((def x 2) (def x (fn [x] (* x 2)))) analyze) {})
+(collect-defs (analyze-many '((def x 2) (def q (fn [x] (* x 2)))) analyze) {})
