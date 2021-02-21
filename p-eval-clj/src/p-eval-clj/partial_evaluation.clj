@@ -274,7 +274,16 @@
   (let [globals (atom {})]
      (mapv (partial evaluate* {} globals) exprs)))
 
+(defn logic-variable? [x]
+  (and (symbol? x)
+       (string/starts-with? (name x) "?")))
 
+(defn parse-with-quotes [pattern]
+  (clojure.walk/postwalk
+   (fn [x] (if (logic-variable? x)
+             `(quote ~x)
+             x))
+   (zyntax/parse pattern)))
 
 
 
@@ -343,16 +352,9 @@
 
 
 
-(defn logic-variable? [x]
-  (and (symbol? x)
-       (string/starts-with? (name x) "?")))
 
-(defn parse-with-quotes [pattern]
-  (clojure.walk/postwalk
-   (fn [x] (if (logic-variable? x)
-             `(quote ~x)
-             x))
-   (zyntax/parse pattern)))
+
+
 
 (atom? '{:a 1})
 
