@@ -2,7 +2,8 @@
   (:require [ring.adapter.jetty9 :as jetty]
             [editscript.core :as editscript]
             [editscript.edit :as edit]
-            [cognitect.transit :as transit])
+            [cognitect.transit :as transit]
+            [clojure.java.io :as io])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream]))
 
 
@@ -77,6 +78,17 @@
    :on-pong (fn [ws bytebuffer] (println "pong"))} )
 
 
+(def main-js (slurp (io/resource "main.js")))
+(def index-html (slurp (io/resource "index.html")))
+
+
+(defn web-handler [req]
+  (let [uri (:uri req)]
+    (case uri
+      "/" {:body index-html
+           :headers {"Content-Type" "text/html"}}
+      "/main.js" {:body main-js})))
+
 ;; TODO: Need to break things apart so you can run this on your own server
 ;; TODO: Need to have options like port
 ;; TODO: Need to make broadcast overridable, but it needs more context
@@ -92,61 +104,11 @@
                (fn [_ _ _ state]
                  (update-view-and-send-patch view state internal-state broadcast)))
 
-
-    ;; Is there a performance penalty for the way I am doing the dynamic things here?
-    ;; TODO: Need to actualy serve the client side page here.
-    (jetty/run-jetty (fn [req] {:body "It Works"})
+    (jetty/run-jetty #'web-handler
                      {:websockets {"/loc" (fn [_req]
                                             (#'make-ws-handler internal-state event-handler))}
                       :port 50505
-                      :join? false}))
-  )
-
-
-
-
-(def state (atom {:name "No One"
-                  :input-value ""
-                  :items []
-                  :actions []}))
-
-
-;; Updating view can cause some state issues
-;; TODO: FIX
-(defn view [{:keys [name input-value items actions]}]
-  [:body
-   [:h1 {:style {:color "green"}} "Hello " name]
-   [:form {:onsubmit [:submit {}]}
-    [:input {:value input-value
-             :onchange [:input-change {}]}]
-    [:button {:type "submit"} "Submit"]
-    [:button {:type "button" :onclick [:clear {}]} "Clear"]]
-   [:ul
-    (for [item actions]
-      [:li (prn-str item)])]
-   [:ul
-    (for [item items]
-      [:li item])]])
-
-
-(defn handle-event [{:keys [action internal-state]}]
-  (let [[type payload] action]
-    #_(swap! state update :actions conj action)
-    (case type
-      :submit (when (not (empty? (:input-value @state)))
-                (dosync (swap! state update :items conj (:input-value @state))
-                        (swap! state assoc :input-value "")))
-      :input-change (swap! state assoc :input-value (:value payload))
-      :clear (swap! state assoc :items [] :actions [])
-      (prn action))))
-
-
-(def server (start-live-view-server {:state state 
-                                     :view #'view 
-                                     :event-handler #'handle-event}))
-
-(comment
-  (.stop server))
+                      :join? false})))
 
 
 

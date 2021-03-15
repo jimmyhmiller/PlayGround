@@ -3,6 +3,7 @@
             [editscript.edit :as edit]
             [cognitect.transit :as transit]
             [hipo.core :as hipo]
+            [hipo.interceptor :as interceptor]
             [goog.object]))
 
 
@@ -38,17 +39,28 @@
                         ;; The builtin style handler uses
                         ;; aset which doesn't work for objects now
                         {:target {:attr "style"} 
-                         :fn (fn [node _ _ styles] 
+                         :fn (fn [node x y styles]
                                (doseq [[k v] styles]
                                  (goog.object/set (.-style ^js/HTMLElement node)
                                                   (name k) v)))}]})
 
 
+
+(deftype StyleInterceptor []
+   interceptor/Interceptor
+  (-intercept [_ t m f] 
+    (if (and (= t :update-attribute) (= (:name m) :style))
+      (doseq [[k v] (:new-value m)]
+        (goog.object/set (.-style ^js/HTMLElement (:target m))
+                         (name k) v))
+      (f))))
+
 (defn apply-patch [node current-hiccup patch]
   (let [new-hiccup (editscript/patch current-hiccup (edit/edits->script patch ))]
     (hipo/reconciliate!
      node
-     new-hiccup)
+     new-hiccup
+     {:interceptors [(StyleInterceptor.)]})
    
     new-hiccup))
 
