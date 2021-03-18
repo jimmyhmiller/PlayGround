@@ -4,6 +4,7 @@
             [cognitect.transit :as transit]
             [hipo.core :as hipo]
             [hipo.interceptor :as interceptor]
+            [clojure.set]
             [goog.object]))
 
 
@@ -16,15 +17,15 @@
                                                   "input"
                                                   (fn [e]
                                                     (let [writer (transit/writer :json)]
-                                                      (.send ws 
-                                                             (transit/write 
+                                                      (.send ws
+                                                             (transit/write
                                                               writer
                                                               [action (assoc (or payload {}) :value (.-value (.-target e)))]))))))}
                         {:target {:attr "onsubmit"}
                          :fn (fn [node a b val]
                                (.addEventListener node
                                                   "submit"
-                                                  (fn [e] 
+                                                  (fn [e]
                                                     (.preventDefault e)
                                                     (let [writer (transit/writer :json)]
                                                       (.send ws (transit/write writer val))))))}
@@ -32,13 +33,13 @@
                          :fn (fn [node a b val]
                                (.addEventListener node
                                                   "click"
-                                                  (fn [e] 
+                                                  (fn [e]
                                                     (.preventDefault e)
                                                     (let [writer (transit/writer :json)]
                                                       (.send ws (transit/write writer val))))))}
                         ;; The builtin style handler uses
                         ;; aset which doesn't work for objects now
-                        {:target {:attr "style"} 
+                        {:target {:attr "style"}
                          :fn (fn [node x y styles]
                                (doseq [[k v] styles]
                                  (goog.object/set (.-style ^js/HTMLElement node)
@@ -48,12 +49,22 @@
 
 (deftype StyleInterceptor []
    interceptor/Interceptor
-  (-intercept [_ t m f] 
-    (if (and (= t :update-attribute) (= (:name m) :style))
-      (doseq [[k v] (:new-value m)]
-        (goog.object/set (.-style ^js/HTMLElement (:target m))
-                         (name k) v))
-      (f))))
+   (-intercept [_ t m f]
+     (cond
+       (and (= t :update-attribute) (= (:name m) :style))
+       (do
+         (let [new-value (:new-value m)
+               new-keys (set (keys new-value))
+               old-keys  (set (keys (:old-value m)))
+               removed-attributes (clojure.set/difference old-keys new-keys )]
+           (doseq [attr removed-attributes]
+             (goog.object/set (.-style ^js/HTMLElement (:target m))
+                              (name attr) ""))
+           (doseq [[k v] new-value]
+             (goog.object/set (.-style ^js/HTMLElement (:target m))
+                              (name k) v))))
+
+      :else (f))))
 
 (defn apply-patch [node current-hiccup patch]
   (let [new-hiccup (editscript/patch current-hiccup (edit/edits->script patch ))]
@@ -61,7 +72,7 @@
      node
      new-hiccup
      {:interceptors [(StyleInterceptor.)]})
-   
+
     new-hiccup))
 
 (defn create-renderer [dom-node ws]
