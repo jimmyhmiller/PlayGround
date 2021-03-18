@@ -84,4 +84,6 @@
               (swap! state assoc :items (take 50 (drop offset items)))
               (recur (inc offset))))))))
 
-  (future-cancel process))
+  (future-cancel process)
+
+  )
