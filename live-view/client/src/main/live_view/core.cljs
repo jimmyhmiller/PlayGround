@@ -99,7 +99,8 @@
 
 
 (defn init []
-  (let [ws (js/WebSocket. "ws://localhost:50505/loc/")
+  (let [port (or js/window.LIVE_VIEW_PORT js/window.location.port)
+        ws (js/WebSocket. (str "ws://localhost:" port "/loc/"))
         renderer (create-renderer js/document.body ws)]
   (set! (.-onopen ws) (fn [] (.send ws "init")))
   (set! (.-onmessage ws) (fn [e] (let [reader (transit/reader :json)]
