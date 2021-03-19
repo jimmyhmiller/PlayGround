@@ -13,7 +13,6 @@
 ;; Routing
 
 
-
 (defn send-transit! [ws payload]
   (let [out (ByteArrayOutputStream. 4096)
         writer (transit/writer out :json)]
@@ -45,20 +44,20 @@
     (jetty/send! ws patch)))
 
 (defn update-view-and-send-patch [view state internal-state-atom broadcast]
-  (let [new-view-state (view state)
-        patch (edit/get-edits (editscript/diff (:view-state @internal-state-atom) new-view-state))
+  (let [current-state @internal-state-atom
+        new-view-state (view state)
+        patch (edit/get-edits (editscript/diff (:view-state current-state) new-view-state))
         _ (swap! internal-state-atom assoc :view-state new-view-state)
         out (ByteArrayOutputStream. 4096)
         writer (transit/writer out :json)]
     (transit/write writer {:type :patch
                            :value patch})
-    (broadcast (:clients @internal-state-atom) (.toString out))))
+    (broadcast (:clients current-state) (.toString out))))
 
 
 
 (defn make-ws-handler [internal-state-atom on-event]
   {:on-connect (fn [ws]
-                 (println "connect")
                  (swap! internal-state-atom update :clients assoc ws {:metadata {}}))
    :on-error (fn [ws e] (println "error" e))
    :on-close (fn [ws status-code reason]
@@ -73,26 +72,22 @@
                            :current-state @internal-state-atom
                            :state-atom internal-state-atom
                            :internal-state-atom internal-state-atom})))
-   :on-bytes (fn [ws bytes offset len] (println "bytes" bytes) )
-   :on-ping (fn [ws bytebuffer] (println "ping") )
-   :on-pong (fn [ws bytebuffer] (println "pong"))} )
+   :on-bytes (fn [ws bytes offset len])
+   :on-ping (fn [ws bytebuffer])
+   :on-pong (fn [ws bytebuffer])} )
 
-
-(def main-js (slurp (io/resource "main.js")))
-(def index-html (slurp (io/resource "index.html")))
 
 
 (defn web-handler [req]
   (let [uri (:uri req)]
     (case uri
-      "/" {:body index-html
+      "/" {:body  (slurp (io/resource "index.html"))
            :headers {"Content-Type" "text/html"}}
-      "/main.js" {:body main-js})))
+      "/main.js" {:body (slurp (io/resource "main.js"))})))
 
 ;; TODO: Need to break things apart so you can run this on your own server
-;; TODO: Need to have options like port
 ;; TODO: Need to make broadcast overridable, but it needs more context
-(defn start-live-view-server [{:keys [state view event-handler]}]
+(defn start-live-view-server [{:keys [state view event-handler port]}]
   (let [internal-state (atom {:clients {}
                               :view-state nil})]
     (swap! internal-state assoc :view-state (view @state))
@@ -107,7 +102,7 @@
     (jetty/run-jetty #'web-handler
                      {:websockets {"/loc" (fn [_req]
                                             (#'make-ws-handler internal-state event-handler))}
-                      :port 50505
+                      :port (or port 50505)
                       :join? false})))
 
 
@@ -133,32 +128,3 @@
 
 ;; Maybe something like?
 ;; :view-depends-on [:state :user-state]
-
-
-
-
-(comment
-
-  (swap! state assoc :name "Jimmy!")
-  (swap! state assoc :items [])
-
-  (swap! state assoc :actions [])
-
-
-  (def process
-    (future
-      (let [items (map (fn [x]
-                         (str "item" x))
-                       (range 0 5000))]
-        (loop [offset 0]
-          (if (>= offset 5000)
-            (recur 0)
-            (do
-              (Thread/sleep 16)
-              (swap! state assoc :items (take 50 (drop offset items)))
-              (recur (inc offset))))))))
-
-
-
-  (future-cancel process)
-)

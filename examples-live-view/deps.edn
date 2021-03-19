@@ -1,0 +1,6 @@
+{:paths ["src" "resources"]
+ :deps {live-view/live-view-server {:local/root "../live-view/server"}
+        ring/ring {:mvn/version "1.9.1"}
+        ring/ring-json {:mvn/version "0.5.0"}
+        metosin/reitit {:mvn/version "0.5.12"}
+        cheshire/cheshire {:mvn/version "5.10.0"}}}
