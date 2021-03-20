@@ -1,5 +1,6 @@
 (ns live-view-server.core
   (:require [ring.adapter.jetty9 :as jetty]
+            [ring.middleware.resource]
             [editscript.core :as editscript]
             [editscript.edit :as edit]
             [cognitect.transit :as transit]
@@ -43,6 +44,11 @@
     ;; we are calling send synchronously.
     (jetty/send! ws patch)))
 
+
+;; I should actually put these on a queue are grab only the latest
+;; Or maybe I need to do that on client side?
+;; regardless, if the server is sending things faster than we can render,
+;; We can just skip states and only render the latest
 (defn update-view-and-send-patch [view state internal-state-atom broadcast]
   (let [current-state @internal-state-atom
         new-view-state (view state)
@@ -58,20 +64,27 @@
 
 (defn make-ws-handler [internal-state-atom on-event]
   {:on-connect (fn [ws]
-                 (swap! internal-state-atom update :clients assoc ws {:metadata {}}))
+                 (do (println "connecting")
+                     (swap! internal-state-atom update :clients assoc ws {:metadata {}})
+                     (println "done connecting")))
    :on-error (fn [ws e] (println "error" e))
    :on-close (fn [ws status-code reason]
                (swap! internal-state-atom update :clients dissoc ws)
                (println "close"))
    :on-text (fn [ws text-message]
               (if (= text-message "init")
-                (send-transit! ws {:type :init
-                                   :value (:view-state @internal-state-atom)})
-                (on-event {:ws ws
-                           :action (read-transit text-message)
-                           :current-state @internal-state-atom
-                           :state-atom internal-state-atom
-                           :internal-state-atom internal-state-atom})))
+                (do (println "init")
+                    (send-transit! ws {:type :init
+                                       :value (:view-state @internal-state-atom)})
+                    (println "done init"))
+                (do
+                  (println "event")
+                  (on-event {:ws ws
+                             :action (read-transit text-message)
+                             :current-state @internal-state-atom
+                             :state-atom internal-state-atom
+                             :internal-state-atom internal-state-atom})
+                  (println "done event"))))
    :on-bytes (fn [ws bytes offset len])
    :on-ping (fn [ws bytebuffer])
    :on-pong (fn [ws bytebuffer])} )
@@ -93,13 +106,15 @@
     (swap! internal-state assoc :view-state (view @state))
     (when (var? view)
       (add-watch view :view-updated
-                  (fn [_ _ _ new-view-fn]
-                    (update-view-and-send-patch new-view-fn @state internal-state #'broadcast))))
+                 (fn [_ _ _ new-view-fn]
+                  #_ (future)
+                   (update-view-and-send-patch new-view-fn @state internal-state #'broadcast))))
     (add-watch state :send-websocket
                (fn [_ _ _ state]
+                 #_(future)
                  (update-view-and-send-patch view state internal-state broadcast)))
 
-    (jetty/run-jetty #'web-handler
+    (jetty/run-jetty (ring.middleware.resource/wrap-resource #'web-handler "/")
                      {:websockets {"/loc" (fn [_req]
                                             (#'make-ws-handler internal-state event-handler))}
                       :port (or port 50505)
