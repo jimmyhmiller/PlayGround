@@ -43,6 +43,7 @@
 ;; Styles
 ;; Search
 ;; Replay request button
+;; Save req/response as var in repl
 
 (defn view [{:keys [requests shown]}]
   [:body
