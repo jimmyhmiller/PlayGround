@@ -76,11 +76,6 @@
       (println "not handled" action))))
 
 
-(swap! state assoc :shown #{})
-
-
-(reset! state {:requests ()
-               :shown #{}})
 (do
   (def add-tap-to-state)
   (remove-tap add-tap-to-state)
@@ -158,4 +153,4 @@
 
 
 
-;95;21M;; Handle errors in event handler
+;; Handle errors in event handler
