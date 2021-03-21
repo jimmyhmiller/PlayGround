@@ -2,23 +2,12 @@
   (:require [live-view-server.core :as live-view]
             [clojure.string :as string]))
 
-
 (def state (atom {:todos (sorted-map)
                   :counter 0
                   :input ""
                   :filter :all
                   :editing nil
                   :editing-input ""}))
-
-@state
-
-(reset! state {:todos (sorted-map)
-                  :counter 0
-                  :input ""
-                  :filter :all
-                  :editing nil
-                  :editing-input ""})
-
 
 (defn add-todo [text]
   (let [{:keys [counter]} (swap! state update :counter inc)]
@@ -34,12 +23,12 @@
 (defn complete-all [v] (swap! state update :todos mmap map #(assoc-in % [1 :done] v)))
 (defn clear-done [] (swap! state update :todos mmap remove #(get-in % [1 :done])))
 
-(defonce init (do
-                (add-todo "Rename Cloact to Reagent")
-                (add-todo "Add undo demo")
-                (add-todo "Make all rendering async")
-                (add-todo "Allow any arguments to component functions")
-                (complete-all true)))
+(defonce init
+  (do
+    (add-todo "Make Todo MVC")
+    (add-todo "Write 0 lines of Javascript")
+    (add-todo "Write 0 lines of Clojurescript ")
+    (complete-all true)))
 
 (defn todo-input [{:keys [input on-save on-stop id class placeholder]}]
   [:input {:type "text"
@@ -134,8 +123,6 @@
 (defn view [state]
   (todo-app state))
 
-
-
 (defn event-handler [{:keys [action]}]
   (prn action)
   (let [[action-type payload] action]
@@ -162,14 +149,13 @@
                                       (assoc :editing nil
                                              :editing-input "")))))
       (println "not handled" action))))
-@state
+
 (def live-view-server
   (live-view/start-live-view-server
    {:state state
     :view #'view
     :event-handler #'event-handler
     :port 56789}))
-
 
 (comment
 

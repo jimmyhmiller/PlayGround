@@ -7,32 +7,88 @@
             [ring.middleware.keyword-params]
             [clojure.java.io :as io]
             [cheshire.generate]
-            [clojure.pprint :as pprint]))
+            [clojure.pprint :as pprint]
+            [clojure.string :as string]
+            [glow.html]
+            [glow.parse]
+            [glow.core]))
 
 
 
+(def my-color-scheme
+  {:exception "#005cc5"
+   :repeat "#005cc5"
+   :conditional "#005cc5"
+   :variable "#df5000"
+   :core-fn "#6f42c1"
+   :definition "#d73a49"
+   :reader-char "#032f62"
+   :special-form  "#6f42c1"
+   :macro "#6f42c1"
+   :number "#d73a49"
+   :boolean "#005cc5"
+   :nil "#005cc5"
+   :s-exp :black
+   :keyword "#005cc5"
+   :comment "#969896"
+   :string "#032f62"
+   :character "#032f62"
+   :regex "#032f62"})
 
+(defn pprint-str [coll]
+  (let [out (java.io.StringWriter.)]
+    (pprint/pprint coll out)
+   (str out)))
 
-(defn view [data]
+(defn view [{:keys [requests shown]}]
   [:body
-   (for [datum data]
-     [:code [:pre (let [out (java.io.StringWriter.)]
-                    (pprint/pprint datum out)
-                    (str out))]])])
+   [:style {:type "text/css"}
+    (glow.core/generate-css my-color-scheme)]
+   [:ul
+    (map-indexed
+     (fn [i {:keys [request response time]}]
+       (let [{:keys [request-method uri]} request
+             {:keys [status]} response]
+         [:li {:onclick [:toggle {:index i}]}
+          
+          [:p (str (name request-method) " " uri " - " status ": " time)]
+          (when (contains? shown i)
+            [:div
+             [:h2 "Request"]
+            
+             [:div [:code.syntax [:pre (glow.html/hiccup-transform (glow.parse/parse (pprint-str request)))]]]
+             [:h2 "Response"]
+             [:div  [:code.syntax [:pre (glow.html/hiccup-transform (glow.parse/parse (pprint-str response)))]]]])]))
+     requests)]])
+
+(def state (atom {:requests ()
+                  :shown #{}}))
+
+(defn event-handler [{:keys [action]}]
+  (println action)
+  (let [[action-type payload] action]
+    (case action-type
+      :toggle (let [index (:index payload)]
+                (swap! state update :shown (fn [shown]
+                                             (if (contains? shown index)
+                                               (disj shown index)
+                                               (conj shown index)))))
+      (println "not handled" action))))
 
 
-(defn event-handler [_])
+(swap! state assoc :shown #{})
 
-(def state (atom {}))
 
-(reset! state ())
+(reset! state {:requests ()
+               :shown #{}})
+(do
+  (def add-tap-to-state)
+  (remove-tap add-tap-to-state)
 
-(remove-tap add-tap-to-state)
+  (defn add-tap-to-state [value]
+    (swap! state update :requests (fn [coll] (cons value coll))))
 
-(defn add-tap-to-state [value]
-  (swap! state (fn [coll] (take 100 (cons value coll)))))
-
-(add-tap add-tap-to-state)
+  (add-tap add-tap-to-state))
 
 
 (def live-view-server
@@ -44,16 +100,10 @@
 
 
 
-
-(cheshire.generate/add-encoder Object (fn [o generator]
-                                        (.writeString generator (pr-str o))))
-
 (def posts
   (json/parse-string (slurp (io/resource "posts.json")) true))
 
 (def list-of-posts (vals (:list posts)))
-
-
 
 (def handler
   (reitit.ring/ring-handler
@@ -74,14 +124,13 @@
 
 
 
-
 (defn tapping-middleware [handler]
   (fn [req]
     (let [response (handler req)]
       (tap> {:request req
-             :response response})
+             :response response
+             :time (str (java.time.Instant/now))})
       response)))
-
 
 (def app (-> #'handler
              tapping-middleware
@@ -98,9 +147,15 @@
 
 
 
-(app {:request-method :get
-      :uri "/api/random-post"})
-
 
 (comment
+
+  (dotimes [_ 100]
+    (app {:request-method :get
+          :uri "/api/random-post"}))
+  
   (.stop web-server))
+
+
+
+;95;21M;; Handle errors in event handler
