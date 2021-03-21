@@ -14,7 +14,6 @@
             [glow.core]))
 
 
-
 (def my-color-scheme
   {:exception "#005cc5"
    :repeat "#005cc5"
@@ -39,6 +38,11 @@
   (let [out (java.io.StringWriter.)]
     (pprint/pprint coll out)
    (str out)))
+
+;; To add:
+;; Styles
+;; Search
+;; Replay request button
 
 (defn view [{:keys [requests shown]}]
   [:body
