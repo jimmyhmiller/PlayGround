@@ -79,11 +79,14 @@
                     (println "done init"))
                 (do
                   (println "event")
-                  (on-event {:ws ws
-                             :action (read-transit text-message)
-                             :current-state @internal-state-atom
-                             :state-atom internal-state-atom
-                             :internal-state-atom internal-state-atom})
+                  (try
+                    (on-event {:ws ws
+                               :action (read-transit text-message)
+                               :current-state @internal-state-atom
+                               :state-atom internal-state-atom
+                               :internal-state-atom internal-state-atom})
+                    (catch Exception e
+                      (.printStackTrace e)))
                   (println "done event"))))
    :on-bytes (fn [ws bytes offset len])
    :on-ping (fn [ws bytebuffer])
@@ -107,10 +110,12 @@
     (when (var? view)
       (add-watch view :view-updated
                  (fn [_ _ _ new-view-fn]
+                   ;; Should these be in futures?
                   #_ (future)
                    (update-view-and-send-patch new-view-fn @state internal-state #'broadcast))))
     (add-watch state :send-websocket
                (fn [_ _ _ state]
+                 ;; Should these be in futures?
                  #_(future)
                  (update-view-and-send-patch view state internal-state broadcast)))
 
