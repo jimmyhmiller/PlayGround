@@ -111,13 +111,13 @@
       (add-watch view :view-updated
                  (fn [_ _ _ new-view-fn]
                    ;; Should these be in futures?
-                  #_ (future)
-                   (update-view-and-send-patch new-view-fn @state internal-state #'broadcast))))
+                   (future
+                     (update-view-and-send-patch new-view-fn @state internal-state #'broadcast)))))
     (add-watch state :send-websocket
                (fn [_ _ _ state]
                  ;; Should these be in futures?
-                 #_(future)
-                 (update-view-and-send-patch view state internal-state broadcast)))
+                 (future
+                   (update-view-and-send-patch view state internal-state broadcast))))
 
     (jetty/run-jetty (ring.middleware.resource/wrap-resource #'web-handler "/")
                      {:websockets {"/loc" (fn [_req]
