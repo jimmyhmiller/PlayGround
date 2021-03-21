@@ -64,21 +64,21 @@
 
 (defn make-ws-handler [internal-state-atom on-event]
   {:on-connect (fn [ws]
-                 (do (println "connecting")
+                 (do #_(println "connecting")
                      (swap! internal-state-atom update :clients assoc ws {:metadata {}})
-                     (println "done connecting")))
+                     #_(println "done connecting")))
    :on-error (fn [ws e] (println "error" e))
    :on-close (fn [ws status-code reason]
                (swap! internal-state-atom update :clients dissoc ws)
-               (println "close"))
+               #_(println "close"))
    :on-text (fn [ws text-message]
               (if (= text-message "init")
-                (do (println "init")
+                (do #_(println "init")
                     (send-transit! ws {:type :init
                                        :value (:view-state @internal-state-atom)})
-                    (println "done init"))
+                   #_ (println "done init"))
                 (do
-                  (println "event")
+                 #_ (println "event")
                   (try
                     (on-event {:ws ws
                                :action (read-transit text-message)
@@ -87,7 +87,7 @@
                                :internal-state-atom internal-state-atom})
                     (catch Exception e
                       (.printStackTrace e)))
-                  (println "done event"))))
+                 #_ (println "done event"))))
    :on-bytes (fn [ws bytes offset len])
    :on-ping (fn [ws bytebuffer])
    :on-pong (fn [ws bytebuffer])} )

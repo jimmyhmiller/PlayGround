@@ -23,17 +23,18 @@
 (def pillar-gap 158)
 (def pillar-width 86)
 
-(def starting-state { :timer-running false
-                      :jump-count 0
-                      :initial-vel 0
-                      :start-time 0
-                      :flappy-start-time 0
-                      :flappy-y   start-y
-                      :pillar-list
-                      [{ :start-time 0
-                         :pos-x 900
-                         :cur-x 900
-                         :gap-top 200 }]})
+(def starting-state {:timer-running false
+                     :jump-count 0
+                     :initial-vel 0
+                     :start-time 0
+                     :flappy-start-time 0
+                     :cur-time 0
+                     :flappy-y   start-y
+                     :pillar-list
+                     [{ :start-time 0
+                       :pos-x 900
+                       :cur-x 900
+                       :gap-top 200 }]})
 
 (defn reset-state [_ cur-time]
   (-> starting-state
@@ -158,7 +159,6 @@
 (defn px [n] (str n "px"))
 
 (defn pillar [{:keys [cur-x pos-x upper-height lower-height]}]
-  (println upper-height)
   [:div.pillars
    [:div.pillar.pillar-upper {:style {:left (px cur-x)
                                        :height upper-height}}]
@@ -173,14 +173,11 @@
       (Thread/sleep 30)
       (recur (inst-ms (java.time.Instant/now))))))
 
-(def my-future (atom nil))
-
-
 
 (defn start-game []
   (let [time  (inst-ms (java.time.Instant/now))]
     (reset! flap-state (reset-state @flap-state time))
-    (reset! my-future (future (time-loop time)))))
+    (future (time-loop time))))
 
 (defn main-template [{:keys [score cur-time jump-count
                              timer-running border-pos
@@ -188,7 +185,7 @@
   [:body
    [:link {:rel "stylesheet" :href "flappy.css"}]
    [:div.board {:onclick [:flap]}
-    [:h1.score score]
+    [:h1.score {:style {:user-select "none"}} score]
     (if-not timer-running
       [:a.start-button {:onclick [:start-game]}
        (if (< 1 jump-count) "RESTART" "START")]
@@ -203,7 +200,7 @@
   (main-template (world state)))
 
 (defn event-handler [{:keys [action]}]
-  (println action)
+  #_(println action)
   (let [[action-type payload] action]
     (case action-type
       :start-game (start-game)
@@ -217,13 +214,3 @@
     :view #'view
     :event-handler #'event-handler
     :port 4444}))
-
-(comment
-  (let [node (.getElementById js/document "board-area")]
-    (defn renderer [full-state]
-      (.render js/ReactDOM (main-template full-state) node)))
-
-  (add-watch flap-state :renderer (fn [_ _ _ n]
-                                    (renderer (world n))))
-
-  (reset! flap-state @flap-state))
