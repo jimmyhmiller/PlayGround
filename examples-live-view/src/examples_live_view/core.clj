@@ -156,5 +156,3 @@
   (.stop web-server))
 
 
-
-;; Handle errors in event handler
