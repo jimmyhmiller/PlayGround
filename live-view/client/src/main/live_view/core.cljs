@@ -36,10 +36,7 @@
                                                (if (= (.. e -target -type) "checkbox")
                                                  (.. e -target -checked)
                                                  (.. e -target -value)))]))))]
-       (println "ONCHANGE---------------------------------")
-       (println  (get-in @event-listeners [node "onchange"]) )
-       (println (.removeEventListener node "input" (get-in @event-listeners [node "onchange"]) false))
-       (println "--------------------------------------------------")
+       (.removeEventListener node "input" (get-in @event-listeners [node "onchange"]) false)
        (swap! event-listeners assoc-in [node "onchange"] listener)
        (.addEventListener node "input" listener)))
    "onblur"
@@ -49,7 +46,6 @@
                       (let [writer (transit/writer :json)]
                         (.send js/window.liveWS (transit/write writer val))))]
        (.removeEventListener node "blur" (get-in @event-listeners [node "onblur"]) false)
-       (println  "Adding blur" listener)
        (swap! event-listeners assoc-in [node "onblur"] listener)
        (.addEventListener node "blur" listener)))
    "onsubmit"
@@ -126,7 +122,9 @@
                               (name attr) ""))
            (doseq [[k v] new-value]
              (goog.object/set (.-style ^js/HTMLElement (:target m))
-                              (name k) v))))
+                              (name k) (if (number? v)
+                                         (str v "px")
+                                          v)))))
        (and (= t :update-attribute))
        (do
          #_(println "Attribute" m)
@@ -172,22 +170,22 @@
 
 
 (defn init []
-  (println "init")
+  
   (let [port (or js/window.LIVE_VIEW_PORT js/window.location.port)
         ws (js/WebSocket. (str "ws://localhost:" port "/loc/"))
         renderer (create-renderer js/document.body ws)]
     ;; ugly hack
     (set! (.-liveWS js/window) ws)
-    (println "should connect" ws)
+    #_(println "should connect" ws)
     (set! (.-onerror ws) (fn [e] (println "error" e)))
     (set! (.-onopen ws) (fn []
-                          (println "sending init")
+                        #_  (println "sending init")
                           (.send ws "init")
-                          (println "sent init")))
+                          #_(println "sent init")))
     (set! (.-onmessage ws) (fn [e]
-                              (println "got message")
+                              #_(println "got message")
                              (let [reader (transit/reader :json)]
                                (let [payload (transit/read reader (.-data e))]
-                                 (println "read message")
+                                #_ (println "read message")
                                  (renderer payload)
-                                  (println "rendered")))))))
+                                 #_ (println "rendered")))))))
