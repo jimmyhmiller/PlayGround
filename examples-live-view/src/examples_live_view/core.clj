@@ -49,18 +49,31 @@
   [:body
    [:style {:type "text/css"}
     (glow.core/generate-css my-color-scheme)]
-   [:ul
+   [:h1 "Ring Api Inspector"]
+   [:div {:style {:width 800 :margin 30}}
+    [:div {:style {:display "grid" :grid-template-columns "1fr 1fr 1fr 1fr"}}
+     [:div "Status"]
+     [:div "Method"]
+     [:div "Uri"]
+     [:div "Time"]]
     (map-indexed
      (fn [i {:keys [request response time]}]
        (let [{:keys [request-method uri]} request
              {:keys [status]} response]
-         [:li {:onclick [:toggle {:index i}]}
-          
-          [:p (str (name request-method) " " uri " - " status ": " time)]
+         [:div
+          [:div {:style {:display "grid"
+                         :grid-template-columns "1fr 1fr 1fr 1fr"
+                         :padding 10
+                         :background-color (if (even? i) "rgb(249,249,249)" "white")
+                         :cursor "pointer"}
+                 :onclick [:toggle {:index i}]}
+           [:div status]
+           [:div (name request-method)]
+           [:div uri]
+           [:div time]]
           (when (contains? shown i)
             [:div
              [:h2 "Request"]
-            
              [:div [:code.syntax [:pre (glow.html/hiccup-transform (glow.parse/parse (pprint-str request)))]]]
              [:h2 "Response"]
              [:div  [:code.syntax [:pre (glow.html/hiccup-transform (glow.parse/parse (pprint-str response)))]]]])]))
@@ -97,6 +110,12 @@
     :view #'view
     :event-handler #'event-handler
     :port 12345}))
+
+
+
+
+
+;; BEGIN REST API
 
 
 
