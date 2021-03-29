@@ -1,7 +1,12 @@
 (ns example-live-view.code-view
   (:require [live-view-server.core :as live-view]
             [clojure.repl]
-            [clojure.java.io :as io]))
+            [clojure.java.io :as io]
+            [clojure.string :as string]
+            [clojure.pprint :as pprint]
+            [glow.html]
+            [glow.parse]
+            [glow.core]))
 
 
 ;; Slightly modified from clojure.repl
@@ -36,15 +41,48 @@
 ;; Need to instrument things
 ;; Need to make a real UI
 
+(defn pprint-str [coll]
+  (let [out (java.io.StringWriter.)]
+    (pprint/pprint coll out)
+   (str out)))
 
 
 
 (defn view [_]
-  [:body
+  [:body {:style {:background-color "#363638"
+                  :color "white"}}
+   [:style {:type "text/css"}
+    (glow.core/generate-css)]
    [:h1 "Code View"]
-   [:div
-    (for [var-name (keys (ns-publics *ns*))]
-      [:div (name var-name)])]])
+   [:div {:style {:display "grid"
+                  :grid-template-columns "repeat(3, 1fr)"}}
+    (for [[var-name var-value]
+          (remove #(string/includes? % "$")
+                   (ns-publics *ns*))]
+      [:div {:style {:margin 20
+                     :background-color "#002b36"
+                     :padding 10}}
+       (name var-name)
+       [:div {:style {:borderBottom "2px solid #002b36"
+                      :padding-top 10
+                      :filter "brightness(80%)"}}]
+       [:code.syntax
+        [:pre
+         (glow.html/hiccup-transform
+          (glow.parse/parse
+           (let [type-name (.getName (type (deref var-value)))]
+             (cond (= type-name "clojure.lang.Atom")
+                   (pprint-str @@var-value)
+
+                   (and (string/includes? type-name "$")
+                        (fn? @var-value))
+                   (source-fn var-name)
+
+                   (instance? clojure.lang.IObj @var-value)
+                   (pprint-str @var-value)
+
+                   :else  (pprint-str (keys (bean @var-value)))))))]]])]])
+
 
 
 (defonce state (atom {}))
@@ -59,5 +97,4 @@
     :view #'view
     :event-handler #'event-handler
     :port 23456}))
-
 
