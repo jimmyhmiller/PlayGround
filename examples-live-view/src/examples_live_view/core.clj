@@ -103,13 +103,13 @@
 
   (add-tap add-tap-to-state))
 
-
-(def live-view-server
-  (live-view/start-live-view-server
-   {:state state
-    :view #'view
-    :event-handler #'event-handler
-    :port 12345}))
+(comment
+  (def live-view-server
+    (live-view/start-live-view-server
+     {:state state
+      :view #'view
+      :event-handler #'event-handler
+      :port 12345})))
 
 
 

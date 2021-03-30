@@ -47,43 +47,51 @@
    (str out)))
 
 
+(ns-publics (find-ns 'clojure.string))
+
 
 (defn view [_]
   [:body {:style {:background-color "#363638"
                   :color "white"}}
    [:style {:type "text/css"}
     (glow.core/generate-css)]
-   [:h1 "Code View"]
-   [:div {:style {:display "grid"
-                  :grid-template-columns "repeat(3, 1fr)"}}
-    (for [[var-name var-value]
-          (remove #(string/includes? % "$")
-                   (ns-publics *ns*))]
-      [:div {:style {:margin 20
-                     :background-color "#002b36"
-                     :padding 10}}
-       (name var-name)
-       [:div {:style {:borderBottom "2px solid #002b36"
-                      :padding-top 10
-                      :filter "brightness(80%)"}}]
-       [:code.syntax
-        [:pre
-         (glow.html/hiccup-transform
-          (glow.parse/parse
-           (let [type-name (.getName (type (deref var-value)))]
-             (cond (= type-name "clojure.lang.Atom")
-                   (pprint-str @@var-value)
+   (let [ns-name 'clojure.string] 
+     [:h1 "Code View"]
+     [:div {:style {:display "grid"
+                    :grid-template-columns "repeat(3, 1fr)"}}
+      (for [[var-name var-value]
+            (remove #(string/includes? % "$")
+                    (ns-publics (find-ns ns-name)))]
+        [:div {:style {:margin 20
+                       :background-color "#002b36"
+                       :padding 10
+                       :max-width "30vw"
+                       :overflow "scroll"}}
+         (name var-name)
+         [:div {:style {:borderBottom "2px solid #002b36"
+                        :padding-top 10
+                        :filter "brightness(80%)"}}]
+         [:code.syntax
+          [:pre
+           (glow.html/hiccup-transform
+            (glow.parse/parse
+             (let [type-name (.getName (type (deref var-value)))]
+               (cond (= type-name "clojure.lang.Atom")
+                     "" #_(pprint-str @@var-value)
 
-                   (and (string/includes? type-name "$")
-                        (fn? @var-value))
-                   (source-fn var-name)
+                     (and (string/includes? type-name "$")
+                          (fn? @var-value))
+                     (try (source-fn (symbol (name ns-name) (name var-name) ))
+                          (catch Exception e
+                            (clojure.repl/source-fn (symbol (name ns-name) (name var-name) ))))
 
-                   (instance? clojure.lang.IObj @var-value)
-                   (pprint-str @var-value)
+                     (instance? clojure.lang.IObj @var-value)
+                     (pprint-str @var-value)
 
-                   :else  (pprint-str (keys (bean @var-value)))))))]]])]])
+                     :else  (pprint-str (keys (bean @var-value)))))))]]])])])
 
 
+(clojure.repl/source-fn (symbol (name 'clojure.string) (name 'split-lines)))
 
 (defonce state (atom {}))
 
