@@ -74,7 +74,25 @@
                         (.send  js/window.liveWS (transit/write writer val))))]
        (.removeEventListener node "dblclick" (get-in @event-listeners [node "ondoubleclick"]) false)
        (swap! event-listeners assoc-in [node "ondoubleclick"] listener)
-                                 (.addEventListener node "dblclick" listener)))})
+       (.addEventListener node "dblclick" listener)))
+   "onmouseover"
+   (fn [node _ _ val]
+     (let [listener (fn [e]
+                      (.preventDefault e)
+                      (let [writer (transit/writer :json)]
+                        (.send  js/window.liveWS (transit/write writer val))))]
+       (.removeEventListener node "mouseover" (get-in @event-listeners [node "onmouseover"]) false)
+       (swap! event-listeners assoc-in [node "onmouseover"] listener)
+       (.addEventListener node "mouseover" listener)))
+   "onmouseout"
+   (fn [node _ _ val]
+     (let [listener (fn [e]
+                      (.preventDefault e)
+                      (let [writer (transit/writer :json)]
+                        (.send  js/window.liveWS (transit/write writer val))))]
+       (.removeEventListener node "mouseover" (get-in @event-listeners [node "onmouseout"]) false)
+       (swap! event-listeners assoc-in [node "onmouseout"] listener)
+       (.addEventListener node "mouseout" listener)))})
 
 
 ;; Doesn't look like event handlers are being set if the view changes.
@@ -91,7 +109,11 @@
                         {:target {:attr "onclick"}
                          :fn (get event-fns "onclick")}
                         {:target {:attr "ondoubleclick"}
-                         :fn  (get event-fns "ondoubleclick")}
+                         :fn (get event-fns "ondoubleclick")}
+                        {:target {:attr "onmouseover"}
+                         :fn (get event-fns "onmouseover")}
+                        {:target {:attr "onmouseout"}
+                         :fn (get event-fns "onmouseout")}
                         ;; The builtin style handler uses
                         ;; aset which doesn't work for objects now
                         {:target {:attr "style"}
@@ -148,12 +170,16 @@
 
 (defn create-renderer [dom-node ws]
   (let [dom-node (atom dom-node)
-        virtual-dom (atom nil)]
+        virtual-dom (atom nil)
+        epoch (atom -1)]
     (fn [data]
       (let [current-vdom @virtual-dom]
         (case (:type data)
           :patch (if current-vdom
-                   (reset! virtual-dom (apply-patch @dom-node current-vdom (:value data)))
+                   (do
+                     #_(when (> (:epoch data) @epoch))
+                     (reset! epoch (:epoch data))
+                     (reset! virtual-dom (apply-patch @dom-node current-vdom (:value data))))
                    {:type :error
                     :reason :no-state})
           :init (do

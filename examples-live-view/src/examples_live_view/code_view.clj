@@ -47,10 +47,80 @@
    (str out)))
 
 
-(ns-publics (find-ns 'clojure.string))
 
 
-(defn view [_]
+(def instrumented-vars (atom {}))
+
+
+
+#_(reset! state {:calls {}})
+(defonce state (atom {:calls {}}))
+
+(do
+  (def add-tap-to-state)
+  (remove-tap add-tap-to-state)
+
+  (defn add-tap-to-state [{:keys [var-name args results]}]
+    (swap! state (fn [state]
+                   (-> state
+                       (update-in [:calls var-name :number] (fnil inc 0))
+                       (update-in [:calls var-name :values] (fnil conj []) {:args args
+                                                                            :results results})))))
+
+  (add-tap add-tap-to-state))
+
+
+
+(defn stats-handling [v f]
+  (fn [& args]
+    (if live-view/*live-view-context*
+      (apply f args)
+      (let [results (apply f args)]
+        (tap> {:args args
+               :results results
+               :var v
+               :var-name (:name (meta v))})
+        results))))
+
+;; Need to copy meta information
+(defn instrument-var [v]
+  (let [old-val @v
+        instrumented-f (stats-handling v old-val)]
+    (when (not (contains? @instrumented-vars v))
+      (alter-var-root v (constantly instrumented-f))
+      (swap! instrumented-vars assoc v {:old old-val :new instrumented-f}))))
+
+(defn unstrument-var [v]
+  (when-let [val (get-in @instrumented-vars [v :old])]
+    (alter-var-root v (constantly val))
+    (swap! instrumented-vars dissoc v)))
+
+
+(defn instrument-ns [namespace-symbol]
+  (doseq [[_ var] (ns-publics (find-ns namespace-symbol))]
+    (instrument-var var)))
+
+(defn unstrument-ns [namespace-symbol]
+  (doseq [[_ var] (ns-publics (find-ns namespace-symbol))]
+    (unstrument-var var)))
+
+
+(instrument-ns 'clojure.string)
+(unstrument-ns 'clojure.string)
+
+(def old-cloure-string-starts-with? @#'clojure.string/starts-with?)
+(instrument-var #'clojure.string/starts-with?)
+(unstrument-var #'clojure.string/starts-with?)
+
+(string/reverse "asdfsadf")
+
+(instrument-var #'clojure.string/includes?)
+
+
+
+
+(defn view [{:keys [calls current-hover] :as state}]
+  (println current-hover)
   [:body {:style {:background-color "#363638"
                   :color "white"}}
    [:style {:type "text/css"}
@@ -66,37 +136,60 @@
                        :background-color "#002b36"
                        :padding 10
                        :max-width "30vw"
-                       :overflow "scroll"}}
-         (name var-name)
-         [:div {:style {:borderBottom "2px solid #002b36"
-                        :padding-top 10
-                        :filter "brightness(80%)"}}]
-         [:code.syntax
-          [:pre
-           (glow.html/hiccup-transform
-            (glow.parse/parse
-             (let [type-name (.getName (type (deref var-value)))]
-               (cond (= type-name "clojure.lang.Atom")
-                     "" #_(pprint-str @@var-value)
+                       :position "relative"}}
+         [:ul {:style {:position "absolute"
+                       :left -30
+                       :font-size 30
+                       :top -20
+                       :line-height 20}}
+          (for [i (range (min 20 (get-in calls [var-name :number] 0)))]
+            (let [hovered? (= current-hover [var-name i])]
+              [:li {:style {:cursor "pointer"
+                            :color (if hovered? "white" "#585858")}
+                    :onmouseover [:hover {:i i :var-name var-name}]
+                    :onmouseout [:unhover {:i i :var-name var-name}]}]))]
+         [:div {:style {:overflow "scroll"
+                        :max-width "30vw"}}
+          (name var-name)
+          [:span {:style {:float "right"}}
+           (get-in calls [var-name :number] 0)]
+          [:div {:style {:borderBottom "2px solid #002b36"
+                         :padding-top 10
+                         :filter "brightness(80%)"}}]
+          [:code.syntax
+           [:pre
+            (glow.html/hiccup-transform
+             (glow.parse/parse
+              (let [type-name (.getName (type (deref var-value)))]
+                (cond (= type-name "clojure.lang.Atom")
+                      "" #_(pprint-str @@var-value)
 
-                     (and (string/includes? type-name "$")
-                          (fn? @var-value))
-                     (try (source-fn (symbol (name ns-name) (name var-name) ))
-                          (catch Exception e
-                            (clojure.repl/source-fn (symbol (name ns-name) (name var-name) ))))
+                      (and (string/includes? type-name "$")
+                           (fn? @var-value))
+                      (try (source-fn (symbol (name ns-name) (name var-name) ))
+                           (catch Exception e
+                             (clojure.repl/source-fn (symbol (name ns-name) (name var-name) ))))
 
-                     (instance? clojure.lang.IObj @var-value)
-                     (pprint-str @var-value)
+                      (instance? clojure.lang.IObj @var-value)
+                      (pprint-str @var-value)
 
-                     :else  (pprint-str (keys (bean @var-value)))))))]]])])])
+                      :else  (pprint-str (keys (bean @var-value)))))))]]]
+
+         (when (= (first current-hover) var-name)
+           (let [{:keys [args results]} (get-in calls [var-name :values (second current-hover)])]
+             [:code.syntax
+              [:pre  (glow.html/hiccup-transform
+                      (glow.parse/parse
+                       (str "(" (pr-str var-name) " " (string/join " " (map pr-str args)) ") ;;=> " (pr-str results))))]]))])])])
 
 
-(clojure.repl/source-fn (symbol (name 'clojure.string) (name 'split-lines)))
-
-(defonce state (atom {}))
-
-(defn event-handler [action]
-  (println action))
+(defn event-handler [{:keys [action]}]
+  (println action)
+  (let [[action-type payload] action]
+    (case action-type
+      :hover (swap! state assoc :current-hover [(:var-name payload) (:i payload)])
+      :unhover (swap! state dissoc :current-hover)
+      (println "unhandled action" action-type))))
 
 
 (defonce live-view-server
@@ -106,3 +199,5 @@
     :event-handler #'event-handler
     :port 23456}))
 
+(comment
+  (.stop live-view-server))
