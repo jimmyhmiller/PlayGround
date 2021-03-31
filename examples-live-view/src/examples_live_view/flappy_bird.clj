@@ -214,3 +214,6 @@
     :view #'view
     :event-handler #'event-handler
     :port 4444}))
+
+(comment
+  (.stop live-view-server))
