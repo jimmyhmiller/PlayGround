@@ -132,7 +132,7 @@
      (cond
        (and (= (:old-value m) (:new-value m))  (= t :update-attribute))
        nil
-       
+
        (and (= t :update-attribute) (= (:name m) :style))
        (do
          (let [new-value (:new-value m)
@@ -155,7 +155,7 @@
             #_ (println event-handler (:target m) nil nil (:new-value m))
              (event-handler (:target m) nil nil (:new-value m))))
            (f))
-       
+
 
       :else (f))))
 
@@ -196,7 +196,7 @@
 
 
 (defn init []
-  
+
   (let [port (or js/window.LIVE_VIEW_PORT js/window.location.port)
         ws (js/WebSocket. (str "ws://localhost:" port "/loc/"))
         renderer (create-renderer js/document.body ws)]

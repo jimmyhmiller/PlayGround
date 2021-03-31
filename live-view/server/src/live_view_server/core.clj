@@ -50,19 +50,19 @@
 ;; Or maybe I need to do that on client side?
 ;; regardless, if the server is sending things faster than we can render,
 ;; We can just skip states and only render the latest
-(defn update-view-and-send-patch [view state internal-state-atom broadcast epoch]
-  (binding [*live-view-context* {}]
-    (let [[old-view-state new-view-state] 
+(defn update-view-and-send-patch [view state internal-state-atom broadcast]
+  (binding [*live-view-context* (or *live-view-context* {})]
+    (let [[old-view-state new-view-state]
           (swap-vals! internal-state-atom (fn [internal-state]
-                                            (if (<= (:epoch internal-state) epoch)
-                                              (assoc internal-state :view-state (view @state))
-                                              internal-state)))
+                                            #_(if (<= (:epoch internal-state) epoch))
+                                            (assoc internal-state :view-state (view @state))
+                                           #_ internal-state))
           patch (edit/get-edits (editscript/diff (:view-state old-view-state) (:view-state new-view-state)))
           out (ByteArrayOutputStream. 4096)
           writer (transit/writer out :json)]
       (when-not (empty? patch)
         (transit/write writer {:type :patch
-                               :epoch epoch
+                              #_#_ :epoch epoch
                                :value patch})
         (broadcast (:clients new-view-state) (.toString out))))))
 
@@ -73,7 +73,7 @@
    :on-close (fn [ws status-code reason]
                (swap! internal-state-atom update :clients dissoc ws))
    :on-text (fn [ws text-message]
-              (binding [*live-view-context* {}]
+              (binding [*live-view-context* (or *live-view-context* {})]
                 (if (= text-message "init")
                   (send-transit! ws {:type :init
                                      :value (:view-state @internal-state-atom)})
@@ -104,57 +104,47 @@
 ;; TODO: Need to break things apart so you can run this on your own server
 ;; TODO: Need to make broadcast overridable, but it needs more context
 (defn start-live-view-server [{:keys [state view event-handler port]}]
-  (binding [*live-view-context* {}]
-    (let [internal-state (atom {:clients {}
-                                :view-state nil
-                                :epoch 0})]
-      (swap! internal-state assoc :view-state (view @state))
-      (when (var? view)
-        (add-watch view :view-updated
-                   (fn [_ _ _ new-view-fn]
-                     ;; See large comment below
-                     (future
-                       (update-view-and-send-patch new-view-fn
-                                                   state
-                                                   internal-state
-                                                   #'broadcast
-                                                   (:epoch (swap! internal-state update :epoch inc)))))))
-      (add-watch state :send-websocket
-                 (fn [_ _ _ state-value]
-                   ;; Putting these in futures actually creates a real
-                   ;; issue. We shouldn't block here because if we do,
-                   ;; we are in danger of having backpressure where the
-                   ;; app can't update. But now, by just shoving these
-                   ;; in the a future, we are having the messages sent
-                   ;; out of order.
+  (let [ ^java.util.concurrent.ArrayBlockingQueue message-queue (java.util.concurrent.ArrayBlockingQueue. 1024)
+        queue-worker (future
+                       (loop []
+                         ;; Should consider if we want to take all
+                         ;; messages and just process the last.
+                         ;; Could mean we skip too many frames
+                         ;; But also probobly give us much better performance
+                         (let [message (.take message-queue)]
+                           (when message
+                             (apply update-view-and-send-patch message)))
+                         (recur)))]
+    (binding [*live-view-context* (or *live-view-context* {})]
+      (let [internal-state (atom {:clients {}
+                                  :view-state nil
+                                  :epoch 0})]
+        (swap! internal-state assoc :view-state (view @state))
+        (when (var? view)
+          (add-watch view :view-updated
+                     (fn [_ _ _ new-view-fn]
+                       ;; See large comment below
+                       (future
+                         (update-view-and-send-patch new-view-fn
+                                                     state
+                                                     internal-state
+                                                     #'broadcast)))))
+        (add-watch state :send-websocket
+                   (fn [_ _ _ state-value]
+                     ;; A queue ensures we are processing messages in order
+                     ;; This is definitely not enough to handle our distributed issue.
+                     ;; It is possible to send messages in order, but to recieve them out of order.
+                     (.put message-queue
+                           [view
+                            state
+                            internal-state
+                            broadcast])))
 
-                   ;; So for right now I have added an epoch counter
-                   ;; (logical clock) so that I can ensure I don't send
-                   ;; old messages. This definitely not sufficient for a
-                   ;; robust handling of these concurrent issues. Really
-                   ;; I need to send which epoch I'm transitioning too
-                   ;; and from the ensure that the client is in sync. If
-                   ;; it is not, we have a couple options
-                   ;; 1) Have a way of storing recent epochs and do the
-                   ;; diff again
-                   ;; 2) Resend the whole dom and do the patch locally.
-
-                   ;; 2 seems more feasible.
-                   ;; This scheme might not be valid though once I allow
-                   ;; each client to have its own view state. Need to
-                   ;; think more deeply about this.
-                   (future
-                     (update-view-and-send-patch view
-                                                 state
-                                                 internal-state
-                                                 broadcast
-                                                 (:epoch (swap! internal-state update :epoch inc))))))
-
-      (jetty/run-jetty (ring.middleware.resource/wrap-resource #'web-handler "/")
-                       {:websockets {"/loc" (fn [_req]
-                                              (#'make-ws-handler internal-state event-handler))}
-                        :port (or port 50505)
-                        :join? false}))))
+        (jetty/run-jetty (ring.middleware.resource/wrap-resource #'web-handler "/")
+                         {:websockets {"/loc" (fn [_req]
+                                                (#'make-ws-handler internal-state event-handler))}
+                          :port (or port 50505)
+                          :join? false})))))
 
 
 
