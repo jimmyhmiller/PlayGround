@@ -55,6 +55,7 @@
 
 #_(reset! state {:calls {}})
 (defonce state (atom {:calls {}}))
+(get-in @state [:calls 'px :number])
 
 (do
   (def add-tap-to-state)
@@ -73,7 +74,7 @@
 
 (defn stats-handling [v f]
   (fn [& args]
-    (if live-view/*live-view-context*
+    (if (= (get live-view/*live-view-context* :app) :code-view)
       (apply f args)
       (let [results (apply f args)]
         (tap> {:args args
@@ -86,7 +87,8 @@
 (defn instrument-var [v]
   (let [old-val @v
         instrumented-f (stats-handling v old-val)]
-    (when (not (contains? @instrumented-vars v))
+    (when (and (not (contains? @instrumented-vars v))
+               (fn? old-val))
       (alter-var-root v (constantly instrumented-f))
       (swap! instrumented-vars assoc v {:old old-val :new instrumented-f}))))
 
@@ -104,28 +106,36 @@
   (doseq [[_ var] (ns-publics (find-ns namespace-symbol))]
     (unstrument-var var)))
 
-
-(instrument-ns 'clojure.string)
-(unstrument-ns 'clojure.string)
-
-(def old-cloure-string-starts-with? @#'clojure.string/starts-with?)
-(instrument-var #'clojure.string/starts-with?)
-(unstrument-var #'clojure.string/starts-with?)
-
-(string/reverse "asdfsadf")
-
-(instrument-var #'clojure.string/includes?)
+(comment
+  (instrument-ns 'example-live-view.flappy-bird)
+  (unstrument-ns 'example-live-view.flappy-bird))
+(comment
+  (instrument-ns 'example-live-view.todo))
 
 
+(comment
+  (unstrument-ns 'example-live-view.flappy-bird)
+
+  (instrument-ns 'clojure.string)
+  (unstrument-ns 'clojure.string)
+
+  (def old-cloure-string-starts-with? @#'clojure.string/starts-with?)
+  (instrument-var #'clojure.string/starts-with?)
+  (unstrument-var #'clojure.string/starts-with?)
+
+  (string/reverse "asdfsadf")
+
+  (instrument-var #'clojure.string/includes?))
 
 
-(defn view [{:keys [calls current-hover] :as state}]
-  (println current-hover)
+
+
+(defn view [{:keys [calls current-hover current-click] :as state}]
   [:body {:style {:background-color "#363638"
                   :color "white"}}
    [:style {:type "text/css"}
     (glow.core/generate-css)]
-   (let [ns-name 'clojure.string] 
+   (let [ns-name 'example-live-view.todo]
      [:h1 "Code View"]
      [:div {:style {:display "grid"
                     :grid-template-columns "repeat(3, 1fr)"}}
@@ -142,12 +152,14 @@
                        :font-size 30
                        :top -20
                        :line-height 20}}
-          (for [i (range (min 20 (get-in calls [var-name :number] 0)))]
-            (let [hovered? (= current-hover [var-name i])]
+          (for [i (range (min 10 (get-in calls [var-name :number] 0)))]
+            (let [hovered? (or (= current-hover [var-name i])
+                               (= current-click [var-name i]))]
               [:li {:style {:cursor "pointer"
                             :color (if hovered? "white" "#585858")}
                     :onmouseover [:hover {:i i :var-name var-name}]
-                    :onmouseout [:unhover {:i i :var-name var-name}]}]))]
+                    :onmouseout [:unhover {:i i :var-name var-name}]
+                    :onclick [:click {:i i :var-name var-name}]}]))]
          [:div {:style {:overflow "scroll"
                         :max-width "30vw"}}
           (name var-name)
@@ -175,29 +187,41 @@
 
                       :else  (pprint-str (keys (bean @var-value)))))))]]]
 
-         (when (= (first current-hover) var-name)
-           (let [{:keys [args results]} (get-in calls [var-name :values (second current-hover)])]
-             [:code.syntax
-              [:pre  (glow.html/hiccup-transform
-                      (glow.parse/parse
-                       (str "(" (pr-str var-name) " " (string/join " " (map pr-str args)) ") ;;=> " (pr-str results))))]]))])])])
+         (let [shown-value (or current-click current-hover)]
+           (if (= (first shown-value) var-name)
+             (let [{:keys [args results]} (get-in calls [var-name :values (- (get-in calls [var-name :number] 0)
+                                                                             (second shown-value)
+                                                                             1)])]
+               [:div {:style {:height 50
+                              :overflow-y "hidden"
+                              :overflow-x "scroll"}}
+                [:code.syntax
+                 [:pre  (glow.html/hiccup-transform
+                         (glow.parse/parse
+                          (str "(" (pr-str var-name) " " (string/join " " (map pr-str args)) ") ;;=> " (pr-str results))))]]])
+             [:div {:style {:height 50}}]))])])])
+
 
 
 (defn event-handler [{:keys [action]}]
-  (println action)
+ #_ (println action)
   (let [[action-type payload] action]
     (case action-type
-      :hover (swap! state assoc :current-hover [(:var-name payload) (:i payload)])
+      :hover (swap! state assoc
+                    :current-hover [(:var-name payload) (:i payload)]
+                    :current-click nil)
       :unhover (swap! state dissoc :current-hover)
+      :click (swap! state assoc :current-click [(:var-name payload) (:i payload)])
       (println "unhandled action" action-type))))
 
 
-(defonce live-view-server
-  (live-view/start-live-view-server
-   {:state state
-    :view #'view
-    :event-handler #'event-handler
-    :port 23456}))
+(def live-view-server
+  (binding [live-view/*live-view-context* {:app :code-view}]
+    (live-view/start-live-view-server
+     {:state state
+      :view #'view
+      :event-handler #'event-handler
+      :port 23456})))
 
 (comment
   (.stop live-view-server))
