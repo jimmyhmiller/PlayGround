@@ -73,17 +73,18 @@
    :on-close (fn [ws status-code reason]
                (swap! internal-state-atom update :clients dissoc ws))
    :on-text (fn [ws text-message]
-              (if (= text-message "init")
-                (send-transit! ws {:type :init
-                                   :value (:view-state @internal-state-atom)})
-                (try
-                  (on-event {:ws ws
-                             :action (read-transit text-message)
-                             :current-state @internal-state-atom
-                             :state-atom internal-state-atom
-                             :internal-state-atom internal-state-atom})
-                  (catch Exception e
-                    (.printStackTrace e)))))
+              (binding [*live-view-context* {}]
+                (if (= text-message "init")
+                  (send-transit! ws {:type :init
+                                     :value (:view-state @internal-state-atom)})
+                  (try
+                    (on-event {:ws ws
+                               :action (read-transit text-message)
+                               :current-state @internal-state-atom
+                               :state-atom internal-state-atom
+                               :internal-state-atom internal-state-atom})
+                    (catch Exception e
+                      (.printStackTrace e))))))
    :on-bytes (fn [ws bytes offset len])
    :on-ping (fn [ws bytebuffer])
    :on-pong (fn [ws bytebuffer])})
