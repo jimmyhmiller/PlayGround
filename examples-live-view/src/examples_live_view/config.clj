@@ -1,4 +1,4 @@
-(ns example-live-view.config
+(ns examples-live-view.config
   (:require [live-view-server.core :as live-view]))
 
 

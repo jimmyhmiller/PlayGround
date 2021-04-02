@@ -1,4 +1,4 @@
-(ns example-live-view.flappy-bird
+(ns examples-live-view.flappy-bird
   (:require [live-view-server.core :as live-view]))
 
 ;; https://github.com/bhauman/flappy-bird-demo
