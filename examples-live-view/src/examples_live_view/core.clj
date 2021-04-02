@@ -1,4 +1,4 @@
-(ns example-live-view.core
+(ns examples-live-view.core
   (:require [reitit.ring]
             [live-view-server.core :as live-view]
             [cheshire.core :as json]

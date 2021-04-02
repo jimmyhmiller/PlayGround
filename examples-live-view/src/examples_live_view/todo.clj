@@ -1,4 +1,4 @@
-(ns example-live-view.todo
+(ns examples-live-view.todo
   (:require [live-view-server.core :as live-view]
             [clojure.string :as string]))
 

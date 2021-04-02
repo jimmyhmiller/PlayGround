@@ -1,4 +1,4 @@
-(ns example-live-view.ultimate
+(ns examples-live-view.ultimate
   (:require [live-view-server.core :as live-view]))
 
 

@@ -16,34 +16,38 @@
 (def ^:dynamic *live-view-context* nil)
 
 (defn send-transit! [ws payload]
-  (let [out (ByteArrayOutputStream. 4096)
-        writer (transit/writer out :json)]
-    (transit/write writer payload)
-    ;; Super important to pass this empty map
-    ;; it is the callback handlers. Otherwise
-    ;; we are calling send synchronously.
-    (jetty/send! ws (.toString out) {})))
+  (binding [*live-view-context* (or *live-view-context* {})]
+    (let [out (ByteArrayOutputStream. 4096)
+          writer (transit/writer out :json)]
+      (transit/write writer payload)
+      ;; Super important to pass this empty map
+      ;; it is the callback handlers. Otherwise
+      ;; we are calling send synchronously.
+      (jetty/send! ws (.toString out) {}))))
 
 
 (defn string->stream
   ([s] (string->stream s "UTF-8"))
   ([^String s encoding]
-   (-> s
-       (.getBytes encoding)
-       (java.io.ByteArrayInputStream.))))
+   (binding [*live-view-context* (or *live-view-context* {})]
+     (-> s
+         (.getBytes encoding)
+         (java.io.ByteArrayInputStream.)))))
 
 (defn read-transit [data]
-  (let [in (string->stream data)
-        reader (transit/reader in :json)]
-    (transit/read reader)))
+  (binding [*live-view-context* (or *live-view-context* {})]
+    (let [in (string->stream data)
+          reader (transit/reader in :json)]
+      (transit/read reader))))
 
 
 (defn broadcast [clients patch]
-  (doseq [[ws _] clients]
-    ;; Super important to pass this empty map
-    ;; it is the callback handlers. Otherwise
-    ;; we are calling send synchronously.
-    (jetty/send! ws patch)))
+  (binding [*live-view-context* (or *live-view-context* {})]
+    (doseq [[ws _] clients]
+      ;; Super important to pass this empty map
+      ;; it is the callback handlers. Otherwise
+      ;; we are calling send synchronously.
+      (jetty/send! ws patch {}))))
 
 
 ;; I should actually put these on a queue are grab only the latest
@@ -67,36 +71,36 @@
         (broadcast (:clients new-view-state) (.toString out))))))
 
 (defn make-ws-handler [internal-state-atom on-event]
-  {:on-connect (fn [ws]
-                 (swap! internal-state-atom update :clients assoc ws {:metadata {}}))
-   :on-error (fn [ws e] (println "error" e))
-   :on-close (fn [ws status-code reason]
-               (swap! internal-state-atom update :clients dissoc ws))
-   :on-text (fn [ws text-message]
-              (binding [*live-view-context* (or *live-view-context* {})]
-                (if (= text-message "init")
-                  (send-transit! ws {:type :init
-                                     :value (:view-state @internal-state-atom)})
-                  (try
-                    (on-event {:ws ws
-                               :action (read-transit text-message)
-                               :current-state @internal-state-atom
-                               :state-atom internal-state-atom
-                               :internal-state-atom internal-state-atom})
-                    (catch Exception e
-                      (.printStackTrace e))))))
-   :on-bytes (fn [ws bytes offset len])
-   :on-ping (fn [ws bytebuffer])
-   :on-pong (fn [ws bytebuffer])})
+  (let [live-view-context (or *live-view-context* {})]
+    {:on-connect (fn [ws]
+                   (binding [*live-view-context* (or live-view-context {})]
+                     (swap! internal-state-atom update :clients assoc ws {:metadata {}})))
+     :on-error (fn [ws e] (println "error" e))
+     :on-close (fn [ws status-code reason]
+                 (binding [*live-view-context* (or live-view-context {})]
+                   (swap! internal-state-atom update :clients dissoc ws)))
+     :on-text (fn [ws text-message]
+                (binding [*live-view-context* (or live-view-context {})]
+                  (if (= text-message "init")
+                    (send-transit! ws {:type :init
+                                       :value (:view-state @internal-state-atom)})
+                    (try
+                      (on-event {:action (read-transit text-message)})
+                      (catch Exception e
+                        (.printStackTrace e))))))
+     :on-bytes (fn [ws bytes offset len])
+     :on-ping (fn [ws bytebuffer])
+     :on-pong (fn [ws bytebuffer])}))
 
 
 
 (defn web-handler [req]
-  (let [uri (:uri req)]
-    (case uri
-      "/" {:body  (slurp (io/resource "index.html"))
-           :headers {"Content-Type" "text/html"}}
-      "/main.js" {:body (slurp (io/resource "main.js"))})))
+  (binding [*live-view-context* (or *live-view-context* {})]
+    (let [uri (:uri req)]
+      (case uri
+        "/" {:body  (slurp (io/resource "index.html"))
+             :headers {"Content-Type" "text/html"}}
+        "/main.js" {:body (slurp (io/resource "main.js"))}))))
 
 
 
@@ -104,18 +108,23 @@
 ;; TODO: Need to break things apart so you can run this on your own server
 ;; TODO: Need to make broadcast overridable, but it needs more context
 (defn start-live-view-server [{:keys [state view event-handler port]}]
-  (let [ ^java.util.concurrent.ArrayBlockingQueue message-queue (java.util.concurrent.ArrayBlockingQueue. 1024)
-        queue-worker (future
-                       (loop []
-                         ;; Should consider if we want to take all
-                         ;; messages and just process the last.
-                         ;; Could mean we skip too many frames
-                         ;; But also probobly give us much better performance
-                         (let [message (.take message-queue)]
-                           (when message
-                             (apply update-view-and-send-patch message)))
-                         (recur)))]
-    (binding [*live-view-context* (or *live-view-context* {})]
+  (let [live-view-context (or *live-view-context* {})]
+    (let [^java.util.concurrent.ArrayBlockingQueue message-queue (java.util.concurrent.ArrayBlockingQueue. 1024)
+          queue-worker (future
+                         (loop []
+                           ;; Should consider if we want to take all
+                           ;; messages and just process the last.
+                           ;; Could mean we skip too many frames
+                           ;; But also probobly give us much better
+                           ;; performance
+                           (binding [*live-view-context* (or *live-view-context* {})]
+                             (try
+                               (let [message (.take message-queue)]
+                                 (when message
+                                   (apply update-view-and-send-patch message)))
+                               (catch Exception e
+                                 (.printStackTrace e))))
+                           (recur)))]
       (let [internal-state (atom {:clients {}
                                   :view-state nil
                                   :epoch 0})]
@@ -123,28 +132,33 @@
         (when (var? view)
           (add-watch view :view-updated
                      (fn [_ _ _ new-view-fn]
-                       ;; See large comment below
+                       ;; Probably should reconsider future?
                        (future
-                         (update-view-and-send-patch new-view-fn
-                                                     state
-                                                     internal-state
-                                                     #'broadcast)))))
+                         (binding [*live-view-context* (or live-view-context {})]
+                           (update-view-and-send-patch new-view-fn
+                                                       state
+                                                       internal-state
+                                                       #'broadcast))))))
         (add-watch state :send-websocket
                    (fn [_ _ _ state-value]
                      ;; A queue ensures we are processing messages in order
                      ;; This is definitely not enough to handle our distributed issue.
-                     ;; It is possible to send messages in order, but to recieve them out of order.
-                     (.put message-queue
-                           [view
-                            state
-                            internal-state
-                            broadcast])))
+                     ;; It is possible to send messages in order, but
+                     ;; to recieve them out of order.
+                     (binding [*live-view-context* (or live-view-context {})]
+                       (.put message-queue
+                             [view
+                              state
+                              internal-state
+                              broadcast]))))
 
-        (jetty/run-jetty (ring.middleware.resource/wrap-resource #'web-handler "/")
-                         {:websockets {"/loc" (fn [_req]
-                                                (#'make-ws-handler internal-state event-handler))}
-                          :port (or port 50505)
-                          :join? false})))))
+        (let [live-view-context *live-view-context*]
+          (jetty/run-jetty (ring.middleware.resource/wrap-resource #'web-handler "/")
+                           {:websockets {"/loc" (fn [_req]
+                                                  (binding [*live-view-context* (or live-view-context {})]
+                                                    (make-ws-handler internal-state event-handler)))}
+                            :port (or port 50505)
+                            :join? false}))))))
 
 
 
