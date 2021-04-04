@@ -107,24 +107,34 @@
 
 ;; TODO: Need to break things apart so you can run this on your own server
 ;; TODO: Need to make broadcast overridable, but it needs more context
-(defn start-live-view-server [{:keys [state view event-handler port]}]
+(defn start-live-view-server [{:keys [state view event-handler port skip-frames-allowed?]}]
   (let [live-view-context (or *live-view-context* {})]
-    (let [^java.util.concurrent.ArrayBlockingQueue message-queue (java.util.concurrent.ArrayBlockingQueue. 1024)
+    (let [^java.util.concurrent.ArrayBlockingQueue message-queue (java.util.concurrent.ArrayBlockingQueue. (* 1024 10))
           queue-worker (future
-                         (loop []
-                           ;; Should consider if we want to take all
-                           ;; messages and just process the last.
-                           ;; Could mean we skip too many frames
-                           ;; But also probobly give us much better
-                           ;; performance
-                           (binding [*live-view-context* (or *live-view-context* {})]
-                             (try
-                               (let [message (.take message-queue)]
-                                 (when message
-                                   (apply update-view-and-send-patch message)))
-                               (catch Exception e
-                                 (.printStackTrace e))))
-                           (recur)))]
+                         (let [coll (java.util.ArrayList.)]
+                           (loop []
+                             ;; Should consider if we want to take all
+                             ;; messages and just process the last.
+                             ;; Could mean we skip too many frames
+                             ;; But also probobly give us much better
+                             ;; performance
+                             (binding [*live-view-context* (or *live-view-context* {})]
+                               (try
+                                 (if skip-frames-allowed?
+                                   (do
+                                     (.drainTo message-queue coll)
+                                     (when-not (zero?( .size coll))
+                                       (let [message (.get coll (dec (.size coll)))]
+                                         (.clear coll)
+                                         (when message
+                                           (apply update-view-and-send-patch message))))
+                                     (Thread/sleep 5))
+                                   (let [message (.take message-queue)]
+                                     (when message
+                                       (apply update-view-and-send-patch message))))
+                                 (catch Exception e
+                                   (.printStackTrace e))))
+                             (recur))))]
       (let [internal-state (atom {:clients {}
                                   :view-state nil
                                   :epoch 0})]
@@ -152,13 +162,14 @@
                               internal-state
                               broadcast]))))
 
-        (let [live-view-context *live-view-context*]
-          (jetty/run-jetty (ring.middleware.resource/wrap-resource #'web-handler "/")
-                           {:websockets {"/loc" (fn [_req]
-                                                  (binding [*live-view-context* (or live-view-context {})]
-                                                    (make-ws-handler internal-state event-handler)))}
-                            :port (or port 50505)
-                            :join? false}))))))
+        (let [live-view-context *live-view-context*
+              server (jetty/run-jetty (ring.middleware.resource/wrap-resource #'web-handler "/")
+                                      {:websockets {"/loc" (fn [_req]
+                                                             (binding [*live-view-context* (or live-view-context {})]
+                                                               (make-ws-handler internal-state event-handler)))}
+                                       :port (or port 50505)
+                                       :join? false})]
+          server)))))
 
 
 

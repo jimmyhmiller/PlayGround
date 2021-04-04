@@ -13,5 +13,8 @@
   (sadly not vectors, though it's an easy transformation). Uses Glow's ANTLR
   grammar (see glow.parse/antlr-clojure)."
   [s]
-  (antlr/parse antlr-clojure s))
+  (try
+    (antlr/parse antlr-clojure s)
+    (catch Exception e
+      [:span s])))
 

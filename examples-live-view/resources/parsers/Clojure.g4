@@ -112,7 +112,7 @@ meta_data
     ;
 
 var_quote
-    : '#\'' symbol
+    : '#\'' (symbol | '~' symbol)
     ;
 
 host_expr

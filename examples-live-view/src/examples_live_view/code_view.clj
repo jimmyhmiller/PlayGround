@@ -97,10 +97,68 @@
   (doseq [[_ var] (ns-publics (find-ns namespace-symbol))]
     (unstrument-var var)))
 
+
+(defn view-code* [{:keys [var-value var-name ns-name]}]
+  [:code.syntax
+   [:pre
+    (glow.html/hiccup-transform
+     (parse/parse
+      (let [val @var-value
+            type-name (.getName (type val))]
+        ;; There is no atom pred??
+        (cond (= type-name "clojure.lang.Atom")
+              (pprint-str @val)
+
+              (or (number? val) (boolean? val) (string? val))
+              (str val)
+
+              (and (string/includes? type-name "$")
+                   (fn? @var-value))
+              (try (source-fn (symbol (name ns-name) (name var-name)))
+                   (catch Exception e
+                     (try
+                       (clojure.repl/source-fn (symbol (name ns-name) (name var-name)))
+                       (catch Exception e nil))))
+
+              (instance? clojure.lang.IObj @var-value)
+              (pprint-str @var-value)
+
+              :else  (pprint-str (keys (bean @var-value)))))))]])
+
+(def view-code (memoize view-code*))
+(def view-code view-code*)
+
+(defn code->hiccup [code]
+  [:code.syntax
+   [:pre
+    (glow.html/hiccup-transform
+     (parse/parse (pprint-str code)))]])
+
+
+(defn view-single-var [{:keys [var-name var-calls ns-name only-distinct-calls]}]
+  (let [namespace (and ns-name (find-ns (symbol ns-name)))
+        var-value (get (ns-publics namespace) var-name)
+        var-calls (update var-calls :values (if only-distinct-calls distinct identity))]
+    [:div
+     [:a {:onclick [:back]} "back"]
+     (view-code {:var-name var-name :var-value var-value :ns-name ns-name})
+     [:p "Distinct" [:input {:type "checkbox"
+                             :onchange [:only-distinct-calls]
+                             :checked only-distinct-calls}]]
+     (for [[i {:keys [args results]}] (map-indexed vector (:values var-calls))]
+       [:div
+        i
+        (code->hiccup args)
+        (code->hiccup results)])]))
+
+
+
 (defn view [{:keys [calls
                     current-hover
                     current-click
                     namespace-input
+                    highlight-var
+                    only-distinct-calls
                     ns-name] :as state}]
   [:body {:style {:background-color "#363638"
                   :color "white"}}
@@ -108,79 +166,67 @@
     (glow.core/generate-css)]
    [:div
     [:h1 "Code View"]
-    [:input {:onchange [:namespace-input-change]
-             :list "namespaces"
-             :style {:width 300}}]
-    [:datalist {:id "namespaces"}
-     (map (fn [ns]
-            [:option {:value ns}])
-          (sort (map #(.getName %) (all-ns))))]
-    [:button {:onclick [:view]} "view"]
-    [:button {:onclick [:inspect]} "inspect"]
-    [:div {:style {:display "grid"
-                   :grid-template-columns "repeat(3, 1fr)"}}
-     (when-let [namespace (and ns-name (find-ns (symbol ns-name)))]
-       (for [[var-name var-value]
-             (remove #(string/includes? % "$")
-                     (ns-publics namespace))]
-         [:div {:style {:margin 20
-                        :background-color "#002b36"
-                        :padding 10
-                        :max-width "30vw"
-                        :position "relative"}}
-          [:ul {:style {:position "absolute"
-                        :left -30
-                        :font-size 30
-                        :top -20
-                        :line-height 20}}
-           (for [i (range (min 10 (get-in calls [var-name :number] 0)))]
-             (let [hovered? (or (= current-hover [var-name i])
-                                (= current-click [var-name i]))]
-               [:li {:style {:cursor "pointer"
-                             :color (if hovered? "white" "#585858")}
-                     :onmouseover [:hover {:i i :var-name var-name}]
-                     :onmouseout [:unhover {:i i :var-name var-name}]
-                     :onclick [:click {:i i :var-name var-name}]}]))]
-          [:div {:style {:overflow "scroll"
-                         :max-width "30vw"}}
-           (name var-name)
-           [:span {:style {:float "right"}}
-            (get-in calls [var-name :number] 0)]
-           [:div {:style {:borderBottom "2px solid #002b36"
-                          :padding-top 10
-                          :filter "brightness(80%)"}}]
-           [:code.syntax
-            [:pre
-             (glow.html/hiccup-transform
-              (parse/parse
-               (let [type-name (.getName (type (deref var-value)))]
-                 (cond (= type-name "clojure.lang.Atom")
-                       "" #_(pprint-str @@var-value)
-
-                       (and (string/includes? type-name "$")
-                            (fn? @var-value))
-                       (try (source-fn (symbol (name ns-name) (name var-name) ))
-                            (catch Exception e
-                              (clojure.repl/source-fn (symbol (name ns-name) (name var-name) ))))
-
-                       (instance? clojure.lang.IObj @var-value)
-                       (pprint-str @var-value)
-
-                       :else  (pprint-str (keys (bean @var-value)))))))]]]
-
-          (let [shown-value (or current-click current-hover)]
-            (if (= (first shown-value) var-name)
-              (let [{:keys [args results]} (get-in calls [var-name :values (- (get-in calls [var-name :number] 0)
-                                                                              (second shown-value)
-                                                                              1)])]
-                [:div {:style {:height 50
-                               :overflow-y "hidden"
-                               :overflow-x "scroll"}}
-                 [:code.syntax
-                  [:pre  (glow.html/hiccup-transform
-                          (parse/parse
-                           (str "(" (pr-str var-name) " " (string/join " " (map pr-str args)) ") ;;=> " (pr-str results))))]]])
-              [:div {:style {:height 50}}]))]))]]])
+    (if highlight-var
+      (view-single-var {:var-name highlight-var
+                        :var-calls (get calls highlight-var)
+                        :ns-name ns-name
+                        :only-distinct-calls only-distinct-calls})
+      [:div
+       [:input {:onchange [:namespace-input-change]
+                :list "namespaces"
+                :style {:width 300}}]
+       [:datalist {:id "namespaces"}
+        (map (fn [ns]
+               [:option {:value ns}])
+             (sort (map #(.getName %) (all-ns))))]
+       [:button {:onclick [:view]} "view"]
+       [:button {:onclick [:inspect]} "inspect"]
+       [:div {:style {:display "grid"
+                      :grid-template-columns "repeat(3, 1fr)"}}
+        (when-let [namespace (and ns-name (find-ns (symbol ns-name)))]
+          (for [[var-name var-value]
+                (remove #(string/includes? % "$")
+                        (ns-publics namespace))]
+            [:div {:style {:margin 20
+                           :background-color "#002b36"
+                           :padding 10
+                           :max-width "28vw"
+                           :position "relative"}}
+             [:ul {:style {:position "absolute"
+                           :left -30
+                           :font-size 30
+                           :top -20
+                           :line-height 20}}
+              (for [i (range (min 10 (get-in calls [var-name :number] 0)))]
+                (let [hovered? (or (= current-hover [var-name i])
+                                   (= current-click [var-name i]))]
+                  [:li {:style {:cursor "pointer"
+                                :color (if hovered? "white" "#585858")}
+                        :onmouseover [:hover {:i i :var-name var-name}]
+                        :onmouseout [:unhover {:i i :var-name var-name}]
+                        :onclick [:click {:i i :var-name var-name}]}]))]
+             [:div {:style {:overflow "scroll"
+                            :max-width "28vw"}}
+              [:a {:onclick [:highlight-var {:var-name var-name}]} (name var-name)]
+              [:span {:style {:float "right"}}
+               (get-in calls [var-name :number] 0)]
+              [:div {:style {:borderBottom "2px solid #002b36"
+                             :padding-top 10
+                             :filter "brightness(80%)"}}]
+              (view-code {:var-name var-name :var-value var-value :ns-name ns-name})]
+             (let [shown-value (or current-click current-hover)]
+               (if (= (first shown-value) var-name)
+                 (let [{:keys [args results]} (get-in calls [var-name :values (- (get-in calls [var-name :number] 0)
+                                                                                 (second shown-value)
+                                                                                 1)])]
+                   [:div {:style {:height 50
+                                  :overflow-y "hidden"
+                                  :overflow-x "scroll"}}
+                    [:code.syntax
+                     [:pre  (glow.html/hiccup-transform
+                             (parse/parse
+                              (str "(" (pr-str var-name) " " (string/join " " (map pr-str args)) ") ;;=> " (pr-str results))))]]])
+                 [:div {:style {:height 50}}]))]))]])]])
 
 
 
@@ -200,7 +246,10 @@
                 (swap! state assoc :ns-name (:namespace-input @state)))
       ;; Should make this a toggle
       :inspect (instrument-ns (symbol (:ns-name @state)))
-      (println "unhandled action" action-type))))
+      :highlight-var (swap! state assoc :highlight-var (:var-name payload))
+      :back (swap! state dissoc :highlight-var)
+      :only-distinct-calls (swap! state update :only-distinct-calls #(not %))
+      (println "unhandled action" action))))
 
 
 (defonce live-view-server
@@ -209,10 +258,17 @@
      {:state state
       :view #'view
       :event-handler #'event-handler
-      :port 23456})))
+      :port 23456
+      :skip-frames-allowed? true})))
+
+(string/reverse "asdfdsaf")
 
 
 (comment
   (.stop live-view-server))
 
 
+
+
+
+ 
