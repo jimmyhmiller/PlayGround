@@ -39,7 +39,8 @@
 (defn pprint-str [coll]
   (let [out (java.io.StringWriter.)]
     (pprint/pprint coll out)
-   (str out)))
+    (str out)))
+
 
 
 (def instrumented-vars (atom {}))
@@ -48,7 +49,18 @@
 (defonce state (atom {:calls {}
                       :namespace-input ""}))
 
+(reset! state {:calls {}
+                      :namespace-input ""})
+
+
+;; Tap has some positive and some negative attributes. Because it
+;; intentionally doesn't block on puts, it doesn't have a large probe
+;; effect. But it also has a 1024 fixed buffer size, and no watch to
+;; batch results. I could probably make my own system fairly easily
+;; that overcomes these issues, but for now this works fairly well for
+;; most uses cases.
 (do
+  ;; Little song and dance to make this repl safe.
   (def add-tap-to-state)
   (remove-tap add-tap-to-state)
 
@@ -64,6 +76,8 @@
 
 (defn stats-handling [v f]
   (fn [& args]
+    ;; This ensures we don't infinite loop by adding stats to our own
+    ;; function calls.
     (if (= (get live-view/*live-view-context* :app) :code-view)
       (apply f args)
       (let [results (apply f args)]
@@ -123,9 +137,12 @@
               (instance? clojure.lang.IObj @var-value)
               (pprint-str @var-value)
 
-              :else  (pprint-str (keys (bean @var-value)))))))]])
+              :else (pprint-str (keys (bean @var-value)))))))]])
 
-(def view-code (memoize view-code*))
+;; This parser I am using is very slow and makes my views very
+;; non-performant. But, a naive memoize gets rid of some of the nice
+;; things we get like watching atoms update.
+#_(def view-code (memoize view-code*))
 (def view-code view-code*)
 
 (defn code->hiccup [code]
@@ -135,12 +152,15 @@
      (parse/parse (pprint-str code)))]])
 
 
+
+;; This is really ugly right now, need to make prettier.
 (defn view-single-var [{:keys [var-name var-calls ns-name only-distinct-calls]}]
   (let [namespace (and ns-name (find-ns (symbol ns-name)))
         var-value (get (ns-publics namespace) var-name)
         var-calls (update var-calls :values (if only-distinct-calls distinct identity))]
     [:div
      [:a {:onclick [:back]} "back"]
+     [:h2 (str ns-name "/" (name var-name))]
      (view-code {:var-name var-name :var-value var-value :ns-name ns-name})
      [:p "Distinct" [:input {:type "checkbox"
                              :onchange [:only-distinct-calls]
@@ -159,6 +179,7 @@
                     namespace-input
                     highlight-var
                     only-distinct-calls
+                    filter-called
                     ns-name] :as state}]
   [:body {:style {:background-color "#363638"
                   :color "white"}}
@@ -181,12 +202,19 @@
              (sort (map #(.getName %) (all-ns))))]
        [:button {:onclick [:view]} "view"]
        [:button {:onclick [:inspect]} "inspect"]
+       [:p "Only Show Called" [:input {:type "checkbox" :onchange [:filter-called]
+                                       :checked filter-called} ]]
        [:div {:style {:display "grid"
                       :grid-template-columns "repeat(3, 1fr)"}}
         (when-let [namespace (and ns-name (find-ns (symbol ns-name)))]
           (for [[var-name var-value]
-                (remove #(string/includes? % "$")
-                        (ns-publics namespace))]
+                (remove (fn [[k v]]
+                          (if filter-called
+                            (or (not (get-in calls [k :number])) 
+                                (zero? (get-in calls [k :number]) ))
+                            false))
+                        (remove #(string/includes? % "$")
+                                (ns-publics namespace)))]
             [:div {:style {:margin 20
                            :background-color "#002b36"
                            :padding 10
@@ -213,7 +241,10 @@
               [:div {:style {:borderBottom "2px solid #002b36"
                              :padding-top 10
                              :filter "brightness(80%)"}}]
-              (view-code {:var-name var-name :var-value var-value :ns-name ns-name})]
+              (view-code {:var-name var-name :var-value var-value
+                          :ns-name ns-name})]
+             ;; This hover interface is less than great.
+             ;; But it shows that we have this information available.
              (let [shown-value (or current-click current-hover)]
                (if (= (first shown-value) var-name)
                  (let [{:keys [args results]} (get-in calls [var-name :values (- (get-in calls [var-name :number] 0)
@@ -240,15 +271,17 @@
       :unhover (swap! state dissoc :current-hover)
       :click (swap! state assoc :current-click [(:var-name payload) (:i payload)])
       :namespace-input-change (swap! state assoc :namespace-input (:value payload))
-      :view (do (when (and (:ns-name @state)
-                           (not= (:ns-name @state) (:namespace-input @state)))
-                  (unstrument-ns (symbol (:ns-name @state))))
-                (swap! state assoc :ns-name (:namespace-input @state)))
+      :view (do
+              (when (and (:ns-name @state)
+                         (not= (:ns-name @state) (:namespace-input @state)))
+                (unstrument-ns (symbol (:ns-name @state))))
+              (swap! state assoc :ns-name (:namespace-input @state)))
       ;; Should make this a toggle
       :inspect (instrument-ns (symbol (:ns-name @state)))
       :highlight-var (swap! state assoc :highlight-var (:var-name payload))
       :back (swap! state dissoc :highlight-var)
       :only-distinct-calls (swap! state update :only-distinct-calls #(not %))
+      :filter-called (swap! state update :filter-called #(not %))
       (println "unhandled action" action))))
 
 
@@ -258,10 +291,9 @@
      {:state state
       :view #'view
       :event-handler #'event-handler
-      :port 23456
+      :port 1116
       :skip-frames-allowed? true})))
 
-(string/reverse "asdfdsaf")
 
 
 (comment

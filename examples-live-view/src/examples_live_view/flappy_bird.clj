@@ -1,6 +1,8 @@
 (ns examples-live-view.flappy-bird
   (:require [live-view-server.core :as live-view]))
 
+
+;; ported from
 ;; https://github.com/bhauman/flappy-bird-demo
 
 
@@ -213,7 +215,7 @@
    {:state flap-state
     :view #'view
     :event-handler #'event-handler
-    :port 4444}))
+    :port 1114}))
 
 (comment
   (.stop live-view-server))

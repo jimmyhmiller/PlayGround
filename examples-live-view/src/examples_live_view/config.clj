@@ -42,7 +42,7 @@
       "Reset"]]]])
 
 
-(def state (atom {}))
+(def state (atom initial-config))
 
 (add-watch my-config :state (fn [_ _ _ value]
                               (reset! state value)))
@@ -50,7 +50,7 @@
 
 (defn event-handler [{:keys [action]}]
   (let [[action-type payload] action]
-    (println action)
+   #_ (println action)
     (case action-type
       :change-greeting (swap! my-config assoc :greeting (:value payload))
       :change-delayed-field (swap! state assoc :delayed-field (:value payload))
@@ -66,9 +66,15 @@
    {:state state
     :view #'view
     :event-handler #'event-handler
-    :port 5555}))
+    :port 1112}))
 
 
 (comment
-  (.stop live-view-server)
+
+  (.stop (:server live-view-server))
+  (future-cancel (:queue-worker live-view-server))
+
+
   )
+
+
