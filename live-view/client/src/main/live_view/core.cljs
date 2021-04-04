@@ -11,6 +11,13 @@
 (def event-listeners (atom {}))
 
 
+
+
+;; This is far from optimal. Really what we need is a virtual event
+;; system like react so we can handle this more generically. There is
+;; a ton of repetition here and it is very incomplete. If I made a
+;; virtual event system, we could handle all of this much better and
+;; not have to keep updating this each time I have a new use case.
 (def event-fns
   {"onkeydown"
    (fn [node _ _ [action payload]]
@@ -89,7 +96,7 @@
      (let [listener (fn [e]
                       (.preventDefault e)
                       (let [writer (transit/writer :json)]
-                        (.send  js/window.liveWS (transit/write writer val))))]
+                        (.send js/window.liveWS (transit/write writer val))))]
        (.removeEventListener node "mouseover" (get-in @event-listeners [node "onmouseout"]) false)
        (swap! event-listeners assoc-in [node "onmouseout"] listener)
        (.addEventListener node "mouseout" listener)))})
@@ -126,7 +133,8 @@
 
 
 
-(deftype StyleInterceptor []
+
+(deftype LiveViewInterceptor []
    interceptor/Interceptor
    (-intercept [_ t m f]
      (cond
@@ -149,11 +157,8 @@
                                           v)))))
        (and (= t :update-attribute))
        (do
-         #_(println "Attribute" m)
          (if-let [event-handler (get event-fns (name (:name m)))]
-           (do
-            #_ (println event-handler (:target m) nil nil (:new-value m))
-             (event-handler (:target m) nil nil (:new-value m))))
+           (event-handler (:target m) nil nil (:new-value m)))
            (f))
 
 
@@ -164,21 +169,18 @@
     (hipo/reconciliate!
      node
      new-hiccup
-     {:interceptors [(StyleInterceptor.)]})
+     {:interceptors [(LiveViewInterceptor.)]})
 
     new-hiccup))
 
 (defn create-renderer [dom-node ws]
   (let [dom-node (atom dom-node)
-        virtual-dom (atom nil)
-        epoch (atom -1)]
+        virtual-dom (atom nil)]
     (fn [data]
       (let [current-vdom @virtual-dom]
         (case (:type data)
           :patch (if current-vdom
                    (do
-                     #_(when (> (:epoch data) @epoch))
-                     (reset! epoch (:epoch data))
                      (reset! virtual-dom (apply-patch @dom-node current-vdom (:value data))))
                    {:type :error
                     :reason :no-state})
@@ -190,28 +192,18 @@
 
 
 
-
-
-
-
-
+;; This has no reconnection logic at all. Need to add that.
 (defn init []
 
   (let [port (or js/window.LIVE_VIEW_PORT js/window.location.port)
         ws (js/WebSocket. (str "ws://localhost:" port "/loc/"))
         renderer (create-renderer js/document.body ws)]
-    ;; ugly hack
+    ;; ugly hack to help us handle stuff in events.
     (set! (.-liveWS js/window) ws)
-    #_(println "should connect" ws)
     (set! (.-onerror ws) (fn [e] (println "error" e)))
     (set! (.-onopen ws) (fn []
-                        #_  (println "sending init")
-                          (.send ws "init")
-                          #_(println "sent init")))
+                          (.send ws "init")))
     (set! (.-onmessage ws) (fn [e]
-                              #_(println "got message")
                              (let [reader (transit/reader :json)]
                                (let [payload (transit/read reader (.-data e))]
-                                #_ (println "read message")
-                                 (renderer payload)
-                                 #_ (println "rendered")))))))
+                                 (renderer payload)))))))

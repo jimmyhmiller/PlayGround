@@ -13,6 +13,15 @@
 ;; LifeCycle Handlers
 ;; Routing
 
+
+
+
+;; This exists mostly right now so that apps can detect when they are
+;; in the live view context. They may want to behave different, send
+;; more information, not do some operation, etc.
+;; Right now I am being a little overzelous with my bindings here. If
+;; I took a little more time the think about it, I could probably make
+;; things more streamlined.
 (def ^:dynamic *live-view-context* nil)
 
 (defn send-transit! [ws payload]
@@ -58,19 +67,19 @@
   (binding [*live-view-context* (or *live-view-context* {})]
     (let [[old-view-state new-view-state]
           (swap-vals! internal-state-atom (fn [internal-state]
-                                            #_(if (<= (:epoch internal-state) epoch))
-                                            (assoc internal-state :view-state (view @state))
-                                           #_ internal-state))
-          patch (edit/get-edits (editscript/diff (:view-state old-view-state) (:view-state new-view-state)))
-          out (ByteArrayOutputStream. 4096)
-          writer (transit/writer out :json)]
+                                            (assoc internal-state :view-state (view @state))))
+          patch (edit/get-edits (editscript/diff (:view-state old-view-state) (:view-state new-view-state)))]
       (when-not (empty? patch)
-        (transit/write writer {:type :patch
-                              #_#_ :epoch epoch
-                               :value patch})
-        (broadcast (:clients new-view-state) (.toString out))))))
+        (let [out (ByteArrayOutputStream. 4096)
+              writer (transit/writer out :json)]
+          (transit/write writer {:type :patch
+                                 :value patch})
+          (broadcast (:clients new-view-state) (.toString out)))))))
 
 (defn make-ws-handler [internal-state-atom on-event]
+  ;; We let bind live-view-context to make sure the closure captures
+  ;; it becasue these functions will be called by jetty, not us and
+  ;; won't necessarily have the clojure dynamic vars set.
   (let [live-view-context (or *live-view-context* {})]
     {:on-connect (fn [ws]
                    (binding [*live-view-context* (or live-view-context {})]
@@ -85,6 +94,7 @@
                     (send-transit! ws {:type :init
                                        :value (:view-state @internal-state-atom)})
                     (try
+                      ;; Should we acknowlege event handling?
                       (on-event {:action (read-transit text-message)})
                       (catch Exception e
                         (.printStackTrace e))))))
@@ -103,6 +113,37 @@
         "/main.js" {:body (slurp (io/resource "main.js"))}))))
 
 
+(defn run-queue-worker [message-queue {:keys [skip-frames-allowed? live-view-context]}]
+  (binding [*live-view-context* (or live-view-context {})]
+    (let [coll (java.util.ArrayList.)]
+      (loop []
+        (try
+          ;; If we have a ton of messages coming in quuickly, it can
+          ;; make sense to just jump to the last one. If we care only
+          ;; about the final result and not the intermediate steps,
+          ;; this can be useful.
+          ;; But it can also cause issues for many interfaces so not
+          ;; something we can really enable by default.
+          (if skip-frames-allowed?
+            (do
+              (.drainTo message-queue coll)
+              (when-not (zero?( .size coll))
+                (let [message (.get coll (dec (.size coll)))]
+                  (.clear coll)
+                  (when message
+                    (apply update-view-and-send-patch message))))
+              ;; Do we need this sleep?
+              ;; It feels pretty messy, but on this path we don't
+              ;; block on the message queue, so we are in a tight loop.
+              (Thread/sleep 5))
+            (let [message (.take message-queue)]
+              (when message
+                (apply update-view-and-send-patch message))))
+          (catch Exception e
+            (.printStackTrace e)))
+        (when (not (Thread/interrupted))
+          (recur))))))
+
 
 
 ;; TODO: Need to break things apart so you can run this on your own server
@@ -110,31 +151,8 @@
 (defn start-live-view-server [{:keys [state view event-handler port skip-frames-allowed?]}]
   (let [live-view-context (or *live-view-context* {})]
     (let [^java.util.concurrent.ArrayBlockingQueue message-queue (java.util.concurrent.ArrayBlockingQueue. (* 1024 10))
-          queue-worker (future
-                         (let [coll (java.util.ArrayList.)]
-                           (loop []
-                             ;; Should consider if we want to take all
-                             ;; messages and just process the last.
-                             ;; Could mean we skip too many frames
-                             ;; But also probobly give us much better
-                             ;; performance
-                             (binding [*live-view-context* (or *live-view-context* {})]
-                               (try
-                                 (if skip-frames-allowed?
-                                   (do
-                                     (.drainTo message-queue coll)
-                                     (when-not (zero?( .size coll))
-                                       (let [message (.get coll (dec (.size coll)))]
-                                         (.clear coll)
-                                         (when message
-                                           (apply update-view-and-send-patch message))))
-                                     (Thread/sleep 5))
-                                   (let [message (.take message-queue)]
-                                     (when message
-                                       (apply update-view-and-send-patch message))))
-                                 (catch Exception e
-                                   (.printStackTrace e))))
-                             (recur))))]
+          queue-worker (future (run-queue-worker message-queue {:skip-frames-allowed? skip-frames-allowed?
+                                                                :live-view-context live-view-context}))]
       (let [internal-state (atom {:clients {}
                                   :view-state nil
                                   :epoch 0})]
@@ -142,7 +160,7 @@
         (when (var? view)
           (add-watch view :view-updated
                      (fn [_ _ _ new-view-fn]
-                       ;; Probably should reconsider future?
+                       ;; Is this future needed?
                        (future
                          (binding [*live-view-context* (or live-view-context {})]
                            (update-view-and-send-patch new-view-fn
@@ -155,6 +173,12 @@
                      ;; This is definitely not enough to handle our distributed issue.
                      ;; It is possible to send messages in order, but
                      ;; to recieve them out of order.
+                     ;; If we really want this to be robust we
+                     ;; probably need some sort of logical clock
+                     ;; setup, so we know the state of the client and
+                     ;; ensure we don't get out of sync.
+                     ;; I had made a proof of concept system like that,
+                     ;; but those things are easy to get wrong.
                      (binding [*live-view-context* (or live-view-context {})]
                        (.put message-queue
                              [view
@@ -169,7 +193,8 @@
                                                                (make-ws-handler internal-state event-handler)))}
                                        :port (or port 50505)
                                        :join? false})]
-          server)))))
+          {:server server
+           :queue-worker queue-worker})))))
 
 
 

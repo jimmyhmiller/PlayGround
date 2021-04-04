@@ -1,4 +1,4 @@
-(ns examples-live-view.core
+(ns examples-live-view.ring
   (:require [reitit.ring]
             [live-view-server.core :as live-view]
             [cheshire.core :as json]
@@ -103,13 +103,12 @@
 
   (add-tap add-tap-to-state))
 
-(comment
-  (def live-view-server
-    (live-view/start-live-view-server
-     {:state state
-      :view #'view
-      :event-handler #'event-handler
-      :port 12345})))
+(def live-view-server
+  (live-view/start-live-view-server
+   {:state state
+    :view #'view
+    :event-handler #'event-handler
+    :port 1115}))
 
 
 

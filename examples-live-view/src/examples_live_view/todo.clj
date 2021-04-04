@@ -2,6 +2,10 @@
   (:require [live-view-server.core :as live-view]
             [clojure.string :as string]))
 
+;; ported from https://github.com/reagent-project/reagent/blob/master/examples/todomvc/src/todomvc/core.cljs
+;; Only thing I didn't get working was focus on edit.
+;; I think I would need a notion of lifecycle that I just don't have.
+
 (def state (atom {:todos (sorted-map)
                   :counter 0
                   :input ""
@@ -124,7 +128,7 @@
   (todo-app state))
 
 (defn event-handler [{:keys [action]}]
-  (prn action)
+  #_(prn action)
   (let [[action-type payload] action]
     (case action-type
       :delete (delete (:id payload))
@@ -155,11 +159,13 @@
    {:state state
     :view #'view
     :event-handler #'event-handler
-    :port 56789}))
+    :port 1111}))
 
 (comment
 
-  (.stop live-view-server))
+  (.stop (:server live-view-server))
+  (future-cancel (:queue-worker live-view-server))
+  )
 
 
 
