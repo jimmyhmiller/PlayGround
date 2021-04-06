@@ -217,5 +217,11 @@
     :event-handler #'event-handler
     :port 1114}))
 
+
 (comment
-  (.stop live-view-server))
+
+  (.stop (:server live-view-server))
+  (future-cancel (:queue-worker live-view-server))
+
+
+  )

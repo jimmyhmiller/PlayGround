@@ -168,7 +168,7 @@
       :else (f))))
 
 (defn apply-patch [node current-hiccup patch]
-  (let [new-hiccup (editscript/patch current-hiccup (edit/edits->script patch ))]
+  (let [new-hiccup (editscript/patch current-hiccup (edit/edits->script patch))]
     (hipo/reconciliate!
      node
      new-hiccup
