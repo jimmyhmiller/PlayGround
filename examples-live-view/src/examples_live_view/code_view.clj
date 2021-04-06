@@ -214,7 +214,7 @@
                                 (zero? (get-in calls [k :number]) ))
                             false))
                         (remove #(string/includes? % "$")
-                                (ns-publics namespace)))]
+                                (sort-by first (ns-publics namespace))))]
             [:div {:style {:margin 20
                            :background-color "#002b36"
                            :padding 10
@@ -283,6 +283,7 @@
       :only-distinct-calls (swap! state update :only-distinct-calls #(not %))
       :filter-called (swap! state update :filter-called #(not %))
       (println "unhandled action" action))))
+
 
 
 (defonce live-view-server
