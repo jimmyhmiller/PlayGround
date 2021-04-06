@@ -273,11 +273,11 @@
       (square segment))]
    (instructions state)])
 
-(defn game-over-overlay [{:keys [victory gameover score]}]
+(defn game-over-overlay [{:keys [victory game-over score]}]
   (let [winner victory]
     [:div
      {:class (str "modal"
-                  (if gameover
+                  (if game-over
                     " is-active"
                     ""))}
      [:div.modal-background]
