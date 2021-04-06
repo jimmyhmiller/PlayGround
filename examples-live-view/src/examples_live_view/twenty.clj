@@ -303,10 +303,11 @@
 (defn view [state]
   [:body {:onkeydown [:app.events/on-keydown]}
    [:link {:rel "stylesheet" :href "/twenty/main.css"}]
-   [:div
-    (control-panel state)
-    (board state)
-    (game-over-overlay state)]])
+   [:div {:class "page"}
+    [:div
+     (control-panel state)
+     (board state)
+     (game-over-overlay state)]]])
 #_(view @state)
 
 
@@ -333,6 +334,12 @@
                           points-added-callback))
     db))
 
+(defn handle-game-over-acknowledged
+  "Closes 'game over' modal when player dismisses it."
+  [db _]
+  (assoc db :game-over false))
+
+
 (defn handle-endgame-monitor-tick
   "Checks for endgame conditions and ends the game if met."
   [state]
@@ -357,6 +364,7 @@
                                    (event-handler {:action [:app.events/points-added points]}))
                                  (reset! points-added []))
         :app.events/points-added (swap! state handle-points-added payload)
+        :app.events/game-over-acknowledged (swap! state h)
         (println "Unhandled Action" action))))
   (handle-endgame-monitor-tick state))
 
