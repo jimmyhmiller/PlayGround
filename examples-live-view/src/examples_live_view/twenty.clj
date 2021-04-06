@@ -336,7 +336,7 @@
 
 (defn handle-game-over-acknowledged
   "Closes 'game over' modal when player dismisses it."
-  [db _]
+  [db]
   (assoc db :game-over false))
 
 
@@ -364,7 +364,7 @@
                                    (event-handler {:action [:app.events/points-added points]}))
                                  (reset! points-added []))
         :app.events/points-added (swap! state handle-points-added payload)
-        :app.events/game-over-acknowledged (swap! state h)
+        :app.events/game-over-acknowledged (swap! state handle-game-over-acknowledged)
         (println "Unhandled Action" action))))
   (handle-endgame-monitor-tick state))
 
