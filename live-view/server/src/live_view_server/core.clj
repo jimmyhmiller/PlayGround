@@ -8,6 +8,7 @@
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream]))
 
 
+;; Needed:
 ;; Metadata per connection
 ;; Filtering Broadcast
 ;; LifeCycle Handlers
@@ -200,6 +201,9 @@
 
 
 
+;; Notes
+
+
 ;; Need client local state
 ;; That means I need to run the view function for each client.
 ;; But I should really only do this if I need to.
@@ -219,3 +223,13 @@
 
 ;; Maybe something like?
 ;; :view-depends-on [:state :user-state]
+
+
+
+;; One problem that needs to be addressed is using a key aware diffing
+;; algorithm. Right now I'm using editscript which is not key aware,
+;; so it is slower than it needs to be, but also produces much much
+;; larger patches than it should. 
+
+
+

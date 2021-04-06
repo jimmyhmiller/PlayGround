@@ -202,4 +202,10 @@
 
 (comment
 
-  (.stop live-view-server))
+  (.stop (:server live-view-server))
+  (future-cancel (:queue-worker live-view-server))
+
+
+  )
+
+

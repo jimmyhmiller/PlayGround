@@ -171,7 +171,14 @@
   (dotimes [_ 100]
     (app {:request-method :get
           :uri "/api/random-post"}))
-  
-  (.stop web-server))
+
+
+
+
+  (.stop (:server live-view-server))
+  (future-cancel (:queue-worker live-view-server))
+
+
+)
 
 

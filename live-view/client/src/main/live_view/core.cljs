@@ -105,8 +105,6 @@
        (.addEventListener node "mouseout" listener)))})
 
 
-;; Doesn't look like event handlers are being set if the view changes.
-;; Need to look into that.
 (defn hipo-options [ws]
   {:attribute-handlers [{:target {:attr "onkeydown"}
                          :fn (get event-fns "onkeydown")}
@@ -126,6 +124,7 @@
                          :fn (get event-fns "onmouseout")}
                         ;; The builtin style handler uses
                         ;; aset which doesn't work for objects now
+                        ;; Duplicated down below in the interceptor
                         {:target {:attr "style"}
                          :fn (fn [node _ _ styles]
                                (doseq [[k v] styles]
@@ -136,7 +135,8 @@
 
 
 
-
+;; This exists to handle status in a better way but also to deal with
+;; event handlers.
 (deftype LiveViewInterceptor []
    interceptor/Interceptor
    (-intercept [_ t m f]
