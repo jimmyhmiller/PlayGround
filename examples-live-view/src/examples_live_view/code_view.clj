@@ -153,7 +153,7 @@
 
 
 
-;; This is really ugly right now, need to make prettier.
+;; This view has no styles yet. Should fix that
 (defn view-single-var [{:keys [var-name var-calls ns-name only-distinct-calls]}]
   (let [namespace (and ns-name (find-ns (symbol ns-name)))
         var-value (get (ns-publics namespace) var-name)
@@ -172,6 +172,60 @@
         (code->hiccup results)])]))
 
 
+(defn code-view-hover-dots [{:keys [calls current-hover current-click var-name]}]
+  [:ul {:style {:position "absolute"
+                :left -30
+                :font-size 30
+                :top -20
+                :line-height 20}}
+   (for [i (range (min 10 (get-in calls [var-name :number] 0)))]
+     (let [hovered? (or (= current-hover [var-name i])
+                        (= current-click [var-name i]))]
+       [:li {:style {:cursor "pointer"
+                     :color (if hovered? "white" "#585858")}
+             :onmouseover [:hover {:i i :var-name var-name}]
+             :onmouseout [:unhover {:i i :var-name var-name}]
+             :onclick [:click {:i i :var-name var-name}]}]))])
+
+
+(defn code-search [{:keys [filter-called]}]
+  [:div
+   [:input {:onchange [:namespace-input-change]
+            :list "namespaces"
+            :style {:width 300}}]
+   [:datalist {:id "namespaces"}
+    (map (fn [ns]
+           [:option {:value ns}])
+         (sort (map #(.getName %) (all-ns))))]
+   [:button {:onclick [:view]} "view"]
+   [:button {:onclick [:inspect]} "inspect"]
+   [:p "Only Show Called" [:input {:type "checkbox" :onchange [:filter-called]
+                                   :checked filter-called} ]]])
+
+(defn filter-vars [{:keys [filter-called namespace calls]}]
+  (remove (fn [[k v]]
+            (if filter-called
+              (or (not (get-in calls [k :number])) 
+                  (zero? (get-in calls [k :number]) ))
+              false))
+          (remove #(string/includes? % "$")
+                  (sort-by first (ns-publics namespace)))))
+
+
+(defn hover-preview [{:keys [current-click current-hover calls var-name]}]
+  (let [shown-value (or current-click current-hover)]
+    (if (= (first shown-value) var-name)
+      (let [{:keys [args results]} (get-in calls [var-name :values (- (get-in calls [var-name :number] 0)
+                                                                      (second shown-value)
+                                                                      1)])]
+        [:div {:style {:height 50
+                       :overflow-y "hidden"
+                       :overflow-x "scroll"}}
+         [:code.syntax
+          [:pre  (glow.html/hiccup-transform
+                  (parse/parse
+                   (str "(" (pr-str var-name) " " (string/join " " (map pr-str args)) ") ;;=> " (pr-str results))))]]])
+      [:div {:style {:height 50}}])))
 
 (defn view [{:keys [calls
                     current-hover
@@ -193,46 +247,23 @@
                         :ns-name ns-name
                         :only-distinct-calls only-distinct-calls})
       [:div
-       [:input {:onchange [:namespace-input-change]
-                :list "namespaces"
-                :style {:width 300}}]
-       [:datalist {:id "namespaces"}
-        (map (fn [ns]
-               [:option {:value ns}])
-             (sort (map #(.getName %) (all-ns))))]
-       [:button {:onclick [:view]} "view"]
-       [:button {:onclick [:inspect]} "inspect"]
-       [:p "Only Show Called" [:input {:type "checkbox" :onchange [:filter-called]
-                                       :checked filter-called} ]]
+       (code-search {:filter-called filter-called})
        [:div {:style {:display "grid"
                       :grid-template-columns "repeat(3, 1fr)"}}
         (when-let [namespace (and ns-name (find-ns (symbol ns-name)))]
           (for [[var-name var-value]
-                (remove (fn [[k v]]
-                          (if filter-called
-                            (or (not (get-in calls [k :number])) 
-                                (zero? (get-in calls [k :number]) ))
-                            false))
-                        (remove #(string/includes? % "$")
-                                (sort-by first (ns-publics namespace))))]
+                (filter-vars {:calls calls
+                              :filter-called filter-called
+                              :namespace namespace})]
             [:div {:style {:margin 20
                            :background-color "#002b36"
                            :padding 10
                            :max-width "28vw"
                            :position "relative"}}
-             [:ul {:style {:position "absolute"
-                           :left -30
-                           :font-size 30
-                           :top -20
-                           :line-height 20}}
-              (for [i (range (min 10 (get-in calls [var-name :number] 0)))]
-                (let [hovered? (or (= current-hover [var-name i])
-                                   (= current-click [var-name i]))]
-                  [:li {:style {:cursor "pointer"
-                                :color (if hovered? "white" "#585858")}
-                        :onmouseover [:hover {:i i :var-name var-name}]
-                        :onmouseout [:unhover {:i i :var-name var-name}]
-                        :onclick [:click {:i i :var-name var-name}]}]))]
+             (code-view-hover-dots {:calls calls
+                                    :current-hover current-hover
+                                    :current-click current-click
+                                    :var-name var-name})
              [:div {:style {:overflow "scroll"
                             :max-width "28vw"}}
               [:a {:onclick [:highlight-var {:var-name var-name}]} (name var-name)]
@@ -245,19 +276,11 @@
                           :ns-name ns-name})]
              ;; This hover interface is less than great.
              ;; But it shows that we have this information available.
-             (let [shown-value (or current-click current-hover)]
-               (if (= (first shown-value) var-name)
-                 (let [{:keys [args results]} (get-in calls [var-name :values (- (get-in calls [var-name :number] 0)
-                                                                                 (second shown-value)
-                                                                                 1)])]
-                   [:div {:style {:height 50
-                                  :overflow-y "hidden"
-                                  :overflow-x "scroll"}}
-                    [:code.syntax
-                     [:pre  (glow.html/hiccup-transform
-                             (parse/parse
-                              (str "(" (pr-str var-name) " " (string/join " " (map pr-str args)) ") ;;=> " (pr-str results))))]]])
-                 [:div {:style {:height 50}}]))]))]])]])
+             (hover-preview {:current-click current-click
+                             :current-hover current-hover
+                             :calls calls
+                             :var-name var-name})]))]])]])
+
 
 
 
