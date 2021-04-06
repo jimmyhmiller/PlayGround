@@ -8,6 +8,8 @@
             [goog.object]))
 
 
+;; Ported from https://github.com/egierach/2048
+
 (def event-listeners (atom {}))
 
 
@@ -27,6 +29,7 @@
                                (transit/write
                                 writer
                                 [action (assoc (or payload {})
+                                               :key (.. e -key)
                                                :keycode
                                                (.. e -keyCode))]))))]
        (.removeEventListener node "keydown" (get-in event-listeners [node "onkeydown"]) false)
