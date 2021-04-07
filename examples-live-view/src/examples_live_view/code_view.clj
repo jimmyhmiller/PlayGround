@@ -80,12 +80,21 @@
     ;; function calls.
     (if (= (get live-view/*live-view-context* :app) :code-view)
       (apply f args)
-      (let [results (apply f args)]
-        (tap> {:args args
-               :results results
-               :var v
-               :var-name (:name (meta v))})
-        results))))
+
+      (try
+        (let [results (apply f args)]
+          (tap> {:args args
+                 :results results
+                 :var v
+                 :var-name (:name (meta v))})
+          results)
+        (catch Exception e
+          (tap> {:args args
+                 :var v
+                 :var-name (:name (meta v))
+                 :results e})
+          (throw e))))))
+
 
 
 ;; Need to copy meta information
@@ -317,8 +326,6 @@
       :event-handler #'event-handler
       :port 1116
       :skip-frames-allowed? true})))
-
-
 
 
 (comment
