@@ -1,0 +1,19 @@
+;; shadow-cljs configuration
+{:deps true
+
+ :dev-http {8080 "resources/public/"}
+
+ :builds {:main {:target :node-script
+                 :output-to "resources/main.js"
+                 :main app.main.core/main
+                 :js-options
+                 ;; Ugly hack
+                 {:resolve
+                  {"nrepl-server" {:target :file
+                                   :file   "node_modules/nrepl-client/src/nrepl-server.js"}}}}
+
+          :renderer {:target :browser
+                     :output-dir "resources/public/js"
+                     :asset-path "js"
+                     :js-options {:js-provider :require}
+                     :modules {:renderer {:init-fn app.renderer.core/start!}}}}}

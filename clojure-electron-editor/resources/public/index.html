@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>Hello World!</title>
+    <link rel="stylesheet" href="css/main.css">
+    <meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline' 'unsafe-eval'; script-src * 'unsafe-inline' 'unsafe-eval'; connect-src * 'unsafe-inline'; img-src * data: blob: 'unsafe-inline'; frame-src *; style-src * 'unsafe-inline';
+">
+  </head>
+  <body>
+      <div id="app-container">
+        <!-- We are using node.js <script>document.write(process.version)</script> -->
+        <!-- and electron <script>document.write(process.versions['electron'])</script>. -->
+      </div>
+      <div id="docs"></div>
+  </body>
+  <script src="js/renderer.js"></script>
+</html>
