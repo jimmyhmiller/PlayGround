@@ -1,7 +1,13 @@
 (ns app.main.core
   (:require ["electron" :refer [app BrowserWindow crashReporter] :as electron]
             [nrepl-client :as nrepl-client]
-            ["nrepl-server" :default nrepl-server]))
+            ["nrepl-server" :default nrepl-server]
+            [clojure.pprint]))
+
+
+
+
+;; Need to actually make it so we can load up projects and open files
 (comment
 
   (.removeAllListeners electron/ipcMain "eval")
@@ -11,48 +17,61 @@
                              (when err
                                (println err))
                              (reset! server-state server)))
+  
   (.stop nrepl-server @server-state)
 
   (def conn
     (.connect
      nrepl-client
-     #js {:port "56011" :verbose true}))
+     #js {:port (.-port @server-state) :verbose true}))
 
 
-  (.once conn "connect"
-         (fn []
-           (println "Connect")
-           (.eval conn "(+ 2 2)" (fn [err result]
-                                   (.reduce result (fn [result msg]
-                                                     (println result)
-                                                     (if (.-value msg)
-                                                       (str result (.-value msg))
-                                                       result))
-                                            "")
-                                   (println result)))))
   (.on conn "error" (fn [err]
                       (println err)))
 
+  ;; not right, run manually
+  (.once conn "connect"
+         (fn []
+           ;; Should pull out of options
+           (.eval conn "(defn my-print [value writer options]
+(binding [clojure.pprint/*print-right-margin* 50]
+  (clojure.pprint/pprint value writer)))")))
 
-  (.on electron/ipcMain "eval"
-       (fn [event arg]
-         (println "Got3" event arg (.-sender event))
-         (.eval conn arg (fn [err result]
-                           (println "got here" err result)
-                           (.send (.-sender event) "eval-result"
-                                  (.reduce result (fn [result msg]
-                                                    (println result)
-                                                    (if (.-value msg)
-                                                      (str result (.-value msg))
-                                                      result))
-                                           ""))))))
-
+  (do (.removeAllListeners electron/ipcMain "eval")
+      (.on electron/ipcMain "eval"
+           (fn [event arg]
+             (.send conn
+                    #js {:op "eval"
+                         :code arg
+                         "nrepl.middleware.print/print" "user/my-print"
+                         "nrepl.middleware.print/options" #js {:print-width 40}}
+                    (fn [err result]
+                      
+                      (.send (.-sender event) "eval-result"
+                             (.reduce result (fn [result msg]
+                                               (cond (.-value msg)
+                                                     (str result (.-value msg))
+                                                     (.-err msg)
+                                                     (str result (.-err msg))
+                                                     :else result))
+                                      "")))))))
+  
   (.end conn))
 
 
 
+(.send conn #js {:op "eval"
+                  "nrepl.middleware.print/print" "user/my-print"
+                 :code "{:a 2 :b 3 :c 3 :d 5 :e 2 :f 4 :g [{:a 2 :b 3 :c 3 :d 5 :e 2 :f 4 :g [{:a 2}]}]}"}
+       (fn [err result]
+         (println "Asdsad"
+                  result)))
+
+(+ 2 2)
 
 
+
+(clojure.pprint/pprint {:a 2 :b 3 :c 3 :d 5 :e 2 :f 4 :g [{:a 2 :b 3 :c 3 :d 5 :e 2 :f 4 :g [{:a 2}]}]})
 (def main-window (atom nil))
 
 (defn init-browser []
