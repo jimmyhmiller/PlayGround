@@ -31,8 +31,7 @@
 
 (def theme
   (.theme EditorView
-          (j/lit {".cm-content" {:white-space "pre-wrap"
-                                 :padding "10px 0"}
+          (j/lit {".cm-content" {:padding "10px 0"}
                   "&.cm-focused" {:outline "none"}
                   ".cm-line" {:padding "0 9px"
                               :line-height "1.6"
@@ -52,7 +51,7 @@
       (history)
       highlight/defaultHighlightStyle
       (view/drawSelection)
-                                        ;(lineNumbers)
+      (lineNumbers)
       (fold/foldGutter)
       (.. EditorState -allowMultipleSelections (of true))
       (if false
@@ -60,11 +59,11 @@
         #js[(cm-clj/syntax live-grammar/parser)
             (.slice cm-clj/default-extensions 1)]
         cm-clj/default-extensions)
+      
       (.of view/keymap cm-clj/complete-keymap)
       (.of view/keymap historyKeymap)])
 
 (defn eval-string [expr]
-  (println "sending" expr)
   (.send electron/ipcRenderer "eval" expr))
 
 (j/defn eval-at-cursor [on-result ^:js {:keys [state]}]
@@ -106,14 +105,37 @@
 
 
 
+
+
+(defn editor2 [{:keys [eval? source]}]
+  (r/with-let [!view (r/atom nil)
+               last-result (when eval? (r/atom ::no-result))
+               mount! (fn [el]
+                        (when el
+                          (reset! !view (new EditorView
+                                             (j/obj :state
+                                                    (test-utils/make-state
+                                                     (cond-> #js [extensions]
+                                                       eval? (.concat #js [(extension {:modifier  "Alt"
+                                                                                       :on-result (partial reset! last-result)})]))
+                                                     source)
+                                                    :parent el)))
+                          (set! (.-editor js/window) @!view)))]
+    [:div {:style {:display "grid"
+                   :grid-template-columns "1fr 1fr"}}
+     [:div {:class "rounded-md mb-0 text-sm monospace overflow-auto relative border shadow-lg bg-white"
+            :ref mount!
+            :style {:max-height "100vh"}}]]
+    (finally
+      (j/call @!view :destroy))))
+
 (defn editor [source {:keys [eval?]}]
   (r/with-let [!view (r/atom nil)
                last-result (when eval? (r/atom ::no-result))
                mount! (fn [el]
                         (when el
-                          (println "Setting up handler")
+                          
                           (.on electron/ipcRenderer "eval-result" (fn [event arg]
-                                                                    (println "Got" event arg)
                                                                     (reset! last-result arg)))
                           (reset! !view (new EditorView
                                              (j/obj :state
@@ -127,10 +149,10 @@
                    :grid-template-columns "1fr 1fr"}}
      [:div {:class "rounded-md mb-0 text-sm monospace overflow-auto relative border shadow-lg bg-white"
             :ref mount!
-            :style {:max-height 410}}]
+            :style {:max-height "100vh"}}]
      (when (and eval? (not= @last-result ::no-result))
-       [:div.mt-3.mv-4.pl-6 {:style {:white-space "pre-wrap" :font-size 22 :font-family "mono"}}
-         @last-result])]
+       [:div {:style {:max-height "100vh" :overflow "scroll" :font-size 22 :font-family "mono"}}
+        [editor2 {:key @last-result :source @last-result} ]])]
     (finally
       (j/call @!view :destroy))))
 
