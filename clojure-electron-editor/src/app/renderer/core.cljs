@@ -24,7 +24,8 @@
             [reagent.core :as r]
             [reagent.dom :as rdom]
             ["electron" :as electron]
-            [cljs.reader]))
+            [cljs.reader]
+            [clojure.pprint]))
 
 
 
@@ -52,6 +53,23 @@
       highlight/defaultHighlightStyle
       (view/drawSelection)
       (lineNumbers)
+      (fold/foldGutter)
+      (.. EditorState -allowMultipleSelections (of true))
+      (if false
+        ;; use live-reloading grammar
+        #js[(cm-clj/syntax live-grammar/parser)
+            (.slice cm-clj/default-extensions 1)]
+        cm-clj/default-extensions)
+      
+      (.of view/keymap cm-clj/complete-keymap)
+      (.of view/keymap historyKeymap)])
+
+
+(defonce extensions-viewer
+  #js[theme
+      (history)
+      highlight/defaultHighlightStyle
+      (view/drawSelection)
       (fold/foldGutter)
       (.. EditorState -allowMultipleSelections (of true))
       (if false
@@ -105,7 +123,7 @@
 
 
 
-
+(range 100000)
 
 (defn editor2 [{:keys [eval? source]}]
   (r/with-let [!view (r/atom nil)
@@ -115,7 +133,7 @@
                           (reset! !view (new EditorView
                                              (j/obj :state
                                                     (test-utils/make-state
-                                                     (cond-> #js [extensions]
+                                                     (cond-> #js [extensions-viewer]
                                                        eval? (.concat #js [(extension {:modifier  "Alt"
                                                                                        :on-result (partial reset! last-result)})]))
                                                      source)
@@ -132,11 +150,13 @@
 (defn editor [source {:keys [eval?]}]
   (r/with-let [!view (r/atom nil)
                last-result (when eval? (r/atom ::no-result))
+               
                mount! (fn [el]
                         (when el
                           
                           (.on electron/ipcRenderer "eval-result" (fn [event arg]
-                                                                    (reset! last-result arg)))
+                                                                    (reset! last-result (try (cljs.reader/read-string arg)
+                                                                                             (catch :default e arg)))))
                           (reset! !view (new EditorView
                                              (j/obj :state
                                                     (test-utils/make-state
@@ -151,8 +171,28 @@
             :ref mount!
             :style {:max-height "100vh"}}]
      (when (and eval? (not= @last-result ::no-result))
-       [:div {:style {:max-height "100vh" :overflow "scroll" :font-size 22 :font-family "mono"}}
-        [editor2 {:key @last-result :source @last-result} ]])]
+       [:div {:style {:max-height "100vh" :overflow "scroll" :font-size 16 :font-family "monospace"}}
+        (let [result @last-result]
+          (cond (string? result)
+                [editor2 {:key result :source result}]
+                ;; Should lazily display
+                (sequential? result)
+                (for [[i entry] (map-indexed vector result)]
+                  (cond (map? entry)
+                        [:div {:key (str i entry)}
+                         [:ul 
+                          (for [[k v] entry]
+                            ;; need to actually use parser
+                            [:li {:key (str i k)
+                                  :style {:list-style-type :none}}
+                             [:strong {:class "ͼa"} (pr-str k) " "]
+                             [:span {:class (if (string? v) "ͼc" "ͼb")}(pr-str v)]])]
+                         [:hr {:style {:height 1 :background-color "#dadada" :border :none :margin-right "5%"}}]]
+                        
+                        :else
+                        [editor2 {:key (str i entry) :source (clojure.string/trim (with-out-str (clojure.pprint/pprint entry)))}]))
+                :else  [editor2 {:key result :source (pr-str result)}]))
+        ])]
     (finally
       (j/call @!view :destroy))))
 
@@ -167,6 +207,16 @@
     5  \"buzz\"
     n))
 
+
+
+(take 100
+  (repeatedly (fn []
+                {:id (+ 10000 (rand-int 1000))
+                 :name (first (shuffle [\"Jimmy\" \"Greg\" \"Neil\"]))
+                 :likes (rand-int 3000)
+                 :keywords (set (take
+                                  (rand-int 3)
+                                  (shuffle [\"programming\" \"philosophy\" \"society\"])))})))
 
 (comment
   (fizz-buzz 1)
@@ -248,3 +298,23 @@
 
   (when (linux?)
     (js/twemoji.parse (.-body js/document))))
+
+
+
+
+
+
+
+;; Next steps
+
+;; Cider jack-in (clj only at first)
+;; Rewrite in Helix
+;; Select-keys Functionality
+;; Filter Functionality
+;; Map Functionality
+;; Lazy Render List?
+;; Look at nrepl streaming?
+;; Consider making own nrepl client?
+;; Consider transit printing?
+
+
