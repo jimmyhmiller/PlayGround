@@ -25,7 +25,8 @@
             [reagent.dom :as rdom]
             ["electron" :as electron]
             [cljs.reader]
-            [clojure.pprint]))
+            [clojure.pprint]
+            [app.renderer.new]))
 
 
 
@@ -282,7 +283,7 @@
                          [:td.px-3.py-1.align-top.text-sm]
                          [:td.px-3.py-1.align-top]])]))))])
 
-(defn ^:dev/after-load start! []
+(defn  old-start! []
   (rdom/render [samples] (js/document.getElementById "app-container"))
 
   (.. (js/document.querySelectorAll "[clojure-mode]")
@@ -299,7 +300,8 @@
   (when (linux?)
     (js/twemoji.parse (.-body js/document))))
 
-
+(defn ^:dev/after-load start! []
+  (app.renderer.new/start!))
 
 
 

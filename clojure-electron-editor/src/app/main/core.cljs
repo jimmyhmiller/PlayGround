@@ -43,8 +43,8 @@
              (.send conn
                     #js {:op "eval"
                          :code arg
-                         "nrepl.middleware.print/print" "user/my-print"
-                         "nrepl.middleware.print/options" #js {:print-width 40}}
+                         #_#_"nrepl.middleware.print/print" "user/my-print"
+                         #_#_"nrepl.middleware.print/options" #js {:print-width 40}}
                     (fn [err result]
                       
                       (.send (.-sender event) "eval-result"
@@ -58,20 +58,20 @@
   
   (.end conn))
 
+(comment
+
+  (.send conn #js {:op "eval"
+                   "nrepl.middleware.print/print" "user/my-print"
+                   :code "{:a 2 :b 3 :c 3 :d 5 :e 2 :f 4 :g [{:a 2 :b 3 :c 3 :d 5 :e 2 :f 4 :g [{:a 2}]}]}"}
+         (fn [err result]
+           (println "Asdsad"
+                    result)))
+
+  (+ 2 2)
 
 
-(.send conn #js {:op "eval"
-                  "nrepl.middleware.print/print" "user/my-print"
-                 :code "{:a 2 :b 3 :c 3 :d 5 :e 2 :f 4 :g [{:a 2 :b 3 :c 3 :d 5 :e 2 :f 4 :g [{:a 2}]}]}"}
-       (fn [err result]
-         (println "Asdsad"
-                  result)))
 
-(+ 2 2)
-
-
-
-(clojure.pprint/pprint {:a 2 :b 3 :c 3 :d 5 :e 2 :f 4 :g [{:a 2 :b 3 :c 3 :d 5 :e 2 :f 4 :g [{:a 2}]}]})
+  (clojure.pprint/pprint {:a 2 :b 3 :c 3 :d 5 :e 2 :f 4 :g [{:a 2 :b 3 :c 3 :d 5 :e 2 :f 4 :g [{:a 2}]}]}))
 (def main-window (atom nil))
 
 (defn init-browser []
