@@ -290,7 +290,7 @@
       (forEach #(when-not (.-firstElementChild %)
                   (rdom/render [editor (str/trim (.-innerHTML %))] %))))
 
-  (let [mapping (key-mapping)]
+  #_(let [mapping (key-mapping)]
     (.. (js/document.querySelectorAll ".mod,.alt,.ctrl")
         (forEach #(when-let [k (get mapping (.-innerHTML %))]
                     (set! (.-innerHTML %) k)))))
@@ -301,6 +301,7 @@
     (js/twemoji.parse (.-body js/document))))
 
 (defn ^:dev/after-load start! []
+  #_(old-start!)
   (app.renderer.new/start!))
 
 
