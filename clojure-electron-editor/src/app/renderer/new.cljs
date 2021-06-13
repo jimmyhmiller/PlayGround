@@ -18,17 +18,86 @@
 
 
 
+(def colors ["green" "red" "yellow"])
+
+
+
 
 
 (defclass MyMarker
   (extends gutter/GutterMarker)
-  (constructor [this xx] (super)
-               (set! x xx))
-  (field x)
+  (constructor [this] (super))
+  (field down)
+  (field start 0)
+  (field drag 0)
+  (field elem)
+  Object
+  (mouseMove [this e]
+             (when down
+               (set! (.-drag this) {:x (- (.-clientX e)
+                                          (:x start))
+                                    :y (- (.-clientY e)
+                                          (:y start))})
+               (set!
+                (.-cssText
+                 (.-style
+                  elem))
+                (str
+                 "background-color:"
+                 (get colors (mod (/ (:x drag) 10 ) 3))
+                 ";width:10px;"
+                 "margin-left:" (* (min (/ (:x drag) 10) 3) 10)
+                 "px;height:20px;"))
+               (js/console.log (:x drag))))
+  (toDOM [this view]
+         (let [elem (js/document.createElement "div")
+               moved (.bind (.-mouseMove this) this)]
+           (set! (.-elem this) elem)
+           (set!
+            (.-cssText
+             (.-style
+              elem))
+            (str
+             "background-color:"
+             (get colors (mod (mod (:x drag) 30) 3))
+             ";width:10px;"
+             "margin-left:" (min (mod (:x drag) 30) 30)
+             "px;height:20px;"))
+
+           (set! (.-onmousedown elem) (fn [e]
+                                        (println "Down!")
+                                        (set! (.-start this) {:x (.-clientX e)
+                                                              :y (.-clientY e)})
+                                        (set! (.-down this) true)
+                                        (.addEventListener js/window "mousemove" moved)
+                                        (.addEventListener js/window "mouseup"
+                                                           (fn [e]
+                                                             (println "up")
+                                                             (.removeEventListener js/window "mousemove" moved true)
+                                                             (set! (.-down this) false)))))
+           
+           
+           elem)
+         #_(js/document.createTextNode x))
+  (compare [this x y] true))
+
+
+
+(defclass MySpacer
+  (extends gutter/GutterMarker)
+  (constructor [this] (super))
   Object
   (toDOM [this view]
-         (js/document.createTextNode x))
+         (let [elem (js/document.createElement "div")]
+           (set!
+            (.-cssText
+             (.-style
+              elem))
+            "width:30px")
+           elem)
+         #_(js/document.createTextNode x))
   (compare [this x y] true))
+
 
 
 (js/console.log
@@ -45,6 +114,7 @@
 
 ;; This is not the right way to do this, but hacking it until I understand the facets and dispatch and all that.
 ;; Once I get that figured out. It shouldn't be that hard to add the layers, I don't think.
+;; But surprisingly this bad method works fairly well
 
 (add-watch my-state :top-level-forms
            (fn [_ _ _ state]
@@ -57,9 +127,6 @@
                             (.-nextSibling top-level)
                             (conj ranges [(.-from top-level) (.-to top-level)]))))))))
 
-(println (.-number (.lineAt ^codemirror-text/Text
-                           (.-doc @my-state)
-                           (.-to (.-nextSibling (.-firstChild (.-node (.cursor (language/syntaxTree @my-state)))))))))
 
 (comment)
 (def my-line-numbers (gutter/lineNumbers))
@@ -68,8 +135,9 @@
                                             (reset! my-state (.-state view))
                                             (if (some (fn [[from to]] (and (>= (.-from ^js line) from)
                                                                            (<= (.-to ^js line) to))) @ranges)
-                                              (MyMarker. "|")
-                                              nil))}))
+                                              (MyMarker.)
+                                              nil))
+                              :initialSpacer (fn [view] (MySpacer.))}))
 
 
 
