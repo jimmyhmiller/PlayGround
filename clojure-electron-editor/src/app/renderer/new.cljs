@@ -18,7 +18,7 @@
 
 
 
-(def colors ["green" "red" "yellow"])
+(def colors ["green" "red" "blue"])
 
 
 
@@ -26,29 +26,35 @@
 
 (defclass MyMarker
   (extends gutter/GutterMarker)
-  (constructor [this] (super))
+  (constructor [this my-height]
+               (super)
+               (set! height my-height))
+  (field height)
   (field down)
   (field start 0)
+  (field offset 0)
   (field drag 0)
   (field elem)
   Object
   (mouseMove [this e]
              (when down
-               (set! (.-drag this) {:x (- (.-clientX e)
-                                          (:x start))
+               (set! (.-drag this) {:x(max 0 (min (+ offset
+                                                     (- (.-clientX e)
+                                                        (:x start)))
+                                                  20))
                                     :y (- (.-clientY e)
-                                          (:y start))})
+                                            (:y start))})
                (set!
                 (.-cssText
                  (.-style
                   elem))
                 (str
                  "background-color:"
-                 (get colors (mod (/ (:x drag) 10 ) 3))
-                 ";width:10px;"
-                 "margin-left:" (* (min (/ (:x drag) 10) 3) 10)
-                 "px;height:20px;"))
-               (js/console.log (:x drag))))
+                 (get colors (mod (/ (:x drag) 8 ) 3))
+                 ";width:10px;border-radius:20px;"
+                 "margin-left:" (:x drag)
+                 "px;height:" height "px;");
+                )))
   (toDOM [this view]
          (let [elem (js/document.createElement "div")
                moved (.bind (.-mouseMove this) this)]
@@ -60,23 +66,26 @@
             (str
              "background-color:"
              (get colors (mod (mod (:x drag) 30) 3))
-             ";width:10px;"
+             ";width:10px;border-radius:20px;"
              "margin-left:" (min (mod (:x drag) 30) 30)
-             "px;height:20px;"))
+             "px;height:" height "px;"))
 
            (set! (.-onmousedown elem) (fn [e]
-                                        (println "Down!")
+
                                         (set! (.-start this) {:x (.-clientX e)
                                                               :y (.-clientY e)})
+
                                         (set! (.-down this) true)
                                         (.addEventListener js/window "mousemove" moved)
                                         (.addEventListener js/window "mouseup"
                                                            (fn [e]
-                                                             (println "up")
+                                                             ;; Need to snap based on direction of movement
+                                                             (set! (.-offset this) (:x drag))
+
                                                              (.removeEventListener js/window "mousemove" moved true)
                                                              (set! (.-down this) false)))))
-           
-           
+
+
            elem)
          #_(js/document.createTextNode x))
   (compare [this x y] true))
@@ -133,10 +142,21 @@
 (aset my-line-numbers 1 (gutter/gutter
                          #js {:lineMarker (fn [view line z]
                                             (reset! my-state (.-state view))
-                                            (if (some (fn [[from to]] (and (>= (.-from ^js line) from)
-                                                                           (<= (.-to ^js line) to))) @ranges)
-                                              (MyMarker.)
-                                              nil))
+                                            (when-let [range (first (filter (fn [[from to]]
+                                                                              (= (.-from ^js line) from)) @ranges))]
+                                              (js/console.log (-
+                                                               (.-number (.lineAt (.-doc ^js (.-state view))
+                                                                                 (second range) ))
+                                                               (.-number (.lineAt (.-doc ^js (.-state view))
+                                                                                 (first range) ))))
+                                              (let [marker (MyMarker. (* (+ (.-height line) 5) (inc (-
+                                                                                                 (.-number (.lineAt (.-doc ^js (.-state view))
+                                                                                                                    (second range) ))
+                                                                                                 (.-number (.lineAt (.-doc ^js (.-state view))
+                                                                                                                    (first range) ))))))]
+                                                (set! (.-from marker) (first range))
+                                                (set! (.-to  marker) (second range))
+                                                marker)))
                               :initialSpacer (fn [view] (MySpacer.))}))
 
 
@@ -205,5 +225,3 @@
 
 (defn ^:dev/after-load start! []
   (react-dom/render (helix/$ app) (js/document.getElementById "app-container")))
-
-
