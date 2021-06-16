@@ -109,8 +109,7 @@
 
 
 
-(js/console.log
- gutter/lineNumberMarkers)
+
 
 
 (defonce my-state (atom nil))
@@ -144,16 +143,12 @@
                                             (reset! my-state (.-state view))
                                             (when-let [range (first (filter (fn [[from to]]
                                                                               (= (.-from ^js line) from)) @ranges))]
-                                              (js/console.log (-
-                                                               (.-number (.lineAt (.-doc ^js (.-state view))
-                                                                                 (second range) ))
-                                                               (.-number (.lineAt (.-doc ^js (.-state view))
-                                                                                 (first range) ))))
-                                              (let [marker (MyMarker. (* (+ (.-height line) 5) (inc (-
-                                                                                                 (.-number (.lineAt (.-doc ^js (.-state view))
-                                                                                                                    (second range) ))
-                                                                                                 (.-number (.lineAt (.-doc ^js (.-state view))
-                                                                                                                    (first range) ))))))]
+                                              (let [marker (MyMarker. (* (+ (.-height line) 5)
+                                                                         (inc (-
+                                                                               (.-number (.lineAt (.-doc ^js (.-state view))
+                                                                                                  (second range) ))
+                                                                               (.-number (.lineAt (.-doc ^js (.-state view))
+                                                                                                  (first range) ))))))]
                                                 (set! (.-from marker) (first range))
                                                 (set! (.-to  marker) (second range))
                                                 marker)))
