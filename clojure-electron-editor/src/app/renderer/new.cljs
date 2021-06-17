@@ -17,10 +17,44 @@
             [shadow.cljs.modern :refer (defclass)]))
 
 
+;; Need to have toggles for the layers
+;; Need to update state based on those toggles
+;; Need to hide layer controls of hidden top-level forms
+;; Need to do all of this in the codemirror state instead of an atom
+
 
 (def colors ["green" "red" "blue"])
 
 
+(defclass Hide
+  (extends codemirror-view/WidgetType)
+  (constructor [this]
+               (super))
+  Object
+  (ignireEvents [this]
+                false)
+  (toDOM [this view]
+         (println "HERE")
+         (js/document.createTextNode "")))
+
+(def HideDecoration
+  (.replace codemirror-view/Decoration #js {:widget (Hide.)}))
+
+(defonce ranges (atom nil))
+
+
+(def my-state-field
+  (.define codemirror-state/StateField
+           #js {:create (fn [] (.-none codemirror-view/Decoration))
+                :update (fn [things tr]
+                          
+                          (js/console.log things )
+                          (println (first @ranges))
+                          #_(.update things #js {:add #js[(.range HideDecoration
+                                                                (first (first @ranges))
+                                                                (second (first @ranges)))]})
+                          things)
+                :provide (fn [f] (.compute (.-decorations codemirror-view/EditorView) #js [f], (fn [s] (.field ^js s f))))}))
 
 
 
@@ -36,6 +70,18 @@
   (field drag 0)
   (field elem)
   Object
+  (setStyle [this]
+            (set!
+             (.-cssText
+              (.-style
+               elem))
+             (str
+              "background-color:"
+              (get colors (mod (/ (:x drag) 8 ) 3))
+              ";width:10px;border-radius:20px;"
+              "margin-left:" (:x drag)
+              "px;height:" height "px;");
+             ))
   (mouseMove [this e]
              (when down
                (set! (.-drag this) {:x(max 0 (min (+ offset
@@ -43,18 +89,8 @@
                                                         (:x start)))
                                                   20))
                                     :y (- (.-clientY e)
-                                            (:y start))})
-               (set!
-                (.-cssText
-                 (.-style
-                  elem))
-                (str
-                 "background-color:"
-                 (get colors (mod (/ (:x drag) 8 ) 3))
-                 ";width:10px;border-radius:20px;"
-                 "margin-left:" (:x drag)
-                 "px;height:" height "px;");
-                )))
+                                          (:y start))})
+               (.setStyle this)))
   (toDOM [this view]
          (let [elem (js/document.createElement "div")
                moved (.bind (.-mouseMove this) this)]
@@ -63,27 +99,27 @@
             (.-cssText
              (.-style
               elem))
-            (str
-             "background-color:"
-             (get colors (mod (mod (:x drag) 30) 3))
-             ";width:10px;border-radius:20px;"
-             "margin-left:" (min (mod (:x drag) 30) 30)
-             "px;height:" height "px;"))
+            (.setStyle this))
 
-           (set! (.-onmousedown elem) (fn [e]
+           (set! (.-onmousedown elem)
+                 (fn [e]
+                   (.preventDefault e)
+                   (set! (.-start this) {:x (.-clientX e)
+                                         :y (.-clientY e)})
 
-                                        (set! (.-start this) {:x (.-clientX e)
-                                                              :y (.-clientY e)})
-
-                                        (set! (.-down this) true)
-                                        (.addEventListener js/window "mousemove" moved)
-                                        (.addEventListener js/window "mouseup"
-                                                           (fn [e]
-                                                             ;; Need to snap based on direction of movement
-                                                             (set! (.-offset this) (:x drag))
-
-                                                             (.removeEventListener js/window "mousemove" moved true)
-                                                             (set! (.-down this) false)))))
+                   (set! (.-down this) true)
+                   (.addEventListener js/window "mousemove" moved)
+                   (.addEventListener js/window "mouseup"
+                                      (fn [e]
+                                        ;; Need to snap based on direction of movement
+                                        (set! (.-offset this)  (* 10 ((if (neg? (- (:x drag) offset))
+                                                                        js/Math.floor
+                                                                        js/Math.ceil)
+                                                                      (/ (:x drag) 10))))
+                                        (set! (.-drag this) {:x offset})
+                                        (.setStyle this)
+                                        (.removeEventListener js/window "mousemove" moved true)
+                                        (set! (.-down this) false)))))
 
 
            elem)
@@ -114,7 +150,7 @@
 
 (defonce my-state (atom nil))
 
-(defonce ranges (atom nil))
+
 @my-state
 
 @ranges
@@ -155,16 +191,20 @@
                               :initialSpacer (fn [view] (MySpacer.))}))
 
 
+(def my-theme
+  (.baseTheme codemirror-view/EditorView #js {".cm-gutter" #js {:overflow "visible !important"}}))
 
 (helix/defnc editor [{:keys [text]}]
   (let [start-state (.create codemirror-state/EditorState
                              #js {:doc text
                                   :extensions #js [highlight/defaultHighlightStyle
-                                                    (gutter/lineNumbers)
+                                                   (gutter/lineNumbers)
+                                                   my-theme
                                                    my-line-numbers
                                                    (codemirror-view/drawSelection)
                                                    #_(fold/foldGutter)
                                                    clojure-mode/default-extensions
+                                                   my-state-field
                                                    (history/history)
                                                    (.of codemirror-view/keymap clojure-mode/complete-keymap)
                                                    (.of codemirror-view/keymap history/historyKeymap)]})
