@@ -14,6 +14,7 @@
             ["@codemirror/text" :as codemirror-text]
             ["@codemirror/fold" :as fold]
             ["@codemirror/language" :as language]
+            ["@codemirror/panel" :as panel]
             [shadow.cljs.modern :refer (defclass)]))
 
 
@@ -34,35 +35,17 @@
   (ignireEvents [this]
                 false)
   (toDOM [this view]
-         (println "HERE")
          (js/document.createTextNode "")))
 
 (def HideDecoration
   (.replace codemirror-view/Decoration #js {:widget (Hide.)}))
 
-(defonce ranges (atom nil))
-
-
-(def my-state-field
-  (.define codemirror-state/StateField
-           #js {:create (fn [] (.-none codemirror-view/Decoration))
-                :update (fn [things tr]
-                          
-                          (js/console.log things )
-                          (println (first @ranges))
-                          #_(.update things #js {:add #js[(.range HideDecoration
-                                                                (first (first @ranges))
-                                                                (second (first @ranges)))]})
-                          things)
-                :provide (fn [f] (.compute (.-decorations codemirror-view/EditorView) #js [f], (fn [s] (.field ^js s f))))}))
-
-
-
 (defclass MyMarker
   (extends gutter/GutterMarker)
-  (constructor [this my-height]
+  (constructor [this my-height my-from]
                (super)
                (set! height my-height))
+  (field from)
   (field height)
   (field down)
   (field start 0)
@@ -95,11 +78,7 @@
          (let [elem (js/document.createElement "div")
                moved (.bind (.-mouseMove this) this)]
            (set! (.-elem this) elem)
-           (set!
-            (.-cssText
-             (.-style
-              elem))
-            (.setStyle this))
+           (.setStyle this)
 
            (set! (.-onmousedown elem)
                  (fn [e]
@@ -111,19 +90,19 @@
                    (.addEventListener js/window "mousemove" moved)
                    (.addEventListener js/window "mouseup"
                                       (fn [e]
-                                        ;; Need to snap based on direction of movement
-                                        (set! (.-offset this)  (* 10 ((if (neg? (- (:x drag) offset))
-                                                                        js/Math.floor
-                                                                        js/Math.ceil)
-                                                                      (/ (:x drag) 10))))
-                                        (set! (.-drag this) {:x offset})
-                                        (.setStyle this)
-                                        (.removeEventListener js/window "mousemove" moved true)
-                                        (set! (.-down this) false)))))
+                                        (let [pos ((if (neg? (- (:x drag) offset))
+                                                     js/Math.floor
+                                                     js/Math.ceil)
+                                                   (/ (:x drag) 10))]
+                                          ;; Need to snap based on direction of movement
+                                          (set! (.-offset this) (* 10 pos))
+                                          (set! (.-drag this) {:x offset})
+                                          (.setStyle this)
+                                          (.removeEventListener js/window "mousemove" moved true)
+                                          (set! (.-down this) false))))))
 
 
-           elem)
-         #_(js/document.createTextNode x))
+           elem))
   (compare [this x y] true))
 
 
@@ -143,52 +122,196 @@
          #_(js/document.createTextNode x))
   (compare [this x y] true))
 
+(def toggle-layer (.define codemirror-state/StateEffect))
+
+(declare layer-toggle-state)
+
+(defn create-layer-toggle [view]
+  
+  (let [dom (js/document.createElement "div")
+        update-dom (fn [state dom]
+                     (set! (.-innerHTML dom) "")
+                     (doseq [[i layer] (map-indexed vector (.field ^js state layer-toggle-state))]
+                       (let [link (js/document.createElement "a")]
+                         (set! (.-innerHTML link) (str layer))
+                         (.addEventListener link "click"
+                                            (fn [e]
+                                              (.preventDefault e)
+                                              (.dispatch ^js view
+                                                         #js {:effects (.of toggle-layer [i (not layer)])})))
+                         (.appendChild dom link))))]
+    (update-dom (.-state view) dom)
+    #js {:top true
+         :dom dom
+         :update (fn [update]
+                   (update-dom (.-state update) dom))}))
+
+
+
+(def layer-toggle-state
+  (.define codemirror-state/StateField
+           #js {:create (fn [] [true true true])
+                :update (fn [state tr]
+                          (reduce (fn [state e]
+                                    (if (.is e toggle-layer)
+                                      (assoc state (first (.-value e)) (second (.-value e)))
+                                      state))
+                                  state
+                                  (.-effects ^js tr)))
+                :provide (fn [f] (.from panel/showPanel f (fn [state] create-layer-toggle)))}))
+
+
+(defclass Layer
+  (extends rangeset/Range)
+  (constructor [this _from _to _layer]
+               (super _from _to _layer)
+               (set! from _from)
+               (set! to _to)
+               (set! layer _layer))
+  (field from)
+  (field to)
+  (field layer))
 
 
 
 
+;; We need to trigger an event on layer drag.
+;; We need to tie layers to the actual state
+;; We need to track layers via changes so their state
+;; stays in sync
+;; Need to fix top level nodes not being correct.
 
-(defonce my-state (atom nil))
+
+(defn range-exists? [ranges from to]
+  (let [found #js {:found false}]
+    (.between ^js ranges from to (fn [a b]
+                                   (if  (= a from)
+                                     (do
+                                       (set! (.-found found) true)
+                                       false)
+                                     true)))
+    (.-found found)))
 
 
-@my-state
+(rangeset/Range.
+        0 0
+        0)
 
-@ranges
+(def track-layers-state
+  (.define codemirror-state/StateField
+           (let [init-layers (fn [state init-ranges]
+                               (let [root (.-node (.cursor (language/syntaxTree state)))]
+                                 (loop [top-level (.-firstChild root) ranges (or init-ranges (.-empty rangeset/RangeSet))]
+                                   (if-not top-level
+                                     ranges
+                                     (recur
+                                      (.-nextSibling top-level)
+                                      (if (range-exists? ranges
+                                                         (.-from top-level)
+                                                         (.-to top-level))
+                                        ranges
+                                        (do
+                                          (.update ranges #js {:add #js [(rangeset/Range.
+                                                                          (.-from top-level)
+                                                                          (.-to top-level)
+                                                                          0)]}))))))))]
+             #js {:create (fn [state] (init-layers state nil))
+                  :update (fn [layers tr]
+                            ;; Need to filter out things as well first.
+                            (init-layers
+                             (.-state tr)
+                             (.map layers (.-changes ^js tr))))})))
+
+
+
+
+(def hide-layer-state
+  (.define codemirror-state/StateField
+           #js {:create (fn [] (.-none codemirror-view/Decoration))
+                :update (fn [hidden tr]
+                         hidden
+                         #_ (let [forms (.field ^js (.-state tr) track-layers-state)
+                                layer-toggles (.field ^js (.-state tr) layer-toggle-state)
+                                hidden (.map hidden (.-changes ^js tr))]
+                            (reduce (fn [hidden form]
+                                      (if (= (:layer form) 1)
+                                        (.update hidden #js {:add #js [(.range HideDecoration
+                                                                               (:from form)
+                                                                               (:to form))]})
+                                        hidden))
+                                    hidden
+                                    forms)))
+                :provide (fn [f] (.compute (.-decorations codemirror-view/EditorView) #js [f], (fn [s] (.field ^js s f))))}))
 
 
 ;; This is not the right way to do this, but hacking it until I understand the facets and dispatch and all that.
 ;; Once I get that figured out. It shouldn't be that hard to add the layers, I don't think.
 ;; But surprisingly this bad method works fairly well
 
-(add-watch my-state :top-level-forms
-           (fn [_ _ _ state]
-             (let [root (.-node (.cursor (language/syntaxTree state)))]
-               (reset! ranges
-                       (loop [top-level (.-firstChild root) ranges []]
-                         (if-not top-level
-                           ranges
-                           (recur
-                            (.-nextSibling top-level)
-                            (conj ranges [(.-from top-level) (.-to top-level)]))))))))
 
 
-(comment)
-(def my-line-numbers (gutter/lineNumbers))
-(aset my-line-numbers 1 (gutter/gutter
-                         #js {:lineMarker (fn [view line z]
-                                            (reset! my-state (.-state view))
-                                            (when-let [range (first (filter (fn [[from to]]
-                                                                              (= (.-from ^js line) from)) @ranges))]
-                                              (let [marker (MyMarker. (* (+ (.-height line) 5)
-                                                                         (inc (-
-                                                                               (.-number (.lineAt (.-doc ^js (.-state view))
-                                                                                                  (second range) ))
-                                                                               (.-number (.lineAt (.-doc ^js (.-state view))
-                                                                                                  (first range) ))))))]
-                                                (set! (.-from marker) (first range))
-                                                (set! (.-to  marker) (second range))
-                                                marker)))
-                              :initialSpacer (fn [view] (MySpacer.))}))
+(defn collect-with-gas [gas rangeset]
+  (let [iter (.iter ^js rangeset)]
+    (loop [i 0
+           coll []]
+      (cond
+        (= i gas) coll
+        (nil? (.-value iter)) coll
+        :else (let [from (.-from iter)
+                    to (.-to iter)
+                    value (.-value iter)]
+                (.next iter)
+                (recur
+                 (inc i)
+                 (conj coll {:from from
+                             :to to
+                             :value value})))))))
+
+(comment
+
+  (.update ranges #js {:add #js [(rangeset/Range.
+                                  (.-from top-level)
+                                  (.-to top-level)
+                                  0)]})
+
+
+  (collect-with-gas 10
+   (.update
+    (.update
+     (.update  (.-empty rangeset/RangeSet) #js {:add #js [(rangeset/Range. 1 64 0)]})
+     #js {:add #js [(rangeset/Range. 199 200 0)]})
+    #js {:add #js [(rangeset/Range. 203 207 0)]})
+  )
+
+
+  (def rangeset (.update  (.-empty rangeset/RangeSet) #js {:add #js [(rangeset/Range. 1 64 0)]}))
+
+  (def iter
+    (.iter ^js rangeset))
+  (do
+    (.next iter)
+    [(.-value iter)
+     (.-from iter)
+     (.-to iter)]))
+
+(def layer-gutter
+  (gutter/gutter
+   #js {:lineMarker (fn [view line _]
+                      #_(count (collect-with-gas 10 (.field ^js (.-state view) track-layers-state)))
+                     (let [ranges (collect-with-gas 10 (.field ^js (.-state view) track-layers-state))]
+                        (when-let [range (first (filter (fn [{:keys [from to]}]
+                                                          (= (.-from ^js line) from)) ranges))]
+                          (let [marker (MyMarker. (* (+ (.-height line) 5)
+                                                     (inc (-
+                                                           (.-number (.lineAt (.-doc ^js (.-state view))
+                                                                              (:to range) ))
+                                                           (.-number (.lineAt (.-doc ^js (.-state view))
+                                                                              (:from range))))))
+                                                  (:from range))]
+                            (set! (.-from marker) (:from range))
+                            (set! (.-to  marker) (:to range))
+                            marker))))
+        :initialSpacer (fn [view] (MySpacer.))}))
 
 
 (def my-theme
@@ -200,11 +323,13 @@
                                   :extensions #js [highlight/defaultHighlightStyle
                                                    (gutter/lineNumbers)
                                                    my-theme
-                                                   my-line-numbers
+                                                   layer-gutter
+                                                   track-layers-state
                                                    (codemirror-view/drawSelection)
                                                    #_(fold/foldGutter)
+                                                   layer-toggle-state
                                                    clojure-mode/default-extensions
-                                                   my-state-field
+                                                   hide-layer-state
                                                    (history/history)
                                                    (.of codemirror-view/keymap clojure-mode/complete-keymap)
                                                    (.of codemirror-view/keymap history/historyKeymap)]})
