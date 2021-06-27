@@ -40,11 +40,20 @@
 (def HideDecoration
   (.replace codemirror-view/Decoration #js {:widget (Hide.)}))
 
+
+(def move-layer (.define codemirror-state/StateEffect))
+
 (defclass MyMarker
   (extends gutter/GutterMarker)
-  (constructor [this my-height my-from]
+  (constructor [this my-height _from _to _value _dispatch]
                (super)
-               (set! height my-height))
+               (set! height my-height)
+               (set! startSide _from)
+               (set! endSide _to)
+               (set! value _value)
+               (set! drag {:x (* 10 (dec _value))})
+               (set! offset (:x drag))
+               (set! dispatch _dispatch))
   (field from)
   (field height)
   (field down)
@@ -52,6 +61,10 @@
   (field offset 0)
   (field drag 0)
   (field elem)
+  (field startSide)
+  (field endSide)
+  (field value)
+  (field dispatch)
   Object
   (setStyle [this]
             (set!
@@ -67,7 +80,7 @@
              ))
   (mouseMove [this e]
              (when down
-               (set! (.-drag this) {:x(max 0 (min (+ offset
+               (set! (.-drag this) {:x (max 0 (min (+ offset
                                                      (- (.-clientX e)
                                                         (:x start)))
                                                   20))
@@ -94,7 +107,9 @@
                                                      js/Math.floor
                                                      js/Math.ceil)
                                                    (/ (:x drag) 10))]
-                                          ;; Need to snap based on direction of movement
+                                          (dispatch #js {:effects (.of move-layer {:from startSide
+                                                                                   :to endSide
+                                                                                   :value (inc pos)})})
                                           (set! (.-offset this) (* 10 pos))
                                           (set! (.-drag this) {:x offset})
                                           (.setStyle this)
@@ -103,7 +118,8 @@
 
 
            elem))
-  (compare [this x y] true))
+  (compare [this other] (and (= startSide (.-startSide ^js other))
+                             (= endSide (.-endSide ^js other)))))
 
 
 
@@ -120,7 +136,7 @@
             "width:30px")
            elem)
          #_(js/document.createTextNode x))
-  (compare [this x y] true))
+  (compare [this other] true))
 
 (def toggle-layer (.define codemirror-state/StateEffect))
 
@@ -133,7 +149,17 @@
                      (set! (.-innerHTML dom) "")
                      (doseq [[i layer] (map-indexed vector (.field ^js state layer-toggle-state))]
                        (let [link (js/document.createElement "a")]
-                         (set! (.-innerHTML link) (str layer))
+                         #_(set! (.-innerHTML link) (str layer))
+                         (set! (.-cssText (.-style link))
+                               (str "border-radius: 20px;
+                                     width: 15px;
+                                     height: 15px;
+                                     display: inline-block;
+                                     margin-right: 3px;
+                                     margin-top: 2px;"
+                                    "background-color: " (get colors i) ";"
+                                    (when-not layer
+                                      "opacity: 0.4;")))
                          (.addEventListener link "click"
                                             (fn [e]
                                               (.preventDefault e)
@@ -144,7 +170,10 @@
     #js {:top true
          :dom dom
          :update (fn [update]
-                   (update-dom (.-state update) dom))}))
+                   (doseq [t (.-transactions ^js update)]
+                     (doseq [e (.-effects ^js t)]
+                       (when (.is e toggle-layer)
+                         (update-dom (.-state update) dom)))))}))
 
 
 
@@ -174,80 +203,22 @@
 
 
 
-
-;; We need to trigger an event on layer drag.
-;; We need to tie layers to the actual state
-;; We need to track layers via changes so their state
-;; stays in sync
-;; Need to fix top level nodes not being correct.
-
-
-(defn range-exists? [ranges from to]
+(defn find-range [ranges from to]
   (let [found #js {:found false}]
-    (.between ^js ranges from to (fn [a b]
-                                   (if  (= a from)
+    (.between ^js ranges from to (fn [from* to* value]
+                                   (if (= from* from)
                                      (do
-                                       (set! (.-found found) true)
+                                       (set! (.-found found) value)
                                        false)
                                      true)))
     (.-found found)))
 
 
-(rangeset/Range.
-        0 0
-        0)
 
-(def track-layers-state
-  (.define codemirror-state/StateField
-           (let [init-layers (fn [state init-ranges]
-                               (let [root (.-node (.cursor (language/syntaxTree state)))]
-                                 (loop [top-level (.-firstChild root) ranges (or init-ranges (.-empty rangeset/RangeSet))]
-                                   (if-not top-level
-                                     ranges
-                                     (recur
-                                      (.-nextSibling top-level)
-                                      (if (range-exists? ranges
-                                                         (.-from top-level)
-                                                         (.-to top-level))
-                                        ranges
-                                        (do
-                                          (.update ranges #js {:add #js [(rangeset/Range.
-                                                                          (.-from top-level)
-                                                                          (.-to top-level)
-                                                                          0)]}))))))))]
-             #js {:create (fn [state] (init-layers state nil))
-                  :update (fn [layers tr]
-                            ;; Need to filter out things as well first.
-                            (init-layers
-                             (.-state tr)
-                             (.map layers (.-changes ^js tr))))})))
-
-
-
-
-(def hide-layer-state
-  (.define codemirror-state/StateField
-           #js {:create (fn [] (.-none codemirror-view/Decoration))
-                :update (fn [hidden tr]
-                         hidden
-                         #_ (let [forms (.field ^js (.-state tr) track-layers-state)
-                                layer-toggles (.field ^js (.-state tr) layer-toggle-state)
-                                hidden (.map hidden (.-changes ^js tr))]
-                            (reduce (fn [hidden form]
-                                      (if (= (:layer form) 1)
-                                        (.update hidden #js {:add #js [(.range HideDecoration
-                                                                               (:from form)
-                                                                               (:to form))]})
-                                        hidden))
-                                    hidden
-                                    forms)))
-                :provide (fn [f] (.compute (.-decorations codemirror-view/EditorView) #js [f], (fn [s] (.field ^js s f))))}))
-
-
-;; This is not the right way to do this, but hacking it until I understand the facets and dispatch and all that.
-;; Once I get that figured out. It shouldn't be that hard to add the layers, I don't think.
-;; But surprisingly this bad method works fairly well
-
+;; If range exists, copy layer (aka value)
+;; If not add
+;; Check of layer change events and update
+;; Make markers pay attention to state
 
 
 (defn collect-with-gas [gas rangeset]
@@ -267,50 +238,107 @@
                              :to to
                              :value value})))))))
 
-(comment
 
-  (.update ranges #js {:add #js [(rangeset/Range.
-                                  (.-from top-level)
-                                  (.-to top-level)
-                                  0)]})
+(def track-layers-state
+  (.define codemirror-state/StateField
+           (let [init-layers (fn [state init-ranges]
+                               ;; Need to do this properly, probably actually use the cursor?
+                               ;; Right now it stops early
+                              (let [root (.-node (.cursor (language/syntaxTree state)))]
+                                 (loop [top-level (.-firstChild root) ranges (.-empty rangeset/RangeSet)]
+                                   
+                                   (if-not top-level
+                                     ranges
+                                     (do
+                                       (js/console.log "top-level" top-level)
+                                       (recur
+                                        (.-nextSibling top-level)
+                                        (let [existing-range (or (find-range init-ranges
+                                                                             (.-from top-level)
+                                                                             (.-to top-level))
+                                                                 1)]
+                                          (.update ranges #js {:add #js [(rangeset/Range.
+                                                                          (.-from top-level)
+                                                                          (.-to top-level)
+                                                                          (or existing-range 1))]}))))))))]
+             #js {:create (fn [state]  (init-layers state (.-empty rangeset/RangeSet)))
+                  :update (fn [layers transaction]
+                            (let [moved-layers (.map layers (.-changes ^js transaction))
+                                  new-layers (reduce (fn [acc effect]
+                                                       (if (.is ^js effect move-layer)
+                                                         (let [{:keys [from to value]} (.-value ^js effect)]
+                                                           (.update acc #js {:filter (fn [from* _ _] (not= from* from))
+                                                                             :add #js [(rangeset/Range.
+                                                                                        from
+                                                                                        to
+                                                                                        value)]}))
+                                                         acc))
+                                                     moved-layers
+                                                     (.-effects ^js transaction))]
+                              ;; Need to filter out things as well first.
+                              (init-layers
+                               (.-state transaction)
+                               new-layers)))})))
 
 
-  (collect-with-gas 10
-   (.update
-    (.update
-     (.update  (.-empty rangeset/RangeSet) #js {:add #js [(rangeset/Range. 1 64 0)]})
-     #js {:add #js [(rangeset/Range. 199 200 0)]})
-    #js {:add #js [(rangeset/Range. 203 207 0)]})
-  )
 
 
-  (def rangeset (.update  (.-empty rangeset/RangeSet) #js {:add #js [(rangeset/Range. 1 64 0)]}))
+(def hide-layer-state
+  (.define codemirror-state/StateField
+           #js {:create (fn [] (.-none codemirror-view/Decoration))
+                :update (fn [hidden tr]
+                          (let [forms (.field ^js (.-state tr) track-layers-state)
+                                layer-toggles (.field ^js (.-state tr) layer-toggle-state)
+                                hidden (.map hidden (.-changes ^js tr))]
+                            #_(println forms layer-toggles hidden)
+                            hidden
+                            (reduce (fn [hidden form]
+                                      (if-not (nth layer-toggles (dec (:value form)))
+                                        (.update hidden #js {:add #js [(.range HideDecoration
+                                                                               (:from form)
+                                                                               (:to form))]})
+                                        (.update hidden #js {:filter (fn [from* _ _]
+                                                                       (not= (:from form) from*))})))
+                                    hidden
+                                    (collect-with-gas 10 forms))))
+                :provide (fn [f] (.compute (.-decorations codemirror-view/EditorView) #js [f], (fn [s] (.field ^js s f))))}))
 
-  (def iter
-    (.iter ^js rangeset))
-  (do
-    (.next iter)
-    [(.-value iter)
-     (.-from iter)
-     (.-to iter)]))
+
+;; This is not the right way to do this, but hacking it until I understand the facets and dispatch and all that.
+;; Once I get that figured out. It shouldn't be that hard to add the layers, I don't think.
+;; But surprisingly this bad method works fairly well
+
+
+
+
+(defn into-rangeset [coll]
+  (reduce (fn [acc x]
+            (.update acc #js {:add #js [(rangeset/Range. (.-startSide ^js x) (.-endSide ^js x) x)]}))
+          (.-empty rangeset/RangeSet)
+          coll))
+
+
 
 (def layer-gutter
   (gutter/gutter
-   #js {:lineMarker (fn [view line _]
-                      #_(count (collect-with-gas 10 (.field ^js (.-state view) track-layers-state)))
-                     (let [ranges (collect-with-gas 10 (.field ^js (.-state view) track-layers-state))]
-                        (when-let [range (first (filter (fn [{:keys [from to]}]
-                                                          (= (.-from ^js line) from)) ranges))]
-                          (let [marker (MyMarker. (* (+ (.-height line) 5)
-                                                     (inc (-
-                                                           (.-number (.lineAt (.-doc ^js (.-state view))
-                                                                              (:to range) ))
-                                                           (.-number (.lineAt (.-doc ^js (.-state view))
-                                                                              (:from range))))))
-                                                  (:from range))]
-                            (set! (.-from marker) (:from range))
-                            (set! (.-to  marker) (:to range))
-                            marker))))
+   #js {:markers (fn [view]
+                   (let [layer-toggles (.field ^js (.-state ^js view) layer-toggle-state)
+                         ranges (collect-with-gas 10000 (.field ^js (.-state view) track-layers-state))]
+                     (into-rangeset
+                      (filter identity
+                              (for [range ranges]
+                                ;; TODO: account for line height
+                                (when (nth layer-toggles (dec (:value range)))
+                                  (MyMarker. (* 18
+                                                (inc (-
+                                                      (.-number (.lineAt (.-doc ^js (.-state view))
+                                                                         (:to range) ))
+                                                      (.-number (.lineAt (.-doc ^js (.-state view))
+                                                                         (:from range))))))
+                                             (:from range)
+                                             (:to range)
+                                             (:value range)
+                                             (.-dispatch ^js view))))))))
         :initialSpacer (fn [view] (MySpacer.))}))
 
 
@@ -324,10 +352,11 @@
                                                    (gutter/lineNumbers)
                                                    my-theme
                                                    layer-gutter
+                                                   layer-toggle-state
                                                    track-layers-state
                                                    (codemirror-view/drawSelection)
                                                    #_(fold/foldGutter)
-                                                   layer-toggle-state
+                                                  
                                                    clojure-mode/default-extensions
                                                    hide-layer-state
                                                    (history/history)
