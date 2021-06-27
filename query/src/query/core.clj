@@ -3,6 +3,7 @@
 ;; https://scattered-thoughts.net/writing/a-practical-relational-query-compiler-in-500-lines/
 
 
+
 (defn gallop [coll val]
   (if (and (not (empty? coll))
            (< (first coll) val))
@@ -31,9 +32,7 @@
                             (bit-shift-right step 1))
                      (recur coll val (bit-shift-right step 1)))
                    coll))]
-      (subvec coll 1))
-    coll))
-
-
+      (subvec coll 1)))
+  coll)
 
 
