@@ -133,7 +133,7 @@
             (.-cssText
              (.-style
               elem))
-            "width:30px")
+            "width:32px")
            elem)
          #_(js/document.createTextNode x))
   (compare [this other] true))
@@ -214,13 +214,7 @@
     (.-found found)))
 
 
-
-;; If range exists, copy layer (aka value)
-;; If not add
-;; Check of layer change events and update
-;; Make markers pay attention to state
-
-
+;; Need to get rid of this at some point
 (defn collect-with-gas [gas rangeset]
   (let [iter (.iter ^js rangeset)]
     (loop [i 0
@@ -239,28 +233,34 @@
                              :value value})))))))
 
 
+
+(defn add-range [init-ranges ranges node]
+  (if-not node
+    ranges
+    (let [existing-range (or (find-range init-ranges
+                                         (.-from ^js node)
+                                         (.-to ^js node))
+                             1)
+          updated-range (.update ranges #js {:add #js [(rangeset/Range.
+                                                        (.-from ^js node)
+                                                        (.-to ^js node)
+                                                        (or existing-range 1))]})]
+      updated-range)))
+
 (def track-layers-state
   (.define codemirror-state/StateField
            (let [init-layers (fn [state init-ranges]
-                               ;; Need to do this properly, probably actually use the cursor?
-                               ;; Right now it stops early
-                              (let [root (.-node (.cursor (language/syntaxTree state)))]
-                                 (loop [top-level (.-firstChild root) ranges (.-empty rangeset/RangeSet)]
-                                   
-                                   (if-not top-level
-                                     ranges
-                                     (do
-                                       (js/console.log "top-level" top-level)
-                                       (recur
-                                        (.-nextSibling top-level)
-                                        (let [existing-range (or (find-range init-ranges
-                                                                             (.-from top-level)
-                                                                             (.-to top-level))
-                                                                 1)]
-                                          (.update ranges #js {:add #js [(rangeset/Range.
-                                                                          (.-from top-level)
-                                                                          (.-to top-level)
-                                                                          (or existing-range 1))]}))))))))]
+                               (let [cursor (.cursor (language/syntaxTree state))]
+                                 (.firstChild cursor)
+                                 (loop [ranges (.-empty rangeset/RangeSet)]
+                                   (let [node (.-node cursor)
+                                         ranges (add-range init-ranges ranges node)]
+                                     (cond (.nextSibling cursor)
+                                           (recur ranges)
+                                           (do (.parent cursor)
+                                               (.childAfter cursor (.-to node)))
+                                           (recur ranges)
+                                           :else ranges)))))]
              #js {:create (fn [state]  (init-layers state (.-empty rangeset/RangeSet)))
                   :update (fn [layers transaction]
                             (let [moved-layers (.map layers (.-changes ^js transaction))
@@ -280,7 +280,7 @@
                                (.-state transaction)
                                new-layers)))})))
 
-
+;; Need to index all the deflikes
 
 
 (def hide-layer-state
@@ -289,18 +289,26 @@
                 :update (fn [hidden tr]
                           (let [forms (.field ^js (.-state tr) track-layers-state)
                                 layer-toggles (.field ^js (.-state tr) layer-toggle-state)
-                                hidden (.map hidden (.-changes ^js tr))]
-                            #_(println forms layer-toggles hidden)
+                                hidden (.map hidden (.-changes ^js tr))
+                                tree (language/syntaxTree (.-state tr))]
                             hidden
                             (reduce (fn [hidden form]
-                                      (if-not (nth layer-toggles (dec (:value form)))
-                                        (.update hidden #js {:add #js [(.range HideDecoration
-                                                                               (:from form)
-                                                                               (:to form))]})
-                                        (.update hidden #js {:filter (fn [from* _ _]
-                                                                       (not= (:from form) from*))})))
+                                      (let [cursor (.-cursor (.resolve tree (:from form) 1))
+                                            node-before (if (.prevSibling cursor)
+                                                          (.-node cursor)
+                                                          (do
+                                                            (.parent cursor)
+                                                            (when (.prevSibling cursor)
+                                                              (.-node cursor))))
+                                            from (if node-before (.-to node-before) (:from form))]
+                                        (if-not (nth layer-toggles (dec (:value form)))
+                                          (.update hidden #js {:add #js [(.range HideDecoration
+                                                                                 from
+                                                                                 (:to form))]})
+                                          (.update hidden #js {:filter (fn [from* _ _]
+                                                                         (not= from from*))}))))
                                     hidden
-                                    (collect-with-gas 10 forms))))
+                                    (collect-with-gas 10000 forms))))
                 :provide (fn [f] (.compute (.-decorations codemirror-view/EditorView) #js [f], (fn [s] (.field ^js s f))))}))
 
 
@@ -394,7 +402,6 @@
 
 (helix/defnc app []
   (d/div
-   (d/h1 "Hello World!!!")
    (helix/$ editor {:text "
 (defn fact [n]
   (if (<= n 1)
