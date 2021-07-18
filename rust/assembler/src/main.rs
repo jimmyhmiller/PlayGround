@@ -33,11 +33,11 @@ impl Register {
     fn index(&self) -> u8 {
         match self {
             Register::RAX => 0,
-            Register::RBX => 1,
-            Register::RCX => 2,
-            Register::RDX => 3,
-            Register::RDP => 4,
-            Register::RSP => 5,
+            Register::RCX => 1,
+            Register::RDX => 2,
+            Register::RBX => 3,
+            Register::RSP => 4,
+            Register::RDP => 5,
             Register::RSI => 6,
             Register::RDI => 7,
         }
@@ -50,7 +50,8 @@ impl Register {
 enum Val {
     Int(i32),
     Reg(Register),
-    Addr(i32)
+    AddrReg(Register),
+    AddrOffset(i32),
 }
 
 
@@ -91,7 +92,7 @@ impl Emitter<'_> {
     fn emit(&mut self, bytes: &[u8]) {
         for (i, byte) in bytes.iter().enumerate() {
             self.memory[self.instruction_index + i] = *byte;
-            println!("here {}, {:#04x}", self.instruction_index + i, self.memory[self.instruction_index + i]);
+            println!("{:#04x}", self.memory[self.instruction_index + i]);
         }
         self.instruction_index += bytes.len();
     }
@@ -105,22 +106,25 @@ impl Emitter<'_> {
     }
 
     fn mov(&mut self, val1: Val, val2: Val) {
-        self.emit(&[0x48]);
+
         match (val1, val2) {
             (Val::Reg(dst), Val::Int(src)) => {
+                        self.emit(&[0x48]);
                 self.emit(&[0xC7]);
                 self.emit(&[0xC0 | (dst.index() & 7)]);
                 self.imm(src);
             }
-            (Val::Reg(_dst), Val::Addr(src)) => {
-                // This is definitely wrong because dst isn't used.
-                self.emit(&[0xC7]);
-                self.emit(&[0xC7]);
-                self.imm(src);
+            (Val::Reg(dst), Val::AddrReg(src)) => {
+                // This is Rex.W
+                self.emit(&[0x48]);
+                self.emit(&[0x8b]);
+                self.emit(&[(src.index()) | dst.index() << 3]);
             }
             (Val::Reg(dst), Val::Reg(src)) => {
+                self.emit(&[0x48]);
                 self.emit(&[0x89]);
-                self.emit(&[0xC0 | (src.index() << 3) | dst.index()]);
+                // This is the MODRM
+                self.emit(&[0xC0 | src.index() | (dst.index()  << 3)]);
             }
             _ => panic!("Mov not implemented for that combination")
         }
@@ -140,7 +144,7 @@ impl Emitter<'_> {
             }
             (Val::Reg(dst), Val::Reg(src)) => {
                 self.emit(&[0x01]);
-                self.emit(&[0xC0 | (src.index() << 3) | dst.index()]);
+                self.emit(&[0xC0 | (src.index()) | (dst.index() << 3)]);
             }
             _ => panic!("Mov not implemented for that combination")
         }
@@ -162,16 +166,16 @@ fn main() {
 
     println!("{}", e.instruction_index);
 
+    e.mov(Val::Reg(Register::RDX), Val::AddrReg(Register::RCX));
+    // e.mov(Val::Reg(Register::RBX), Val::Int(20));
+    // e.mov(Val::Reg(Register::RAX), Val::Int(22));
+    // e.add(Val::Reg(Register::RAX), Val::Reg(Register::RBX));
+    // e.add(Val::Reg(Register::RAX), Val::Int(-1));
+    // e.ret();
 
-    e.mov(Val::Reg(Register::RBX), Val::Int(20));
-    e.mov(Val::Reg(Register::RAX), Val::Int(22));
-    e.add(Val::Reg(Register::RAX), Val::Reg(Register::RBX));
-    e.add(Val::Reg(Register::RAX), Val::Int(-1));
-    e.ret();
 
 
-
-    let main_fn: extern "C" fn() -> i64 = unsafe { mem::transmute(m.data()) };
-    println!("Hello, world! {:}", main_fn());
+    // let main_fn: extern "C" fn() -> i64 = unsafe { mem::transmute(m.data()) };
+    // println!("Hello, world! {:}", main_fn());
 
 }
