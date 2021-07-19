@@ -13,7 +13,7 @@ enum Register {
     RBX,
     RCX,
     RDX,
-    RDP,
+    RBP,
     RSP,
     RSI,
     RDI,
@@ -37,7 +37,7 @@ impl Register {
             Register::RDX => 2,
             Register::RBX => 3,
             Register::RSP => 4,
-            Register::RDP => 5,
+            Register::RBP => 5,
             Register::RSI => 6,
             Register::RDI => 7,
         }
@@ -51,7 +51,7 @@ enum Val {
     Int(i32),
     Reg(Register),
     AddrReg(Register),
-    AddrOffset(i32),
+    AddrRegOffset(Register, i32),
 }
 
 
@@ -92,7 +92,7 @@ impl Emitter<'_> {
     fn emit(&mut self, bytes: &[u8]) {
         for (i, byte) in bytes.iter().enumerate() {
             self.memory[self.instruction_index + i] = *byte;
-            println!("{:#04x}", self.memory[self.instruction_index + i]);
+            // println!("{:#04x}", self.memory[self.instruction_index + i]);
         }
         self.instruction_index += bytes.len();
     }
@@ -106,13 +106,25 @@ impl Emitter<'_> {
     }
 
     fn mov(&mut self, val1: Val, val2: Val) {
-
+        // There are more compact ways to do this.
+        // But being verabose helps me understand.
         match (val1, val2) {
             (Val::Reg(dst), Val::Int(src)) => {
-                        self.emit(&[0x48]);
+                self.emit(&[0x48]);
                 self.emit(&[0xC7]);
                 self.emit(&[0xC0 | (dst.index() & 7)]);
                 self.imm(src);
+            }
+            (Val::Reg(dst), Val::AddrReg(Register::RSP)) => {
+                // This is Rex.W
+                self.emit(&[0x48]);
+                self.emit(&[0x8b]);
+                self.emit(&[(Register::RSP.index()) | dst.index() << 3]);
+                // This is a SIB where the scale is 0
+                // the index is rsp
+                // and the base is rsp
+                // or at least I think...
+                self.emit(&[0x24]);
             }
             (Val::Reg(dst), Val::AddrReg(src)) => {
                 // This is Rex.W
@@ -120,11 +132,42 @@ impl Emitter<'_> {
                 self.emit(&[0x8b]);
                 self.emit(&[(src.index()) | dst.index() << 3]);
             }
+            (Val::Reg(dst), Val::AddrRegOffset(src, offset)) => {
+                // This is Rex.W
+                self.emit(&[0x48]);
+                self.emit(&[0x8b]);
+                self.emit(&[(src.index()) | dst.index() << 3]);
+                self.imm(offset);
+            }
+            (Val::AddrReg(Register::RSP), Val::Reg(src)) => {
+                // This is Rex.W
+                self.emit(&[0x48]);
+                self.emit(&[0x89]);
+                self.emit(&[(Register::RSP.index()) | src.index() << 3]);
+                // This is a SIB where the scale is 0
+                // the index is rsp
+                // and the base is rsp
+                // or at least I think...
+                self.emit(&[0x24]);
+            }
+            (Val::AddrReg(dst), Val::Reg(src)) => {
+                // This is Rex.W
+                self.emit(&[0x48]);
+                self.emit(&[0x89]);
+                self.emit(&[(dst.index()) | src.index() << 3]);
+            }
+            ( Val::AddrRegOffset(dst, offset), Val::Reg(src)) => {
+                // This is Rex.W
+                self.emit(&[0x48]);
+                self.emit(&[0x89]);
+                self.emit(&[(dst.index()) | src.index() << 3]);
+                self.imm(offset);
+            }
             (Val::Reg(dst), Val::Reg(src)) => {
                 self.emit(&[0x48]);
                 self.emit(&[0x89]);
                 // This is the MODRM
-                self.emit(&[0xC0 | src.index() | (dst.index()  << 3)]);
+                self.emit(&[0xC0 | src.index() | (dst.index() << 3)]);
             }
             _ => panic!("Mov not implemented for that combination")
         }
@@ -146,7 +189,20 @@ impl Emitter<'_> {
                 self.emit(&[0x01]);
                 self.emit(&[0xC0 | (src.index()) | (dst.index() << 3)]);
             }
-            _ => panic!("Mov not implemented for that combination")
+            _ => panic!("add not implemented for that combination")
+        }
+    }
+
+    fn push(&mut self, val: Val) {
+        match val {
+            Val::Int(i) => {
+                self.emit(&[0x68]);
+                self.imm(i);
+            },
+            Val::Reg(reg) => {
+                self.emit(&[0x50 | reg.index()])
+            },
+             _ => panic!("push not implemented for that combination")
         }
     }
 }
@@ -164,18 +220,26 @@ fn main() {
         instruction_index: 0
     };
 
-    println!("{}", e.instruction_index);
+    // Things are encoding properly. But I'm not doing anything that makes
+    // sense. Need to make program that writes to memory and reads it back.
+    e.mov(Val::Reg(Register::RBX), Val::Int(0));
+    e.mov(Val::Reg(Register::RAX), Val::Int(22));
+     // RBP is used for RIP here??
+    e.mov(Val::Reg(Register::RCX), Val::AddrRegOffset(Register::RBP, 64));
+    e.mov(Val::AddrRegOffset(Register::RBP, 64), Val::Reg(Register::RAX));
+    e.mov(Val::Reg(Register::RAX), Val::Int(0));
+    // RBP is used for RIP here??
+    e.mov(Val::Reg(Register::RAX), Val::AddrRegOffset(Register::RBP, 64));
+    e.add(Val::Reg(Register::RBX), Val::Reg(Register::RAX));
+    e.add(Val::Reg(Register::RAX), Val::Int(-1));
+    e.ret();
 
-    e.mov(Val::Reg(Register::RDX), Val::AddrReg(Register::RCX));
-    // e.mov(Val::Reg(Register::RBX), Val::Int(20));
-    // e.mov(Val::Reg(Register::RAX), Val::Int(22));
-    // e.add(Val::Reg(Register::RAX), Val::Reg(Register::RBX));
-    // e.add(Val::Reg(Register::RAX), Val::Int(-1));
-    // e.ret();
+    for i in 0..e.instruction_index {
+        print!("{:02x}", my_memory[i]);
+    }
+    println!("\n");
 
-
-
-    // let main_fn: extern "C" fn() -> i64 = unsafe { mem::transmute(m.data()) };
-    // println!("Hello, world! {:}", main_fn());
+    let main_fn: extern "C" fn() -> i64 = unsafe { mem::transmute(m.data()) };
+    println!("Hello, world! {:}", main_fn());
 
 }
