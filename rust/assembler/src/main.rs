@@ -171,7 +171,7 @@ impl Emitter<'_> {
                 self.emit(&[0x48]);
                 self.emit(&[0x89]);
                 // This is the MODRM
-                self.emit(&[0xC0 | src.index() | (dst.index() << 3)]);
+                self.emit(&[0xC0 | dst.index() | (src.index() << 3)]);
             }
             _ => panic!("Mov not implemented for that combination")
         }
@@ -185,12 +185,12 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Int(src)) => {
-                self.emit(&[0x01]);
+                self.emit(&[0x81]);
                 self.emit(&[0xC0 | (dst.index() & 7)]);
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Reg(src)) => {
-                self.emit(&[0x01]);
+                self.emit(&[0x81]);
                 self.emit(&[0xC0 | (src.index()) | (dst.index() << 3)]);
             }
             _ => panic!("add not implemented for that combination")
@@ -224,7 +224,17 @@ impl Emitter<'_> {
 }
 
 
+#[allow(dead_code)]
+const RAX: Val = Val::Reg(Register::RAX);
 
+#[allow(dead_code)]
+const RSP: Val = Val::Reg(Register::RSP);
+
+#[allow(dead_code)]
+const RDI: Val = Val::Reg(Register::RDI);
+
+#[allow(dead_code)]
+const RBX: Val = Val::Reg(Register::RBX);
 
 
 fn main() {
@@ -241,11 +251,16 @@ fn main() {
     // e.mov(Val::Reg(Register::RBX), Val::Int(0));
     // e.mov(Val::Reg(Register::RAX), Val::Int(22));
      // RBP is used for RIP here??
-    e.mov(Val::Reg(Register::RAX), Val::Int(42));
-    e.mov(Val::AddrRegOffset(Register::RDI, 64), Val::Reg(Register::RAX));
-    e.mov(Val::Reg(Register::RAX), Val::AddrRegOffset(Register::RDI, 64));
+    e.mov(RAX, Val::Int(42));
+    e.add(RDI, Val::Int(64));
+    e.mov(RBX, RSP);
+    e.mov(RSP, RDI);
+    // e.mov(Val::AddrRegOffset(Register::RDI, 64), Val::Reg(Register::RAX));
+    // e.mov(Val::Reg(Register::RAX), Val::AddrRegOffset(Register::RDI, 64));
     e.push(Val::Reg(Register::RAX));
-    e.pop(Val::Reg(Register::RAX));
+    // e.pop(Val::Reg(Register::RAX));
+    e.mov(RSP, RBX);
+    e.mov(RAX, Val::Int(43));
     // e.mov(Val::Reg(Register::RAX), Val::Int(0));
     // e.mov(Val::AddrRegOffset(Register::RBP, 64), Val::Reg(Register::RAX));
     // e.mov(Val::Reg(Register::RAX), Val::Int(0));
@@ -262,5 +277,6 @@ fn main() {
 
     let main_fn: extern "C" fn(*mut u8) -> i64 = unsafe { mem::transmute(m.data()) };
     println!("Hello, world! {:}", main_fn(m.data()));
-
+    println!("{}", u64::from_le_bytes(e.memory[(64-8)..64].try_into().expect("Wrong size")));
+    
 }
