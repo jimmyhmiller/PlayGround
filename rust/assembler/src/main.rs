@@ -136,8 +136,10 @@ impl Emitter<'_> {
                 // This is Rex.W
                 self.emit(&[0x48]);
                 self.emit(&[0x8b]);
-                self.emit(&[(src.index()) | dst.index() << 3]);
-                self.imm(offset);
+                self.emit(&[0x80 | src.index() | (dst.index() << 3)]);
+                if offset != 0 {
+                    self.imm(offset);
+                }
             }
             (Val::AddrReg(Register::RSP), Val::Reg(src)) => {
                 // This is Rex.W
@@ -160,8 +162,10 @@ impl Emitter<'_> {
                 // This is Rex.W
                 self.emit(&[0x48]);
                 self.emit(&[0x89]);
-                self.emit(&[(dst.index()) | src.index() << 3]);
-                self.imm(offset);
+                self.emit(&[0x80 | dst.index() | (src.index() << 3)]);
+                if offset != 0 {
+                    self.imm(offset);
+                }
             }
             (Val::Reg(dst), Val::Reg(src)) => {
                 self.emit(&[0x48]);
@@ -205,6 +209,18 @@ impl Emitter<'_> {
              _ => panic!("push not implemented for that combination")
         }
     }
+    fn pop(&mut self, val: Val) {
+        match val {
+            Val::Int(i) => {
+                self.emit(&[0x8f]);
+                self.imm(i);
+            },
+            Val::Reg(reg) => {
+                self.emit(&[0x58 | reg.index()])
+            },
+             _ => panic!("push not implemented for that combination")
+        }
+    }
 }
 
 
@@ -222,24 +238,29 @@ fn main() {
 
     // Things are encoding properly. But I'm not doing anything that makes
     // sense. Need to make program that writes to memory and reads it back.
-    e.mov(Val::Reg(Register::RBX), Val::Int(0));
-    e.mov(Val::Reg(Register::RAX), Val::Int(22));
+    // e.mov(Val::Reg(Register::RBX), Val::Int(0));
+    // e.mov(Val::Reg(Register::RAX), Val::Int(22));
      // RBP is used for RIP here??
-    e.mov(Val::Reg(Register::RCX), Val::AddrRegOffset(Register::RBP, 64));
-    e.mov(Val::AddrRegOffset(Register::RBP, 64), Val::Reg(Register::RAX));
-    e.mov(Val::Reg(Register::RAX), Val::Int(0));
+    e.mov(Val::Reg(Register::RAX), Val::Int(42));
+    e.mov(Val::AddrRegOffset(Register::RDI, 64), Val::Reg(Register::RAX));
+    e.mov(Val::Reg(Register::RAX), Val::AddrRegOffset(Register::RDI, 64));
+    e.push(Val::Reg(Register::RAX));
+    e.pop(Val::Reg(Register::RAX));
+    // e.mov(Val::Reg(Register::RAX), Val::Int(0));
+    // e.mov(Val::AddrRegOffset(Register::RBP, 64), Val::Reg(Register::RAX));
+    // e.mov(Val::Reg(Register::RAX), Val::Int(0));
     // RBP is used for RIP here??
-    e.mov(Val::Reg(Register::RAX), Val::AddrRegOffset(Register::RBP, 64));
-    e.add(Val::Reg(Register::RBX), Val::Reg(Register::RAX));
-    e.add(Val::Reg(Register::RAX), Val::Int(-1));
+    // e.mov(Val::Reg(Register::RAX), Val::AddrRegOffset(Register::RBP, 64));
+    // e.add(Val::Reg(Register::RBX), Val::Reg(Register::RAX));
+    // e.add(Val::Reg(Register::RAX), Val::Int(-1));
     e.ret();
 
     for i in 0..e.instruction_index {
-        print!("{:02x}", my_memory[i]);
+        print!("{:02x}", e.memory[i]);
     }
     println!("\n");
 
-    let main_fn: extern "C" fn() -> i64 = unsafe { mem::transmute(m.data()) };
-    println!("Hello, world! {:}", main_fn());
+    let main_fn: extern "C" fn(*mut u8) -> i64 = unsafe { mem::transmute(m.data()) };
+    println!("Hello, world! {:}", main_fn(m.data()));
 
 }
