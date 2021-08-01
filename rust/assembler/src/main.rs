@@ -87,6 +87,90 @@ struct Emitter<'a> {
 }
 
 
+#[derive(Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+struct Rex {
+    w: bool,
+    r: bool,
+    b: bool,
+    x: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+enum Mode {
+    M11,
+    M10,
+    M01,
+    M00,
+}
+
+impl Mode {
+    fn to_bytes(self) -> u8 {
+        match self {
+            Mode::M11 => 0b11000000,
+            Mode::M10 => 0b10000000,
+            Mode::M01 => 0b01000000,
+            Mode::M00 => 0b00000000,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+struct ModRM {
+    mode: Mode,
+    reg: Val,
+    rm: Val,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+struct Instruction {
+    opcode: u8,
+    rex: Option<Rex>,
+    modrm: Option<ModRM>,
+    offset: Option<i32>,
+}
+
+#[allow(dead_code)]
+impl Instruction {
+    fn encode(self, bytes: &mut[u8]) -> usize {
+        let mut i = 0;
+        if self.rex.is_some() {
+            let rex = self.rex.unwrap();
+            bytes[i] = 0b0100 << 4 | 
+                      (rex.w as u8) << 3 |
+                      (rex.r as u8) << 2 |
+                      (rex.b as u8) << 1 |
+                      (rex.x as u8) << 0;
+            i += 1;
+        }
+        bytes[i] = self.opcode;
+        i += 1;
+        if self.modrm.is_some() {
+            let modrm = self.modrm.unwrap();
+            match (modrm.reg, modrm.rm)  {
+                (Val::Reg(r1), Val::Reg(r2)) => {
+                    bytes[i] = modrm.mode.to_bytes() | (r1.index() << 3) | r2.index();
+                    i += 1;
+                }
+                x => unimplemented!("Didn't handle case {:?}", x),
+            }
+        }
+        if self.offset.is_some() {
+            let offset = self.offset.unwrap();
+            let offset_bytes : [u8; 4] = offset.to_le_bytes();
+            for j in 0..4 {
+                bytes[i] = offset_bytes[j];
+                i += 1;
+            }
+        }
+        i
+    }
+}
+
+
 #[allow(dead_code)]
 impl Emitter<'_> {
     fn emit(&mut self, bytes: &[u8]) {
@@ -236,6 +320,9 @@ const RDI: Val = Val::Reg(Register::RDI);
 #[allow(dead_code)]
 const RBX: Val = Val::Reg(Register::RBX);
 
+#[allow(dead_code)]
+const RCX: Val = Val::Reg(Register::RCX);
+
 
 fn main() {
     let m = MemoryMap::new(4096, &[MapOption::MapReadable, MapOption::MapWritable, MapOption::MapExecutable]).unwrap();
@@ -273,7 +360,104 @@ fn main() {
     for i in 0..e.instruction_index {
         print!("{:02x}", e.memory[i]);
     }
+
+    let mut output : [u8;8] = [0;8];
     println!("\n");
+    let instructions = Instruction {
+        rex: Some(Rex {w: true, r: false, x: false, b: false}),
+        opcode: 0x89,
+        modrm: Some(ModRM {
+            mode: Mode::M00,
+            reg: RDI,
+            rm: RAX,
+        }),
+        offset: None,
+    }.encode(&mut output);
+    for i in 0..(instructions) {
+        print!("{:02x}", output[i]);
+    }
+    println!("");
+    
+
+
+    let instructions = Instruction {
+        rex: None,
+        opcode: 0xFF,
+        modrm: Some(ModRM {
+            mode: Mode::M11,
+            reg: RSP,
+            rm: RDI,
+        }),
+        offset: None,
+    }.encode(&mut output);
+    println!("instructions {}", instructions);
+    for i in 0..(instructions) {
+        print!("{:02x}", output[i]);
+    }
+    println!("");
+
+
+
+
+    let instructions = Instruction {
+        rex: Some(Rex {w: true, r: false, x: false, b: false}),
+        opcode: 0x8D,
+        modrm: Some(ModRM {
+            mode: Mode::M00,
+            reg: RSP,
+            rm: RDI,
+        }),
+        offset: None,
+    }.encode(&mut output);
+    println!("instructions {}", instructions);
+    for i in 0..(instructions) {
+        print!("{:02x}", output[i]);
+    }
+    println!("");
+
+
+    let instructions = Instruction {
+        rex: Some(Rex {w: true, r: false, x: false, b: false}),
+        opcode: 0xFF,
+        modrm: Some(ModRM {
+            mode: Mode::M11,
+            reg: RCX, // Consider allowing register to just be u8
+            // this is really just 1, not the register
+            rm: RDI,
+        }),
+        offset: None,
+    }.encode(&mut output);
+    println!("instructions {}", instructions);
+    for i in 0..(instructions) {
+        print!("{:02x}", output[i]);
+    }
+    println!("");
+
+
+
+    let instructions = Instruction {
+        rex: Some(Rex {w: true, r: false, x: false, b: false}),
+        opcode: 0x69,
+        modrm: Some(ModRM {
+            mode: Mode::M11,
+            reg: RCX, // Consider allowing register to just be u8
+            // this is really just 1, not the register
+            rm: RDI,
+        }),
+        offset: Some(42),
+    }.encode(&mut output);
+    println!("instructions {}", instructions);
+    for i in 0..(instructions) {
+        print!("{:02x}", output[i]);
+    }
+    println!("");
+
+
+    // This is working well, but need to figure out more than just 64bit
+    // Need to figure out the whole SIB thing (can I just consider that an offset)
+    // Need to figure out how I want to code this.
+    // Need to deal with things that aren't really registers in modrm
+
 
     let main_fn: extern "C" fn(*mut u8) -> i64 = unsafe { mem::transmute(m.data()) };
     println!("Hello, world! {:}", main_fn(m.data()));
