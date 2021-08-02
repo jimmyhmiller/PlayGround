@@ -106,7 +106,7 @@ enum Mode {
 }
 
 impl Mode {
-    fn to_bytes(self) -> u8 {
+    fn into_bytes(self) -> u8 {
         match self {
             Mode::M11 => 0b11000000,
             Mode::M10 => 0b10000000,
@@ -143,7 +143,7 @@ impl Instruction {
                       (rex.w as u8) << 3 |
                       (rex.r as u8) << 2 |
                       (rex.b as u8) << 1 |
-                      (rex.x as u8) << 0;
+                      (rex.x as u8);
             i += 1;
         }
         bytes[i] = self.opcode;
@@ -152,7 +152,7 @@ impl Instruction {
             let modrm = self.modrm.unwrap();
             match (modrm.reg, modrm.rm)  {
                 (Val::Reg(r1), Val::Reg(r2)) => {
-                    bytes[i] = modrm.mode.to_bytes() | (r1.index() << 3) | r2.index();
+                    bytes[i] = modrm.mode.into_bytes() | (r1.index() << 3) | r2.index();
                     i += 1;
                 }
                 x => unimplemented!("Didn't handle case {:?}", x),
@@ -161,8 +161,8 @@ impl Instruction {
         if self.offset.is_some() {
             let offset = self.offset.unwrap();
             let offset_bytes : [u8; 4] = offset.to_le_bytes();
-            for j in 0..4 {
-                bytes[i] = offset_bytes[j];
+            for byte in &offset_bytes {
+                bytes[i] = *byte;
                 i += 1;
             }
         }
@@ -373,10 +373,10 @@ fn main() {
         }),
         offset: None,
     }.encode(&mut output);
-    for i in 0..(instructions) {
-        print!("{:02x}", output[i]);
+    for byte in output.iter().take(instructions) {
+        print!("{:02x}", byte);
     }
-    println!("");
+    println!();
     
 
 
@@ -391,10 +391,10 @@ fn main() {
         offset: None,
     }.encode(&mut output);
     println!("instructions {}", instructions);
-    for i in 0..(instructions) {
-        print!("{:02x}", output[i]);
+    for byte in output.iter().take(instructions) {
+        print!("{:02x}", byte);
     }
-    println!("");
+    println!();
 
 
 
@@ -410,10 +410,10 @@ fn main() {
         offset: None,
     }.encode(&mut output);
     println!("instructions {}", instructions);
-    for i in 0..(instructions) {
-        print!("{:02x}", output[i]);
+    for byte in output.iter().take(instructions) {
+        print!("{:02x}", byte);
     }
-    println!("");
+    println!();
 
 
     let instructions = Instruction {
@@ -428,10 +428,10 @@ fn main() {
         offset: None,
     }.encode(&mut output);
     println!("instructions {}", instructions);
-    for i in 0..(instructions) {
-        print!("{:02x}", output[i]);
+    for byte in output.iter().take(instructions) {
+        print!("{:02x}", byte);
     }
-    println!("");
+    println!();
 
 
 
@@ -447,10 +447,10 @@ fn main() {
         offset: Some(42),
     }.encode(&mut output);
     println!("instructions {}", instructions);
-    for i in 0..(instructions) {
-        print!("{:02x}", output[i]);
+    for byte in output.iter().take(instructions) {
+        print!("{:02x}", byte);
     }
-    println!("");
+    println!();
 
 
     // This is working well, but need to figure out more than just 64bit
