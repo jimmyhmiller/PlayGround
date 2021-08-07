@@ -283,6 +283,8 @@ impl Emitter<'_> {
         self.emit(&[0xC3]);
     }
 
+    // I could make it so there are multiple moves depending on type
+
     fn mov(&mut self, val1: Val, val2: Val) {
         // I might have gotten some of the src vs dst wrong :(
 
