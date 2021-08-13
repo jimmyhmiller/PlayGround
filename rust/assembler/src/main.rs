@@ -3,6 +3,7 @@ use mmap::MemoryMap;
 use std::convert::TryInto;
 use std::mem;
 use std::io::{self, Write};
+use std::process::Command;
 
 // https://github.com/sdiehl/tinyjit/blob/master/src/Assembler.hs
 
@@ -280,7 +281,7 @@ impl Emitter<'_> {
     }
 
     fn ret(&mut self) {
-        self.emit(&[0xC3]);
+        self.opcode(0xC3);
     }
 
     // I could make it so there are multiple moves depending on type
@@ -503,10 +504,22 @@ fn main() {
     e.add(RAX, Val::Int(1));
     e.ret();
 
-    for i in 0..e.instruction_index {
-        print!("{:02x}", e.memory[i]);
-    }
+
+   let result =  e.memory.iter().take(e.instruction_index).fold(String::new(),
+        |res, byte| res + &format!("{:02x}", byte)
+    );
+
+    println!("{}", result);
     println!();
+   
+    let output =  Command::new("yaxdis")
+            .arg("-a")
+            .arg("x86_64")
+            .arg(result)
+            .output()
+            .expect("failed to execute process");
+
+    println!("{}", String::from_utf8(output.stdout).unwrap());
 
     io::stdout().flush().unwrap();
     // This is working well, but need to figure out more than just 64bit
