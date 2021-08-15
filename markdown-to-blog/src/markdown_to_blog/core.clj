@@ -5,7 +5,7 @@
 
 
 (def markdown
-  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/Conceptual Preservation.md"))
+  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/CDD and the Non-Linearity of Discovery.md"))
 
 
 (defmulti transform

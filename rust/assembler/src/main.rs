@@ -6,7 +6,13 @@ use std::io::{self, Write};
 use std::mem;
 use std::process::Command;
 
-// https://github.com/sdiehl/tinyjit/blob/master/src/Assembler.hs
+
+
+
+/// Notes:
+// All my jumps are rel32
+// I should probably expand labels or some way of referencing things outside
+// just jumps. Labelling positions is generally useful.
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
 #[allow(dead_code)]
@@ -101,7 +107,6 @@ impl Label {
         }
         let label_loc = self.location.unwrap();
         for location in self.called.iter() {
-            println!("loc {} {}", location, label_loc);
             // Need to emit it back 4 from where we are relative to.
             // It is relative to end of instruction
             emitter.emit_i32_loc(*location - 4, (label_loc - location).try_into().unwrap());
@@ -292,10 +297,8 @@ impl Emitter<'_> {
         }
     }
 
-    fn jmp_label(&mut self, name: String) {
-        self.opcode(0xE9);
-
-        if self.labels.contains_key(&name) {
+    fn add_label(&mut self, name: String) {
+         if self.labels.contains_key(&name) {
             let mut label = self.labels.remove_entry(&name).unwrap();
             label.1.add_called(self);
             self.labels.insert(label.0, label.1);
@@ -308,6 +311,30 @@ impl Emitter<'_> {
             self.labels.insert(name, label);
         }
     }
+
+    fn jump_label(&mut self, name: String) {
+        self.opcode(0xE9);
+        self.add_label(name);
+    }
+
+
+    fn jump_label_equal(&mut self, name: String) {
+        self.opcode(0x0F);
+        self.opcode(0x84);
+        self.add_label(name);
+    }
+
+    fn jump_label_not_equal(&mut self, name: String) {
+        self.opcode(0x0F);
+        self.opcode(0x85);
+        self.add_label(name);
+    }
+
+    fn call_label(&mut self, name: String) {
+        self.opcode(0xE8);
+        self.add_label(name);
+    }
+
 
     fn emit(&mut self, bytes: &[u8]) {
         for (i, byte) in bytes.iter().enumerate() {
@@ -568,6 +595,40 @@ impl Emitter<'_> {
         }
     }
 
+    // Unsigned divide RDX:RAX by r/m64, with result stored in RAX ← Quotient, RDX ← Remainder.
+    // Not sure what this RDX:RAX means. Is this a fake 128 bit number?
+    // will have to learn more, but so far when using it I zero out RDX
+    fn div(&mut self, val: Val) {
+        match val {
+            Val::Reg(divisor) => {
+                self.rex(REX_W);
+                self.opcode(0xF7);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::U8(6),
+                    rm: Val::Reg(divisor),
+                });
+            }
+            _ => panic!("add not implemented for that combination"),
+        }
+    }
+
+    fn inc(&mut self, val: Val) {
+        match val {
+            Val::Reg(reg) => {
+                self.rex(REX_W);
+                self.opcode(0xFF);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::U8(0),
+                    rm: Val::Reg(reg),
+                });
+            }
+            _ => panic!("add not implemented for that combination"),
+        }
+    }
+
+
     fn and(&mut self, val1: Val, val2: Val) {
         match (val1, val2) {
             (Val::Reg(Register::RAX), Val::Int(src)) => {
@@ -628,6 +689,99 @@ impl Emitter<'_> {
         }
     }
 
+    fn xor(&mut self, val1: Val, val2: Val) {
+        match (val1, val2) {
+            (Val::Reg(Register::RAX), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x35);
+                self.imm(src);
+            }
+            (Val::Reg(dst), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x81);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::U8(6),
+                    rm: Val::Reg(dst),
+                });
+                self.imm(src);
+            }
+            (Val::Reg(dst), Val::Reg(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x33);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::Reg(dst),
+                    rm: Val::Reg(src),
+                });
+            }
+            _ => panic!("add not implemented for that combination"),
+        }
+    }
+
+
+    fn cmp(&mut self, val1: Val, val2: Val) {
+        match (val1, val2) {
+            (Val::Reg(Register::RAX), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x3D);
+                self.imm(src);
+            }
+            (Val::Reg(dst), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x81);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::U8(7),
+                    rm: Val::Reg(dst),
+                });
+                self.imm(src);
+            }
+            (Val::Reg(reg1), Val::Reg(reg2)) => {
+                self.rex(REX_W);
+                self.opcode(0x39);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::Reg(reg1),
+                    rm: Val::Reg(reg2),
+                });
+            }
+            _ => panic!("cmp not implemented for that combination"),
+        }
+    }
+
+    // test(rax, rax) = cmp(rax, 0)
+    fn test(&mut self, val1: Val, val2: Val) {
+        match (val1, val2) {
+            (Val::Reg(Register::RAX), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0xA9);
+                self.imm(src);
+            }
+            (Val::Reg(dst), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0xF7);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::U8(0),
+                    rm: Val::Reg(dst),
+                });
+                self.imm(src);
+            }
+            (Val::Reg(reg1), Val::Reg(reg2)) => {
+                self.rex(REX_W);
+                self.opcode(0x85);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::Reg(reg1),
+                    rm: Val::Reg(reg2),
+                });
+            }
+            _ => panic!("test not implemented for that combination"),
+        }
+    }
+
+
 
     fn push(&mut self, val: Val) {
         match val {
@@ -659,6 +813,9 @@ const RSP: Val = Val::Reg(Register::RSP);
 
 #[allow(dead_code)]
 const RDI: Val = Val::Reg(Register::RDI);
+
+#[allow(dead_code)]
+const RDX: Val = Val::Reg(Register::RDX);
 
 #[allow(dead_code)]
 const RSI: Val = Val::Reg(Register::RSI);
@@ -701,15 +858,35 @@ fn main() {
     // e.mov(Val::Reg(Register::RAX), Val::Int(22));
     // RBP is used for RIP here??
 
-    e.mov(RAX, Val::Int(42));
-    e.jmp_label("over".to_string());
-    e.label("over2".to_string());
-    e.mov(RAX, Val::Int(22));
-    e.ret();
-    e.mov(RAX, Val::Int(0));
-    e.label("over".to_string());
-    e.jmp_label("over2".to_string());
-    e.ret();
+
+    // e.jump_label("over".to_string());
+    // e.label("over2".to_string());
+    // e.mov(RAX, Val::Int(22));
+    // e.ret();
+    // e.mov(RAX, Val::Int(0));
+    // e.label("over".to_string());
+    // e.jump_label("over2".to_string());
+    // e.mov(RBX, Val::Int(42));
+    // e.cmp(RAX, RBX);
+    // e.jump_label_equal("done".to_string());
+    // e.mov(RAX, Val::Int(0));
+    // e.label("done".to_string());
+    // e.mov(RAX, Val::Int(0));
+    // e.call_label("the_answer".to_string());
+    // e.call_label("things".to_string());
+    // e.ret();
+
+    // e.label("the_answer".to_string());
+    // e.mov(RAX, Val::Int(42));
+    // e.ret();
+
+    // e.label("things".to_string());
+    // e.mov(RAX, Val::Int(44));
+    // e.mov(RDI, Val::Int(2));
+    // e.xor(RDX, RDX);
+    // e.div(RDI);
+    // // e.mov(RAX, RDX);
+    // e.ret();
 
 
     // e.mov(RAX, Val::Int(42));
@@ -744,7 +921,47 @@ fn main() {
     // e.add(RAX, Val::Int(1));
     // e.imul(RAX, Val::Int(2));
 
+    let sum = RDI;
+    let counter = RSI;
+    let div_3 = RBX;
+    let div_5 = RCX; 
     // e.ret();
+    e.mov(sum, Val::Int(0)); // sum
+    e.mov(counter, Val::Int(3)); // counter
+    e.mov(div_3, Val::Int(3)); // const for division
+    e.mov(div_5, Val::Int(5)); // const for division
+
+    e.label("main".to_string());
+    e.mov(RAX, counter);
+    e.xor(RDX, RDX);
+    e.div(div_3);
+
+    e.cmp(RDX, Val::Int(0));
+    e.jump_label_equal("sum".to_string());
+
+    
+    e.mov(RAX, counter);
+    e.xor(RDX, RDX);
+    e.div(div_5);
+
+    e.cmp(RDX, Val::Int(0));
+    e.jump_label_not_equal("next".to_string());
+
+    e.label("sum".to_string());
+    e.add(sum, counter);
+
+    e.label("next".to_string());
+    e.inc(counter);
+    e.cmp(counter, Val::Int(1000));
+
+    e.jump_label_not_equal("main".to_string());
+
+    e.mov(RAX, sum);
+
+
+    e.ret();
+
+
 
     let result = e
         .memory
