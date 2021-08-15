@@ -418,6 +418,134 @@ impl Emitter<'_> {
         }
     }
 
+    fn sub(&mut self, val1: Val, val2: Val) {
+        match (val1, val2) {
+            (Val::Reg(Register::RAX), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x2D);
+                self.imm(src);
+            }
+            (Val::Reg(dst), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x81);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::U8(5),
+                    rm: Val::Reg(dst),
+                });
+                self.imm(src);
+            }
+            (Val::Reg(dst), Val::Reg(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x2B);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::Reg(dst),
+                    rm: Val::Reg(src),
+                });
+            }
+            _ => panic!("add not implemented for that combination"),
+        }
+    }
+
+    fn imul(&mut self, val1: Val, val2: Val) {
+        match (val1, val2) {
+            (Val::Reg(Register::RAX), Val::Reg(src)) => {
+                self.rex(REX_W);
+                self.opcode(0xF7);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::U8(5),
+                    rm: Val::Reg(src),
+                });
+            }
+            (Val::Reg(dst), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x69);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::Reg(dst),
+                    rm: Val::Reg(dst),
+                });
+                self.imm(src);
+            }
+            (Val::Reg(dst), Val::Reg(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x69);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::Reg(dst),
+                    rm: Val::Reg(src),
+                });
+                self.imm(1);
+
+            }
+            _ => panic!("add not implemented for that combination"),
+        }
+    }
+
+    fn and(&mut self, val1: Val, val2: Val) {
+        match (val1, val2) {
+            (Val::Reg(Register::RAX), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x25);
+                self.imm(src);
+            }
+            (Val::Reg(dst), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x81);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::U8(4),
+                    rm: Val::Reg(dst),
+                });
+                self.imm(src);
+            }
+            (Val::Reg(dst), Val::Reg(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x23);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::Reg(dst),
+                    rm: Val::Reg(src),
+                });
+            }
+            _ => panic!("add not implemented for that combination"),
+        }
+    }
+
+    fn or(&mut self, val1: Val, val2: Val) {
+        match (val1, val2) {
+            (Val::Reg(Register::RAX), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x0D);
+                self.imm(src);
+            }
+            (Val::Reg(dst), Val::Int(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x81);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::U8(1),
+                    rm: Val::Reg(dst),
+                });
+                self.imm(src);
+            }
+            (Val::Reg(dst), Val::Reg(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x0B);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::Reg(dst),
+                    rm: Val::Reg(src),
+                });
+            }
+            _ => panic!("add not implemented for that combination"),
+        }
+    }
+
+
+
     fn push(&mut self, val: Val) {
         match val {
             Val::Int(i) => {
@@ -480,6 +608,10 @@ fn main() {
         instruction_index: 0,
     };
 
+    // If my code gets too big, I could overwrite this offset
+    let mem_offset = 4096-128;
+    let mem_offset_size : usize = mem_offset.try_into().unwrap();
+
     // Things are encoding properly. But I'm not doing anything that makes
     // sense. Need to make program that writes to memory and reads it back.
     // e.mov(Val::Reg(Register::RBX), Val::Int(0));
@@ -487,12 +619,16 @@ fn main() {
     // RBP is used for RIP here??
 
     e.mov(RAX, Val::Int(42));
+    e.sub(RAX, Val::Int(1));
+    e.mov(RSI, RDI);
     // e.add(RDI, Val::Int(64));
     // e.mov(RBX, RSP);
     // e.mov(RSP, RDI);
-    e.mov(Val::AddrRegOffset(Register::RDI, 64), Val::Reg(Register::RAX));
-    e.mov(RAX, Val::AddrRegOffset(Register::RDI, 64));
-    e.add(RDI, Val::Int(64));
+    e.mov(Val::AddrRegOffset(Register::RDI, mem_offset), Val::Reg(Register::RAX));
+    e.mov(RAX, Val::AddrRegOffset(Register::RDI, mem_offset));
+    e.add(RDI, Val::Int(mem_offset));
+    e.sub(RSI, Val::Int(1));
+    e.imul(RSI, Val::Int(2));
     e.mov(RBX, Val::AddrReg(Register::RDI));
     e.mov(Val::AddrReg(Register::RDI), RBX);
     // e.mov(Val::AddrRegOffset(Register::RDI, 0), RBX);
@@ -500,8 +636,16 @@ fn main() {
     e.pop(Val::Reg(Register::RAX));
     e.mov(RSI, RBX);
     // e.mov(RAX, Val::Int(43));
+    e.and(RAX, RAX);
+    e.and(RAX, Val::Int(1));
+    e.and(RAX, RDI);
+    e.or(RAX, RAX);
+    e.or(RAX, Val::Int(1));
+    e.or(RAX, RSI);
     e.add(RAX, RBX);
     e.add(RAX, Val::Int(1));
+    e.imul(RAX, Val::Int(2));
+
     e.ret();
 
 
@@ -533,6 +677,6 @@ fn main() {
         "{}",
         // I had been looking at a different address because I change rsp
         // and pushing which goes in the other direction
-        u64::from_le_bytes(e.memory[64..(64+8)].try_into().expect("Wrong size"))
+        u64::from_le_bytes(e.memory[mem_offset_size..(mem_offset_size+8)].try_into().expect("Wrong size"))
     );
 }
