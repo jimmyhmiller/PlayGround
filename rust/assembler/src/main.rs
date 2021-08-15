@@ -111,7 +111,7 @@ impl Label {
     fn add_called(&mut self, emitter: &mut Emitter) {
         let loc = (emitter.instruction_index + 4) as u32;
         if let Some(location) = self.location {
-            emitter.imm((location - loc).try_into().unwrap())
+            emitter.imm((location as i32 - loc as i32).try_into().unwrap())
         } else {
             emitter.imm(0);
         }
@@ -701,7 +701,6 @@ fn main() {
     // e.mov(Val::Reg(Register::RAX), Val::Int(22));
     // RBP is used for RIP here??
 
-    // overflowing. Need to fix
     e.mov(RAX, Val::Int(42));
     e.jmp_label("over".to_string());
     e.label("over2".to_string());
