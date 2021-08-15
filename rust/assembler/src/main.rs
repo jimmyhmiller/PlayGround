@@ -1,8 +1,9 @@
 use mmap::MapOption;
 use mmap::MemoryMap;
+use std::collections::HashMap;
 use std::convert::TryInto;
-use std::mem;
 use std::io::{self, Write};
+use std::mem;
 use std::process::Command;
 
 // https://github.com/sdiehl/tinyjit/blob/master/src/Assembler.hs
@@ -78,11 +79,55 @@ enum Instructions {
 
 #[derive(Debug, Eq, PartialEq)]
 #[allow(dead_code)]
+struct Label {
+    location: Option<u32>,
+    // Don't love this vector
+    called: Vec<u32>,
+}
+
+impl Label {
+    fn set_location(&mut self, emitter: &mut Emitter,) {
+        let loc = emitter.instruction_index;
+        if let Some(_) = self.location {
+            panic!("Setting Location twice {:?} at {}", self, loc);
+        }
+        self.location = Some(loc.try_into().unwrap());
+        self.patch(emitter);
+    }
+
+    fn patch(&mut self, emitter: &mut Emitter) {
+        if let None = self.location {
+            panic!("Patching without a location {:?}", self);
+        }
+        let label_loc = self.location.unwrap();
+        for location in self.called.iter() {
+            println!("loc {} {}", location, label_loc);
+            // Need to emit it back 4 from where we are relative to.
+            // It is relative to end of instruction
+            emitter.emit_i32_loc(*location - 4, (label_loc - location).try_into().unwrap());
+        }
+    }
+
+    fn add_called(&mut self, emitter: &mut Emitter) {
+        let loc = (emitter.instruction_index + 4) as u32;
+        if let Some(location) = self.location {
+            emitter.imm((location - loc).try_into().unwrap())
+        } else {
+            emitter.imm(0);
+        }
+        self.called.push(loc.try_into().unwrap());
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 struct Emitter<'a> {
     // Going to assume a page for the moment
     // Obviously not good enough forever
     memory: &'a mut [u8; 4096],
     instruction_index: usize,
+    // Is there a better, lighter-weight way?
+    labels: HashMap<String, Label>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -230,9 +275,57 @@ impl Instruction {
 
 #[allow(dead_code)]
 impl Emitter<'_> {
+    fn label(&mut self, name: String) {
+        // This is terrible and I'm sure there is a better way to make the
+        // type checker happy.
+        if self.labels.contains_key(&name) {
+            let mut label = self.labels.remove_entry(&name).unwrap();
+            label.1.set_location(self);
+            self.labels.insert(label.0, label.1);
+        } else {
+            let mut label = Label {
+                called: vec![],
+                location: None
+            };
+            label.set_location(self);
+            self.labels.insert(name, label);
+        }
+    }
+
+    fn jmp_label(&mut self, name: String) {
+        self.opcode(0xE9);
+
+        if self.labels.contains_key(&name) {
+            let mut label = self.labels.remove_entry(&name).unwrap();
+            label.1.add_called(self);
+            self.labels.insert(label.0, label.1);
+        } else {
+            let mut label = Label {
+                called: vec![],
+                location: None
+            };
+            label.add_called(self);
+            self.labels.insert(name, label);
+        }
+    }
+
+    fn emit(&mut self, bytes: &[u8]) {
+        for (i, byte) in bytes.iter().enumerate() {
+            self.memory[self.instruction_index + i] = *byte;
+            // println!("{:#04x}", self.memory[self.instruction_index + i]);
+        }
+        self.instruction_index += bytes.len();
+    }
+
     fn emit_u8(&mut self, byte: u8) {
         self.memory[self.instruction_index] = byte;
         self.instruction_index += 1;
+    }
+
+    fn emit_i32_loc(&mut self, loc: u32, rel: i32) {
+        for (i, byte) in rel.to_le_bytes().iter().enumerate() {
+            self.memory[loc as usize + i] = *byte;
+        }
     }
 
     fn opcode(&mut self, opcode: u8) {
@@ -266,14 +359,6 @@ impl Emitter<'_> {
 
     fn sib(&mut self, sib: Sib) {
         self.emit_u8(sib.scale.into_bytes() | sib.index.into_bytes() << 3 | sib.base.into_bytes());
-    }
-
-    fn emit(&mut self, bytes: &[u8]) {
-        for (i, byte) in bytes.iter().enumerate() {
-            self.memory[self.instruction_index + i] = *byte;
-            // println!("{:#04x}", self.memory[self.instruction_index + i]);
-        }
-        self.instruction_index += bytes.len();
     }
 
     fn imm(&mut self, i: i32) {
@@ -478,7 +563,6 @@ impl Emitter<'_> {
                     rm: Val::Reg(src),
                 });
                 self.imm(1);
-
             }
             _ => panic!("add not implemented for that combination"),
         }
@@ -545,7 +629,6 @@ impl Emitter<'_> {
     }
 
 
-
     fn push(&mut self, val: Val) {
         match val {
             Val::Int(i) => {
@@ -580,7 +663,6 @@ const RDI: Val = Val::Reg(Register::RDI);
 #[allow(dead_code)]
 const RSI: Val = Val::Reg(Register::RSI);
 
-
 #[allow(dead_code)]
 const RBX: Val = Val::Reg(Register::RBX);
 
@@ -606,11 +688,12 @@ fn main() {
     let e = &mut Emitter {
         memory: &mut my_memory,
         instruction_index: 0,
+        labels: HashMap::new(),
     };
 
     // If my code gets too big, I could overwrite this offset
-    let mem_offset = 4096-128;
-    let mem_offset_size : usize = mem_offset.try_into().unwrap();
+    let mem_offset = 4096 - 128;
+    let mem_offset_size: usize = mem_offset.try_into().unwrap();
 
     // Things are encoding properly. But I'm not doing anything that makes
     // sense. Need to make program that writes to memory and reads it back.
@@ -618,50 +701,67 @@ fn main() {
     // e.mov(Val::Reg(Register::RAX), Val::Int(22));
     // RBP is used for RIP here??
 
+    // overflowing. Need to fix
     e.mov(RAX, Val::Int(42));
-    e.sub(RAX, Val::Int(1));
-    e.mov(RSI, RDI);
-    // e.add(RDI, Val::Int(64));
-    // e.mov(RBX, RSP);
-    // e.mov(RSP, RDI);
-    e.mov(Val::AddrRegOffset(Register::RDI, mem_offset), Val::Reg(Register::RAX));
-    e.mov(RAX, Val::AddrRegOffset(Register::RDI, mem_offset));
-    e.add(RDI, Val::Int(mem_offset));
-    e.sub(RSI, Val::Int(1));
-    e.imul(RSI, Val::Int(2));
-    e.mov(RBX, Val::AddrReg(Register::RDI));
-    e.mov(Val::AddrReg(Register::RDI), RBX);
-    // e.mov(Val::AddrRegOffset(Register::RDI, 0), RBX);
-    e.push(Val::Reg(Register::RAX));
-    e.pop(Val::Reg(Register::RAX));
-    e.mov(RSI, RBX);
-    // e.mov(RAX, Val::Int(43));
-    e.and(RAX, RAX);
-    e.and(RAX, Val::Int(1));
-    e.and(RAX, RDI);
-    e.or(RAX, RAX);
-    e.or(RAX, Val::Int(1));
-    e.or(RAX, RSI);
-    e.add(RAX, RBX);
-    e.add(RAX, Val::Int(1));
-    e.imul(RAX, Val::Int(2));
-
+    e.jmp_label("over".to_string());
+    e.label("over2".to_string());
+    e.mov(RAX, Val::Int(22));
+    e.ret();
+    e.mov(RAX, Val::Int(0));
+    e.label("over".to_string());
+    e.jmp_label("over2".to_string());
     e.ret();
 
 
-   let result =  e.memory.iter().take(e.instruction_index).fold(String::new(),
-        |res, byte| res + &format!("{:02x}", byte)
-    );
+    // e.mov(RAX, Val::Int(42));
+    // e.sub(RAX, Val::Int(1));
+    // e.mov(RSI, RDI);
+    // // e.add(RDI, Val::Int(64));
+    // // e.mov(RBX, RSP);
+    // // e.mov(RSP, RDI);
+    // e.mov(
+    //     Val::AddrRegOffset(Register::RDI, mem_offset),
+    //     Val::Reg(Register::RAX),
+    // );
+    // e.mov(RAX, Val::AddrRegOffset(Register::RDI, mem_offset));
+    // e.add(RDI, Val::Int(mem_offset));
+    // e.sub(RSI, Val::Int(1));
+    // e.imul(RSI, Val::Int(2));
+
+    // e.mov(RBX, Val::AddrReg(Register::RDI));
+    // e.mov(Val::AddrReg(Register::RDI), RBX);
+    // // e.mov(Val::AddrRegOffset(Register::RDI, 0), RBX);
+    // e.push(Val::Reg(Register::RAX));
+    // e.pop(Val::Reg(Register::RAX));
+    // e.mov(RSI, RBX);
+    // // e.mov(RAX, Val::Int(43));
+    // e.and(RAX, RAX);
+    // e.and(RAX, Val::Int(1));
+    // e.and(RAX, RDI);
+    // e.or(RAX, RAX);
+    // e.or(RAX, Val::Int(1));
+    // e.or(RAX, RSI);
+    // e.add(RAX, RBX);
+    // e.add(RAX, Val::Int(1));
+    // e.imul(RAX, Val::Int(2));
+
+    // e.ret();
+
+    let result = e
+        .memory
+        .iter()
+        .take(e.instruction_index)
+        .fold(String::new(), |res, byte| res + &format!("{:02x}", byte));
 
     println!("{}", result);
     println!();
-   
-    let output =  Command::new("yaxdis")
-            .arg("-a")
-            .arg("x86_64")
-            .arg(result)
-            .output()
-            .expect("failed to execute process");
+
+    let output = Command::new("yaxdis")
+        .arg("-a")
+        .arg("x86_64")
+        .arg(result)
+        .output()
+        .expect("failed to execute process");
 
     println!("{}", String::from_utf8(output.stdout).unwrap());
 
@@ -677,6 +777,10 @@ fn main() {
         "{}",
         // I had been looking at a different address because I change rsp
         // and pushing which goes in the other direction
-        u64::from_le_bytes(e.memory[mem_offset_size..(mem_offset_size+8)].try_into().expect("Wrong size"))
+        u64::from_le_bytes(
+            e.memory[mem_offset_size..(mem_offset_size + 8)]
+                .try_into()
+                .expect("Wrong size")
+        )
     );
 }
