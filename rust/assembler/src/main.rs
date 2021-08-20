@@ -297,6 +297,19 @@ impl Emitter<'_> {
         }
     }
 
+    // Need to finish this.
+    // The idea is to put some value in a register
+    // and then be able to call it.
+    // fn label_in_reg(&mut self, label: String, reg: Val) {
+    //     if let Reg(reg) = Val {
+    //         // self.mov( )
+    //         self.add_label(label);
+    //     } else {
+    //         unimplemented!("Must be a register {:?}", reg),
+    //     }
+    // }
+
+
     fn add_label(&mut self, name: String) {
          if self.labels.contains_key(&name) {
             let mut label = self.labels.remove_entry(&name).unwrap();
