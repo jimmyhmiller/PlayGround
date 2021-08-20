@@ -335,6 +335,28 @@ impl Emitter<'_> {
         self.add_label(name);
     }
 
+    fn call_indirect(&mut self, reg: Val) {
+        match reg {
+            Val::Reg(addr) => {
+                self.opcode(0xff);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::U8(2),
+                    rm: Val::Reg(addr),
+                });
+            }
+            Val::AddrReg(addr) => {
+                self.opcode(0xff);
+                self.modrm(ModRM {
+                    mode: Mode::M00,
+                    reg: Val::U8(2),
+                    rm: Val::Reg(addr),
+                });
+            }
+            x => unimplemented!("Didn't handle case {:?}", x),
+        }
+    }
+
 
     fn emit(&mut self, bytes: &[u8]) {
         for (i, byte) in bytes.iter().enumerate() {
@@ -389,6 +411,10 @@ impl Emitter<'_> {
     }
 
     fn imm(&mut self, i: i32) {
+        self.emit(&i.to_le_bytes());
+    }
+
+    fn imm_usize(&mut self, i: usize) {
         self.emit(&i.to_le_bytes());
     }
 
@@ -826,6 +852,11 @@ const RBX: Val = Val::Reg(Register::RBX);
 #[allow(dead_code)]
 const RCX: Val = Val::Reg(Register::RCX);
 
+pub extern "C" fn print(x: u64) {
+    println!("HERE!!!! {}", x);
+}
+
+
 fn main() {
     let m = MemoryMap::new(
         4096,
@@ -921,6 +952,11 @@ fn main() {
     // e.add(RAX, Val::Int(1));
     // e.imul(RAX, Val::Int(2));
 
+    e.mov(RBX, RDI);
+    e.mov(RDI, Val::Int(32));
+    e.call_indirect(RBX);
+
+
     let sum = RDI;
     let counter = RSI;
     let div_3 = RBX;
@@ -961,6 +997,11 @@ fn main() {
 
     e.ret();
 
+    e.label("print".to_string());
+
+    let ptr = print as *const () as usize;
+    e.imm_usize(ptr);
+
 
 
     let result = e
@@ -987,8 +1028,9 @@ fn main() {
     // Need to figure out how I want to code this.
     // Need to deal with things that aren't really registers in modrm
 
-    let main_fn: extern "C" fn(*mut u8) -> i64 = unsafe { mem::transmute(m.data()) };
-    println!("Hello, world! {:}", main_fn(m.data()));
+    let ptr = print as *const ();
+    let main_fn: extern "C" fn(*const ()) -> i64 = unsafe { mem::transmute(m.data()) };
+    println!("Hello, world! {:}", main_fn(ptr));
     println!(
         "{}",
         // I had been looking at a different address because I change rsp
