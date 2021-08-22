@@ -62,26 +62,6 @@ enum Val {
     AddrRegOffset(Register, i32),
 }
 
-#[derive(Debug, Eq, PartialEq)]
-#[allow(dead_code)]
-enum Instructions {
-    Ret,
-    Mov(Val, Val),
-    Add(Val, Val),
-    Sub(Val, Val),
-    Mul(Val),       // unsigned?
-    IMul(Val, Val), // signed?
-    Xor(Val, Val),
-    Inc(Val),
-    Dec(Val),
-    Push(Val),
-    Pop(Val),
-    Call(Val),
-    Loop(Val),
-    Nop,
-    Syscall,
-    // Probably need to do some jumps
-}
 
 #[derive(Debug, Eq, PartialEq)]
 #[allow(dead_code)]
@@ -133,6 +113,7 @@ struct Emitter<'a> {
     instruction_index: usize,
     // Is there a better, lighter-weight way?
     labels: HashMap<String, Label>,
+    symbol_index: usize,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -280,6 +261,12 @@ impl Instruction {
 
 #[allow(dead_code)]
 impl Emitter<'_> {
+
+    fn new_symbol(&mut self, prefix: &str) -> String {
+        self.symbol_index += 1;
+        return format!("{}_{}", prefix, self.symbol_index);
+    }
+
     fn label(&mut self, name: String) {
         // This is terrible and I'm sure there is a better way to make the
         // type checker happy.
@@ -300,14 +287,20 @@ impl Emitter<'_> {
     // Need to finish this.
     // The idea is to put some value in a register
     // and then be able to call it.
-    // fn label_in_reg(&mut self, label: String, reg: Val) {
-    //     if let Reg(reg) = Val {
-    //         // self.mov( )
-    //         self.add_label(label);
-    //     } else {
-    //         unimplemented!("Must be a register {:?}", reg),
-    //     }
-    // }
+    fn label_in_reg(&mut self, label: String, reg: Val) -> Val {
+        if let Val::Reg(reg) = reg {
+            // 0 here is a placeholder that should
+            // be filled in by our label patcher
+            self.mov(Val::Reg(reg), Val::AddrRegOffset(Register::RBP, 10));
+            // Move the instruction pointer back
+            // 4 bytes (32 bit) so we patch the correct location;
+            self.instruction_index -= 4;
+            self.add_label(label);
+            return Val::Reg(reg);
+        } else {
+            unimplemented!("Must be a register {:?}", reg);
+        }
+    }
 
 
     fn add_label(&mut self, name: String) {
@@ -430,10 +423,16 @@ impl Emitter<'_> {
     fn imm_usize(&mut self, i: usize) {
         self.emit(&i.to_le_bytes());
     }
+    fn imm_i64(&mut self, i: i64) {
+        self.emit(&i.to_le_bytes());
+    }
 
     fn ret(&mut self) {
         self.opcode(0xC3);
     }
+
+
+    // All these instructions could be encoded in a much better way.
 
     // I could make it so there are multiple moves depending on type
 
@@ -452,6 +451,20 @@ impl Emitter<'_> {
                 });
                 self.imm(src);
             }
+            // This is RIP relative, make it better.
+            (Val::Reg(dst), Val::AddrRegOffset(Register::RBP, offset)) => {
+                self.rex(REX_W);
+                self.opcode(0x8b);
+                self.modrm(ModRM {
+                    mode: Mode::M00,
+                    reg: Val::Reg(dst),
+                    // Need to rethink what modrm takes, because it doesn't care about addrReg I don't think
+                    // I am just turning it into reg here becasue then the code will work.
+                    rm: Val::U8(5),
+                });
+                self.imm(offset);
+            }
+
             (Val::Reg(dst), Val::AddrReg(Register::RSP)) => {
                 self.rex(REX_W);
                 self.opcode(0x8b);
@@ -462,7 +475,6 @@ impl Emitter<'_> {
                     // I am just turning it into reg here becasue then the code will work.
                     rm: Val::Reg(dst),
                 });
-                self.emit(&[(Register::RSP.index()) | dst.index() << 3]);
                 // This seems like a completely special case. But is there a way for me to see it isn't?
                 // Maybe it jsut is.
                 self.sib(Sib {
@@ -536,6 +548,21 @@ impl Emitter<'_> {
                 });
             }
             _ => panic!("Mov not implemented for that combination"),
+        }
+    }
+
+    fn lea(&mut self, dst: Val, mem_src: Val) {
+        match (dst, mem_src) {
+            (Val::Reg(dst), Val::AddrReg(src)) => {
+                self.rex(REX_W);
+                self.opcode(0x8D);
+                self.modrm(ModRM {
+                    mode: Mode::M00,
+                    reg: Val::Reg(dst),
+                    rm: Val::Reg(src),
+                });
+            }
+            _ => panic!("Mov not implemented for that combination")
         }
     }
 
@@ -844,6 +871,122 @@ impl Emitter<'_> {
     }
 }
 
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+enum Lang {
+    Func { name: String, args: Vec<String>, body: Vec<Lang> },
+    Add(Box<Lang>, Box<Lang>),
+    Sub(Box<Lang>, Box<Lang>),
+    Mul(Box<Lang>, Box<Lang>),
+    // TODO: Div
+    If(Box<Lang>, Box<Lang>, Box<Lang>),
+    Equal(Box<Lang>, Box<Lang>),
+    Int(i32),
+    Call1(String, Box<Lang>),
+    Call2(String, Box<Lang>, Box<Lang>),
+    Call3(String, Box<Lang>, Box<Lang>, Box<Lang>),
+    While(Box<Lang>, Vec<Lang>),
+    True,
+    False,
+    Variable(String),
+    Return(Box<Lang>),
+}
+
+
+impl Lang {
+
+    #[allow(dead_code, unused_variables)]
+    fn compile(self, env: &mut HashMap<String, Val>, emitter: &mut Emitter) {
+        // let mut stack : Vec<Lang> = vec![];
+        // stack.push(self.clone());
+        // while let Some(expr) = stack.pop() {
+        match self {
+            // If I didn't want to push I would need a register allocator
+            Lang::Int(i) => emitter.push(Val::Int(i)),
+            Lang::True => emitter.push(Val::Int(1)),
+            Lang::False => emitter.push(Val::Int(0)),
+            Lang::Add(a, b) =>  {
+                (*b).compile(env, emitter);
+                (*a).compile(env, emitter);
+                // We need to think about registers :(
+                emitter.pop(RAX);
+                emitter.pop(RBX);
+                emitter.add(RAX, RBX);
+                emitter.push(RAX);
+            }
+            Lang::Sub(a, b) =>  {
+                (*b).compile(env, emitter);
+                (*a).compile(env, emitter);
+                // We need to think about registers :(
+                emitter.pop(RAX);
+                emitter.pop(RBX);
+                emitter.sub(RAX, RBX);
+                emitter.push(RAX);
+            }
+            Lang::Mul(a, b) =>  {
+                (*b).compile(env, emitter);
+                (*a).compile(env, emitter);
+                // We need to think about registers :(
+                emitter.pop(RAX);
+                emitter.pop(RBX);
+                emitter.imul(RAX, RBX);
+                emitter.push(RAX);
+            }
+            Lang::If(pred, t_branch, f_branch) => {
+                (*pred).compile(env, emitter);
+                let if_symbol = emitter.new_symbol("if");
+                let else_symbol = emitter.new_symbol("if");
+                emitter.pop(RAX);
+                emitter.cmp(RAX, Val::Int(1));
+                emitter.jump_label_not_equal(if_symbol.clone());
+                (*t_branch).compile(env, emitter);
+                emitter.jump_label(else_symbol.clone());
+                emitter.label(if_symbol);
+                (*f_branch).compile(env, emitter);
+                emitter.label(else_symbol);
+            }
+            Lang::Equal(a, b) => {
+                // Terrible way of doing this,
+                // But should work.
+                let eq_symbol = emitter.new_symbol("eq");
+                (*b).compile(env, emitter);
+                (*a).compile(env, emitter);
+                emitter.pop(RAX);
+                emitter.pop(RBX);
+                emitter.cmp(RAX, RBX);
+                emitter.mov(RAX, Val::Int(0));
+                emitter.jump_label_not_equal(eq_symbol.clone());
+                emitter.mov(RAX, Val::Int(1));
+                emitter.label(eq_symbol);
+                emitter.push(RAX);
+            }
+            Lang::Func{name, args, body} => {
+                let label = emitter.new_symbol(&format!("fn_{}", name));
+                emitter.label(label);
+                // Need to think about args
+                // If they are passed on the stack how should I reference them?
+                // Arg numbers and offst from RBP?
+                emitter.push(RBP);
+                emitter.mov(RBP, RSP);
+            }
+
+
+            Lang::Return(expr) => {
+                // Should this actually emitter.ret?
+                (*expr).compile(env, emitter);
+                emitter.pop(RAX);
+            },
+            _ => {}
+        }
+        // }
+    }
+}
+
+
+
+
+
 #[allow(dead_code)]
 const RAX: Val = Val::Reg(Register::RAX);
 
@@ -864,6 +1007,9 @@ const RBX: Val = Val::Reg(Register::RBX);
 
 #[allow(dead_code)]
 const RCX: Val = Val::Reg(Register::RCX);
+
+#[allow(dead_code)]
+const RBP: Val = Val::Reg(Register::RBP);
 
 pub extern "C" fn print(x: u64) {
     println!("HERE!!!! {}", x);
@@ -890,6 +1036,7 @@ fn main() {
         memory: &mut my_memory,
         instruction_index: 0,
         labels: HashMap::new(),
+        symbol_index: 0,
     };
 
     // If my code gets too big, I could overwrite this offset
@@ -970,43 +1117,56 @@ fn main() {
     e.call_indirect(RBX);
 
 
-    let sum = RDI;
-    let counter = RSI;
-    let div_3 = RBX;
-    let div_5 = RCX; 
-    // e.ret();
-    e.mov(sum, Val::Int(0)); // sum
-    e.mov(counter, Val::Int(3)); // counter
-    e.mov(div_3, Val::Int(3)); // const for division
-    e.mov(div_5, Val::Int(5)); // const for division
+    // Maybe make this better?
+    e.mov(RDI, Val::Int(42));
+    let reg = e.label_in_reg("print".to_string(), RBX);
+    e.call_indirect(reg);
+    e.mov(RAX, Val::Int(52));
 
-    e.label("main".to_string());
-    e.mov(RAX, counter);
-    e.xor(RDX, RDX);
-    e.div(div_3);
 
-    e.cmp(RDX, Val::Int(0));
-    e.jump_label_equal("sum".to_string());
+    // let sum = RDI;
+    // let counter = RSI;
+    // let div_3 = RBX;
+    // let div_5 = RCX; 
+    // // e.ret();
+    // e.mov(sum, Val::Int(0)); // sum
+    // e.mov(counter, Val::Int(3)); // counter
+    // e.mov(div_3, Val::Int(3)); // const for division
+    // e.mov(div_5, Val::Int(5)); // const for division
+
+    // e.label("main".to_string());
+    // e.mov(RAX, counter);
+    // e.xor(RDX, RDX);
+    // e.div(div_3);
+
+    // e.cmp(RDX, Val::Int(0));
+    // e.jump_label_equal("sum".to_string());
 
     
-    e.mov(RAX, counter);
-    e.xor(RDX, RDX);
-    e.div(div_5);
+    // e.mov(RAX, counter);
+    // e.xor(RDX, RDX);
+    // e.div(div_5);
 
-    e.cmp(RDX, Val::Int(0));
-    e.jump_label_not_equal("next".to_string());
+    // e.cmp(RDX, Val::Int(0));
+    // e.jump_label_not_equal("next".to_string());
 
-    e.label("sum".to_string());
-    e.add(sum, counter);
+    // e.label("sum".to_string());
+    // e.add(sum, counter);
 
-    e.label("next".to_string());
-    e.inc(counter);
-    e.cmp(counter, Val::Int(1000));
+    // e.label("next".to_string());
+    // e.inc(counter);
+    // e.cmp(counter, Val::Int(1000));
 
-    e.jump_label_not_equal("main".to_string());
+    // e.jump_label_not_equal("main".to_string());
 
-    e.mov(RAX, sum);
-
+    // e.mov(RAX, sum);
+    let env = &mut HashMap::new();
+    Lang::Return(Box::new(
+            Lang::If(Box::new(Lang::Equal(Box::new(Lang::Int(0)), Box::new(Lang::Int(0)))), 
+                Box::new(Lang::Int(42)), 
+                Box::new(Lang::Int(0))))).compile(env, e);
+    // Lang::Mul(Box::new(Lang::Int(3)), Box::new(Lang::Int(123)))
+    //     .compile(env, e);
 
     e.ret();
 
