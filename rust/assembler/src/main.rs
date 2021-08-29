@@ -870,6 +870,9 @@ impl Emitter<'_> {
 const FUNCTION_REGISTERS: [Val; 3] = [RDI, RSI, RDX];
 
 
+// Need to add a set!
+// Need to add a local variable declaration
+
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 enum Lang {

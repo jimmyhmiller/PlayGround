@@ -52,7 +52,7 @@ const useFetchPaginate = (initial, endpoint, count, initialOffset, f) => {
         })
         .then(resp => {
           if (resp.status === 401 && !window.location.toString().includes("oauth")) {
-            if (window.location.toString().includes("localhost")) {
+            if (window.location.toString().includes("localhost") || process.env.VERCEL_ENV !== "production") {
               console.log("Set the Auth Token!");
               return
             }
@@ -122,7 +122,7 @@ const ArticleInfo = ({ is_article, word_count }) => {
 }
 
 function nWords(str, n) {
-  return str.split(/\s+/).slice(0, n).join(" ");
+  return str?.split(/\s+/).slice(0, n).join(" ");
 }
 
 const Conditional = ({ exists, children }) => {
