@@ -284,13 +284,9 @@ impl Emitter<'_> {
         }
     }
 
-    // Need to finish this.
-    // The idea is to put some value in a register
-    // and then be able to call it.
     fn label_in_reg(&mut self, label: String, reg: Val) -> Val {
         if let Val::Reg(reg) = reg {
-            // 0 here is a placeholder that should
-            // be filled in by our label patcher
+
             self.mov(Val::Reg(reg), Val::AddrRegOffset(Register::RBP, 10));
             // Move the instruction pointer back
             // 4 bytes (32 bit) so we patch the correct location;
@@ -871,6 +867,8 @@ impl Emitter<'_> {
     }
 }
 
+const FUNCTION_REGISTERS: [Val; 3] = [RDI, RSI, RDX];
+
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -883,6 +881,7 @@ enum Lang {
     If(Box<Lang>, Box<Lang>, Box<Lang>),
     Equal(Box<Lang>, Box<Lang>),
     Int(i32),
+    Call0(String),
     Call1(String, Box<Lang>),
     Call2(String, Box<Lang>, Box<Lang>),
     Call3(String, Box<Lang>, Box<Lang>, Box<Lang>),
@@ -962,15 +961,64 @@ impl Lang {
                 emitter.push(RAX);
             }
             Lang::Func{name, args, body} => {
-                let label = emitter.new_symbol(&format!("fn_{}", name));
-                emitter.label(label);
-                // Need to think about args
-                // If they are passed on the stack how should I reference them?
-                // Arg numbers and offst from RBP?
-                emitter.push(RBP);
-                emitter.mov(RBP, RSP);
+                // I could make it so that functions are hot patchable
+                // by having some indirection here.
+
+                emitter.label(name);
+                // Probably need to setup stack at some point
+                // emitter.push(RBP);
+                // emitter.mov(RBP, RSP);
+
+                assert!(args.len() <= 3);
+                for (var, register) in args.iter().zip(FUNCTION_REGISTERS) {
+                    env.insert(var.to_string(), register);
+                }
+                for expr in body {
+                    expr.compile(env, emitter);
+                }
+                // Cleanup env
+                for var in args.iter() {
+                    env.remove_entry(var);
+                }
+                emitter.ret();
+                println!("{:?}", env);
             }
 
+            Lang::Call0(name) => {
+                emitter.call_label(name);
+                emitter.push(RAX);
+            }
+
+            Lang::Call1(name, arg) => {
+                arg.compile(env, emitter);
+                emitter.pop(FUNCTION_REGISTERS[0]);
+                emitter.call_label(name);
+                emitter.push(RAX);
+            }
+
+            Lang::Call2(name, arg1, arg2) => {
+                arg1.compile(env, emitter);
+                emitter.pop(FUNCTION_REGISTERS[0]);
+                arg2.compile(env, emitter);
+                emitter.pop(FUNCTION_REGISTERS[1]);
+                emitter.call_label(name);
+                emitter.push(RAX);
+            }
+
+            Lang::Call3(name, arg1, arg2, arg3) => {
+                arg1.compile(env, emitter);
+                emitter.pop(FUNCTION_REGISTERS[0]);
+                arg2.compile(env, emitter);
+                emitter.pop(FUNCTION_REGISTERS[1]);
+                arg3.compile(env, emitter);
+                emitter.pop(FUNCTION_REGISTERS[2]);
+                emitter.call_label(name);
+                emitter.push(RAX);
+            }
+
+            Lang::Variable(name) => {
+                emitter.push(*env.get(&name).unwrap());
+            }
 
             Lang::Return(expr) => {
                 // Should this actually emitter.ret?
@@ -1112,16 +1160,16 @@ fn main() {
     // e.add(RAX, Val::Int(1));
     // e.imul(RAX, Val::Int(2));
 
-    e.mov(RBX, RDI);
-    e.mov(RDI, Val::Int(32));
-    e.call_indirect(RBX);
+    // e.mov(RBX, RDI);
+    // e.mov(RDI, Val::Int(32));
+    // e.call_indirect(RBX);
 
 
     // Maybe make this better?
-    e.mov(RDI, Val::Int(42));
-    let reg = e.label_in_reg("print".to_string(), RBX);
-    e.call_indirect(reg);
-    e.mov(RAX, Val::Int(52));
+    // e.mov(RDI, Val::Int(42));
+    // let reg = e.label_in_reg("print".to_string(), RBX);
+    // e.call_indirect(reg);
+    // e.mov(RAX, Val::Int(52));
 
 
     // let sum = RDI;
@@ -1161,14 +1209,53 @@ fn main() {
 
     // e.mov(RAX, sum);
     let env = &mut HashMap::new();
+
+
+
+    // If I want to put functions first, I would need to tell the program what
+    // address to start at.
+    // Lang::Return(Box::new(
+    //         Lang::If(Box::new(Lang::Equal(Box::new(Lang::Int(0)), Box::new(Lang::Int(0)))), 
+    //             Box::new(Lang::Call1("answer".to_string(), Box::new(Lang::Int(32)))), 
+    //             Box::new(Lang::Int(0))))).compile(env, e);
+
+
     Lang::Return(Box::new(
             Lang::If(Box::new(Lang::Equal(Box::new(Lang::Int(0)), Box::new(Lang::Int(0)))), 
-                Box::new(Lang::Int(42)), 
+                Box::new(Lang::Call3("add3".to_string(), Box::new(Lang::Int(2)), Box::new(Lang::Int(13)), Box::new(Lang::Int(4)))), 
                 Box::new(Lang::Int(0))))).compile(env, e);
-    // Lang::Mul(Box::new(Lang::Int(3)), Box::new(Lang::Int(123)))
-    //     .compile(env, e);
+
 
     e.ret();
+
+
+
+    Lang::Func {
+        name: "answer".to_string(),
+        args: vec!["x".to_string()],
+        body: vec![
+            Lang::Return(Box::new(Lang::Variable("x".to_string()))),
+        ]
+    }.compile(env, e);
+
+
+    Lang::Func {
+        name: "add3".to_string(),
+        args: vec!["x".to_string(), "y".to_string(), "z".to_string()],
+        body: vec![
+            Lang::Return(Box::new(
+                Lang::Add(
+                Box::new(Lang::Add(Box::new(Lang::Variable("x".to_string())), Box::new(Lang::Variable("y".to_string())))),
+                Box::new(Lang::Variable("z".to_string()))
+
+                )
+            ))
+        ]
+    }.compile(env, e);
+
+
+    // Lang::Mul(Box::new(Lang::Int(3)), Box::new(Lang::Int(123)))
+    //     .compile(env, e);
 
     e.label("print".to_string());
 
