@@ -21,7 +21,7 @@ const httpRequest = ({ method, body, url }) => {
 }
 
 
-const Entry = ({ name, calories, first }) => (
+const Entry = ({ name, calories, first, summary }) => (
   <div>
     <button
       onClick={async () => {
@@ -35,7 +35,7 @@ const Entry = ({ name, calories, first }) => (
             date: today()
           }
         })
-        trigger("/api/entry?summary=true");
+        mutate("/api/entry?summary=true", subtractRemaining({ summary, calories}));
       }}
       className="entry"
       style={{
@@ -157,10 +157,10 @@ const AddEntry = ({ summary }) => {
   const [calories, setCalories] = useState("");
   return (
     <>
-      <Entry name="Bowl" calories={850} first />
-      <Entry name="Cortado" calories={100} />
-      <Entry name="Biscuit" calories={185} />
-      <Entry name="1 Mile Walk" calories={-100} />
+      <Entry name="Bowl" calories={850} first summary={summary} />
+      <Entry name="Cortado" calories={10} summary={summary} />
+      <Entry name="Biscuit" calories={185} summary={summary} />
+      <Entry name="1 Mile Walk" calories={-100} summary={summary} />
       {/*Ugly*/}
       <input
         value={calories}
