@@ -37,10 +37,6 @@ const drawGraph = (canvasRef) => {
     ctx.lineTo(x * widthFactor, height - (height * y));
   }
 
-  // ctx.lineTo(0, 0);
-  // ctx.lineTo(100, height-100);
-  // ctx.lineTo(200,  height-100);
-  // ctx.lineTo(300, height-10);
   ctx.closePath();
   ctx.stroke();
   ctx.fill();
@@ -53,11 +49,6 @@ const drawGraph = (canvasRef) => {
   for (let [x, y] of nums2) {
     ctx.lineTo(500 + (400 - (x * widthFactor)), height - (height * y));
   }
-
-  // ctx.lineTo(0, 0);
-  // ctx.lineTo(100, height-100);
-  // ctx.lineTo(200,  height-100);
-  // ctx.lineTo(300, height-10);
   ctx.closePath();
   ctx.stroke();
   ctx.fill();
