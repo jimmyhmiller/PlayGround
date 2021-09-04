@@ -6,6 +6,9 @@ import { useRef, useState, useEffect } from 'react';
 // Need to think about "hello world" for my game.
 // Probably need to think about frame rate independent movement.
 
+// I also need to ensure I can control multiple "players", because
+// that is in my plans for this game.
+
 
 // I probably want my y axis to be zero at the bottom.
 // That is why gravity is backwards right now
@@ -35,14 +38,14 @@ const updateState = (t, state) => {
     state.player.x -= 10;
   }
 
+  // This is kinda sorta wrong, because at peek it should be 0 too.
+  // it doesn't happen to be. But I should think about that more.
   if (state.keys.up && state.player.vy === 0) {
     state.player.vy -= 40;
   }
 
   // Totally arbitrary number
-  // That is wrong and needs to change
-  // because I need a delta instead of just t.
-  const {y, vy} = gravity(t/1000000, state.player.vy, state.player.y);
+  const {y, vy} = gravity(t/30, state.player.vy, state.player.y);
   state.player.y = y;
   state.player.vy = vy;
 
@@ -118,7 +121,7 @@ const Canvas = () => {
   const state = useRef({
     player: {
       x: 0,
-      y: 0,
+      y: 400,
       vy: 0,
       vx: 10,
     },
@@ -150,9 +153,9 @@ const Canvas = () => {
     let start = performance.now();
     let elapsed = 0;
     let id = requestAnimationFrame(function animate(t) {
-      // Pretty sure this t just keeps increasing and I actually need
-      // a delta t.
-      updateState(t, state.current);
+      elapsed = t - start;
+      start = t;
+      updateState(elapsed, state.current);
       draw(state.current, canvasRef);
       id = requestAnimationFrame(animate);
     });
