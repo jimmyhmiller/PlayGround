@@ -40,6 +40,8 @@ const updateState = (t, state) => {
   }
 
   // Totally arbitrary number
+  // That is wrong and needs to change
+  // because I need a delta instead of just t.
   const {y, vy} = gravity(t/1000000, state.player.vy, state.player.y);
   state.player.y = y;
   state.player.vy = vy;
@@ -118,7 +120,7 @@ const Canvas = () => {
       x: 0,
       y: 0,
       vy: 0,
-      vx: 0,
+      vx: 10,
     },
     keys: {
       up: false,
@@ -148,6 +150,8 @@ const Canvas = () => {
     let start = performance.now();
     let elapsed = 0;
     let id = requestAnimationFrame(function animate(t) {
+      // Pretty sure this t just keeps increasing and I actually need
+      // a delta t.
       updateState(t, state.current);
       draw(state.current, canvasRef);
       id = requestAnimationFrame(animate);
