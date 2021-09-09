@@ -39,32 +39,6 @@
 (defn make-pdf-id []
   (str "pdf_" (uuid-ish)))
 
-(defn make-board-with-pdf [{:keys [pdf-name label]}]
-  (let [id (make-board-id)
-        pdf-id (make-pdf-id)]
-    {:documents
-     {id
-      {:cards [{:document_id pdf-id
-                :position_x 95,
-                :position_y 88,
-                :size_height 150,
-                :size_width 200,
-                :z 2}],
-       :created_at (now)
-       :ink_models {:0 {}},
-       :label label
-       :should_auto_resize_card true,
-       :snapshot_scale 0.30674847960472107,
-       :type "board"},
-      pdf-id
-      {:created_at (now)
-       :ink_models {},
-       :label label
-       :original_file pdf-name
-       :type "pdf"}},
-     :root id}))
-
-
 (defn add-board [context {:keys [label cards id parent-id position size]}]
   (let [board-id (or id (make-board-id))]
     (cond-> context
@@ -76,7 +50,7 @@
                  :label label
                  :should_auto_resize_card true,
                  ;; Probably need to figure this out
-                 :snapshot_scale 0.30674847960472107,
+                 :snapshot_scale 0.15
                  :type "board"})
 
       parent-id
@@ -153,9 +127,8 @@
   (let [board-id (make-board-id)]
     (-> context
         (add-board {:id board-id :label label :parent-id parent-id :position position})
-        (add-pdf {:label label :file file :position {:x 20 :y 20} :parent-id board-id}))))
+        (add-pdf {:label label :file file :position {:x 50 :y 110} :parent-id board-id}))))
 
-(def pdfs (repeat  10 {}))
 
 (defn make-pdf-grid [context parent-id [label pdfs]]
   (reduce (fn [context {:keys [label file position]}]
@@ -164,7 +137,7 @@
                                       :parent-id parent-id
                                       :position position}))
           context
-          (grid-locations pdfs {:margin 80 :elem-width 250 :elem-height 150 :width-max 2000})))
+          (grid-locations pdfs {:margin 80 :elem-width 185 :elem-height 250 :width-max 1400})))
 
 (defn finalize-context [context]
   (let [contents (.getBytes (json/generate-string (:muse context)))
@@ -179,7 +152,12 @@
     (.close (:zip context))))
 
 
-
+(defn get-article-name [file]
+  (-> file
+      (.getName)
+      (string/split #"-")
+      last
+      (string/replace ".pdf" "")))
 
 (def worrydream-files-by-author
   (->> (file-seq (io/file "/Users/jimmyhmiller/Desktop/worrydream/worrydream.com/refs"))
@@ -189,43 +167,45 @@
        (group-by (comp extract-author-from-name :label))
        (sort-by (comp count second))
        reverse
-       (take 2)
+       (map (fn [[author pdfs]]
+              [author (map (fn [{:keys [file] :as context}]
+                             (assoc context :label (get-article-name file)))
+                           pdfs)])
+            )
+       #_(take 2)
        #_(take-while #(> (count (second %)) 1))
-       (into {})))
+       #_(into {})))
 
-
-
-
-(map (juxt first (comp count second))
-     (reverse (sort-by (comp count second) worrydream-files-by-author)))
 
 ;; This is close, but sizing isn't working properly. Probably need to play with how that works
 (defn make-pdf-grid-all-authors [context author-groups]
-  (reduce (fn [context [author pdfs]]
+  (reduce (fn [context {:keys [author pdfs position]}]
             (let [board-id (make-board-id)]
               (-> context
                   (add-board {:id board-id
                               :label author
                               :parent-id  (get-in context [:muse :root])
                               ;; Need to change position
-                              :position {:x 60 :y 60}})
+                              :position position})
                   (make-pdf-grid board-id [author pdfs]))))
           context
-          author-groups))
+          (grid-locations
+           (map (fn [[author pdfs]]
+                  {:author author
+                   :pdfs pdfs})
+                author-groups)
+           {:margin 80 :elem-width 250 :elem-height 150 :width-max 1400})))
 
 
 
-(let [root (make-board-id)]
-  (-> (initial-context {:output-path "/Users/jimmyhmiller/Downloads/test2.muse"})
-      (add-root {:id root :label "Future of Coding"})
-      (make-pdf-grid-all-authors worrydream-files-by-author)
-      (finalize-context)))
+(defn produce-whole-future-of-coding-board []
+  (let [root (make-board-id)]
+    (-> (initial-context {:output-path "/Users/jimmyhmiller/Downloads/test2.muse"})
+        (add-root {:id root :label "Future of Coding"})
+        (make-pdf-grid-all-authors worrydream-files-by-author)
+        (finalize-context))))
 
-
-(last (sort-by (comp count second) worrydream-files-by-author))
-
-
-
+(produce-whole-future-sof-coding-board)
 
 
 (defn file-name-f [f]
@@ -239,33 +219,56 @@
 
 
 
+(comment
 
 
+  (defn make-board-with-pdf [{:keys [pdf-name label]}]
+    (let [id (make-board-id)
+          pdf-id (make-pdf-id)]
+      {:documents
+       {id
+        {:cards [{:document_id pdf-id
+                  :position_x 95,
+                  :position_y 88,
+                  :size_height 150,
+                  :size_width 200,
+                  :z 2}],
+         :created_at (now)
+         :ink_models {:0 {}},
+         :label label
+         :should_auto_resize_card true,
+         :snapshot_scale 0.30674847960472107,
+         :type "board"},
+        pdf-id
+        {:created_at (now)
+         :ink_models {},
+         :label label
+         :original_file pdf-name
+         :type "pdf"}},
+       :root id}))
+  
+  (do
+    (def file (io/file "/Users/jimmyhmiller/Downloads/test.muse"))
+    (def out (ZipOutputStream. (io/output-stream file)))
 
+    (.putNextEntry out (ZipEntry. "Board 2021-09-06 11.03.15/"))
+    (.putNextEntry out (ZipEntry. "Board 2021-09-06 11.03.15/contents.json"))
 
+    (def contents (.getBytes (json/generate-string (make-board-with-pdf {:pdf-name"mypdf.pdf" :label "Hello World!"}))))
+    (.write out contents 0 (alength contents))
+    (.closeEntry out)
+    (.putNextEntry out (ZipEntry. "Board 2021-09-06 11.03.15/metadata.json"))
+    (def metadata (.getBytes (slurp "/Users/jimmyhmiller/Downloads/Board 2021-09-05 21.03.15/metadata.json")))
+    (.write out metadata 0 (alength metadata))
+    (.closeEntry out)
 
-(do
-  (def file (io/file "/Users/jimmyhmiller/Downloads/test.muse"))
-  (def out (ZipOutputStream. (io/output-stream file)))
+    (.putNextEntry out (ZipEntry. "Board 2021-09-06 11.03.15/files/"))
+    (.putNextEntry out (ZipEntry. "Board 2021-09-06 11.03.15/files/mypdf.pdf"))
+    (def pdf (slurp-bytes "/Users/jimmyhmiller/Downloads/Realism and Reason/files/pdf_a9d11ad6cd8341a9a9fc3aa035b046ea_original.pdf"))
+    (.write out pdf 0 (alength pdf))
+    (.closeEntry out)
 
-  (.putNextEntry out (ZipEntry. "Board 2021-09-06 11.03.15/"))
-  (.putNextEntry out (ZipEntry. "Board 2021-09-06 11.03.15/contents.json"))
-
-  (def contents (.getBytes (json/generate-string (make-board-with-pdf {:pdf-name"mypdf.pdf" :label "Hello World!"}))))
-  (.write out contents 0 (alength contents))
-  (.closeEntry out)
-  (.putNextEntry out (ZipEntry. "Board 2021-09-06 11.03.15/metadata.json"))
-  (def metadata (.getBytes (slurp "/Users/jimmyhmiller/Downloads/Board 2021-09-05 21.03.15/metadata.json")))
-  (.write out metadata 0 (alength metadata))
-  (.closeEntry out)
-
-  (.putNextEntry out (ZipEntry. "Board 2021-09-06 11.03.15/files/"))
-  (.putNextEntry out (ZipEntry. "Board 2021-09-06 11.03.15/files/mypdf.pdf"))
-  (def pdf (slurp-bytes "/Users/jimmyhmiller/Downloads/Realism and Reason/files/pdf_a9d11ad6cd8341a9a9fc3aa035b046ea_original.pdf"))
-  (.write out pdf 0 (alength pdf))
-  (.closeEntry out)
-
-  (.close out))
+    (.close out)))
 
 
 
