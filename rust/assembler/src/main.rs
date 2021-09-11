@@ -6,9 +6,6 @@ use std::io::{self, Write};
 use std::mem;
 use std::process::Command;
 
-
-
-
 /// Notes:
 // All my jumps are rel32
 // I should probably expand labels or some way of referencing things outside
@@ -25,6 +22,7 @@ enum Register {
     RSP,
     RSI,
     RDI,
+    RIP,
     // These require some different encoding
     // Need to understand these better
     // R8,
@@ -48,6 +46,7 @@ impl Register {
             Register::RBP => 5,
             Register::RSI => 6,
             Register::RDI => 7,
+            Register::RIP => panic!("Try to get index for RIP"),
         }
     }
 }
@@ -62,7 +61,6 @@ enum Val {
     AddrRegOffset(Register, i32),
 }
 
-
 #[derive(Debug, Eq, PartialEq)]
 #[allow(dead_code)]
 struct Label {
@@ -72,7 +70,7 @@ struct Label {
 }
 
 impl Label {
-    fn set_location(&mut self, emitter: &mut Emitter,) {
+    fn set_location(&mut self, emitter: &mut Emitter) {
         let loc = emitter.instruction_index;
         if let Some(_) = self.location {
             panic!("Setting Location twice {:?} at {}", self, loc);
@@ -261,7 +259,6 @@ impl Instruction {
 
 #[allow(dead_code)]
 impl Emitter<'_> {
-
     fn new_symbol(&mut self, prefix: &str) -> String {
         self.symbol_index += 1;
         return format!("{}_{}", prefix, self.symbol_index);
@@ -277,7 +274,7 @@ impl Emitter<'_> {
         } else {
             let mut label = Label {
                 called: vec![],
-                location: None
+                location: None,
             };
             label.set_location(self);
             self.labels.insert(name, label);
@@ -286,8 +283,7 @@ impl Emitter<'_> {
 
     fn label_in_reg(&mut self, label: String, reg: Val) -> Val {
         if let Val::Reg(reg) = reg {
-
-            self.mov(Val::Reg(reg), Val::AddrRegOffset(Register::RBP, 10));
+            self.mov(Val::Reg(reg), Val::AddrRegOffset(Register::RIP, 10));
             // Move the instruction pointer back
             // 4 bytes (32 bit) so we patch the correct location;
             self.instruction_index -= 4;
@@ -298,16 +294,15 @@ impl Emitter<'_> {
         }
     }
 
-
     fn add_label(&mut self, name: String) {
-         if self.labels.contains_key(&name) {
+        if self.labels.contains_key(&name) {
             let mut label = self.labels.remove_entry(&name).unwrap();
             label.1.add_called(self);
             self.labels.insert(label.0, label.1);
         } else {
             let mut label = Label {
                 called: vec![],
-                location: None
+                location: None,
             };
             label.add_called(self);
             self.labels.insert(name, label);
@@ -318,7 +313,6 @@ impl Emitter<'_> {
         self.opcode(0xE9);
         self.add_label(name);
     }
-
 
     fn jump_label_equal(&mut self, name: String) {
         self.opcode(0x0F);
@@ -358,7 +352,6 @@ impl Emitter<'_> {
             x => unimplemented!("Didn't handle case {:?}", x),
         }
     }
-
 
     fn emit(&mut self, bytes: &[u8]) {
         for (i, byte) in bytes.iter().enumerate() {
@@ -427,6 +420,9 @@ impl Emitter<'_> {
         self.opcode(0xC3);
     }
 
+    fn leave(&mut self) {
+        self.opcode(0xC9);
+    }
 
     // All these instructions could be encoded in a much better way.
 
@@ -447,8 +443,7 @@ impl Emitter<'_> {
                 });
                 self.imm(src);
             }
-            // This is RIP relative, make it better.
-            (Val::Reg(dst), Val::AddrRegOffset(Register::RBP, offset)) => {
+            (Val::Reg(dst), Val::AddrRegOffset(Register::RIP, offset)) => {
                 self.rex(REX_W);
                 self.opcode(0x8b);
                 self.modrm(ModRM {
@@ -558,7 +553,7 @@ impl Emitter<'_> {
                     rm: Val::Reg(src),
                 });
             }
-            _ => panic!("Mov not implemented for that combination")
+            _ => panic!("Mov not implemented for that combination"),
         }
     }
 
@@ -690,7 +685,6 @@ impl Emitter<'_> {
         }
     }
 
-
     fn and(&mut self, val1: Val, val2: Val) {
         match (val1, val2) {
             (Val::Reg(Register::RAX), Val::Int(src)) => {
@@ -781,7 +775,6 @@ impl Emitter<'_> {
         }
     }
 
-
     fn cmp(&mut self, val1: Val, val2: Val) {
         match (val1, val2) {
             (Val::Reg(Register::RAX), Val::Int(src)) => {
@@ -843,8 +836,6 @@ impl Emitter<'_> {
         }
     }
 
-
-
     fn push(&mut self, val: Val) {
         match val {
             Val::Int(i) => {
@@ -869,14 +860,17 @@ impl Emitter<'_> {
 
 const FUNCTION_REGISTERS: [Val; 3] = [RDI, RSI, RDX];
 
-
 // Need to add a set!
 // Need to add a local variable declaration
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 enum Lang {
-    Func { name: String, args: Vec<String>, body: Vec<Lang> },
+    Func {
+        name: String,
+        args: Vec<String>,
+        body: Vec<Lang>,
+    },
     Add(Box<Lang>, Box<Lang>),
     Sub(Box<Lang>, Box<Lang>),
     Mul(Box<Lang>, Box<Lang>),
@@ -891,13 +885,12 @@ enum Lang {
     While(Box<Lang>, Vec<Lang>),
     True,
     False,
+    Let(String, Box<Lang>),
     Variable(String),
     Return(Box<Lang>),
 }
 
-
 impl Lang {
-
     #[allow(dead_code, unused_variables)]
     fn compile(self, env: &mut HashMap<String, Val>, emitter: &mut Emitter) {
         // let mut stack : Vec<Lang> = vec![];
@@ -908,7 +901,7 @@ impl Lang {
             Lang::Int(i) => emitter.push(Val::Int(i)),
             Lang::True => emitter.push(Val::Int(1)),
             Lang::False => emitter.push(Val::Int(0)),
-            Lang::Add(a, b) =>  {
+            Lang::Add(a, b) => {
                 (*b).compile(env, emitter);
                 (*a).compile(env, emitter);
                 // We need to think about registers :(
@@ -917,7 +910,7 @@ impl Lang {
                 emitter.add(RAX, RBX);
                 emitter.push(RAX);
             }
-            Lang::Sub(a, b) =>  {
+            Lang::Sub(a, b) => {
                 (*b).compile(env, emitter);
                 (*a).compile(env, emitter);
                 // We need to think about registers :(
@@ -926,7 +919,7 @@ impl Lang {
                 emitter.sub(RAX, RBX);
                 emitter.push(RAX);
             }
-            Lang::Mul(a, b) =>  {
+            Lang::Mul(a, b) => {
                 (*b).compile(env, emitter);
                 (*a).compile(env, emitter);
                 // We need to think about registers :(
@@ -963,25 +956,70 @@ impl Lang {
                 emitter.label(eq_symbol);
                 emitter.push(RAX);
             }
-            Lang::Func{name, args, body} => {
+
+            Lang::Let(name, expr) => {
+                expr.compile(env, emitter);
+                emitter.pop(RAX);
+                emitter.mov(*env.get(&name).unwrap(), RAX);
+            }
+
+            Lang::Func { name, args, body } => {
                 // I could make it so that functions are hot patchable
                 // by having some indirection here.
 
                 emitter.label(name);
                 // Probably need to setup stack at some point
-                // emitter.push(RBP);
-                // emitter.mov(RBP, RSP);
+                emitter.push(RBP);
+                emitter.mov(RBP, RSP);
+
+                // TODO: need to actually add compile for let
+
+                // This whole local var handling is a mess.
+                let local_var_count = {
+                    let mut count = 0;
+                    for expr in &body {
+                        if let Lang::Let(_, _) = expr {
+                            count += 1;
+                        }
+                    }
+                    count
+                };
+                let mut local_vars: Vec<String> = Vec::with_capacity(local_var_count);
+
+                // Make room for our local vars
+                // Could deal with stack alignment here?
+                // If I care about that in this JITed deal.
+                emitter.sub(RSP, Val::Int(local_var_count as i32 * 8));
 
                 assert!(args.len() <= 3);
                 for (var, register) in args.iter().zip(FUNCTION_REGISTERS) {
                     env.insert(var.to_string(), register);
                 }
+                let mut current_local_var = 1;
                 for expr in body {
-                    expr.compile(env, emitter);
+                    match expr {
+                        Lang::Let(ref name, _) => {
+                            env.insert(
+                                name.to_string(),
+                                Val::AddrRegOffset(Register::RBP, current_local_var * -8),
+                            );
+                            local_vars.push(name.to_string());
+                            current_local_var += 1;
+                            expr.compile(env, emitter);
+                        }
+                        expr => expr.compile(env, emitter),
+                    }
                 }
+
+                emitter.leave();
+
+                // If I'm shadowing this is going to be a problem
                 // Cleanup env
                 for var in args.iter() {
                     env.remove_entry(var);
+                }
+                for name in &local_vars {
+                    env.remove_entry(name);
                 }
                 emitter.ret();
                 println!("{:?}", env);
@@ -1020,23 +1058,26 @@ impl Lang {
             }
 
             Lang::Variable(name) => {
-                emitter.push(*env.get(&name).unwrap());
+                let val = *env.get(&name).unwrap();
+                match val {
+                    Val::AddrRegOffset(_, _) => {
+                        emitter.mov(RAX, val);
+                        emitter.push(RAX);
+                    }
+                    _ => emitter.push(val),
+                }
             }
 
             Lang::Return(expr) => {
                 // Should this actually emitter.ret?
                 (*expr).compile(env, emitter);
                 emitter.pop(RAX);
-            },
+            }
             _ => {}
         }
         // }
     }
 }
-
-
-
-
 
 #[allow(dead_code)]
 const RAX: Val = Val::Reg(Register::RAX);
@@ -1065,7 +1106,6 @@ const RBP: Val = Val::Reg(Register::RBP);
 pub extern "C" fn print(x: u64) {
     println!("HERE!!!! {}", x);
 }
-
 
 fn main() {
     let m = MemoryMap::new(
@@ -1100,7 +1140,6 @@ fn main() {
     // e.mov(Val::Reg(Register::RAX), Val::Int(22));
     // RBP is used for RIP here??
 
-
     // e.jump_label("over".to_string());
     // e.label("over2".to_string());
     // e.mov(RAX, Val::Int(22));
@@ -1129,7 +1168,6 @@ fn main() {
     // e.div(RDI);
     // // e.mov(RAX, RDX);
     // e.ret();
-
 
     // e.mov(RAX, Val::Int(42));
     // e.sub(RAX, Val::Int(1));
@@ -1167,18 +1205,16 @@ fn main() {
     // e.mov(RDI, Val::Int(32));
     // e.call_indirect(RBX);
 
-
     // Maybe make this better?
     // e.mov(RDI, Val::Int(42));
     // let reg = e.label_in_reg("print".to_string(), RBX);
     // e.call_indirect(reg);
     // e.mov(RAX, Val::Int(52));
 
-
     // let sum = RDI;
     // let counter = RSI;
     // let div_3 = RBX;
-    // let div_5 = RCX; 
+    // let div_5 = RCX;
     // // e.ret();
     // e.mov(sum, Val::Int(0)); // sum
     // e.mov(counter, Val::Int(3)); // counter
@@ -1193,7 +1229,6 @@ fn main() {
     // e.cmp(RDX, Val::Int(0));
     // e.jump_label_equal("sum".to_string());
 
-    
     // e.mov(RAX, counter);
     // e.xor(RDX, RDX);
     // e.div(div_5);
@@ -1213,25 +1248,30 @@ fn main() {
     // e.mov(RAX, sum);
     let env = &mut HashMap::new();
 
-
-
     // If I want to put functions first, I would need to tell the program what
     // address to start at.
     // Lang::Return(Box::new(
-    //         Lang::If(Box::new(Lang::Equal(Box::new(Lang::Int(0)), Box::new(Lang::Int(0)))), 
-    //             Box::new(Lang::Call1("answer".to_string(), Box::new(Lang::Int(32)))), 
+    //         Lang::If(Box::new(Lang::Equal(Box::new(Lang::Int(0)), Box::new(Lang::Int(0)))),
+    //             Box::new(Lang::Call1("answer".to_string(), Box::new(Lang::Int(32)))),
     //             Box::new(Lang::Int(0))))).compile(env, e);
 
+    // Need to think about calling builtin functions.
+    // They will be indirect calls and I don't have a good notion of that.
+    // If I made first class pointers and derefs though I could right?
 
-    Lang::Return(Box::new(
-            Lang::If(Box::new(Lang::Equal(Box::new(Lang::Int(0)), Box::new(Lang::Int(0)))), 
-                Box::new(Lang::Call3("add3".to_string(), Box::new(Lang::Int(2)), Box::new(Lang::Int(13)), Box::new(Lang::Int(4)))), 
-                Box::new(Lang::Int(0))))).compile(env, e);
-
+    Lang::Return(Box::new(Lang::If(
+        Box::new(Lang::Equal(Box::new(Lang::Int(0)), Box::new(Lang::Int(0)))),
+        Box::new(Lang::Call3(
+            "add3".to_string(),
+            Box::new(Lang::Int(2)),
+            Box::new(Lang::Int(13)),
+            Box::new(Lang::Int(4)),
+        )),
+        Box::new(Lang::Int(0)),
+    )))
+    .compile(env, e);
 
     e.ret();
-
-
 
     Lang::Func {
         name: "answer".to_string(),
@@ -1241,21 +1281,23 @@ fn main() {
         ]
     }.compile(env, e);
 
-
     Lang::Func {
         name: "add3".to_string(),
         args: vec!["x".to_string(), "y".to_string(), "z".to_string()],
         body: vec![
-            Lang::Return(Box::new(
-                Lang::Add(
-                Box::new(Lang::Add(Box::new(Lang::Variable("x".to_string())), Box::new(Lang::Variable("y".to_string())))),
-                Box::new(Lang::Variable("z".to_string()))
-
-                )
-            ))
-        ]
-    }.compile(env, e);
-
+            Lang::Let("q".to_string(), Box::new(Lang::Variable("x".to_string()))),
+            Lang::Let("r".to_string(), Box::new(Lang::Variable("y".to_string()))),
+            Lang::Let("s".to_string(), Box::new(Lang::Variable("z".to_string()))),
+            Lang::Return(Box::new(Lang::Add(
+                Box::new(Lang::Add(
+                    Box::new(Lang::Variable("q".to_string())),
+                    Box::new(Lang::Variable("r".to_string())),
+                )),
+                Box::new(Lang::Variable("s".to_string())),
+            ))),
+        ],
+    }
+    .compile(env, e);
 
     // Lang::Mul(Box::new(Lang::Int(3)), Box::new(Lang::Int(123)))
     //     .compile(env, e);
@@ -1264,8 +1306,6 @@ fn main() {
 
     let ptr = print as *const () as usize;
     e.imm_usize(ptr);
-
-
 
     let result = e
         .memory
