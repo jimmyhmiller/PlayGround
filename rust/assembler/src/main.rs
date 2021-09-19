@@ -860,8 +860,10 @@ impl Emitter<'_> {
 
 const FUNCTION_REGISTERS: [Val; 3] = [RDI, RSI, RDX];
 
-// Need to add a set!
-// Need to add a local variable declaration
+// TODO
+// Need to make it so I can actually use 64 bit numbers
+// Need to deal with memory addresses and memory allocation
+// Need to have built-in functions
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -877,15 +879,18 @@ enum Lang {
     // TODO: Div
     If(Box<Lang>, Box<Lang>, Box<Lang>),
     Equal(Box<Lang>, Box<Lang>),
+    NotEqual(Box<Lang>, Box<Lang>),
     Int(i32),
     Call0(String),
     Call1(String, Box<Lang>),
     Call2(String, Box<Lang>, Box<Lang>),
     Call3(String, Box<Lang>, Box<Lang>, Box<Lang>),
-    While(Box<Lang>, Vec<Lang>),
+    While(Box<Lang>, Box<Lang>),
     True,
     False,
+    Do(Vec<Lang>),
     Let(String, Box<Lang>),
+    Set(String, Box<Lang>),
     Variable(String),
     Return(Box<Lang>),
 }
@@ -957,12 +962,49 @@ impl Lang {
                 emitter.push(RAX);
             }
 
+            Lang::NotEqual(a, b) => {
+                // Terrible way of doing this,
+                // But should work.
+                let eq_symbol = emitter.new_symbol("eq");
+                (*b).compile(env, emitter);
+                (*a).compile(env, emitter);
+                emitter.pop(RAX);
+                emitter.pop(RBX);
+                emitter.cmp(RAX, RBX);
+                emitter.mov(RAX, Val::Int(1));
+                emitter.jump_label_not_equal(eq_symbol.clone());
+                emitter.mov(RAX, Val::Int(0));
+                emitter.label(eq_symbol);
+                emitter.push(RAX);
+            }
+
             Lang::Let(name, expr) => {
                 expr.compile(env, emitter);
                 emitter.pop(RAX);
                 emitter.mov(*env.get(&name).unwrap(), RAX);
             }
-
+            Lang::Set(name, expr) => {
+                expr.compile(env, emitter);
+                emitter.pop(RAX);
+                emitter.mov(*env.get(&name).unwrap(), RAX); 
+            }
+            Lang::While(pred, body) => {
+                let start_loop_symbol = emitter.new_symbol("loop");
+                let exit_loop_symbol = emitter.new_symbol("loop");
+                emitter.label(start_loop_symbol.clone());
+                (*pred).compile(env, emitter);
+                emitter.pop(RAX);
+                emitter.cmp(RAX, Val::Int(1));
+                emitter.jump_label_not_equal(exit_loop_symbol.clone());
+                (*body).compile(env, emitter);
+                emitter.jump_label(start_loop_symbol.clone());
+                emitter.label(exit_loop_symbol.clone());
+            }
+            Lang::Do(exprs) => {
+                for expr in exprs {
+                    expr.compile(env, emitter);
+                }
+            }
             Lang::Func { name, args, body } => {
                 // I could make it so that functions are hot patchable
                 // by having some indirection here.
@@ -971,8 +1013,6 @@ impl Lang {
                 // Probably need to setup stack at some point
                 emitter.push(RBP);
                 emitter.mov(RBP, RSP);
-
-                // TODO: need to actually add compile for let
 
                 // This whole local var handling is a mess.
                 let local_var_count = {
@@ -1022,7 +1062,6 @@ impl Lang {
                     env.remove_entry(name);
                 }
                 emitter.ret();
-                println!("{:?}", env);
             }
 
             Lang::Call0(name) => {
@@ -1259,45 +1298,70 @@ fn main() {
     // They will be indirect calls and I don't have a good notion of that.
     // If I made first class pointers and derefs though I could right?
 
-    Lang::Return(Box::new(Lang::If(
-        Box::new(Lang::Equal(Box::new(Lang::Int(0)), Box::new(Lang::Int(0)))),
-        Box::new(Lang::Call3(
-            "add3".to_string(),
-            Box::new(Lang::Int(2)),
-            Box::new(Lang::Int(13)),
-            Box::new(Lang::Int(4)),
-        )),
-        Box::new(Lang::Int(0)),
-    )))
-    .compile(env, e);
+    // Lang::Return(Box::new(Lang::If(
+    //     Box::new(Lang::Equal(Box::new(Lang::Int(0)), Box::new(Lang::Int(0)))),
+    //     Box::new(Lang::Call3(
+    //         "add3".to_string(),
+    //         Box::new(Lang::Int(2)),
+    //         Box::new(Lang::Int(13)),
+    //         Box::new(Lang::Int(4)),
+    //     )),
+    //     Box::new(Lang::Int(0)),
+    // )))
+    // .compile(env, e);
 
-    e.ret();
+    // e.ret();
+
+    Lang::Return(Box::new(Lang::Call1(
+            "try_while".to_string(),
+            Box::new(Lang::Int(100000000))
+        )
+    )).compile(env, e);
+     e.ret();
+
+    // Lang::Func {
+    //     name: "answer".to_string(),
+    //     args: vec!["x".to_string()],
+    //     body: vec![
+    //         Lang::Return(Box::new(Lang::Variable("x".to_string()))),
+    //     ]
+    // }.compile(env, e);
+
+    // Lang::Func {
+    //     name: "add3".to_string(),
+    //     args: vec!["x".to_string(), "y".to_string(), "z".to_string()],
+    //     body: vec![
+    //         Lang::Let("q".to_string(), Box::new(Lang::Variable("x".to_string()))),
+    //         Lang::Let("r".to_string(), Box::new(Lang::Variable("y".to_string()))),
+    //         Lang::Let("s".to_string(), Box::new(Lang::Variable("z".to_string()))),
+    //         Lang::Return(Box::new(Lang::Add(
+    //             Box::new(Lang::Add(
+    //                 Box::new(Lang::Variable("q".to_string())),
+    //                 Box::new(Lang::Variable("r".to_string())),
+    //             )),
+    //             Box::new(Lang::Variable("s".to_string())),
+    //         ))),
+    //     ],
+    // }
+    // .compile(env, e);
+
 
     Lang::Func {
-        name: "answer".to_string(),
-        args: vec!["x".to_string()],
+        name: "try_while".to_string(),
+        args: vec!["n".to_string()],
         body: vec![
-            Lang::Return(Box::new(Lang::Variable("x".to_string()))),
+
+            Lang::While(
+                Box::new(Lang::NotEqual(Box::new(Lang::Variable("n".to_string())), Box::new(Lang::Int(0)))),
+                Box::new(Lang::Do(
+                    vec![
+                        Lang::Set("n".to_string(), Box::new(Lang::Sub(Box::new(Lang::Variable("n".to_string())), Box::new(Lang::Int(1))))),
+                    ]
+                ))
+            ),
+            Lang::Return(Box::new(Lang::Variable("n".to_string())))
         ]
     }.compile(env, e);
-
-    Lang::Func {
-        name: "add3".to_string(),
-        args: vec!["x".to_string(), "y".to_string(), "z".to_string()],
-        body: vec![
-            Lang::Let("q".to_string(), Box::new(Lang::Variable("x".to_string()))),
-            Lang::Let("r".to_string(), Box::new(Lang::Variable("y".to_string()))),
-            Lang::Let("s".to_string(), Box::new(Lang::Variable("z".to_string()))),
-            Lang::Return(Box::new(Lang::Add(
-                Box::new(Lang::Add(
-                    Box::new(Lang::Variable("q".to_string())),
-                    Box::new(Lang::Variable("r".to_string())),
-                )),
-                Box::new(Lang::Variable("s".to_string())),
-            ))),
-        ],
-    }
-    .compile(env, e);
 
     // Lang::Mul(Box::new(Lang::Int(3)), Box::new(Lang::Int(123)))
     //     .compile(env, e);
