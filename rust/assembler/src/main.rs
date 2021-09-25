@@ -46,7 +46,7 @@ impl Register {
             Register::RBP => 5,
             Register::RSI => 6,
             Register::RDI => 7,
-            Register::RIP => panic!("Try to get index for RIP"),
+            Register::RIP => 5,
         }
     }
 }
@@ -281,9 +281,15 @@ impl Emitter<'_> {
         }
     }
 
-    fn label_in_reg(&mut self, label: String, reg: Val) -> Val {
+    fn add_label_patch(&mut self, label: String) {
+        self.instruction_index -= 4;
+        self.add_label(label);
+    }
+
+    fn label_in_reg(&mut self, reg: Val, label: String) -> Val {
         if let Val::Reg(reg) = reg {
-            self.mov(Val::Reg(reg), Val::AddrRegOffset(Register::RIP, 10));
+            // 0 here is a placeholder
+            self.mov(Val::Reg(reg), RIP_PLACEHOLDER);
             // Move the instruction pointer back
             // 4 bytes (32 bit) so we patch the correct location;
             self.instruction_index -= 4;
@@ -331,7 +337,7 @@ impl Emitter<'_> {
         self.add_label(name);
     }
 
-    fn call_indirect(&mut self, reg: Val) {
+    fn call(&mut self, reg: Val) {
         match reg {
             Val::Reg(addr) => {
                 self.opcode(0xff);
@@ -348,6 +354,15 @@ impl Emitter<'_> {
                     reg: Val::U8(2),
                     rm: Val::Reg(addr),
                 });
+            }
+            Val::AddrRegOffset(addr, offset) => {
+                self.opcode(0xff);
+                self.modrm(ModRM {
+                    mode: Mode::M00,
+                    reg: Val::U8(2),
+                    rm: Val::Reg(addr),
+                });
+                self.imm(offset);
             }
             x => unimplemented!("Didn't handle case {:?}", x),
         }
@@ -451,7 +466,7 @@ impl Emitter<'_> {
                     reg: Val::Reg(dst),
                     // Need to rethink what modrm takes, because it doesn't care about addrReg I don't think
                     // I am just turning it into reg here becasue then the code will work.
-                    rm: Val::U8(5),
+                    rm: Val::Reg(Register::RIP),
                 });
                 self.imm(offset);
             }
@@ -684,6 +699,20 @@ impl Emitter<'_> {
             _ => panic!("add not implemented for that combination"),
         }
     }
+    fn dec(&mut self, val: Val) {
+        match val {
+            Val::Reg(reg) => {
+                self.rex(REX_W);
+                self.opcode(0xFF);
+                self.modrm(ModRM {
+                    mode: Mode::M11,
+                    reg: Val::U8(1),
+                    rm: Val::Reg(reg),
+                });
+            }
+            _ => panic!("add not implemented for that combination"),
+        }
+    }
 
     fn and(&mut self, val1: Val, val2: Val) {
         match (val1, val2) {
@@ -863,7 +892,8 @@ const FUNCTION_REGISTERS: [Val; 3] = [RDI, RSI, RDX];
 // TODO
 // Need to make it so I can actually use 64 bit numbers
 // Need to deal with memory addresses and memory allocation
-// Need to have built-in functions
+// Better void handling?
+// Make a little lisp macro
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -872,6 +902,11 @@ enum Lang {
         name: String,
         args: Vec<String>,
         body: Vec<Lang>,
+    },
+    FFI {
+        name: String,
+        args: Vec<String>,
+        ptr: *const (),
     },
     Add(Box<Lang>, Box<Lang>),
     Sub(Box<Lang>, Box<Lang>),
@@ -895,9 +930,16 @@ enum Lang {
     Return(Box<Lang>),
 }
 
+// Not the prettiest.
+// But this whole compiler is about capability not beauty
+struct EnvData {
+    val: Val,
+    is_foreign: bool,
+}
+
 impl Lang {
     #[allow(dead_code, unused_variables)]
-    fn compile(self, env: &mut HashMap<String, Val>, emitter: &mut Emitter) {
+    fn compile(self, env: &mut HashMap<String, EnvData>, emitter: &mut Emitter) {
         // let mut stack : Vec<Lang> = vec![];
         // stack.push(self.clone());
         // while let Some(expr) = stack.pop() {
@@ -981,12 +1023,12 @@ impl Lang {
             Lang::Let(name, expr) => {
                 expr.compile(env, emitter);
                 emitter.pop(RAX);
-                emitter.mov(*env.get(&name).unwrap(), RAX);
+                emitter.mov(env.get(&name).unwrap().val, RAX);
             }
             Lang::Set(name, expr) => {
                 expr.compile(env, emitter);
                 emitter.pop(RAX);
-                emitter.mov(*env.get(&name).unwrap(), RAX); 
+                emitter.mov(env.get(&name).unwrap().val, RAX);
             }
             Lang::While(pred, body) => {
                 let start_loop_symbol = emitter.new_symbol("loop");
@@ -1001,10 +1043,29 @@ impl Lang {
                 emitter.label(exit_loop_symbol.clone());
             }
             Lang::Do(exprs) => {
+                let mut i = 0;
+                let last = exprs.len() - 1;
                 for expr in exprs {
                     expr.compile(env, emitter);
+                    if i != last {
+                        emitter.add(RSP, Val::Int(8));
+                    }
+                    i += 1;
                 }
             }
+            Lang::FFI { name, args, ptr } => {
+                emitter.label(name.clone());
+                emitter.imm_usize(ptr as usize);
+                env.insert(
+                    name,
+                    EnvData {
+                        val: Val::U8(0), // Dummy
+                        is_foreign: true,
+                    },
+                );
+            }
+
+            // Need to properly handle void
             Lang::Func { name, args, body } => {
                 // I could make it so that functions are hot patchable
                 // by having some indirection here.
@@ -1033,7 +1094,13 @@ impl Lang {
 
                 assert!(args.len() <= 3);
                 for (var, register) in args.iter().zip(FUNCTION_REGISTERS) {
-                    env.insert(var.to_string(), register);
+                    env.insert(
+                        var.to_string(),
+                        EnvData {
+                            val: register,
+                            is_foreign: false,
+                        },
+                    );
                 }
                 let mut current_local_var = 1;
                 for expr in body {
@@ -1041,7 +1108,10 @@ impl Lang {
                         Lang::Let(ref name, _) => {
                             env.insert(
                                 name.to_string(),
-                                Val::AddrRegOffset(Register::RBP, current_local_var * -8),
+                                EnvData {
+                                    val: Val::AddrRegOffset(Register::RBP, current_local_var * -8),
+                                    is_foreign: false,
+                                },
                             );
                             local_vars.push(name.to_string());
                             current_local_var += 1;
@@ -1063,16 +1133,31 @@ impl Lang {
                 }
                 emitter.ret();
             }
-
+            // Need to properly handle void
             Lang::Call0(name) => {
-                emitter.call_label(name);
+                if env.get(&name).map(|x| x.is_foreign).unwrap_or(false) {
+                    emitter.call(RIP_PLACEHOLDER);
+                    emitter.add_label_patch(name);
+                } else {
+                    emitter.call_label(name);
+                }
                 emitter.push(RAX);
             }
 
             Lang::Call1(name, arg) => {
                 arg.compile(env, emitter);
                 emitter.pop(FUNCTION_REGISTERS[0]);
-                emitter.call_label(name);
+                if env.get(&name).map(|x| x.is_foreign).unwrap_or(false) {
+                    // arg registers are not preserved
+                    // So I need to save them
+                    // since I do no analysis to see if they are used.
+                    emitter.push(FUNCTION_REGISTERS[0]);
+                    emitter.call(Val::AddrRegOffset(Register::RIP, 0));
+                    emitter.add_label_patch(name);
+                    emitter.pop(FUNCTION_REGISTERS[0]);
+                } else {
+                    emitter.call_label(name);
+                }
                 emitter.push(RAX);
             }
 
@@ -1081,7 +1166,16 @@ impl Lang {
                 emitter.pop(FUNCTION_REGISTERS[0]);
                 arg2.compile(env, emitter);
                 emitter.pop(FUNCTION_REGISTERS[1]);
-                emitter.call_label(name);
+                if env.get(&name).map(|x| x.is_foreign).unwrap_or(false) {
+                    emitter.push(FUNCTION_REGISTERS[0]);
+                    emitter.push(FUNCTION_REGISTERS[1]);
+                    emitter.label_in_reg(RBX, name);
+                    emitter.call(RBX);
+                    emitter.pop(FUNCTION_REGISTERS[1]);
+                    emitter.pop(FUNCTION_REGISTERS[0]);
+                } else {
+                    emitter.call_label(name);
+                }
                 emitter.push(RAX);
             }
 
@@ -1092,12 +1186,23 @@ impl Lang {
                 emitter.pop(FUNCTION_REGISTERS[1]);
                 arg3.compile(env, emitter);
                 emitter.pop(FUNCTION_REGISTERS[2]);
-                emitter.call_label(name);
+                if env.get(&name).map(|x| x.is_foreign).unwrap_or(false) {
+                    emitter.push(FUNCTION_REGISTERS[0]);
+                    emitter.push(FUNCTION_REGISTERS[1]);
+                    emitter.push(FUNCTION_REGISTERS[2]);
+                    emitter.label_in_reg(RBX, name);
+                    emitter.call(RBX);
+                    emitter.pop(FUNCTION_REGISTERS[2]);
+                    emitter.pop(FUNCTION_REGISTERS[1]);
+                    emitter.pop(FUNCTION_REGISTERS[0]);
+                } else {
+                    emitter.call_label(name);
+                }
                 emitter.push(RAX);
             }
 
             Lang::Variable(name) => {
-                let val = *env.get(&name).unwrap();
+                let val = env.get(&name).unwrap().val;
                 match val {
                     Val::AddrRegOffset(_, _) => {
                         emitter.mov(RAX, val);
@@ -1142,8 +1247,12 @@ const RCX: Val = Val::Reg(Register::RCX);
 #[allow(dead_code)]
 const RBP: Val = Val::Reg(Register::RBP);
 
-pub extern "C" fn print(x: u64) {
-    println!("HERE!!!! {}", x);
+#[allow(dead_code)]
+const RIP_PLACEHOLDER : Val = Val::AddrRegOffset(Register::RIP, 0);
+
+pub extern "C" fn print(x: u64) -> usize {
+    println!("{}", x);
+    return 1;
 }
 
 fn main() {
@@ -1242,12 +1351,12 @@ fn main() {
 
     // e.mov(RBX, RDI);
     // e.mov(RDI, Val::Int(32));
-    // e.call_indirect(RBX);
+    // e.call(RBX);
 
     // Maybe make this better?
     // e.mov(RDI, Val::Int(42));
-    // let reg = e.label_in_reg("print".to_string(), RBX);
-    // e.call_indirect(reg);
+    // e.label_in_reg(RBX, "print".to_string());
+    // e.call(RBX);
     // e.mov(RAX, Val::Int(52));
 
     // let sum = RDI;
@@ -1312,12 +1421,30 @@ fn main() {
 
     // e.ret();
 
-    Lang::Return(Box::new(Lang::Call1(
+    // Lang::Return(Box::new(Lang::Call1(
+    //         "try_while".to_string(),
+    //         Box::new(Lang::Int(100000000))
+    //     )
+    // )).compile(env, e);
+
+    Lang::FFI {
+        name: "print".to_string(),
+        args: vec!["x".to_string()],
+        ptr: print as *const (),
+    }
+    .compile(env, e);
+
+    Lang::Func {
+        name: "main".to_string(),
+        args: vec![],
+        body: vec![Lang::Return(Box::new(Lang::Call1(
             "try_while".to_string(),
-            Box::new(Lang::Int(100000000))
-        )
-    )).compile(env, e);
-     e.ret();
+            Box::new(Lang::Int(3)),
+        )))],
+    }
+    .compile(env, e);
+
+    e.ret();
 
     // Lang::Func {
     //     name: "answer".to_string(),
@@ -1345,31 +1472,41 @@ fn main() {
     // }
     // .compile(env, e);
 
-
     Lang::Func {
         name: "try_while".to_string(),
         args: vec!["n".to_string()],
         body: vec![
-
             Lang::While(
-                Box::new(Lang::NotEqual(Box::new(Lang::Variable("n".to_string())), Box::new(Lang::Int(0)))),
-                Box::new(Lang::Do(
-                    vec![
-                        Lang::Set("n".to_string(), Box::new(Lang::Sub(Box::new(Lang::Variable("n".to_string())), Box::new(Lang::Int(1))))),
-                    ]
-                ))
+                Box::new(Lang::NotEqual(
+                    Box::new(Lang::Variable("n".to_string())),
+                    Box::new(Lang::Int(0)),
+                )),
+                Box::new(Lang::Do(vec![
+                    Lang::Call1(
+                        "print".to_string(),
+                        Box::new(Lang::Variable("n".to_string())),
+                    ),
+                    Lang::Set(
+                        "n".to_string(),
+                        Box::new(Lang::Sub(
+                            Box::new(Lang::Variable("n".to_string())),
+                            Box::new(Lang::Int(1)),
+                        )),
+                    ),
+                ])),
             ),
-            Lang::Return(Box::new(Lang::Variable("n".to_string())))
-        ]
-    }.compile(env, e);
+            Lang::Return(Box::new(Lang::Variable("n".to_string()))),
+        ],
+    }
+    .compile(env, e);
 
     // Lang::Mul(Box::new(Lang::Int(3)), Box::new(Lang::Int(123)))
     //     .compile(env, e);
 
-    e.label("print".to_string());
+    // e.label("print".to_string());
 
-    let ptr = print as *const () as usize;
-    e.imm_usize(ptr);
+    // let ptr = print as *const () as usize;
+    // e.imm_usize(ptr);
 
     let result = e
         .memory
@@ -1396,7 +1533,19 @@ fn main() {
     // Need to deal with things that aren't really registers in modrm
 
     let ptr = print as *const ();
-    let main_fn: extern "C" fn(*const ()) -> i64 = unsafe { mem::transmute(m.data()) };
+    let main_fn: extern "C" fn(*const ()) -> i64 = unsafe {
+        mem::transmute(
+            m.data().offset(
+                e.labels
+                    .get("main")
+                    .unwrap()
+                    .location
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            ),
+        )
+    };
     println!("Hello, world! {:}", main_fn(ptr));
     println!(
         "{}",
