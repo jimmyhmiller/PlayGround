@@ -1275,6 +1275,9 @@ pub extern "C" fn print(x: u64) -> usize {
 
 
 pub extern "C" fn get_heap() ->  *const u8{
+    // I am a bit confused about life times and this working.
+    // Maybe once I have the pointer all best are off for the
+    // borrow checker? Really not sure.
     let heap : [u8; 1024] = [0; 1024];
     return (&heap) as *const u8;
 }
