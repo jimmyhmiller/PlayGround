@@ -891,7 +891,7 @@ const FUNCTION_REGISTERS: [Val; 3] = [RDI, RSI, RDX];
 
 // TODO
 // Need to make it so I can actually use 64 bit numbers
-// Need to deal with memory addresses and memory allocation
+// Better memory stuff. Try out a linked list.
 // Better void handling?
 // Make a little lisp macro
 
@@ -928,6 +928,8 @@ enum Lang {
     Set(String, Box<Lang>),
     Variable(String),
     Return(Box<Lang>),
+    Get(Box<Lang>),
+    Store(Box<Lang>, Box<Lang>),
 }
 
 // Not the prettiest.
@@ -1217,6 +1219,22 @@ impl Lang {
                 (*expr).compile(env, emitter);
                 emitter.pop(RAX);
             }
+
+            Lang::Get(expr) => {
+                (*expr).compile(env, emitter);
+                emitter.pop(RAX);
+                emitter.mov(RAX, Val::AddrReg(Register::RAX));
+                emitter.push(RAX);
+            }
+            Lang::Store(location, value) => {
+                (*location).compile(env, emitter);
+                (*value).compile(env, emitter);
+                emitter.pop(RBX);
+                emitter.pop(RAX);
+                emitter.mov(Val::AddrReg(Register::RAX), RBX);
+                emitter.add(RAX, Val::Int(64)); // next location
+                emitter.push(RAX);
+            }
             _ => {}
         }
         // }
@@ -1253,6 +1271,12 @@ const RIP_PLACEHOLDER : Val = Val::AddrRegOffset(Register::RIP, 0);
 pub extern "C" fn print(x: u64) -> usize {
     println!("{}", x);
     return 1;
+}
+
+
+pub extern "C" fn get_heap() ->  *const u8{
+    let heap : [u8; 1024] = [0; 1024];
+    return (&heap) as *const u8;
 }
 
 fn main() {
@@ -1434,15 +1458,39 @@ fn main() {
     }
     .compile(env, e);
 
-    Lang::Func {
-        name: "main".to_string(),
+
+    Lang::FFI {
+        name: "get_heap".to_string(),
         args: vec![],
-        body: vec![Lang::Return(Box::new(Lang::Call1(
-            "try_while".to_string(),
-            Box::new(Lang::Int(3)),
-        )))],
+        ptr: get_heap as *const (),
     }
     .compile(env, e);
+
+    // Lang::Func {
+    //     name: "main".to_string(),
+    //     args: vec![],
+    //     body: vec![Lang::Return(Box::new(Lang::Call1(
+    //         "try_while".to_string(),
+    //         Box::new(Lang::Int(3)),
+    //     )))],
+    // }
+    // .compile(env, e);
+    e.mov(RAX, Val::Int(42));
+
+     Lang::Func {
+        name: "main".to_string(),
+        args: vec![],
+        body: vec![
+            Lang::Let("l".to_string(),  Box::new(Lang::Call0("get_heap".to_string()))),
+            Lang::Store(
+                Box::new(Lang::Variable("l".to_string())),
+                Box::new(Lang::Int(49))
+            ), // ummm probably need to pop here. Just like in do
+            Lang::Return(Box::new(Lang::Get(Box::new(Lang::Variable("l".to_string()))))
+        )],
+    }
+    .compile(env, e);
+
 
     e.ret();
 
@@ -1472,33 +1520,33 @@ fn main() {
     // }
     // .compile(env, e);
 
-    Lang::Func {
-        name: "try_while".to_string(),
-        args: vec!["n".to_string()],
-        body: vec![
-            Lang::While(
-                Box::new(Lang::NotEqual(
-                    Box::new(Lang::Variable("n".to_string())),
-                    Box::new(Lang::Int(0)),
-                )),
-                Box::new(Lang::Do(vec![
-                    Lang::Call1(
-                        "print".to_string(),
-                        Box::new(Lang::Variable("n".to_string())),
-                    ),
-                    Lang::Set(
-                        "n".to_string(),
-                        Box::new(Lang::Sub(
-                            Box::new(Lang::Variable("n".to_string())),
-                            Box::new(Lang::Int(1)),
-                        )),
-                    ),
-                ])),
-            ),
-            Lang::Return(Box::new(Lang::Variable("n".to_string()))),
-        ],
-    }
-    .compile(env, e);
+    // Lang::Func {
+    //     name: "try_while".to_string(),
+    //     args: vec!["n".to_string()],
+    //     body: vec![
+    //         Lang::While(
+    //             Box::new(Lang::NotEqual(
+    //                 Box::new(Lang::Variable("n".to_string())),
+    //                 Box::new(Lang::Int(0)),
+    //             )),
+    //             Box::new(Lang::Do(vec![
+    //                 Lang::Call1(
+    //                     "print".to_string(),
+    //                     Box::new(Lang::Variable("n".to_string())),
+    //                 ),
+    //                 Lang::Set(
+    //                     "n".to_string(),
+    //                     Box::new(Lang::Sub(
+    //                         Box::new(Lang::Variable("n".to_string())),
+    //                         Box::new(Lang::Int(1)),
+    //                     )),
+    //                 ),
+    //             ])),
+    //         ),
+    //         Lang::Return(Box::new(Lang::Variable("n".to_string()))),
+    //     ],
+    // }
+    // .compile(env, e);
 
     // Lang::Mul(Box::new(Lang::Int(3)), Box::new(Lang::Int(123)))
     //     .compile(env, e);
