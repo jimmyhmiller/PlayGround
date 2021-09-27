@@ -39,21 +39,24 @@ const useLocalStorage = (key) => {
 }
 
 
-const useFetchPaginate = (initial, endpoint, count, initialOffset, f) => {
+const useFetchPaginate = (initial, endpoint, count, initialOffset, setLoading, f) => {
   const [data, setData] = useState(initial || []);
   const [offset, setOffset] = useState(initialOffset);
   const [complete, setComplete] = useState(false);
 
   useEffect(() => {
-    console.log(offset, endpoint, complete)
+    if (complete) {
+      setLoading(null);
+    }
     if (endpoint && !complete) {
+      setLoading(`Loading: ${offset}`);
       fetch(`${endpoint}?count=${count}&offset=${offset}`, {
           credentials: "same-origin"
         })
         .then(resp => {
           if (resp.status === 401 && !window.location.toString().includes("oauth")) {
-            if (window.location.toString().includes("localhost") || process.env.VERCEL_ENV !== "production") {
-              console.log("Set the Auth Token!");
+            if (window.location.toString().includes("localhost")) {
+              console.log("Set the Auth Token!", process.env.VERCEL_ENV);
               return
             }
             window.location = "/api/oauth"
@@ -74,6 +77,10 @@ const useFetchPaginate = (initial, endpoint, count, initialOffset, f) => {
             setComplete(true);
           }
         })
+        .catch(e => {
+          console.error(e);
+          setLoading("Error");
+        })
       }
   }, [endpoint, offset, complete])
 
@@ -81,10 +88,10 @@ const useFetchPaginate = (initial, endpoint, count, initialOffset, f) => {
 }
 
 
-const useLocalCache = (initial, endpoint, f) => {
+const useLocalCache = (initial, endpoint, setLoading, f) => {
   const {value, setValue, offset, setOffset} = useLocalStorage(endpoint);
   // ugly hard coding of endpoint to fetch
-  const [data, newOffset] = useFetchPaginate(value, endpoint, 1000, offset, f);
+  const [data, newOffset] = useFetchPaginate(value, endpoint, 1000, offset, setLoading, f);
   useEffect(() => {
     if (data) {
       setValue(data)
@@ -264,8 +271,9 @@ const Experiment2 = ({ items }) => {
 
 const App = () => {
 
+  const [loading, setLoading] = useState("not loading");
   const items = orderBy(
-    useLocalCache([], "/api/items", x => x ? Object.values(x.list) : []),
+    useLocalCache([], "/api/items", setLoading, x => x ? Object.values(x.list) : []),
   )
 
 
@@ -286,6 +294,7 @@ const App = () => {
           }
         `}
       </style>
+      <div style={{position:"absolute", bottom: 100, right: 100}}>{loading}</div>
       <div>
         <Selector onClick={() => setView("all")} text="All" />
         <Selector onClick={() => setView("experiment1")} text="Experiment 1" />
