@@ -1268,9 +1268,9 @@ const RBP: Val = Val::Reg(Register::RBP);
 #[allow(dead_code)]
 const RIP_PLACEHOLDER : Val = Val::AddrRegOffset(Register::RIP, 0);
 
-pub extern "C" fn print(x: u64) -> usize {
+pub extern "C" fn print(x: u64) -> u64 {
     println!("{}", x);
-    return 1;
+    return x;
 }
 
 
