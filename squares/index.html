@@ -23,38 +23,59 @@
         mouse.y = e.clientY - 2;
     })
 
-    const sizeWidth = window.innerWidth;
-    const sizeHeight = window.innerHeight;
-    canvas.width = sizeWidth;
-    canvas.height = sizeHeight;
-    canvas.style.width = sizeWidth;
-    canvas.style.height = sizeHeight;
 
-    console.log(sizeWidth, sizeHeight, sizeWidth*sizeHeight)
 
-    const throttle = 16;
+    const throttle = 0;
    
 
-
     const draw = () => {
+        const sizeWidth = window.innerWidth;
+        const sizeHeight = window.innerHeight;
+   
+
+        canvas.width = sizeWidth;
+        canvas.height = sizeHeight;
+        canvas.style.width = sizeWidth;
+        canvas.style.height = sizeHeight;
 
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-
+        const gap = 30;
+        const increments = 10;
+        const effectRange = gap * increments;
+        const sizeRatio = gap / increments;
+        const minSize = 3;
+        const offset = 10;
+        // Completely random number of rows and columns
         for (let i of range(1000)) {
-            for (let j of range(100)) {
-                let x = i * 30 + 10;
-                let y = j * 30 + 10;
-                if (Math.abs(x - mouse.x) <= 90 && Math.abs(y - mouse.y) <= 90) {
-                    let distance = {
-                        x: 30 - (10 * Math.floor(Math.abs(x - mouse.x)/ 30)),
-                        y: 30 - (10 * Math.floor(Math.abs(y - mouse.y) /30)),
+            for (let j of range(200)) {
+                let x = i * gap + offset;
+                let y = j * gap + offset;
+                if (Math.abs(x - mouse.x) < effectRange && Math.abs(y - mouse.y) < effectRange) {
+ 
+                    // If I want to keep the pattern when on a dot I have to bias in some direction
+                    if (Math.abs(y - mouse.y) === 0) {
+                        mouse.y += 1;
                     }
-                    let dominiate = Math.min(distance.x, distance.y);
+                    if (Math.abs(x - mouse.x) === 0) {
+                        mouse.x += 1;
+                    }
 
-                    // console.log(distance)
-                    ctx.fillRect(x - dominiate/2, y - dominiate/2, dominiate, dominiate);
+
+                    let distance = {
+                        x: gap - (sizeRatio * Math.floor(Math.abs(x - mouse.x) / gap)),
+                        y: gap - (sizeRatio * Math.floor(Math.abs(y - mouse.y) / gap)),
+                    }
+
+
+                    let dominate = Math.max(Math.min(distance.x, distance.y), minSize);
+                    let center = dominate === minSize ? 0 :  Math.floor(dominate/2)
+
+                    ctx.fillRect(x - center, 
+                                 y - center,
+                                 dominate,
+                                 dominate);
                 } else {
-                    ctx.fillRect(x, y, 3, 3);
+                    ctx.fillRect(x, y, minSize, minSize);
                 }
                 
             }
