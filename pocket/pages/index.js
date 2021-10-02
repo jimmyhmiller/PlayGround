@@ -257,7 +257,7 @@ const Experiment1 = ({ items }) => {
 
 
 const Experiment2 = ({ items }) => {
-  const filteredItems = items.filter(item => item.tags && item.tags.muse);
+  const filteredItems = orderBy(items.filter(item => item.tags && item.tags.muse), 'time_added', 'desc');
   return (
     <>
       <h1 style={{marginTop: 0}}>Pocket App</h1>

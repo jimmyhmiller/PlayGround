@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title></title>
+</head>
+
+
+<body style="margin:0">
+    <canvas width="100vw" height="100vh" id="canvas" />
+</body>
+
+<script type="text/javascript">
+    const range = (n) => [...Array(n).keys()];
+
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext('2d');
+
+    let mouse = {x: 0, y: 0}
+
+    document.addEventListener("mousemove", (e) => {
+        mouse.x = e.clientX - 2;
+        mouse.y = e.clientY - 2;
+    })
+
+    const sizeWidth = window.innerWidth;
+    const sizeHeight = window.innerHeight;
+    canvas.width = sizeWidth;
+    canvas.height = sizeHeight;
+    canvas.style.width = sizeWidth;
+    canvas.style.height = sizeHeight;
+
+    console.log(sizeWidth, sizeHeight, sizeWidth*sizeHeight)
+
+    const throttle = 16;
+   
+
+
+    const draw = () => {
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        for (let i of range(1000)) {
+            for (let j of range(100)) {
+                let x = i * 30 + 10;
+                let y = j * 30 + 10;
+                if (Math.abs(x - mouse.x) <= 90 && Math.abs(y - mouse.y) <= 90) {
+                    let distance = {
+                        x: 30 - (10 * Math.floor(Math.abs(x - mouse.x)/ 30)),
+                        y: 30 - (10 * Math.floor(Math.abs(y - mouse.y) /30)),
+                    }
+                    let dominiate = Math.min(distance.x, distance.y);
+
+                    // console.log(distance)
+                    ctx.fillRect(x - dominiate/2, y - dominiate/2, dominiate, dominiate);
+                } else {
+                    ctx.fillRect(x, y, 3, 3);
+                }
+                
+            }
+        }
+    };
+
+    const throttledDraw = () => {
+        let start = performance.now();
+        let elapsed = 0;
+        let id = requestAnimationFrame(function animate(time) {
+            elapsed += time - start;
+            if (elapsed >= throttle) {
+                elapsed = 0;
+                start = time;
+                draw(canvas);
+            }
+            id = requestAnimationFrame(animate);
+        })
+    }
+
+    throttledDraw()
+
+</script>
+</html>
