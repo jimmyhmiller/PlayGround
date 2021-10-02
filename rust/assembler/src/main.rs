@@ -1274,7 +1274,7 @@ pub extern "C" fn print(x: u64) -> u64 {
 }
 
 
-pub extern "C" fn get_heap() ->  *const u8{
+pub extern "C" fn get_heap() ->  *const u8 {
     // I am a bit confused about life times and this working.
     // Maybe once I have the pointer all best are off for the
     // borrow checker? Really not sure.
@@ -1485,17 +1485,73 @@ fn main() {
         args: vec![],
         body: vec![
             Lang::Let("l".to_string(),  Box::new(Lang::Call0("get_heap".to_string()))),
-            Lang::Store(
-                Box::new(Lang::Variable("l".to_string())),
-                Box::new(Lang::Int(49))
-            ), // ummm probably need to pop here. Just like in do
-            Lang::Return(Box::new(Lang::Get(Box::new(Lang::Variable("l".to_string()))))
-        )],
+            Lang::Let("l2".to_string(), 
+                    Box::new(Lang::Call3("cons".to_string(), Box::new(Lang::Int(41)), Box::new(Lang::Int(0)), Box::new(Lang::Variable("l".to_string()))))),
+            Lang::Let("l3".to_string(), 
+                    Box::new(Lang::Call3("cons".to_string(), Box::new(Lang::Int(42)), Box::new(Lang::Variable("l".to_string())), Box::new(Lang::Variable("l2".to_string()))))),
+            Lang::Return(Box::new(Lang::Call1("head".to_string(), Box::new(Lang::Call1("tail".to_string(), Box::new(Lang::Variable("l2".to_string())))))))
+        ],
     }
     .compile(env, e);
 
 
     e.ret();
+
+
+
+
+
+    Lang::Func {
+        name: "cons".to_string(),
+        // We are starting with an explicit location because I need to think
+        // about how we would automatically get a new location. I'm guessing
+        // some sort of free list?
+        args: vec!["head".to_string(), "tail".to_string(), "loc".to_string()],
+        body: vec![
+            Lang::Let("next".to_string(),
+                Box::new(
+                    Lang::Store(
+                        Box::new(Lang::Variable("loc".to_string())),
+                        Box::new(Lang::Variable("head".to_string()))
+                    )
+                )
+            ),            
+            Lang::Let("after".to_string(),
+                Box::new(
+                    Lang::Store(
+                        Box::new(Lang::Variable("next".to_string())),
+                        Box::new(Lang::Variable("tail".to_string()))
+                    )
+                )
+            ),
+
+            Lang::Return(Box::new(Lang::Variable("after".to_string())))
+        ],
+    }
+    .compile(env, e);
+
+    Lang::Func {
+        name: "head".to_string(),
+        args: vec!["list".to_string()],
+        body: vec![
+            Lang::Return(Box::new(Lang::Get(Box::new(Lang::Variable("list".to_string())))))
+        ],
+    }
+    .compile(env, e);
+
+    Lang::Func {
+        name: "tail".to_string(),
+        args: vec!["list".to_string()],
+        body: vec![
+            Lang::Return(
+                Box::new(Lang::Get(
+                    Box::new(Lang::Add(
+                        Box::new(Lang::Variable("list".to_string())),
+                        Box::new(Lang::Int(64)))))))
+        ],
+    }
+    .compile(env, e);
+
 
     // Lang::Func {
     //     name: "answer".to_string(),
