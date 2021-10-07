@@ -889,11 +889,20 @@ impl Emitter<'_> {
 
 const FUNCTION_REGISTERS: [Val; 3] = [RDI, RSI, RDX];
 
-// TODO
-// Need to make it so I can actually use 64 bit numbers
-// Better memory stuff. Try out a linked list.
-// Better void handling?
-// Make a little lisp macro
+// TODO!: Need to fix the way I save registers!
+// I need to save my local arguments first
+// see how I'm doing it in call1
+
+
+// TODO: FIX LOCAL VARIABLES!
+// I don't recurse, so I can't really make let.
+// Need to deal with that.
+// Maybe a context where I know what function I am in and can update things?
+
+
+// Think about closures.
+// Think about debugging features
+
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -1071,7 +1080,7 @@ impl Lang {
             Lang::Func { name, args, body } => {
                 // I could make it so that functions are hot patchable
                 // by having some indirection here.
-
+                println!("compiling {}", name);
                 emitter.label(name);
                 // Probably need to setup stack at some point
                 emitter.push(RBP);
@@ -1105,6 +1114,10 @@ impl Lang {
                     );
                 }
                 let mut current_local_var = 1;
+                println!("local_vars");
+                // I actually need to recurse if I want this to work :(
+                // Or does this need to be at some global level?
+                // Really not sure
                 for expr in body {
                     match expr {
                         Lang::Let(ref name, _) => {
@@ -1119,7 +1132,9 @@ impl Lang {
                             current_local_var += 1;
                             expr.compile(env, emitter);
                         }
-                        expr => expr.compile(env, emitter),
+                        expr => { 
+                            expr.compile(env, emitter)
+                        },
                     }
                 }
 
@@ -1148,20 +1163,22 @@ impl Lang {
 
             Lang::Call1(name, arg) => {
                 arg.compile(env, emitter);
-                emitter.pop(FUNCTION_REGISTERS[0]);
+                emitter.pop(RAX);
+                emitter.push(FUNCTION_REGISTERS[0]);
+                emitter.mov(FUNCTION_REGISTERS[0], RAX);
                 if env.get(&name).map(|x| x.is_foreign).unwrap_or(false) {
                     // arg registers are not preserved
                     // So I need to save them
                     // since I do no analysis to see if they are used.
-                    emitter.push(FUNCTION_REGISTERS[0]);
                     emitter.call(Val::AddrRegOffset(Register::RIP, 0));
                     emitter.add_label_patch(name);
-                    emitter.pop(FUNCTION_REGISTERS[0]);
                 } else {
                     emitter.call_label(name);
                 }
+                emitter.pop(FUNCTION_REGISTERS[0]);
                 emitter.push(RAX);
             }
+
 
             Lang::Call2(name, arg1, arg2) => {
                 arg1.compile(env, emitter);
@@ -1241,6 +1258,76 @@ impl Lang {
     }
 }
 
+
+macro_rules! lang {
+    ((defn $name:ident[] 
+        $body:tt
+     )) => {
+        Lang::Func{ 
+            name: stringify!($name).to_string(), 
+            args: vec![],
+            body: vec![Lang::Return(Box::new(lang!($body)))]
+        }
+    };
+    ((defn $name:ident[$arg:ident] 
+        $body:tt
+     )) => {
+        Lang::Func{ 
+            name: stringify!($name).to_string(), 
+            args: vec![stringify!($arg).to_string()],
+            body: vec![Lang::Return(Box::new(lang!($body)))]
+        }
+    };
+    ((let [$name:tt $val:tt]
+        $body:tt
+    )) => {
+        Lang::Do(vec![
+            Lang::Let("n".to_string(), Box::new(lang!($val))),
+            lang!($body)]);
+    };
+    ((if (= $arg:ident $val:expr)
+        $result1:tt
+        $result2:tt
+    )) => {
+        Lang::If(Box::new(
+                Lang::Equal(
+                    Box::new(Lang::Variable(stringify!($arg).to_string())),
+                    Box::new(Lang::Int($val)))),
+                Box::new(lang!($result1)),
+                Box::new(lang!($result2)))
+    };
+    ((+ $arg1:tt $arg2:tt)) => {
+        Lang::Add(Box::new(lang!($arg1)),
+                  Box::new(lang!($arg2)))
+    };
+    ((- $arg1:tt $arg2:tt)) => {
+        Lang::Sub(Box::new(lang!($arg1)),
+                  Box::new(lang!($arg2)))
+    };
+    ((* $arg1:tt $arg2:tt)) => {
+        Lang::Mul(Box::new(lang!($arg1)),
+                  Box::new(lang!($arg2)))
+    };
+    ((do $($arg1:tt)+)) => {
+        Lang::Do(vec![$(lang!($arg1)),+])
+    };
+    ((return $arg:tt)) => {
+        Lang::Return(Box::new(lang!($arg)))
+    };
+    (($f:ident $arg:tt)) => {
+        Lang::Call1(stringify!($f).to_string(), Box::new(lang!($arg)))
+    };
+    ($int:literal) => {
+        Lang::Int($int)
+    };
+    ($var:ident) => {
+        Lang::Variable(stringify!($var).to_string())
+    }
+}
+
+
+
+
 #[allow(dead_code)]
 const RAX: Val = Val::Reg(Register::RAX);
 
@@ -1281,6 +1368,7 @@ pub extern "C" fn get_heap() ->  *const u8 {
     let heap : [u8; 1024] = [0; 1024];
     return (&heap) as *const u8;
 }
+
 
 fn main() {
     let m = MemoryMap::new(
@@ -1462,12 +1550,12 @@ fn main() {
     .compile(env, e);
 
 
-    Lang::FFI {
-        name: "get_heap".to_string(),
-        args: vec![],
-        ptr: get_heap as *const (),
-    }
-    .compile(env, e);
+    // Lang::FFI {
+    //     name: "get_heap".to_string(),
+    //     args: vec![],
+    //     ptr: get_heap as *const (),
+    // }
+    // .compile(env, e);
 
     // Lang::Func {
     //     name: "main".to_string(),
@@ -1478,79 +1566,107 @@ fn main() {
     //     )))],
     // }
     // .compile(env, e);
-    e.mov(RAX, Val::Int(42));
-
-     Lang::Func {
-        name: "main".to_string(),
-        args: vec![],
-        body: vec![
-            Lang::Let("l".to_string(),  Box::new(Lang::Call0("get_heap".to_string()))),
-            Lang::Let("l2".to_string(), 
-                    Box::new(Lang::Call3("cons".to_string(), Box::new(Lang::Int(41)), Box::new(Lang::Int(0)), Box::new(Lang::Variable("l".to_string()))))),
-            Lang::Let("l3".to_string(), 
-                    Box::new(Lang::Call3("cons".to_string(), Box::new(Lang::Int(42)), Box::new(Lang::Variable("l".to_string())), Box::new(Lang::Variable("l2".to_string()))))),
-            Lang::Return(Box::new(Lang::Call1("head".to_string(), Box::new(Lang::Call1("tail".to_string(), Box::new(Lang::Variable("l2".to_string())))))))
-        ],
-    }
-    .compile(env, e);
 
 
-    e.ret();
+    lang!(
+        (defn fact [n]
+                (if (= n 1)
+                    1
+                    (* n (fact (- n 1)))))
+    ).compile(env, e);
+
+
+    lang!(
+        (defn fib [n]
+            (if (= n 0)
+                0
+                (if (= n 1)
+                    1
+                    (+ (fib (- n 1))
+                       (fib (- n 2))))))
+    ).compile(env, e);
+
+
+    lang!(
+        (defn main []
+            (fib 20))
+
+    ).compile(env, e);
+
+
+    // Lang::Func {
+    //     name: "main".to_string(),
+    //     args: vec![],
+    //     body: vec![
+    //         // Lang::Let("l".to_string(),  Box::new(Lang::Call0("get_heap".to_string()))),
+    //         // Lang::Let("l2".to_string(), 
+    //         //         Box::new(Lang::Call3("cons".to_string(), Box::new(Lang::Int(41)), Box::new(Lang::Int(0)), Box::new(Lang::Variable("l".to_string()))))),
+    //         // Lang::Let("l3".to_string(), 
+    //         //         Box::new(Lang::Call3("cons".to_string(), Box::new(Lang::Int(42)), Box::new(Lang::Variable("l".to_string())), Box::new(Lang::Variable("l2".to_string()))))),
+    //         // Lang::Return(Box::new(Lang::Call1("head".to_string(), Box::new(Lang::Call1("tail".to_string(), Box::new(Lang::Variable("l2".to_string())))))))
+
+    //         Lang::Return(Box::new(Lang::Call1("fact".to_string(), Box::new(Lang::Int(20)))))
+    //     ],
+    // }
+    // .compile(env, e);
+
+
+    // e.ret();
 
 
 
 
 
-    Lang::Func {
-        name: "cons".to_string(),
-        // We are starting with an explicit location because I need to think
-        // about how we would automatically get a new location. I'm guessing
-        // some sort of free list?
-        args: vec!["head".to_string(), "tail".to_string(), "loc".to_string()],
-        body: vec![
-            Lang::Let("next".to_string(),
-                Box::new(
-                    Lang::Store(
-                        Box::new(Lang::Variable("loc".to_string())),
-                        Box::new(Lang::Variable("head".to_string()))
-                    )
-                )
-            ),            
-            Lang::Let("after".to_string(),
-                Box::new(
-                    Lang::Store(
-                        Box::new(Lang::Variable("next".to_string())),
-                        Box::new(Lang::Variable("tail".to_string()))
-                    )
-                )
-            ),
+    // Lang::Func {
+    //     name: "cons".to_string(),
+    //     // We are starting with an explicit location because I need to think
+    //     // about how we would automatically get a new location. I'm guessing
+    //     // some sort of free list?
+    //     args: vec!["head".to_string(), "tail".to_string(), "loc".to_string()],
+    //     body: vec![
+    //         Lang::Let("next".to_string(),
+    //             Box::new(
+    //                 Lang::Store(
+    //                     Box::new(Lang::Variable("loc".to_string())),
+    //                     Box::new(Lang::Variable("head".to_string()))
+    //                 )
+    //             )
+    //         ),            
+    //         Lang::Let("after".to_string(),
+    //             Box::new(
+    //                 Lang::Store(
+    //                     Box::new(Lang::Variable("next".to_string())),
+    //                     Box::new(Lang::Variable("tail".to_string()))
+    //                 )
+    //             )
+    //         ),
 
-            Lang::Return(Box::new(Lang::Variable("after".to_string())))
-        ],
-    }
-    .compile(env, e);
+    //         Lang::Return(Box::new(Lang::Variable("after".to_string())))
+    //     ],
+    // }
+    // .compile(env, e);
 
-    Lang::Func {
-        name: "head".to_string(),
-        args: vec!["list".to_string()],
-        body: vec![
-            Lang::Return(Box::new(Lang::Get(Box::new(Lang::Variable("list".to_string())))))
-        ],
-    }
-    .compile(env, e);
+    // Lang::Func {
+    //     name: "head".to_string(),
+    //     args: vec!["list".to_string()],
+    //     body: vec![
+    //         Lang::Return(Box::new(Lang::Get(Box::new(Lang::Variable("list".to_string())))))
+    //     ],
+    // }
+    // .compile(env, e);
 
-    Lang::Func {
-        name: "tail".to_string(),
-        args: vec!["list".to_string()],
-        body: vec![
-            Lang::Return(
-                Box::new(Lang::Get(
-                    Box::new(Lang::Add(
-                        Box::new(Lang::Variable("list".to_string())),
-                        Box::new(Lang::Int(64)))))))
-        ],
-    }
-    .compile(env, e);
+    // Lang::Func {
+    //     name: "tail".to_string(),
+    //     args: vec!["list".to_string()],
+    //     body: vec![
+    //         Lang::Return(
+    //             Box::new(Lang::Get(
+    //                 Box::new(Lang::Add(
+    //                     Box::new(Lang::Variable("list".to_string())),
+    //                     Box::new(Lang::Int(64)))))))
+    //     ],
+    // }
+    // .compile(env, e);
 
 
     // Lang::Func {
@@ -1653,15 +1769,6 @@ fn main() {
             ),
         )
     };
-    println!("Hello, world! {:}", main_fn(ptr));
-    println!(
-        "{}",
-        // I had been looking at a different address because I change rsp
-        // and pushing which goes in the other direction
-        u64::from_le_bytes(
-            e.memory[mem_offset_size..(mem_offset_size + 8)]
-                .try_into()
-                .expect("Wrong size")
-        )
-    );
+    println!("Result {:}", main_fn(ptr));
+  
 }
