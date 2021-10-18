@@ -916,17 +916,18 @@ impl Emitter<'_> {
                 self.emit(&[0x8f]);
                 self.imm(i);
             }
-            Val::Reg(reg) => self.emit(&[0x58 | reg.index()]),
+            Val::Reg(reg) =>  {
+                if reg.extended() {
+                    self.rex(REX_W.extend_rm(reg));
+                }
+                self.emit(&[0x58 | reg.index()])
+            },
             _ => panic!("push not implemented for that combination"),
         }
     }
 }
 
 const FUNCTION_REGISTERS: [Val; 3] = [RDI, RSI, RDX];
-
-// TODO!: Need to fix the way I save registers!
-// I need to save my local arguments first
-// see how I'm doing it in call1
 
 
 // TODO: FIX LOCAL VARIABLES!
@@ -1186,21 +1187,36 @@ impl Lang {
                 emitter.ret();
             }
             // Need to properly handle void
+            // Need to handle saving registers in a less terrible way.
+            // Right now I save all the function argument registers
+            // no matter what. Which is not great.
             Lang::Call0(name) => {
+
+                emitter.push(FUNCTION_REGISTERS[0]);
+                emitter.push(FUNCTION_REGISTERS[1]);
+                emitter.push(FUNCTION_REGISTERS[2]);
                 if env.get(&name).map(|x| x.is_foreign).unwrap_or(false) {
                     emitter.call(RIP_PLACEHOLDER);
                     emitter.add_label_patch(name);
                 } else {
                     emitter.call_label(name);
                 }
+                emitter.pop(FUNCTION_REGISTERS[2]);
+                emitter.pop(FUNCTION_REGISTERS[1]);
+                emitter.pop(FUNCTION_REGISTERS[0]);
                 emitter.push(RAX);
             }
 
+
             Lang::Call1(name, arg) => {
                 arg.compile(env, emitter);
-                emitter.pop(RAX);
+                emitter.pop(R8);
                 emitter.push(FUNCTION_REGISTERS[0]);
-                emitter.mov(FUNCTION_REGISTERS[0], RAX);
+                emitter.mov(FUNCTION_REGISTERS[0], R8);
+
+                emitter.push(FUNCTION_REGISTERS[1]);
+                emitter.push(FUNCTION_REGISTERS[2]);
+
                 if env.get(&name).map(|x| x.is_foreign).unwrap_or(false) {
                     // arg registers are not preserved
                     // So I need to save them
@@ -1210,6 +1226,8 @@ impl Lang {
                 } else {
                     emitter.call_label(name);
                 }
+                emitter.pop(FUNCTION_REGISTERS[2]);
+                emitter.pop(FUNCTION_REGISTERS[1]);
                 emitter.pop(FUNCTION_REGISTERS[0]);
                 emitter.push(RAX);
             }
@@ -1217,41 +1235,56 @@ impl Lang {
 
             Lang::Call2(name, arg1, arg2) => {
                 arg1.compile(env, emitter);
-                emitter.pop(FUNCTION_REGISTERS[0]);
+                
+                emitter.pop(R8);
+                emitter.push(FUNCTION_REGISTERS[0]);
+                emitter.mov(FUNCTION_REGISTERS[0], R8);
+
                 arg2.compile(env, emitter);
-                emitter.pop(FUNCTION_REGISTERS[1]);
+                
+                emitter.pop(R9);
+                emitter.push(FUNCTION_REGISTERS[1]);
+                emitter.mov(FUNCTION_REGISTERS[1], R9);
+
+                emitter.push(FUNCTION_REGISTERS[2]);
+
                 if env.get(&name).map(|x| x.is_foreign).unwrap_or(false) {
-                    emitter.push(FUNCTION_REGISTERS[0]);
-                    emitter.push(FUNCTION_REGISTERS[1]);
-                    emitter.label_in_reg(RBX, name);
-                    emitter.call(RBX);
-                    emitter.pop(FUNCTION_REGISTERS[1]);
-                    emitter.pop(FUNCTION_REGISTERS[0]);
+                    emitter.call(Val::AddrRegOffset(Register::RIP, 0));
+                    emitter.add_label_patch(name);
                 } else {
                     emitter.call_label(name);
                 }
+                emitter.pop(FUNCTION_REGISTERS[2]);
+                emitter.pop(FUNCTION_REGISTERS[1]);
+                emitter.pop(FUNCTION_REGISTERS[0]);
                 emitter.push(RAX);
             }
 
             Lang::Call3(name, arg1, arg2, arg3) => {
                 arg1.compile(env, emitter);
-                emitter.pop(FUNCTION_REGISTERS[0]);
+                emitter.pop(R8);
+                emitter.push(FUNCTION_REGISTERS[0]);
+                emitter.mov(FUNCTION_REGISTERS[0], R8);
+
                 arg2.compile(env, emitter);
-                emitter.pop(FUNCTION_REGISTERS[1]);
+                emitter.pop(R9);
+                emitter.push(FUNCTION_REGISTERS[1]);
+                emitter.mov(FUNCTION_REGISTERS[1], R9);
+
                 arg3.compile(env, emitter);
-                emitter.pop(FUNCTION_REGISTERS[2]);
+                emitter.pop(R10);
+                emitter.push(FUNCTION_REGISTERS[2]);
+                emitter.mov(FUNCTION_REGISTERS[2], R10);
+
                 if env.get(&name).map(|x| x.is_foreign).unwrap_or(false) {
-                    emitter.push(FUNCTION_REGISTERS[0]);
-                    emitter.push(FUNCTION_REGISTERS[1]);
-                    emitter.push(FUNCTION_REGISTERS[2]);
-                    emitter.label_in_reg(RBX, name);
-                    emitter.call(RBX);
-                    emitter.pop(FUNCTION_REGISTERS[2]);
-                    emitter.pop(FUNCTION_REGISTERS[1]);
-                    emitter.pop(FUNCTION_REGISTERS[0]);
+                    emitter.call(Val::AddrRegOffset(Register::RIP, 0));
+                    emitter.add_label_patch(name);
                 } else {
                     emitter.call_label(name);
                 }
+                emitter.pop(FUNCTION_REGISTERS[2]);
+                emitter.pop(FUNCTION_REGISTERS[1]);
+                emitter.pop(FUNCTION_REGISTERS[0]);
                 emitter.push(RAX);
             }
 
@@ -1313,6 +1346,24 @@ macro_rules! lang {
             body: vec![Lang::Return(Box::new(lang!($body)))]
         }
     };
+    ((defn $name:ident[$arg1:ident $arg2:ident] 
+        $body:tt
+     )) => {
+        Lang::Func{ 
+            name: stringify!($name).to_string(), 
+            args: vec![stringify!($arg1).to_string(), stringify!($arg2).to_string()],
+            body: vec![Lang::Return(Box::new(lang!($body)))]
+        }
+    };
+    ((defn $name:ident[$arg1:ident $arg2:ident $arg3:ident] 
+        $body:tt
+     )) => {
+        Lang::Func{ 
+            name: stringify!($name).to_string(), 
+            args: vec![stringify!($arg1).to_string(), stringify!($arg2).to_string(), stringify!($arg3).to_string()],
+            body: vec![Lang::Return(Box::new(lang!($body)))]
+        }
+    };
     ((let [$name:tt $val:tt]
         $body:tt
     )) => {
@@ -1351,6 +1402,12 @@ macro_rules! lang {
     };
     (($f:ident $arg:tt)) => {
         Lang::Call1(stringify!($f).to_string(), Box::new(lang!($arg)))
+    };
+    (($f:ident $arg1:tt $arg2:tt)) => {
+        Lang::Call2(stringify!($f).to_string(), Box::new(lang!($arg1)), Box::new(lang!($arg2)))
+    };
+    (($f:ident $arg1:tt $arg2:tt $arg3:tt)) => {
+        Lang::Call3(stringify!($f).to_string(), Box::new(lang!($arg1)), Box::new(lang!($arg2)), Box::new(lang!($arg3)))
     };
     ($int:literal) => {
         Lang::Int($int)
@@ -1631,12 +1688,12 @@ fn main() {
     // .compile(env, e);
 
 
-    lang!(
-        (defn fact [n]
-                (if (= n 1)
-                    1
-                    (* n (fact (- n 1)))))
-    ).compile(env, e);
+    // lang!(
+    //     (defn fact [n]
+    //             (if (= n 1)
+    //                 1
+    //                 (* n (fact (- n 1)))))
+    // ).compile(env, e);
 
 
     lang!(
@@ -1649,6 +1706,18 @@ fn main() {
                        (fib (- n 2))))))
     ).compile(env, e);
 
+    lang!(
+        (defn add3 [x y z]
+            (do (print x)
+                (print y)
+                (print z)
+           (+ x (+ y z))))
+    ).compile(env, e);
+
+
+    e.mov(FUNCTION_REGISTERS[0], Val::Int(0));
+    e.mov(FUNCTION_REGISTERS[1], Val::Int(0));
+    e.mov(FUNCTION_REGISTERS[2], Val::Int(0));
 
     lang!(
         (defn main []
