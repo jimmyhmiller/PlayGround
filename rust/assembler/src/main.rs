@@ -25,14 +25,14 @@ enum Register {
     RIP,
     // These require some different encoding
     // Need to understand these better
-    // R8,
-    // R9,
-    // R10,
-    // R11,
-    // R12,
-    // R13,
-    // R14,
-    // R15,
+    R8,
+    R9,
+    R10,
+    R11,
+    R12,
+    R13,
+    R14,
+    R15,
 }
 
 impl Register {
@@ -46,7 +46,30 @@ impl Register {
             Register::RBP => 5,
             Register::RSI => 6,
             Register::RDI => 7,
+            Register::R8 => 0,
+            Register::R9 => 1,
+            Register::R10 => 2,
+            Register::R11 => 3,
+            Register::R12 => 4,
+            Register::R13 => 5,
+            Register::R14 => 6,
+            Register::R15 => 7,
             Register::RIP => 5,
+        }
+    }
+    fn extended(&self) -> bool {
+        match self {
+            Register::RAX |
+            Register::RCX |
+            Register::RDX |
+            Register::RBX |
+            Register::RSP |
+            Register::RBP |
+            Register::RSI |
+            Register::RDI |
+            Register::RIP => false,
+
+            _ => true
         }
     }
 }
@@ -129,6 +152,18 @@ const REX_W: Rex = Rex {
     b: false,
     x: false,
 };
+
+impl Rex {
+    fn extend_reg(mut self, reg: Register) -> Self {
+        self.r = reg.extended(); 
+        self
+    }
+
+    fn extend_rm(mut self, reg: Register) -> Self {
+        self.x = reg.extended(); 
+        self
+    }
+}
 
 #[derive(Debug, Eq, PartialEq)]
 #[allow(dead_code)]
@@ -449,7 +484,7 @@ impl Emitter<'_> {
         match (val1, val2) {
             (Val::Reg(dst), Val::Int(src)) => {
                 // Need to deal with extended registers
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(dst));
                 self.opcode(0xC7);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -459,7 +494,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::AddrRegOffset(Register::RIP, offset)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst));
                 self.opcode(0x8b);
                 self.modrm(ModRM {
                     mode: Mode::M00,
@@ -472,7 +507,7 @@ impl Emitter<'_> {
             }
 
             (Val::Reg(dst), Val::AddrReg(Register::RSP)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(dst));
                 self.opcode(0x8b);
                 self.modrm(ModRM {
                     mode: Mode::M00,
@@ -490,7 +525,7 @@ impl Emitter<'_> {
                 });
             }
             (Val::Reg(dst), Val::AddrReg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst).extend_rm(src));
                 self.opcode(0x8b);
                 self.modrm(ModRM {
                     mode: Mode::M00,
@@ -499,7 +534,7 @@ impl Emitter<'_> {
                 });
             }
             (Val::Reg(dst), Val::AddrRegOffset(src, offset)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst).extend_rm(src));
                 self.opcode(0x8b);
                 self.modrm(ModRM {
                     mode: Mode::M10,
@@ -510,7 +545,7 @@ impl Emitter<'_> {
                 self.imm(offset);
             }
             (Val::AddrReg(Register::RSP), Val::Reg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(src));
                 self.opcode(0x89);
                 self.modrm(ModRM {
                     mode: Mode::M00,
@@ -525,7 +560,7 @@ impl Emitter<'_> {
                 });
             }
             (Val::AddrReg(dst), Val::Reg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst).extend_rm(src));
                 self.opcode(0x89);
                 self.modrm(ModRM {
                     mode: Mode::M00,
@@ -534,7 +569,7 @@ impl Emitter<'_> {
                 });
             }
             (Val::AddrRegOffset(dst, offset), Val::Reg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst).extend_rm(src));
                 self.opcode(0x89);
                 self.modrm(ModRM {
                     mode: Mode::M10,
@@ -545,7 +580,7 @@ impl Emitter<'_> {
                 self.imm(offset);
             }
             (Val::Reg(dst), Val::Reg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(src).extend_rm(dst));
                 self.opcode(0x89);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -560,7 +595,7 @@ impl Emitter<'_> {
     fn lea(&mut self, dst: Val, mem_src: Val) {
         match (dst, mem_src) {
             (Val::Reg(dst), Val::AddrReg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst).extend_rm(src));
                 self.opcode(0x8D);
                 self.modrm(ModRM {
                     mode: Mode::M00,
@@ -580,7 +615,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Int(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(dst));
                 self.opcode(0x81);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -590,7 +625,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Reg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst).extend_rm(src));
                 self.opcode(0x03);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -610,7 +645,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Int(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(dst));
                 self.opcode(0x81);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -620,7 +655,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Reg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst).extend_rm(src));
                 self.opcode(0x2B);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -635,7 +670,7 @@ impl Emitter<'_> {
     fn imul(&mut self, val1: Val, val2: Val) {
         match (val1, val2) {
             (Val::Reg(Register::RAX), Val::Reg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(src));
                 self.opcode(0xF7);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -644,7 +679,7 @@ impl Emitter<'_> {
                 });
             }
             (Val::Reg(dst), Val::Int(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst).extend_rm(dst));
                 self.opcode(0x69);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -654,7 +689,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Reg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst).extend_rm(src));
                 self.opcode(0x69);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -673,7 +708,7 @@ impl Emitter<'_> {
     fn div(&mut self, val: Val) {
         match val {
             Val::Reg(divisor) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(divisor));
                 self.opcode(0xF7);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -688,7 +723,7 @@ impl Emitter<'_> {
     fn inc(&mut self, val: Val) {
         match val {
             Val::Reg(reg) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(reg));
                 self.opcode(0xFF);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -702,7 +737,7 @@ impl Emitter<'_> {
     fn dec(&mut self, val: Val) {
         match val {
             Val::Reg(reg) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(reg));
                 self.opcode(0xFF);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -722,7 +757,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Int(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(dst));
                 self.opcode(0x81);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -732,7 +767,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Reg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst).extend_rm(src));
                 self.opcode(0x23);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -752,7 +787,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Int(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(dst));
                 self.opcode(0x81);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -762,7 +797,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Reg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst).extend_rm(src));
                 self.opcode(0x0B);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -782,7 +817,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Int(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(dst));
                 self.opcode(0x81);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -792,7 +827,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Reg(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(dst).extend_rm(src));
                 self.opcode(0x33);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -812,7 +847,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Int(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(dst));
                 self.opcode(0x81);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -822,7 +857,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(reg1), Val::Reg(reg2)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(reg1).extend_rm(reg2));
                 self.opcode(0x39);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -843,7 +878,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(dst), Val::Int(src)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_rm(dst));
                 self.opcode(0xF7);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -853,7 +888,7 @@ impl Emitter<'_> {
                 self.imm(src);
             }
             (Val::Reg(reg1), Val::Reg(reg2)) => {
-                self.rex(REX_W);
+                self.rex(REX_W.extend_reg(reg1).extend_rm(reg2));
                 self.opcode(0x85);
                 self.modrm(ModRM {
                     mode: Mode::M11,
@@ -1331,6 +1366,7 @@ macro_rules! lang {
 #[allow(dead_code)]
 const RAX: Val = Val::Reg(Register::RAX);
 
+
 #[allow(dead_code)]
 const RSP: Val = Val::Reg(Register::RSP);
 
@@ -1351,6 +1387,33 @@ const RCX: Val = Val::Reg(Register::RCX);
 
 #[allow(dead_code)]
 const RBP: Val = Val::Reg(Register::RBP);
+
+#[allow(dead_code)]
+const R8: Val = Val::Reg(Register::R8);
+
+#[allow(dead_code)]
+const R9: Val = Val::Reg(Register::R9);
+
+#[allow(dead_code)]
+const R10: Val = Val::Reg(Register::R10);
+
+#[allow(dead_code)]
+const R11: Val = Val::Reg(Register::R11);
+
+#[allow(dead_code)]
+const R12: Val = Val::Reg(Register::R12);
+
+#[allow(dead_code)]
+const R13: Val = Val::Reg(Register::R13);
+
+#[allow(dead_code)]
+const R14: Val = Val::Reg(Register::R14);
+
+#[allow(dead_code)]
+const R15: Val = Val::Reg(Register::R15);
+
+
+
 
 #[allow(dead_code)]
 const RIP_PLACEHOLDER : Val = Val::AddrRegOffset(Register::RIP, 0);
@@ -1592,6 +1655,22 @@ fn main() {
             (fib 20))
 
     ).compile(env, e);
+
+
+    // e.label("main".to_string());
+    // e.mov(RAX, Val::Int(2));
+    // e.mov(R8, RAX);
+    // e.add(R8, R8);
+    // e.mov(R9, R8);
+    // e.mov(R10, R9);
+    // e.mov(R11, R10);
+    // e.mov(R12, R11);
+    // e.mov(R13, R12);
+    // e.mov(R14, R13);
+    // e.mov(R15, R14);
+    // e.mov(RAX, R15);
+
+    // e.ret();
 
 
     // Lang::Func {
