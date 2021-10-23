@@ -1491,13 +1491,25 @@ macro_rules! lang {
         Lang::Add(Box::new(lang!($arg1)),
                   Box::new(lang!($arg2)))
     };
+    ((+ $arg1:tt $arg2:tt $($args:tt)+)) => {
+            Lang::Add(Box::new(lang!($arg1)),
+                     Box::new(lang!((+ $arg2 $($args)+))))
+    };
     ((- $arg1:tt $arg2:tt)) => {
         Lang::Sub(Box::new(lang!($arg1)),
                   Box::new(lang!($arg2)))
     };
+    ((- $arg1:tt $arg2:tt $($args:tt)+)) => {
+        Lang::Add(Box::new(lang!($arg1)),
+                 Box::new(lang!((- $arg2 $($args)+))))
+    };
     ((* $arg1:tt $arg2:tt)) => {
         Lang::Mul(Box::new(lang!($arg1)),
                   Box::new(lang!($arg2)))
+    };
+    ((* $arg1:tt $arg2:tt $($args:tt)+)) => {
+        Lang::Add(Box::new(lang!($arg1)),
+                 Box::new(lang!((+ $arg2 $($args)+))))
     };
     ((do $($arg1:tt)+)) => {
         Lang::Do(vec![$(lang!($arg1)),+])
@@ -1588,7 +1600,7 @@ pub extern "C" fn print(x: u64) -> u64 {
 
 pub extern "C" fn get_heap() ->  *const u8 {
     // I am a bit confused about life times and this working.
-    // Maybe once I have the pointer all best are off for the
+    // Maybe once I have the pointer all bets are off for the
     // borrow checker? Really not sure.
     let heap : [u8; 1024] = [0; 1024];
     (&heap) as *const u8
@@ -1775,12 +1787,12 @@ fn main() {
     .compile(env, e);
 
 
-    // Lang::FFI {
-    //     name: "get_heap".to_string(),
-    //     args: vec![],
-    //     ptr: get_heap as *const (),
-    // }
-    // .compile(env, e);
+    Lang::FFI {
+        name: "get_heap".to_string(),
+        args: vec![],
+        ptr: get_heap as *const (),
+    }
+    .compile(env, e);
 
     // Lang::Func {
     //     name: "main".to_string(),
@@ -1793,31 +1805,31 @@ fn main() {
     // .compile(env, e);
 
 
-    // lang!(
-    //     (defn fact [n]
-    //             (if (= n 1)
-    //                 1
-    //                 (* n (fact (- n 1)))))
-    // ).compile(env, e);
+    lang!(
+        (defn fact [n]
+                (if (= n 1)
+                    1
+                    (* n (fact (- n 1)))))
+    ).compile(env, e);
 
 
-    // lang!(
-    //     (defn fib [n]
-    //         (if (= n 0)
-    //             0
-    //             (if (= n 1)
-    //                 1
-    //                 (+ (fib (- n 1))
-    //                    (fib (- n 2))))))
-    // ).compile(env, e);
+    lang!(
+        (defn fib [n]
+            (if (= n 0)
+                0
+                (if (= n 1)
+                    1
+                    (+ (fib (- n 1))
+                       (fib (- n 2))))))
+    ).compile(env, e);
 
-    // lang!(
-    //     (defn add3 [x y z]
-    //         (do (print x)
-    //             (print y)
-    //             (print z)
-    //        (+ x (+ y z))))
-    // ).compile(env, e);
+    lang!(
+        (defn add3 [x y z]
+            (do (print x)
+                (print y)
+                (print z)
+           (+ x y z)))
+    ).compile(env, e);
 
 
     lang!(
@@ -1825,18 +1837,21 @@ fn main() {
            (let [x1 1]
              (let [x2 2]
                 (let [x3 3]
-                    (+ z (+ y (+ x (+ x1 (+ x2 x3)))))))))
+                    (+ z y x x1 x2 x3)))))
     ).compile(env, e);
 
 
 
+    // Not needed, just for debugging
     e.mov(FUNCTION_REGISTERS[0], Val::Int(0));
     e.mov(FUNCTION_REGISTERS[1], Val::Int(0));
     e.mov(FUNCTION_REGISTERS[2], Val::Int(0));
 
     lang!(
         (defn main []
-            (addstuff 1 2 32))
+          (+ (fib 20)
+             (fact 10)
+             (addstuff 1 2 3)))
 
     ).compile(env, e);
 
@@ -1958,6 +1973,8 @@ fn main() {
     // }
     // .compile(env, e);
 
+    
+    // TODO: Make this representable in lang!
     // Lang::Func {
     //     name: "try_while".to_string(),
     //     args: vec!["n".to_string()],
