@@ -58,7 +58,7 @@ impl Register {
         }
     }
     fn extended(&self) -> bool {
-        match self {
+        !matches!(self,
             Register::RAX |
             Register::RCX |
             Register::RDX |
@@ -67,10 +67,7 @@ impl Register {
             Register::RBP |
             Register::RSI |
             Register::RDI |
-            Register::RIP => false,
-
-            _ => true
-        }
+            Register::RIP)
     }
 }
 
@@ -95,7 +92,7 @@ struct Label {
 impl Label {
     fn set_location(&mut self, emitter: &mut Emitter) {
         let loc = emitter.instruction_index;
-        if let Some(_) = self.location {
+        if self.location.is_some() {
             panic!("Setting Location twice {:?} at {}", self, loc);
         }
         self.location = Some(loc.try_into().unwrap());
@@ -103,7 +100,7 @@ impl Label {
     }
 
     fn patch(&mut self, emitter: &mut Emitter) {
-        if let None = self.location {
+        if self.location.is_none() {
             panic!("Patching without a location {:?}", self);
         }
         let label_loc = self.location.unwrap();
@@ -117,11 +114,11 @@ impl Label {
     fn add_called(&mut self, emitter: &mut Emitter) {
         let loc = (emitter.instruction_index + 4) as u32;
         if let Some(location) = self.location {
-            emitter.imm((location as i32 - loc as i32).try_into().unwrap())
+            emitter.imm(location as i32 - loc as i32)
         } else {
             emitter.imm(0);
         }
-        self.called.push(loc.try_into().unwrap());
+        self.called.push(loc);
     }
 }
 
@@ -329,7 +326,7 @@ impl Emitter<'_> {
             // 4 bytes (32 bit) so we patch the correct location;
             self.instruction_index -= 4;
             self.add_label(label);
-            return Val::Reg(reg);
+            Val::Reg(reg)
         } else {
             unimplemented!("Must be a register {:?}", reg);
         }
@@ -930,12 +927,6 @@ impl Emitter<'_> {
 const FUNCTION_REGISTERS: [Val; 3] = [RDI, RSI, RDX];
 
 
-// TODO: FIX LOCAL VARIABLES!
-// I don't recurse, so I can't really make let.
-// Need to deal with that.
-// Maybe a context where I know what function I am in and can update things?
-
-
 // Think about closures.
 // Think about debugging features
 
@@ -985,6 +976,123 @@ struct EnvData {
 }
 
 impl Lang {
+
+
+    // This isn't perfect and probably allocates more than it needs to
+    // But I wrote this super fast thanks to copilot.
+    fn find_all_lets(&self) -> Vec<(String, Lang)> {
+        match self {
+            // This probably doesn't make sense right now because nested functions aren't supported
+            // but it also might never make sense because my let analysis shouldn't work like this with nested functions
+            Lang::Func { name: _, args, body } => {
+                let mut lets = vec![];
+                for arg in args {
+                    lets.push((arg.to_string(), Lang::Variable(arg.to_string())));
+                }
+                for stmt in body {
+                    let mut stmt_lets = stmt.find_all_lets();
+                    lets.append(&mut stmt_lets);
+                }
+                lets
+            }
+            Lang::Add(lhs, rhs) => {
+                let mut lets = lhs.find_all_lets();
+                let mut rhs_lets = rhs.find_all_lets();
+                lets.append(&mut rhs_lets);
+                lets
+            }
+            Lang::Sub(lhs, rhs) => {
+                let mut lets = lhs.find_all_lets();
+                let mut rhs_lets = rhs.find_all_lets();
+                lets.append(&mut rhs_lets);
+                lets
+            }
+            Lang::Mul(lhs, rhs) => {
+                let mut lets = lhs.find_all_lets();
+                let mut rhs_lets = rhs.find_all_lets();
+                lets.append(&mut rhs_lets);
+                lets
+            }
+            Lang::If(cond, then, else_) => {
+                let mut lets = cond.find_all_lets();
+                let mut then_lets = then.find_all_lets();
+                let mut else_lets = else_.find_all_lets();
+                lets.append(&mut then_lets);
+                lets.append(&mut else_lets);
+                lets
+            }
+            Lang::Equal(lhs, rhs) => {
+                let mut lets = lhs.find_all_lets();
+                let mut rhs_lets = rhs.find_all_lets();
+                lets.append(&mut rhs_lets);
+                lets
+            }
+            Lang::NotEqual(lhs, rhs) => {
+                let mut lets = lhs.find_all_lets();
+                let mut rhs_lets = rhs.find_all_lets();
+                lets.append(&mut rhs_lets);
+                lets
+            }
+            Lang::Int(_) => vec![],
+            Lang::Call0(_name) => vec![],
+            Lang::Call1(_name, arg) => {
+                arg.find_all_lets()
+            }
+            Lang::Call2(_name, arg1, arg2) => {
+                let mut lets = arg1.find_all_lets();
+                let mut arg2_lets = arg2.find_all_lets();
+                lets.append(&mut arg2_lets);
+                lets
+            }
+            Lang::Call3(_name, arg1, arg2, arg3) => {
+                let mut lets = arg1.find_all_lets();
+                let mut arg2_lets = arg2.find_all_lets();
+                let mut arg3_lets = arg3.find_all_lets();
+                lets.append(&mut arg2_lets);
+                lets.append(&mut arg3_lets);
+                lets
+            }
+            Lang::While(cond, body) => {
+                let mut lets = cond.find_all_lets();
+                let mut body_lets = body.find_all_lets();
+                lets.append(&mut body_lets);
+                lets
+            }
+            Lang::True => vec![],
+            Lang::False => vec![],
+            Lang::Do(stmts) => {
+                let mut lets = vec![];
+                for stmt in stmts {
+                    let mut stmt_lets = stmt.find_all_lets();
+                    lets.append(&mut stmt_lets);
+                }
+                lets
+            }
+            Lang::Let(name, val) => {
+                let mut lets = val.find_all_lets();
+                lets.append(&mut vec![(name.clone(), *val.clone())]);
+                lets
+            }
+            Lang::Set(_name, val) => {
+                val.find_all_lets()
+            }
+            Lang::Variable(_name) => vec![],
+            Lang::Return(val) => {
+                val.find_all_lets()
+            }
+            Lang::Get(val) => {
+                val.find_all_lets()
+            }
+            Lang::Store(val, ptr) => {
+                let mut lets = val.find_all_lets();
+                let mut ptr_lets = ptr.find_all_lets();
+                lets.append(&mut ptr_lets);
+                lets
+            }
+            Lang::FFI { name: _, args: _, ptr: _ } => vec![],
+        } 
+    }
+
     #[allow(dead_code, unused_variables)]
     fn compile(self, env: &mut HashMap<String, EnvData>, emitter: &mut Emitter) {
         // let mut stack : Vec<Lang> = vec![];
@@ -1086,18 +1194,26 @@ impl Lang {
                 emitter.cmp(RAX, Val::Int(1));
                 emitter.jump_label_not_equal(exit_loop_symbol.clone());
                 (*body).compile(env, emitter);
-                emitter.jump_label(start_loop_symbol.clone());
-                emitter.label(exit_loop_symbol.clone());
+                emitter.jump_label(start_loop_symbol);
+                emitter.label(exit_loop_symbol);
             }
             Lang::Do(exprs) => {
-                let mut i = 0;
                 let last = exprs.len() - 1;
-                for expr in exprs {
-                    expr.compile(env, emitter);
-                    if i != last {
-                        emitter.add(RSP, Val::Int(8));
+                for (i, expr) in exprs.into_iter().enumerate() {
+                    match expr {
+                        // Let's don't add to stack
+                        // probably others I need to do this with too.
+                        // could a is_statement method
+                        Lang::Let(_, _) => {
+                            expr.compile(env, emitter);
+                        }
+                        expr => {
+                            expr.compile(env, emitter);
+                            if i != last {
+                                emitter.add(RSP, Val::Int(8));
+                            }
+                        }
                     }
-                    i += 1;
                 }
             }
             Lang::FFI { name, args, ptr } => {
@@ -1122,18 +1238,27 @@ impl Lang {
                 emitter.push(RBP);
                 emitter.mov(RBP, RSP);
 
-                // This whole local var handling is a mess.
-                let local_var_count = {
-                    let mut count = 0;
-                    for expr in &body {
-                        if let Lang::Let(_, _) = expr {
-                            count += 1;
-                        }
-                    }
-                    count
-                };
-                let mut local_vars: Vec<String> = Vec::with_capacity(local_var_count);
 
+                let mut current_local_var = 1;
+                let lets = body.iter().fold(vec![], |mut acc, body| {
+                    acc.extend(body.find_all_lets());
+                    acc
+                });
+
+                for (name, _val) in &lets {
+                    env.insert(
+                        name.to_string(),
+                        EnvData {
+                            val: Val::AddrRegOffset(Register::RBP, current_local_var * -8),
+                            is_foreign: false,
+                        },
+                    );
+                    current_local_var += 1;
+                }
+
+                // This whole local var handling is a mess.
+                let local_var_count = lets.len();
+               
                 // Make room for our local vars
                 // Could deal with stack alignment here?
                 // If I care about that in this JITed deal.
@@ -1149,29 +1274,9 @@ impl Lang {
                         },
                     );
                 }
-                let mut current_local_var = 1;
-                println!("local_vars");
-                // I actually need to recurse if I want this to work :(
-                // Or does this need to be at some global level?
-                // Really not sure
+               
                 for expr in body {
-                    match expr {
-                        Lang::Let(ref name, _) => {
-                            env.insert(
-                                name.to_string(),
-                                EnvData {
-                                    val: Val::AddrRegOffset(Register::RBP, current_local_var * -8),
-                                    is_foreign: false,
-                                },
-                            );
-                            local_vars.push(name.to_string());
-                            current_local_var += 1;
-                            expr.compile(env, emitter);
-                        }
-                        expr => { 
-                            expr.compile(env, emitter)
-                        },
-                    }
+                    expr.compile(env, emitter)
                 }
 
                 emitter.leave();
@@ -1181,7 +1286,7 @@ impl Lang {
                 for var in args.iter() {
                     env.remove_entry(var);
                 }
-                for name in &local_vars {
+                for (name, _val) in &lets {
                     env.remove_entry(name);
                 }
                 emitter.ret();
@@ -1368,7 +1473,7 @@ macro_rules! lang {
         $body:tt
     )) => {
         Lang::Do(vec![
-            Lang::Let("n".to_string(), Box::new(lang!($val))),
+            Lang::Let(stringify!($name).to_string(), Box::new(lang!($val))),
             lang!($body)]);
     };
     ((if (= $arg:ident $val:expr)
@@ -1477,7 +1582,7 @@ const RIP_PLACEHOLDER : Val = Val::AddrRegOffset(Register::RIP, 0);
 
 pub extern "C" fn print(x: u64) -> u64 {
     println!("{}", x);
-    return x;
+    x   
 }
 
 
@@ -1486,7 +1591,7 @@ pub extern "C" fn get_heap() ->  *const u8 {
     // Maybe once I have the pointer all best are off for the
     // borrow checker? Really not sure.
     let heap : [u8; 1024] = [0; 1024];
-    return (&heap) as *const u8;
+    (&heap) as *const u8
 }
 
 
@@ -1515,7 +1620,7 @@ fn main() {
 
     // If my code gets too big, I could overwrite this offset
     let mem_offset = 4096 - 128;
-    let mem_offset_size: usize = mem_offset.try_into().unwrap();
+    let _mem_offset_size: usize = mem_offset.try_into().unwrap();
 
     // Things are encoding properly. But I'm not doing anything that makes
     // sense. Need to make program that writes to memory and reads it back.
@@ -1696,23 +1801,33 @@ fn main() {
     // ).compile(env, e);
 
 
-    lang!(
-        (defn fib [n]
-            (if (= n 0)
-                0
-                (if (= n 1)
-                    1
-                    (+ (fib (- n 1))
-                       (fib (- n 2))))))
-    ).compile(env, e);
+    // lang!(
+    //     (defn fib [n]
+    //         (if (= n 0)
+    //             0
+    //             (if (= n 1)
+    //                 1
+    //                 (+ (fib (- n 1))
+    //                    (fib (- n 2))))))
+    // ).compile(env, e);
+
+    // lang!(
+    //     (defn add3 [x y z]
+    //         (do (print x)
+    //             (print y)
+    //             (print z)
+    //        (+ x (+ y z))))
+    // ).compile(env, e);
+
 
     lang!(
-        (defn add3 [x y z]
-            (do (print x)
-                (print y)
-                (print z)
-           (+ x (+ y z))))
+        (defn addstuff [x y z]
+           (let [x1 1]
+             (let [x2 2]
+                (let [x3 3]
+                    (+ z (+ y (+ x (+ x1 (+ x2 x3)))))))))
     ).compile(env, e);
+
 
 
     e.mov(FUNCTION_REGISTERS[0], Val::Int(0));
@@ -1721,7 +1836,7 @@ fn main() {
 
     lang!(
         (defn main []
-            (fib 20))
+            (addstuff 1 2 32))
 
     ).compile(env, e);
 
