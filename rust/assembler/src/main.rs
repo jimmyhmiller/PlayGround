@@ -473,9 +473,6 @@ impl Emitter<'_> {
     }
 
    
-
-
-
     // All these instructions could be encoded in a much better way.
 
     // I could make it so there are multiple moves depending on type
@@ -605,7 +602,7 @@ impl Emitter<'_> {
                     rm: Val::Reg(src),
                 });
             }
-            _ => panic!("Mov not implemented for that combination"),
+            _ => panic!("lea not implemented for that combination"),
         }
     }
 
@@ -934,7 +931,7 @@ impl Emitter<'_> {
                 }
                 self.emit(&[0x58 | reg.index()])
             },
-            _ => panic!("push not implemented for that combination"),
+            _ => panic!("pop not implemented for that combination"),
         }
     }
 }
@@ -1442,7 +1439,6 @@ impl Lang {
             }
             _ => {}
         }
-        // }
     }
 }
 
