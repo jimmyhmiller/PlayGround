@@ -5,6 +5,7 @@ use std::convert::TryInto;
 use std::io::{self, Write};
 use std::mem;
 use std::process::Command;
+use std::time::Instant;
 
 /// Notes:
 // All my jumps are rel32
@@ -471,6 +472,10 @@ impl Emitter<'_> {
         self.opcode(0xC9);
     }
 
+   
+
+
+
     // All these instructions could be encoded in a much better way.
 
     // I could make it so there are multiple moves depending on type
@@ -660,7 +665,7 @@ impl Emitter<'_> {
                     rm: Val::Reg(src),
                 });
             }
-            _ => panic!("add not implemented for that combination"),
+            _ => panic!("sub not implemented for that combination"),
         }
     }
 
@@ -695,7 +700,7 @@ impl Emitter<'_> {
                 });
                 self.imm(1);
             }
-            _ => panic!("add not implemented for that combination"),
+            _ => panic!("imul not implemented for that combination"),
         }
     }
 
@@ -713,7 +718,7 @@ impl Emitter<'_> {
                     rm: Val::Reg(divisor),
                 });
             }
-            _ => panic!("add not implemented for that combination"),
+            _ => panic!("div not implemented for that combination"),
         }
     }
 
@@ -728,7 +733,7 @@ impl Emitter<'_> {
                     rm: Val::Reg(reg),
                 });
             }
-            _ => panic!("add not implemented for that combination"),
+            _ => panic!("inc not implemented for that combination"),
         }
     }
     fn dec(&mut self, val: Val) {
@@ -742,7 +747,7 @@ impl Emitter<'_> {
                     rm: Val::Reg(reg),
                 });
             }
-            _ => panic!("add not implemented for that combination"),
+            _ => panic!("dec not implemented for that combination"),
         }
     }
 
@@ -772,7 +777,7 @@ impl Emitter<'_> {
                     rm: Val::Reg(src),
                 });
             }
-            _ => panic!("add not implemented for that combination"),
+            _ => panic!("and not implemented for that combination"),
         }
     }
 
@@ -802,7 +807,17 @@ impl Emitter<'_> {
                     rm: Val::Reg(src),
                 });
             }
-            _ => panic!("add not implemented for that combination"),
+            _ => panic!("or not implemented for that combination"),
+        }
+    }
+
+    fn enter(&mut self, val: Val) {
+        match val {
+            Val::Int(src) => {
+                self.opcode(0xC8);
+                self.imm(src);
+            }
+            _ => panic!("enter not implemented for that combination"),
         }
     }
 
@@ -832,7 +847,7 @@ impl Emitter<'_> {
                     rm: Val::Reg(src),
                 });
             }
-            _ => panic!("add not implemented for that combination"),
+            _ => panic!("xor not implemented for that combination"),
         }
     }
 
@@ -1232,7 +1247,7 @@ impl Lang {
             Lang::Func { name, args, body } => {
                 // I could make it so that functions are hot patchable
                 // by having some indirection here.
-                println!("compiling {}", name);
+                // println!("compiling {}", name);
                 emitter.label(name);
                 // Probably need to setup stack at some point
                 emitter.push(RBP);
@@ -1608,6 +1623,8 @@ pub extern "C" fn get_heap() ->  *const u8 {
 
 
 fn main() {
+    let start_time = Instant::now();
+
     let m = MemoryMap::new(
         4096,
         &[
@@ -2011,6 +2028,9 @@ fn main() {
     // let ptr = print as *const () as usize;
     // e.imm_usize(ptr);
 
+    let end_time = Instant::now() - start_time;
+    println!("Compiled in {} micros", end_time.as_micros());
+
     let result = e
         .memory
         .iter()
@@ -2029,7 +2049,7 @@ fn main() {
 
     println!("{}", String::from_utf8(output.stdout).unwrap());
 
-    io::stdout().flush().unwrap();
+    // io::stdout().flush().unwrap();
     // This is working well, but need to figure out more than just 64bit
     // Need to figure out the whole SIB thing (can I just consider that an offset)
     // Need to figure out how I want to code this.
