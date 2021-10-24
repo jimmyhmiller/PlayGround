@@ -11,9 +11,8 @@ use std::ops::Mul;
 use sdl2::video::Window;
 
 extern crate sdl2;
-extern crate wolf;
 
-use wolf::world_map::get_world_map;
+use crate::world_map::get_world_map;
 
 // code borrowed from https://lodev.org/cgtutor/raycasting.html
 
@@ -140,7 +139,9 @@ fn handle_key_presses(
     }
 }
 
-fn main() {
+
+pub fn main() {
+
     let world_map = get_world_map();
 
     let sdl_context = sdl2::init().unwrap();
@@ -151,7 +152,7 @@ fn main() {
 
     let window = video_subsystem
         .window("Example", map_width as u32, map_height as u32)
-        .fullscreen()
+        // .fullscreen()
         .build()
         .unwrap();
 
@@ -189,7 +190,6 @@ fn main() {
                 } => {
                     running = false;
                 }
-
                 Event::MouseButtonDown { x: _, y: _, .. } => {}
                 _ => {}
             }

@@ -64,10 +64,16 @@ fn handle_key_presses(event_pump: &EventPump, player: &mut Player, world_map: &V
     }
 }
 
-fn main() -> Result<(), String> {
+
+fn main() -> Result<(), String>  {
+   Ok(wolf::learning::main())
+}
+fn new_main() -> Result<(), String> {
+    // not done
     let world_map = get_world_map();
 
     let sdl_context = sdl2::init()?;
+    let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string())?;
 
     let map_width: i32 = 500;
     let map_height: i32 = 500;
@@ -78,8 +84,10 @@ fn main() -> Result<(), String> {
         .unwrap();
 
     // Let's create a Canvas which we will use to draw in our Window
-    let _canvas: Canvas<Window> = window.into_canvas().present_vsync().build().unwrap();
+    let canvas: Canvas<Window> = window.into_canvas().present_vsync().build().unwrap();
     let mut event_pump = sdl_context.event_pump()?;
+
+    let texture_creator = canvas.texture_creator();
 
     let mut player = Player {
         facing: Point { x: -1.0, y: 0.0 },

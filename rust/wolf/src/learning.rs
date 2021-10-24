@@ -5,6 +5,7 @@ use sdl2::keyboard::Keycode;
 use sdl2::event::Event;
 
 use sdl2::video::Window;
+use std::borrow::BorrowMut;
 use std::cmp;
 
 extern crate sdl2;
@@ -72,7 +73,21 @@ fn move_player(player : &mut Player, ground : i32) {
 
 
 
-fn main() {
+pub fn main() {
+    
+    unsafe { 
+
+        use cocoa_foundation::foundation::NSUserDefaults;
+        use cocoa_foundation::foundation::NSString;
+        use cocoa_foundation::base::nil;
+        // [[NSUserDefaults standardUserDefaults] setBool: YES
+        //                                        forKey: @"AppleMomentumScrollSupported"];
+
+        let defaults = cocoa_foundation::base::id::standardUserDefaults();
+        let key = NSString::alloc(nil).init_str("AppleMomentumScrollSupported");
+        defaults.setBool_forKey_(cocoa_foundation::base::YES, key)
+    }
+    
 
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
@@ -89,7 +104,9 @@ fn main() {
 
     let mut players : Vec<Player> = vec![];
 
+
     while running {
+        let mut scrollY = 0;
 
         for event in event_pump.poll_iter() {
             match event {
@@ -99,20 +116,30 @@ fn main() {
                 Event::MouseButtonDown {x, y, ..} => {
                     players.push(Player{x: x, y: y, xvelocity: 0, yvelocity: 0})
                 }
+
+                Event::MouseWheel {x, y, direction , timestamp: _, .. } => {
+                    let direction_multiplier = match direction {
+                        sdl2::mouse::MouseWheelDirection::Normal => -1,
+                        sdl2::mouse::MouseWheelDirection::Flipped => 1,
+                        sdl2::mouse::MouseWheelDirection::Unknown(x) => x as i32
+                    };
+                    scrollY = y  * direction_multiplier * 3;
+                }
                 _ => {}
             }
         }
 
 
         for i in 0..players.len() {
-            let mut ground = None;
-            for j in 0..players.len()  {
-                if j != i && collision(&players[j], &players[i]) {
-                    ground = Some(rect_for_player(&players[j]).top() + (rect_for_player(&players[i]).height() as i32));
-                }
-            }
-            gravity(&mut players[i], ground.is_some());
-            move_player(&mut players[i], ground.unwrap_or(580));
+            // let mut ground = None;
+            // for j in 0..players.len()  {
+            //     if j != i && collision(&players[j], &players[i]) {
+            //         ground = Some(rect_for_player(&players[j]).top() + (rect_for_player(&players[i]).height() as i32));
+            //     }
+            // }
+            // gravity(&mut players[i], ground.is_some());
+            // move_player(&mut players[i], ground.unwrap_or(580));
+            players[i].y += scrollY;
         }
 
         clear_canvas(&mut canvas);
