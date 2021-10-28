@@ -1,4 +1,4 @@
-use std::{cmp::{max, min}, convert::TryInto, fs};
+use std::{cmp::{max, min}, convert::TryInto, fs, ops::Neg};
 
 use sdl2::{*, event::*, keyboard::*, pixels::Color, rect::Rect, render::*, video::*};
 
@@ -6,16 +6,6 @@ use sdl2::{*, event::*, keyboard::*, pixels::Color, rect::Rect, render::*, video
 fn render_char(width: i32, height: i32, c: char) -> Rect {
     let width = width / 94;
     let rect = Rect::new(width * (c as i32 - 33), 0, width as u32, height as u32);
-    // Interesting code from copilot, probably useful later
-    // match c {
-    //     ' ' => rect.set_x(width),
-    //     '\n' => rect.set_y(height),
-    //     '\t' => rect.set_x(width * 4),
-    //     '\r' => rect.set_x(0),
-    //     '\x08' => rect.set_x(width * -1),
-    //     '\x0C' => rect.set_x(width * -2),
-    //     _ => {}
-    // }
     rect
 }
 
@@ -52,7 +42,7 @@ fn main() -> Result<(), String> {
 
     
 
-    let mut window_width: i32 = 500;
+    let window_width: i32 = 500;
     let mut window_height: i32 = 500;
 
     let window = sdl_context
@@ -103,12 +93,11 @@ fn main() -> Result<(), String> {
     // Need that concept in this app.
     // But while this is "slow", in release it is only about a second for a 1 GB file.
     let start_time = std::time::Instant::now();
-    for char in chars {
+    for (line_end, char) in chars.into_iter().enumerate() {
         if *char == 10 {
             line_range.push((line_start, line_end - 1));
             line_start = line_end + 1;
         }
-        line_end += 1;
     }
     println!("parsed file in {} ms", start_time.elapsed().as_millis());
 
@@ -121,8 +110,8 @@ fn main() -> Result<(), String> {
             Some(Event::Quit { .. }) => ::std::process::exit(0),
             // Continuous resize in sdl2 is a bit weird
             // Would need to watch events or something
-            Some(Event::Window {win_event: WindowEvent::Resized(w, h), ..}) => {
-                window_width = w;
+            Some(Event::Window {win_event: WindowEvent::Resized(_w, h), ..}) => {
+                // window_width = w;
                 window_height = h;
             }
             Some(Event::MouseWheel {x: _, y, direction , timestamp: _, .. }) => {
@@ -156,7 +145,7 @@ fn main() -> Result<(), String> {
         
         let line_fraction = offset_y as usize % letter_height as usize;
 
-        let mut target = Rect::new(10 as i32, line_fraction as i32 * -1, letter_width, letter_height);
+        let mut target = Rect::new(10, (line_fraction as i32).neg(), letter_width, letter_height);
         
         if lines_above_fold + viewing_window >= line_range.len() + 3 {
             at_end = true;
@@ -164,11 +153,14 @@ fn main() -> Result<(), String> {
             at_end = false;
         }
 
+        // I got rid of line wrap in this refactor. Probably should add that back in.
         for i in lines_above_fold as usize..min(lines_above_fold + viewing_window, line_range.len()) {
             let line_start = line_range[i as usize].0;
             let line_end = line_range[i as usize].1;
-            // let line_length = line_end - line_start;
             let mut line_offset = 10;
+            // I want to pad this so that the offset by the line number never changes.
+            // Really I should draw a line or something to make it look nicer.
+            line_offset += ((digit_count(line_range.len()) - digit_count(i + 1)) * 10) as i32;
             let line_number = (i + 1).to_string();
             for char in line_number.chars() {
                 let char_rect = render_char(width as i32, height as i32, char as char);
@@ -176,11 +168,9 @@ fn main() -> Result<(), String> {
                 canvas.copy(&texture, Some(char_rect), Some(target)).unwrap();
                 line_offset += letter_width as i32;
             }
-            // I want to pad this so that the offset by the line number never changes.
-            // Really I should draw a line or something to make it look nicer.
-            line_offset += ((digit_count(line_range.len()) - digit_count(i + 1)) * 10) as i32;
-            line_offset += 10;
-            for j in line_start..line_end {
+
+            line_offset += 20;
+            for j in line_start..line_end+1 {
                 let char = chars[j];
                 let rect = render_char(width as i32, height as i32, char as char);
                 target.set_x(line_offset as i32);
@@ -191,8 +181,6 @@ fn main() -> Result<(), String> {
         }
 
         canvas.present();
-
-        scroll_y = 0;
 
         // handle_key_presses(&event_pump, &mut player, &world_map);
     }
