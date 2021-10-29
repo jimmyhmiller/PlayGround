@@ -81,7 +81,7 @@ fn main() -> Result<(), String> {
     let letter_height = height;
 
     let start_time = std::time::Instant::now();
-    let text = fs::read_to_string("/Users/jimmyhmiller/Desktop/test/test3.txt").unwrap();
+    let text = fs::read_to_string("/Users/jimmyhmiller/Desktop/test/test.txt").unwrap();
     println!("read file in {} ms", start_time.elapsed().as_millis());
     let chars = text.as_bytes();
 
@@ -94,7 +94,7 @@ fn main() -> Result<(), String> {
     // But while this is "slow", in release it is only about a second for a 1 GB file.
     let start_time = std::time::Instant::now();
     for (line_end, char) in chars.into_iter().enumerate() {
-        if *char == 10 {
+        if *char == '\n' as u8 {
             line_range.push((line_start, line_end - 1));
             line_start = line_end + 1;
         }
@@ -104,26 +104,39 @@ fn main() -> Result<(), String> {
     println!("copied file");
     let mut offset_y = 0;
     let mut at_end = false;
+    let mut scroll_speed : i32 = 5;
     loop {
-        let mut scroll_y = 0;
+        let mut scroll_y : i32 = 0;
         match event_pump.poll_event() {
             Some(Event::Quit { .. }) => ::std::process::exit(0),
+            Some(Event::KeyDown { keycode: Some(Keycode::Escape), .. }) => ::std::process::exit(0),
+            // Play with scroll speed
+            Some(Event::KeyDown { keycode: Some(Keycode::Up), .. }) => {
+                scroll_speed /= 2;
+                scroll_speed = max(scroll_speed, 1);
+            }
+            Some(Event::KeyDown { keycode: Some(Keycode::Down), .. }) => {
+                scroll_speed = scroll_speed.saturating_mul(2)
+            }
             // Continuous resize in sdl2 is a bit weird
             // Would need to watch events or something
             Some(Event::Window {win_event: WindowEvent::Resized(_w, h), ..}) => {
                 // window_width = w;
                 window_height = h;
             }
+
             Some(Event::MouseWheel {x: _, y, direction , timestamp: _, .. }) => {
                 let direction_multiplier = match direction {
                     sdl2::mouse::MouseWheelDirection::Normal => 1,
                     sdl2::mouse::MouseWheelDirection::Flipped => -1,
                     sdl2::mouse::MouseWheelDirection::Unknown(x) => x as i32
                 };
-                scroll_y = y  * direction_multiplier * 5;
+                scroll_y = y  * direction_multiplier * scroll_speed;
             }
             _ => {}
         }
+
+        println!("zoomies! {}", scroll_speed);
 
         if !at_end || scroll_y < 0 {
             offset_y += scroll_y;
@@ -181,7 +194,5 @@ fn main() -> Result<(), String> {
         }
 
         canvas.present();
-
-        // handle_key_presses(&event_pump, &mut player, &world_map);
     }
 }
