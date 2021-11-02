@@ -1,5 +1,6 @@
 use std::{cmp::{max, min}, convert::TryInto, fs, ops::Neg};
 
+use native_dialog::FileDialog;
 use sdl2::{*, event::*, keyboard::*, libc::fpos_t, pixels::Color, rect::Rect, render::*, video::*};
 
 
@@ -32,8 +33,6 @@ fn draw_string<'a>(canvas: & mut Canvas<Window>, target: &'a mut Rect, texture: 
 // It would be pretty cool to add a minimap
 // Also cool to just add my own scrollbar.
 
-// Need to figure out colors for the texture.
-
 fn main() -> Result<(), String> {
 
     unsafe { 
@@ -54,8 +53,8 @@ fn main() -> Result<(), String> {
 
     
 
-    let mut window_width: i32 = 500;
-    let mut window_height: i32 = 500;
+    let mut window_width: i32 = 1200;
+    let mut window_height: i32 = 800;
 
     let window = sdl_context
         .video()?
@@ -87,20 +86,23 @@ fn main() -> Result<(), String> {
     // let text ="abcdefghijklmnopqrstuvwxyz";
     let surface = font
         .render(text.as_str())
-        .blended(Color::RGBA(0, 0, 0, 255))
+        // This needs to be 255 if I want to change colors
+        .blended(Color::RGBA(255, 255, 255, 255))
         .map_err(|e| e.to_string())?;
+
     let mut texture = texture_creator
         .create_texture_from_surface(&surface)
         .map_err(|e| e.to_string())?;
+
 
     let TextureQuery { width, height, .. } = texture.query();
     let letter_width = width / text.len() as u32;
     let letter_height = height;
 
     let start_time = std::time::Instant::now();
-    let text = fs::read_to_string("/Users/jimmyhmiller/Desktop/test/test3.txt").unwrap();
+    let mut text = fs::read_to_string("/Users/jimmyhmiller/Desktop/test/test3.txt").unwrap();
     println!("read file in {} ms", start_time.elapsed().as_millis());
-    let chars = text.as_bytes();
+    let mut chars = text.as_bytes();
 
     let mut line_range = Vec::<(usize,usize)>::with_capacity(chars.len()/60);
     let mut line_start = 0;
@@ -125,6 +127,7 @@ fn main() -> Result<(), String> {
     let mut time_start = std::time::Instant::now();
     let mut fps = 0;
     
+    texture.set_color_mod(167, 174, 210);
     loop {
 
         let mut scroll_y : i32 = 0;
@@ -139,6 +142,41 @@ fn main() -> Result<(), String> {
             Some(Event::KeyDown { keycode: Some(Keycode::Down), .. }) => {
                 scroll_speed = scroll_speed.saturating_mul(2)
             }
+
+            Some(Event::KeyDown { keycode: Some(Keycode::O), keymod: Mod::LGUIMOD | Mod:: RGUIMOD, .. }) => {  
+                let path = FileDialog::new()
+                    .set_location("~/Documents")
+                    .show_open_single_file()
+                    .unwrap();
+                let start_time = std::time::Instant::now();
+                if path.is_none() {
+                    continue;
+                }
+                let path = path.unwrap();
+                let path_str = path.to_str().unwrap();
+                let path_str = &path_str.replace("file://", "");
+
+                // Need to refactor into reusable function instead of just repeating here.
+                text = fs::read_to_string(path_str).unwrap();
+                println!("read file in {} ms", start_time.elapsed().as_millis());
+                chars = text.as_bytes();
+            
+                line_range = Vec::<(usize,usize)>::with_capacity(chars.len()/60);
+                line_start = 0;
+                // This is slow. I don't actually have to do this for the whole file in one go.
+                // I can do it for the first screen and then start doing more over time.
+                // Need that concept in this app.
+                // But while this is "slow", in release it is only about a second for a 1 GB file.
+                let start_time = std::time::Instant::now();
+                for (line_end, char) in chars.into_iter().enumerate() {
+                    if *char == '\n' as u8 {
+                        line_range.push((line_start, line_end - 1));
+                        line_start = line_end + 1;
+                    }
+                }
+                offset_y = 0;
+                println!("parsed file in {} ms", start_time.elapsed().as_millis());
+            }
             // Continuous resize in sdl2 is a bit weird
             // Would need to watch events or something
             Some(Event::Window {win_event: WindowEvent::Resized(w, h), ..}) => {
@@ -152,8 +190,9 @@ fn main() -> Result<(), String> {
                     sdl2::mouse::MouseWheelDirection::Flipped => -1,
                     sdl2::mouse::MouseWheelDirection::Unknown(x) => x as i32
                 };
-                scroll_y = y  * direction_multiplier * scroll_speed;
+                scroll_y = y * direction_multiplier * scroll_speed;
             }
+
             _ => {}
         }
 
@@ -162,7 +201,7 @@ fn main() -> Result<(), String> {
         }
 
 
-        canvas.set_draw_color(Color::RGBA(255, 255, 255, 255));
+        canvas.set_draw_color(Color::RGBA(42, 45, 62, 255));
         canvas.clear();
 
         // I should be smartest than this. I can know what I need to render
@@ -175,6 +214,7 @@ fn main() -> Result<(), String> {
         let lines_above_fold : usize = offset_y as usize / letter_height as usize;
         let viewing_window: usize = min((window_height / letter_height as i32).try_into().unwrap(), 1000);
         
+
         let line_fraction = offset_y as usize % letter_height as usize;
 
         let mut target = Rect::new(10, (line_fraction as i32).neg(), letter_width, letter_height);
@@ -185,33 +225,36 @@ fn main() -> Result<(), String> {
             at_end = false;
         }
 
+        // Need to add a real parser or I can try messing with tree sitter.
+        // But maybe I need to make text editable first?
+
         // I got rid of line wrap in this refactor. Probably should add that back in.
         for i in lines_above_fold as usize..min(lines_above_fold + viewing_window, line_range.len()) {
-            let line_start = line_range[i as usize].0;
-            let line_end = line_range[i as usize].1;
-            let mut line_offset = 10;
+            texture.set_color_mod(167, 174, 210);
+            let (start, end) = line_range[i];
+            target.set_x(10);
+
             // I want to pad this so that the offset by the line number never changes.
             // Really I should draw a line or something to make it look nicer.
-            line_offset += ((digit_count(line_range.len()) - digit_count(i + 1)) * 10) as i32;
+            let left_padding_count = digit_count(line_range.len()) - digit_count(i + 1);
+            let padding = left_padding_count * letter_width as usize;
+            target.set_x(target.x() + padding as i32);
             let line_number = (i + 1).to_string();
-            target.set_x(line_offset);
 
             let target = draw_string(&mut canvas, &mut target, &texture,&line_number);
-            line_offset = target.x();
-            // I should take a slice of u8 and convert it to a str then draw that
-            line_offset += 20;
-            for j in line_start..line_end+1 {
-                let char = chars[j];
-                let rect = render_char(letter_width as i32, height as i32, char as char);
-                target.set_x(line_offset as i32);
-                canvas.copy(&texture, rect, *target).unwrap();
-                line_offset += letter_width as i32;
+            target.set_x(target.x() + 20);
+        
+            if chars[start..=start+1] == [';' as u8, ';' as u8] {
+                texture.set_color_mod(251, 224, 149);
+            } else {
+                texture.set_color_mod(167, 174, 210);
             }
+            draw_string(&mut canvas, target, &texture, std::str::from_utf8(chars[start..=end].as_ref()).unwrap());
             target.set_y(target.y + height as i32);
         }
 
-        let mut target = Rect::new(window_width - (letter_width * 4) as i32, 0, letter_width, letter_height);
-        draw_string(&mut canvas, &mut target, &texture,  &fps.to_string());
+        let mut target = Rect::new(window_width - (letter_width * 8) as i32, 0, letter_width, letter_height);
+        draw_string(&mut canvas, &mut target, &texture, &format!("fps: {}", fps));
         frame_counter += 1;
         if time_start.elapsed().as_secs() == 1 {
             fps = frame_counter;
