@@ -1,12 +1,11 @@
 use std::{cmp::{max, min}, convert::TryInto, fs, ops::Neg};
 
 use native_dialog::FileDialog;
-use sdl2::{*, event::*, keyboard::*, libc::fpos_t, pixels::Color, rect::Rect, render::*, video::*};
+use sdl2::{event::*, keyboard::*, pixels::Color, rect::Rect, render::*, video::*};
 
 
 fn render_char(width: i32, height: i32, c: char) -> Rect {
-    let rect = Rect::new(width * (c as i32 - 33), 0, width as u32, height as u32);
-    rect
+    Rect::new(width * (c as i32 - 33), 0, width as u32, height as u32)
 }
 
 fn digit_count(x: usize) -> usize {
@@ -27,20 +26,20 @@ fn draw_string<'a>(canvas: & mut Canvas<Window>, target: &'a mut Rect, texture: 
         target.set_x(target.x() + target.width() as i32);
         canvas.copy(texture, Some(char_rect), Some(*target)).unwrap();
     }
-    return target;
+    target
 }
 
 
 
 fn move_right(target: &mut Rect, padding: i32) -> &mut Rect {
     target.set_x(target.x() + padding);
-    return target;
+    target
 }
 
 
 fn move_down(target: &mut Rect, padding: i32) -> &mut Rect {
     target.set_y(target.y() + padding);
-    return target;
+    target
 }
 
 // It would be pretty cool to add a minimap
@@ -124,8 +123,8 @@ fn main() -> Result<(), String> {
     // Need that concept in this app.
     // But while this is "slow", in release it is only about a second for a 1 GB file.
     let start_time = std::time::Instant::now();
-    for (line_end, char) in chars.into_iter().enumerate() {
-        if *char == '\n' as u8 {
+    for (line_end, char) in chars.iter().enumerate() {
+        if *char == b'\n' {
             line_range.push((line_start, line_end - 1));
             line_start = line_end + 1;
         }
@@ -135,7 +134,7 @@ fn main() -> Result<(), String> {
     println!("copied file");
     let mut offset_y = 0;
     let mut at_end = false;
-    let mut scroll_speed : i32 = 5;
+    let scroll_speed : i32 = 5;
     let mut frame_counter = 0;
     let mut time_start = std::time::Instant::now();
     let mut fps = 0;
@@ -172,8 +171,8 @@ fn main() -> Result<(), String> {
                 if cursor.is_some() {
                     cursor = Some((cursor.unwrap().0 - 1, cursor.unwrap().1));
                     // Need to actually deal with line fractions here.
-                    if cursor.unwrap().0 + 1 <= lines_above_fold {
-                        offset_y -= letter_height as i32;;
+                    if cursor.unwrap().0 < lines_above_fold {
+                        offset_y -= letter_height as i32;
                     }
                 }
                 // Need something to deal with stuff not existing
@@ -212,7 +211,6 @@ fn main() -> Result<(), String> {
                     column_number = line_range[line_number].1 - line_range[line_number].0;
                 }
                 cursor = Some((line_number, column_number));
-                println!("Column {}", column_number);
             }
             Some(Event::KeyDown { keycode: Some(Keycode::O), keymod: Mod::LGUIMOD | Mod:: RGUIMOD, .. }) => {  
                 let path = FileDialog::new()
@@ -239,8 +237,8 @@ fn main() -> Result<(), String> {
                 // Need that concept in this app.
                 // But while this is "slow", in release it is only about a second for a 1 GB file.
                 let start_time = std::time::Instant::now();
-                for (line_end, char) in chars.into_iter().enumerate() {
-                    if *char == '\n' as u8 {
+                for (line_end, char) in chars.iter().enumerate() {
+                    if *char == b'\n' {
                         line_range.push((line_start, line_end - 1));
                         line_start = line_end + 1;
                     }
@@ -295,7 +293,10 @@ fn main() -> Result<(), String> {
         }
 
 
-        // TODO: Add some spacing between letters!
+        // TODO:
+        // Add some spacing between letters!
+        // Change cursor
+    
 
         // Need to add a real parser or I can try messing with tree sitter.
         // But maybe I need to make text editable first?
@@ -317,11 +318,13 @@ fn main() -> Result<(), String> {
             let target = draw_string(&mut canvas, &mut target, &texture, &line_number);
             move_right(target, line_number_gutter_width as i32);
         
-            if cursor.is_some() && cursor.unwrap().0 == i  {
-                let cursor_x = cursor.unwrap().1 as i32  * letter_width as i32 + line_number_padding as i32;
-                let cursor_y = target.y();
-                canvas.set_draw_color(Color::RGBA(82, 135, 249, 255));
-                canvas.fill_rect(Rect::new(cursor_x as i32, cursor_y as i32, 2, letter_height))?;
+            if let Some(cursor) = cursor {
+                if cursor.0 == i {
+                    let cursor_x = cursor.1 as i32  * letter_width as i32 + line_number_padding as i32 + letter_width as i32;
+                    let cursor_y = target.y();
+                    canvas.set_draw_color(Color::RGBA(82, 135, 249, 255));
+                    canvas.fill_rect(Rect::new(cursor_x as i32, cursor_y as i32, 2, letter_height))?;
+                }
             }
 
             draw_string(&mut canvas, target, &texture, std::str::from_utf8(chars[start..=end].as_ref()).unwrap());
