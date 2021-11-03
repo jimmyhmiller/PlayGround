@@ -42,6 +42,27 @@ fn move_down(target: &mut Rect, padding: i32) -> &mut Rect {
     target
 }
 
+
+// I am editing in place right now. There are a lot of things wrong with the way I'm doing it
+// but in general it is working.
+// I need to fix it so that cursors can't end up in the middle of nowhere.
+// I need to fix special symbols.
+// I need to fix lots of things
+// Editing a 1 gb file is slow. But do I care?
+// This path might not be sustainable long term,
+// but I it is getting my going.
+// I need delete. I also think I am getting rid of \n characters
+// at times and that might be awkward for delete.
+
+// TODO:
+// Add some spacing between letters!
+// Change cursor
+
+
+// Need to add a real parser or I can try messing with tree sitter.
+// But maybe I need to make text editable first?
+
+
 // It would be pretty cool to add a minimap
 // Also cool to just add my own scrollbar.
 
@@ -114,7 +135,7 @@ fn main() -> Result<(), String> {
     let start_time = std::time::Instant::now();
     let mut text = fs::read_to_string("/Users/jimmyhmiller/Desktop/test/test3.txt").unwrap();
     println!("read file in {} ms", start_time.elapsed().as_millis());
-    let mut chars = text.as_bytes();
+    let mut chars = text.as_bytes().to_vec();
 
     let mut line_range = Vec::<(usize,usize)>::with_capacity(chars.len()/60);
     let mut line_start = 0;
@@ -145,8 +166,6 @@ fn main() -> Result<(), String> {
     loop {
 
 
-
-
         canvas.set_draw_color(Color::RGBA(42, 45, 62, 255));
         canvas.clear();
     
@@ -162,107 +181,173 @@ fn main() -> Result<(), String> {
         // Fix this to be less hacky.
         let viewing_window: usize = min((window_height / letter_height as i32).try_into().unwrap(), 1000);
 
-        
-        match event_pump.poll_event() {
-            Some(Event::Quit { .. }) => ::std::process::exit(0),
-            Some(Event::KeyDown { keycode: Some(Keycode::Escape), .. }) => ::std::process::exit(0),
-            // Play with scroll speed
-            Some(Event::KeyDown { keycode: Some(Keycode::Up), .. }) => {
-                if cursor.is_some() {
-                    cursor = Some((cursor.unwrap().0 - 1, cursor.unwrap().1));
-                    // Need to actually deal with line fractions here.
-                    if cursor.unwrap().0 < lines_above_fold {
-                        offset_y -= letter_height as i32;
-                    }
-                }
-                // Need something to deal with stuff not existing
-            }
-            Some(Event::KeyDown { keycode: Some(Keycode::Down), .. }) => {
-                if cursor.is_some() {
-                    cursor = Some((cursor.unwrap().0 + 1, cursor.unwrap().1));
-                    // Need to actually deal with line fractions here.
-                    if cursor.unwrap().0 + 1 > lines_above_fold + viewing_window {
-                        offset_y += letter_height as i32;
-                    }
-                }
-                
-                // Need something to deal with stuff not existing
-            }
-            Some(Event::KeyDown { keycode: Some(Keycode::Right), .. }) => {
-                if cursor.is_some() {
-                    cursor = Some((cursor.unwrap().0, cursor.unwrap().1 + 1));
-                }
-                // Need something to deal with stuff not existing
-            }
-            Some(Event::KeyDown { keycode: Some(Keycode::Left), .. }) => {
-                if cursor.is_some() {
-                    cursor = Some((cursor.unwrap().0, cursor.unwrap().1 - 1));
-                }
-                // Need something to deal with stuff not existing
-            }
-            Some(Event::MouseButtonUp { x, y, .. }) => {
-                // Need to make sure I round up here so I can get the right line.
-                let line_number : usize = (y / letter_height as i32 + lines_above_fold as i32).try_into().unwrap();
-                if x < line_number_padding as i32 {
-                    continue;
-                }
-                let mut column_number : usize = ((x - line_number_padding as i32) / letter_width as i32).try_into().unwrap();
-                if column_number > line_range[line_number].1 - line_range[line_number].0 {
-                    column_number = line_range[line_number].1 - line_range[line_number].0;
-                }
-                cursor = Some((line_number, column_number));
-            }
-            Some(Event::KeyDown { keycode: Some(Keycode::O), keymod: Mod::LGUIMOD | Mod:: RGUIMOD, .. }) => {  
-                let path = FileDialog::new()
-                    .set_location("~/Documents")
-                    .show_open_single_file()
-                    .unwrap();
-                let start_time = std::time::Instant::now();
-                if path.is_none() {
-                    continue;
-                }
-                let path = path.unwrap();
-                let path_str = path.to_str().unwrap();
-                let path_str = &path_str.replace("file://", "");
-
-                // Need to refactor into reusable function instead of just repeating here.
-                text = fs::read_to_string(path_str).unwrap();
-                println!("read file in {} ms", start_time.elapsed().as_millis());
-                chars = text.as_bytes();
+        for event in event_pump.poll_iter() {
             
-                line_range = Vec::<(usize,usize)>::with_capacity(chars.len()/60);
-                line_start = 0;
-                // This is slow. I don't actually have to do this for the whole file in one go.
-                // I can do it for the first screen and then start doing more over time.
-                // Need that concept in this app.
-                // But while this is "slow", in release it is only about a second for a 1 GB file.
-                let start_time = std::time::Instant::now();
-                for (line_end, char) in chars.iter().enumerate() {
-                    if *char == b'\n' {
-                        line_range.push((line_start, line_end - 1));
-                        line_start = line_end + 1;
+            match event {
+                Event::Quit { .. } => ::std::process::exit(0),
+                Event::KeyDown { keycode: Some(Keycode::Escape), .. } => ::std::process::exit(0),
+                // Play with scroll speed
+                Event::KeyDown { keycode: Some(Keycode::Up), .. } => {
+                    if cursor.is_some() {
+                        cursor = Some((cursor.unwrap().0 - 1, cursor.unwrap().1));
+                        // Need to actually deal with line fractions here.
+                        if cursor.unwrap().0 < lines_above_fold {
+                            offset_y -= letter_height as i32;
+                        }
+                    }
+                    // Need something to deal with stuff not existing
+                }
+                Event::KeyDown { keycode: Some(Keycode::Down), .. } => {
+                    if cursor.is_some() {
+                        cursor = Some((cursor.unwrap().0 + 1, cursor.unwrap().1));
+                        // Need to actually deal with line fractions here.
+                        if cursor.unwrap().0 + 1 > lines_above_fold + viewing_window {
+                            offset_y += letter_height as i32;
+                        }
+                    }
+                    
+                    // Need something to deal with stuff not existing
+                }
+                Event::KeyDown { keycode: Some(Keycode::Right), .. } => {
+                    if cursor.is_some() {
+                        cursor = Some((cursor.unwrap().0, cursor.unwrap().1 + 1));
+                    }
+                    // Need something to deal with stuff not existing
+                }
+                Event::KeyDown { keycode: Some(Keycode::Left), .. } => {
+                    if cursor.is_some() {
+                        cursor = Some((cursor.unwrap().0, cursor.unwrap().1 - 1));
+                    }
+                    // Need something to deal with stuff not existing
+                }
+                Event::KeyDown {keycode: Some(Keycode::Backspace), ..} => {
+                    if let Some((cursor_line, cursor_column)) = cursor {
+                        let line_start = line_range[cursor_line].0;
+                        let char_pos = line_start + cursor_column;
+                        chars.remove(char_pos);
+                        for mut line in line_range.iter_mut().skip(cursor_line + 1) {
+                            line.0 -= 1;
+                            line.1 -= 1;
+                        }
+
+                        // Need to deal with new lines
+                        cursor = Some((cursor_line, cursor_column - 1));
+                    }
+                    
+                }
+                Event::KeyDown {keycode: Some(Keycode::Return), ..} => {
+                    if let Some((cursor_line, cursor_column)) = cursor {
+                        let line_start = line_range[cursor_line].0;
+                        let char_pos = line_start + cursor_column + 1;
+                        chars.splice(char_pos..char_pos, [b'\n']);
+                        let (start, end) = line_range[cursor_line];
+                        if char_pos > end {
+                            line_range.insert(cursor_line + 1, (char_pos,char_pos));
+                        } else {
+                            line_range.splice(cursor_line..cursor_line + 1, [(start, char_pos), (char_pos+1, end)]);
+                        }
+   
+                        for mut line in line_range.iter_mut().skip(cursor_line + 1) {
+                            line.0 += 1;
+                            line.1 += 1;
+                        }
+                        cursor = Some((cursor_line+1, 0));
                     }
                 }
-                offset_y = 0;
-                println!("parsed file in {} ms", start_time.elapsed().as_millis());
-            }
-            // Continuous resize in sdl2 is a bit weird
-            // Would need to watch events or something
-            Some(Event::Window {win_event: WindowEvent::Resized(w, h), ..}) => {
-                window_width = w;
-                window_height = h;
-            }
+                Event::KeyDown {keycode: Some(k), keymod: Mod::NOMOD, ..} => {
+                    if let Some((cursor_line, cursor_column)) = cursor {
+                        let line_start = line_range[cursor_line].0;
+                        let char_pos = line_start + cursor_column + 1;
+                        chars.splice(char_pos..char_pos, vec![k as u8]);
+                        line_range[cursor_line] = (line_start, line_range[cursor_line].1 + 1);
+                        for mut line in line_range.iter_mut().skip(cursor_line + 1) {
+                            line.0 += 1;
+                            line.1 += 1;
+                        }
+                        cursor = Some((cursor_line, cursor_column + 1));
+                    }
+                }
+                Event::KeyDown {keycode: Some(k), keymod: Mod::LSHIFTMOD | Mod::RSHIFTMOD, ..} => {
+                    if !(k as u8).is_ascii() {
+                        continue;
+                    }
+                    if let Some((cursor_line, cursor_column)) = cursor {
+                        let line_start = line_range[cursor_line].0;
+                        let char_pos = line_start + cursor_column + 1;
+                        chars.splice(char_pos..char_pos, vec![k as u8 - 32]);
+                        line_range[cursor_line] = (line_start, line_range[cursor_line].1 + 1);
+                        for mut line in line_range.iter_mut().skip(cursor_line + 1) {
+                            line.0 += 1;
+                            line.1 += 1;
+                        }
+                        cursor = Some((cursor_line, cursor_column + 1));
+                    }
+                }
+               
+                Event::MouseButtonUp { x, y, .. } => {
+                    // Need to make sure I round up here so I can get the right line.
+                    let line_number : usize = (y / letter_height as i32 + lines_above_fold as i32).try_into().unwrap();
+                    if x < line_number_padding as i32 {
+                        continue;
+                    }
+                    let mut column_number : usize = ((x - line_number_padding as i32) / letter_width as i32).try_into().unwrap();
+                    if column_number > line_range[line_number].1 - line_range[line_number].0 {
+                        column_number = line_range[line_number].1 - line_range[line_number].0;
+                    }
+                    cursor = Some((line_number, column_number));
+                }
+                Event::KeyDown { keycode: Some(Keycode::O), keymod: Mod::LGUIMOD | Mod:: RGUIMOD, .. } => {  
+                    let path = FileDialog::new()
+                        .set_location("~/Documents")
+                        .show_open_single_file()
+                        .unwrap();
+                    let start_time = std::time::Instant::now();
+                    if path.is_none() {
+                        continue;
+                    }
+                    let path = path.unwrap();
+                    let path_str = path.to_str().unwrap();
+                    let path_str = &path_str.replace("file://", "");
 
-            Some(Event::MouseWheel {x: _, y, direction , timestamp: _, .. }) => {
-                let direction_multiplier = match direction {
-                    sdl2::mouse::MouseWheelDirection::Normal => 1,
-                    sdl2::mouse::MouseWheelDirection::Flipped => -1,
-                    sdl2::mouse::MouseWheelDirection::Unknown(x) => x as i32
-                };
-                scroll_y = y * direction_multiplier * scroll_speed;
-            }
+                    // Need to refactor into reusable function instead of just repeating here.
+                    text = fs::read_to_string(path_str).unwrap();
+                    println!("read file in {} ms", start_time.elapsed().as_millis());
+                    chars = text.as_bytes().to_vec();
+                
+                    line_range = Vec::<(usize,usize)>::with_capacity(chars.len()/60);
+                    line_start = 0;
+                    // This is slow. I don't actually have to do this for the whole file in one go.
+                    // I can do it for the first screen and then start doing more over time.
+                    // Need that concept in this app.
+                    // But while this is "slow", in release it is only about a second for a 1 GB file.
+                    let start_time = std::time::Instant::now();
+                    for (line_end, char) in chars.iter().enumerate() {
+                        if *char == b'\n' {
+                            line_range.push((line_start, line_end - 1));
+                            line_start = line_end + 1;
+                        }
+                    }
+                    offset_y = 0;
+                    println!("parsed file in {} ms", start_time.elapsed().as_millis());
+                }
+                // Continuous resize in sdl2 is a bit weird
+                // Would need to watch events or something
+                Event::Window {win_event: WindowEvent::Resized(w, h), ..} => {
+                    window_width = w;
+                    window_height = h;
+                }
 
-            _ => {}
+                Event::MouseWheel {x: _, y, direction , timestamp: _, .. } => {
+                    let direction_multiplier = match direction {
+                        sdl2::mouse::MouseWheelDirection::Normal => 1,
+                        sdl2::mouse::MouseWheelDirection::Flipped => -1,
+                        sdl2::mouse::MouseWheelDirection::Unknown(x) => x as i32
+                    };
+                    scroll_y = y * direction_multiplier * scroll_speed;
+                }
+
+                _ => {}
+            }
         }
 
 
@@ -270,15 +355,6 @@ fn main() -> Result<(), String> {
             offset_y += scroll_y;
         }
         offset_y = max(0, offset_y);
-
-
-
-
-        // I should be smartest than this. I can know what I need to render
-        // based on offset and window size
-        // let mut lines = 0;
-
-
 
 
 
@@ -293,13 +369,7 @@ fn main() -> Result<(), String> {
         }
 
 
-        // TODO:
-        // Add some spacing between letters!
-        // Change cursor
-    
-
-        // Need to add a real parser or I can try messing with tree sitter.
-        // But maybe I need to make text editable first?
+        
 
         // I got rid of line wrap in this refactor. Probably should add that back in.
         for i in lines_above_fold as usize..min(lines_above_fold + viewing_window, line_range.len()) {
@@ -328,13 +398,15 @@ fn main() -> Result<(), String> {
             }
 
             draw_string(&mut canvas, target, &texture, std::str::from_utf8(chars[start..=end].as_ref()).unwrap());
+
+
             move_down(target, letter_height as i32);
         }
 
         let mut target = Rect::new(window_width - (letter_width * 8) as i32, 0, letter_width, letter_height);
         draw_string(&mut canvas, &mut target, &texture, &format!("fps: {}", fps));
         frame_counter += 1;
-        if time_start.elapsed().as_secs() == 1 {
+        if time_start.elapsed().as_secs() >= 1 {
             fps = frame_counter;
             frame_counter = 0;
             time_start = std::time::Instant::now();
