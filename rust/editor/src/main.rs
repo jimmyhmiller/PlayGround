@@ -411,6 +411,12 @@ fn main() -> Result<(), String> {
             frame_counter = 0;
             time_start = std::time::Instant::now();
         }
+        let mut target = Rect::new(20 as i32, window_height-letter_height as i32, letter_width, letter_height);
+        if let Some((cursor_line, cursor_column)) = cursor {
+            draw_string(&mut canvas, &mut target, &texture, &format!("Line {}, Column {}", cursor_line, cursor_column));
+        }
+       
+
 
         canvas.present();
     }
