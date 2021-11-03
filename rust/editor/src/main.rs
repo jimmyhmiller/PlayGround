@@ -30,6 +30,19 @@ fn draw_string<'a>(canvas: & mut Canvas<Window>, target: &'a mut Rect, texture: 
     return target;
 }
 
+
+
+fn move_right(target: &mut Rect, padding: i32) -> &mut Rect {
+    target.set_x(target.x() + padding);
+    return target;
+}
+
+
+fn move_down(target: &mut Rect, padding: i32) -> &mut Rect {
+    target.set_y(target.y() + padding);
+    return target;
+}
+
 // It would be pretty cool to add a minimap
 // Also cool to just add my own scrollbar.
 
@@ -126,23 +139,81 @@ fn main() -> Result<(), String> {
     let mut frame_counter = 0;
     let mut time_start = std::time::Instant::now();
     let mut fps = 0;
+    let mut cursor: Option<(usize, usize)> = None;
     
+
     texture.set_color_mod(167, 174, 210);
     loop {
 
+
+
+
+        canvas.set_draw_color(Color::RGBA(42, 45, 62, 255));
+        canvas.clear();
+    
         let mut scroll_y : i32 = 0;
+
+        let editor_left_margin = 10;
+        let line_number_digits = digit_count(line_range.len());
+        let line_number_gutter_width = 20;
+        // final letter width is because we write our string, we are in that letters position, then move more.
+        let line_number_padding = line_number_digits * letter_width as usize + line_number_gutter_width + editor_left_margin + letter_width as usize;
+
+        let lines_above_fold : usize = offset_y as usize / letter_height as usize;
+        // Fix this to be less hacky.
+        let viewing_window: usize = min((window_height / letter_height as i32).try_into().unwrap(), 1000);
+
+        
         match event_pump.poll_event() {
             Some(Event::Quit { .. }) => ::std::process::exit(0),
             Some(Event::KeyDown { keycode: Some(Keycode::Escape), .. }) => ::std::process::exit(0),
             // Play with scroll speed
             Some(Event::KeyDown { keycode: Some(Keycode::Up), .. }) => {
-                scroll_speed /= 2;
-                scroll_speed = max(scroll_speed, 1);
+                if cursor.is_some() {
+                    cursor = Some((cursor.unwrap().0 - 1, cursor.unwrap().1));
+                    // Need to actually deal with line fractions here.
+                    if cursor.unwrap().0 + 1 <= lines_above_fold {
+                        offset_y -= letter_height as i32;;
+                    }
+                }
+                // Need something to deal with stuff not existing
             }
             Some(Event::KeyDown { keycode: Some(Keycode::Down), .. }) => {
-                scroll_speed = scroll_speed.saturating_mul(2)
+                if cursor.is_some() {
+                    cursor = Some((cursor.unwrap().0 + 1, cursor.unwrap().1));
+                    // Need to actually deal with line fractions here.
+                    if cursor.unwrap().0 + 1 > lines_above_fold + viewing_window {
+                        offset_y += letter_height as i32;
+                    }
+                }
+                
+                // Need something to deal with stuff not existing
             }
-
+            Some(Event::KeyDown { keycode: Some(Keycode::Right), .. }) => {
+                if cursor.is_some() {
+                    cursor = Some((cursor.unwrap().0, cursor.unwrap().1 + 1));
+                }
+                // Need something to deal with stuff not existing
+            }
+            Some(Event::KeyDown { keycode: Some(Keycode::Left), .. }) => {
+                if cursor.is_some() {
+                    cursor = Some((cursor.unwrap().0, cursor.unwrap().1 - 1));
+                }
+                // Need something to deal with stuff not existing
+            }
+            Some(Event::MouseButtonUp { x, y, .. }) => {
+                // Need to make sure I round up here so I can get the right line.
+                let line_number : usize = (y / letter_height as i32 + lines_above_fold as i32).try_into().unwrap();
+                if x < line_number_padding as i32 {
+                    continue;
+                }
+                let mut column_number : usize = ((x - line_number_padding as i32) / letter_width as i32).try_into().unwrap();
+                if column_number > line_range[line_number].1 - line_range[line_number].0 {
+                    column_number = line_range[line_number].1 - line_range[line_number].0;
+                }
+                cursor = Some((line_number, column_number));
+                println!("Column {}", column_number);
+            }
             Some(Event::KeyDown { keycode: Some(Keycode::O), keymod: Mod::LGUIMOD | Mod:: RGUIMOD, .. }) => {  
                 let path = FileDialog::new()
                     .set_location("~/Documents")
@@ -196,34 +267,35 @@ fn main() -> Result<(), String> {
             _ => {}
         }
 
+
         if !at_end || scroll_y < 0 {
             offset_y += scroll_y;
         }
+        offset_y = max(0, offset_y);
 
 
-        canvas.set_draw_color(Color::RGBA(42, 45, 62, 255));
-        canvas.clear();
+
 
         // I should be smartest than this. I can know what I need to render
         // based on offset and window size
         // let mut lines = 0;
 
-        offset_y = max(0, offset_y);
 
 
-        let lines_above_fold : usize = offset_y as usize / letter_height as usize;
-        let viewing_window: usize = min((window_height / letter_height as i32).try_into().unwrap(), 1000);
-        
+
 
         let line_fraction = offset_y as usize % letter_height as usize;
 
-        let mut target = Rect::new(10, (line_fraction as i32).neg(), letter_width, letter_height);
+        let mut target = Rect::new(editor_left_margin as i32, (line_fraction as i32).neg(), letter_width, letter_height);
         
         if lines_above_fold + viewing_window >= line_range.len() + 3 {
             at_end = true;
         } else {
             at_end = false;
         }
+
+
+        // TODO: Add some spacing between letters!
 
         // Need to add a real parser or I can try messing with tree sitter.
         // But maybe I need to make text editable first?
@@ -232,25 +304,28 @@ fn main() -> Result<(), String> {
         for i in lines_above_fold as usize..min(lines_above_fold + viewing_window, line_range.len()) {
             texture.set_color_mod(167, 174, 210);
             let (start, end) = line_range[i];
-            target.set_x(10);
+            target.set_x(editor_left_margin as i32);
 
             // I want to pad this so that the offset by the line number never changes.
             // Really I should draw a line or something to make it look nicer.
-            let left_padding_count = digit_count(line_range.len()) - digit_count(i + 1);
+            let left_padding_count = line_number_digits - digit_count(i + 1);
             let padding = left_padding_count * letter_width as usize;
-            target.set_x(target.x() + padding as i32);
+            move_right(&mut target, padding as i32);
+
             let line_number = (i + 1).to_string();
 
-            let target = draw_string(&mut canvas, &mut target, &texture,&line_number);
-            target.set_x(target.x() + 20);
+            let target = draw_string(&mut canvas, &mut target, &texture, &line_number);
+            move_right(target, line_number_gutter_width as i32);
         
-            if chars[start..=start+1] == [';' as u8, ';' as u8] {
-                texture.set_color_mod(251, 224, 149);
-            } else {
-                texture.set_color_mod(167, 174, 210);
+            if cursor.is_some() && cursor.unwrap().0 == i  {
+                let cursor_x = cursor.unwrap().1 as i32  * letter_width as i32 + line_number_padding as i32;
+                let cursor_y = target.y();
+                canvas.set_draw_color(Color::RGBA(82, 135, 249, 255));
+                canvas.fill_rect(Rect::new(cursor_x as i32, cursor_y as i32, 2, letter_height))?;
             }
+
             draw_string(&mut canvas, target, &texture, std::str::from_utf8(chars[start..=end].as_ref()).unwrap());
-            target.set_y(target.y + height as i32);
+            move_down(target, letter_height as i32);
         }
 
         let mut target = Rect::new(window_width - (letter_width * 8) as i32, 0, letter_width, letter_height);
