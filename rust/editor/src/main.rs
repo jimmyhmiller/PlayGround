@@ -210,17 +210,30 @@ fn main() -> Result<(), String> {
                 }
                 Event::KeyDown { keycode: Some(Keycode::Right), .. } => {
                     if cursor.is_some() {
-                        cursor = Some((cursor.unwrap().0, cursor.unwrap().1 + 1));
+                        let length = line_range[cursor.unwrap().0].1 - line_range[cursor.unwrap().0].0;
+                        if cursor.unwrap().1  > length + 1 {
+                            cursor = Some((cursor.unwrap().0 + 1, 0));
+                        } else {
+                            cursor = Some((cursor.unwrap().0, cursor.unwrap().1 + 1));
+                        }
                     }
                     // Need something to deal with stuff not existing
                 }
                 Event::KeyDown { keycode: Some(Keycode::Left), .. } => {
                     if cursor.is_some() {
-                        cursor = Some((cursor.unwrap().0, cursor.unwrap().1 - 1));
+                        if cursor.unwrap().1.saturating_sub(1) == 0 {
+                            let length = line_range[cursor.unwrap().0.saturating_sub(1)].1 - line_range[cursor.unwrap().0.saturating_sub(1)].0;
+                            cursor = Some((cursor.unwrap().0.saturating_sub(1), length + 1));
+                        } else {
+                            cursor = Some((cursor.unwrap().0, cursor.unwrap().1.saturating_sub(1)));
+                        }
+                        
                     }
                     // Need something to deal with stuff not existing
                 }
                 Event::KeyDown {keycode: Some(Keycode::Backspace), ..} => {
+
+                    // This is broken.
                     if let Some((cursor_line, cursor_column)) = cursor {
                         let line_start = line_range[cursor_line].0;
                         let char_pos = line_start + cursor_column;
@@ -236,9 +249,10 @@ fn main() -> Result<(), String> {
                     
                 }
                 Event::KeyDown {keycode: Some(Keycode::Return), ..} => {
+                    // This is wrong
                     if let Some((cursor_line, cursor_column)) = cursor {
                         let line_start = line_range[cursor_line].0;
-                        let char_pos = line_start + cursor_column + 1;
+                        let char_pos = line_start + cursor_column;
                         chars.splice(char_pos..char_pos, [b'\n']);
                         let (start, end) = line_range[cursor_line];
                         if char_pos > end {
@@ -257,7 +271,7 @@ fn main() -> Result<(), String> {
                 Event::KeyDown {keycode: Some(k), keymod: Mod::NOMOD, ..} => {
                     if let Some((cursor_line, cursor_column)) = cursor {
                         let line_start = line_range[cursor_line].0;
-                        let char_pos = line_start + cursor_column + 1;
+                        let char_pos = line_start + cursor_column;
                         chars.splice(char_pos..char_pos, vec![k as u8]);
                         line_range[cursor_line] = (line_start, line_range[cursor_line].1 + 1);
                         for mut line in line_range.iter_mut().skip(cursor_line + 1) {
@@ -273,7 +287,7 @@ fn main() -> Result<(), String> {
                     }
                     if let Some((cursor_line, cursor_column)) = cursor {
                         let line_start = line_range[cursor_line].0;
-                        let char_pos = line_start + cursor_column + 1;
+                        let char_pos = line_start + cursor_column;
                         chars.splice(char_pos..char_pos, vec![k as u8 - 32]);
                         line_range[cursor_line] = (line_start, line_range[cursor_line].1 + 1);
                         for mut line in line_range.iter_mut().skip(cursor_line + 1) {
@@ -284,15 +298,18 @@ fn main() -> Result<(), String> {
                     }
                 }
                
-                Event::MouseButtonUp { x, y, .. } => {
+                Event::MouseButtonUp { mut x, y, .. } => {
                     // Need to make sure I round up here so I can get the right line.
                     let line_number : usize = (y / letter_height as i32 + lines_above_fold as i32).try_into().unwrap();
+                    if x < line_number_padding as i32 && x > line_number_padding as i32 - 20  {
+                        x = line_number_padding as i32;
+                    } 
                     if x < line_number_padding as i32 {
                         continue;
                     }
                     let mut column_number : usize = ((x - line_number_padding as i32) / letter_width as i32).try_into().unwrap();
                     if column_number > line_range[line_number].1 - line_range[line_number].0 {
-                        column_number = line_range[line_number].1 - line_range[line_number].0;
+                        column_number = line_range[line_number].1 - line_range[line_number].0 + 1;
                     }
                     cursor = Some((line_number, column_number));
                 }
@@ -390,7 +407,7 @@ fn main() -> Result<(), String> {
         
             if let Some(cursor) = cursor {
                 if cursor.0 == i {
-                    let cursor_x = cursor.1 as i32  * letter_width as i32 + line_number_padding as i32 + letter_width as i32;
+                    let cursor_x = cursor.1 as i32  * letter_width as i32 + line_number_padding as i32;
                     let cursor_y = target.y();
                     canvas.set_draw_color(Color::RGBA(82, 135, 249, 255));
                     canvas.fill_rect(Rect::new(cursor_x as i32, cursor_y as i32, 2, letter_height))?;
@@ -403,7 +420,7 @@ fn main() -> Result<(), String> {
             move_down(target, letter_height as i32);
         }
 
-        let mut target = Rect::new(window_width - (letter_width * 8) as i32, 0, letter_width, letter_height);
+        let mut target = Rect::new(window_width - (letter_width * 10) as i32, 0, letter_width, letter_height);
         draw_string(&mut canvas, &mut target, &texture, &format!("fps: {}", fps));
         frame_counter += 1;
         if time_start.elapsed().as_secs() >= 1 {
@@ -411,7 +428,7 @@ fn main() -> Result<(), String> {
             frame_counter = 0;
             time_start = std::time::Instant::now();
         }
-        let mut target = Rect::new(20 as i32, window_height-letter_height as i32, letter_width, letter_height);
+        let mut target = Rect::new(window_width - (letter_width * 30) as i32 as i32, window_height-letter_height as i32, letter_width, letter_height);
         if let Some((cursor_line, cursor_column)) = cursor {
             draw_string(&mut canvas, &mut target, &texture, &format!("Line {}, Column {}", cursor_line, cursor_column));
         }
