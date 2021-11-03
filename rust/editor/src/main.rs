@@ -100,7 +100,7 @@ fn main() -> Result<(), String> {
     // Let's create a Canvas which we will use to draw in our Window
     let mut canvas: Canvas<Window> = window
         .into_canvas()
-        .present_vsync()
+        // .present_vsync()
         .build()
         .unwrap();
     let mut event_pump = sdl_context.event_pump()?;
