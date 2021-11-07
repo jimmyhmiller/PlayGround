@@ -151,11 +151,16 @@ fn main() -> Result<(), String> {
     // But while this is "slow", in release it is only about a second for a 1 GB file.
     let start_time = std::time::Instant::now();
     for (line_end, char) in chars.iter().enumerate() {
-        if *char == b'\n' {
+        if *char == b'\n'{
             line_range.push((line_start, line_end - 1));
             line_start = line_end + 1;
         }
+        if line_end == chars.len() - 1 {
+            line_range.push((line_start, line_end));
+        }
     }
+    
+    println!("{:?}", line_range);
     println!("parsed file in {} ms", start_time.elapsed().as_millis());
 
     println!("copied file");
@@ -244,20 +249,23 @@ fn main() -> Result<(), String> {
                             if let Some((cursor_line, cursor_column)) = cursor {
                                 if let Some((line_start, _line_end)) = line_range.get(cursor_line) {
                                     let char_pos = line_start + cursor_column - 1;
+                                    if chars.is_empty() || char_pos > chars.len() {
+                                        continue;
+                                    }
                                     chars.remove(char_pos);
-                                    line_range[cursor_line].1 -= 1;
+                                    line_range[cursor_line].1 = line_range[cursor_line].1.saturating_sub(1);
                                     if cursor_column == 0 {
                                         line_range[cursor_line - 1] = (line_range[cursor_line - 1].0, line_range[cursor_line].1);
                                         line_range.remove(cursor_line);
                                     }
                                     for mut line in line_range.iter_mut().skip(cursor_line + 1) {
-                                        line.0 -= 1;
-                                        line.1 -= 1;
+                                        line.0 = line.0.saturating_sub(1);
+                                        line.1 = line.1.saturating_sub(1);
                                     }
         
                                     if cursor_column == 0 {
                                         println!("{}", line_range[cursor_line - 1].1);
-                                        cursor = Some((cursor_line.saturating_sub(1), line_length(line_range[cursor_line - 1])));
+                                        cursor = Some((cursor_line.saturating_sub(1), line_length(line_range[cursor_line - 1]) + 1));
                                     } else {
                                         cursor = Some((cursor_line, cursor_column - 1));
                                     }
@@ -270,10 +278,18 @@ fn main() -> Result<(), String> {
                             if let Some((cursor_line, cursor_column)) = cursor {
                                 let line_start = line_range[cursor_line].0;
                                 let char_pos = line_start + cursor_column;
-                                chars.splice(char_pos..char_pos, [b'\n']);
+
+  
+                                println!("{} {} {:?}", char_pos, chars.len(), line_range[cursor_line]);
+                                if char_pos == chars.len() {
+                                    chars.splice(char_pos-1..char_pos-1, [b'\n']);
+                                } else {
+                                    chars.splice(char_pos..char_pos, [b'\n']);
+                                }
+                                
                                 let (start, end) = line_range[cursor_line];
                                 if char_pos > end {
-                                    line_range.insert(cursor_line + 1, (char_pos,char_pos));
+                                    line_range.insert(cursor_line + 1, (char_pos, char_pos));
                                 } else {
                                     line_range.splice(cursor_line..cursor_line + 1, [(start, char_pos), (char_pos+1, end)]);
                                 }
@@ -373,6 +389,12 @@ fn main() -> Result<(), String> {
                         }
                         cursor = Some((line_number, column_number));
                     }
+                    if line_number > line_range.len() {
+                        if let Some((start, end)) = line_range.last() {
+                            cursor = Some((line_range.len() - 1, line_length((*start, *end)) + 1));
+                        }
+                       
+                    }
                 }
                 // Continuous resize in sdl2 is a bit weird
                 // Would need to watch events or something
@@ -439,8 +461,6 @@ fn main() -> Result<(), String> {
                     canvas.fill_rect(Rect::new(cursor_x as i32, cursor_y as i32, 2, letter_height))?;
                 }
             }
-
-            // TODO: Crashes with empty file.
             draw_string(&mut canvas, target, &texture, std::str::from_utf8(chars[start..=end].as_ref()).unwrap());
 
 
