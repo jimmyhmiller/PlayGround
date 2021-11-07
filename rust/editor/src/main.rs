@@ -62,6 +62,7 @@ fn line_length(line: (usize, usize)) -> usize {
 // Add some spacing between letters!
 // Change cursor
 // Need to make some nice cursor movement function
+// This is probably pretty important to do.
 
 
 // Need to add a real parser or I can try messing with tree sitter.
@@ -138,8 +139,8 @@ fn main() -> Result<(), String> {
     let letter_height = height;
 
     let start_time = std::time::Instant::now();
-    // let mut text = fs::read_to_string("/Users/jimmyhmiller/Desktop/test/test3.txt").unwrap();
-    let mut text = "test\nthing\nstuff".to_string();
+    let mut text = fs::read_to_string("/Users/jimmyhmiller/Desktop/test/test2.txt").unwrap();
+    // let mut text = "test\nthing\nstuff".to_string();
     println!("read file in {} ms", start_time.elapsed().as_millis());
     let mut chars = text.as_bytes().to_vec();
 
@@ -152,15 +153,15 @@ fn main() -> Result<(), String> {
     let start_time = std::time::Instant::now();
     for (line_end, char) in chars.iter().enumerate() {
         if *char == b'\n'{
-            line_range.push((line_start, line_end - 1));
+            line_range.push((line_start, line_end));
             line_start = line_end + 1;
         }
         if line_end == chars.len() - 1 {
-            line_range.push((line_start, line_end));
+            line_range.push((line_start, line_end + 1));
         }
     }
     
-    println!("{:?}", line_range);
+    // println!("{:?}", line_range);
     println!("parsed file in {} ms", start_time.elapsed().as_millis());
 
     println!("copied file");
@@ -182,6 +183,8 @@ fn main() -> Result<(), String> {
     
         let mut scroll_y : i32 = 0;
 
+         // duplicated below because we need to recompute after
+         // we update line count
         let editor_left_margin = 10;
         let line_number_digits = digit_count(line_range.len());
         let line_number_gutter_width = 20;
@@ -196,25 +199,29 @@ fn main() -> Result<(), String> {
             
             match event {
                 Event::Quit { .. } => ::std::process::exit(0),
-                Event::KeyDown { keycode: Some(Keycode::Escape), .. } => ::std::process::exit(0),
-                // Play with scroll speed
 
                 Event::KeyDown { keycode, keymod, .. } => {
                     matches!(keycode, Some(_));
                     match (keycode.unwrap(), keymod) {
                         (Keycode::Up, _) => {
-                            if cursor.is_some() {
-                                cursor = Some((cursor.unwrap().0 - 1, cursor.unwrap().1));
-                                // Need to actually deal with line fractions here.
-                                if cursor.unwrap().0 < lines_above_fold {
+                            if let Some((cursor_line, cursor_column)) = cursor {
+                                let new_line = cursor_line.saturating_sub(1);
+                                cursor = Some((new_line, min(cursor_column, line_length(line_range[new_line]))));
+
+                                // Need to deal with line_fraction
+                                if cursor_line < lines_above_fold {
                                     offset_y -= letter_height as i32;
                                 }
                             }
                         },
                         (Keycode::Down, _) => {
-                            if cursor.is_some() {
-                                cursor = Some((cursor.unwrap().0 + 1, cursor.unwrap().1));
-                                if cursor.unwrap().0 > lines_above_fold + viewing_window {
+
+                            if let Some((cursor_line, cursor_column)) = cursor {
+                                let new_line = cursor_line.saturating_add(1);
+                                cursor = Some((new_line, min(cursor_column, line_length(line_range[new_line]))));
+
+                                // Need to deal with line_fraction
+                                if cursor_line > lines_above_fold {
                                     offset_y += letter_height as i32;
                                 }
                             }
@@ -223,7 +230,7 @@ fn main() -> Result<(), String> {
                             if let Some((cursor_line, cursor_column)) = cursor {
                                 if let Some((line_start, line_end)) = line_range.get(cursor_line) {
                                     let length = line_length((*line_start, *line_end));
-                                    if cursor_column > length {
+                                    if cursor_column >= length {
                                         if cursor_line + 1 < line_range.len() {
                                             cursor = Some((cursor_line + 1, 0));
                                         }
@@ -234,41 +241,50 @@ fn main() -> Result<(), String> {
                             }
                         },
                         (Keycode::Left, _) => {
-                            if cursor.is_some() {
-                                if cursor.unwrap().1 == 0 {
-                                    if cursor.unwrap().0 != 0 {
-                                        let length = line_range[cursor.unwrap().0.saturating_sub(1)].1 - line_range[cursor.unwrap().0.saturating_sub(1)].0;
-                                        cursor = Some((cursor.unwrap().0.saturating_sub(1), length + 1));
-                                    }
+                            if let Some((cursor_line, cursor_column)) = cursor {
+                                if cursor_column == 0 && cursor_line != 0 {
+                                    let previous_line = line_range[cursor_line - 1];
+                                    let length = line_length(previous_line);
+                                    cursor = Some((cursor.unwrap().0.saturating_sub(1), length));
                                 } else {
-                                    cursor = Some((cursor.unwrap().0, cursor.unwrap().1.saturating_sub(1)));
+                                    cursor = Some((cursor_line, cursor_column.saturating_sub(1)));
                                 }
                             }
                         },
                         (Keycode::Backspace, _) => {
+
+                            // Need to deal with backspacing new line. Cursor is wrong.
                             if let Some((cursor_line, cursor_column)) = cursor {
                                 if let Some((line_start, _line_end)) = line_range.get(cursor_line) {
                                     let char_pos = line_start + cursor_column - 1;
+                                    
                                     if chars.is_empty() || char_pos > chars.len() {
                                         continue;
                                     }
                                     chars.remove(char_pos);
+                                    
+                                    // I can crash here
+                                    // I can get it so the range becomes negative.
+                                    // Need to debug.
                                     line_range[cursor_line].1 = line_range[cursor_line].1.saturating_sub(1);
+                                    let mut line_erased = false;
                                     if cursor_column == 0 {
                                         line_range[cursor_line - 1] = (line_range[cursor_line - 1].0, line_range[cursor_line].1);
                                         line_range.remove(cursor_line);
+                                        line_erased = true;
                                     }
-                                    for mut line in line_range.iter_mut().skip(cursor_line + 1) {
+                                    for mut line in line_range.iter_mut().skip(cursor_line + (if line_erased {0} else {1})) {
                                         line.0 = line.0.saturating_sub(1);
                                         line.1 = line.1.saturating_sub(1);
                                     }
         
                                     if cursor_column == 0 {
-                                        println!("{}", line_range[cursor_line - 1].1);
-                                        cursor = Some((cursor_line.saturating_sub(1), line_length(line_range[cursor_line - 1]) + 1));
+                                        // println!("{}", line_range[cursor_line - 1].1);
+                                        cursor = Some((cursor_line.saturating_sub(1), line_length(line_range[cursor_line - 1])));
                                     } else {
                                         cursor = Some((cursor_line, cursor_column - 1));
                                     }
+                                    // println!("{} {} {:?}", char_pos, chars.len(), line_range.get(cursor_line));
                                 }
                             }
                         }
@@ -280,20 +296,18 @@ fn main() -> Result<(), String> {
                                 let char_pos = line_start + cursor_column;
 
   
-                                println!("{} {} {:?}", char_pos, chars.len(), line_range[cursor_line]);
-                                if char_pos == chars.len() {
-                                    chars.splice(char_pos-1..char_pos-1, [b'\n']);
-                                } else {
-                                    chars.splice(char_pos..char_pos, [b'\n']);
-                                }
+                                // println!("Return {} {} {:?}", char_pos, chars.len(), line_range[cursor_line]);
+                                chars.splice(char_pos..char_pos, [b'\n']);
                                 
                                 let (start, end) = line_range[cursor_line];
-                                if char_pos > end {
+                                if char_pos >= end {
                                     line_range.insert(cursor_line + 1, (char_pos, char_pos));
+                                } else if cursor_column == 0 {
+                                    line_range.splice(cursor_line..cursor_line+1, [(char_pos,char_pos), (start+1, end+1)]);
                                 } else {
-                                    line_range.splice(cursor_line..cursor_line + 1, [(start, char_pos), (char_pos+1, end)]);
+                                    line_range.splice(cursor_line..cursor_line + 1, [(start, char_pos), (char_pos+1, end+1)]);
                                 }
-                                for mut line in line_range.iter_mut().skip(cursor_line + 1) {
+                                for mut line in line_range.iter_mut().skip(cursor_line + 2) {
                                     line.0 += 1;
                                     line.1 += 1;
                                 }
@@ -385,13 +399,13 @@ fn main() -> Result<(), String> {
 
                     if let Some((line_start, line_end)) = line_range.get(line_number) {
                         if column_number > line_end - line_start {
-                            column_number = line_range[line_number].1 - line_range[line_number].0 + 1;
+                            column_number = line_range[line_number].1 - line_range[line_number].0;
                         }
                         cursor = Some((line_number, column_number));
                     }
                     if line_number > line_range.len() {
                         if let Some((start, end)) = line_range.last() {
-                            cursor = Some((line_range.len() - 1, line_length((*start, *end)) + 1));
+                            cursor = Some((line_range.len() - 1, line_length((*start, *end))));
                         }
                        
                     }
@@ -414,6 +428,13 @@ fn main() -> Result<(), String> {
                 _ => {}
             }
         }
+
+        // duplicated
+        let editor_left_margin = 10;
+        let line_number_digits = digit_count(line_range.len());
+        let line_number_gutter_width = 20;
+        // final letter width is because we write our string, we are in that letters position, then move more.
+        let line_number_padding = line_number_digits * letter_width as usize + line_number_gutter_width + editor_left_margin + letter_width as usize;
 
 
         if !at_end || scroll_y < 0 {
@@ -461,7 +482,7 @@ fn main() -> Result<(), String> {
                     canvas.fill_rect(Rect::new(cursor_x as i32, cursor_y as i32, 2, letter_height))?;
                 }
             }
-            draw_string(&mut canvas, target, &texture, std::str::from_utf8(chars[start..=end].as_ref()).unwrap());
+            draw_string(&mut canvas, target, &texture, std::str::from_utf8(chars[start..end].as_ref()).unwrap());
 
 
             move_down(target, letter_height as i32);
