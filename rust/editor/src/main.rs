@@ -1,7 +1,7 @@
 use std::{cmp::{max, min}, convert::TryInto, fs, ops::Neg};
 
 use native_dialog::FileDialog;
-use sdl2::{event::*, keyboard::*, pixels::Color, rect::Rect, render::*, video::*};
+use sdl2::{event::*, keyboard::*, mouse::{Cursor, SystemCursor}, pixels::Color, rect::Rect, render::*, video::*};
 
 
 fn render_char(width: i32, height: i32, c: char) -> Rect {
@@ -27,6 +27,42 @@ fn draw_string<'a>(canvas: & mut Canvas<Window>, target: &'a mut Rect, texture: 
         canvas.copy(texture, Some(char_rect), Some(*target)).unwrap();
     }
     target
+}
+
+
+#[derive(Debug)]
+struct EditorBounds<'a> {
+    lines_above_fold: usize,
+    letter_height: usize,
+    letter_width: usize,
+    line_number_padding: usize,
+    line_range: &'a Vec<(usize, usize)>
+}
+
+
+fn text_space_from_screen_space(EditorBounds {lines_above_fold, letter_height,line_number_padding, letter_width, line_range} : EditorBounds, mut x: i32, y: i32) -> Option<(usize, usize)> {
+    let line_number : usize = (y / letter_height as i32 + lines_above_fold as i32).try_into().unwrap();
+    if x < line_number_padding as i32 && x > line_number_padding as i32 - 20  {
+        x = line_number_padding as i32;
+    } 
+    if x < line_number_padding as i32 {
+        return None;
+    }
+    let mut column_number : usize = ((x - line_number_padding as i32) / letter_width as i32).try_into().unwrap();
+
+    if let Some((line_start, line_end)) = line_range.get(line_number) {
+        if column_number > line_end - line_start {
+            column_number = line_range[line_number].1 - line_range[line_number].0;
+        }
+        return Some((line_number, column_number));
+    }
+    if line_number > line_range.len() {
+        if let Some((start, end)) = line_range.last() {
+           return Some((line_range.len() - 1, line_length((*start, *end))));
+        }
+       
+    }
+    None
 }
 
 
@@ -64,6 +100,11 @@ fn line_length(line: (usize, usize)) -> usize {
 // Need to make some nice cursor movement function
 // This is probably pretty important to do.
 
+// TODO: 
+// scroll on keypresses and selection
+// Delete selections
+// UNDO!
+// Refactor things
 
 // Need to add a real parser or I can try messing with tree sitter.
 // But maybe I need to make text editable first?
@@ -102,6 +143,10 @@ fn main() -> Result<(), String> {
         .build()
         .unwrap();
 
+    let cursor = Cursor::from_system(SystemCursor::IBeam)
+        .map_err(|err| format!("failed to load cursor: {}", err))?;
+    cursor.set();
+
 
     // Let's create a Canvas which we will use to draw in our Window
     let mut canvas: Canvas<Window> = window
@@ -135,8 +180,12 @@ fn main() -> Result<(), String> {
 
 
     let TextureQuery { width, height, .. } = texture.query();
+
+
     let letter_width = width / text.len() as u32;
     let letter_height = height;
+    let letter_height_usize : usize = letter_height.try_into().unwrap();
+    let letter_width_usize : usize = letter_width.try_into().unwrap();
 
     let start_time = std::time::Instant::now();
     // let mut text = fs::read_to_string("/Users/jimmyhmiller/Desktop/test/test2.txt").unwrap();
@@ -173,6 +222,10 @@ fn main() -> Result<(), String> {
     let mut time_start = std::time::Instant::now();
     let mut fps = 0;
     let mut cursor: Option<(usize, usize)> = None;
+    let mut mouse_down : Option<(i32, i32)> = None;
+    let mut selection : Option<((i32, i32), (i32, i32))> = None;
+
+    
     
 
     texture.set_color_mod(167, 174, 210);
@@ -195,6 +248,9 @@ fn main() -> Result<(), String> {
         let lines_above_fold : usize = offset_y as usize / letter_height as usize;
         // Fix this to be less hacky.
         let viewing_window: usize = min((window_height / letter_height as i32).try_into().unwrap(), 1000);
+
+
+
 
         // Commands can stop this from being text input
         let mut is_text_input = false;
@@ -373,30 +429,85 @@ fn main() -> Result<(), String> {
                 // Need to make selection work
                 // Which probably means changing cursor representation
                
-                Event::MouseButtonDown { mut x, y, .. } => {
+                Event::MouseButtonDown { x, y, .. } => {
+                    cursor = text_space_from_screen_space(
+                        EditorBounds {
+                            lines_above_fold,
+                            letter_height: letter_height_usize,
+                            letter_width: letter_width_usize,
+                            line_number_padding,
+                            line_range: &line_range,
+                        },
+                        x,
+                        y,
+                    );
+                    if let Some((x, y) ) = cursor {
+                        mouse_down = Some((x.try_into().unwrap(), y.try_into().unwrap()));
+                    }
                     
-                    // Need to make sure I round up here so I can get the right line.
-                    let line_number : usize = (y / letter_height as i32 + lines_above_fold as i32).try_into().unwrap();
-                    if x < line_number_padding as i32 && x > line_number_padding as i32 - 20  {
-                        x = line_number_padding as i32;
-                    } 
-                    if x < line_number_padding as i32 {
-                        continue;
-                    }
-                    let mut column_number : usize = ((x - line_number_padding as i32) / letter_width as i32).try_into().unwrap();
+                    selection = None;
+                }
 
-                    if let Some((line_start, line_end)) = line_range.get(line_number) {
-                        if column_number > line_end - line_start {
-                            column_number = line_range[line_number].1 - line_range[line_number].0;
+                Event::MouseMotion{x, y, .. } => {
+                    if let Some((start_line, mut start_column)) = mouse_down {
+                        let position = text_space_from_screen_space(
+                            EditorBounds {
+                                lines_above_fold,
+                                letter_height: letter_height_usize,
+                                letter_width: letter_width_usize,
+                                line_number_padding,
+                                line_range: &line_range,
+                            },
+                            x,
+                            y,
+                        );
+                        // TODO: Get my int types correct!
+                        if let Some((line, mut column)) = position {
+                            let new_start_line = start_line.min(line.try_into().unwrap());
+                            let line = line.max(start_line.try_into().unwrap());
+                            if new_start_line != start_line || start_line == line as i32 && start_column > column as i32 {
+                                let temp = start_column;
+                                start_column = column.try_into().unwrap();
+                                column = temp as usize;
+                            }
+
+                            selection = Some(((new_start_line, start_column), (line.try_into().unwrap(), column.try_into().unwrap())));
+                            println!("start: ({},{}) current: ({}, {})", new_start_line, start_column, line, column);
                         }
-                        cursor = Some((line_number, column_number));
                     }
-                    if line_number > line_range.len() {
-                        if let Some((start, end)) = line_range.last() {
-                            cursor = Some((line_range.len() - 1, line_length((*start, *end))));
+                }
+
+                Event::MouseButtonUp{x, y, ..} => {
+                    if let Some((start_line, mut start_column)) = mouse_down {
+                        cursor = text_space_from_screen_space(
+                            EditorBounds {
+                                lines_above_fold,
+                                letter_height: letter_height_usize,
+                                letter_width: letter_width_usize,
+                                line_number_padding,
+                                line_range: &line_range,
+                            },
+                            x,
+                            y,
+                        );
+                        if selection.is_some() {
+                            if let Some((line, mut column)) = cursor {
+                                let new_start_line = start_line.min(line.try_into().unwrap());
+                                let line = line.max(start_line.try_into().unwrap());
+                                if new_start_line != start_line || start_line == line as i32 && start_column > column as i32{
+                                    let temp = start_column;
+                                    start_column = column.try_into().unwrap();
+                                    column = temp as usize;
+                                }
+    
+                                selection = Some(((new_start_line, start_column), (line.try_into().unwrap(), column.try_into().unwrap())));
+                                println!("Finished start: ({},{}) current: ({}, {})", start_line, start_column, line, column);
+                            }
                         }
-                       
+                            
                     }
+                    
+                    mouse_down = None;
                 }
                 // Continuous resize in sdl2 is a bit weird
                 // Would need to watch events or something
@@ -438,7 +549,7 @@ fn main() -> Result<(), String> {
 
         let line_fraction = offset_y as usize % letter_height as usize;
 
-        let mut target = Rect::new(editor_left_margin as i32, (line_fraction as i32).neg(), letter_width, letter_height);
+
 
         if lines_above_fold + viewing_window >= line_range.len() + 3 {
             at_end = true;
@@ -447,33 +558,61 @@ fn main() -> Result<(), String> {
         }
 
 
-        
+
+        let mut target = Rect::new(editor_left_margin as i32, (line_fraction as i32).neg(), letter_width, letter_height);
 
         // I got rid of line wrap in this refactor. Probably should add that back in.
-        for i in lines_above_fold as usize..min(lines_above_fold + viewing_window, line_range.len()) {
+        for line in lines_above_fold as usize..min(lines_above_fold + viewing_window, line_range.len()) {
             texture.set_color_mod(167, 174, 210);
-            let (start, end) = line_range[i];
+            let (start, end) = line_range[line];
             target.set_x(editor_left_margin as i32);
 
             // I want to pad this so that the offset by the line number never changes.
             // Really I should draw a line or something to make it look nicer.
-            let left_padding_count = line_number_digits - digit_count(i + 1);
+            let left_padding_count = line_number_digits - digit_count(line + 1);
             let padding = left_padding_count * letter_width as usize;
             move_right(&mut target, padding as i32);
 
-            let line_number = (i + 1).to_string();
+            let line_number = (line + 1).to_string();
 
             let target = draw_string(&mut canvas, &mut target, &texture, &line_number);
             move_right(target, line_number_gutter_width as i32);
         
             if let Some(cursor) = cursor {
-                if cursor.0 == i {
+                if cursor.0 == line {
                     let cursor_x = cursor.1 as i32  * letter_width as i32 + line_number_padding as i32;
                     let cursor_y = target.y();
                     canvas.set_draw_color(Color::RGBA(82, 135, 249, 255));
                     canvas.fill_rect(Rect::new(cursor_x as i32, cursor_y as i32, 2, letter_height))?;
                 }
             }
+
+
+            if let Some(((start_line, start_column), (end_line, end_column))) = selection {
+                if line >= start_line.try_into().unwrap() && line <= end_line.try_into().unwrap() {
+                    let start_x = if line as i32 == start_line {
+                        start_column as i32 * letter_width as i32 + line_number_padding as i32
+                    } else {
+                        line_number_padding as i32
+                    };
+                    let width = if start_line == end_line {
+                        ((end_column - start_column) * letter_width as i32).try_into().unwrap()
+                    } else if line as i32 == end_line {
+                        (end_column * letter_width as i32).try_into().unwrap()
+                    } else if line as i32 == start_line {
+                        ((line_length(line_range[line]) as i32 - start_column) * letter_width as i32).try_into().unwrap()
+                    } else {
+                        (line_length(line_range[line]) * letter_width_usize).try_into().unwrap()
+                    };
+
+                    let start_y = target.y();
+                    canvas.set_draw_color(Color::RGBA(82, 135, 249, 255));
+                    // Need to deal with last line.
+                    canvas.fill_rect(Rect::new(start_x, start_y, width, letter_height))?;
+                }
+
+            };
+
             draw_string(&mut canvas, target, &texture, std::str::from_utf8(chars[start..end].as_ref()).unwrap());
 
 
@@ -494,6 +633,8 @@ fn main() -> Result<(), String> {
         if let Some((cursor_line, cursor_column)) = cursor {
             draw_string(&mut canvas, &mut target, &texture, &format!("Line {}, Column {}", cursor_line, cursor_column));
         }
+
+
 
         canvas.present();
     }
