@@ -450,7 +450,7 @@ fn main() -> Result<(), String> {
 
                 Event::MouseMotion{x, y, .. } => {
                     if let Some((start_line, mut start_column)) = mouse_down {
-                        let position = text_space_from_screen_space(
+                        cursor = text_space_from_screen_space(
                             EditorBounds {
                                 lines_above_fold,
                                 letter_height: letter_height_usize,
@@ -462,7 +462,7 @@ fn main() -> Result<(), String> {
                             y,
                         );
                         // TODO: Get my int types correct!
-                        if let Some((line, mut column)) = position {
+                        if let Some((line, mut column)) = cursor {
                             let new_start_line = start_line.min(line.try_into().unwrap());
                             let line = line.max(start_line.try_into().unwrap());
                             if new_start_line != start_line || start_line == line as i32 && start_column > column as i32 {
@@ -472,7 +472,7 @@ fn main() -> Result<(), String> {
                             }
 
                             selection = Some(((new_start_line, start_column), (line.try_into().unwrap(), column.try_into().unwrap())));
-                            println!("start: ({},{}) current: ({}, {})", new_start_line, start_column, line, column);
+                            
                         }
                     }
                 }
@@ -501,7 +501,6 @@ fn main() -> Result<(), String> {
                                 }
     
                                 selection = Some(((new_start_line, start_column), (line.try_into().unwrap(), column.try_into().unwrap())));
-                                println!("Finished start: ({},{}) current: ({}, {})", start_line, start_column, line, column);
                             }
                         }
                             
@@ -582,7 +581,7 @@ fn main() -> Result<(), String> {
                 if cursor.0 == line {
                     let cursor_x = cursor.1 as i32  * letter_width as i32 + line_number_padding as i32;
                     let cursor_y = target.y();
-                    canvas.set_draw_color(Color::RGBA(82, 135, 249, 255));
+                    canvas.set_draw_color(Color::RGBA(255, 204, 0, 255));
                     canvas.fill_rect(Rect::new(cursor_x as i32, cursor_y as i32, 2, letter_height))?;
                 }
             }
@@ -606,7 +605,7 @@ fn main() -> Result<(), String> {
                     };
 
                     let start_y = target.y();
-                    canvas.set_draw_color(Color::RGBA(82, 135, 249, 255));
+                    canvas.set_draw_color(Color::RGBA(65, 70, 99, 255));
                     // Need to deal with last line.
                     canvas.fill_rect(Rect::new(start_x, start_y, width, letter_height))?;
                 }
