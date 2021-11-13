@@ -29,6 +29,21 @@ fn draw_string<'a>(canvas: & mut Canvas<Window>, target: &'a mut Rect, texture: 
     target
 }
 
+fn parse_lines(chars : & Vec<u8>) ->  Vec<(usize, usize)> {
+    let mut line_start = 0;
+    let mut line_range = Vec::<(usize,usize)>::with_capacity(chars.len()/60);
+    for (line_end, char) in chars.iter().enumerate() {
+        if *char == b'\n'{
+            line_range.push((line_start, line_end));
+            line_start = line_end + 1;
+        }
+        if line_end == chars.len() - 1 {
+            line_range.push((line_start, line_end + 1));
+        }
+    }
+    return line_range;
+}
+
 
 #[derive(Debug)]
 struct EditorBounds<'a> {
@@ -108,6 +123,10 @@ fn line_length(line: (usize, usize)) -> usize {
 
 // Need to add a real parser or I can try messing with tree sitter.
 // But maybe I need to make text editable first?
+
+
+// Bugs:
+// completely empty file cannot have any content added
 
 
 // It would be pretty cool to add a minimap
@@ -194,7 +213,7 @@ fn main() -> Result<(), String> {
     println!("read file in {} ms", start_time.elapsed().as_millis());
     let mut chars = text.as_bytes().to_vec();
 
-    let mut line_range = Vec::<(usize,usize)>::with_capacity(chars.len()/60);
+    let mut line_range = parse_lines(&chars);
     let mut line_start = 0;
     // This is slow. I don't actually have to do this for the whole file in one go.
     // I can do it for the first screen and then start doing more over time.
@@ -311,6 +330,26 @@ fn main() -> Result<(), String> {
                             }
                         },
                         (Keycode::Backspace, _) => {
+
+                            // Seems to mostly work. Need to do similar thing for text input.
+                            if let Some(current_selection) = selection {
+                                let (start, end) = current_selection;
+                                let (start_line, start_column) = start;
+                                let (end_line, end_column) = end;
+                                if let Some((line_start, _line_end)) = line_range.get(start_line as usize) {
+                                    let char_start_pos = line_start + start_column as usize ;
+                                    if let Some((end_line_start, _line_end)) = line_range.get(end_line as usize) {
+                                        let char_end_pos = end_line_start + end_column as usize;
+                                        chars.drain(char_start_pos as usize..char_end_pos as usize);
+                                        // Probably shouldn't reparse the whole file.
+                                        line_range = parse_lines(&chars);
+                                        selection = None;
+                                        continue;
+                                    }
+                                    
+                                }
+                            }
+
                             // Need to deal with backspacing new line. Cursor is wrong.
                             if let Some((cursor_line, cursor_column)) = cursor {
                                 if let Some((line_start, _line_end)) = line_range.get(cursor_line) {
@@ -385,22 +424,7 @@ fn main() -> Result<(), String> {
                             println!("read file in {} ms", start_time.elapsed().as_millis());
                             chars = text.as_bytes().to_vec();
                         
-                            line_range = Vec::<(usize,usize)>::with_capacity(chars.len()/60);
-                            line_start = 0;
-                            // This is slow. I don't actually have to do this for the whole file in one go.
-                            // I can do it for the first screen and then start doing more over time.
-                            // Need that concept in this app.
-                            // But while this is "slow", in release it is only about a second for a 1 GB file.
-                            let start_time = std::time::Instant::now();
-                            for (line_end, char) in chars.iter().enumerate() {
-                                if *char == b'\n'{
-                                    line_range.push((line_start, line_end));
-                                    line_start = line_end + 1;
-                                }
-                                if line_end == chars.len() - 1 {
-                                    line_range.push((line_start, line_end + 1));
-                                }
-                            }
+                            line_range = parse_lines(&chars);
                             
                             offset_y = 0;
                             println!("parsed file in {} ms", start_time.elapsed().as_millis());
