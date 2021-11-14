@@ -41,7 +41,10 @@ fn parse_lines(chars : & Vec<u8>) ->  Vec<(usize, usize)> {
             line_range.push((line_start, line_end + 1));
         }
     }
-    return line_range;
+    if line_range.is_empty() {
+        line_range.push((0, 0));
+    }
+    line_range
 }
 
 
@@ -56,7 +59,9 @@ struct EditorBounds<'a> {
 
 
 fn text_space_from_screen_space(EditorBounds {lines_above_fold, letter_height,line_number_padding, letter_width, line_range} : EditorBounds, mut x: i32, y: i32) -> Option<(usize, usize)> {
-    let line_number : usize = (y / letter_height as i32 + lines_above_fold as i32).try_into().unwrap();
+    // Slightly off probably due to rounding.
+    // println!("{}", y as f32 / letter_height as f32);
+    let line_number : usize = ((y as f32 / letter_height as f32).floor() as i32 + lines_above_fold as i32).try_into().unwrap();
     if x < line_number_padding as i32 && x > line_number_padding as i32 - 20  {
         x = line_number_padding as i32;
     } 
@@ -95,6 +100,23 @@ fn move_down(target: &mut Rect, padding: i32) -> &mut Rect {
 
 fn line_length(line: (usize, usize)) -> usize {
     line.1 - line.0
+}
+
+fn fix_cursor(cursor: Option<(usize, usize)>, line_range: &Vec<(usize, usize)>) -> Option<(usize, usize)> {
+    // Need to do sanity checks for cursor column
+    if let Some((cursor_line, cursor_column)) = cursor {
+        match line_range.get(cursor_line) {
+            Some((start, end)) => {
+                if cursor_column > *end {
+                    return Some((cursor_line, line_length((*start, *end))));
+                }
+            }
+            None => {
+                return line_range.last().map(|(line, column)| (*line, *column));
+            }
+        }
+    }
+    return cursor
 }
 
 
@@ -207,28 +229,13 @@ fn main() -> Result<(), String> {
     let letter_width_usize : usize = letter_width.try_into().unwrap();
 
     let start_time = std::time::Instant::now();
-    // let mut text = fs::read_to_string("/Users/jimmyhmiller/Desktop/test/test2.txt").unwrap();
+    // let mut text = fs::read_to_string("/Users/jimmyhmiller/Desktop/test/test.txt").unwrap();
     let mut text = fs::read_to_string("/Users/jimmyhmiller/Documents/Code/jml/src/jml/core.clj").unwrap();
     // let mut text = "test\nthing\nstuff".to_string();
     println!("read file in {} ms", start_time.elapsed().as_millis());
     let mut chars = text.as_bytes().to_vec();
 
     let mut line_range = parse_lines(&chars);
-    let mut line_start = 0;
-    // This is slow. I don't actually have to do this for the whole file in one go.
-    // I can do it for the first screen and then start doing more over time.
-    // Need that concept in this app.
-    // But while this is "slow", in release it is only about a second for a 1 GB file.
-    let start_time = std::time::Instant::now();
-    for (line_end, char) in chars.iter().enumerate() {
-        if *char == b'\n'{
-            line_range.push((line_start, line_end));
-            line_start = line_end + 1;
-        }
-        if line_end == chars.len() - 1 {
-            line_range.push((line_start, line_end + 1));
-        }
-    }
     
     // println!("{:?}", line_range);
     println!("parsed file in {} ms", start_time.elapsed().as_millis());
@@ -274,7 +281,7 @@ fn main() -> Result<(), String> {
         // Commands can stop this from being text input
         let mut is_text_input = false;
         for event in event_pump.poll_iter() {
-
+            // println!("frame: {}, event {:?}", frame_counter, event);
             match event {
                 Event::Quit { .. } => ::std::process::exit(0),
 
@@ -295,8 +302,10 @@ fn main() -> Result<(), String> {
                         (Keycode::Down, _) => {
 
                             if let Some((cursor_line, cursor_column)) = cursor {
-                                let new_line = cursor_line.saturating_add(1);
-                                cursor = Some((new_line, min(cursor_column, line_length(line_range[new_line]))));
+                                let new_line = cursor_line + 1;
+                                if let Some(line) = line_range.get(new_line) {
+                                    cursor = Some((new_line, min(cursor_column, line_length(*line))));
+                                }
 
                                 // // Need to deal with line_fraction
                                 // if cursor_line > lines_above_fold {
@@ -344,19 +353,20 @@ fn main() -> Result<(), String> {
                                         // Probably shouldn't reparse the whole file.
                                         line_range = parse_lines(&chars);
                                         selection = None;
+                                        cursor = fix_cursor(cursor, &line_range);
                                         continue;
                                     }
                                     
                                 }
                             }
 
-                            // Need to deal with backspacing new line. Cursor is wrong.
+                            // Deleting new line cursor is wrong.
                             if let Some((cursor_line, cursor_column)) = cursor {
                                 if let Some((line_start, _line_end)) = line_range.get(cursor_line) {
-                                    let char_pos = line_start + cursor_column - 1;
-                                    let line_above_length = line_length(line_range[cursor_line - 1]);
+                                    let char_pos = (line_start + cursor_column).saturating_sub(1);
+                                    let line_above_length = line_length(line_range[cursor_line.saturating_sub(1)]);
                                     
-                                    if chars.is_empty() || char_pos > chars.len() {
+                                    if chars.is_empty() || char_pos >= chars.len() {
                                         continue;
                                     }
                                     chars.remove(char_pos);
@@ -368,7 +378,8 @@ fn main() -> Result<(), String> {
                                         line_range.remove(cursor_line);
                                         line_erased = true;
                                     }
-                                    for mut line in line_range.iter_mut().skip(cursor_line + (if line_erased {0} else {1})) {
+
+                                    for mut line in line_range.iter_mut().skip(cursor_line + if line_erased { 0} else {1}) {
                                         line.0 = line.0.saturating_sub(1);
                                         line.1 = line.1.saturating_sub(1);
                                     }
@@ -392,7 +403,7 @@ fn main() -> Result<(), String> {
                                 
                                 let (start, end) = line_range[cursor_line];
                                 if char_pos >= end && cursor_column != 0 {
-                                    line_range.insert(cursor_line + 1, (char_pos, char_pos));
+                                    line_range.insert(cursor_line + 1, (char_pos+1, char_pos+1));
                                 } else if cursor_column == 0 {
                                     line_range.splice(cursor_line..cursor_line+1, [(start,char_pos), (start+1, end+1)]);
                                 } else {
@@ -429,12 +440,17 @@ fn main() -> Result<(), String> {
                             offset_y = 0;
                             println!("parsed file in {} ms", start_time.elapsed().as_millis());
                         }
+                        (Keycode::A, Mod::LGUIMOD | Mod::RGUIMOD) => {
+                            selection = Some(((0,0), ((line_range.len()-1).try_into().unwrap(), line_length(line_range[line_range.len()-1]).try_into().unwrap())));
+                        }
 
                         _ => is_text_input = true
                     }
                 }
                 Event::TextInput{text, ..} => {
                     if is_text_input {
+                        // TODO: Replace with actually deleting the selection.
+                        selection = None;
                         if let Some((cursor_line, cursor_column)) = cursor {
                             let line_start = line_range[cursor_line].0;
                             let char_pos = line_start + cursor_column;
@@ -549,7 +565,9 @@ fn main() -> Result<(), String> {
                 }
                 _ => {}
             }
+            cursor = fix_cursor(cursor, &line_range);
         }
+       
 
 
 
@@ -652,7 +670,7 @@ fn main() -> Result<(), String> {
         }
 
         // Need to calculate this based on length
-        let mut target = Rect::new(window_width - (letter_width * 22) as i32 as i32, window_height-letter_height as i32, letter_width, letter_height);
+        let mut target = Rect::new(window_width - (letter_width * 22) as i32, window_height-letter_height as i32, letter_width, letter_height);
         if let Some((cursor_line, cursor_column)) = cursor {
             draw_string(&mut canvas, &mut target, &texture, &format!("Line {}, Column {}", cursor_line, cursor_column));
         }
