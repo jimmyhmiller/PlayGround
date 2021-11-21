@@ -7,11 +7,124 @@ use sdl2::{event::*, keyboard::*, mouse::{SystemCursor}, pixels::Color, rect::Re
 // This wouldn't work for multiple cursors
 // But could if I do transactions separately
 
+// I really want so debugging panels.
+// Should probably invest in that.
+// Make it work automatically with Debug.
+
+#[derive(Debug)]
+struct Transaction {
+    transaction_number: usize,
+    parent_pointer: usize,
+    action: EditAction,
+}
+
+#[derive(Debug)]
+struct TransactionManager {
+    transactions: Vec<Transaction>,
+    current_transaction: usize,
+    transaction_pointer: usize,
+}
+
+// I think I want to control when transactions start and end
+// for the most part. I am sure there are cases where I will
+// need to let the caller decide. 
+// I will have to think more about how to make those two work.
+impl TransactionManager {
+    fn new() -> TransactionManager {
+        TransactionManager {
+            transactions: Vec::new(),
+            current_transaction: 1,
+            transaction_pointer: 0,
+        }
+    }
+
+    fn add_action_pair(&mut self, action: EditAction, cursor_action: EditAction) {
+
+        if let EditAction::Insert(_, s) = &action {
+            // This does not handle multiple spaces which we probably want to group
+            if s.trim().is_empty() {
+                self.current_transaction += 1;
+            }
+        }
+        if let EditAction::Delete(_, _) = &action {
+            // Delete isn't quite right. I kind of want strings
+            // of deletes to coalesce.
+            // Maybe I should have some compact functions?
+            self.current_transaction += 1;
+        }
+        self.add_action(action);
+        self.add_action(cursor_action);
+    }
+
+    fn add_action(&mut self, action: EditAction) {
+
+        self.transactions.push(Transaction {
+            transaction_number: self.current_transaction,
+            parent_pointer: self.transaction_pointer,
+            action,
+        });
+
+        self.transaction_pointer = self.transactions.len() - 1;
+    }
+
+    fn undo(&mut self, cursor: &mut Cursor, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
+        if self.transaction_pointer == 0 {
+           return;
+        }
+        println!("Undo {:?}", self.transactions);
+        let last_transaction = self.transactions[self.transaction_pointer].transaction_number;
+        let mut i = self.transaction_pointer;
+        while self.transactions[i].transaction_number == last_transaction {
+
+            self.transactions[i].action.undo(cursor, chars, line_range);
+
+            if i == 0 {
+                break;
+            }
+            i = self.transactions[i].parent_pointer;
+        }
+        self.transaction_pointer = i;
+
+    }
+
+    // How do I redo?
+
+    fn redo(&mut self, cursor: &mut Cursor, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
+        println!("Redo!");
+
+        if self.transaction_pointer == self.transactions.len() - 1 {
+            return;
+        }
+
+        let last_undo = self.transactions.iter()
+            .rev()
+            .filter(|t| t.parent_pointer == self.transaction_pointer)
+            .next();
+        
+        // My cursor is one off! But this seems to be close to correct for the small cases I tried.
+        if let Some(Transaction{ transaction_number: last_transaction, ..}) = last_undo {
+            for (i, transaction) in self.transactions.iter().enumerate() {
+                if transaction.transaction_number == *last_transaction {
+                    self.transactions[i].action.redo(cursor, chars, line_range);
+                    self.transaction_pointer = i;
+                }
+                if transaction.transaction_number > *last_transaction {
+                    break;
+                }
+            }
+           
+            
+        }
+    }
+
+}
+
+
 
 #[derive(Debug)]
 enum EditAction {
     Insert((usize, usize), String),
-    DeleteResult((usize,usize), String),
+    Delete((usize,usize), String),
     // These only get recorded as part of these other actions.
     // They would be in the same transaction as other actions
     CursorPosition(Cursor),
@@ -20,18 +133,38 @@ enum EditAction {
 // Copilot talked about an apply function
 // That is an interesting idea
 impl EditAction  {
-    fn undo(&self, cursor: &mut Cursor, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)> ) {
+    fn undo(&self, cursor: &mut Cursor, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
         match self {
             EditAction::Insert((start, end), _text_to_insert) => {
                 let mut new_position = Cursor(*start, *end);
                 new_position.move_right(line_range);
                 handle_delete(new_position, chars, line_range);
             },
-            EditAction::DeleteResult((start, end), text_to_delete) => {
-                handle_insert((*start, *end), text_to_delete.as_bytes(), chars, line_range);
+            EditAction::Delete((start, end), text_to_delete) => {
+                // println!("Delete! ({}, {}) {:?}", start, end, text_to_delete);
+                let mut new_position = Cursor(*start, *end);
+                new_position.move_left(line_range);
+                handle_insert(new_position, text_to_delete.as_bytes(), chars, line_range);
             },
             EditAction::CursorPosition(old_cursor) => {
                 cursor.set_position(*old_cursor);
+            }
+        }
+    }
+
+    fn redo(&self, cursor: &mut Cursor, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
+
+        match self {
+            EditAction::Insert((start, end), text_to_insert) => {
+                let mut new_position = Cursor(*start, *end);
+                handle_insert(new_position, text_to_insert.as_bytes(), chars, line_range);
+            },
+            EditAction::Delete((start, end), _text_to_delete) => {
+                let mut new_position = Cursor(*start, *end);
+                handle_delete(new_position, chars, line_range);
+            },
+            EditAction::CursorPosition(new_cursor) => {
+                cursor.set_position(*new_cursor);
             }
         }
     }
@@ -137,15 +270,15 @@ fn handle_delete(cursor: Cursor, chars: &mut Vec<u8>, line_range: &mut Vec<(usiz
             line.0 = line.0.saturating_sub(1);
             line.1 = line.1.saturating_sub(1);
         }
-        return Some(EditAction::DeleteResult((cursor_line, cursor_column), result.to_string()));
+        return Some(EditAction::Delete((cursor_line, cursor_column), std::str::from_utf8(&[result]).unwrap().to_string()));
     }
     None
 }
 
 // Need to think about paste
-fn handle_insert(cursor: (usize, usize), to_insert: &[u8],  chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) -> EditAction {
-
-    let (cursor_line, cursor_column) = cursor;
+fn handle_insert(cursor: Cursor, to_insert: &[u8], chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) -> EditAction {
+    // println!("Insert! {:?} {:?}", cursor, to_insert);
+    let Cursor(cursor_line, cursor_column) = cursor;
     let line_start = line_range[cursor_line].0;
     let char_pos = line_start + cursor_column;
     chars.splice(char_pos..char_pos, to_insert.to_vec());
@@ -422,9 +555,7 @@ fn main() -> Result<(), String> {
     let mut cursor: Option<Cursor> = None;
     let mut mouse_down : Option<(i32, i32)> = None;
     let mut selection : Option<((i32, i32), (i32, i32))> = None;
-    let mut transaction_number = 1;
-    let mut history : Vec<(usize, usize, EditAction)> = vec![];
-    let mut history_pointer = 0;
+    let mut transaction_manager = TransactionManager::new();
     
     
 
@@ -454,6 +585,7 @@ fn main() -> Result<(), String> {
 
         // Commands can stop this from being text input
         let mut is_text_input = false;
+        let mut command_down = false;
         for event in event_pump.poll_iter() {
             // println!("frame: {}, event {:?}", frame_counter, event);
             match event {
@@ -465,6 +597,13 @@ fn main() -> Result<(), String> {
                 // Event::KeyDown{keycode: Some(Keycode::Escape), ..} => {
                 //     println!("{:?}", "yep");
                 // }
+
+                Event::KeyDown{keycode: Some(Keycode::LGui) | Some(Keycode::RGui), ..} => {
+                    command_down = true;
+                }
+                Event::KeyUp{keycode: Some(Keycode::LGui) | Some(Keycode::RGui), .. } => {
+                    command_down = false;
+                }
 
                 Event::KeyDown { keycode, keymod, .. } => {
                     matches!(keycode, Some(_));
@@ -522,11 +661,7 @@ fn main() -> Result<(), String> {
                                 // move_left isn't option but this is. Probably some weird edge case here
                                 let action = handle_delete(*current_cursor, &mut chars, &mut line_range);
                                 if action.is_some() {
-                                    history.push((transaction_number, history_pointer, action.unwrap()));
-                                    history_pointer = history.len() - 1;
-                                    history.push((transaction_number, history_pointer, cursor_action));
-                                    transaction_number += 1;
-                                    history_pointer = history.len() - 1;
+                                    transaction_manager.add_action_pair(action.unwrap(), cursor_action);
                                 }
 
 
@@ -538,62 +673,30 @@ fn main() -> Result<(), String> {
                             // Letters appear out of the void
                             if let Some(current_cursor) = cursor.as_mut() {
                                 let Cursor(cursor_line, cursor_column) = *current_cursor;
-                                let action = handle_insert((cursor_line, cursor_column), &[b'\n'], &mut chars, &mut line_range);
+                                let action = handle_insert(Cursor(cursor_line, cursor_column), &[b'\n'], &mut chars, &mut line_range);
                                 let cursor_action = current_cursor.move_down(&line_range);
-                                history.push((transaction_number, history_pointer, action));
-                                history_pointer = history.len() - 1;
-                                history.push((transaction_number, history_pointer, cursor_action));
-                                transaction_number += 1;
-                                history_pointer = history.len() - 1;
+                                transaction_manager.add_action_pair(action, cursor_action);
                                 
                                 current_cursor.start_of_line();
                             }
                         },
 
-                        (Keycode::Z, Mod::LGUIMOD | Mod::RGUIMOD) => {
+
+                        (Keycode::Z, key_mod) => {
                             
-                            if history_pointer == 0 {
-                                break;
-                            }
-                            let last_transaction = history[history_pointer].0;
-                            let mut i = history_pointer;
-                            while history[i].0 == last_transaction {
-
+                            if key_mod == Mod::LGUIMOD || keymod == Mod::RGUIMOD {
                                 let mut new_cursor = cursor.unwrap_or(Cursor(0, 0));
-                                history[i].2.undo(&mut new_cursor, &mut chars, &mut line_range);
+                                transaction_manager.undo(&mut new_cursor, &mut chars, &mut line_range);
                                 cursor = Some(new_cursor);
-
-
-                                if i == 0 {
-                                    break;
-                                }
-                                i = history[i].1;
+                            } else if key_mod == (Mod::LSHIFTMOD | Mod::LGUIMOD) {
+                                let mut new_cursor = cursor.unwrap_or(Cursor(0, 0));
+                                transaction_manager.redo(&mut new_cursor, &mut chars, &mut line_range);
+                                cursor = Some(new_cursor);
+                            } else {
+                                is_text_input = true
                             }
-                            history_pointer = i;
-                            // for i in (0..history_pointer).rev() {
-                            //     let (new_transaction_number, action) = &history[i];
-                            //     let last_transaction = transaction_number.saturating_sub(1);
-                            //     // Probably need to keep track of where I am in the history
-                            //     if transaction_number == 0 {
-                            //         break;
-                            //     }
-                                
-                            //     if last_transaction == *new_transaction_number {
-                            //         println!("HERE! {:?}", action);
-
-                            //     }
-
-                            //     if *new_transaction_number < last_transaction {
-                            //         println!("Changing history pointer {}", i);
-                            //         history_pointer = i;
-                            //         break;
-                            //     }
-                            //     if *new_transaction_number > last_transaction {
-                            //         continue;
-                            //     }
-                                
-                            // }
-                        }
+                           
+                        },
 
                         (Keycode::O, Mod::LGUIMOD | Mod::RGUIMOD) => {
                             let path = FileDialog::new()
@@ -633,14 +736,10 @@ fn main() -> Result<(), String> {
                         if let Some(current_cursor) = cursor.as_mut() {
                             let Cursor(cursor_line, cursor_column) = *current_cursor;
                             let to_insert = text.into_bytes();
-                            let action = handle_insert((cursor_line, cursor_column), to_insert.as_slice(), &mut chars, &mut line_range);
+                            let action = handle_insert(Cursor(cursor_line, cursor_column), to_insert.as_slice(), &mut chars, &mut line_range);
                             let cursor_action = current_cursor.move_right(&line_range);
                             
-                            history.push((transaction_number, history_pointer, action));
-                            history_pointer = history.len() - 1;
-                            history.push((transaction_number, history_pointer, cursor_action));
-                            transaction_number += 1;
-                            history_pointer = history.len() - 1;
+                            transaction_manager.add_action_pair(action, cursor_action);
                         }
                     }
                 }
@@ -855,8 +954,12 @@ fn main() -> Result<(), String> {
             draw_string(&mut canvas, &mut target, &texture, &format!("Line {}, Column {}", cursor_line, cursor_column));
         }
 
-        let mut target = Rect::new(window_width - (letter_width * 22) as i32, window_height-(letter_height*3) as i32, letter_width, letter_height);
-        draw_string(&mut canvas, &mut target, &texture, &format!("#: {} len: {} ptr: {}", transaction_number, history.len(), history_pointer));
+        let mut target = Rect::new(window_width - (letter_width * 50) as i32, window_height-(letter_height*3) as i32, letter_width, letter_height);
+        draw_string(&mut canvas, &mut target, &texture, 
+            &format!("#: {} len: {} ptr: {}", 
+                            transaction_manager.current_transaction, 
+                            transaction_manager.transactions.len(),
+                            transaction_manager.transaction_pointer));
 
 
 
