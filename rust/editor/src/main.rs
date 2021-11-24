@@ -843,8 +843,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         //     let action = handle_insert(Cursor(cursor_line, cursor_column), &[b'\n'], chars, line_range); 
                         // }
                         if let Some(current_cursor) = cursor_context.cursor.as_mut() {
-                            let Cursor(cursor_line, cursor_column) = *current_cursor;
-                            let action = handle_insert(Cursor(cursor_line, cursor_column), &[b'\n'], chars, line_range);
+                            let action = handle_insert(*current_cursor, &[b'\n'], chars, line_range);
                             let cursor_action = current_cursor.move_down(line_range);
                             transaction_manager.add_action_pair(action, cursor_action);
                         
@@ -900,9 +899,8 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     // TODO: Replace with actually deleting the selection.
                     cursor_context.clear_selection();
                     if let Some(current_cursor) = cursor_context.cursor.as_mut() {
-                        let Cursor(cursor_line, cursor_column) = *current_cursor;
                         let to_insert = text.into_bytes();
-                        let action = handle_insert(Cursor(cursor_line, cursor_column), to_insert.as_slice(), chars, line_range);
+                        let action = handle_insert(*current_cursor, to_insert.as_slice(), chars, line_range);
                         let cursor_action = current_cursor.move_right(line_range);
                     
                         transaction_manager.add_action_pair(action, cursor_action);
