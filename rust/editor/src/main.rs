@@ -1,8 +1,49 @@
-use std::{cmp::{max, min}, convert::TryInto, fs, ops::Neg};
+use std::{cmp::{max, min}, convert::TryInto, fs, ops::Neg, time::Instant};
 use std::fmt::Debug;
 
 use native_dialog::FileDialog;
-use sdl2::{event::*, keyboard::*, mouse::{SystemCursor}, pixels::Color, rect::Rect, render::*, video};
+use sdl2::{event::*, keyboard::*, mouse::{SystemCursor}, pixels::Color, rect::Rect, render::*, video::{self, WindowContext}};
+
+
+
+fn setup_sdl(window: &Window) -> Result<(sdl2::ttf::Sdl2TtfContext, Canvas<video::Window>, sdl2::EventPump, TextureCreator<WindowContext>), String> {
+    let sdl_context = sdl2::init()?;
+    let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string())?;
+    let sdl_window = sdl_context
+        .video()?
+        .window("Example", window.width as u32, window.height as u32)
+        .resizable()
+        .build()
+        .unwrap();
+        
+    let cursor = sdl2::mouse::Cursor::from_system(SystemCursor::IBeam)
+        .map_err(|err| format!("failed to load cursor: {}", err))?;
+    cursor.set();
+    
+    let canvas: Canvas<video::Window> = sdl_window
+        .into_canvas()
+        .present_vsync()
+        .build()
+        .unwrap();
+
+    let event_pump = sdl_context.event_pump()?;
+
+    let texture_creator = canvas.texture_creator();
+
+    Ok((ttf_context, canvas, event_pump, texture_creator))
+}
+
+
+fn set_smooth_scroll() {
+    unsafe {
+        use cocoa_foundation::foundation::NSUserDefaults;
+        use cocoa_foundation::foundation::NSString;
+        use cocoa_foundation::base::nil;
+        let defaults = cocoa_foundation::base::id::standardUserDefaults();
+        let key = NSString::alloc(nil).init_str("AppleMomentumScrollSupported");
+        defaults.setBool_forKey_(cocoa_foundation::base::YES, key)
+    }
+}
 
 
 // This wouldn't work for multiple cursors
@@ -68,15 +109,14 @@ impl TransactionManager {
         self.transaction_pointer = self.transactions.len() - 1;
     }
 
-    fn undo(&mut self, cursor: &mut Cursor, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
+    fn undo(&mut self, cursor_context: &mut CursorContext, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
         if self.transaction_pointer == 0 {
            return;
         }
         let last_transaction = self.transactions[self.transaction_pointer].transaction_number;
         let mut i = self.transaction_pointer;
         while self.transactions[i].transaction_number == last_transaction {
-            println!("{:?}", self.transactions[i].action);
-            self.transactions[i].action.undo(cursor, chars, line_range);
+            self.transactions[i].action.undo(cursor_context, chars, line_range);
 
             if i == 0 {
                 break;
@@ -89,7 +129,7 @@ impl TransactionManager {
 
     // How do I redo?
 
-    fn redo(&mut self, cursor: &mut Cursor, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
+    fn redo(&mut self, cursor_context: &mut CursorContext, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
 
         if self.transaction_pointer == self.transactions.len() - 1 {
             return;
@@ -104,7 +144,7 @@ impl TransactionManager {
         if let Some(Transaction{ transaction_number: last_transaction, ..}) = last_undo {
             for (i, transaction) in self.transactions.iter().enumerate() {
                 if transaction.transaction_number == *last_transaction {
-                    self.transactions[i].action.redo(cursor, chars, line_range);
+                    self.transactions[i].action.redo(cursor_context, chars, line_range);
                     self.transaction_pointer = i;
                 }
                 if transaction.transaction_number > *last_transaction {
@@ -132,29 +172,29 @@ enum EditAction {
 // Copilot talked about an apply function
 // That is an interesting idea
 impl EditAction  {
-    fn undo(&self, cursor: &mut Cursor, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
+    fn undo(&self, cursor_context: &mut CursorContext, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
         match self {
             EditAction::Insert((start, end), _text_to_insert) => {
                 let mut new_position = Cursor(*start, *end);
                 new_position.move_right(line_range);
                 handle_delete(new_position, chars, line_range);
                 new_position.move_left(line_range);
-                *cursor = new_position;
+                cursor_context.set_cursor(new_position);
             },
             EditAction::Delete((start, end), text_to_delete) => {
                 let mut new_position = Cursor(*start, *end);
                 new_position.move_left(line_range);
                 handle_insert(new_position, text_to_delete.as_bytes(), chars, line_range);
                 new_position.move_right(line_range);
-                *cursor = new_position;
+                cursor_context.set_cursor(new_position);
             },
             EditAction::CursorPosition(old_cursor) => {
-                cursor.set_position(*old_cursor);
+                cursor_context.set_cursor(*old_cursor);
             }
         }
     }
 
-    fn redo(&self, cursor: &mut Cursor, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
+    fn redo(&self, cursor_context: &mut CursorContext, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
 
         match self {
             EditAction::Insert((start, end), text_to_insert) => {
@@ -164,7 +204,7 @@ impl EditAction  {
                 handle_delete( Cursor(*start, *end), chars, line_range);
             },
             EditAction::CursorPosition(new_cursor) => {
-                cursor.set_position(*new_cursor);
+                cursor_context.set_cursor(*new_cursor);
             }
         }
     }
@@ -356,24 +396,40 @@ fn parse_lines(chars : & Vec<u8>) ->  Vec<(usize, usize)> {
 
 #[derive(Debug)]
 struct EditorBounds {
-    lines_above_fold: usize,
+    editor_left_margin: usize,
+    line_number_gutter_width: usize,
     letter_height: usize,
     letter_width: usize,
-    line_number_padding: usize,
+}
+
+impl EditorBounds{
+
+    fn line_number_digits(&self, line_range: &Vec<(usize,usize)>) -> usize {
+        digit_count(line_range.len())
+    }
+    fn line_number_padding(&self, line_range: &Vec<(usize,usize)>) -> usize {
+        self.line_number_digits(line_range) * self.letter_width as usize + self.line_number_gutter_width + self.editor_left_margin + self.letter_width as usize
+    }
 }
 
 
-fn text_space_from_screen_space(EditorBounds {lines_above_fold, letter_height,line_number_padding, letter_width} : &EditorBounds, mut x: i32, y: i32, line_range: &Vec<(usize,usize)>) -> Option<Cursor> {
+fn text_space_from_screen_space(scroller: &Scroller, mut x: i32, y: i32, line_range: &Vec<(usize,usize)>) -> Option<Cursor> {
     // Slightly off probably due to rounding.
     // println!("{}", y as f32 / letter_height as f32);
-    let line_number : usize = ((y as f32 / *letter_height as f32).floor() as i32 + *lines_above_fold as i32).try_into().unwrap();
-    if x < *line_number_padding as i32 && x > *line_number_padding as i32 - 20  {
-        x = *line_number_padding as i32;
+    
+    // Probably should move some/all of this to the scroller.
+    let EditorBounds {letter_height, letter_width, ..} = scroller.bounds;
+    let bounds = &scroller.bounds;
+    let line_number_padding = bounds.line_number_padding(line_range) as i32;
+
+    let line_number : usize = ((y as f32 / letter_height as f32).floor() as i32 + scroller.lines_above_fold() as i32).try_into().unwrap();
+    if x < line_number_padding && x > line_number_padding - 20  {
+        x = line_number_padding;
     } 
-    if x < *line_number_padding as i32 {
+    if x < line_number_padding {
         return None;
     }
-    let mut column_number : usize = ((x - *line_number_padding as i32) / *letter_width as i32).try_into().unwrap();
+    let mut column_number : usize = ((x - line_number_padding as i32) / letter_width as i32).try_into().unwrap();
 
     if let Some((line_start, line_end)) = line_range.get(line_number) {
         if column_number > line_end - line_start {
@@ -457,261 +513,29 @@ where I: IntoIterator<Item=T> {
 }
 
 
-
-fn main() -> Result<(), String> {
-
-    unsafe { 
-
-        use cocoa_foundation::foundation::NSUserDefaults;
-        use cocoa_foundation::foundation::NSString;
-        use cocoa_foundation::base::nil;
-        // [[NSUserDefaults standardUserDefaults] setBool: YES
-        //                                        forKey: @"AppleMomentumScrollSupported"];
-
-        let defaults = cocoa_foundation::base::id::standardUserDefaults();
-        let key = NSString::alloc(nil).init_str("AppleMomentumScrollSupported");
-        defaults.setBool_forKey_(cocoa_foundation::base::YES, key)
-    }
-
-    let sdl_context = sdl2::init()?;
-    let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string())?;
-
-    let mut window = Window {
-        width: 1200,
-        height: 800,
-    };
-
-    let sdl_window = sdl_context
-        .video()?
-        .window("Example", window.width as u32, window.height as u32)
-        .resizable()
-        .build()
-        .unwrap();
-
-    let cursor = sdl2::mouse::Cursor::from_system(SystemCursor::IBeam)
-        .map_err(|err| format!("failed to load cursor: {}", err))?;
-    cursor.set();
-
-
-    // Let's create a Canvas which we will use to draw in our Window
-    let mut canvas: Canvas<video::Window> = sdl_window
-        .into_canvas()
-        .present_vsync()
-        .build()
-        .unwrap();
-    let mut event_pump = sdl_context.event_pump()?;
-
-    let texture_creator = canvas.texture_creator();
-    let font_path = "/Users/jimmyhmiller/Library/Fonts/UbuntuMono-Regular.ttf";
-    let font = ttf_context.load_font(font_path, 16)?;
-
-
-    let mut text = String::new();
-    for i  in 33..127 {
-        text.push(i as u8 as char);
-    }
-    
-    // println!("{}", text);
-    // let text ="abcdefghijklmnopqrstuvwxyz";
-    let surface = font
-        .render(text.as_str())
-        // This needs to be 255 if I want to change colors
-        .blended(Color::RGBA(255, 255, 255, 255))
-        .map_err(|e| e.to_string())?;
-
-    let mut texture = texture_creator
-        .create_texture_from_surface(&surface)
-        .map_err(|e| e.to_string())?;
-
-
-    let TextureQuery { width, height, .. } = texture.query();
-
-
-    let letter_width = width / text.len() as u32;
-    let letter_height = height;
-    let letter_height_usize : usize = letter_height.try_into().unwrap();
-    let letter_width_usize : usize = letter_width.try_into().unwrap();
-
-    let start_time = std::time::Instant::now();
-    // let mut text = fs::read_to_string("/Users/jimmyhmiller/Desktop/test/test.txt").unwrap();
-    let text = fs::read_to_string("/Users/jimmyhmiller/Documents/Code/jml/src/jml/core.clj").unwrap();
-    // let mut text = "test\nthing\nstuff".to_string();
-    println!("read file in {} ms", start_time.elapsed().as_millis());
-    let mut chars = text.as_bytes().to_vec();
-
-    let mut line_range = parse_lines(&chars);
-    
-    // println!("{:?}", line_range);
-    println!("parsed file in {} ms", start_time.elapsed().as_millis());
-
-    println!("copied file");
-    let mut offset_y = 0;
-    let mut at_end = false;
-    let scroll_speed : i32 = 5;
-    let mut frame_counter = 0;
-    let mut time_start = std::time::Instant::now();
-    let mut fps = 0;
-    let mut cursor_context = CursorContext {
-        cursor: None,
-        mouse_down: None,
-        selection: None,
-    };
-    let mut transaction_manager = TransactionManager::new();
-    
-    
-
-    texture.set_color_mod(167, 174, 210);
-    loop {
-        
-
-        canvas.set_draw_color(Color::RGBA(42, 45, 62, 255));
-        canvas.clear();
-    
-        let mut scroll_y : i32 = 0;
-
-         // duplicated below because we need to recompute after
-         // we update line count
-        let editor_left_margin = 10;
-        let line_number_digits = digit_count(line_range.len());
-        let line_number_gutter_width = 20;
-        // final letter width is because we write our string, we are in that letters position, then move more.
-        let line_number_padding = line_number_digits * letter_width as usize + line_number_gutter_width + editor_left_margin + letter_width as usize;
-
-        let lines_above_fold : usize = offset_y as usize / letter_height as usize;
-        // Fix this to be less hacky.
-        let viewing_window: usize = min((window.height / letter_height as i32).try_into().unwrap(), 1000);
-
-
-
-        let editor_bounds = EditorBounds {
-            lines_above_fold,
-            letter_height: letter_height_usize,
-            letter_width: letter_width_usize,
-            line_number_padding,
-        };
-
-        handle_events(&mut event_pump,  &mut cursor_context, &mut line_range, &mut chars, &mut transaction_manager,editor_bounds, &mut window, &mut offset_y, &mut scroll_y, scroll_speed);
-
-
-        // duplicated
-        let editor_left_margin = 10;
-        let line_number_digits = digit_count(line_range.len());
-        let line_number_gutter_width = 20;
-        // final letter width is because we write our string, we are in that letters position, then move more.
-        let line_number_padding = line_number_digits * letter_width as usize + line_number_gutter_width + editor_left_margin + letter_width as usize;
-
-
-        if !at_end || scroll_y < 0 {
-            offset_y += scroll_y;
-        }
-        offset_y = max(0, offset_y);
-
-        // Need to reset this after scroll
-        // Need better handling of these things.
-        let lines_above_fold : usize = offset_y as usize / letter_height as usize;
-
-        let line_fraction = offset_y as usize % letter_height as usize;
-
-
-
-        if lines_above_fold + viewing_window >= line_range.len() + 3 {
-            at_end = true;
-        } else {
-            at_end = false;
-        }
-
-
-
-        let mut target = Rect::new(editor_left_margin as i32, (line_fraction as i32).neg(), letter_width, letter_height);
-
-        // I got rid of line wrap in this refactor. Probably should add that back in.
-        for line in lines_above_fold as usize..min(lines_above_fold + viewing_window, line_range.len()) {
-            texture.set_color_mod(167, 174, 210);
-            let (start, end) = line_range[line];
-            target.set_x(editor_left_margin as i32);
-
-            // I want to pad this so that the offset by the line number never changes.
-            // Really I should draw a line or something to make it look nicer.
-            let left_padding_count = line_number_digits - digit_count(line + 1);
-            let padding = left_padding_count * letter_width as usize;
-            move_right(&mut target, padding as i32);
-
-            let line_number = (line + 1).to_string();
-
-            let target = draw_string(&mut canvas, &mut target, &texture, &line_number);
-            move_right(target, line_number_gutter_width as i32);
-        
-            if let Some(cursor) = cursor_context.cursor {
-                if cursor.0 == line {
-                    let cursor_x = cursor.1 as i32  * letter_width as i32 + line_number_padding as i32;
-                    let cursor_y = target.y();
-                    canvas.set_draw_color(Color::RGBA(255, 204, 0, 255));
-                    canvas.fill_rect(Rect::new(cursor_x as i32, cursor_y as i32, 2, letter_height))?;
-                }
-            }
-
-
-            if let Some(((start_line, start_column), (end_line, end_column))) = cursor_context.selection {
-                if line >= start_line.try_into().unwrap() && line <= end_line.try_into().unwrap() {
-                    let start_x = if line == start_line {
-                        start_column * letter_width_usize + line_number_padding
-                    } else {
-                        line_number_padding
-                    };
-                    let width = if start_line == end_line {
-                        ((end_column - start_column) * letter_width as usize).try_into().unwrap()
-                    } else if line == end_line {
-                        (end_column * letter_width as usize).try_into().unwrap()
-                    } else if line == start_line {
-                        ((line_length(line_range[line]) - start_column) * letter_width as usize).try_into().unwrap()
-                    } else {
-                        (line_length(line_range[line]) * letter_width_usize).try_into().unwrap()
-                    };
-
-                    let start_y = target.y();
-                    canvas.set_draw_color(Color::RGBA(65, 70, 99, 255));
-                    // Need to deal with last line.
-                    canvas.fill_rect(Rect::new(start_x as i32, start_y, width, letter_height))?;
-                }
-
-            };
-
-            draw_string(&mut canvas, target, &texture, std::str::from_utf8(chars[start..end].as_ref()).unwrap());
-
-
-            move_down(target, letter_height as i32);
-        }
-
-        let mut target = Rect::new(window.width - (letter_width * 10) as i32, 0, letter_width, letter_height);
-        draw_string(&mut canvas, &mut target, &texture, &format!("fps: {}", fps));
-        frame_counter += 1;
-        if time_start.elapsed().as_secs() >= 1 {
-            fps = frame_counter;
-            frame_counter = 0;
-            time_start = std::time::Instant::now();
-        }
-
-        // Need to calculate this based on length
-        let mut target = Rect::new(window.width - (letter_width * 22) as i32, window.height-letter_height as i32, letter_width, letter_height);
-        if let Some(Cursor(cursor_line, cursor_column)) = cursor_context.cursor {
-            draw_string(&mut canvas, &mut target, &texture, &format!("Line {}, Column {}", cursor_line, cursor_column));
-        }
-
-        // let mut target = Rect::new(window_width - (letter_width * 50) as i32, window_height-(letter_height*3) as i32, letter_width, letter_height);
-        // draw_string(&mut canvas, &mut target, &texture, 
-        //     &format!("#: {} len: {} ptr: {}", 
-        //                     transaction_manager.current_transaction, 
-        //                     transaction_manager.transactions.len(),
-        //                     transaction_manager.transaction_pointer));
-
-        // let mut target = Rect::new(window_width - (letter_width * 150) as i32, 10, letter_width, letter_height);
-        // draw_list(&mut canvas, &mut target, &texture, letter_height as i32, transaction_manager.transactions.iter().skip(lines_above_fold));
-
-
-
-        canvas.present();
-    }
+struct FpsCounter {
+    start_time: Instant,
+    frame_count: usize,
+    fps: usize,
 }
+
+impl FpsCounter {
+    fn reset(&mut self) {
+        self.start_time = Instant::now();
+        self.frame_count = 0;
+    }
+
+    fn tick(&mut self) -> usize {
+        self.frame_count += 1;
+        if self.start_time.elapsed().as_secs() >= 1 {
+            self.fps = self.frame_count;
+            self.reset();
+        }
+        self.fps
+    }
+    
+}
+
 
 
 struct Window {
@@ -736,22 +560,22 @@ impl CursorContext {
     fn move_up(&mut self, line_range: &Vec<(usize, usize)>) {
         self.cursor
             .as_mut()
-            .map(|cursor| cursor.move_up(&*line_range));
+            .map(|cursor| cursor.move_up(line_range));
     }
     fn move_down(&mut self, line_range: &Vec<(usize, usize)>) {
         self.cursor
             .as_mut()
-            .map(|cursor| cursor.move_down(&*line_range));
+            .map(|cursor| cursor.move_down(line_range));
     }
     fn move_left(&mut self, line_range: &Vec<(usize, usize)>) {
         self.cursor
             .as_mut()
-            .map(|cursor| cursor.move_left(&*line_range));
+            .map(|cursor| cursor.move_left(line_range));
     }
     fn move_right(&mut self, line_range: &Vec<(usize, usize)>) {
         self.cursor
             .as_mut()
-            .map(|cursor| cursor.move_right(&*line_range));
+            .map(|cursor| cursor.move_right(line_range));
     }
     fn set_cursor(&mut self, cursor: Cursor) {
         self.cursor = Some(cursor);
@@ -791,10 +615,147 @@ impl CursorContext {
     fn clear_mouse_down(&mut self) {
         self.mouse_down = None;
     }
- 
+
+    fn move_cursor_from_screen_position(&mut self, scroller: &Scroller, x: i32, y: i32, line_range: &Vec<(usize,usize)>) {
+        self.cursor = text_space_from_screen_space(scroller, x, y, line_range);
+    }
+
+    fn cursor_exists(&self) -> bool {
+        self.cursor.is_some()
+    }
 }
 
 
+struct Scroller {
+    offset_y: i32,
+    scroll_speed: i32,
+    window: Window,
+    bounds: EditorBounds,
+}
+
+impl Scroller {
+    fn scroll(&mut self, amount: i32, line_range: &Vec<(usize, usize)>) {
+        if !self.at_end(line_range) || amount < 0 {
+            self.offset_y += amount * self.scroll_speed;
+        }
+        self.offset_y = max(0, self.offset_y);
+    }
+
+    fn viewing_lines(&self) -> usize {
+       (self.window.height / self.bounds.letter_height as i32) as usize
+    }
+    
+    fn lines_above_fold(&self) -> usize {
+        self.offset_y as usize / self.bounds.letter_height as usize
+    }
+    
+    fn at_end(&self, line_range: &Vec<(usize, usize)>) -> bool {
+        self.lines_above_fold() + self.viewing_lines() >= line_range.len() + 3
+    }
+
+    fn to_the_top(&mut self) {
+        self.offset_y = 0;
+    }
+
+    fn line_fraction(&self) -> usize {
+        self.offset_y as usize % self.bounds.letter_height as usize
+    }
+}
+
+
+fn draw_font_texture<'a>(texture_creator: &'a TextureCreator<WindowContext>, ttf_context: sdl2::ttf::Sdl2TtfContext) -> Result<(Texture<'a>, usize, usize), String> {
+    let font_path = "/Users/jimmyhmiller/Library/Fonts/UbuntuMono-Regular.ttf";
+    let font = ttf_context.load_font(font_path, 16)?;
+    let mut text = String::new();
+    for i  in 33..127 {
+        text.push(i as u8 as char);
+    }
+    let surface = font
+        .render(text.as_str())
+        // This needs to be 255 if I want to change colors
+        .blended(Color::RGBA(255, 255, 255, 255))
+        .map_err(|e| e.to_string())?;
+    let texture = texture_creator
+        .create_texture_from_surface(&surface)
+        .map_err(|e| e.to_string())?;
+    let TextureQuery { width, height, .. } = texture.query();
+    let width = (width / text.len() as u32).try_into().unwrap();
+    Ok((texture, width, height.try_into().unwrap()))
+}
+
+fn draw(canvas: &mut Canvas<video::Window>, scroller: &Scroller, line_range: &Vec<(usize, usize)>, texture: &mut Texture, cursor_context: &CursorContext,  chars: &Vec<u8>, fps: &mut FpsCounter) -> Result<(), String> {
+    canvas.set_draw_color(Color::RGBA(42, 45, 62, 255));
+    canvas.clear();
+    let editor_left_margin = scroller.bounds.editor_left_margin;
+    let line_number_padding = scroller.bounds.line_number_padding(line_range);
+    let line_number_digits = scroller.bounds.line_number_digits(line_range);
+    let mut target = Rect::new(editor_left_margin as i32, (scroller.line_fraction() as i32).neg(), scroller.bounds.letter_width as u32, scroller.bounds.letter_height as u32);
+    for line in scroller.lines_above_fold() as usize..min(scroller.lines_above_fold() + scroller.viewing_lines(), line_range.len()) {
+        texture.set_color_mod(167, 174, 210);
+        let (start, end) = line_range[line];
+        target.set_x(editor_left_margin as i32);
+
+        // I want to pad this so that the offset by the line number never changes.
+        // Really I should draw a line or something to make it look nicer.
+        let left_padding_count = line_number_digits - digit_count(line + 1);
+        let padding = left_padding_count * scroller.bounds.letter_width as usize;
+        move_right(&mut target, padding as i32);
+
+        let line_number = (line + 1).to_string();
+
+        let target = draw_string(canvas, &mut target, texture, &line_number);
+        move_right(target, scroller.bounds.line_number_gutter_width as i32);
+
+        if let Some(cursor) = cursor_context.cursor {
+            if cursor.0 == line {
+                let cursor_x = cursor.1 as i32  * scroller.bounds.letter_width as i32 + line_number_padding as i32;
+                let cursor_y = target.y();
+                canvas.set_draw_color(Color::RGBA(255, 204, 0, 255));
+                canvas.fill_rect(Rect::new(cursor_x as i32, cursor_y as i32, 2, scroller.bounds.letter_height as u32))?;
+            }
+        }
+
+
+        if let Some(((start_line, start_column), (end_line, end_column))) = cursor_context.selection {
+            if line >= start_line.try_into().unwrap() && line <= end_line.try_into().unwrap() {
+                let start_x = if line == start_line {
+                    start_column * scroller.bounds.letter_width + line_number_padding
+                } else {
+                    line_number_padding
+                };
+                let width = if start_line == end_line {
+                    ((end_column - start_column) * scroller.bounds.letter_width).try_into().unwrap()
+                } else if line == end_line {
+                    (end_column * scroller.bounds.letter_width as usize).try_into().unwrap()
+                } else if line == start_line {
+                    ((line_length(line_range[line]) - start_column) * scroller.bounds.letter_width as usize).try_into().unwrap()
+                } else {
+                    (line_length(line_range[line]) * scroller.bounds.letter_width).try_into().unwrap()
+                };
+
+                let start_y = target.y();
+                canvas.set_draw_color(Color::RGBA(65, 70, 99, 255));
+                // Need to deal with last line.
+                canvas.fill_rect(Rect::new(start_x as i32, start_y, width, scroller.bounds.letter_height as u32))?;
+            }
+
+        };
+
+        draw_string(canvas, target, texture, std::str::from_utf8(chars[start..end].as_ref()).unwrap());
+
+
+        move_down(target, scroller.bounds.letter_height as i32);
+    }
+    let current_fps = fps.tick();
+    let mut target = Rect::new(scroller.window.width - (scroller.bounds.letter_width * 10) as i32, 0, scroller.bounds.letter_width as u32, scroller.bounds.letter_height as u32);
+    draw_string(canvas, &mut target, texture, &format!("fps: {}", current_fps));
+    let mut target = Rect::new(scroller.window.width - (scroller.bounds.letter_width * 22) as i32, scroller.window.height-scroller.bounds.letter_height as i32, scroller.bounds.letter_width as u32, scroller.bounds.letter_height as u32);
+    if let Some(Cursor(cursor_line, cursor_column)) = cursor_context.cursor {
+        draw_string(canvas, &mut target, texture, &format!("Line {}, Column {}", cursor_line, cursor_column));
+    }
+    canvas.present();
+    Ok(())
+}
 
 
 fn handle_events(event_pump: &mut sdl2::EventPump,
@@ -806,13 +767,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                 
                 transaction_manager: &mut TransactionManager,
 
-                editor_bounds: EditorBounds,
-
-                window: &mut Window,
-
-                offset_y: &mut i32,
-                scroll_y: &mut i32,
-                scroll_speed: i32) {
+                scroller: &mut Scroller) {
     let mut is_text_input = false;
     for event in event_pump.poll_iter() {
         // println!("frame: {}, event {:?}", frame_counter, event);
@@ -854,9 +809,9 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                                     let char_end_pos = end_line_start + end_column as usize;
                                     chars.drain(char_start_pos as usize..char_end_pos as usize);
                                     // Probably shouldn't reparse the whole file.
-                                    *line_range = parse_lines(&*chars);
+                                    *line_range = parse_lines(chars);
                                     cursor_context.clear_selection();
-                                    cursor_context.fix_cursor(&*line_range);
+                                    cursor_context.fix_cursor(line_range);
                                     continue;
                                 }
                             
@@ -871,7 +826,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                             let mut old_cursor = current_cursor.clone();
                             // We do this move_left first, because otherwise we might end up at the end
                             // of the new line we formed from the deletion, rather than the old end of the line.
-                            let cursor_action = old_cursor.move_left(&*line_range);
+                            let cursor_action = old_cursor.move_left(line_range);
                             // move_left isn't option but this is. Probably some weird edge case here
                             let action = handle_delete(current_cursor, chars, line_range);
                             if action.is_some() {
@@ -883,12 +838,14 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         }
                     }
                     (Keycode::Return, _) => {
-                        // Some weird things are happening here.
-                        // Letters appear out of the void
+                        // refactor to be better
+                        // if cursor_context.cursor_exists() {
+                        //     let action = handle_insert(Cursor(cursor_line, cursor_column), &[b'\n'], chars, line_range); 
+                        // }
                         if let Some(current_cursor) = cursor_context.cursor.as_mut() {
                             let Cursor(cursor_line, cursor_column) = *current_cursor;
                             let action = handle_insert(Cursor(cursor_line, cursor_column), &[b'\n'], chars, line_range);
-                            let cursor_action = current_cursor.move_down(&*line_range);
+                            let cursor_action = current_cursor.move_down(line_range);
                             transaction_manager.add_action_pair(action, cursor_action);
                         
                             current_cursor.start_of_line();
@@ -899,17 +856,9 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     (Keycode::Z, key_mod) => {
                     
                         if key_mod == Mod::LGUIMOD || keymod == Mod::RGUIMOD {
-                            // Do I need these cursors? Why doesn't redo and undo just set the cursor?
-                            // Need to refactor.
-                            let mut new_cursor = cursor_context.cursor.unwrap_or(Cursor(0, 0));
-                            transaction_manager.undo(&mut new_cursor, chars, line_range);
-                            cursor_context.set_cursor(new_cursor);
+                            transaction_manager.undo(cursor_context, chars, line_range);
                         } else if key_mod == (Mod::LSHIFTMOD | Mod::LGUIMOD) {
-                            // Do I need these cursors? Why doesn't redo and undo just set the cursor?
-                            // Need to refactor.
-                            let mut new_cursor = cursor_context.cursor.unwrap_or(Cursor(0, 0));
-                            transaction_manager.redo(&mut new_cursor, chars, line_range);
-                            cursor_context.set_cursor(new_cursor);
+                            transaction_manager.redo(cursor_context, chars, line_range);
                         } else {
                             is_text_input = true
                         }
@@ -921,7 +870,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                             .set_location("~/Documents")
                             .show_open_single_file()
                             .unwrap();
-                        let start_time = std::time::Instant::now();
+
                         if path.is_none() {
                             continue;
                         }
@@ -931,17 +880,16 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
 
                         // Need to refactor into reusable function instead of just repeating here.
                         let text = fs::read_to_string(path_str).unwrap();
-                        println!("read file in {} ms", start_time.elapsed().as_millis());
                         *chars = text.as_bytes().to_vec();
                 
-                        *line_range = parse_lines(&*chars);
-                    
-                        *offset_y = 0;
-                        println!("parsed file in {} ms", start_time.elapsed().as_millis());
+                        *line_range = parse_lines(chars);
+
+                        scroller.to_the_top();
+
                     }
                     (Keycode::A, Mod::LGUIMOD | Mod::RGUIMOD) => {
                         // This is super ugly, fix.
-                        cursor_context.set_selection(((0,0), ((line_range.len()-1).try_into().unwrap(), line_length(line_range[line_range.len()-1]).try_into().unwrap())));
+                        cursor_context.set_selection(((0,0), (line_range.len()-1, line_length(line_range[line_range.len()-1]))));
                     }
 
                     _ => is_text_input = true
@@ -955,7 +903,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         let Cursor(cursor_line, cursor_column) = *current_cursor;
                         let to_insert = text.into_bytes();
                         let action = handle_insert(Cursor(cursor_line, cursor_column), to_insert.as_slice(), chars, line_range);
-                        let cursor_action = current_cursor.move_right(&*line_range);
+                        let cursor_action = current_cursor.move_right(line_range);
                     
                         transaction_manager.add_action_pair(action, cursor_action);
                     }
@@ -966,29 +914,14 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
             // Which probably means changing cursor representation
        
             Event::MouseButtonDown { x, y, .. } => {
-                cursor_context.set_cursor_opt(
-                    text_space_from_screen_space(
-                        &editor_bounds,
-                        x,
-                        y,
-                        &*line_range,
-                    )
-                );
-
+                cursor_context.move_cursor_from_screen_position(scroller, x, y, line_range);
                 cursor_context.mouse_down();
                 cursor_context.clear_selection();
             }
 
             Event::MouseMotion{x, y, .. } => {
                 if let Some(Cursor(start_line, mut start_column)) = cursor_context.mouse_down {
-                    cursor_context.set_cursor_opt(
-                 text_space_from_screen_space(
-                            &editor_bounds,
-                            x,
-                            y,
-                            &*line_range,
-                        )
-                    );
+                    cursor_context.move_cursor_from_screen_position(scroller, x, y, line_range);
                     // TODO: Get my int types correct!
                     if let Some(Cursor(line, mut column)) = cursor_context.cursor {
                         let new_start_line = start_line.min(line.try_into().unwrap());
@@ -1000,7 +933,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         }
 
                         // ugly refactor
-                        cursor_context.set_selection(((new_start_line, start_column), (line.try_into().unwrap(), column.try_into().unwrap())));
+                        cursor_context.set_selection(((new_start_line, start_column), (line, column)));
                     
                     }
                 }
@@ -1008,14 +941,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
 
             Event::MouseButtonUp{x, y, ..} => {
                 if let Some(Cursor(start_line, mut start_column)) = cursor_context.mouse_down {
-                    cursor_context.set_cursor_opt(
-                        text_space_from_screen_space(
-                                   &editor_bounds,
-                                   x,
-                                   y,
-                                   &*line_range,
-                               )
-                           );
+                    cursor_context.move_cursor_from_screen_position(scroller, x, y, line_range);
                     if cursor_context.selection.is_some() {
                         if let Some(Cursor(line, mut column)) = cursor_context.cursor {
                             let new_start_line = start_line.min(line.try_into().unwrap());
@@ -1038,7 +964,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
             // Continuous resize in sdl2 is a bit weird
             // Would need to watch events or something
             Event::Window {win_event: WindowEvent::Resized(width, height), ..} => {
-                window.resize(width, height);
+                scroller.window.resize(width, height);
             }
 
             Event::MouseWheel {x: _, y, direction , timestamp: _, .. } => {
@@ -1047,7 +973,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     sdl2::mouse::MouseWheelDirection::Flipped => -1,
                     sdl2::mouse::MouseWheelDirection::Unknown(x) => x as i32
                 };
-                *scroll_y = y * direction_multiplier * scroll_speed;
+                scroller.scroll( y * direction_multiplier, &line_range);
             }
             _ => {}
         }
@@ -1055,5 +981,54 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
     }
 }
 
+
+
+fn main() -> Result<(), String> {
+    set_smooth_scroll();
+
+    let window = Window {
+        width: 1200,
+        height: 800,
+    };
+
+    let (ttf_context, mut canvas, mut event_pump, texture_creator) = setup_sdl(&window)?;
+    let (mut texture, letter_width, letter_height) = draw_font_texture(&texture_creator, ttf_context)?;
+    texture.set_color_mod(167, 174, 210);
+
+    let mut scroller = Scroller {
+        offset_y: 0,
+        scroll_speed: 5,
+        window,
+        bounds: EditorBounds {
+            editor_left_margin: 10,
+            line_number_gutter_width : 20,
+            letter_height,
+            letter_width,
+        },
+    };
+
+    let text = fs::read_to_string("/Users/jimmyhmiller/Documents/Code/Playground/rust/editor/src/main.rs").unwrap();
+    let mut chars = text.as_bytes().to_vec();
+    let mut line_range = parse_lines(&chars);
+
+    let mut fps = FpsCounter{
+        start_time: Instant::now(),
+        frame_count: 0,
+        fps: 0,
+    };
+
+    let mut cursor_context = CursorContext {
+        cursor: None,
+        mouse_down: None,
+        selection: None,
+    };
+    let mut transaction_manager = TransactionManager::new();
+
+
+    loop {
+        draw(&mut canvas, &scroller, &line_range,  &mut texture, &cursor_context,  &chars, &mut fps)?;
+        handle_events(&mut event_pump,  &mut cursor_context, &mut line_range, &mut chars, &mut transaction_manager, &mut scroller);
+    }
+}
 
 
