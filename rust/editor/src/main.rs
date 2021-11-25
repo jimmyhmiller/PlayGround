@@ -80,25 +80,31 @@ impl TransactionManager {
         }
     }
 
-    fn add_action_pair(&mut self, action: EditAction, cursor_action: EditAction) {
 
-        if let EditAction::Insert(_, s) = &action {
-            // This does not handle multiple spaces which we probably want to group
-            if s.trim().is_empty() {
-                self.current_transaction += 1;
-            }
-        }
-        if let EditAction::Delete(_, _) = &action {
-            // Delete isn't quite right. I kind of want strings
-            // of deletes to coalesce.
-            // Maybe I should have some compact functions?
-            self.current_transaction += 1;
-        }
-        self.add_action(action);
-        self.add_action(cursor_action);
-    }
 
     fn add_action(&mut self, action: EditAction) {
+
+        match &action {
+            EditAction::Noop => {},
+            EditAction::InsertWithCursor(_, _, _) => {
+                let (a, b) = action.split_insert_and_cursor();
+                self.add_action(a);
+                self.add_action(b);
+                return;
+            }
+            EditAction::Insert(_, s) => {
+                if s.trim().is_empty() {
+                    self.current_transaction += 1;
+                }
+            }
+            EditAction::Delete(_, _) => {
+                // Delete isn't quite right. I kind of want strings
+                // of deletes to coalesce.
+                // Maybe I should have some compact functions?
+                self.current_transaction += 1;
+            }
+            EditAction::CursorPosition(_) => {}
+        }
 
         self.transactions.push(Transaction {
             transaction_number: self.current_transaction,
@@ -167,6 +173,8 @@ enum EditAction {
     // These only get recorded as part of these other actions.
     // They would be in the same transaction as other actions
     CursorPosition(Cursor),
+    InsertWithCursor((usize, usize), String, Cursor),
+    Noop,
 }
 
 // Copilot talked about an apply function
@@ -191,6 +199,13 @@ impl EditAction  {
             EditAction::CursorPosition(old_cursor) => {
                 cursor_context.set_cursor(*old_cursor);
             }
+            EditAction::InsertWithCursor(location, text_to_insert, cursor ) => {
+                EditAction::Insert(*location, text_to_insert.clone()).undo(cursor_context, chars, line_range);
+                EditAction::CursorPosition(*cursor).undo(cursor_context, chars, line_range);
+            }
+            EditAction::Noop => {
+                // Do nothing
+            }
         }
     }
 
@@ -206,6 +221,31 @@ impl EditAction  {
             EditAction::CursorPosition(new_cursor) => {
                 cursor_context.set_cursor(*new_cursor);
             }
+            EditAction::InsertWithCursor(location,text_to_insert, cursor ) => {
+                EditAction::Insert(*location, text_to_insert.clone()).redo(cursor_context, chars, line_range);
+                EditAction::CursorPosition(*cursor).redo(cursor_context, chars, line_range);
+            }
+            EditAction::Noop => {
+                // Do nothing
+            }
+        }
+    }
+
+    fn combine_insert_and_cursor(self, cursor_action: EditAction) -> EditAction {
+        match (self, cursor_action) {
+            (EditAction::Insert(location, text_to_insert), EditAction::CursorPosition(cursor)) => {
+                EditAction::InsertWithCursor(location, text_to_insert, cursor)
+            }
+            x => panic!("Can't combine these actions {:?}", x)
+        }
+    }
+
+    fn split_insert_and_cursor(&self) -> (EditAction, EditAction) {
+        match self {
+            EditAction::InsertWithCursor(location, text_to_insert, cursor) => {
+                (EditAction::Insert(*location, text_to_insert.clone()), EditAction::CursorPosition(*cursor))
+            }
+            x => panic!("Can't split these actions {:?}", x)
         }
     }
 }
@@ -218,11 +258,6 @@ impl Cursor {
  
     fn start_of_line(&mut self) {
         self.1 = 0;
-    }
-    
-    fn set_position(&mut self, cursor: Cursor) {
-        self.0 = cursor.0;
-        self.1 = cursor.1;
     }
     
     fn move_up(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction {
@@ -317,7 +352,6 @@ fn handle_delete(cursor: Cursor, chars: &mut Vec<u8>, line_range: &mut Vec<(usiz
 
 // Need to think about paste
 fn handle_insert(cursor: Cursor, to_insert: &[u8], chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) -> EditAction {
-    // println!("Insert! {:?} {:?}", cursor, to_insert);
     let Cursor(cursor_line, cursor_column) = cursor;
     let line_start = line_range[cursor_line].0;
     let char_pos = line_start + cursor_column;
@@ -375,6 +409,7 @@ fn draw_string<'a>(canvas: & mut Canvas<video::Window>, target: &'a mut Rect, te
     target
 }
 
+// Need to move to text_buffer
 fn parse_lines(chars : & Vec<u8>) ->  Vec<(usize, usize)> {
     let mut line_start = 0;
     let mut line_range = Vec::<(usize,usize)>::with_capacity(chars.len()/60);
@@ -557,32 +592,38 @@ struct CursorContext {
 }
 
 impl CursorContext {
-    fn move_up(&mut self, line_range: &Vec<(usize, usize)>) {
+    fn move_up(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction {
         self.cursor
             .as_mut()
-            .map(|cursor| cursor.move_up(line_range));
+            .map(|cursor| cursor.move_up(line_range))
+            .unwrap_or(EditAction::Noop)
     }
-    fn move_down(&mut self, line_range: &Vec<(usize, usize)>) {
+    fn move_down(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction {
         self.cursor
             .as_mut()
-            .map(|cursor| cursor.move_down(line_range));
+            .map(|cursor| cursor.move_down(line_range))
+            .unwrap_or(EditAction::Noop)
     }
-    fn move_left(&mut self, line_range: &Vec<(usize, usize)>) {
+    fn move_left(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction  {
         self.cursor
             .as_mut()
-            .map(|cursor| cursor.move_left(line_range));
+            .map(|cursor| cursor.move_left(line_range))
+            .unwrap_or(EditAction::Noop)
     }
-    fn move_right(&mut self, line_range: &Vec<(usize, usize)>) {
+    fn move_right(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction  {
         self.cursor
             .as_mut()
-            .map(|cursor| cursor.move_right(line_range));
+            .map(|cursor| cursor.move_right(line_range))
+            .unwrap_or(EditAction::Noop)
     }
+    fn start_of_line(&mut self) {
+        self.cursor
+            .as_mut()
+            .map(|cursor| cursor.start_of_line());
+    }
+    
     fn set_cursor(&mut self, cursor: Cursor) {
         self.cursor = Some(cursor);
-    }
-
-    fn set_cursor_opt(&mut self, cursor: Option<Cursor>) {
-        self.cursor = cursor;
     }
 
     fn clear_selection(&mut self) {
@@ -620,8 +661,19 @@ impl CursorContext {
         self.cursor = text_space_from_screen_space(scroller, x, y, line_range);
     }
 
-    fn cursor_exists(&self) -> bool {
-        self.cursor.is_some()
+    fn handle_insert(&mut self, to_insert: &[u8], chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) -> EditAction {
+        if let Some(cursor) = self.cursor {
+            let main_action = handle_insert(cursor, to_insert, chars, line_range);
+            let cursor_action = if to_insert == b"\n" {
+                self.move_down(line_range)
+            } else {
+                self.move_right(line_range)
+            };
+            main_action.combine_insert_and_cursor(cursor_action)
+        } else {
+            EditAction::Noop
+        }
+        
     }
 }
 
@@ -683,9 +735,11 @@ fn draw_font_texture<'a>(texture_creator: &'a TextureCreator<WindowContext>, ttf
     Ok((texture, width, height.try_into().unwrap()))
 }
 
-fn draw(canvas: &mut Canvas<video::Window>, scroller: &Scroller, line_range: &Vec<(usize, usize)>, texture: &mut Texture, cursor_context: &CursorContext,  chars: &Vec<u8>, fps: &mut FpsCounter) -> Result<(), String> {
+fn draw(canvas: &mut Canvas<video::Window>, scroller: &Scroller, texture: &mut Texture, cursor_context: &CursorContext,  text_buffer: &TextBuffer, fps: &mut FpsCounter) -> Result<(), String> {
     canvas.set_draw_color(Color::RGBA(42, 45, 62, 255));
     canvas.clear();
+    let line_range = &text_buffer.line_range;
+    let chars = &text_buffer.chars;
     let editor_left_margin = scroller.bounds.editor_left_margin;
     let line_number_padding = scroller.bounds.line_number_padding(line_range);
     let line_number_digits = scroller.bounds.line_number_digits(line_range);
@@ -757,18 +811,20 @@ fn draw(canvas: &mut Canvas<video::Window>, scroller: &Scroller, line_range: &Ve
     Ok(())
 }
 
+struct TextBuffer {
+    line_range: Vec<(usize, usize)>,
+    chars: Vec<u8>,
+}
+
 
 fn handle_events(event_pump: &mut sdl2::EventPump,
-                
-                cursor_context: &mut CursorContext,           
-
-                line_range: &mut Vec<(usize, usize)>,
-                chars: &mut Vec<u8>,
-                
-                transaction_manager: &mut TransactionManager,
-
-                scroller: &mut Scroller) {
+                 cursor_context: &mut CursorContext,           
+                 transaction_manager: &mut TransactionManager,
+                 scroller: &mut Scroller,
+                 text_buffer: &mut TextBuffer) {
     let mut is_text_input = false;
+    let line_range = &mut text_buffer.line_range;
+    let chars = &mut text_buffer.chars;
     for event in event_pump.poll_iter() {
         // println!("frame: {}, event {:?}", frame_counter, event);
         match event {
@@ -827,10 +883,12 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                             // We do this move_left first, because otherwise we might end up at the end
                             // of the new line we formed from the deletion, rather than the old end of the line.
                             let cursor_action = old_cursor.move_left(line_range);
-                            // move_left isn't option but this is. Probably some weird edge case here
+                            // Need to move to handle_delete in cursor_context.
+                            
                             let action = handle_delete(current_cursor, chars, line_range);
                             if action.is_some() {
-                                transaction_manager.add_action_pair(action.unwrap(), cursor_action);
+                                transaction_manager.add_action(action.unwrap());
+                                transaction_manager.add_action(cursor_action);
                             }
 
 
@@ -839,16 +897,9 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     }
                     (Keycode::Return, _) => {
                         // refactor to be better
-                        // if cursor_context.cursor_exists() {
-                        //     let action = handle_insert(Cursor(cursor_line, cursor_column), &[b'\n'], chars, line_range); 
-                        // }
-                        if let Some(current_cursor) = cursor_context.cursor.as_mut() {
-                            let action = handle_insert(*current_cursor, &[b'\n'], chars, line_range);
-                            let cursor_action = current_cursor.move_down(line_range);
-                            transaction_manager.add_action_pair(action, cursor_action);
-                        
-                            current_cursor.start_of_line();
-                        }
+                        let action = cursor_context.handle_insert(&[b'\n'], chars, line_range);
+                        transaction_manager.add_action(action);
+                        cursor_context.start_of_line();
                     },
 
 
@@ -873,12 +924,9 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         if path.is_none() {
                             continue;
                         }
-                        let path = path.unwrap();
-                        let path_str = path.to_str().unwrap();
-                        let path_str = &path_str.replace("file://", "");
-
+                        let path = &path.unwrap().to_str().unwrap().replace("file://", "");
                         // Need to refactor into reusable function instead of just repeating here.
-                        let text = fs::read_to_string(path_str).unwrap();
+                        let text = fs::read_to_string(path).unwrap();
                         *chars = text.as_bytes().to_vec();
                 
                         *line_range = parse_lines(chars);
@@ -898,13 +946,9 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                 if is_text_input {
                     // TODO: Replace with actually deleting the selection.
                     cursor_context.clear_selection();
-                    if let Some(current_cursor) = cursor_context.cursor.as_mut() {
-                        let to_insert = text.into_bytes();
-                        let action = handle_insert(*current_cursor, to_insert.as_slice(), chars, line_range);
-                        let cursor_action = current_cursor.move_right(line_range);
-                    
-                        transaction_manager.add_action_pair(action, cursor_action);
-                    }
+
+                    let action = cursor_context.handle_insert(text.as_bytes(), chars, line_range);
+                    transaction_manager.add_action(action);
                 }
             }
 
@@ -1006,13 +1050,10 @@ fn main() -> Result<(), String> {
     };
 
     let text = fs::read_to_string("/Users/jimmyhmiller/Documents/Code/Playground/rust/editor/src/main.rs").unwrap();
-    let mut chars = text.as_bytes().to_vec();
-    let mut line_range = parse_lines(&chars);
 
-    let mut fps = FpsCounter{
-        start_time: Instant::now(),
-        frame_count: 0,
-        fps: 0,
+    let mut text_buffer = TextBuffer {
+        chars: text.as_bytes().to_vec(),
+        line_range: parse_lines(&text.as_bytes().to_vec()),
     };
 
     let mut cursor_context = CursorContext {
@@ -1022,10 +1063,16 @@ fn main() -> Result<(), String> {
     };
     let mut transaction_manager = TransactionManager::new();
 
+    let mut fps = FpsCounter{
+        start_time: Instant::now(),
+        frame_count: 0,
+        fps: 0,
+    };
+
 
     loop {
-        draw(&mut canvas, &scroller, &line_range,  &mut texture, &cursor_context,  &chars, &mut fps)?;
-        handle_events(&mut event_pump,  &mut cursor_context, &mut line_range, &mut chars, &mut transaction_manager, &mut scroller);
+        draw(&mut canvas, &scroller,  &mut texture, &cursor_context,  &text_buffer, &mut fps)?;
+        handle_events(&mut event_pump,  &mut cursor_context, &mut transaction_manager, &mut scroller, &mut text_buffer);
     }
 }
 
