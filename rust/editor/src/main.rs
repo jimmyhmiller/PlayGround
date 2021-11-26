@@ -42,8 +42,6 @@ impl TransactionManager {
         }
     }
 
-
-
     fn add_action(&mut self, action: EditAction) {
 
         match &action {
@@ -162,9 +160,7 @@ impl EditAction  {
                 EditAction::Insert(*location, text_to_insert.clone()).undo(cursor_context, text_buffer);
                 EditAction::CursorPosition(*cursor).undo(cursor_context, text_buffer);
             }
-            EditAction::Noop => {
-                // Do nothing
-            }
+            EditAction::Noop => {}
         }
     }
 
@@ -184,9 +180,7 @@ impl EditAction  {
                 EditAction::Insert(*location, text_to_insert.clone()).redo(cursor_context, text_buffer);
                 EditAction::CursorPosition(*cursor).redo(cursor_context, text_buffer);
             }
-            EditAction::Noop => {
-                // Do nothing
-            }
+            EditAction::Noop => {}
         }
     }
 
@@ -221,10 +215,9 @@ impl Cursor {
     }
     
     fn move_up(&mut self, text_buffer: &TextBuffer) -> EditAction {
-        let Cursor(cursor_line, cursor_column) = *self;
-        let new_line = cursor_line.saturating_sub(1);
+        let new_line = self.0.saturating_sub(1);
         self.0 = new_line;
-        self.1 = min(cursor_column, line_length(text_buffer[new_line]));
+        self.1 = min(self.1, line_length(text_buffer[new_line]));
         EditAction::CursorPosition(*self)
         // *self = Cursor(new_line, min(cursor_column, line_length(line_range[new_line])));
 
@@ -236,11 +229,8 @@ impl Cursor {
     }
 
     fn move_down(&mut self, text_buffer: &TextBuffer) -> EditAction  {
-        let Cursor(cursor_line, cursor_column) = *self;
-        let new_line = cursor_line + 1;
-        if let Some(line) = text_buffer.get_line(new_line) {
-            *self = Cursor(new_line, min(cursor_column, line_length(*line)));
-        }   
+        self.0 = min(self.0 + 1, text_buffer.line_count() -1);
+        self.1 = min(self.1, line_length(text_buffer[self.0]));
         EditAction::CursorPosition(*self)
 
         // Need to use this output to deal with scrolling down
@@ -581,7 +571,7 @@ impl Scroller {
 
 
 
-fn draw(canvas: &mut Canvas<video::Window>, scroller: &Scroller, texture: &mut Texture, cursor_context: &CursorContext,  text_buffer: &TextBuffer, fps: &mut FpsCounter) -> Result<(), String> {
+fn draw(canvas: &mut Canvas<video::Window>, scroller: &Scroller, texture: &mut Texture, cursor_context: &CursorContext, text_buffer: &TextBuffer, fps: &mut FpsCounter) -> Result<(), String> {
     canvas.set_draw_color(Color::RGBA(42, 45, 62, 255));
     canvas.clear();
 
@@ -867,6 +857,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         // Maybe a non-mutating method?
                         // How to deal with optional aspect here?
                         if let Some(current_cursor) = cursor_context.cursor {
+                            // BUG:
                             // This is not working quite correctly.
                             // Delete at the end of a line with a non-empty above.
                             // Try undoing the delete and then redoing.
