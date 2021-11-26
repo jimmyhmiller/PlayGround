@@ -16,13 +16,9 @@ pub fn set_smooth_scroll() {
 pub fn open_file_dialog() -> Option<String> {
     let path = FileDialog::new()
         .set_location("~/Documents")
-        .show_open_single_file()
-        .unwrap();
-
-    if path.is_none() {
-        return None;
-    }
-    let path = &path.unwrap().to_str().unwrap().replace("file://", "");
+        .show_open_single_file().ok()??;
+    
+    let path = &path.to_str().unwrap().replace("file://", "");
     // Need to refactor into reusable function instead of just repeating here.
     fs::read_to_string(path).ok()
 }
