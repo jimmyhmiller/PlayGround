@@ -1,49 +1,11 @@
 use std::{cmp::{max, min}, convert::TryInto, fs, ops::{Index, IndexMut, Neg, RangeBounds}, str::from_utf8, time::Instant};
 use std::fmt::Debug;
 
-use native_dialog::FileDialog;
-use sdl2::{event::*, keyboard::*, mouse::{SystemCursor}, pixels::Color, rect::Rect, render::*, video::{self, WindowContext}};
+use sdl2::{event::{Event, WindowEvent}, keyboard::{Keycode, Mod}, pixels::Color, rect::Rect, render::{Canvas, Texture}, video::{self}};
 
 
-
-fn setup_sdl(window: &Window) -> Result<(sdl2::ttf::Sdl2TtfContext, Canvas<video::Window>, sdl2::EventPump, TextureCreator<WindowContext>), String> {
-    let sdl_context = sdl2::init()?;
-    let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string())?;
-    let sdl_window = sdl_context
-        .video()?
-        .window("Example", window.width as u32, window.height as u32)
-        .resizable()
-        .build()
-        .unwrap();
-        
-    let cursor = sdl2::mouse::Cursor::from_system(SystemCursor::IBeam)
-        .map_err(|err| format!("failed to load cursor: {}", err))?;
-    cursor.set();
-    
-    let canvas: Canvas<video::Window> = sdl_window
-        .into_canvas()
-        .present_vsync()
-        .build()
-        .unwrap();
-
-    let event_pump = sdl_context.event_pump()?;
-
-    let texture_creator = canvas.texture_creator();
-
-    Ok((ttf_context, canvas, event_pump, texture_creator))
-}
-
-
-fn set_smooth_scroll() {
-    unsafe {
-        use cocoa_foundation::foundation::NSUserDefaults;
-        use cocoa_foundation::foundation::NSString;
-        use cocoa_foundation::base::nil;
-        let defaults = cocoa_foundation::base::id::standardUserDefaults();
-        let key = NSString::alloc(nil).init_str("AppleMomentumScrollSupported");
-        defaults.setBool_forKey_(cocoa_foundation::base::YES, key)
-    }
-}
+mod native;
+mod sdl;
 
 
 // This wouldn't work for multiple cursors
@@ -618,25 +580,7 @@ impl Scroller {
 }
 
 
-fn draw_font_texture<'a>(texture_creator: &'a TextureCreator<WindowContext>, ttf_context: sdl2::ttf::Sdl2TtfContext) -> Result<(Texture<'a>, usize, usize), String> {
-    let font_path = "/Users/jimmyhmiller/Library/Fonts/UbuntuMono-Regular.ttf";
-    let font = ttf_context.load_font(font_path, 16)?;
-    let mut text = String::new();
-    for i  in 33..127 {
-        text.push(i as u8 as char);
-    }
-    let surface = font
-        .render(text.as_str())
-        // This needs to be 255 if I want to change colors
-        .blended(Color::RGBA(255, 255, 255, 255))
-        .map_err(|e| e.to_string())?;
-    let texture = texture_creator
-        .create_texture_from_surface(&surface)
-        .map_err(|e| e.to_string())?;
-    let TextureQuery { width, height, .. } = texture.query();
-    let width = (width / text.len() as u32).try_into().unwrap();
-    Ok((texture, width, height.try_into().unwrap()))
-}
+
 
 fn draw(canvas: &mut Canvas<video::Window>, scroller: &Scroller, texture: &mut Texture, cursor_context: &CursorContext,  text_buffer: &TextBuffer, fps: &mut FpsCounter) -> Result<(), String> {
     canvas.set_draw_color(Color::RGBA(42, 45, 62, 255));
@@ -958,21 +902,11 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     },
 
                     (Keycode::O, Mod::LGUIMOD | Mod::RGUIMOD) => {
-                        let path = FileDialog::new()
-                            .set_location("~/Documents")
-                            .show_open_single_file()
-                            .unwrap();
-
-                        if path.is_none() {
-                            continue;
+                        let text = native::open_file_dialog();
+                        if let Some(text) = text {
+                            text_buffer.set_contents(text.as_bytes());
+                            scroller.to_the_top();
                         }
-                        let path = &path.unwrap().to_str().unwrap().replace("file://", "");
-                        // Need to refactor into reusable function instead of just repeating here.
-                        let text = fs::read_to_string(path).unwrap();
-                        text_buffer.set_contents(text.as_bytes());
-
-                        scroller.to_the_top();
-
                     }
                     (Keycode::A, Mod::LGUIMOD | Mod::RGUIMOD) => {
                         // This is super ugly, fix.
@@ -1063,18 +997,16 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
     }
 }
 
-
-
 fn main() -> Result<(), String> {
-    set_smooth_scroll();
+    native::set_smooth_scroll();
 
     let window = Window {
         width: 1200,
         height: 800,
     };
 
-    let (ttf_context, mut canvas, mut event_pump, texture_creator) = setup_sdl(&window)?;
-    let (mut texture, letter_width, letter_height) = draw_font_texture(&texture_creator, ttf_context)?;
+    let (ttf_context, mut canvas, mut event_pump, texture_creator) = sdl::setup_sdl(window.width as usize, window.height as usize)?;
+    let (mut texture, letter_width, letter_height) = sdl::draw_font_texture(&texture_creator, ttf_context)?;
     texture.set_color_mod(167, 174, 210);
 
     let mut scroller = Scroller {
