@@ -1,4 +1,4 @@
-use std::{cmp::{max, min}, convert::TryInto, fs, ops::Neg, time::Instant};
+use std::{cmp::{max, min}, convert::TryInto, fs, ops::{Index, IndexMut, Neg, RangeBounds}, str::from_utf8, time::Instant};
 use std::fmt::Debug;
 
 use native_dialog::FileDialog;
@@ -115,14 +115,14 @@ impl TransactionManager {
         self.transaction_pointer = self.transactions.len() - 1;
     }
 
-    fn undo(&mut self, cursor_context: &mut CursorContext, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
+    fn undo(&mut self, cursor_context: &mut CursorContext, text_buffer: &mut TextBuffer) {
         if self.transaction_pointer == 0 {
            return;
         }
         let last_transaction = self.transactions[self.transaction_pointer].transaction_number;
         let mut i = self.transaction_pointer;
         while self.transactions[i].transaction_number == last_transaction {
-            self.transactions[i].action.undo(cursor_context, chars, line_range);
+            self.transactions[i].action.undo(cursor_context, text_buffer);
 
             if i == 0 {
                 break;
@@ -135,7 +135,7 @@ impl TransactionManager {
 
     // How do I redo?
 
-    fn redo(&mut self, cursor_context: &mut CursorContext, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
+    fn redo(&mut self, cursor_context: &mut CursorContext, text_buffer: &mut TextBuffer) {
 
         if self.transaction_pointer == self.transactions.len() - 1 {
             return;
@@ -150,15 +150,13 @@ impl TransactionManager {
         if let Some(Transaction{ transaction_number: last_transaction, ..}) = last_undo {
             for (i, transaction) in self.transactions.iter().enumerate() {
                 if transaction.transaction_number == *last_transaction {
-                    self.transactions[i].action.redo(cursor_context, chars, line_range);
+                    self.transactions[i].action.redo(cursor_context, text_buffer);
                     self.transaction_pointer = i;
                 }
                 if transaction.transaction_number > *last_transaction {
                     break;
                 }
             }
-           
-            
         }
     }
 
@@ -180,28 +178,28 @@ enum EditAction {
 // Copilot talked about an apply function
 // That is an interesting idea
 impl EditAction  {
-    fn undo(&self, cursor_context: &mut CursorContext, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
+    fn undo(&self, cursor_context: &mut CursorContext, text_buffer: &mut TextBuffer) {
         match self {
             EditAction::Insert((start, end), _text_to_insert) => {
                 let mut new_position = Cursor(*start, *end);
-                new_position.move_right(line_range);
-                handle_delete(new_position, chars, line_range);
-                new_position.move_left(line_range);
+                new_position.move_right(text_buffer);
+                text_buffer.remove_char(new_position);
+                new_position.move_left(text_buffer);
                 cursor_context.set_cursor(new_position);
             },
             EditAction::Delete((start, end), text_to_delete) => {
                 let mut new_position = Cursor(*start, *end);
-                new_position.move_left(line_range);
-                handle_insert(new_position, text_to_delete.as_bytes(), chars, line_range);
-                new_position.move_right(line_range);
+                new_position.move_left(text_buffer);
+                text_buffer.insert_char(new_position, text_to_delete.as_bytes());
+                new_position.move_right(text_buffer);
                 cursor_context.set_cursor(new_position);
             },
             EditAction::CursorPosition(old_cursor) => {
                 cursor_context.set_cursor(*old_cursor);
             }
             EditAction::InsertWithCursor(location, text_to_insert, cursor ) => {
-                EditAction::Insert(*location, text_to_insert.clone()).undo(cursor_context, chars, line_range);
-                EditAction::CursorPosition(*cursor).undo(cursor_context, chars, line_range);
+                EditAction::Insert(*location, text_to_insert.clone()).undo(cursor_context, text_buffer);
+                EditAction::CursorPosition(*cursor).undo(cursor_context, text_buffer);
             }
             EditAction::Noop => {
                 // Do nothing
@@ -209,21 +207,21 @@ impl EditAction  {
         }
     }
 
-    fn redo(&self, cursor_context: &mut CursorContext, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) {
+    fn redo(&self, cursor_context: &mut CursorContext, text_buffer: &mut TextBuffer) {
 
         match self {
             EditAction::Insert((start, end), text_to_insert) => {
-                handle_insert( Cursor(*start, *end), text_to_insert.as_bytes(), chars, line_range);
+                text_buffer.insert_char(Cursor(*start, *end), text_to_insert.as_bytes());
             },
             EditAction::Delete((start, end), _text_to_delete) => {
-                handle_delete( Cursor(*start, *end), chars, line_range);
+                text_buffer.remove_char(Cursor(*start, *end));
             },
             EditAction::CursorPosition(new_cursor) => {
                 cursor_context.set_cursor(*new_cursor);
             }
             EditAction::InsertWithCursor(location,text_to_insert, cursor ) => {
-                EditAction::Insert(*location, text_to_insert.clone()).redo(cursor_context, chars, line_range);
-                EditAction::CursorPosition(*cursor).redo(cursor_context, chars, line_range);
+                EditAction::Insert(*location, text_to_insert.clone()).redo(cursor_context, text_buffer);
+                EditAction::CursorPosition(*cursor).redo(cursor_context, text_buffer);
             }
             EditAction::Noop => {
                 // Do nothing
@@ -251,6 +249,7 @@ impl EditAction  {
 }
 
 
+
 #[derive(Debug, Copy, Clone)]
 struct Cursor(usize, usize);
 
@@ -260,11 +259,11 @@ impl Cursor {
         self.1 = 0;
     }
     
-    fn move_up(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction {
+    fn move_up(&mut self, text_buffer: &TextBuffer) -> EditAction {
         let Cursor(cursor_line, cursor_column) = *self;
         let new_line = cursor_line.saturating_sub(1);
         self.0 = new_line;
-        self.1 = min(cursor_column, line_length(line_range[new_line]));
+        self.1 = min(cursor_column, line_length(text_buffer[new_line]));
         EditAction::CursorPosition(*self)
         // *self = Cursor(new_line, min(cursor_column, line_length(line_range[new_line])));
 
@@ -275,10 +274,10 @@ impl Cursor {
         // }
     }
 
-    fn move_down(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction  {
+    fn move_down(&mut self, text_buffer: &TextBuffer) -> EditAction  {
         let Cursor(cursor_line, cursor_column) = *self;
         let new_line = cursor_line + 1;
-        if let Some(line) = line_range.get(new_line) {
+        if let Some(line) = text_buffer.get_line(new_line) {
             *self = Cursor(new_line, min(cursor_column, line_length(*line)));
         }   
         EditAction::CursorPosition(*self)
@@ -287,10 +286,10 @@ impl Cursor {
     }
 
     
-    fn move_left(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction  {
+    fn move_left(&mut self, text_buffer: &TextBuffer) -> EditAction  {
         let Cursor(cursor_line, cursor_column) = *self;
         if cursor_column == 0 && cursor_line != 0 {
-            let previous_line = line_range[cursor_line - 1];
+            let previous_line = text_buffer[cursor_line - 1];
             let length = line_length(previous_line);
             *self = Cursor(cursor_line.saturating_sub(1), length);
         } else {
@@ -300,12 +299,12 @@ impl Cursor {
         EditAction::CursorPosition(*self)
     }
 
-    fn move_right(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction  {
+    fn move_right(&mut self, text_buffer: &TextBuffer) -> EditAction  {
         let Cursor(cursor_line, cursor_column) = *self;
-        if let Some((line_start, line_end)) = line_range.get(cursor_line) {
+        if let Some((line_start, line_end)) = text_buffer.get_line(cursor_line) {
             let length = line_length((*line_start, *line_end));
             if cursor_column >= length {
-                if cursor_line + 1 < line_range.len() {
+                if cursor_line + 1 < text_buffer.line_count() {
                     *self = Cursor(cursor_line + 1, 0);
                 }
             } else {
@@ -317,72 +316,6 @@ impl Cursor {
     }
 
 }
-
-// There is no length here.
-// We should do that.
-// Also consider a direction
-// Finally line_range should probably have some methods for doing what we do here.
-fn handle_delete(cursor: Cursor, chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) -> Option<EditAction> {
-    let Cursor(cursor_line, cursor_column)= cursor;
-
-    if let Some((line_start, _line_end)) = line_range.get(cursor_line) {
-        let char_pos = (line_start + cursor_column).saturating_sub(1);
-        
-        if chars.is_empty() || char_pos >= chars.len() {
-            return None;
-        }
-        let result = chars.remove(char_pos);
-                                        
-        line_range[cursor_line].1 = line_range[cursor_line].1.saturating_sub(1);
-        let mut line_erased = false;
-        if cursor_column == 0 {
-            line_range[cursor_line - 1] = (line_range[cursor_line - 1].0, line_range[cursor_line].1);
-            line_range.remove(cursor_line);
-            line_erased = true;
-        }
-
-        for mut line in line_range.iter_mut().skip(cursor_line + if line_erased { 0} else {1}) {
-            line.0 = line.0.saturating_sub(1);
-            line.1 = line.1.saturating_sub(1);
-        }
-        return Some(EditAction::Delete((cursor_line, cursor_column), std::str::from_utf8(&[result]).unwrap().to_string()));
-    }
-    None
-}
-
-// Need to think about paste
-fn handle_insert(cursor: Cursor, to_insert: &[u8], chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) -> EditAction {
-    let Cursor(cursor_line, cursor_column) = cursor;
-    let line_start = line_range[cursor_line].0;
-    let char_pos = line_start + cursor_column;
-    chars.splice(char_pos..char_pos, to_insert.to_vec());
-
-    let mut lines_to_skip = 1;
-    if to_insert == [b'\n'] {
-        let (start, end) = line_range[cursor_line];
-        if char_pos >= end && cursor_column != 0 {
-            line_range.insert(cursor_line + 1, (char_pos+1, char_pos+1));
-        } else if cursor_column == 0 {
-            line_range.splice(cursor_line..cursor_line+1, [(start,char_pos), (start+1, end+1)]);
-        } else {
-            line_range.splice(cursor_line..cursor_line + 1, [(start, char_pos), (char_pos+1, end+1)]);
-        }
-        lines_to_skip = 2;
-    } else {
-        line_range[cursor_line] = (line_start, line_range[cursor_line].1 + 1);
-    }
- 
-    for mut line in line_range.iter_mut().skip(cursor_line + lines_to_skip) {
-        line.0 += 1;
-        line.1 += 1;
-    }
-
-    EditAction::Insert((cursor_line, cursor_column), std::str::from_utf8(to_insert).unwrap().to_string())
-}
-
-
-
-
 
 fn render_char(width: i32, height: i32, c: char) -> Rect {
     Rect::new(width * (c as i32 - 33), 0, width as u32, height as u32)
@@ -409,25 +342,6 @@ fn draw_string<'a>(canvas: & mut Canvas<video::Window>, target: &'a mut Rect, te
     target
 }
 
-// Need to move to text_buffer
-fn parse_lines(chars : & Vec<u8>) ->  Vec<(usize, usize)> {
-    let mut line_start = 0;
-    let mut line_range = Vec::<(usize,usize)>::with_capacity(chars.len()/60);
-    for (line_end, char) in chars.iter().enumerate() {
-        if *char == b'\n'{
-            line_range.push((line_start, line_end));
-            line_start = line_end + 1;
-        }
-        if line_end == chars.len() - 1 {
-            line_range.push((line_start, line_end + 1));
-        }
-    }
-    if line_range.is_empty() {
-        line_range.push((0, 0));
-    }
-    line_range
-}
-
 
 #[derive(Debug)]
 struct EditorBounds {
@@ -439,23 +353,23 @@ struct EditorBounds {
 
 impl EditorBounds{
 
-    fn line_number_digits(&self, line_range: &Vec<(usize,usize)>) -> usize {
-        digit_count(line_range.len())
+    fn line_number_digits(&self, text_buffer: &TextBuffer) -> usize {
+        digit_count(text_buffer.line_count())
     }
-    fn line_number_padding(&self, line_range: &Vec<(usize,usize)>) -> usize {
-        self.line_number_digits(line_range) * self.letter_width as usize + self.line_number_gutter_width + self.editor_left_margin + self.letter_width as usize
+    fn line_number_padding(&self, text_buffer: &TextBuffer) -> usize {
+        self.line_number_digits(text_buffer) * self.letter_width as usize + self.line_number_gutter_width + self.editor_left_margin + self.letter_width as usize
     }
 }
 
 
-fn text_space_from_screen_space(scroller: &Scroller, mut x: i32, y: i32, line_range: &Vec<(usize,usize)>) -> Option<Cursor> {
+fn text_space_from_screen_space(scroller: &Scroller, mut x: i32, y: i32, text_buffer: &TextBuffer) -> Option<Cursor> {
     // Slightly off probably due to rounding.
     // println!("{}", y as f32 / letter_height as f32);
     
     // Probably should move some/all of this to the scroller.
     let EditorBounds {letter_height, letter_width, ..} = scroller.bounds;
     let bounds = &scroller.bounds;
-    let line_number_padding = bounds.line_number_padding(line_range) as i32;
+    let line_number_padding = bounds.line_number_padding(text_buffer) as i32;
 
     let line_number : usize = ((y as f32 / letter_height as f32).floor() as i32 + scroller.lines_above_fold() as i32).try_into().unwrap();
     if x < line_number_padding && x > line_number_padding - 20  {
@@ -466,15 +380,15 @@ fn text_space_from_screen_space(scroller: &Scroller, mut x: i32, y: i32, line_ra
     }
     let mut column_number : usize = ((x - line_number_padding as i32) / letter_width as i32).try_into().unwrap();
 
-    if let Some((line_start, line_end)) = line_range.get(line_number) {
+    if let Some((line_start, line_end)) = text_buffer.get_line(line_number) {
         if column_number > line_end - line_start {
-            column_number = line_range[line_number].1 - line_range[line_number].0;
+            column_number = text_buffer[line_number].1 - text_buffer[line_number].0;
         }
         return Some(Cursor(line_number, column_number));
     }
-    if line_number > line_range.len() {
-        if let Some((start, end)) = line_range.last() {
-           return Some(Cursor(line_range.len() - 1, line_length((*start, *end))));
+    if line_number > text_buffer.line_count() {
+        if let Some((start, end)) = text_buffer.last_line() {
+           return Some(Cursor(text_buffer.line_count() - 1, line_length((*start, *end))));
         }
        
     }
@@ -493,6 +407,8 @@ fn move_down(target: &mut Rect, padding: i32) -> &mut Rect {
     target
 }
 
+
+// Move to TextBuffer
 fn line_length(line: (usize, usize)) -> usize {
     line.1 - line.0
 }
@@ -533,19 +449,6 @@ fn line_length(line: (usize, usize)) -> usize {
 
 // It would be pretty cool to add a minimap
 // Also cool to just add my own scrollbar.
-
-
-// It would be great to make this like a real window
-// But probably need a lot more abstraction before I get there.
-fn draw_list<'a, T: Debug, I>(canvas: & mut Canvas<video::Window>, target: &'a mut Rect, texture: &Texture, line_height: i32, elements: I) -> ()
-where I: IntoIterator<Item=T> {
-    let start_x = target.x();
-    for element in elements {
-        draw_string(canvas, target, texture, &format!("{:?}", element));
-        move_down(target, line_height);
-        target.set_x(start_x);
-    }
-}
 
 
 struct FpsCounter {
@@ -592,28 +495,28 @@ struct CursorContext {
 }
 
 impl CursorContext {
-    fn move_up(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction {
+    fn move_up(&mut self, text_buffer: &TextBuffer) -> EditAction {
         self.cursor
             .as_mut()
-            .map(|cursor| cursor.move_up(line_range))
+            .map(|cursor| cursor.move_up(text_buffer))
             .unwrap_or(EditAction::Noop)
     }
-    fn move_down(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction {
+    fn move_down(&mut self, text_buffer: &TextBuffer) -> EditAction {
         self.cursor
             .as_mut()
-            .map(|cursor| cursor.move_down(line_range))
+            .map(|cursor| cursor.move_down(text_buffer))
             .unwrap_or(EditAction::Noop)
     }
-    fn move_left(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction  {
+    fn move_left(&mut self, text_buffer: &TextBuffer) -> EditAction  {
         self.cursor
             .as_mut()
-            .map(|cursor| cursor.move_left(line_range))
+            .map(|cursor| cursor.move_left(text_buffer))
             .unwrap_or(EditAction::Noop)
     }
-    fn move_right(&mut self, line_range: &Vec<(usize, usize)>) -> EditAction  {
+    fn move_right(&mut self, text_buffer: &TextBuffer) -> EditAction  {
         self.cursor
             .as_mut()
-            .map(|cursor| cursor.move_right(line_range))
+            .map(|cursor| cursor.move_right(text_buffer))
             .unwrap_or(EditAction::Noop)
     }
     fn start_of_line(&mut self) {
@@ -634,17 +537,17 @@ impl CursorContext {
         self.selection = Some(selection);
     }
 
-    fn fix_cursor(&mut self, line_range: &Vec<(usize, usize)>) {
+    fn fix_cursor(&mut self, text_buffer: &TextBuffer) {
         // Need to do sanity checks for cursor column
         if let Some(Cursor(cursor_line, cursor_column)) = self.cursor {
-            match line_range.get(cursor_line) {
+            match text_buffer.get_line(cursor_line) {
                 Some((start, end)) => {
                     if cursor_column > *end {
                         self.cursor = Some(Cursor(cursor_line, line_length((*start, *end))));
                     }
                 }
                 None => {
-                    self.cursor = line_range.last().map(|(line, column)| Cursor(*line, *column));
+                    self.cursor = text_buffer.last_line().map(|(line, column)| Cursor(*line, *column));
                 }
             }
         }
@@ -657,17 +560,17 @@ impl CursorContext {
         self.mouse_down = None;
     }
 
-    fn move_cursor_from_screen_position(&mut self, scroller: &Scroller, x: i32, y: i32, line_range: &Vec<(usize,usize)>) {
-        self.cursor = text_space_from_screen_space(scroller, x, y, line_range);
+    fn move_cursor_from_screen_position(&mut self, scroller: &Scroller, x: i32, y: i32, text_buffer: &TextBuffer) {
+        self.cursor = text_space_from_screen_space(scroller, x, y, text_buffer);
     }
 
-    fn handle_insert(&mut self, to_insert: &[u8], chars: &mut Vec<u8>, line_range: &mut Vec<(usize, usize)>) -> EditAction {
+    fn handle_insert(&mut self, to_insert: &[u8], text_buffer : &mut TextBuffer) -> EditAction {
         if let Some(cursor) = self.cursor {
-            let main_action = handle_insert(cursor, to_insert, chars, line_range);
+            let main_action = text_buffer.insert_char(cursor, to_insert);
             let cursor_action = if to_insert == b"\n" {
-                self.move_down(line_range)
+                self.move_down(text_buffer)
             } else {
-                self.move_right(line_range)
+                self.move_right(text_buffer)
             };
             main_action.combine_insert_and_cursor(cursor_action)
         } else {
@@ -686,8 +589,8 @@ struct Scroller {
 }
 
 impl Scroller {
-    fn scroll(&mut self, amount: i32, line_range: &Vec<(usize, usize)>) {
-        if !self.at_end(line_range) || amount < 0 {
+    fn scroll(&mut self, amount: i32, text_buffer: &TextBuffer) {
+        if !self.at_end(text_buffer) || amount < 0 {
             self.offset_y += amount * self.scroll_speed;
         }
         self.offset_y = max(0, self.offset_y);
@@ -701,8 +604,8 @@ impl Scroller {
         self.offset_y as usize / self.bounds.letter_height as usize
     }
     
-    fn at_end(&self, line_range: &Vec<(usize, usize)>) -> bool {
-        self.lines_above_fold() + self.viewing_lines() >= line_range.len() + 3
+    fn at_end(&self, text_buffer: &TextBuffer) -> bool {
+        self.lines_above_fold() + self.viewing_lines() >= text_buffer.line_count() + 3
     }
 
     fn to_the_top(&mut self) {
@@ -738,15 +641,14 @@ fn draw_font_texture<'a>(texture_creator: &'a TextureCreator<WindowContext>, ttf
 fn draw(canvas: &mut Canvas<video::Window>, scroller: &Scroller, texture: &mut Texture, cursor_context: &CursorContext,  text_buffer: &TextBuffer, fps: &mut FpsCounter) -> Result<(), String> {
     canvas.set_draw_color(Color::RGBA(42, 45, 62, 255));
     canvas.clear();
-    let line_range = &text_buffer.line_range;
-    let chars = &text_buffer.chars;
+
     let editor_left_margin = scroller.bounds.editor_left_margin;
-    let line_number_padding = scroller.bounds.line_number_padding(line_range);
-    let line_number_digits = scroller.bounds.line_number_digits(line_range);
+    let line_number_padding = scroller.bounds.line_number_padding(text_buffer);
+    let line_number_digits = scroller.bounds.line_number_digits(text_buffer);
     let mut target = Rect::new(editor_left_margin as i32, (scroller.line_fraction() as i32).neg(), scroller.bounds.letter_width as u32, scroller.bounds.letter_height as u32);
-    for line in scroller.lines_above_fold() as usize..min(scroller.lines_above_fold() + scroller.viewing_lines(), line_range.len()) {
+    for line in scroller.lines_above_fold() as usize..min(scroller.lines_above_fold() + scroller.viewing_lines(), text_buffer.line_count()) {
         texture.set_color_mod(167, 174, 210);
-        let (start, end) = line_range[line];
+        let (start, end) = text_buffer[line];
         target.set_x(editor_left_margin as i32);
 
         // I want to pad this so that the offset by the line number never changes.
@@ -778,14 +680,14 @@ fn draw(canvas: &mut Canvas<video::Window>, scroller: &Scroller, texture: &mut T
                     line_number_padding
                 };
                 let width = if start_line == end_line {
-                    ((end_column - start_column) * scroller.bounds.letter_width).try_into().unwrap()
+                    (end_column - start_column) * scroller.bounds.letter_width
                 } else if line == end_line {
-                    (end_column * scroller.bounds.letter_width as usize).try_into().unwrap()
+                    end_column * scroller.bounds.letter_width as usize
                 } else if line == start_line {
-                    ((line_length(line_range[line]) - start_column) * scroller.bounds.letter_width as usize).try_into().unwrap()
+                    (line_length(text_buffer[line]) - start_column) * scroller.bounds.letter_width as usize
                 } else {
-                    (line_length(line_range[line]) * scroller.bounds.letter_width).try_into().unwrap()
-                };
+                    line_length(text_buffer[line]) * scroller.bounds.letter_width
+                }.try_into().unwrap();
 
                 let start_y = target.y();
                 canvas.set_draw_color(Color::RGBA(65, 70, 99, 255));
@@ -795,7 +697,7 @@ fn draw(canvas: &mut Canvas<video::Window>, scroller: &Scroller, texture: &mut T
 
         };
 
-        draw_string(canvas, target, texture, std::str::from_utf8(chars[start..end].as_ref()).unwrap());
+        draw_string(canvas, target, texture, std::str::from_utf8(text_buffer.chars[start..end].as_ref()).unwrap());
 
 
         move_down(target, scroller.bounds.letter_height as i32);
@@ -816,6 +718,150 @@ struct TextBuffer {
     chars: Vec<u8>,
 }
 
+impl Index<usize> for TextBuffer {
+    type Output = (usize, usize);
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.line_range[index]
+    }
+}
+
+impl IndexMut<usize> for TextBuffer {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.line_range[index]
+    }
+}
+
+impl TextBuffer {
+    fn get_line(&self, line: usize) -> Option<&(usize,usize)> {
+        self.line_range.get(line)
+    }
+
+    fn line_count(&self) -> usize {
+        self.line_range.len()
+    }
+
+    fn delete_line(&mut self, line: usize) {
+        self.line_range.remove(line);
+    }
+
+    fn insert(&mut self, index: usize, line: (usize, usize)) {
+        self.line_range.insert(index, line);
+    }
+
+    fn splice<R: RangeBounds<usize>, I: IntoIterator<Item=(usize,usize)>>(&mut self, index: R, lines: I) {
+        self.line_range.splice(index, lines);
+    }
+
+    fn lines_iter_mut(&mut self) -> impl Iterator<Item=&mut (usize,usize)> {
+        self.line_range.iter_mut()
+    }
+
+    fn last_line(&self) -> Option<&(usize,usize)> {
+        self.line_range.last()
+    }
+
+    fn parse_lines(&mut self) {
+        let mut line_start = 0;
+        let mut line_range = Vec::<(usize,usize)>::with_capacity(self.chars.len()/60);
+        for (line_end, char) in self.chars.iter().enumerate() {
+            if *char == b'\n'{
+                line_range.push((line_start, line_end));
+                line_start = line_end + 1;
+            }
+            if line_end == self.chars.len() - 1 {
+                line_range.push((line_start, line_end + 1));
+            }
+        }
+        if line_range.is_empty() {
+            line_range.push((0, 0));
+        }
+        self.line_range = line_range;
+
+    }
+    
+    fn set_contents(&mut self, contents: &[u8]) {
+        self.chars = contents.to_vec();
+        self.parse_lines();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.chars.is_empty()
+    }
+
+    fn char_length(&self) -> usize {
+        self.chars.len()
+    }
+
+    fn insert_char(&mut self, cursor: Cursor, to_insert: &[u8]) -> EditAction {
+        // This is assuming that to_insert is a single character.
+        let Cursor(cursor_line, cursor_column) = cursor;
+        let line_start = self[cursor_line].0;
+        let char_pos = line_start + cursor_column;
+        self.chars.splice(char_pos..char_pos, to_insert.to_vec());
+    
+        let mut lines_to_skip = 1;
+        if to_insert == [b'\n'] {
+            let (start, end) = self[cursor_line];
+            if char_pos >= end && cursor_column != 0 {
+                self.insert(cursor_line + 1, (char_pos+1, char_pos+1));
+            } else if cursor_column == 0 {
+                self.splice(cursor_line..cursor_line+1, [(start,char_pos), (start+1, end+1)]);
+            } else {
+                self.splice(cursor_line..cursor_line + 1, [(start, char_pos), (char_pos+1, end+1)]);
+            }
+            lines_to_skip = 2;
+        } else {
+            self[cursor_line] = (line_start, self[cursor_line].1 + 1);
+        }
+     
+        for mut line in self.lines_iter_mut().skip(cursor_line + lines_to_skip) {
+            line.0 += 1;
+            line.1 += 1;
+        }
+    
+        EditAction::Insert((cursor_line, cursor_column), std::str::from_utf8(to_insert).unwrap().to_string())
+    }
+
+    fn remove_char(&mut self, cursor: Cursor) -> EditAction {
+
+        // TODO: Clean Up
+        let Cursor(cursor_line, cursor_column) = cursor;
+        
+        let line = self.get_line(cursor_line);
+        if line.is_none() {
+            return EditAction::Noop;
+        }
+        let line = line.unwrap();
+
+        let char_pos = (line.0 + cursor_column).saturating_sub(1);
+
+        if self.is_empty() || char_pos >= self.char_length( ){
+            return EditAction::Noop;
+        }
+        
+        let result = self.chars.remove(char_pos);
+                                        
+        self[cursor_line].1 = self[cursor_line].1.saturating_sub(1);
+        let mut line_erased = false;
+        if cursor_column == 0 {
+            self[cursor_line - 1] = (self[cursor_line - 1].0, self[cursor_line].1);
+            self.delete_line(cursor_line);
+            line_erased = true;
+        }
+
+        for mut line in self.lines_iter_mut().skip(cursor_line + if line_erased { 0} else {1}) {
+            line.0 = line.0.saturating_sub(1);
+            line.1 = line.1.saturating_sub(1);
+        }
+        EditAction::Delete((cursor_line, cursor_column), 
+                            from_utf8(&[result]).unwrap().to_string())
+    }
+}
+
+
+
+
+
 
 fn handle_events(event_pump: &mut sdl2::EventPump,
                  cursor_context: &mut CursorContext,           
@@ -823,8 +869,6 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                  scroller: &mut Scroller,
                  text_buffer: &mut TextBuffer) {
     let mut is_text_input = false;
-    let line_range = &mut text_buffer.line_range;
-    let chars = &mut text_buffer.chars;
     for event in event_pump.poll_iter() {
         // println!("frame: {}, event {:?}", frame_counter, event);
         match event {
@@ -841,16 +885,16 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                 matches!(keycode, Some(_));
                 match (keycode.unwrap(), keymod) {
                     (Keycode::Up, _) => {
-                        cursor_context.move_up(line_range);
+                        cursor_context.move_up(text_buffer);
                     },
                     (Keycode::Down, _) => {
-                        cursor_context.move_down(line_range);
+                        cursor_context.move_down(text_buffer);
                     },
                     (Keycode::Left, _) => {
-                        cursor_context.move_left(line_range);
+                        cursor_context.move_left(text_buffer);
                     },
                     (Keycode::Right, _) => {
-                        cursor_context.move_right(line_range);
+                        cursor_context.move_right(text_buffer);
                     },
                     (Keycode::Backspace, _) => {
 
@@ -859,15 +903,16 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                             let (start, end) = current_selection;
                             let (start_line, start_column) = start;
                             let (end_line, end_column) = end;
-                            if let Some((line_start, _line_end)) = line_range.get(start_line as usize) {
+                            if let Some((line_start, _line_end)) = text_buffer.get_line(start_line as usize) {
                                 let char_start_pos = line_start + start_column as usize ;
-                                if let Some((end_line_start, _line_end)) = line_range.get(end_line as usize) {
+                                if let Some((end_line_start, _line_end)) = text_buffer.get_line(end_line as usize) {
                                     let char_end_pos = end_line_start + end_column as usize;
-                                    chars.drain(char_start_pos as usize..char_end_pos as usize);
+                                    text_buffer.chars.drain(char_start_pos as usize..char_end_pos as usize);
                                     // Probably shouldn't reparse the whole file.
-                                    *line_range = parse_lines(chars);
+
+                                    text_buffer.parse_lines();
                                     cursor_context.clear_selection();
-                                    cursor_context.fix_cursor(line_range);
+                                    cursor_context.fix_cursor(text_buffer);
                                     continue;
                                 }
                             
@@ -882,14 +927,11 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                             let mut old_cursor = current_cursor.clone();
                             // We do this move_left first, because otherwise we might end up at the end
                             // of the new line we formed from the deletion, rather than the old end of the line.
-                            let cursor_action = old_cursor.move_left(line_range);
-                            // Need to move to handle_delete in cursor_context.
-                            
-                            let action = handle_delete(current_cursor, chars, line_range);
-                            if action.is_some() {
-                                transaction_manager.add_action(action.unwrap());
-                                transaction_manager.add_action(cursor_action);
-                            }
+                            let cursor_action = old_cursor.move_left(text_buffer);
+                            let action = text_buffer.remove_char(current_cursor);
+
+                            transaction_manager.add_action(action);
+                            transaction_manager.add_action(cursor_action);
 
 
                             cursor_context.set_cursor(old_cursor);
@@ -897,7 +939,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     }
                     (Keycode::Return, _) => {
                         // refactor to be better
-                        let action = cursor_context.handle_insert(&[b'\n'], chars, line_range);
+                        let action = cursor_context.handle_insert(&[b'\n'], text_buffer);
                         transaction_manager.add_action(action);
                         cursor_context.start_of_line();
                     },
@@ -906,9 +948,9 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     (Keycode::Z, key_mod) => {
                     
                         if key_mod == Mod::LGUIMOD || keymod == Mod::RGUIMOD {
-                            transaction_manager.undo(cursor_context, chars, line_range);
+                            transaction_manager.undo(cursor_context, text_buffer);
                         } else if key_mod == (Mod::LSHIFTMOD | Mod::LGUIMOD) {
-                            transaction_manager.redo(cursor_context, chars, line_range);
+                            transaction_manager.redo(cursor_context, text_buffer);
                         } else {
                             is_text_input = true
                         }
@@ -927,16 +969,14 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         let path = &path.unwrap().to_str().unwrap().replace("file://", "");
                         // Need to refactor into reusable function instead of just repeating here.
                         let text = fs::read_to_string(path).unwrap();
-                        *chars = text.as_bytes().to_vec();
-                
-                        *line_range = parse_lines(chars);
+                        text_buffer.set_contents(text.as_bytes());
 
                         scroller.to_the_top();
 
                     }
                     (Keycode::A, Mod::LGUIMOD | Mod::RGUIMOD) => {
                         // This is super ugly, fix.
-                        cursor_context.set_selection(((0,0), (line_range.len()-1, line_length(line_range[line_range.len()-1]))));
+                        cursor_context.set_selection(((0,0), (text_buffer.line_count()-1, line_length(text_buffer[text_buffer.line_count()-1]))));
                     }
 
                     _ => is_text_input = true
@@ -947,7 +987,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     // TODO: Replace with actually deleting the selection.
                     cursor_context.clear_selection();
 
-                    let action = cursor_context.handle_insert(text.as_bytes(), chars, line_range);
+                    let action = cursor_context.handle_insert(text.as_bytes(), text_buffer);
                     transaction_manager.add_action(action);
                 }
             }
@@ -956,14 +996,14 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
             // Which probably means changing cursor representation
        
             Event::MouseButtonDown { x, y, .. } => {
-                cursor_context.move_cursor_from_screen_position(scroller, x, y, line_range);
+                cursor_context.move_cursor_from_screen_position(scroller, x, y, text_buffer);
                 cursor_context.mouse_down();
                 cursor_context.clear_selection();
             }
 
             Event::MouseMotion{x, y, .. } => {
                 if let Some(Cursor(start_line, mut start_column)) = cursor_context.mouse_down {
-                    cursor_context.move_cursor_from_screen_position(scroller, x, y, line_range);
+                    cursor_context.move_cursor_from_screen_position(scroller, x, y, text_buffer);
                     // TODO: Get my int types correct!
                     if let Some(Cursor(line, mut column)) = cursor_context.cursor {
                         let new_start_line = start_line.min(line.try_into().unwrap());
@@ -983,7 +1023,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
 
             Event::MouseButtonUp{x, y, ..} => {
                 if let Some(Cursor(start_line, mut start_column)) = cursor_context.mouse_down {
-                    cursor_context.move_cursor_from_screen_position(scroller, x, y, line_range);
+                    cursor_context.move_cursor_from_screen_position(scroller, x, y, text_buffer);
                     if cursor_context.selection.is_some() {
                         if let Some(Cursor(line, mut column)) = cursor_context.cursor {
                             let new_start_line = start_line.min(line.try_into().unwrap());
@@ -1015,11 +1055,11 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     sdl2::mouse::MouseWheelDirection::Flipped => -1,
                     sdl2::mouse::MouseWheelDirection::Unknown(x) => x as i32
                 };
-                scroller.scroll( y * direction_multiplier, &line_range);
+                scroller.scroll( y * direction_multiplier, &text_buffer);
             }
             _ => {}
         }
-        cursor_context.fix_cursor(line_range);
+        cursor_context.fix_cursor(text_buffer);
     }
 }
 
@@ -1053,8 +1093,9 @@ fn main() -> Result<(), String> {
 
     let mut text_buffer = TextBuffer {
         chars: text.as_bytes().to_vec(),
-        line_range: parse_lines(&text.as_bytes().to_vec()),
+        line_range: vec![]
     };
+    text_buffer.parse_lines();
 
     let mut cursor_context = CursorContext {
         cursor: None,
