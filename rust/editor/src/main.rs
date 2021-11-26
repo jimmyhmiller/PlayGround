@@ -105,8 +105,7 @@ impl TransactionManager {
 
         let last_undo = self.transactions.iter()
             .rev()
-            .filter(|t| t.parent_pointer == self.transaction_pointer)
-            .next();
+            .find(|t| t.parent_pointer == self.transaction_pointer);
         
         // My cursor is one off! But this seems to be close to correct for the small cases I tried.
         if let Some(Transaction{ transaction_number: last_transaction, ..}) = last_undo {
@@ -482,9 +481,9 @@ impl CursorContext {
             .unwrap_or(EditAction::Noop)
     }
     fn start_of_line(&mut self) {
-        self.cursor
-            .as_mut()
-            .map(|cursor| cursor.start_of_line());
+        if let Some(cursor) = self.cursor.as_mut() {
+            cursor.start_of_line();
+        }
     }
     
     fn set_cursor(&mut self, cursor: Cursor) {
@@ -617,7 +616,7 @@ fn draw(canvas: &mut Canvas<video::Window>, scroller: &Scroller, texture: &mut T
 
 
         if let Some(((start_line, start_column), (end_line, end_column))) = cursor_context.selection {
-            if line >= start_line.try_into().unwrap() && line <= end_line.try_into().unwrap() {
+            if line >= start_line && line <= end_line {
                 let start_x = if line == start_line {
                     start_column * scroller.bounds.letter_width + line_number_padding
                 } else {
@@ -868,6 +867,10 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         // Maybe a non-mutating method?
                         // How to deal with optional aspect here?
                         if let Some(current_cursor) = cursor_context.cursor {
+                            // This is not working quite correctly.
+                            // Delete at the end of a line with a non-empty above.
+                            // Try undoing the delete and then redoing.
+                            // The cursor is all wrong.
                             let mut old_cursor = current_cursor.clone();
                             // We do this move_left first, because otherwise we might end up at the end
                             // of the new line we formed from the deletion, rather than the old end of the line.
@@ -940,11 +943,11 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     cursor_context.move_cursor_from_screen_position(scroller, x, y, text_buffer);
                     // TODO: Get my int types correct!
                     if let Some(Cursor(line, mut column)) = cursor_context.cursor {
-                        let new_start_line = start_line.min(line.try_into().unwrap());
-                        let line = line.max(start_line.try_into().unwrap());
+                        let new_start_line = start_line.min(line);
+                        let line = line.max(start_line);
                         if new_start_line != start_line || start_line == line && start_column > column {
                             let temp = start_column;
-                            start_column = column.try_into().unwrap();
+                            start_column = column;
                             column = temp as usize;
                         }
 
@@ -960,15 +963,15 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     cursor_context.move_cursor_from_screen_position(scroller, x, y, text_buffer);
                     if cursor_context.selection.is_some() {
                         if let Some(Cursor(line, mut column)) = cursor_context.cursor {
-                            let new_start_line = start_line.min(line.try_into().unwrap());
-                            let line = line.max(start_line.try_into().unwrap());
+                            let new_start_line = start_line.min(line);
+                            let line = line.max(start_line);
                             if new_start_line != start_line || start_line == line && start_column > column {
                                 let temp = start_column;
-                                start_column = column.try_into().unwrap();
+                                start_column = column;
                                 column = temp as usize;
                             }
     
-                            cursor_context.set_selection(((new_start_line, start_column), (line.try_into().unwrap(), column.try_into().unwrap())));
+                            cursor_context.set_selection(((new_start_line, start_column), (line, column)));
                             // TODO: Set Cursor
                         }
                     }
