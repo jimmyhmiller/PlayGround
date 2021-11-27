@@ -665,6 +665,7 @@ impl<'a> Renderer<'a> {
     // Is there a way to make this not own the canvas?
     // Or should I move these drawing methods out to something like a "Pane" and just pass the renderer?
     // Really not sure yet.
+    // After some thought, I definitely think pane is the correct place for these to live.
     fn present(&mut self) {
         self.canvas.present();
     }
@@ -710,9 +711,7 @@ impl Pane {
 fn draw(renderer: &mut Renderer, pane: &mut Pane, fps: &mut FpsCounter) -> Result<(), String> {
     renderer.set_draw_color(Color::RGBA(42, 45, 62, 255));
     renderer.clear();
-    println!("HERE!");
     pane.draw(renderer)?;
-    println!("HERE2!");
     renderer.draw_fps(fps, &pane.scroller)?;
     // Does this belong in the pane?
     // Is it global?
