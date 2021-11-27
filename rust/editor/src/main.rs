@@ -8,9 +8,6 @@ mod native;
 mod sdl;
 
 
-// This wouldn't work for multiple cursors
-// But could if I do transactions separately
-
 // I really want so debugging panels.
 // Should probably invest in that.
 // Make it work automatically with Debug.
@@ -134,8 +131,6 @@ enum EditAction {
     Noop,
 }
 
-// Copilot talked about an apply function
-// That is an interesting idea
 impl EditAction  {
     fn undo(&self, cursor_context: &mut CursorContext, text_buffer: &mut TextBuffer) {
         match self {
@@ -268,9 +263,6 @@ impl Cursor {
 
 }
 
-fn render_char(width: i32, height: i32, c: char) -> Rect {
-    Rect::new(width * (c as i32 - 33), 0, width as u32, height as u32)
-}
 
 fn digit_count(x: usize) -> usize {
     let mut count = 0;
@@ -283,18 +275,7 @@ fn digit_count(x: usize) -> usize {
 }
 
 
-// This clearly is telling me I'm missing an abstraction
-fn draw_string<'a>(canvas: & mut Canvas<video::Window>, target: &'a mut Rect, texture: &Texture, text: &str) -> &'a mut Rect {
-    for char in text.chars() {
-        let char_rect : Rect = render_char(target.width() as i32, target.height() as i32, char as char);
-        target.set_x(target.x() + target.width() as i32);
-        canvas.copy(texture, Some(char_rect), Some(*target)).unwrap();
-    }
-    target
-}
-
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct EditorBounds {
     editor_left_margin: usize,
     line_number_gutter_width: usize,
@@ -348,16 +329,6 @@ fn text_space_from_screen_space(scroller: &Scroller, mut x: i32, y: i32, text_bu
 
 
 
-fn move_right(target: &mut Rect, padding: i32) -> &mut Rect {
-    target.set_x(target.x() + padding);
-    target
-}
-
-fn move_down(target: &mut Rect, padding: i32) -> &mut Rect {
-    target.set_y(target.y() + padding);
-    target
-}
-
 
 // Move to TextBuffer
 fn line_length(line: (usize, usize)) -> usize {
@@ -367,40 +338,16 @@ fn line_length(line: (usize, usize)) -> usize {
 
 
 
-// I am editing in place right now. There are a lot of things wrong with the way I'm doing it
-// but in general it is working.
-// I need to fix it so that cursors can't end up in the middle of nowhere.
-// I need to fix special symbols.
-// I need to fix lots of things
-// Editing a 1 gb file is slow. But do I care?
-// This path might not be sustainable long term,
-// but I it is getting my going.
-// I need delete. I also think I am getting rid of \n characters
-// at times and that might be awkward for delete.
-
 // TODO:
 // Add some spacing between letters!
-// Change cursor
-// Need to make some nice cursor movement function
-// This is probably pretty important to do.
-
-// TODO: 
-// scroll on keypresses and selection
-// Delete selections
-// UNDO!
-// Refactor things
-
 // Need to add a real parser or I can try messing with tree sitter.
-// But maybe I need to make text editable first?
-
-
-// Bugs:
-// completely empty file cannot have any content added
-
-
 // It would be pretty cool to add a minimap
 // Also cool to just add my own scrollbar.
-
+// Add horizontal scroll
+// Add rendering bounds
+// Add multiple panes
+// Need to handle transactions per pane
+// Need to handle active vs inactive pane
 
 struct FpsCounter {
     start_time: Instant,
@@ -569,82 +516,216 @@ impl Scroller {
 }
 
 
+struct Renderer<'a> {
+    canvas: Canvas<video::Window>,
+    texture: Texture<'a>,
+    target: Rect,
+    bounds: EditorBounds,
+}
 
+impl<'a> Renderer<'a> {
+    fn set_draw_color(&mut self, color: Color) {
+        self.canvas.set_draw_color(color);
+    }
 
-fn draw(canvas: &mut Canvas<video::Window>, scroller: &Scroller, texture: &mut Texture, cursor_context: &CursorContext, text_buffer: &TextBuffer, fps: &mut FpsCounter) -> Result<(), String> {
-    canvas.set_draw_color(Color::RGBA(42, 45, 62, 255));
-    canvas.clear();
+    fn clear(&mut self) {
+        self.canvas.clear();
+    }
 
-    let editor_left_margin = scroller.bounds.editor_left_margin;
-    let line_number_padding = scroller.bounds.line_number_padding(text_buffer);
-    let line_number_digits = scroller.bounds.line_number_digits(text_buffer);
-    let mut target = Rect::new(editor_left_margin as i32, (scroller.line_fraction() as i32).neg(), scroller.bounds.letter_width as u32, scroller.bounds.letter_height as u32);
-    for line in scroller.lines_above_fold() as usize..min(scroller.lines_above_fold() + scroller.viewing_lines(), text_buffer.line_count()) {
-        texture.set_color_mod(167, 174, 210);
-        let (start, end) = text_buffer[line];
-        target.set_x(editor_left_margin as i32);
+    fn set_color_mod(&mut self, red: u8, green: u8, blue: u8) {
+        self.texture.set_color_mod(red, green, blue);
+    }
 
+    fn set_initial_rendering_location(&mut self, scroller: &Scroller) {
+        self.target = Rect::new(scroller.bounds.editor_left_margin as i32, (scroller.line_fraction() as i32).neg(), 
+               scroller.bounds.letter_width as u32, scroller.bounds.letter_height as u32)
+    }
+
+    fn copy(&mut self, source: &Rect) -> Result<(), String> {
+        self.canvas.copy(&self.texture, *source, self.target)
+    }
+
+    fn fill_rect(&mut self, rect: &Rect) -> Result<(), String> {
+        self.canvas.fill_rect(*rect)
+    }
+
+    fn move_right(&mut self, padding: i32) {
+        self.target.set_x(self.target.x() + padding);
+    }
+
+    fn move_down(&mut self, padding: i32) {
+        self.target.set_y(self.target.y() + padding);
+    }
+
+    fn move_right_one_char(&mut self) {
+        self.move_right(self.bounds.letter_width as i32);
+    }
+    fn move_down_one_line(&mut self) {
+        self.move_down(self.bounds.letter_height as i32);
+    }
+
+    fn set_x(&mut self, x: i32) {
+        self.target.set_x(x);
+    }
+
+    fn char_position_in_atlas(&self, c: char) -> Rect {
+        Rect::new(self.bounds.letter_width as i32 * (c as i32 - 33), 0, self.bounds.letter_width as u32, self.bounds.letter_height as u32)
+    }
+
+    fn draw_string(&mut self, text: &str) -> Result<(), String> {
+        for char in text.chars() {
+            self.move_right_one_char();
+            self.copy(&self.char_position_in_atlas(char))?
+        }
+        Ok(())
+    }
+
+    // I might want to move this out of here at some point
+    // Not really sure what the responsibilities for this renderer should be.
+    fn draw_line_numbers(&mut self, line_number_digits: usize, line: usize) ->  Result<(), String> {
         // I want to pad this so that the offset by the line number never changes.
         // Really I should draw a line or something to make it look nicer.
         let left_padding_count = line_number_digits - digit_count(line + 1);
-        let padding = left_padding_count * scroller.bounds.letter_width as usize;
-        move_right(&mut target, padding as i32);
-
+        let padding = left_padding_count * self.bounds.letter_width as usize;
+        self.move_right(padding as i32);
         let line_number = (line + 1).to_string();
+        self.draw_string(&line_number)?;
+        self.move_right(self.bounds.line_number_gutter_width as i32);
+        Ok(())
+    }
 
-        let target = draw_string(canvas, &mut target, texture, &line_number);
-        move_right(target, scroller.bounds.line_number_gutter_width as i32);
 
+    fn draw_cursor(&mut self, cursor_context: &CursorContext, line: usize, line_number_padding: usize, ) -> Result<(), String> {
         if let Some(cursor) = cursor_context.cursor {
             if cursor.0 == line {
-                let cursor_x = cursor.1 as i32  * scroller.bounds.letter_width as i32 + line_number_padding as i32;
-                let cursor_y = target.y();
-                canvas.set_draw_color(Color::RGBA(255, 204, 0, 255));
-                canvas.fill_rect(Rect::new(cursor_x as i32, cursor_y as i32, 2, scroller.bounds.letter_height as u32))?;
+                let cursor_x = cursor.1 as i32  * self.bounds.letter_width as i32 + line_number_padding as i32;
+                let cursor_y = self.target.y();
+                self.set_draw_color(Color::RGBA(255, 204, 0, 255));
+                self.fill_rect(&Rect::new(cursor_x as i32, cursor_y as i32, 2, self.bounds.letter_height as u32))?
             }
         }
+        Ok(())
+    }
 
-
+    fn draw_selection(&mut self, cursor_context: &CursorContext, line: usize, line_number_padding: usize, text_buffer: &TextBuffer) -> Result<(), String> {
         if let Some(((start_line, start_column), (end_line, end_column))) = cursor_context.selection {
             if line >= start_line && line <= end_line {
                 let start_x = if line == start_line {
-                    start_column * scroller.bounds.letter_width + line_number_padding
+                    start_column * self.bounds.letter_width + line_number_padding
                 } else {
                     line_number_padding
                 };
                 let width = if start_line == end_line {
-                    (end_column - start_column) * scroller.bounds.letter_width
+                    (end_column - start_column) * self.bounds.letter_width
                 } else if line == end_line {
-                    end_column * scroller.bounds.letter_width as usize
+                    end_column * self.bounds.letter_width as usize
                 } else if line == start_line {
-                    (line_length(text_buffer[line]) - start_column) * scroller.bounds.letter_width as usize
+                    (line_length(text_buffer[line]) - start_column) * self.bounds.letter_width as usize
                 } else {
-                    line_length(text_buffer[line]) * scroller.bounds.letter_width
+                    line_length(text_buffer[line]) * self.bounds.letter_width
                 }.try_into().unwrap();
-
-                let start_y = target.y();
-                canvas.set_draw_color(Color::RGBA(65, 70, 99, 255));
+    
+                let start_y = self.target.y();
+                self.set_draw_color(Color::RGBA(65, 70, 99, 255));
                 // Need to deal with last line.
-                canvas.fill_rect(Rect::new(start_x as i32, start_y, width, scroller.bounds.letter_height as u32))?;
+                self.fill_rect(&Rect::new(start_x as i32, start_y, width, self.bounds.letter_height as u32))?
             }
-
+    
         };
-
-        draw_string(canvas, target, texture, std::str::from_utf8(text_buffer.chars[start..end].as_ref()).unwrap());
-
-
-        move_down(target, scroller.bounds.letter_height as i32);
+        Ok(())
     }
-    let current_fps = fps.tick();
-    let mut target = Rect::new(scroller.window.width - (scroller.bounds.letter_width * 10) as i32, 0, scroller.bounds.letter_width as u32, scroller.bounds.letter_height as u32);
-    draw_string(canvas, &mut target, texture, &format!("fps: {}", current_fps));
-    let mut target = Rect::new(scroller.window.width - (scroller.bounds.letter_width * 22) as i32, scroller.window.height-scroller.bounds.letter_height as i32, scroller.bounds.letter_width as u32, scroller.bounds.letter_height as u32);
-    if let Some(Cursor(cursor_line, cursor_column)) = cursor_context.cursor {
-        draw_string(canvas, &mut target, texture, &format!("Line {}, Column {}", cursor_line, cursor_column));
+
+
+    fn draw_code(&mut self, text_buffer: &TextBuffer, line: usize) -> Result<(), String> {
+        let (start, end) = text_buffer[line];
+        self.draw_string(from_utf8(text_buffer.chars[start..end].as_ref()).unwrap())
+    }   
+
+
+    fn draw_fps(&mut self, fps: &mut FpsCounter, scroller: &Scroller) -> Result<(), String> {
+        let current_fps = fps.tick();
+        // Do something better with this target
+        self.target = Rect::new(scroller.window.width - (scroller.bounds.letter_width * 10) as i32, 0, scroller.bounds.letter_width as u32, scroller.bounds.letter_height as u32);
+        self.draw_string(&format!("fps: {}", current_fps))
     }
-    canvas.present();
+
+    fn draw_column_line(&mut self, scroller: &Scroller, cursor_context: &CursorContext) -> Result<(), String> {
+        self.target = Rect::new(scroller.window.width - (scroller.bounds.letter_width * 22) as i32, scroller.window.height-scroller.bounds.letter_height as i32, scroller.bounds.letter_width as u32, scroller.bounds.letter_height as u32);
+        if let Some(Cursor(cursor_line, cursor_column)) = cursor_context.cursor {
+            self.draw_string( &format!("Line {}, Column {}", cursor_line, cursor_column))?;
+        }
+        Ok(())
+    }
+    
+    // This makes me question what the responsibilities of this renderer should be.
+    // If it is drawing things like the cursor, the line numbers, the text, the column line, etc,
+    // then we need multiple of these, but now we are singularly presenting the canvas.
+    // Feels a bit strange.
+    // Also, the bounds now would need to change per drawing area, but we set the bounds.
+    // Is there a way to make this not own the canvas?
+    // Or should I move these drawing methods out to something like a "Pane" and just pass the renderer?
+    // Really not sure yet.
+    fn present(&mut self) {
+        self.canvas.present();
+    }
+
+    
+
+}
+
+struct Pane {
+    scroller: Scroller,
+    cursor_context: CursorContext,
+    text_buffer: TextBuffer,
+    position: (usize, usize),
+}
+
+// Thoughts:
+// I don't have any notion of bounds to stop rendering at.
+// I need to think about that here.
+impl Pane {
+    fn draw(&mut self, renderer: &mut Renderer) -> Result<(), String> {
+        let editor_left_margin = self.scroller.bounds.editor_left_margin;
+        let line_number_padding = self.scroller.bounds.line_number_padding(&self.text_buffer);
+        let line_number_digits = self.scroller.bounds.line_number_digits(&self.text_buffer);
+        
+        renderer.set_initial_rendering_location(&self.scroller);
+
+        for line in self.scroller.lines_above_fold() as usize..min(self.scroller.lines_above_fold() + self.scroller.viewing_lines(), self.text_buffer.line_count()) {
+            renderer.set_color_mod(167, 174, 210);
+            renderer.set_x(editor_left_margin as i32);
+
+            renderer.draw_line_numbers(line_number_digits, line)?;
+            renderer.draw_cursor(&self.cursor_context, line, line_number_padding)?;
+            renderer.draw_selection(&self.cursor_context, line, line_number_padding, &self.text_buffer)?;
+
+            renderer.draw_code(&self.text_buffer, line)?;
+
+            renderer.move_down_one_line();
+        }
+        Ok(())
+    }
+}
+
+fn draw(renderer: &mut Renderer, pane: &mut Pane, fps: &mut FpsCounter) -> Result<(), String> {
+    renderer.set_draw_color(Color::RGBA(42, 45, 62, 255));
+    renderer.clear();
+    println!("HERE!");
+    pane.draw(renderer)?;
+    println!("HERE2!");
+    renderer.draw_fps(fps, &pane.scroller)?;
+    // Does this belong in the pane?
+    // Is it global?
+    // Need to think about the UI
+    renderer.draw_column_line(&pane.scroller, &pane.cursor_context)?;
+    renderer.present();
+    
     Ok(())
 }
+
+
+
+
 
 struct TextBuffer {
     line_range: Vec<(usize, usize)>,
@@ -796,12 +877,13 @@ impl TextBuffer {
 
 
 
-fn handle_events(event_pump: &mut sdl2::EventPump,
-                 cursor_context: &mut CursorContext,           
+fn handle_events(event_pump: &mut sdl2::EventPump,   
                  transaction_manager: &mut TransactionManager,
-                 scroller: &mut Scroller,
-                 text_buffer: &mut TextBuffer) {
+                pane: &mut Pane) {
     let mut is_text_input = false;
+    let text_buffer = &mut pane.text_buffer;
+    let cursor_context = &mut pane.cursor_context;
+    let scroller = &mut pane.scroller;
     for event in event_pump.poll_iter() {
         // println!("frame: {}, event {:?}", frame_counter, event);
         match event {
@@ -818,16 +900,16 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                 matches!(keycode, Some(_));
                 match (keycode.unwrap(), keymod) {
                     (Keycode::Up, _) => {
-                        cursor_context.move_up(text_buffer);
+                        cursor_context.move_up(&text_buffer);
                     },
                     (Keycode::Down, _) => {
-                        cursor_context.move_down(text_buffer);
+                        cursor_context.move_down(&text_buffer);
                     },
                     (Keycode::Left, _) => {
-                        cursor_context.move_left(text_buffer);
+                        cursor_context.move_left(&text_buffer);
                     },
                     (Keycode::Right, _) => {
-                        cursor_context.move_right(text_buffer);
+                        cursor_context.move_right(&text_buffer);
                     },
                     (Keycode::Backspace, _) => {
 
@@ -845,7 +927,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
 
                                     text_buffer.parse_lines();
                                     cursor_context.clear_selection();
-                                    cursor_context.fix_cursor(text_buffer);
+                                    cursor_context.fix_cursor(&text_buffer);
                                     continue;
                                 }
                             
@@ -865,7 +947,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                             let mut old_cursor = current_cursor.clone();
                             // We do this move_left first, because otherwise we might end up at the end
                             // of the new line we formed from the deletion, rather than the old end of the line.
-                            let cursor_action = old_cursor.move_left(text_buffer);
+                            let cursor_action = old_cursor.move_left(&text_buffer);
                             let action = text_buffer.remove_char(current_cursor);
 
                             transaction_manager.add_action(action);
@@ -999,20 +1081,21 @@ fn main() -> Result<(), String> {
         height: 800,
     };
 
-    let (ttf_context, mut canvas, mut event_pump, texture_creator) = sdl::setup_sdl(window.width as usize, window.height as usize)?;
+    let (ttf_context, canvas, mut event_pump, texture_creator) = sdl::setup_sdl(window.width as usize, window.height as usize)?;
     let (mut texture, letter_width, letter_height) = sdl::draw_font_texture(&texture_creator, ttf_context)?;
     texture.set_color_mod(167, 174, 210);
 
-    let mut scroller = Scroller {
+    let bounds = EditorBounds {
+        editor_left_margin: 10,
+        line_number_gutter_width : 20,
+        letter_height,
+        letter_width,
+    };
+    let scroller = Scroller {
         offset_y: 0,
         scroll_speed: 5,
         window,
-        bounds: EditorBounds {
-            editor_left_margin: 10,
-            line_number_gutter_width : 20,
-            letter_height,
-            letter_width,
-        },
+        bounds: bounds.clone(),
     };
 
     let text = fs::read_to_string("/Users/jimmyhmiller/Documents/Code/Playground/rust/editor/src/main.rs").unwrap();
@@ -1023,7 +1106,7 @@ fn main() -> Result<(), String> {
     };
     text_buffer.parse_lines();
 
-    let mut cursor_context = CursorContext {
+    let cursor_context = CursorContext {
         cursor: None,
         mouse_down: None,
         selection: None,
@@ -1036,10 +1119,24 @@ fn main() -> Result<(), String> {
         fps: 0,
     };
 
+    let mut pane = Pane {
+        scroller,
+        cursor_context,
+        text_buffer,
+        position: (0, 0)
+    };
+
+    let mut renderer = Renderer {
+        canvas,
+        texture,
+        target: Rect::new(0, 0, 0, 0),
+        bounds: bounds,
+    };
 
     loop {
-        draw(&mut canvas, &scroller,  &mut texture, &cursor_context,  &text_buffer, &mut fps)?;
-        handle_events(&mut event_pump,  &mut cursor_context, &mut transaction_manager, &mut scroller, &mut text_buffer);
+        
+        draw(&mut renderer, &mut pane, &mut fps)?;
+        handle_events(&mut event_pump, &mut transaction_manager, &mut pane);
     }
 }
 
