@@ -1228,6 +1228,10 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
             }
 
             Event::MouseWheel {x, y, direction , timestamp: _, .. } => {
+                // mouse state does not update when not focused.
+                // Need to fix that some how.
+                // So that I can scroll both panes unfocused.
+                // pane_manager.set_scroll_active_if_mouse_over((mouse_state.x(), mouse_state.y()));
                 let direction_multiplier = match direction {
                     sdl2::mouse::MouseWheelDirection::Normal => 1,
                     sdl2::mouse::MouseWheelDirection::Flipped => -1,
@@ -1237,7 +1241,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                 pane.scroller.scroll_x(pane.width, x * direction_multiplier * -1, &pane.text_buffer);
                 pane.scroller.scroll_y(pane.height, y * direction_multiplier, &pane.text_buffer);
             }
-            _ => {}
+            event => println!("{:?}", event)
         }
         let pane = pane_manager.get_active_pane_mut();
         pane.cursor_context.fix_cursor(&pane.text_buffer);
