@@ -373,7 +373,7 @@ impl FpsCounter {
 }
 
 
-
+#[derive(Debug, Clone, Copy)]
 struct Window {
     width: i32,
     height: i32,
@@ -386,6 +386,7 @@ impl Window {
     }
 }
 
+#[derive(Debug, Clone)]
 struct CursorContext {
     cursor: Option<Cursor>,
     selection: Option<((usize, usize), (usize, usize))>,
@@ -478,32 +479,31 @@ impl CursorContext {
     }
 }
 
-
+#[derive(Debug, Clone)]
 struct Scroller {
     offset_y: i32,
     scroll_speed: i32,
-    window: Window,
     bounds: EditorBounds,
 }
 
 impl Scroller {
-    fn scroll(&mut self, amount: i32, text_buffer: &TextBuffer) {
-        if !self.at_end(text_buffer) || amount < 0 {
+    fn scroll(&mut self, window: &Window, amount: i32, text_buffer: &TextBuffer) {
+        if !self.at_end(window, text_buffer) || amount < 0 {
             self.offset_y += amount * self.scroll_speed;
         }
         self.offset_y = max(0, self.offset_y);
     }
 
-    fn viewing_lines(&self) -> usize {
-       (self.window.height / self.bounds.letter_height as i32) as usize
+    fn viewing_lines(&self, window: &Window) -> usize {
+       (window.height / self.bounds.letter_height as i32) as usize
     }
     
     fn lines_above_fold(&self) -> usize {
         self.offset_y as usize / self.bounds.letter_height as usize
     }
     
-    fn at_end(&self, text_buffer: &TextBuffer) -> bool {
-        self.lines_above_fold() + self.viewing_lines() >= text_buffer.line_count() + 3
+    fn at_end(&self, window: &Window, text_buffer: &TextBuffer) -> bool {
+        self.lines_above_fold() + self.viewing_lines(window) >= text_buffer.line_count() + 3
     }
 
     fn to_the_top(&mut self) {
@@ -580,78 +580,16 @@ impl<'a> Renderer<'a> {
         Ok(())
     }
 
-    // I might want to move this out of here at some point
-    // Not really sure what the responsibilities for this renderer should be.
-    fn draw_line_numbers(&mut self, line_number_digits: usize, line: usize) ->  Result<(), String> {
-        // I want to pad this so that the offset by the line number never changes.
-        // Really I should draw a line or something to make it look nicer.
-        let left_padding_count = line_number_digits - digit_count(line + 1);
-        let padding = left_padding_count * self.bounds.letter_width as usize;
-        self.move_right(padding as i32);
-        let line_number = (line + 1).to_string();
-        self.draw_string(&line_number)?;
-        self.move_right(self.bounds.line_number_gutter_width as i32);
-        Ok(())
-    }
-
-
-    fn draw_cursor(&mut self, cursor_context: &CursorContext, line: usize, line_number_padding: usize, ) -> Result<(), String> {
-        if let Some(cursor) = cursor_context.cursor {
-            if cursor.0 == line {
-                let cursor_x = cursor.1 as i32  * self.bounds.letter_width as i32 + line_number_padding as i32;
-                let cursor_y = self.target.y();
-                self.set_draw_color(Color::RGBA(255, 204, 0, 255));
-                self.fill_rect(&Rect::new(cursor_x as i32, cursor_y as i32, 2, self.bounds.letter_height as u32))?
-            }
-        }
-        Ok(())
-    }
-
-    fn draw_selection(&mut self, cursor_context: &CursorContext, line: usize, line_number_padding: usize, text_buffer: &TextBuffer) -> Result<(), String> {
-        if let Some(((start_line, start_column), (end_line, end_column))) = cursor_context.selection {
-            if line >= start_line && line <= end_line {
-                let start_x = if line == start_line {
-                    start_column * self.bounds.letter_width + line_number_padding
-                } else {
-                    line_number_padding
-                };
-                let width = if start_line == end_line {
-                    (end_column - start_column) * self.bounds.letter_width
-                } else if line == end_line {
-                    end_column * self.bounds.letter_width as usize
-                } else if line == start_line {
-                    (line_length(text_buffer[line]) - start_column) * self.bounds.letter_width as usize
-                } else {
-                    line_length(text_buffer[line]) * self.bounds.letter_width
-                }.try_into().unwrap();
-    
-                let start_y = self.target.y();
-                self.set_draw_color(Color::RGBA(65, 70, 99, 255));
-                // Need to deal with last line.
-                self.fill_rect(&Rect::new(start_x as i32, start_y, width, self.bounds.letter_height as u32))?
-            }
-    
-        };
-        Ok(())
-    }
-
-
-    fn draw_code(&mut self, text_buffer: &TextBuffer, line: usize) -> Result<(), String> {
-        let (start, end) = text_buffer[line];
-        self.draw_string(from_utf8(text_buffer.chars[start..end].as_ref()).unwrap())
-    }   
-
-
-    fn draw_fps(&mut self, fps: &mut FpsCounter, scroller: &Scroller) -> Result<(), String> {
+    fn draw_fps(&mut self, fps: &mut FpsCounter, window: &Window) -> Result<(), String> {
         let current_fps = fps.tick();
         // Do something better with this target
-        self.target = Rect::new(scroller.window.width - (scroller.bounds.letter_width * 10) as i32, 0, scroller.bounds.letter_width as u32, scroller.bounds.letter_height as u32);
+        self.target = Rect::new(window.width - (self.bounds.letter_width * 10) as i32, 0, self.bounds.letter_width as u32, self.bounds.letter_height as u32);
         self.draw_string(&format!("fps: {}", current_fps))
     }
 
-    fn draw_column_line(&mut self, scroller: &Scroller, cursor_context: &CursorContext) -> Result<(), String> {
-        self.target = Rect::new(scroller.window.width - (scroller.bounds.letter_width * 22) as i32, scroller.window.height-scroller.bounds.letter_height as i32, scroller.bounds.letter_width as u32, scroller.bounds.letter_height as u32);
-        if let Some(Cursor(cursor_line, cursor_column)) = cursor_context.cursor {
+    fn draw_column_line(&mut self, pane_manager: &mut PaneManager) -> Result<(), String> {
+        self.target = Rect::new(pane_manager.window.width - (self.bounds.letter_width * 22) as i32, pane_manager.window.height-self.bounds.letter_height as i32, self.bounds.letter_width as u32, self.bounds.letter_height as u32);
+        if let Some(Cursor(cursor_line, cursor_column)) = pane_manager.get_active_pane().cursor_context.cursor {
             self.draw_string( &format!("Line {}, Column {}", cursor_line, cursor_column))?;
         }
         Ok(())
@@ -674,49 +612,158 @@ impl<'a> Renderer<'a> {
 
 }
 
+#[derive(Debug, Clone)]
 struct Pane {
     scroller: Scroller,
     cursor_context: CursorContext,
     text_buffer: TextBuffer,
     position: (usize, usize),
+    width: usize,
+    height: usize,
+    active: bool,
 }
 
 // Thoughts:
 // I don't have any notion of bounds to stop rendering at.
 // I need to think about that here.
 impl Pane {
+
+    fn adjust_position(&self, x: i32, y: i32) -> (i32, i32) {
+        (x.saturating_sub(self.position.0 as i32), y.saturating_sub(self.position.1 as i32))
+    }
+    
+    fn max_characters_per_line(&self) -> usize {
+        (self.width - self.scroller.bounds.line_number_padding(&self.text_buffer)) / self.scroller.bounds.letter_width as usize
+    }
+
+    fn max_lines_per_page(&self) -> usize {
+        self.height / self.scroller.bounds.letter_height as usize
+    }
+
     fn draw(&mut self, renderer: &mut Renderer) -> Result<(), String> {
         let editor_left_margin = self.scroller.bounds.editor_left_margin;
         let line_number_padding = self.scroller.bounds.line_number_padding(&self.text_buffer);
         let line_number_digits = self.scroller.bounds.line_number_digits(&self.text_buffer);
         
         renderer.set_initial_rendering_location(&self.scroller);
+        renderer.move_right(self.position.0 as i32);
+        renderer.move_down(self.position.1 as i32);
 
-        for line in self.scroller.lines_above_fold() as usize..min(self.scroller.lines_above_fold() + self.scroller.viewing_lines(), self.text_buffer.line_count()) {
+        let number_of_lines = min(self.scroller.lines_above_fold() + self.max_lines_per_page(), self.text_buffer.line_count());
+
+        for line in self.scroller.lines_above_fold() as usize..number_of_lines {
             renderer.set_color_mod(167, 174, 210);
-            renderer.set_x(editor_left_margin as i32);
+            renderer.set_x(editor_left_margin as i32 + self.position.0 as i32);
 
-            renderer.draw_line_numbers(line_number_digits, line)?;
-            renderer.draw_cursor(&self.cursor_context, line, line_number_padding)?;
-            renderer.draw_selection(&self.cursor_context, line, line_number_padding, &self.text_buffer)?;
+            self.draw_line_numbers(renderer, line_number_digits, line)?;
+            // This really shouldn't be in this loop.
+            // I could instead figure out if it is visbible.
+            self.draw_cursor(renderer, line, line_number_padding)?;
+            self.draw_selection(renderer, line, line_number_padding)?;
 
-            renderer.draw_code(&self.text_buffer, line)?;
+            self.draw_code(renderer, line)?;
 
             renderer.move_down_one_line();
         }
         Ok(())
     }
+
+    // I might want to move this out of here at some point
+    // Not really sure what the responsibilities for this renderer should be.
+    fn draw_line_numbers(&mut self, renderer: &mut Renderer, line_number_digits: usize, line: usize) -> Result<(), String> {
+        // I want to pad this so that the offset by the line number never changes.
+        // Really I should draw a line or something to make it look nicer.
+        let left_padding_count = line_number_digits - digit_count(line + 1);
+        let padding = left_padding_count * renderer.bounds.letter_width as usize;
+        renderer.move_right(padding as i32);
+        let line_number = (line + 1).to_string();
+        renderer.draw_string(&line_number)?;
+        renderer.move_right(renderer.bounds.line_number_gutter_width as i32);
+        Ok(())
+    }
+
+
+    fn draw_cursor(&mut self, renderer: &mut Renderer, line: usize, line_number_padding: usize) -> Result<(), String> {
+        if !self.active {
+            return Ok(());
+        }
+        if let Some(cursor) = self.cursor_context.cursor {
+            if cursor.0 == line {
+                let cursor_x = cursor.1 as i32  * renderer.bounds.letter_width as i32 + line_number_padding as i32 + self.position.0 as i32;
+                let cursor_y = renderer.target.y();
+                
+                renderer.set_draw_color(Color::RGBA(255, 204, 0, 255));
+                renderer.fill_rect(&Rect::new(cursor_x as i32, cursor_y as i32, 2, renderer.bounds.letter_height as u32))?
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_selection(&mut self, renderer: &mut Renderer, line: usize, line_number_padding: usize) -> Result<(), String> {
+        if let Some(((start_line, start_column), (end_line, end_column))) = self.cursor_context.selection {
+            if line >= start_line && line <= end_line {
+                let mut start_x = if line == start_line {
+                    start_column * renderer.bounds.letter_width + line_number_padding
+                } else {
+                    line_number_padding
+                };
+                let width = if start_line == end_line {
+                    (end_column - start_column) * renderer.bounds.letter_width
+                } else if line == end_line {
+                    end_column * renderer.bounds.letter_width as usize
+                } else if line == start_line {
+                    (line_length(self.text_buffer[line]) - start_column) * renderer.bounds.letter_width as usize
+                } else {
+                    line_length(self.text_buffer[line]) * renderer.bounds.letter_width
+                }.try_into().unwrap();
+
+                start_x += self.position.0;
+    
+                let start_y = renderer.target.y();
+                renderer.set_draw_color(Color::RGBA(65, 70, 99, 255));
+                // Need to deal with last line.
+                renderer.fill_rect(&Rect::new(start_x as i32, start_y, width, renderer.bounds.letter_height as u32))?
+            }
+    
+        };
+        Ok(())
+    }
+
+
+    fn draw_code(&mut self, renderer: &mut Renderer, line: usize) -> Result<(), String> {
+        let (start, end) = self.text_buffer[line];
+        let end = min(end, start + self.max_characters_per_line());
+        renderer.draw_string(from_utf8(self.text_buffer.chars[start..end].as_ref()).unwrap())
+    }
+
+    fn is_mouse_over(&self, (x, y): (i32, i32)) -> bool {
+        (x as usize) > self.position.0 && 
+        (x as usize) < self.position.0 + self.width && 
+        (y as usize) > self.position.1 && 
+        (y as usize) < self.position.1 + self.height
+    }
+
+    fn set_active(&mut self, active: bool) {
+        self.active = active;
+    }
+
+
 }
 
-fn draw(renderer: &mut Renderer, pane: &mut Pane, fps: &mut FpsCounter) -> Result<(), String> {
+fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCounter) -> Result<(), String> {
     renderer.set_draw_color(Color::RGBA(42, 45, 62, 255));
     renderer.clear();
-    pane.draw(renderer)?;
-    renderer.draw_fps(fps, &pane.scroller)?;
+    for pane in pane_manager.panes.iter_mut() {
+        pane.draw(renderer)?;
+    }
+    // TODO:
+    // Fix this whole scroller weirdness.
+    // Really just need window here.
+    renderer.draw_fps(fps, &pane_manager.window)?;
     // Does this belong in the pane?
     // Is it global?
     // Need to think about the UI
-    renderer.draw_column_line(&pane.scroller, &pane.cursor_context)?;
+    renderer.draw_column_line(pane_manager)?;
     renderer.present();
     
     Ok(())
@@ -725,7 +772,7 @@ fn draw(renderer: &mut Renderer, pane: &mut Pane, fps: &mut FpsCounter) -> Resul
 
 
 
-
+#[derive(Debug, Clone)]
 struct TextBuffer {
     line_range: Vec<(usize, usize)>,
     chars: Vec<u8>,
@@ -873,16 +920,55 @@ impl TextBuffer {
 
 
 
+struct PaneManager {
+    panes: Vec<Pane>,
+    active_pane: usize,
+    window: Window,
+}
 
+impl PaneManager {
+
+    fn set_active_if_mouse(&mut self, mouse_pos: (i32, i32)) {
+        let old_active = self.active_pane;
+        let mut new_active_pane = self.active_pane;
+        for (i, pane) in self.panes.iter().enumerate() {
+            if pane.is_mouse_over(mouse_pos) {
+                new_active_pane = i;
+            }
+        }
+        if new_active_pane != self.active_pane {
+            self.active_pane = new_active_pane;
+            self.panes.get_mut(self.active_pane).unwrap().set_active(true);
+            self.panes.get_mut(old_active).unwrap().set_active(false);
+        }
+
+    }
+
+    fn get_active_pane_mut(&mut self) -> &mut Pane {
+        &mut self.panes[self.active_pane]
+    }
+
+
+    fn get_active_pane(&mut self) -> &Pane {
+        &self.panes[self.active_pane]
+    }
+}
 
 
 fn handle_events(event_pump: &mut sdl2::EventPump,   
                  transaction_manager: &mut TransactionManager,
-                pane: &mut Pane) {
+                 pane_manager: &mut PaneManager) {
     let mut is_text_input = false;
-    let text_buffer = &mut pane.text_buffer;
-    let cursor_context = &mut pane.cursor_context;
-    let scroller = &mut pane.scroller;
+
+    // let text_buffer = &mut pane.text_buffer;
+    // let cursor_context = &mut pane.cursor_context;
+    // let scroller = &mut pane.scroller;
+
+    // This whole way of handling things is wrong.
+    // We probably need a pane manager.
+    // Maybe good chance for a pun?
+
+
     for event in event_pump.poll_iter() {
         // println!("frame: {}, event {:?}", frame_counter, event);
         match event {
@@ -899,34 +985,38 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                 matches!(keycode, Some(_));
                 match (keycode.unwrap(), keymod) {
                     (Keycode::Up, _) => {
-                        cursor_context.move_up(&text_buffer);
+                        let pane = pane_manager.get_active_pane_mut();
+                        pane.cursor_context.move_up(&pane.text_buffer);
                     },
                     (Keycode::Down, _) => {
-                        cursor_context.move_down(&text_buffer);
+                        let pane = pane_manager.get_active_pane_mut();
+                        pane.cursor_context.move_down(&pane.text_buffer);
                     },
                     (Keycode::Left, _) => {
-                        cursor_context.move_left(&text_buffer);
+                        let pane = pane_manager.get_active_pane_mut();
+                        pane.cursor_context.move_left(&pane.text_buffer);
                     },
                     (Keycode::Right, _) => {
-                        cursor_context.move_right(&text_buffer);
+                        let pane = pane_manager.get_active_pane_mut();
+                        pane.cursor_context.move_right(&pane.text_buffer);
                     },
                     (Keycode::Backspace, _) => {
-
+                        let pane = pane_manager.get_active_pane_mut();
                         // Need to deal with this in a nicer way
-                        if let Some(current_selection) = cursor_context.selection {
+                        if let Some(current_selection) = pane.cursor_context.selection {
                             let (start, end) = current_selection;
                             let (start_line, start_column) = start;
                             let (end_line, end_column) = end;
-                            if let Some((line_start, _line_end)) = text_buffer.get_line(start_line as usize) {
+                            if let Some((line_start, _line_end)) = pane.text_buffer.get_line(start_line as usize) {
                                 let char_start_pos = line_start + start_column as usize ;
-                                if let Some((end_line_start, _line_end)) = text_buffer.get_line(end_line as usize) {
+                                if let Some((end_line_start, _line_end)) = pane.text_buffer.get_line(end_line as usize) {
                                     let char_end_pos = end_line_start + end_column as usize;
-                                    text_buffer.chars.drain(char_start_pos as usize..char_end_pos as usize);
+                                    pane.text_buffer.chars.drain(char_start_pos as usize..char_end_pos as usize);
                                     // Probably shouldn't reparse the whole file.
 
-                                    text_buffer.parse_lines();
-                                    cursor_context.clear_selection();
-                                    cursor_context.fix_cursor(&text_buffer);
+                                    pane.text_buffer.parse_lines();
+                                    pane.cursor_context.clear_selection();
+                                    pane.cursor_context.fix_cursor(&pane.text_buffer);
                                     continue;
                                 }
                             
@@ -937,7 +1027,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         // Is there a better way to do this other than clone?
                         // Maybe a non-mutating method?
                         // How to deal with optional aspect here?
-                        if let Some(current_cursor) = cursor_context.cursor {
+                        if let Some(current_cursor) = pane.cursor_context.cursor {
                             // BUG:
                             // This is not working quite correctly.
                             // Delete at the end of a line with a non-empty above.
@@ -946,30 +1036,31 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                             let mut old_cursor = current_cursor.clone();
                             // We do this move_left first, because otherwise we might end up at the end
                             // of the new line we formed from the deletion, rather than the old end of the line.
-                            let cursor_action = old_cursor.move_left(&text_buffer);
-                            let action = text_buffer.remove_char(current_cursor);
+                            let cursor_action = old_cursor.move_left(&pane.text_buffer);
+                            let action = pane.text_buffer.remove_char(current_cursor);
 
                             transaction_manager.add_action(action);
                             transaction_manager.add_action(cursor_action);
 
 
-                            cursor_context.set_cursor(old_cursor);
+                            pane.cursor_context.set_cursor(old_cursor);
                         }
                     }
                     (Keycode::Return, _) => {
+                        let pane = pane_manager.get_active_pane_mut();
                         // refactor to be better
-                        let action = cursor_context.handle_insert(&[b'\n'], text_buffer);
+                        let action = pane.cursor_context.handle_insert(&[b'\n'], &mut pane.text_buffer);
                         transaction_manager.add_action(action);
-                        cursor_context.start_of_line();
+                        pane.cursor_context.start_of_line();
                     },
 
 
                     (Keycode::Z, key_mod) => {
-                    
+                        let pane = pane_manager.get_active_pane_mut();
                         if key_mod == Mod::LGUIMOD || keymod == Mod::RGUIMOD {
-                            transaction_manager.undo(cursor_context, text_buffer);
+                            transaction_manager.undo(&mut pane.cursor_context, &mut pane.text_buffer);
                         } else if key_mod == (Mod::LSHIFTMOD | Mod::LGUIMOD) {
-                            transaction_manager.redo(cursor_context, text_buffer);
+                            transaction_manager.redo(&mut pane.cursor_context, &mut pane.text_buffer);
                         } else {
                             is_text_input = true
                         }
@@ -977,26 +1068,29 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     },
 
                     (Keycode::O, Mod::LGUIMOD | Mod::RGUIMOD) => {
+                        let pane = pane_manager.get_active_pane_mut();
                         let text = native::open_file_dialog();
                         if let Some(text) = text {
-                            text_buffer.set_contents(text.as_bytes());
-                            scroller.to_the_top();
+                            pane.text_buffer.set_contents(text.as_bytes());
+                            pane.scroller.to_the_top();
                         }
                     }
                     (Keycode::A, Mod::LGUIMOD | Mod::RGUIMOD) => {
+                        let pane = pane_manager.get_active_pane_mut();
                         // This is super ugly, fix.
-                        cursor_context.set_selection(((0,0), (text_buffer.line_count()-1, line_length(text_buffer[text_buffer.line_count()-1]))));
+                        pane.cursor_context.set_selection(((0,0), (pane.text_buffer.line_count()-1, line_length(pane.text_buffer[pane.text_buffer.line_count()-1]))));
                     }
 
                     _ => is_text_input = true
                 }
             }
             Event::TextInput{text, ..} => {
+                let pane = pane_manager.get_active_pane_mut();
                 if is_text_input {
                     // TODO: Replace with actually deleting the selection.
-                    cursor_context.clear_selection();
+                    pane.cursor_context.clear_selection();
 
-                    let action = cursor_context.handle_insert(text.as_bytes(), text_buffer);
+                    let action = pane.cursor_context.handle_insert(text.as_bytes(), &mut pane.text_buffer);
                     transaction_manager.add_action(action);
                 }
             }
@@ -1005,16 +1099,29 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
             // Which probably means changing cursor representation
        
             Event::MouseButtonDown { x, y, .. } => {
-                cursor_context.move_cursor_from_screen_position(scroller, x, y, text_buffer);
-                cursor_context.mouse_down();
-                cursor_context.clear_selection();
+                let pane = pane_manager.get_active_pane_mut();
+                let (x, y) = pane.adjust_position(x, y);
+                pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer);
+                pane.cursor_context.mouse_down();
+                pane.cursor_context.clear_selection();
             }
 
             Event::MouseMotion{x, y, .. } => {
-                if let Some(Cursor(start_line, mut start_column)) = cursor_context.mouse_down {
-                    cursor_context.move_cursor_from_screen_position(scroller, x, y, text_buffer);
+                
+                // TODO:
+                // distinguish between active and scrolling.
+                // Mouse over is enough for scrolling, but not for active.
+                pane_manager.set_active_if_mouse((x, y));
+
+
+                let pane = pane_manager.get_active_pane_mut();
+                let (x, y) = pane.adjust_position(x, y);
+
+
+                if let Some(Cursor(start_line, mut start_column)) = pane.cursor_context.mouse_down {
+                    pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer);
                     // TODO: Get my int types correct!
-                    if let Some(Cursor(line, mut column)) = cursor_context.cursor {
+                    if let Some(Cursor(line, mut column)) = pane.cursor_context.cursor {
                         let new_start_line = start_line.min(line);
                         let line = line.max(start_line);
                         if new_start_line != start_line || start_line == line && start_column > column {
@@ -1024,17 +1131,19 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         }
 
                         // ugly refactor
-                        cursor_context.set_selection(((new_start_line, start_column), (line, column)));
+                        pane.cursor_context.set_selection(((new_start_line, start_column), (line, column)));
                     
                     }
                 }
             }
 
             Event::MouseButtonUp{x, y, ..} => {
-                if let Some(Cursor(start_line, mut start_column)) = cursor_context.mouse_down {
-                    cursor_context.move_cursor_from_screen_position(scroller, x, y, text_buffer);
-                    if cursor_context.selection.is_some() {
-                        if let Some(Cursor(line, mut column)) = cursor_context.cursor {
+                let pane = pane_manager.get_active_pane_mut();
+                let (x, y) = pane.adjust_position(x, y);
+                if let Some(Cursor(start_line, mut start_column)) = pane.cursor_context.mouse_down {
+                    pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer);
+                    if pane.cursor_context.selection.is_some() {
+                        if let Some(Cursor(line, mut column)) = pane.cursor_context.cursor {
                             let new_start_line = start_line.min(line);
                             let line = line.max(start_line);
                             if new_start_line != start_line || start_line == line && start_column > column {
@@ -1043,19 +1152,28 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                                 column = temp as usize;
                             }
     
-                            cursor_context.set_selection(((new_start_line, start_column), (line, column)));
+                            pane.cursor_context.set_selection(((new_start_line, start_column), (line, column)));
                             // TODO: Set Cursor
                         }
                     }
                     
                 }
             
-                cursor_context.clear_mouse_down();
+                pane.cursor_context.clear_mouse_down();
             }
             // Continuous resize in sdl2 is a bit weird
             // Would need to watch events or something
             Event::Window {win_event: WindowEvent::Resized(width, height), ..} => {
-                scroller.window.resize(width, height);
+
+                for pane in pane_manager.panes.iter_mut() {
+                    pane.width = (width / 2) as usize;
+                    pane.height = height as usize;
+                    if pane.position.0 != 0 {
+                        pane.position.0 = pane.width;
+                    }
+                }
+                pane_manager.window.resize(width, height);
+                
             }
 
             Event::MouseWheel {x: _, y, direction , timestamp: _, .. } => {
@@ -1064,11 +1182,14 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     sdl2::mouse::MouseWheelDirection::Flipped => -1,
                     sdl2::mouse::MouseWheelDirection::Unknown(x) => x as i32
                 };
-                scroller.scroll( y * direction_multiplier, &text_buffer);
+                let window = &pane_manager.window.clone();
+                let pane = pane_manager.get_active_pane_mut();
+                pane.scroller.scroll(window, y * direction_multiplier, &pane.text_buffer);
             }
             _ => {}
         }
-        cursor_context.fix_cursor(text_buffer);
+        let pane = pane_manager.get_active_pane_mut();
+        pane.cursor_context.fix_cursor(&pane.text_buffer);
     }
 }
 
@@ -1093,7 +1214,6 @@ fn main() -> Result<(), String> {
     let scroller = Scroller {
         offset_y: 0,
         scroll_speed: 5,
-        window,
         bounds: bounds.clone(),
     };
 
@@ -1118,24 +1238,43 @@ fn main() -> Result<(), String> {
         fps: 0,
     };
 
-    let mut pane = Pane {
+    let pane1 = Pane {
+        scroller: scroller.clone(),
+        cursor_context: cursor_context.clone(),
+        text_buffer: text_buffer.clone(),
+        position: (0, 0),
+        width: 600,
+        height: 800,
+        active: true,
+    };
+
+    let pane2 = Pane {
         scroller,
         cursor_context,
         text_buffer,
-        position: (0, 0)
+        position: (600, 0),
+        width: 600,
+        height: 800,
+        active: false,
     };
 
     let mut renderer = Renderer {
         canvas,
         texture,
         target: Rect::new(0, 0, 0, 0),
-        bounds: bounds,
+        bounds,
     };
 
+    let mut pane_manager = PaneManager {
+        panes: vec![pane1, pane2],
+        active_pane: 0,
+        window,
+    };
+
+
     loop {
-        
-        draw(&mut renderer, &mut pane, &mut fps)?;
-        handle_events(&mut event_pump, &mut transaction_manager, &mut pane);
+        draw(&mut renderer, &mut pane_manager, &mut fps)?;
+        handle_events(&mut event_pump, &mut transaction_manager, &mut pane_manager);
     }
 }
 
