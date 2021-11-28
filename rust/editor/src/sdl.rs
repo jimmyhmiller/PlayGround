@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use sdl2::{mouse::{SystemCursor}, pixels::Color, render::*, video::{self, WindowContext}};
+use sdl2::{pixels::Color, render::*, video::{self, WindowContext}};
 
 pub fn setup_sdl(width: usize, height: usize) -> Result<(sdl2::ttf::Sdl2TtfContext, Canvas<video::Window>, sdl2::EventPump, TextureCreator<WindowContext>), String> {
     let sdl_context = sdl2::init()?;
@@ -11,10 +11,7 @@ pub fn setup_sdl(width: usize, height: usize) -> Result<(sdl2::ttf::Sdl2TtfConte
         .resizable()
         .build()
         .unwrap();
-        
-    let cursor = sdl2::mouse::Cursor::from_system(SystemCursor::IBeam)
-        .map_err(|err| format!("failed to load cursor: {}", err))?;
-    cursor.set();
+
     
     let canvas: Canvas<video::Window> = sdl_window
         .into_canvas()
@@ -25,6 +22,8 @@ pub fn setup_sdl(width: usize, height: usize) -> Result<(sdl2::ttf::Sdl2TtfConte
     let event_pump = sdl_context.event_pump()?;
 
     let texture_creator = canvas.texture_creator();
+
+
 
     Ok((ttf_context, canvas, event_pump, texture_creator))
 }
