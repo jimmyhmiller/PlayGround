@@ -2,13 +2,21 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::io::Read;
-use std::process::abort;
 use std::time::Instant;
 
 #[derive(Debug)]
 enum Token<'a> {
     OpenParen,
     CloseParen,
+    OpenCurly,
+    CloseCurly,
+    OpenBracket,
+    CloseBracket,
+    SemiColon,
+    Colon,
+    Comma,
+    NewLine,
+    Spaces(&'a str),
     String(&'a str),
     Integer(&'a str),
     Float(&'a str),
@@ -20,7 +28,46 @@ struct Tokenizer<'a> {
     input: &'a str,
     input_bytes: &'a [u8],
     position: usize,
-    temp: Vec<u8>,
+}
+
+#[derive(Debug)]
+enum RustSpecific<'a> {
+    As,
+    Break,
+    Const,
+    Continue,
+    Crate,
+    Else,
+    Enum,
+    Extern,
+    False,
+    Fn,
+    For,
+    If,
+    Impl,
+    In,
+    Let,
+    Loop,
+    Match,
+    Mod,
+    Move,
+    Mut,
+    Pub,
+    Ref,
+    Return,
+    SelfValue,
+    SelfType,
+    Static,
+    Struct,
+    Super,
+    Trait,
+    True,
+    Type,
+    Unsafe,
+    Use,
+    Where,
+    While,
+    Token(Token<'a>)
 }
 
 
@@ -34,6 +81,16 @@ static OPEN_PAREN: u8 = '(' as u8;
 static CLOSE_PAREN: u8 = ')' as u8;
 static PERIOD: u8 = '.' as u8;
 
+impl<'a> Iterator for Tokenizer<'a> {
+    fn next(&mut self) -> Option<Token<'a>> {
+        self.parse_single()
+    }
+
+    type Item = Token<'a>;
+}
+
+
+
 
 impl<'a> Tokenizer<'a> {
     fn new(input: &str) -> Tokenizer {
@@ -41,9 +98,6 @@ impl<'a> Tokenizer<'a> {
             input: input,
             input_bytes: input.as_bytes(),
             position: 0,
-            // This is so we only have to allocate once
-            // Seems to make things faster
-            temp: Vec::with_capacity(10),
         }
     }
 
@@ -57,8 +111,6 @@ impl<'a> Tokenizer<'a> {
 
     fn is_space(&self) -> bool {
         self.current_byte() == SPACE
-            || self.current_byte() == COMMA
-            || self.current_byte() == NEW_LINE
     }
 
     fn at_end(&self) -> bool {
@@ -87,10 +139,29 @@ impl<'a> Tokenizer<'a> {
         self.current_byte() == CLOSE_PAREN
     }
 
-    fn consume_spaces(&mut self) -> () {
+    fn is_open_curly(&self) -> bool {
+        self.current_byte() == '{' as u8
+    }
+
+    fn is_close_curly(&self) -> bool {
+        self.current_byte() == '}' as u8
+    }
+
+    fn is_open_bracket(&self) -> bool {
+        self.current_byte() == '[' as u8
+    }
+
+    fn is_close_bracket(&self) -> bool {
+        self.current_byte() == ']' as u8
+    }
+
+    fn parse_spaces(&mut self) -> Token<'a> {
+        let start = self.position;
         while !self.at_end() && self.is_space() {
             self.consume();
         }
+        Token::Spaces(&self.input[start..self.position])
+
     }
 
     fn is_valid_number_char(&mut self) -> bool {
@@ -116,105 +187,178 @@ impl<'a> Tokenizer<'a> {
 
     fn parse_identifier(&mut self) -> Token<'a> {
         let start = self.position;
-        while !self.is_space() && !self.is_open_paren() && !self.is_close_paren() {
+        while !self.is_space() 
+                && !self.is_open_paren()
+                && !self.is_close_paren()
+                && !self.is_semi_colon()
+                && !self.is_colon()
+                && !self.is_comma()
+                && !self.is_newline() {
             self.consume()
         }
+        // println!("{} {}", start, self.position);
         Token::Atom(&self.input[start..self.position])
     }
 
-    fn parse_single(&mut self) -> Token<'a> {
-        self.consume_spaces();
-        let result = if self.is_open_paren() {
+    fn parse_single(&mut self) -> Option<Token<'a>> {
+        
+        if self.at_end() {
+            return None
+        }
+        let result = if self.is_space() {
+            self.parse_spaces()
+        } else if self.is_newline() {
+            self.consume();
+            Token::NewLine
+        } else if self.is_open_paren() {
+            // println!("open paren");
             self.consume();
             Token::OpenParen
         } else if self.is_close_paren() {
+            // println!("close paren");
             self.consume();
             Token::CloseParen
         } else if self.is_valid_number_char() {
+            // println!("number");
             self.parse_number()
         } else if self.is_quote() {
+            // println!("string");
             self.parse_string()
+        } else if self.is_semi_colon() {
+            // println!("semicolon");
+            self.consume();
+            Token::SemiColon
+        } else if self.is_comma() {
+            self.consume();
+            Token::Comma
+        } else if self.is_colon() {
+            // println!("colon");
+            self.consume();
+            Token::Colon
+        } else if self.is_open_curly() {
+            // println!("open curly");
+            self.consume();
+            Token::OpenCurly
+        } else if self.is_close_curly() {
+            // println!("close curly");
+            self.consume();
+            Token::CloseCurly
+        } else if self.is_open_bracket() {
+            // println!("open bracket");
+            self.consume();
+            Token::OpenBracket
+        } else if self.is_close_bracket() {
+            // println!("close bracket");
+            self.consume();
+            Token::CloseBracket
         } else {
+            // println!("identifier");
             self.parse_identifier()
         };
-        result
+        Some(result)
     }
 
-    fn read(&mut self) -> Vec<Token<'a>> {
-        let mut tokens = Vec::with_capacity(self.input.len());
-        while !self.at_end() {
-            tokens.push(self.parse_single());
+    fn is_semi_colon(&self) -> bool {
+        self.current_byte() == ';' as u8
+    }
+
+    fn is_colon(&self) -> bool {
+        self.current_byte() == ':' as u8
+    }
+
+    fn is_newline(&self) -> bool {
+        self.current_byte() == NEW_LINE
+    }
+
+    fn is_comma(&self) -> bool {
+        self.current_byte() == ',' as u8
+    }
+
+    fn skip_lines(&mut self, n: usize) -> &mut Self {
+        for _ in 0..n {
+            while !self.at_end() && !self.is_newline() {
+                self.consume();
+            }
+            if !self.at_end() {
+                self.consume();
+            }
         }
-        tokens
+        self
     }
+
 }
 
-fn tokenize<'a>(text: &'a str) -> Vec<Token<'a>> {
-    Tokenizer::new(text).read()
-}
 
-#[derive(Debug)]
-enum Expr<'a> {
-    SExpr(Vec<Expr<'a>>),
-    Atom(&'a str),
-    Bool(bool),
-    String(&'a str),
-    Integer(i64),
-    Float(f64),
-}
 
-fn read(tokens: Vec<Token>) -> Expr {
-    // Is there a faster way to do this?
-    // Need to probably refer to slices of things
-    // Like I ended up doing above. But not 100% sure how to do that
-    // given the SExpr structure
-    // Maybe I should do linked list of pointers?
-    let mut exprs_stack = Vec::with_capacity(tokens.len()); // arbitrary
-    let mut current = Vec::with_capacity(10); // arbitrary
 
-    for token in tokens {
+fn rust_specific_pass<'a>(token: Token<'a>) -> RustSpecific<'a> {
+
         match token {
-            Token::Atom(s) if s == "True" => current.push(Expr::Bool(true)),
-            Token::Atom(s) if s == "False" => current.push(Expr::Bool(false)),
-            Token::Atom(s) => current.push(Expr::Atom(s)),
-            Token::Integer(s) => current.push(Expr::Integer(s.parse::<i64>().unwrap())),
-            Token::Float(s) => current.push(Expr::Float(s.parse::<f64>().unwrap())),
-            Token::String(s) => current.push(Expr::String(s)),
-            Token::OpenParen => {
-                exprs_stack.push(current);
-                current = Vec::with_capacity(10); // arbitrary
-            }
-            Token::CloseParen => {
-                let expr = Expr::SExpr(current);
-                current = exprs_stack.pop().unwrap();
-                current.push(expr);
-            }
-        };
-    }
-
-    assert_eq!(current.len(), 1);
-    current.pop().unwrap()
+            Token::Atom("as") => RustSpecific::As,
+            Token::Atom("break") => RustSpecific::Break,
+            Token::Atom("const") => RustSpecific::Const,
+            Token::Atom("continue") => RustSpecific::Continue,
+            Token::Atom("crate") => RustSpecific::Crate,
+            Token::Atom("else") => RustSpecific::Else,
+            Token::Atom("enum") => RustSpecific::Enum,
+            Token::Atom("extern") => RustSpecific::Extern,
+            Token::Atom("false") => RustSpecific::False,
+            Token::Atom("fn") => RustSpecific::Fn,
+            Token::Atom("for") => RustSpecific::For,
+            Token::Atom("if") => RustSpecific::If,
+            Token::Atom("impl") => RustSpecific::Impl,
+            Token::Atom("in") => RustSpecific::In,
+            Token::Atom("let") => RustSpecific::Let,
+            Token::Atom("loop") => RustSpecific::Loop,
+            Token::Atom("match") => RustSpecific::Match,
+            Token::Atom("mod") => RustSpecific::Mod,
+            Token::Atom("move") => RustSpecific::Move,
+            Token::Atom("mut") => RustSpecific::Mut,
+            Token::Atom("pub") => RustSpecific::Pub,
+            Token::Atom("ref") => RustSpecific::Ref,
+            Token::Atom("return") => RustSpecific::Return,
+            Token::Atom("self") => RustSpecific::SelfValue,
+            Token::Atom("Self") => RustSpecific::SelfType,
+            Token::Atom("static") => RustSpecific::Static,
+            Token::Atom("struct") => RustSpecific::Struct,
+            Token::Atom("super") => RustSpecific::Super,
+            Token::Atom("trait") => RustSpecific::Trait,
+            Token::Atom("true") => RustSpecific::True,
+            Token::Atom("type") => RustSpecific::Type,
+            Token::Atom("unsafe") => RustSpecific::Unsafe,
+            Token::Atom("use") => RustSpecific::Use,
+            Token::Atom("where") => RustSpecific::Where,
+            Token::Atom("while") => RustSpecific::While,
+            t => RustSpecific::Token(t)
+        }
 }
 
-fn s_expr_len(x: Expr) -> usize {
-    if let Expr::SExpr(x) = x {
-        x.len()
-    } else {
-        0
-    }
-}
 
 #[allow(dead_code)]
-fn parse_file(filename: String) -> () {
+pub fn parse_file(filename: String) -> () {
     // I need to get a standard file for this.
+    println!("\n\n\n\n\n\n\n\n");
     let file = File::open(filename).unwrap();
     let mut expr = String::new();
     let mut buf_reader = BufReader::new(file);
     buf_reader.read_to_string(&mut expr).unwrap();
 
     let start = Instant::now();
-    let read_expr = read(tokenize(&expr));
+    let mut tokenizer =  Tokenizer::new(&expr);
+    // println!("{:?}", rust_specific_pass(&tokens).collect::<Vec<_>>());
+    // let mut output = RustSpecific::Return;
+    tokenizer.skip_lines(3);
+    while !tokenizer.is_newline() {
+       println!("{:?}", tokenizer.next());
+    }
+
+    // for token in tokenizer.skip_lines(3).map(|x| rust_specific_pass(x)) {
+    //     println!("{:?}", token);
+    //     output = token
+    // }
+    // println!("{:?}", output);
+    // let read_expr = read(tokenize(&expr));
     let duration = start.elapsed();
-    println!("{:?}", s_expr_len(read_expr));
-    println!("{:?}", duration);
+    // println!("{:?}", s_expr_len(read_expr));
+    println!("{:#?}", duration);
 }

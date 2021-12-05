@@ -1,11 +1,13 @@
-use std::{cmp::{max, min}, fs, ops::{Index, IndexMut, Neg, RangeBounds}, str::from_utf8, time::Instant};
+use std::{cmp::{max, min}, fs, ops::{Index, IndexMut, Neg, RangeBounds}, path::{self, Path}, str::from_utf8, time::Instant};
 use std::fmt::Debug;
 
 use sdl2::{event::{Event, WindowEvent}, keyboard::{Keycode, Mod, Scancode}, mouse::SystemCursor, pixels::Color, rect::Rect, render::{Canvas, Texture}, video::{self}};
+use tokenizer::{Tokenizer, rust_specific_pass, RustSpecific, Token};
 
 
 mod native;
 mod sdl;
+mod tokenizer;
 
 
 // I really want so debugging panels.
@@ -295,18 +297,17 @@ impl EditorBounds{
 
 
 // This probably belongs in scroller
-fn text_space_from_screen_space(scroller: &Scroller, mut x: usize, y: usize, text_buffer: &TextBuffer) -> Option<Cursor> {
+fn text_space_from_screen_space(scroller: &Scroller, mut x: usize, y: usize, text_buffer: &TextBuffer, bounds: &EditorBounds) -> Option<Cursor> {
     // Slightly off probably due to rounding.
     // println!("{}", y as f32 / letter_height as f32);
 
     // Probably should move some/all of this to the scroller.
-    let EditorBounds {letter_height, letter_width, ..} = scroller.bounds;
-    let bounds = &scroller.bounds;
+    let EditorBounds {letter_height, letter_width, ..} = *bounds;
     let line_number_padding = bounds.line_number_padding(text_buffer) as i32;
 
     // Still crash here
     // Didn't realize it could do that without the unwrap
-    let line_number : usize = (((y as f32 / letter_height as f32) + (scroller.line_fraction_y() as f32 / bounds.letter_height as f32)).floor() as i32 + scroller.lines_above_fold() as i32) as usize;
+    let line_number : usize = (((y as f32 / letter_height as f32) + (scroller.line_fraction_y(bounds) as f32 / bounds.letter_height as f32)).floor() as i32 + scroller.lines_above_fold(bounds) as i32) as usize;
     if (x as i32) < line_number_padding && (x as i32) > line_number_padding - 20  {
         x = line_number_padding as usize;
     }
@@ -464,8 +465,8 @@ impl CursorContext {
         self.mouse_down = None;
     }
 
-    fn move_cursor_from_screen_position(&mut self, scroller: &Scroller, x: usize, y: usize, text_buffer: &TextBuffer) {
-        self.cursor = text_space_from_screen_space(scroller, x, y, text_buffer);
+    fn move_cursor_from_screen_position(&mut self, scroller: &Scroller, x: usize, y: usize, text_buffer: &TextBuffer, bounds: &EditorBounds) {
+        self.cursor = text_space_from_screen_space(scroller, x, y, text_buffer, bounds);
     }
 
     fn handle_insert(&mut self, to_insert: &[u8], text_buffer : &mut TextBuffer) -> EditAction {
@@ -488,13 +489,12 @@ impl CursorContext {
 struct Scroller {
     offset_x: i32,
     offset_y: i32,
-    scroll_speed: i32,
-    bounds: EditorBounds,
+    scroll_speed: i32
 }
 
 impl Scroller {
-    fn scroll_y(&mut self, height: usize, amount: i32, text_buffer: &TextBuffer) {
-        if !self.at_end(height, text_buffer) || amount < 0 {
+    fn scroll_y(&mut self, height: usize, amount: i32, text_buffer: &TextBuffer, bounds: &EditorBounds) {
+        if !self.at_end(height, text_buffer, bounds) || amount < 0 {
             self.offset_y += amount * self.scroll_speed;
         }
         // Need to set offsety if we are at the end
@@ -502,44 +502,44 @@ impl Scroller {
         self.offset_y = max(0, self.offset_y);
     }
 
-    fn scroll_x(&mut self, width: usize, amount: i32, text_buffer: &mut TextBuffer) {
+    fn scroll_x(&mut self, width: usize, amount: i32, text_buffer: &mut TextBuffer, bounds: &EditorBounds) {
         self.offset_x += amount * self.scroll_speed;
         self.offset_x = max(0, self.offset_x);
-        let max_right = text_buffer.max_line_width() * self.bounds.letter_width;
+        let max_right = text_buffer.max_line_width() * bounds.letter_width;
         // I probably need something in pane to get this right.
-        let viewable_width =  width - self.bounds.letter_width*2 - self.bounds.line_number_padding(text_buffer);
+        let viewable_width =  width - bounds.letter_width*2 - bounds.line_number_padding(text_buffer);
         if self.offset_x + viewable_width as i32 > max_right as i32{
             self.offset_x = (max_right.saturating_sub(viewable_width)) as i32;
         }
         // self.offset_x = min(self.offset_x, (text_buffer.max_line_width() * self.bounds.letter_width) as i32);
     }
     // Will need to do scroll fraction for x too.
-    fn scroll_x_character(&self) -> usize {
-        self.offset_x as usize / self.bounds.letter_width
+    fn scroll_x_character(&self, bounds: &EditorBounds) -> usize {
+        self.offset_x as usize / bounds.letter_width
     }
 
-    fn viewing_lines(&self, height: usize) -> usize {
-       height / self.bounds.letter_height
+    fn viewing_lines(&self, height: usize, bounds: &EditorBounds) -> usize {
+       height / bounds.letter_height
     }
 
-    fn lines_above_fold(&self) -> usize {
-        self.offset_y as usize / self.bounds.letter_height as usize
+    fn lines_above_fold(&self, bounds: &EditorBounds) -> usize {
+        self.offset_y as usize / bounds.letter_height as usize
     }
 
-    fn at_end(&self, height: usize, text_buffer: &TextBuffer) -> bool {
-        self.lines_above_fold() + self.viewing_lines(height) >= text_buffer.line_count() + 3
+    fn at_end(&self, height: usize, text_buffer: &TextBuffer, bounds: &EditorBounds) -> bool {
+        self.lines_above_fold(bounds) + self.viewing_lines(height, bounds) >= text_buffer.line_count() + 3
     }
 
     fn to_the_top(&mut self) {
         self.offset_y = 0;
     }
 
-    fn line_fraction_y(&self) -> usize {
-        self.offset_y as usize % self.bounds.letter_height as usize
+    fn line_fraction_y(&self, bounds: &EditorBounds) -> usize {
+        self.offset_y as usize % bounds.letter_height as usize
     }
 
-    fn line_fraction_x(&self) -> usize {
-        self.offset_x as usize % self.bounds.letter_width as usize
+    fn line_fraction_x(&self, bounds: &EditorBounds) -> usize {
+        self.offset_x as usize % bounds.letter_width as usize
     }
 }
 
@@ -566,10 +566,10 @@ impl<'a> Renderer<'a> {
 
     fn set_initial_rendering_location(&mut self, scroller: &Scroller) {
         self.target = Rect::new(
-            scroller.bounds.editor_left_margin as i32,
-            (scroller.line_fraction_y() as i32).neg(),
-            scroller.bounds.letter_width as u32,
-            scroller.bounds.letter_height as u32
+            self.bounds.editor_left_margin as i32,
+            (scroller.line_fraction_y(&self.bounds) as i32).neg(),
+            self.bounds.letter_width as u32,
+            self.bounds.letter_height as u32
         );
     }
 
@@ -673,25 +673,25 @@ impl Pane {
         (max(0, x - self.position.0) as usize, max(0,y - self.position.1) as usize)
     }
 
-    fn max_characters_per_line(&self) -> usize {
-        let padding = self.scroller.bounds.line_number_padding(&self.text_buffer);
-        let extra_padding = self.scroller.bounds.letter_width;
+    fn max_characters_per_line(&self, bounds: &EditorBounds) -> usize {
+        let padding = bounds.line_number_padding(&self.text_buffer);
+        let extra_padding = bounds.letter_width;
         if self.width < padding + extra_padding {
            0
         } else {
-            ((self.width - padding - extra_padding) / self.scroller.bounds.letter_width) + 2
+            ((self.width - padding - extra_padding) / bounds.letter_width) + 2
         }
 
     }
 
-    fn max_lines_per_page(&self) -> usize {
-        self.height / self.scroller.bounds.letter_height as usize
+    fn max_lines_per_page(&self, bounds: &EditorBounds) -> usize {
+        self.height / bounds.letter_height as usize
     }
 
     fn draw(&mut self, renderer: &mut Renderer) -> Result<(), String> {
-        let editor_left_margin = self.scroller.bounds.editor_left_margin;
-        let line_number_padding = self.scroller.bounds.line_number_padding(&self.text_buffer);
-        let line_number_digits = self.scroller.bounds.line_number_digits(&self.text_buffer);
+        let editor_left_margin = renderer.bounds.editor_left_margin;
+        let line_number_padding = renderer.bounds.line_number_padding(&self.text_buffer);
+        let line_number_digits = renderer.bounds.line_number_digits(&self.text_buffer);
 
         renderer.set_draw_color(Color::RGBA(42, 45, 62, 255));
 
@@ -709,14 +709,20 @@ impl Pane {
         renderer.move_right(self.position.0 as i32);
         renderer.move_down(self.position.1 as i32);
 
-        let number_of_lines = min(self.scroller.lines_above_fold() + self.max_lines_per_page() + 2, self.text_buffer.line_count());
+        let number_of_lines = min(self.scroller.lines_above_fold(&renderer.bounds) + self.max_lines_per_page(&renderer.bounds) + 2, self.text_buffer.line_count());
+        let starting_line = self.scroller.lines_above_fold(&renderer.bounds);
+        
+        // Need to fix this utf8 conversion and clone being needed;
+        let chars = self.text_buffer.chars.clone();
 
+        let mut tokenizer = Tokenizer::new(from_utf8(&chars).unwrap());
+        tokenizer.skip_lines(starting_line);
 
-        for line in self.scroller.lines_above_fold() as usize..number_of_lines {
+        for line in starting_line as usize..number_of_lines {
             renderer.set_color_mod(167, 174, 210);
             renderer.set_x(editor_left_margin as i32 + self.position.0 as i32);
 
-            if self.width > self.scroller.bounds.line_number_padding(&self.text_buffer)  {
+            if self.width > renderer.bounds.line_number_padding(&self.text_buffer)  {
                 self.draw_line_numbers(renderer, line_number_digits, line)?;
             }
 
@@ -725,11 +731,9 @@ impl Pane {
             self.draw_cursor(renderer, line, line_number_padding)?;
             self.draw_selection(renderer, line, line_number_padding)?;
 
-            renderer.move_left(self.scroller.line_fraction_x() as i32);
-            self.draw_code(renderer, line)?;
+            renderer.move_left(self.scroller.line_fraction_x(&renderer.bounds) as i32);
+            self.draw_code(renderer, line, &mut tokenizer)?;
 
-            
-        
 
             renderer.move_down_one_line();
         }
@@ -747,31 +751,31 @@ impl Pane {
         renderer.fill_rect(
             &Rect::new(
                 self.position.0 as i32, 
-                self.position.1 as i32 - self.scroller.bounds.letter_height as i32,
-                (self.width + self.scroller.bounds.letter_width) as u32, 
-                self.scroller.bounds.letter_height as u32))?;
+                self.position.1 as i32 - renderer.bounds.letter_height as i32,
+                (self.width + renderer.bounds.letter_width) as u32, 
+                renderer.bounds.letter_height as u32))?;
         // bottom
         renderer.fill_rect(
             &Rect::new(
                 self.position.0 as i32, 
-                self.position.1 + self.height as i32 + self.scroller.bounds.letter_height as i32,
+                self.position.1 + self.height as i32 + renderer.bounds.letter_height as i32,
                 self.width as u32, 
-                self.scroller.bounds.letter_height as u32))?;
+                renderer.bounds.letter_height as u32))?;
 
         // left
         renderer.fill_rect(
             &Rect::new(
-                self.position.0 as i32 + self.scroller.bounds.line_number_padding(&self.text_buffer) as i32 - self.scroller.bounds.letter_width as i32, 
+                self.position.0 as i32 + renderer.bounds.line_number_padding(&self.text_buffer) as i32 - renderer.bounds.letter_width as i32, 
                 (self.position.1) as i32, 
-                self.scroller.bounds.letter_width as u32, 
+                renderer.bounds.letter_width as u32, 
                 self.height as u32))?;
 
         // right
         renderer.fill_rect(&Rect::new(
-            self.position.0 as i32 + self.width as i32 - self.scroller.bounds.letter_width as i32,
+            self.position.0 as i32 + self.width as i32 - renderer.bounds.letter_width as i32,
             self.position.1 as i32, 
-            (self.scroller.bounds.letter_width * 2) as u32,
-            self.height as u32 + (self.scroller.bounds.letter_height * 2) as u32))?;
+            (renderer.bounds.letter_width * 2) as u32,
+            self.height as u32 + (renderer.bounds.letter_height * 2) as u32))?;
 
 
         renderer.set_draw_color(Color::RGBA(36, 39, 55, 255));
@@ -785,16 +789,16 @@ impl Pane {
         renderer.fill_rect(
                 &Rect::new(
                     self.position.0 as i32, 
-                    self.position.1 as i32 - self.scroller.bounds.letter_height as i32,
+                    self.position.1 as i32 - renderer.bounds.letter_height as i32,
                     self.width as u32, 
-                    self.scroller.bounds.letter_height as u32))?;
+                    renderer.bounds.letter_height as u32))?;
 
         renderer.fill_rect(
             &Rect::new(
                 self.position.0 as i32, 
                 self.position.1 + self.height as i32, 
                 self.width as u32, 
-                self.scroller.bounds.letter_height as u32))?;
+                renderer.bounds.letter_height as u32))?;
         
         Ok(())
     }
@@ -831,6 +835,15 @@ impl Pane {
     }
 
     fn draw_selection(&mut self, renderer: &mut Renderer, line: usize, line_number_padding: usize) -> Result<(), String> {
+
+
+        
+        // TODO: Really think about this and make it work properly.
+        // I need some way of looking at a character and easily deciding where it is
+        // if it is visible, etc.
+
+        // Really this shouldn't be that different than drawing code right?
+        // Maybe I should just record the character range instead of the line range?
         if let Some(((start_line, start_column), (end_line, end_column))) = self.cursor_context.selection {
 
             // TODO: This isn't properly cutting off at the pane boundary.
@@ -840,7 +853,12 @@ impl Pane {
                 } else {
                     line_number_padding as i32
                 };
-                let width = if start_line == end_line {
+                start_x = start_x 
+                    - (self.scroller.scroll_x_character(&renderer.bounds) as i32 * renderer.bounds.letter_width as i32)
+                    - self.scroller.line_fraction_x(&renderer.bounds) as i32;
+                
+
+                let mut width = if start_line == end_line {
                     (end_column - start_column) * renderer.bounds.letter_width
                 } else if line == end_line {
                     end_column * renderer.bounds.letter_width as usize
@@ -850,12 +868,22 @@ impl Pane {
                     line_length(self.text_buffer[line]) * renderer.bounds.letter_width
                 };
 
+                width = if start_x < line_number_padding as i32 + renderer.bounds.letter_width as i32 {
+                    width - min( width as i32, line_number_padding.saturating_sub(start_x as usize) as i32) as usize
+                } else {
+                    width
+                };
+
+                start_x = max(start_x, line_number_padding as i32);
                 start_x += self.position.0;
+
 
                 let start_y = renderer.target.y();
                 renderer.set_draw_color(Color::RGBA(65, 70, 99, 255));
                 // Need to deal with last line.
-                renderer.fill_rect(&Rect::new(start_x as i32, start_y, width as u32, renderer.bounds.letter_height as u32))?
+                if width != 0 {
+                    renderer.fill_rect(&Rect::new(start_x as i32, start_y, width as u32, renderer.bounds.letter_height as u32))?
+                }
             }
 
         };
@@ -863,18 +891,97 @@ impl Pane {
     }
 
 
-    fn draw_code(&mut self, renderer: &mut Renderer, line: usize) -> Result<(), String> {
+    fn draw_code(&mut self, renderer: &mut Renderer, line: usize, tokenizer: &mut Tokenizer) -> Result<(), String> {
+
         let (start, end) = self.text_buffer[line];
-        let start = min(start + self.scroller.scroll_x_character(), end);
-        let end = min(end, start + self.max_characters_per_line());
-        renderer.draw_string(from_utf8(self.text_buffer.chars[start..end].as_ref()).unwrap())
+        let start = min(start + self.scroller.scroll_x_character(&renderer.bounds), end);
+        let end = min(end, start + self.max_characters_per_line(&renderer.bounds));
+        while !tokenizer.at_end() && !tokenizer.is_newline() {
+            match tokenizer.next().map(|token| rust_specific_pass(token)) {
+                Some(x) => match x {
+                    // function name: 130, 170, 225
+                    // brace 130, 208, 241
+                    RustSpecific::Keyword(t) => {
+                        renderer.set_color_mod(194, 143, 249);  
+                        renderer.draw_string(t)?;
+                    },
+                    RustSpecific::Token(Token::Comment(s)) => {
+                        renderer.set_color_mod(103, 110, 149);
+                        renderer.draw_string(s)?;
+                    },
+                    RustSpecific::Token(t) => {
+                        
+                        let color = {
+                            match t {
+                                Token::Comment(_) => {
+                                    (103, 110, 149)
+                                },
+                                Token::OpenBracket | Token::CloseBracket | Token::OpenParen | Token::CloseParen | Token::OpenCurly | Token::CloseCurly | Token::Comma => {
+                                    (130, 208, 241)
+                                },
+                                Token::Atom(_) => {
+                                    (130, 170, 255)
+                                },
+                                _ => {
+                                    (167, 174, 210)
+                                }
+                            }
+                        };
+                        
+                        let text = match t {
+                            Token::Comment(_) => "",
+                            Token::OpenParen => "(",
+                            Token::CloseParen => ")",
+                            Token::OpenCurly => "{",
+                            Token::CloseCurly => "}",
+                            Token::OpenBracket => "[",
+                            Token::CloseBracket => "]",
+                            Token::SemiColon => ";",
+                            Token::Colon => ":",
+                            Token::Comma => ",",
+                            Token::NewLine => "",
+                            Token::Spaces(s) => s,
+                            Token::String(s) => s,
+                            Token::Integer(s) => s,
+                            Token::Float(s) => s,
+                            Token::Atom(s) => s,
+                        };
+                        renderer.set_color_mod(color.0, color.1, color.2);
+                        renderer.draw_string(text)?;
+
+                    }
+    
+                    // Token::CloseParen => todo!(),
+                    // Token::OpenCurly => todo!(),
+                    // Token::CloseCurly => todo!(),
+                    // Token::OpenBracket => todo!(),
+                    // Token::CloseBracket => todo!(),
+                    // Token::SemiColon => todo!(),
+                    // Token::Colon => todo!(),
+                    // Token::Comma => todo!(),
+                    // Token::NewLine => todo!(),
+                    // Token::Spaces(_) => todo!(),
+                    // Token::String(_) => todo!(),
+                    // Token::Integer(_) => todo!(),
+                    // Token::Float(_) => todo!(),
+                    // Token::Atom(_) => todo!(),
+                }
+                None => todo!(),
+            }
+        }
+        if !tokenizer.at_end() {
+            tokenizer.consume();
+        }
+        Ok(())
+
+        
     }
 
-    fn is_mouse_over(&self, (x, y): (i32, i32)) -> bool {
+    fn is_mouse_over(&self, (x, y): (i32, i32), bounds: &EditorBounds) -> bool {
         x > self.position.0  &&
         x < self.position.0 + self.width as i32 &&
-        y > self.position.1 - self.scroller.bounds.letter_height as i32 &&
-        y < self.position.1 + self.height as i32 + self.scroller.bounds.letter_height  as i32
+        y > self.position.1 - bounds.letter_height as i32 &&
+        y < self.position.1 + self.height as i32 + bounds.letter_height  as i32
     }
 
     fn set_active(&mut self, active: bool) {
@@ -1101,16 +1208,16 @@ struct PaneManager {
 
 impl PaneManager {
 
-    fn delete_pane_at_mouse(&mut self, mouse_pos: (i32, i32)) {
-        if let Some(closest_pane) = self.get_pane_at_mouse(mouse_pos) {
+    fn delete_pane_at_mouse(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) {
+        if let Some(closest_pane) = self.get_pane_at_mouse(mouse_pos, bounds) {
             self.panes.remove(closest_pane);
         }
     }
 
-    fn set_scroll_active_if_mouse_over(&mut self, mouse_pos: (i32, i32)) {
+    fn set_scroll_active_if_mouse_over(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) {
         let mut new_active_pane = self.scroll_active_pane;
         for (i, pane) in self.panes.iter().enumerate() {
-            if pane.is_mouse_over(mouse_pos) {
+            if pane.is_mouse_over(mouse_pos, bounds) {
                 new_active_pane = i;
             }
         }
@@ -1119,24 +1226,26 @@ impl PaneManager {
         }
     }
 
-    fn set_active_from_click_coords(&mut self, mouse_pos: (i32, i32)) {
+    fn set_active_from_click_coords(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) {
         let old_active = self.active_pane;
         let mut new_active_pane = self.active_pane;
         for (i, pane) in self.panes.iter().enumerate() {
-            if pane.is_mouse_over(mouse_pos) {
+            if pane.is_mouse_over(mouse_pos, bounds) {
                 new_active_pane = i;
             }
         }
         if new_active_pane != self.active_pane {
             self.active_pane = new_active_pane;
             self.panes.get_mut(self.active_pane).unwrap().set_active(true);
-            self.panes.get_mut(old_active).unwrap().set_active(false);
+            if let Some(pane) = self.panes.get_mut(old_active) {
+                pane.set_active(false);
+            }
         }
     }
 
-    fn get_pane_at_mouse(&mut self, mouse_pos: (i32, i32)) -> Option<usize> {
+    fn get_pane_at_mouse(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<usize> {
         for (i, pane) in self.panes.iter().enumerate() {
-            if pane.is_mouse_over(mouse_pos) {
+            if pane.is_mouse_over(mouse_pos, bounds) {
                 return Some(i);
             }
         }
@@ -1173,8 +1282,8 @@ impl PaneManager {
         }
     }
 
-    fn set_dragging_start(&mut self, mouse_pos: (i32, i32)) -> bool {
-        if let Some(i) = self.get_pane_at_mouse(mouse_pos) {
+    fn set_dragging_start(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> bool {
+        if let Some(i) = self.get_pane_at_mouse(mouse_pos, bounds) {
             self.dragging_start = mouse_pos;
             self.dragging_pane = Some(i);
             self.dragging_pane_start = self.panes[i].position;
@@ -1196,8 +1305,8 @@ impl PaneManager {
         self.dragging_pane = None;
     }
 
-    fn set_resize_start(&mut self, mouse_pos: (i32, i32)) -> bool {
-        if let Some(i) = self.get_pane_at_mouse(mouse_pos) {
+    fn set_resize_start(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> bool {
+        if let Some(i) = self.get_pane_at_mouse(mouse_pos, bounds) {
             self.resize_start = mouse_pos;
             self.resize_pane = Some(i);
             self.update_resize_size(mouse_pos);
@@ -1246,36 +1355,39 @@ impl PaneManager {
         if self.create_pane_activated {
             self.create_pane_activated = false;
 
-            // TODO: Because of this I can't delete all the panes and still make more
-            if let Some(pane) = self.get_active_pane() {
-                let scroller = pane.scroller.clone();
-                let cursor_context = CursorContext {
-                    cursor: None,
-                    mouse_down: None,
-                    selection: None, 
-                };
+            // This is duplicate code
+            let scroller = Scroller {
+                offset_y: 0,
+                offset_x: 0,
+                scroll_speed: 5,
+            };
 
-                let position_x = min(self.create_pane_start.0, self.create_pane_current.0);
-                let position_y = min(self.create_pane_start.1, self.create_pane_current.1);
-                let current_x = max(self.create_pane_start.0, self.create_pane_current.0);
-                let current_y = max(self.create_pane_start.1, self.create_pane_current.1);
-                let width = (current_x - position_x) as usize;
-                let height = (current_y - position_y) as usize;
+            let cursor_context = CursorContext {
+                cursor: None,
+                mouse_down: None,
+                selection: None, 
+            };
 
-                self.panes.push(Pane {
-                    position: (position_x, position_y),
-                    width: width,
-                    height: height,
-                    active: true,
-                    scroller,
-                    cursor_context,
-                    text_buffer: TextBuffer {
-                        line_range: vec![(0,0)],
-                        chars: vec![],
-                        max_line_width_cache: 0,
-                    },
-                });
-            }
+            let position_x = min(self.create_pane_start.0, self.create_pane_current.0);
+            let position_y = min(self.create_pane_start.1, self.create_pane_current.1);
+            let current_x = max(self.create_pane_start.0, self.create_pane_current.0);
+            let current_y = max(self.create_pane_start.1, self.create_pane_current.1);
+            let width = (current_x - position_x) as usize;
+            let height = (current_y - position_y) as usize;
+
+            self.panes.push(Pane {
+                position: (position_x, position_y),
+                width: width,
+                height: height,
+                active: true,
+                scroller,
+                cursor_context,
+                text_buffer: TextBuffer {
+                    line_range: vec![(0,0)],
+                    chars: vec![],
+                    max_line_width_cache: 0,
+                },
+            });
         }
     }
 
@@ -1284,7 +1396,8 @@ impl PaneManager {
 
 fn handle_events(event_pump: &mut sdl2::EventPump,
                  transaction_manager: &mut TransactionManager,
-                 pane_manager: &mut PaneManager) {
+                 pane_manager: &mut PaneManager,
+                 bounds: &EditorBounds) {
     let mut is_text_input = false;
 
     // let text_buffer = &mut pane.text_buffer;
@@ -1441,24 +1554,24 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
 
             Event::MouseButtonDown { x, y, .. } => {
                 if ctrl_is_pressed && alt_is_pressed && cmd_is_pressed {
-                    pane_manager.delete_pane_at_mouse((x, y));
+                    pane_manager.delete_pane_at_mouse((x, y), bounds);
                 }
                 else if ctrl_is_pressed && alt_is_pressed {
-                    let found = pane_manager.set_resize_start((x,y));
+                    let found = pane_manager.set_resize_start((x,y), bounds);
                     if !found {
                         pane_manager.set_create_start((x,y));
                     }
                 } else if ctrl_is_pressed {
-                    let found = pane_manager.set_dragging_start((x, y));
+                    let found = pane_manager.set_dragging_start((x, y), bounds);
                     if !found {
                         pane_manager.set_create_start((x,y));
                     }
                 } else {
 
-                    pane_manager.set_active_from_click_coords((x, y));
+                    pane_manager.set_active_from_click_coords((x, y), bounds);
                     if let Some(pane) = pane_manager.get_active_pane_mut() {
                         let (x, y) = pane.adjust_position(x, y);
-                        pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer);
+                        pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer, bounds);
                         pane.cursor_context.mouse_down();
                         pane.cursor_context.clear_selection();
                     }
@@ -1475,7 +1588,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                 // TODO:
                 // distinguish between active and scrolling.
                 // Mouse over is enough for scrolling, but not for active.
-                pane_manager.set_scroll_active_if_mouse_over((x, y));
+                pane_manager.set_scroll_active_if_mouse_over((x, y), bounds);
 
 
                 if let Some(pane) = pane_manager.get_active_pane_mut() {
@@ -1483,7 +1596,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
 
 
                     if let Some(Cursor(start_line, mut start_column)) = pane.cursor_context.mouse_down {
-                        pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x2, y2, &pane.text_buffer);
+                        pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x2, y2, &pane.text_buffer, bounds);
                         // TODO: Get my int types correct!
                         if let Some(Cursor(line, mut column)) = pane.cursor_context.cursor {
                             let new_start_line = start_line.min(line);
@@ -1509,7 +1622,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                 if let Some(pane) = pane_manager.get_active_pane_mut() {
                     let (x, y) = pane.adjust_position(x, y);
                     if let Some(Cursor(start_line, mut start_column)) = pane.cursor_context.mouse_down {
-                        pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer);
+                        pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer, bounds);
                         if pane.cursor_context.selection.is_some() {
                             if let Some(Cursor(line, mut column)) = pane.cursor_context.cursor {
                                 let new_start_line = start_line.min(line);
@@ -1556,8 +1669,8 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     sdl2::mouse::MouseWheelDirection::Unknown(x) => x as i32
                 };
                 if let Some(pane) = pane_manager.get_scroll_active_pane_mut() {
-                    pane.scroller.scroll_x(pane.width, x * direction_multiplier * -1, &mut pane.text_buffer);
-                    pane.scroller.scroll_y(pane.height, y * direction_multiplier, &pane.text_buffer);
+                    pane.scroller.scroll_x(pane.width, x * direction_multiplier * -1, &mut pane.text_buffer, bounds);
+                    pane.scroller.scroll_y(pane.height, y * direction_multiplier, &pane.text_buffer, bounds);
                 }
 
             }
@@ -1569,6 +1682,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
         
     }
 }
+
 
 fn main() -> Result<(), String> {
     native::set_smooth_scroll();
@@ -1597,10 +1711,10 @@ fn main() -> Result<(), String> {
         offset_y: 0,
         offset_x: 0,
         scroll_speed: 5,
-        bounds: bounds.clone(),
     };
 
     let text = fs::read_to_string("/Users/jimmyhmiller/Documents/Code/Playground/rust/editor/src/main.rs").unwrap();
+
 
     let mut text_buffer = TextBuffer {
         chars: text.as_bytes().to_vec(),
@@ -1667,7 +1781,7 @@ fn main() -> Result<(), String> {
 
     loop {
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
-        handle_events(&mut event_pump, &mut transaction_manager, &mut pane_manager);
+        handle_events(&mut event_pump, &mut transaction_manager, &mut pane_manager, &renderer.bounds);
     }
 }
 

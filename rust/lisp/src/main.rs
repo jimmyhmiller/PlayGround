@@ -1,4 +1,4 @@
-
+mod parser;
 
 struct Machine {
     stack: [u8; 4048],
@@ -107,15 +107,16 @@ impl Machine {
 
 
 fn main() {
-    let mut machine = Machine::new();
-    machine.program[0] = 0x0A01;
-    machine.program[1] = 0x0505;
-    machine.program[2] = 0x0101;
-    machine.program[3] = 0x0003;
-    machine.program[4] = 0x0104;
+    parser::parse_file("/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor/src/main.rs".to_string());
+    // let mut machine = Machine::new();
+    // machine.program[0] = 0x0A01;
+    // machine.program[1] = 0x0505;
+    // machine.program[2] = 0x0101;
+    // machine.program[3] = 0x0003;
+    // machine.program[4] = 0x0104;
 
-    machine.run();
-    let result = machine.current();
+    // machine.run();
+    // let result = machine.current();
 
-    println!("{:?}", result);
+    // println!("{:?}", result);
 }
