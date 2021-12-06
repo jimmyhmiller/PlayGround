@@ -919,8 +919,16 @@ impl Pane {
                                 Token::OpenBracket | Token::CloseBracket | Token::OpenParen | Token::CloseParen | Token::OpenCurly | Token::CloseCurly | Token::Comma => {
                                     (130, 208, 241)
                                 },
-                                Token::Atom(_) => {
-                                    (130, 170, 255)
+                                Token::Atom(s) => {
+                                    if s.chars().next().unwrap().is_ascii_uppercase() {
+                                        (194, 143, 249)
+                                        
+                                    } else {
+                                        (130, 170, 225)
+                                    }
+                                },
+                                Token::String(_) => {
+                                    (195, 232, 141)
                                 },
                                 _ => {
                                     (167, 174, 210)

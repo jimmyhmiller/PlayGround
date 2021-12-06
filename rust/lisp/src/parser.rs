@@ -346,17 +346,17 @@ pub fn parse_file(filename: String) -> () {
     let start = Instant::now();
     let mut tokenizer =  Tokenizer::new(&expr);
     // println!("{:?}", rust_specific_pass(&tokens).collect::<Vec<_>>());
-    // let mut output = RustSpecific::Return;
-    tokenizer.skip_lines(3);
-    while !tokenizer.is_newline() {
-       println!("{:?}", tokenizer.next());
-    }
-
-    // for token in tokenizer.skip_lines(3).map(|x| rust_specific_pass(x)) {
-    //     println!("{:?}", token);
-    //     output = token
+    let mut output = RustSpecific::Return;
+    // tokenizer.skip_lines(3);
+    // while !tokenizer.is_newline() {
+    //    println!("{:?}", tokenizer.next());
     // }
-    // println!("{:?}", output);
+
+    for token in tokenizer.map(|x| rust_specific_pass(x)) {
+        // println!("{:?}", token);
+        output = token
+    }
+    println!("{:?}", output);
     // let read_expr = read(tokenize(&expr));
     let duration = start.elapsed();
     // println!("{:?}", s_expr_len(read_expr));
