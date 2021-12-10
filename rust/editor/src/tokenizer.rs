@@ -74,7 +74,6 @@ static ZERO: u8 = '0' as u8;
 static NINE: u8 = '9' as u8;
 static SPACE: u8 = ' ' as u8;
 static NEW_LINE: u8 = '\n' as u8;
-static COMMA: u8 = ',' as u8;
 static DOUBLE_QUOTE: u8 = '"' as u8;
 static OPEN_PAREN: u8 = '(' as u8;
 static CLOSE_PAREN: u8 = ')' as u8;
@@ -92,8 +91,8 @@ impl<'a> Tokenizer {
     }
 
     fn peek(&self, input_bytes: &[u8]) -> Option<u8> {
-        if self.position < input_bytes.len() {
-            Some(input_bytes[self.position])
+        if self.position + 1 < input_bytes.len() {
+            Some(input_bytes[self.position + 1])
         } else {
             None
         }
@@ -109,7 +108,7 @@ impl<'a> Tokenizer {
             self.consume();
         }
         // self.consume();
-        Token::Comment((start,self.position))
+        Token::Comment((start, self.position))
     }
 
     pub fn consume(&mut self) -> () {
@@ -125,7 +124,7 @@ impl<'a> Tokenizer {
     }
 
     pub fn at_end(&self, input_bytes: &[u8]) -> bool {
-        input_bytes.len() == self.position
+        self.position >= input_bytes.len()
     }
 
     pub fn is_quote(&self, input_bytes: &[u8]) -> bool {
@@ -183,7 +182,7 @@ impl<'a> Tokenizer {
     pub fn parse_number(&mut self, input_bytes: &[u8]) -> Token {
         let mut is_float = false;
         let start = self.position;
-        while self.is_valid_number_char(input_bytes) || self.current_byte(input_bytes) == PERIOD {
+        while !self.at_end(input_bytes) && (self.is_valid_number_char(input_bytes) || self.current_byte(input_bytes) == PERIOD) {
             // Need to handle making sure there is only one "."
             if self.current_byte(input_bytes) == PERIOD {
                 is_float = true;
@@ -199,7 +198,8 @@ impl<'a> Tokenizer {
 
     pub fn parse_identifier(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
-        while !self.is_space(input_bytes) 
+        while !self.at_end(input_bytes)
+                && !self.is_space(input_bytes) 
                 && !self.is_open_paren(input_bytes)
                 && !self.is_close_paren(input_bytes)
                 && !self.is_open_curly(input_bytes)
@@ -209,8 +209,8 @@ impl<'a> Tokenizer {
                 && !self.is_semi_colon(input_bytes)
                 && !self.is_colon(input_bytes)
                 && !self.is_comma(input_bytes)
-                && !self.is_newline(input_bytes) {
-            self.consume()
+                && !self.is_newline(input_bytes)  {
+            self.consume();
         }
         // println!("{} {}", start, self.position);
         Token::Atom((start, self.position))
