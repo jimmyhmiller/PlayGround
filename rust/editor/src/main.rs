@@ -1,4 +1,4 @@
-use std::{cmp::{max, min}, fs, ops::{Index, IndexMut, Neg, RangeBounds}, path::{self, Path}, str::from_utf8, time::Instant};
+use std::{cmp::{max, min}, fs, ops::{Index, IndexMut, Neg, RangeBounds}, str::from_utf8, time::Instant};
 use std::fmt::Debug;
 
 use sdl2::{event::{Event, WindowEvent}, keyboard::{Keycode, Mod, Scancode}, mouse::SystemCursor, pixels::Color, rect::Rect, render::{Canvas, Texture}, video::{self}};
@@ -624,7 +624,7 @@ impl<'a> Renderer<'a> {
         // Do something better with this target
         self.target = Rect::new(window.width - (self.bounds.letter_width * 10) as i32, 0, self.bounds.letter_width as u32, self.bounds.letter_height as u32);
         self.set_color_mod( 167, 174, 210);
-        self.draw_string(&format!("fps: {}", current_fps))
+        self.draw_string(&format!("fps: {}", current_fps, panes))
     }
 
     fn draw_column_line(&mut self, pane_manager: &mut PaneManager) -> Result<(), String> {
@@ -890,6 +890,7 @@ impl Pane {
     }
 
 
+    // TODO: OFF BY ONE ON DRAW! OR TOKEN OR SOMETHING
 
     fn draw_code(&mut self, renderer: &mut Renderer, line: usize) -> Result<(), String> {
 
@@ -928,7 +929,7 @@ impl Pane {
                         }
                     }
                 }).unwrap();
-                
+
                 if position > end {
                     continue;
                 }
@@ -942,6 +943,7 @@ impl Pane {
                     }
                 };
 
+
                 let token_end = {
                     if position + text.len() > end {
                         min(end - position, text.len())
@@ -949,6 +951,8 @@ impl Pane {
                         text.len()
                     }
                 };
+
+
                 if let Some(token_start) = token_start {
                     let token = &text[token_start..token_end];
                     renderer.set_color_mod(color.0, color.1, color.2);
@@ -1154,6 +1158,9 @@ impl TextBuffer {
         if self.is_empty() || char_pos >= self.char_length( ){
             return EditAction::Noop;
         }
+        if cursor_line == 0 && cursor_column == 0 {
+            return EditAction::Noop;
+        }
 
         let result = self.chars.remove(char_pos);
 
@@ -1239,7 +1246,7 @@ impl PaneManager {
     }
 
     fn get_pane_at_mouse(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<usize> {
-        for (i, pane) in self.panes.iter().enumerate() {
+        for (i, pane) in self.panes.iter().enumerate().rev() {
             if pane.is_mouse_over(mouse_pos, bounds) {
                 return Some(i);
             }
@@ -1279,6 +1286,9 @@ impl PaneManager {
 
     fn set_dragging_start(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> bool {
         if let Some(i) = self.get_pane_at_mouse(mouse_pos, bounds) {
+            let pane = self.panes.remove(i);
+            self.panes.push(pane);
+            let i = self.panes.len() - 1;
             self.dragging_start = mouse_pos;
             self.dragging_pane = Some(i);
             self.dragging_pane_start = self.panes[i].position;
@@ -1297,6 +1307,8 @@ impl PaneManager {
     }
 
     fn stop_dragging(&mut self) {
+
+
         self.dragging_pane = None;
     }
 
@@ -1557,7 +1569,15 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     if !found {
                         pane_manager.set_create_start((x,y));
                     }
-                } else if ctrl_is_pressed {
+                } else if cmd_is_pressed && alt_is_pressed {
+                if let Some(i) = pane_manager.get_pane_at_mouse((x, y), bounds) {
+                    let mut pane = pane_manager.panes[i].clone();
+                    pane.position = (pane.position.0 + 20, pane.position.1 + 20);
+                    pane_manager.panes.push(pane);
+                }
+                
+                
+                }   else if ctrl_is_pressed {
                     let found = pane_manager.set_dragging_start((x, y), bounds);
                     if !found {
                         pane_manager.set_create_start((x,y));
@@ -1683,7 +1703,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
 fn color_for_token(token: &RustSpecific, input_bytes: &[u8]) -> (u8, u8, u8) {
     match token {
         RustSpecific::Keyword(_) => (194, 143, 249),
-        RustSpecific::Token(Token::Comment(s)) =>  (103, 110, 149),
+        RustSpecific::Token(Token::Comment(_)) =>  (103, 110, 149),
         RustSpecific::Token(t) => {
             match t {
                 Token::Comment(_) => {
