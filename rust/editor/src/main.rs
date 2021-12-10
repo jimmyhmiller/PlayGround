@@ -623,6 +623,7 @@ impl<'a> Renderer<'a> {
         let current_fps = fps.tick();
         // Do something better with this target
         self.target = Rect::new(window.width - (self.bounds.letter_width * 10) as i32, 0, self.bounds.letter_width as u32, self.bounds.letter_height as u32);
+        self.set_color_mod( 167, 174, 210);
         self.draw_string(&format!("fps: {}", current_fps))
     }
 
@@ -712,11 +713,8 @@ impl Pane {
         let number_of_lines = min(self.scroller.lines_above_fold(&renderer.bounds) + self.max_lines_per_page(&renderer.bounds) + 2, self.text_buffer.line_count());
         let starting_line = self.scroller.lines_above_fold(&renderer.bounds);
         
-        // Need to fix this utf8 conversion and clone being needed;
-        let chars = self.text_buffer.chars.clone();
-
-        let mut tokenizer = Tokenizer::new(from_utf8(&chars).unwrap());
-        tokenizer.skip_lines(starting_line);
+        
+        self.text_buffer.tokenizer.skip_lines(starting_line, &self.text_buffer.chars);
 
         for line in starting_line as usize..number_of_lines {
             renderer.set_color_mod(167, 174, 210);
@@ -732,8 +730,7 @@ impl Pane {
             self.draw_selection(renderer, line, line_number_padding)?;
 
             renderer.move_left(self.scroller.line_fraction_x(&renderer.bounds) as i32);
-            self.draw_code(renderer, line, &mut tokenizer)?;
-
+            self.draw_code(renderer, line)?;
 
             renderer.move_down_one_line();
         }
@@ -800,6 +797,8 @@ impl Pane {
                 self.width as u32, 
                 renderer.bounds.letter_height as u32))?;
         
+        // TODO: do something better
+        self.text_buffer.tokenizer.position = 0;
         Ok(())
     }
 
@@ -892,50 +891,49 @@ impl Pane {
 
 
 
-    fn draw_code(&mut self, renderer: &mut Renderer, line: usize, tokenizer: &mut Tokenizer) -> Result<(), String> {
+    fn draw_code(&mut self, renderer: &mut Renderer, line: usize) -> Result<(), String> {
 
         let (line_start, line_end) = self.text_buffer[line];
         let start = min(line_start + self.scroller.scroll_x_character(&renderer.bounds), line_end);
         let end = min(line_end, start + self.max_characters_per_line(&renderer.bounds));
         // Super awkward hacky approach. But fine for now
         let mut position = line_start;
+        let tokenizer = &mut self.text_buffer.tokenizer;
 
-        while !tokenizer.at_end() && !tokenizer.is_newline() {
-   
-            if let Some(token) = tokenizer.next().map(|token| rust_specific_pass(token)) {
-
-                let color = color_for_token(&token);
+        while !tokenizer.at_end(&self.text_buffer.chars) && !tokenizer.is_newline(&self.text_buffer.chars) {
+            if let Some(token) = tokenizer.parse_single(&self.text_buffer.chars) {
+                let token = rust_specific_pass(token, &self.text_buffer.chars);
+                let color = color_for_token(&token, &self.text_buffer.chars);
                 
-                let text = match token {
-                    RustSpecific::Keyword(s) => s,
+                let text = from_utf8(match token {
+                    RustSpecific::Keyword((s, e)) => &self.text_buffer.chars[s..e],
                     RustSpecific::Token(t) => {
                         match t {
-                            Token::Comment(s) => s,
-                            Token::OpenParen => "(",
-                            Token::CloseParen => ")",
-                            Token::OpenCurly => "{",
-                            Token::CloseCurly => "}",
-                            Token::OpenBracket => "[",
-                            Token::CloseBracket => "]",
-                            Token::SemiColon => ";",
-                            Token::Colon => ":",
-                            Token::Comma => ",",
-                            Token::NewLine => "",
-                            Token::Spaces(s) => s,
-                            Token::String(s) => s,
-                            Token::Integer(s) => s,
-                            Token::Float(s) => s,
-                            Token::Atom(s) => s,
+                            Token::OpenParen => &[b'('],
+                            Token::CloseParen => &[b')'],
+                            Token::OpenCurly => &[b'{'],
+                            Token::CloseCurly => &[b'}'],
+                            Token::OpenBracket => &[b'['],
+                            Token::CloseBracket => &[b']'],
+                            Token::SemiColon => &[b';'],
+                            Token::Colon => &[b':'],
+                            Token::Comma => &[b','],
+                            Token::NewLine => &[],
+                            Token::Comment((s, e))
+                            | Token::Spaces((s, e))
+                            | Token::String((s, e))
+                            | Token::Integer((s, e))
+                            | Token::Float((s, e))
+                            | Token::Atom((s, e)) => &self.text_buffer.chars[s..e],
                         }
                     }
-                };
+                }).unwrap();
                 
                 if position > end {
                     continue;
                 }
                 let token_start = {
                     if position < start && position + text.len() < start {
-                        // println!("{:?}", t);
                         None
                     } else if position < start {
                         Some(start - position) 
@@ -964,7 +962,7 @@ impl Pane {
             }
 
         }
-        if !tokenizer.at_end() {
+        if !tokenizer.at_end(&self.text_buffer.chars) {
             tokenizer.consume();
         }
         Ok(())
@@ -1033,6 +1031,7 @@ struct TextBuffer {
     line_range: Vec<(usize, usize)>,
     chars: Vec<u8>,
     max_line_width_cache: usize,
+    tokenizer: Tokenizer,
 }
 
 impl Index<usize> for TextBuffer {
@@ -1182,6 +1181,7 @@ impl TextBuffer {
         self.max_line_width_cache = self.line_range.iter().map(|(start,end)| end - start).max().unwrap_or(0);
         self.max_line_width_cache
     }
+    
 }
 
 
@@ -1381,6 +1381,7 @@ impl PaneManager {
                     line_range: vec![(0,0)],
                     chars: vec![],
                     max_line_width_cache: 0,
+                    tokenizer: Tokenizer::new(),
                 },
             });
         }
@@ -1679,7 +1680,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
 }
 
 
-fn color_for_token(token: &RustSpecific) -> (u8, u8, u8) {
+fn color_for_token(token: &RustSpecific, input_bytes: &[u8]) -> (u8, u8, u8) {
     match token {
         RustSpecific::Keyword(_) => (194, 143, 249),
         RustSpecific::Token(Token::Comment(s)) =>  (103, 110, 149),
@@ -1697,8 +1698,8 @@ fn color_for_token(token: &RustSpecific) -> (u8, u8, u8) {
                 Token::Comma => {
                     (130, 208, 241)
                 },
-                Token::Atom(s) => {
-                    if s.chars().next().unwrap().is_ascii_uppercase() {
+                Token::Atom((s,_e)) => {
+                    if input_bytes[*s].is_ascii_uppercase() {
                         (194, 143, 249)
                         
                     } else {
@@ -1753,6 +1754,7 @@ fn main() -> Result<(), String> {
         chars: text.as_bytes().to_vec(),
         line_range: vec![],
         max_line_width_cache: 0,
+        tokenizer: Tokenizer::new(),
     };
     text_buffer.parse_lines();
 
