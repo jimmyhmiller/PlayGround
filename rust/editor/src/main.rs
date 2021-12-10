@@ -891,53 +891,26 @@ impl Pane {
     }
 
 
+
     fn draw_code(&mut self, renderer: &mut Renderer, line: usize, tokenizer: &mut Tokenizer) -> Result<(), String> {
 
-        let (start, end) = self.text_buffer[line];
-        let start = min(start + self.scroller.scroll_x_character(&renderer.bounds), end);
-        let end = min(end, start + self.max_characters_per_line(&renderer.bounds));
+        let (line_start, line_end) = self.text_buffer[line];
+        let start = min(line_start + self.scroller.scroll_x_character(&renderer.bounds), line_end);
+        let end = min(line_end, start + self.max_characters_per_line(&renderer.bounds));
+        // Super awkward hacky approach. But fine for now
+        let mut position = line_start;
+
         while !tokenizer.at_end() && !tokenizer.is_newline() {
-            match tokenizer.next().map(|token| rust_specific_pass(token)) {
-                Some(x) => match x {
-                    // function name: 130, 170, 225
-                    // brace 130, 208, 241
-                    RustSpecific::Keyword(t) => {
-                        renderer.set_color_mod(194, 143, 249);  
-                        renderer.draw_string(t)?;
-                    },
-                    RustSpecific::Token(Token::Comment(s)) => {
-                        renderer.set_color_mod(103, 110, 149);
-                        renderer.draw_string(s)?;
-                    },
+   
+            if let Some(token) = tokenizer.next().map(|token| rust_specific_pass(token)) {
+
+                let color = color_for_token(&token);
+                
+                let text = match token {
+                    RustSpecific::Keyword(s) => s,
                     RustSpecific::Token(t) => {
-                        
-                        let color = {
-                            match t {
-                                Token::Comment(_) => {
-                                    (103, 110, 149)
-                                },
-                                Token::OpenBracket | Token::CloseBracket | Token::OpenParen | Token::CloseParen | Token::OpenCurly | Token::CloseCurly | Token::Comma => {
-                                    (130, 208, 241)
-                                },
-                                Token::Atom(s) => {
-                                    if s.chars().next().unwrap().is_ascii_uppercase() {
-                                        (194, 143, 249)
-                                        
-                                    } else {
-                                        (130, 170, 225)
-                                    }
-                                },
-                                Token::String(_) => {
-                                    (195, 232, 141)
-                                },
-                                _ => {
-                                    (167, 174, 210)
-                                }
-                            }
-                        };
-                        
-                        let text = match t {
-                            Token::Comment(_) => "",
+                        match t {
+                            Token::Comment(s) => s,
                             Token::OpenParen => "(",
                             Token::CloseParen => ")",
                             Token::OpenCurly => "{",
@@ -953,29 +926,43 @@ impl Pane {
                             Token::Integer(s) => s,
                             Token::Float(s) => s,
                             Token::Atom(s) => s,
-                        };
-                        renderer.set_color_mod(color.0, color.1, color.2);
-                        renderer.draw_string(text)?;
-
+                        }
                     }
-    
-                    // Token::CloseParen => todo!(),
-                    // Token::OpenCurly => todo!(),
-                    // Token::CloseCurly => todo!(),
-                    // Token::OpenBracket => todo!(),
-                    // Token::CloseBracket => todo!(),
-                    // Token::SemiColon => todo!(),
-                    // Token::Colon => todo!(),
-                    // Token::Comma => todo!(),
-                    // Token::NewLine => todo!(),
-                    // Token::Spaces(_) => todo!(),
-                    // Token::String(_) => todo!(),
-                    // Token::Integer(_) => todo!(),
-                    // Token::Float(_) => todo!(),
-                    // Token::Atom(_) => todo!(),
+                };
+                
+                if position > end {
+                    continue;
                 }
-                None => todo!(),
+                let token_start = {
+                    if position < start && position + text.len() < start {
+                        // println!("{:?}", t);
+                        None
+                    } else if position < start {
+                        Some(start - position) 
+                    } else {
+                        Some(0)
+                    }
+                };
+
+                let token_end = {
+                    if position + text.len() > end {
+                        min(end - position, text.len())
+                    } else {
+                        text.len()
+                    }
+                };
+                if let Some(token_start) = token_start {
+                    let token = &text[token_start..token_end];
+                    renderer.set_color_mod(color.0, color.1, color.2);
+                    renderer.draw_string(token)?;
+                }
+
+                position += text.len();
+
+
+
             }
+
         }
         if !tokenizer.at_end() {
             tokenizer.consume();
@@ -1688,6 +1675,44 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
             pane.cursor_context.fix_cursor(&pane.text_buffer);
         }
         
+    }
+}
+
+
+fn color_for_token(token: &RustSpecific) -> (u8, u8, u8) {
+    match token {
+        RustSpecific::Keyword(_) => (194, 143, 249),
+        RustSpecific::Token(Token::Comment(s)) =>  (103, 110, 149),
+        RustSpecific::Token(t) => {
+            match t {
+                Token::Comment(_) => {
+                    (103, 110, 149)
+                },
+                Token::OpenBracket | 
+                Token::CloseBracket | 
+                Token::OpenParen | 
+                Token::CloseParen | 
+                Token::OpenCurly | 
+                Token::CloseCurly | 
+                Token::Comma => {
+                    (130, 208, 241)
+                },
+                Token::Atom(s) => {
+                    if s.chars().next().unwrap().is_ascii_uppercase() {
+                        (194, 143, 249)
+                        
+                    } else {
+                        (130, 170, 225)
+                    }
+                },
+                Token::String(_) => {
+                    (195, 232, 141)
+                },
+                _ => {
+                    (167, 174, 210)
+                }
+            }
+        }
     }
 }
 
