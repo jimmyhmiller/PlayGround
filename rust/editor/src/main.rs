@@ -624,7 +624,7 @@ impl<'a> Renderer<'a> {
         // Do something better with this target
         self.target = Rect::new(window.width - (self.bounds.letter_width * 10) as i32, 0, self.bounds.letter_width as u32, self.bounds.letter_height as u32);
         self.set_color_mod( 167, 174, 210);
-        self.draw_string(&format!("fps: {}", current_fps, panes))
+        self.draw_string(&format!("fps: {}", current_fps))
     }
 
     fn draw_column_line(&mut self, pane_manager: &mut PaneManager) -> Result<(), String> {
