@@ -10,6 +10,15 @@ mod sdl;
 mod tokenizer;
 
 
+const BACKGROUND_COLOR: Color = Color::RGB(0x29, 0x2D, 0x3E);
+const STANDARD_TEXT_COLOR: Color = Color::RGB(0x95, 0x9D, 0xCB);
+const PURPLE_TEXT_COLOR: Color = Color::RGB(0xC7, 0x92, 0xEA);
+const BLUE_TEXT_COLOR: Color = Color::RGB(0x82,0xAA,0xFF);
+const LIGHT_BLUE_TEXT_COLOR: Color = Color::RGB(0x89,0xDD,0xFF);
+const GREEN_TEXT_COLOR: Color = Color::RGB(0xC3,0xE8, 0x8D);
+const COMMENT_TEXT_COLOR: Color = Color::RGB(0x67, 0x6E, 0x95);
+const ORANGE_TEXT_COLOR: Color = Color::RGB(0xF7, 0x8C, 0x6C);
+
 // I really want so debugging panels.
 // Should probably invest in that.
 // Make it work automatically with Debug.
@@ -89,6 +98,7 @@ impl TransactionManager {
             i = self.transactions[i].parent_pointer;
         }
         self.transaction_pointer = i;
+        self.current_transaction += 1;
 
     }
 
@@ -116,6 +126,7 @@ impl TransactionManager {
                 }
             }
         }
+        self.current_transaction += 1;
     }
 
 }
@@ -214,7 +225,7 @@ impl Cursor {
     fn move_up(&mut self, text_buffer: &TextBuffer) -> EditAction {
         let new_line = self.0.saturating_sub(1);
         self.0 = new_line;
-        self.1 = min(self.1, line_length(text_buffer[new_line]));
+        self.1 = min(self.1, text_buffer.line_length(new_line));
         EditAction::CursorPosition(*self)
         // *self = Cursor(new_line, min(cursor_column, line_length(line_range[new_line])));
 
@@ -227,7 +238,7 @@ impl Cursor {
 
     fn move_down(&mut self, text_buffer: &TextBuffer) -> EditAction  {
         self.0 = min(self.0 + 1, text_buffer.line_count() -1);
-        self.1 = min(self.1, line_length(text_buffer[self.0]));
+        self.1 = min(self.1, text_buffer.line_length(self.0));
         EditAction::CursorPosition(*self)
 
         // Need to use this output to deal with scrolling down
@@ -237,8 +248,7 @@ impl Cursor {
     fn move_left(&mut self, text_buffer: &TextBuffer) -> EditAction  {
         let Cursor(cursor_line, cursor_column) = *self;
         if cursor_column == 0 && cursor_line != 0 {
-            let previous_line = text_buffer[cursor_line - 1];
-            let length = line_length(previous_line);
+            let length = text_buffer.line_length(cursor_line - 1);
             *self = Cursor(cursor_line.saturating_sub(1), length);
         } else {
             *self = Cursor(cursor_line, cursor_column.saturating_sub(1));
@@ -249,8 +259,8 @@ impl Cursor {
 
     fn move_right(&mut self, text_buffer: &TextBuffer) -> EditAction  {
         let Cursor(cursor_line, cursor_column) = *self;
-        if let Some((line_start, line_end)) = text_buffer.get_line(cursor_line) {
-            let length = line_length((*line_start, *line_end));
+        if let Some((_line_start, _line_end)) = text_buffer.get_line(cursor_line) {
+            let length = text_buffer.line_length(cursor_line);
             if cursor_column >= length {
                 if cursor_line + 1 < text_buffer.line_count() {
                     *self = Cursor(cursor_line + 1, 0);
@@ -291,7 +301,10 @@ impl EditorBounds{
         digit_count(text_buffer.line_count())
     }
     fn line_number_padding(&self, text_buffer: &TextBuffer) -> usize {
-        self.line_number_digits(text_buffer) * self.letter_width as usize + self.line_number_gutter_width + self.editor_left_margin + self.letter_width as usize
+        self.line_number_digits(text_buffer) * self.letter_width as usize
+            + self.line_number_gutter_width 
+            + self.editor_left_margin
+            + self.letter_width as usize
     }
 }
 
@@ -323,23 +336,13 @@ fn text_space_from_screen_space(scroller: &Scroller, mut x: usize, y: usize, tex
         return Some(Cursor(line_number, column_number));
     }
     if line_number > text_buffer.line_count() {
-        if let Some((start, end)) = text_buffer.last_line() {
-           return Some(Cursor(text_buffer.line_count() - 1, line_length((*start, *end))));
+        if text_buffer.last_line().is_some() {
+           return Some(Cursor(text_buffer.line_count() - 1, text_buffer.line_length(text_buffer.line_count() - 1)));
         }
 
     }
     None
 }
-
-
-
-
-// Move to TextBuffer
-fn line_length(line: (usize, usize)) -> usize {
-    line.1 - line.0
-}
-
-
 
 
 // TODO:
@@ -446,9 +449,9 @@ impl CursorContext {
         // Need to do sanity checks for cursor column
         if let Some(Cursor(cursor_line, cursor_column)) = self.cursor {
             match text_buffer.get_line(cursor_line) {
-                Some((start, end)) => {
+                Some((_start, end)) => {
                     if cursor_column > *end {
-                        self.cursor = Some(Cursor(cursor_line, line_length((*start, *end))));
+                        self.cursor = Some(Cursor(cursor_line, text_buffer.line_length(cursor_line)));
                     }
                 }
                 None => {
@@ -551,6 +554,7 @@ struct Renderer<'a> {
     bounds: EditorBounds,
 }
 
+
 impl<'a> Renderer<'a> {
     fn set_draw_color(&mut self, color: Color) {
         self.canvas.set_draw_color(color);
@@ -560,8 +564,9 @@ impl<'a> Renderer<'a> {
         self.canvas.clear();
     }
 
-    fn set_color_mod(&mut self, red: u8, green: u8, blue: u8) {
-        self.texture.set_color_mod(red, green, blue);
+    fn set_color_mod(&mut self, color: Color) {
+        let (r, g, b, _) = color.rgba();
+        self.texture.set_color_mod(r, g, b);
     }
 
     fn set_initial_rendering_location(&mut self, scroller: &Scroller) {
@@ -623,7 +628,7 @@ impl<'a> Renderer<'a> {
         let current_fps = fps.tick();
         // Do something better with this target
         self.target = Rect::new(window.width - (self.bounds.letter_width * 10) as i32, 0, self.bounds.letter_width as u32, self.bounds.letter_height as u32);
-        self.set_color_mod( 167, 174, 210);
+        self.set_color_mod(STANDARD_TEXT_COLOR);
         self.draw_string(&format!("fps: {}", current_fps))
     }
 
@@ -656,6 +661,7 @@ impl<'a> Renderer<'a> {
 
 #[derive(Debug, Clone)]
 struct Pane {
+    name: String,
     scroller: Scroller,
     cursor_context: CursorContext,
     text_buffer: TextBuffer,
@@ -717,7 +723,7 @@ impl Pane {
         self.text_buffer.tokenizer.skip_lines(starting_line, &self.text_buffer.chars);
 
         for line in starting_line as usize..number_of_lines {
-            renderer.set_color_mod(167, 174, 210);
+            renderer.set_color_mod(STANDARD_TEXT_COLOR);
             renderer.set_x(editor_left_margin as i32 + self.position.0 as i32);
 
             if self.width > renderer.bounds.line_number_padding(&self.text_buffer)  {
@@ -862,9 +868,9 @@ impl Pane {
                 } else if line == end_line {
                     end_column * renderer.bounds.letter_width as usize
                 } else if line == start_line {
-                    (line_length(self.text_buffer[line]) - start_column) * renderer.bounds.letter_width as usize
+                    (self.text_buffer.line_length(line) - start_column) * renderer.bounds.letter_width as usize
                 } else {
-                    line_length(self.text_buffer[line]) * renderer.bounds.letter_width
+                    self.text_buffer.line_length(line)  * renderer.bounds.letter_width
                 };
 
                 width = if start_x < line_number_padding as i32 + renderer.bounds.letter_width as i32 {
@@ -905,7 +911,6 @@ impl Pane {
             if let Some(token) = tokenizer.parse_single(&self.text_buffer.chars) {
                 let token = rust_specific_pass(token, &self.text_buffer.chars);
                 let color = color_for_token(&token, &self.text_buffer.chars);
-                
                 let text = from_utf8(match token {
                     RustSpecific::Keyword((s, e)) => &self.text_buffer.chars[s..e],
                     RustSpecific::Token(t) => {
@@ -954,8 +959,9 @@ impl Pane {
 
 
                 if let Some(token_start) = token_start {
+
                     let token = &text[token_start..token_end];
-                    renderer.set_color_mod(color.0, color.1, color.2);
+                    renderer.set_color_mod(color);
                     renderer.draw_string(token)?;
                 }
 
@@ -989,7 +995,7 @@ impl Pane {
 }
 
 fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCounter) -> Result<(), String> {
-    renderer.set_draw_color(Color::RGBA(42, 45, 62, 255));
+    renderer.set_draw_color(BACKGROUND_COLOR);
     renderer.clear();
     for pane in pane_manager.panes.iter_mut() {
         pane.draw(renderer)?;
@@ -1060,6 +1066,15 @@ impl TextBuffer {
         self.line_range.len()
     }
 
+    fn line_length(&self, line: usize) -> usize {
+        if let Some(line_range) = self.get_line(line) {
+            line_range.1 - line_range.0
+        } else {
+            // Should this be 0?
+            0
+        }
+    }
+
     fn delete_line(&mut self, line: usize) {
         self.line_range.remove(line);
     }
@@ -1115,6 +1130,12 @@ impl TextBuffer {
     fn insert_char(&mut self, cursor: Cursor, to_insert: &[u8]) -> EditAction {
         // This is assuming that to_insert is a single character.
         let Cursor(cursor_line, cursor_column) = cursor;
+        // TODO: If this line doesn't exist, I need to make it exist.
+        if self.line_range.len() <= cursor_line {
+            self.chars.extend(format!("\nerror {:?}, {}, {:?}, {:?}", self.line_range, cursor_line, cursor, from_utf8(to_insert)).as_bytes().to_vec());
+            self.parse_lines();
+            return EditAction::Noop;
+        }
         let line_start = self[cursor_line].0;
         let char_pos = line_start + cursor_column;
         self.chars.splice(char_pos..char_pos, to_insert.to_vec());
@@ -1383,6 +1404,7 @@ impl PaneManager {
             let height = (current_y - position_y) as usize;
 
             self.panes.push(Pane {
+                name: "temp".to_string(),
                 position: (position_x, position_y),
                 width: width,
                 height: height,
@@ -1537,7 +1559,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     (Keycode::A, Mod::LGUIMOD | Mod::RGUIMOD) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
                         // This is super ugly, fix.
-                            pane.cursor_context.set_selection(((0,0), (pane.text_buffer.line_count()-1, line_length(pane.text_buffer[pane.text_buffer.line_count()-1]))));
+                            pane.cursor_context.set_selection(((0,0), (pane.text_buffer.line_count()-1, pane.text_buffer.line_length(pane.text_buffer.line_count()-1))));
                         }
                     }
 
@@ -1700,14 +1722,14 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
 }
 
 
-fn color_for_token(token: &RustSpecific, input_bytes: &[u8]) -> (u8, u8, u8) {
+fn color_for_token(token: &RustSpecific, input_bytes: &[u8]) -> Color {
     match token {
-        RustSpecific::Keyword(_) => (194, 143, 249),
-        RustSpecific::Token(Token::Comment(_)) =>  (103, 110, 149),
+        RustSpecific::Keyword(_) => PURPLE_TEXT_COLOR,
+        RustSpecific::Token(Token::Comment(_)) =>  COMMENT_TEXT_COLOR,
         RustSpecific::Token(t) => {
             match t {
                 Token::Comment(_) => {
-                    (103, 110, 149)
+                    COMMENT_TEXT_COLOR
                 },
                 Token::OpenBracket | 
                 Token::CloseBracket | 
@@ -1716,21 +1738,24 @@ fn color_for_token(token: &RustSpecific, input_bytes: &[u8]) -> (u8, u8, u8) {
                 Token::OpenCurly | 
                 Token::CloseCurly | 
                 Token::Comma => {
-                    (130, 208, 241)
+                    LIGHT_BLUE_TEXT_COLOR
                 },
                 Token::Atom((s,_e)) => {
                     if input_bytes[*s].is_ascii_uppercase() {
-                        (194, 143, 249)
+                        PURPLE_TEXT_COLOR
                         
                     } else {
-                        (130, 170, 225)
+                        STANDARD_TEXT_COLOR
                     }
                 },
                 Token::String(_) => {
-                    (195, 232, 141)
+                    GREEN_TEXT_COLOR
                 },
+                Token::Integer(_) | Token::Float(_) => {
+                    ORANGE_TEXT_COLOR
+                }
                 _ => {
-                    (167, 174, 210)
+                    STANDARD_TEXT_COLOR
                 }
             }
         }
@@ -1791,7 +1816,27 @@ fn main() -> Result<(), String> {
         fps: 0,
     };
 
+    let mut transaction_text_buffer = TextBuffer {
+        chars: "".as_bytes().to_vec(),
+        line_range: vec![],
+        max_line_width_cache: 0,
+        tokenizer: Tokenizer::new(),
+    };
+    transaction_text_buffer.parse_lines();
+
+    let transaction_pane = Pane {
+        name: "transaction_pane".to_string(),
+        scroller: scroller.clone(),
+        cursor_context: cursor_context.clone(),
+        text_buffer: transaction_text_buffer,
+        position: (250, 650),
+        width: 500,
+        height: 500,
+        active: false,
+    };
+
     let pane1 = Pane {
+        name: "pane1".to_string(),
         scroller: scroller.clone(),
         cursor_context: cursor_context.clone(),
         text_buffer: text_buffer.clone(),
@@ -1802,6 +1847,7 @@ fn main() -> Result<(), String> {
     };
 
     let pane2 = Pane {
+        name: "pane2".to_string(),
         scroller,
         cursor_context,
         text_buffer,
@@ -1811,6 +1857,8 @@ fn main() -> Result<(), String> {
         active: false,
     };
 
+
+
     let mut renderer = Renderer {
         canvas,
         texture,
@@ -1819,7 +1867,7 @@ fn main() -> Result<(), String> {
     };
 
     let mut pane_manager = PaneManager {
-        panes: vec![pane1, pane2],
+        panes: vec![pane1, pane2, transaction_pane],
         active_pane: 0,
         scroll_active_pane: 0,
         window,
@@ -1835,6 +1883,14 @@ fn main() -> Result<(), String> {
 
 
     loop {
+        if let Some(transaction_pane) = pane_manager.panes.iter_mut().find(|p| p.name == "transaction_pane") {
+            transaction_pane.text_buffer.chars.clear();
+            transaction_pane.text_buffer.chars.extend(format!("current: {}, pointer: {}\n", transaction_manager.current_transaction, transaction_manager.transaction_pointer).as_bytes());
+            for transaction in transaction_manager.transactions.iter() {
+                transaction_pane.text_buffer.chars.extend(format!("{:?}\n", transaction).as_bytes());
+            }
+            transaction_pane.text_buffer.parse_lines();
+        }
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
         handle_events(&mut event_pump, &mut transaction_manager, &mut pane_manager, &renderer.bounds);
     }
