@@ -23,14 +23,14 @@ const ORANGE_TEXT_COLOR: Color = Color::RGB(0xF7, 0x8C, 0x6C);
 // Should probably invest in that.
 // Make it work automatically with Debug.
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Transaction {
     transaction_number: usize,
     parent_pointer: usize,
     action: EditAction,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TransactionManager {
     transactions: Vec<Transaction>,
     current_transaction: usize,
@@ -133,7 +133,7 @@ impl TransactionManager {
 
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum EditAction {
     Insert((usize, usize), String),
     Delete((usize,usize), String),
@@ -669,6 +669,7 @@ struct Pane {
     width: usize,
     height: usize,
     active: bool,
+    transaction_manager: TransactionManager,
 }
 
 // Thoughts:
@@ -1257,9 +1258,9 @@ impl PaneManager {
                 new_active_pane = i;
             }
         }
+        self.active_pane = new_active_pane;
+        self.panes.get_mut(self.active_pane).unwrap().set_active(true);
         if new_active_pane != self.active_pane {
-            self.active_pane = new_active_pane;
-            self.panes.get_mut(self.active_pane).unwrap().set_active(true);
             if let Some(pane) = self.panes.get_mut(old_active) {
                 pane.set_active(false);
             }
@@ -1417,6 +1418,7 @@ impl PaneManager {
                     max_line_width_cache: 0,
                     tokenizer: Tokenizer::new(),
                 },
+                transaction_manager: TransactionManager::new(),
             });
         }
     }
@@ -1425,7 +1427,6 @@ impl PaneManager {
 
 
 fn handle_events(event_pump: &mut sdl2::EventPump,
-                 transaction_manager: &mut TransactionManager,
                  pane_manager: &mut PaneManager,
                  bounds: &EditorBounds) {
     let mut is_text_input = false;
@@ -1516,8 +1517,8 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                                 let cursor_action = old_cursor.move_left(&pane.text_buffer);
                                 let action = pane.text_buffer.remove_char(current_cursor);
 
-                                transaction_manager.add_action(action);
-                                transaction_manager.add_action(cursor_action);
+                                pane.transaction_manager.add_action(action);
+                                pane.transaction_manager.add_action(cursor_action);
 
 
                                 pane.cursor_context.set_cursor(old_cursor);
@@ -1528,18 +1529,20 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
                             // refactor to be better
                             let action = pane.cursor_context.handle_insert(&[b'\n'], &mut pane.text_buffer);
-                            transaction_manager.add_action(action);
+                            pane.transaction_manager.add_action(action);
                             pane.cursor_context.start_of_line();
                         }
                     },
 
 
                     (Keycode::Z, key_mod) => {
+                        // I should think about the fact that I might not have an active editor
+                        // Should undo undo pane movement?
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
                             if key_mod == Mod::LGUIMOD || keymod == Mod::RGUIMOD {
-                                transaction_manager.undo(&mut pane.cursor_context, &mut pane.text_buffer);
+                                pane.transaction_manager.undo(&mut pane.cursor_context, &mut pane.text_buffer);
                             } else if key_mod == (Mod::LSHIFTMOD | Mod::LGUIMOD) {
-                                transaction_manager.redo(&mut pane.cursor_context, &mut pane.text_buffer);
+                                pane.transaction_manager.redo(&mut pane.cursor_context, &mut pane.text_buffer);
                             } else {
                                 is_text_input = true
                             }
@@ -1573,7 +1576,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         pane.cursor_context.clear_selection();
 
                         let action = pane.cursor_context.handle_insert(text.as_bytes(), &mut pane.text_buffer);
-                        transaction_manager.add_action(action);
+                        pane.transaction_manager.add_action(action);
                     }
                 }
             }
@@ -1808,7 +1811,6 @@ fn main() -> Result<(), String> {
         mouse_down: None,
         selection: None,
     };
-    let mut transaction_manager = TransactionManager::new();
 
     let mut fps = FpsCounter{
         start_time: Instant::now(),
@@ -1833,6 +1835,7 @@ fn main() -> Result<(), String> {
         width: 500,
         height: 500,
         active: false,
+        transaction_manager: TransactionManager::new(),
     };
 
     let pane1 = Pane {
@@ -1844,6 +1847,7 @@ fn main() -> Result<(), String> {
         width: 500,
         height: 500,
         active: true,
+        transaction_manager: TransactionManager::new(),
     };
 
     let pane2 = Pane {
@@ -1855,6 +1859,7 @@ fn main() -> Result<(), String> {
         width: 500,
         height: 500,
         active: false,
+        transaction_manager: TransactionManager::new(),
     };
 
 
@@ -1883,16 +1888,39 @@ fn main() -> Result<(), String> {
 
 
     loop {
-        if let Some(transaction_pane) = pane_manager.panes.iter_mut().find(|p| p.name == "transaction_pane") {
-            transaction_pane.text_buffer.chars.clear();
-            transaction_pane.text_buffer.chars.extend(format!("current: {}, pointer: {}\n", transaction_manager.current_transaction, transaction_manager.transaction_pointer).as_bytes());
-            for transaction in transaction_manager.transactions.iter() {
-                transaction_pane.text_buffer.chars.extend(format!("{:?}\n", transaction).as_bytes());
+        // This is wrong because I remove the transaction pane and then the active pane index is wrong.
+        println!("active {:?}", pane_manager.get_active_pane().map(|x| x.name.clone()));
+        let mut transaction_pane_index = None;
+        for (i, pane) in pane_manager.panes.iter().enumerate() {
+            if pane.name == "transaction_pane" {
+                transaction_pane_index = Some(i);
             }
-            transaction_pane.text_buffer.parse_lines();
         }
+
+        if let Some(i) = transaction_pane_index { 
+            let mut transaction_pane = pane_manager.panes(i);
+            transaction_pane.text_buffer.chars.clear();
+            
+            if let Some(active_pane) = pane_manager.get_active_pane_mut() {
+                let transaction_manager = &active_pane.transaction_manager;
+                
+                println!("active {:?}", active_pane.name);
+                transaction_pane.text_buffer.chars.extend(format!("current: {}, pointer: {}\n",
+                     transaction_manager.current_transaction,
+                     transaction_manager.transaction_pointer).as_bytes());
+
+                for transaction in active_pane.transaction_manager.transactions.iter() {
+                    transaction_pane.text_buffer.chars.extend(format!("{:?}\n", transaction).as_bytes());
+                }
+            }
+                
+            transaction_pane.text_buffer.parse_lines();
+            pane_manager.panes.insert(i, transaction_pane);
+        }
+
+
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
-        handle_events(&mut event_pump, &mut transaction_manager, &mut pane_manager, &renderer.bounds);
+        handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds);
     }
 }
 

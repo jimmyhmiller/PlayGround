@@ -35,6 +35,7 @@ enum Constant {
     Class{tag: u8, name_index: u16},
     UTF8{tag: u8, length: u16, string: String},
     NameAndType{tag:u8, name_index: u16, descriptor_index: u16},
+    Noop,
 }
 
 fn parse_single_constant(reader: &mut BinaryReader) -> io::Result<Constant> {
@@ -76,7 +77,8 @@ fn parse_single_constant(reader: &mut BinaryReader) -> io::Result<Constant> {
             Constant::NameAndType{tag, name_index, descriptor_index}
         }
         _ => {
-            panic!("Didn't handle {:?}", tag)
+            Constant::Noop
+            // panic!("Didn't handle {:?}", tag)
         }
     })
 }
@@ -123,7 +125,7 @@ impl<'a> BinaryReader<'a> {
 // Feel like this making multiple buffers thing is a bad idea.
 // Need to abstract this with a single buffer
 fn read_class_file() -> io::Result<ClassFile> {
-    let f = File::open("./Hello.class").unwrap();
+    let f = File::open("/Users/jimmyhmiller/Desktop/test-java-stuff/lang/makeFn.class").unwrap();
     let mut reader = BufReader::new(f);
     let mut binary_reader = BinaryReader{
         reader: &mut reader,
@@ -155,14 +157,14 @@ fn read_class_file() -> io::Result<ClassFile> {
 
     // need to parse out fields, methods and attributes next.
 
-    // let fields_count = binary_reader.read_u16()?;
-    // let fields = parse_constants(fields_count, &mut binary_reader)?;
-    // println!("Finished fields");
+    let fields_count = binary_reader.read_u16()?;
+    let fields = parse_constants(fields_count, &mut binary_reader)?;
+    println!("Finished fields");
 
     
-    // let methods_count = binary_reader.read_u16()?;
-    // let methods = parse_constants(methods_count, &mut binary_reader)?;
-    // println!("Finished methods");
+    let methods_count = binary_reader.read_u16()?;
+    let methods = parse_constants(methods_count, &mut binary_reader)?;
+    println!("Finished methods");
 
     // let attributes_count = binary_reader.read_u16()?;
     // let attributes =  parse_constants(attributes_count, &mut binary_reader)?;
@@ -181,15 +183,15 @@ fn read_class_file() -> io::Result<ClassFile> {
         super_class,
         interfaces_count,
         interfaces,
-        fields_count: 0,
-        fields: vec![],
-        methods_count: 0,
-        methods: vec![],
+        fields_count,
+        fields,
+        methods_count,
+        methods,
         attributes_count: 0,
         attributes: vec![],
     })
 }
 
 fn main() {
-    println!("{:?}", read_class_file().expect("failed reading class"));
+    println!("{:#?}", read_class_file().expect("failed reading class"));
 }
