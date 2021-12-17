@@ -18,6 +18,7 @@ const LIGHT_BLUE_TEXT_COLOR: Color = Color::RGB(0x89,0xDD,0xFF);
 const GREEN_TEXT_COLOR: Color = Color::RGB(0xC3,0xE8, 0x8D);
 const COMMENT_TEXT_COLOR: Color = Color::RGB(0x67, 0x6E, 0x95);
 const ORANGE_TEXT_COLOR: Color = Color::RGB(0xF7, 0x8C, 0x6C);
+const CURSOR_COLOR: Color = Color::RGBA(255, 204, 0, 255);
 
 // I really want so debugging panels.
 // Should probably invest in that.
@@ -612,6 +613,11 @@ impl<'a> Renderer<'a> {
         self.target.set_x(x);
     }
 
+    fn set_y(&mut self, x: i32) {
+        self.target.set_y(x);
+    }
+
+
     fn char_position_in_atlas(&self, c: char) -> Rect {
         Rect::new(self.bounds.letter_width as i32 * (c as i32 - 33), 0, self.bounds.letter_width as u32, self.bounds.letter_height as u32)
     }
@@ -670,6 +676,7 @@ struct Pane {
     height: usize,
     active: bool,
     transaction_manager: TransactionManager,
+    editing_name: bool,
 }
 
 // Thoughts:
@@ -743,15 +750,13 @@ impl Pane {
         }
 
 
-
-
-
         renderer.set_draw_color(Color::RGBA(42, 45, 62, 255));
 
         // Ummm, why don't I just draw an unfilled rectangle?
         // Is it becasue I want some sides different?
         // probably not for part of this.
         // top
+        
         renderer.fill_rect(
             &Rect::new(
                 self.position.0 as i32, 
@@ -803,7 +808,22 @@ impl Pane {
                 self.position.1 + self.height as i32, 
                 self.width as u32, 
                 renderer.bounds.letter_height as u32))?;
-        
+
+
+        if self.editing_name {
+            let padding = 5;
+            renderer.set_draw_color(CURSOR_COLOR);
+            renderer.draw_rect(&Rect::new(
+                self.position.0 as i32 + self.width as i32 - (renderer.bounds.letter_width * (self.name.len() + 2)) as i32 - padding,
+                self.position.1 as i32 - renderer.bounds.letter_height as i32,
+                renderer.bounds.letter_width as u32 * (self.name.len() + 1) as u32 + padding as u32,
+                renderer.bounds.letter_height as u32 + padding as u32))?;
+        }
+        renderer.set_color_mod(STANDARD_TEXT_COLOR);
+        renderer.set_x(self.position.0 as i32 + self.width as i32 - (renderer.bounds.letter_width * (self.name.len() + 3)) as i32);
+        renderer.set_y(self.position.1 as i32 - renderer.bounds.letter_height as i32);
+        renderer.draw_string(&self.name)?;
+
         // TODO: do something better
         self.text_buffer.tokenizer.position = 0;
         Ok(())
@@ -833,7 +853,7 @@ impl Pane {
                 let cursor_x = cursor.1 as i32  * renderer.bounds.letter_width as i32 + line_number_padding as i32 + self.position.0 as i32;
                 let cursor_y = renderer.target.y();
 
-                renderer.set_draw_color(Color::RGBA(255, 204, 0, 255));
+                renderer.set_draw_color(CURSOR_COLOR);
                 renderer.fill_rect(&Rect::new(cursor_x as i32, cursor_y as i32, 2, renderer.bounds.letter_height as u32))?
             }
         }
@@ -1233,7 +1253,7 @@ struct PaneManager {
 impl PaneManager {
 
     fn delete_pane_at_mouse(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) {
-        if let Some(closest_pane) = self.get_pane_at_mouse(mouse_pos, bounds) {
+        if let Some(closest_pane) = self.get_pane_index_at_mouse(mouse_pos, bounds) {
             self.panes.remove(closest_pane);
         }
     }
@@ -1267,11 +1287,18 @@ impl PaneManager {
         }
     }
 
-    fn get_pane_at_mouse(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<usize> {
+    fn get_pane_index_at_mouse(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<usize> {
         for (i, pane) in self.panes.iter().enumerate().rev() {
             if pane.is_mouse_over(mouse_pos, bounds) {
                 return Some(i);
             }
+        }
+        None
+    }
+
+    fn get_pane_at_mouse_mut(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<&mut Pane> {
+        if let Some(i) = self.get_pane_index_at_mouse(mouse_pos, bounds) {
+            return self.panes.get_mut(i);
         }
         None
     }
@@ -1307,13 +1334,17 @@ impl PaneManager {
     }
 
     fn set_dragging_start(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> bool {
-        if let Some(i) = self.get_pane_at_mouse(mouse_pos, bounds) {
+        if let Some(i) = self.get_pane_index_at_mouse(mouse_pos, bounds) {
             let pane = self.panes.remove(i);
             self.panes.push(pane);
-            let i = self.panes.len() - 1;
+
+            let new_i = self.panes.len() - 1;
+            if self.active_pane == i {
+                self.active_pane = new_i;
+            }
             self.dragging_start = mouse_pos;
-            self.dragging_pane = Some(i);
-            self.dragging_pane_start = self.panes[i].position;
+            self.dragging_pane = Some(new_i);
+            self.dragging_pane_start = self.panes[new_i].position;
             return true
         }
         false
@@ -1329,13 +1360,11 @@ impl PaneManager {
     }
 
     fn stop_dragging(&mut self) {
-
-
         self.dragging_pane = None;
     }
 
     fn set_resize_start(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> bool {
-        if let Some(i) = self.get_pane_at_mouse(mouse_pos, bounds) {
+        if let Some(i) = self.get_pane_index_at_mouse(mouse_pos, bounds) {
             self.resize_start = mouse_pos;
             self.resize_pane = Some(i);
             self.update_resize_size(mouse_pos);
@@ -1419,8 +1448,26 @@ impl PaneManager {
                     tokenizer: Tokenizer::new(),
                 },
                 transaction_manager: TransactionManager::new(),
+                editing_name: false,
             });
+            self.active_pane = self.panes.len() - 1;
         }
+    }
+
+    fn remove(&mut self, i: usize) -> Pane {
+        // Should swap_remove but more complicated
+        let pane = self.panes.remove(i);
+        if i < self.active_pane {
+            self.active_pane -= 1;
+        }
+        return pane;
+    }
+
+    fn insert(&mut self, i: usize, pane: Pane) {
+        if i <= self.active_pane {
+            self.active_pane += 1;
+        }
+        self.panes.insert(i, pane);
     }
 
 }
@@ -1480,7 +1527,13 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     },
                     (Keycode::Backspace, _) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
+
+                            if pane.editing_name {
+                                pane.name.pop();
+                                continue;
+                            }
                             // Need to deal with this in a nicer way
+                            
                             if let Some(current_selection) = pane.cursor_context.selection {
                                 let (start, end) = current_selection;
                                 let (start_line, start_column) = start;
@@ -1527,6 +1580,11 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     }
                     (Keycode::Return, _) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
+
+                            if pane.editing_name {
+                                pane.editing_name = false;
+                                continue;
+                            }
                             // refactor to be better
                             let action = pane.cursor_context.handle_insert(&[b'\n'], &mut pane.text_buffer);
                             pane.transaction_manager.add_action(action);
@@ -1571,7 +1629,9 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
             }
             Event::TextInput{text, ..} => {
                 if let Some(pane) = pane_manager.get_active_pane_mut() {
-                    if is_text_input {
+                    if is_text_input && pane.editing_name {
+                        pane.name.push_str(&text);
+                    } else if is_text_input {
                         // TODO: Replace with actually deleting the selection.
                         pane.cursor_context.clear_selection();
 
@@ -1588,21 +1648,22 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
             Event::MouseButtonDown { x, y, .. } => {
                 if ctrl_is_pressed && alt_is_pressed && cmd_is_pressed {
                     pane_manager.delete_pane_at_mouse((x, y), bounds);
-                }
-                else if ctrl_is_pressed && alt_is_pressed {
+                } else if ctrl_is_pressed && cmd_is_pressed {
+                    if let Some(pane) = pane_manager.get_pane_at_mouse_mut((x,y), bounds) {
+                        pane.editing_name = true;
+                    }
+                } else if ctrl_is_pressed && alt_is_pressed {
                     let found = pane_manager.set_resize_start((x,y), bounds);
                     if !found {
                         pane_manager.set_create_start((x,y));
                     }
                 } else if cmd_is_pressed && alt_is_pressed {
-                if let Some(i) = pane_manager.get_pane_at_mouse((x, y), bounds) {
-                    let mut pane = pane_manager.panes[i].clone();
-                    pane.position = (pane.position.0 + 20, pane.position.1 + 20);
-                    pane_manager.panes.push(pane);
-                }
-                
-                
-                }   else if ctrl_is_pressed {
+                    if let Some(i) = pane_manager.get_pane_index_at_mouse((x, y), bounds) {
+                        let mut pane = pane_manager.panes[i].clone();
+                        pane.position = (pane.position.0 + 20, pane.position.1 + 20);
+                        pane_manager.panes.push(pane);
+                    }
+                } else if ctrl_is_pressed {
                     let found = pane_manager.set_dragging_start((x, y), bounds);
                     if !found {
                         pane_manager.set_create_start((x,y));
@@ -1617,6 +1678,15 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         pane.cursor_context.clear_selection();
                     }
                    
+                }
+
+                if !(ctrl_is_pressed && cmd_is_pressed) {
+                    // Really I want this to work even if this is pressed, just for all panes
+                    // that are not at the mouse point
+                    // But this is a temporary binding anyways.
+                    for pane in pane_manager.panes.iter_mut() {
+                        pane.editing_name = false;
+                    }
                 }
             }
 
@@ -1745,8 +1815,7 @@ fn color_for_token(token: &RustSpecific, input_bytes: &[u8]) -> Color {
                 },
                 Token::Atom((s,_e)) => {
                     if input_bytes[*s].is_ascii_uppercase() {
-                        PURPLE_TEXT_COLOR
-                        
+                        BLUE_TEXT_COLOR
                     } else {
                         STANDARD_TEXT_COLOR
                     }
@@ -1818,26 +1887,6 @@ fn main() -> Result<(), String> {
         fps: 0,
     };
 
-    let mut transaction_text_buffer = TextBuffer {
-        chars: "".as_bytes().to_vec(),
-        line_range: vec![],
-        max_line_width_cache: 0,
-        tokenizer: Tokenizer::new(),
-    };
-    transaction_text_buffer.parse_lines();
-
-    let transaction_pane = Pane {
-        name: "transaction_pane".to_string(),
-        scroller: scroller.clone(),
-        cursor_context: cursor_context.clone(),
-        text_buffer: transaction_text_buffer,
-        position: (250, 650),
-        width: 500,
-        height: 500,
-        active: false,
-        transaction_manager: TransactionManager::new(),
-    };
-
     let pane1 = Pane {
         name: "pane1".to_string(),
         scroller: scroller.clone(),
@@ -1848,6 +1897,7 @@ fn main() -> Result<(), String> {
         height: 500,
         active: true,
         transaction_manager: TransactionManager::new(),
+        editing_name: false,
     };
 
     let pane2 = Pane {
@@ -1860,6 +1910,7 @@ fn main() -> Result<(), String> {
         height: 500,
         active: false,
         transaction_manager: TransactionManager::new(),
+        editing_name: false,
     };
 
 
@@ -1872,7 +1923,7 @@ fn main() -> Result<(), String> {
     };
 
     let mut pane_manager = PaneManager {
-        panes: vec![pane1, pane2, transaction_pane],
+        panes: vec![pane1, pane2],
         active_pane: 0,
         scroll_active_pane: 0,
         window,
@@ -1888,39 +1939,42 @@ fn main() -> Result<(), String> {
 
 
     loop {
-        // This is wrong because I remove the transaction pane and then the active pane index is wrong.
-        println!("active {:?}", pane_manager.get_active_pane().map(|x| x.name.clone()));
-        let mut transaction_pane_index = None;
-        for (i, pane) in pane_manager.panes.iter().enumerate() {
-            if pane.name == "transaction_pane" {
-                transaction_pane_index = Some(i);
-            }
-        }
+        println!("fps: {}", fps.fps);
+        handle_transaction_pane(&mut pane_manager);
+        draw(&mut renderer, &mut pane_manager, &mut fps)?;
+        handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds);
+    }
+}
 
-        if let Some(i) = transaction_pane_index { 
-            let mut transaction_pane = pane_manager.panes(i);
+// I need to think about how to generalize this
+fn handle_transaction_pane(pane_manager: &mut PaneManager) {
+    let mut transaction_pane_index = None;
+    for (i, pane) in pane_manager.panes.iter().enumerate() {
+        if pane.name == "transaction_pane" {
+            transaction_pane_index = Some(i);
+        }
+    }
+    if Some(pane_manager.active_pane) != transaction_pane_index {
+
+        if let Some(i) = transaction_pane_index  { 
+            let mut transaction_pane = pane_manager.remove(i);
             transaction_pane.text_buffer.chars.clear();
-            
+        
             if let Some(active_pane) = pane_manager.get_active_pane_mut() {
                 let transaction_manager = &active_pane.transaction_manager;
-                
-                println!("active {:?}", active_pane.name);
+            
                 transaction_pane.text_buffer.chars.extend(format!("current: {}, pointer: {}\n",
-                     transaction_manager.current_transaction,
-                     transaction_manager.transaction_pointer).as_bytes());
+                    transaction_manager.current_transaction,
+                    transaction_manager.transaction_pointer).as_bytes());
 
                 for transaction in active_pane.transaction_manager.transactions.iter() {
                     transaction_pane.text_buffer.chars.extend(format!("{:?}\n", transaction).as_bytes());
                 }
             }
-                
+            
             transaction_pane.text_buffer.parse_lines();
-            pane_manager.panes.insert(i, transaction_pane);
+            pane_manager.insert(i, transaction_pane);
         }
-
-
-        draw(&mut renderer, &mut pane_manager, &mut fps)?;
-        handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds);
     }
 }
 
