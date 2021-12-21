@@ -42,6 +42,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
 
 [[package]]
+name = "c_vec"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdd7a427adc0135366d99db65b36dae9237130997e560ed61118041fb72be6e8"
+
+[[package]]
 name = "cc"
 version = "1.0.72"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -161,6 +167,7 @@ version = "0.1.0"
 dependencies = [
  "cocoa-foundation",
  "native-dialog",
+ "nonblock",
  "sdl2",
  "syntect",
 ]
@@ -306,6 +313,15 @@ dependencies = [
  "wfd",
  "which",
  "winapi",
+]
+
+[[package]]
+name = "nonblock"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "796141c8358fc4ce8cbe66b71b57c52eb510ee13289695e43db6843d6f202173"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -465,6 +481,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71f9a9034e52fc021f0e9e156d875d8ff06ddb48b3d4778ceb2f207de9692a95"
 dependencies = [
  "bitflags",
+ "c_vec",
  "lazy_static",
  "libc",
  "sdl2-sys",

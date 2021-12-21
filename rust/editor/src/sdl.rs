@@ -8,6 +8,7 @@ pub fn setup_sdl(width: usize, height: usize) -> Result<(sdl2::ttf::Sdl2TtfConte
     let sdl_window = sdl_context
         .video()?
         .window("Example", width as u32, height as u32)
+        // .opengl()
         .resizable()
         .build()
         .unwrap();
@@ -18,6 +19,7 @@ pub fn setup_sdl(width: usize, height: usize) -> Result<(sdl2::ttf::Sdl2TtfConte
         .present_vsync()
         .build()
         .unwrap();
+
 
     let event_pump = sdl_context.event_pump()?;
 

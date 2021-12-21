@@ -1,8 +1,10 @@
-use std::{cmp::{max, min}, fs, ops::{Index, IndexMut, Neg, RangeBounds}, str::from_utf8, time::Instant};
+use std::{cmp::{max, min}, fs, ops::{Index, IndexMut, Neg, RangeBounds}, str::from_utf8, time::Instant, convert::TryInto, process::{Command, Stdio}};
 use std::fmt::Debug;
 
+use nonblock::NonBlockingReader;
 use sdl2::{event::{Event, WindowEvent}, keyboard::{Keycode, Mod, Scancode}, mouse::SystemCursor, pixels::Color, rect::Rect, render::{Canvas, Texture}, video::{self}};
 use tokenizer::{Tokenizer, rust_specific_pass, RustSpecific, Token};
+use  sdl2::gfx::primitives::DrawRenderer;
 
 
 mod native;
@@ -132,6 +134,10 @@ impl TransactionManager {
 
 }
 
+#[derive(Debug)]
+enum SideEffectAction {
+    Play(String),
+}
 
 
 #[derive(Debug, Clone)]
@@ -158,6 +164,7 @@ impl EditAction  {
             EditAction::Delete((start, end), text_to_delete) => {
                 let mut new_position = Cursor(*start, *end);
                 new_position.move_left(text_buffer);
+                // I have a panic here
                 text_buffer.insert_char(new_position, text_to_delete.as_bytes());
                 new_position.move_right(text_buffer);
                 cursor_context.set_cursor(new_position);
@@ -553,10 +560,16 @@ struct Renderer<'a> {
     texture: Texture<'a>,
     target: Rect,
     bounds: EditorBounds,
+    system_cursor: sdl2::mouse::Cursor,
 }
 
 
 impl<'a> Renderer<'a> {
+
+    fn draw_triangle(&mut self, x: i16, y: i16, color: Color) -> Result<(), String> {
+        self.canvas.filled_trigon(x, y, x, y+10, x+5, y+5, color)
+    }
+
     fn set_draw_color(&mut self, color: Color) {
         self.canvas.set_draw_color(color);
     }
@@ -648,22 +661,31 @@ impl<'a> Renderer<'a> {
         Ok(())
     }
 
-    // This makes me question what the responsibilities of this renderer should be.
-    // If it is drawing things like the cursor, the line numbers, the text, the column line, etc,
-    // then we need multiple of these, but now we are singularly presenting the canvas.
-    // Feels a bit strange.
-    // Also, the bounds now would need to change per drawing area, but we set the bounds.
-    // Is there a way to make this not own the canvas?
-    // Or should I move these drawing methods out to something like a "Pane" and just pass the renderer?
-    // Really not sure yet.
-    // After some thought, I definitely think pane is the correct place for these to live.
     fn present(&mut self) {
         self.canvas.present();
     }
 
+   fn set_cursor_pointer(&mut self) {
+        self.system_cursor = sdl2::mouse::Cursor::from_system(SystemCursor::Hand).unwrap();
+        self.system_cursor.set();
+    }
+
+
+   fn set_cursor_ibeam(&mut self) {
+        self.system_cursor = sdl2::mouse::Cursor::from_system(SystemCursor::IBeam).unwrap();
+        self.system_cursor.set();
+    }
 
 
 }
+
+fn in_square(mouse_pos: (i32, i32), square_pos: (i32, i32), square_size: i32) -> bool {
+    let (x, y) = mouse_pos;
+    let (x_pos, y_pos) = square_pos;
+    let size = square_size;
+    x >= x_pos && x <= x_pos + size && y >= y_pos && y <= y_pos + size
+}
+
 
 #[derive(Debug, Clone)]
 struct Pane {
@@ -677,6 +699,7 @@ struct Pane {
     active: bool,
     transaction_manager: TransactionManager,
     editing_name: bool,
+    mouse_pos: Option<(i32, i32)>,
 }
 
 // Thoughts:
@@ -704,6 +727,9 @@ impl Pane {
     }
 
     fn draw(&mut self, renderer: &mut Renderer) -> Result<(), String> {
+        // It would be great if we normalized the drawing here
+        // to be relative to the pane itself.
+        // Could simplify quite a lot.
         let editor_left_margin = renderer.bounds.editor_left_margin;
         let line_number_padding = renderer.bounds.line_number_padding(&self.text_buffer);
         let line_number_digits = renderer.bounds.line_number_digits(&self.text_buffer);
@@ -718,6 +744,8 @@ impl Pane {
                 self.height as u32
             )
         )?;
+
+        
 
 
         renderer.set_initial_rendering_location(&self.scroller);
@@ -823,6 +851,24 @@ impl Pane {
         renderer.set_x(self.position.0 as i32 + self.width as i32 - (renderer.bounds.letter_width * (self.name.len() + 3)) as i32);
         renderer.set_y(self.position.1 as i32 - renderer.bounds.letter_height as i32);
         renderer.draw_string(&self.name)?;
+
+        // I hate that this requires i16.
+        // Will this cause issues if I allow scrolling?
+        fn into_i16(x: i32) -> i16 {
+            x.try_into().unwrap()
+        }
+        let play_button_x = self.position.0 + renderer.bounds.letter_width as i32;
+        let play_button_y = self.position.1 - renderer.bounds.letter_height as i32 + 4;
+
+        renderer.draw_triangle(into_i16(play_button_x),into_i16(play_button_y), STANDARD_TEXT_COLOR)?;
+
+        if let Some(mouse_pos) = self.mouse_pos {
+            if in_square(mouse_pos, (play_button_x, play_button_y), 10) {
+                renderer.set_cursor_pointer();
+            }
+        }
+       
+        
 
         // TODO: do something better
         self.text_buffer.tokenizer.position = 0;
@@ -1010,6 +1056,26 @@ impl Pane {
 
     fn set_active(&mut self, active: bool) {
         self.active = active;
+    }
+
+    fn mouse_over_play_button(&self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> bool {
+        // probably better to make this work with adjusted positions
+        let play_button_x = self.position.0 + bounds.letter_width as i32;
+        let play_button_y = self.position.1 - bounds.letter_height as i32 + 4;
+        in_square(mouse_pos, (play_button_x, play_button_y), 10)
+    }
+
+    fn on_click(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<SideEffectAction> {
+        if self.mouse_over_play_button(mouse_pos, bounds) {
+            Some(SideEffectAction::Play(self.name.clone()))
+        } else {
+            let (x, y) = self.adjust_position(mouse_pos.0, mouse_pos.1);
+            self.cursor_context.move_cursor_from_screen_position(&self.scroller, x, y, &self.text_buffer, bounds);
+            self.cursor_context.mouse_down();
+            self.cursor_context.clear_selection();
+            None
+        }
+      
     }
 
 
@@ -1252,6 +1318,12 @@ struct PaneManager {
 
 impl PaneManager {
 
+    fn set_mouse_pos(&mut self, mouse_pos: (i32, i32)) {
+        if let Some(pane) = self.panes.get_mut(self.scroll_active_pane) {
+            pane.mouse_pos = Some(mouse_pos);
+        }
+    }
+    
     fn delete_pane_at_mouse(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) {
         if let Some(closest_pane) = self.get_pane_index_at_mouse(mouse_pos, bounds) {
             self.panes.remove(closest_pane);
@@ -1268,6 +1340,7 @@ impl PaneManager {
         if new_active_pane != self.scroll_active_pane {
             self.scroll_active_pane = new_active_pane;
         }
+        self.set_mouse_pos(mouse_pos)
     }
 
     fn set_active_from_click_coords(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) {
@@ -1409,23 +1482,46 @@ impl PaneManager {
         }
     }
 
+    fn create_pane_raw(&mut self, pane_name: String, position: (i32, i32), width: usize, height: usize) -> usize{
+        // This is duplicate code
+        let scroller = Scroller {
+            offset_y: 0,
+            offset_x: 0,
+            scroll_speed: 5,
+        };
+
+        let cursor_context = CursorContext {
+            cursor: None,
+            mouse_down: None,
+            selection: None, 
+        };
+
+        self.panes.push(Pane {
+            name: pane_name,
+            position,
+            width,
+            height,
+            active: true,
+            scroller,
+            cursor_context,
+            text_buffer: TextBuffer {
+                line_range: vec![(0,0)],
+                chars: vec![],
+                max_line_width_cache: 0,
+                tokenizer: Tokenizer::new(),
+            },
+            mouse_pos: None,
+            transaction_manager: TransactionManager::new(),
+            editing_name: false,
+        });
+        self.panes.len() - 1
+    }
+
     fn create_pane(&mut self) {
         if self.create_pane_activated {
             self.create_pane_activated = false;
 
-            // This is duplicate code
-            let scroller = Scroller {
-                offset_y: 0,
-                offset_x: 0,
-                scroll_speed: 5,
-            };
-
-            let cursor_context = CursorContext {
-                cursor: None,
-                mouse_down: None,
-                selection: None, 
-            };
-
+            
             let position_x = min(self.create_pane_start.0, self.create_pane_current.0);
             let position_y = min(self.create_pane_start.1, self.create_pane_current.1);
             let current_x = max(self.create_pane_start.0, self.create_pane_current.0);
@@ -1433,23 +1529,7 @@ impl PaneManager {
             let width = (current_x - position_x) as usize;
             let height = (current_y - position_y) as usize;
 
-            self.panes.push(Pane {
-                name: "temp".to_string(),
-                position: (position_x, position_y),
-                width: width,
-                height: height,
-                active: true,
-                scroller,
-                cursor_context,
-                text_buffer: TextBuffer {
-                    line_range: vec![(0,0)],
-                    chars: vec![],
-                    max_line_width_cache: 0,
-                    tokenizer: Tokenizer::new(),
-                },
-                transaction_manager: TransactionManager::new(),
-                editing_name: false,
-            });
+            self.create_pane_raw("temp".to_string(), (position_x, position_y), width, height);
             self.active_pane = self.panes.len() - 1;
         }
     }
@@ -1470,13 +1550,39 @@ impl PaneManager {
         self.panes.insert(i, pane);
     }
 
+
+    fn get_pane_mut(&mut self, index: usize) -> Option<&mut Pane> {
+        self.panes.get_mut(index)
+    }
+
+    fn get_pane_by_name_mut(&mut self, pane_name: String) -> Option<&mut Pane> {
+        for pane in self.panes.iter_mut() {
+            if pane.name == pane_name {
+                return Some(pane);
+            }
+        }
+        None
+    }
+
+    fn get_pane_by_name(&mut self, pane_name: String) -> Option<&Pane> {
+        for pane in self.panes.iter() {
+            if pane.name == pane_name {
+                return Some(pane);
+            }
+        }
+        None
+    }
+
 }
 
 
 fn handle_events(event_pump: &mut sdl2::EventPump,
                  pane_manager: &mut PaneManager,
-                 bounds: &EditorBounds) {
+                 bounds: &EditorBounds) -> Vec<SideEffectAction> {
     let mut is_text_input = false;
+
+    // Is allocating here bad?
+    let mut actions: Vec<SideEffectAction> = vec![];
 
     // let text_buffer = &mut pane.text_buffer;
     // let cursor_context = &mut pane.cursor_context;
@@ -1672,10 +1778,9 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
 
                     pane_manager.set_active_from_click_coords((x, y), bounds);
                     if let Some(pane) = pane_manager.get_active_pane_mut() {
-                        let (x, y) = pane.adjust_position(x, y);
-                        pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer, bounds);
-                        pane.cursor_context.mouse_down();
-                        pane.cursor_context.clear_selection();
+                        pane.on_click((x, y), bounds).map(|action| {
+                            actions.push(action);
+                        });
                     }
                    
                 }
@@ -1790,8 +1895,8 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
         if let Some(pane) = pane_manager.get_active_pane_mut() {
             pane.cursor_context.fix_cursor(&pane.text_buffer);
         }
-        
     }
+    actions  
 }
 
 
@@ -1847,7 +1952,7 @@ fn main() -> Result<(), String> {
     let (mut texture, letter_width, letter_height) = sdl::draw_font_texture(&texture_creator, ttf_context)?;
     texture.set_color_mod(167, 174, 210);
 
-    // For some reason as soon as I extract this into a function, it doesn't work.
+    // If this gets dropped, the cursor resets.
     let cursor = sdl2::mouse::Cursor::from_system(SystemCursor::IBeam).unwrap();
     cursor.set();
 
@@ -1896,6 +2001,7 @@ fn main() -> Result<(), String> {
         width: 500,
         height: 500,
         active: true,
+        mouse_pos: None,
         transaction_manager: TransactionManager::new(),
         editing_name: false,
     };
@@ -1909,6 +2015,7 @@ fn main() -> Result<(), String> {
         width: 500,
         height: 500,
         active: false,
+        mouse_pos: None,
         transaction_manager: TransactionManager::new(),
         editing_name: false,
     };
@@ -1920,6 +2027,7 @@ fn main() -> Result<(), String> {
         texture,
         target: Rect::new(0, 0, 0, 0),
         bounds,
+        system_cursor: cursor,
     };
 
     let mut pane_manager = PaneManager {
@@ -1939,10 +2047,70 @@ fn main() -> Result<(), String> {
 
 
     loop {
-        println!("fps: {}", fps.fps);
+        renderer.set_cursor_ibeam();
         handle_transaction_pane(&mut pane_manager);
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
-        handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds);
+        let actions = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds);
+        for action in actions {
+            handle_action(&mut pane_manager, action);
+        }
+    }
+}
+
+fn handle_action(pane_manager: &mut PaneManager, action: SideEffectAction) {
+    match action {
+        SideEffectAction::Play(pane_name) => {
+            println!("Playing {}", pane_name);
+            // TODO: think about multiple panes of same name
+            let pane_contents = {
+                if let Some(pane) = pane_manager.get_pane_by_name_mut(pane_name.clone()) {
+                    Some(from_utf8(&pane.text_buffer.chars).unwrap().to_string())
+                } else {
+                    None
+                }
+            };
+
+            if let Some(pane_contents) = pane_contents{
+               
+                let output_pane_name = format!("{}-output", pane_name).to_string();
+                let output_pane = {
+                    let mut existing_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
+                    if existing_pane.is_none() {
+                        let pane_index = pane_manager.create_pane_raw(output_pane_name, (0, 0), 300, 300);
+                        existing_pane =pane_manager.get_pane_mut(pane_index)
+                    }
+                    existing_pane
+                }.unwrap();
+                
+                let mut command = pane_contents;
+                // need to handle error
+                let child = Command::new(format!("bash"))
+                    .arg("-c")
+                    .arg(command)
+                    .stdout(Stdio::piped())
+                    .spawn();
+
+                match child {
+                    Ok(mut child) => {
+                        let stdout = child.stdout.take().unwrap();
+                        let mut noblock_stdout = NonBlockingReader::from_fd(stdout).unwrap();
+                        // TODO: Make this actually non-blocking
+                        let mut buf = String::new();
+                        while !noblock_stdout.is_eof() {
+                            noblock_stdout.read_available_to_string(&mut buf).unwrap();
+                        }
+                        output_pane.text_buffer.chars.clear();
+                        output_pane.text_buffer.chars.extend(buf.as_bytes().to_vec());
+                        output_pane.text_buffer.parse_lines();
+                    } 
+                    Err(e) => {
+                        output_pane.text_buffer.chars.clear();
+                        output_pane.text_buffer.chars.extend(format!("error {:?}", e).as_bytes().to_vec());
+                        output_pane.text_buffer.parse_lines();
+                    }
+                } 
+            }
+        },
     }
 }
 
