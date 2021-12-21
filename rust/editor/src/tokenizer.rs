@@ -1,4 +1,4 @@
-use std::str::from_utf8;
+use std::{str::from_utf8, cmp::min};
 
 #[derive(Debug)]
 pub enum Token {
@@ -104,7 +104,7 @@ impl<'a> Tokenizer {
     
     fn parse_comment(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
-        while !self.is_newline(input_bytes) {
+        while !self.at_end(input_bytes) && !self.is_newline(input_bytes) {
             self.consume();
         }
         // self.consume();
@@ -138,7 +138,9 @@ impl<'a> Tokenizer {
             self.consume();
         }
         // TODO: Deal with escapes
-        self.consume(); // skip closing quote
+        if !self.at_end(input_bytes) {
+            self.consume();
+        }
         Token::String((start, self.position))
     }
 
@@ -209,10 +211,10 @@ impl<'a> Tokenizer {
                 && !self.is_semi_colon(input_bytes)
                 && !self.is_colon(input_bytes)
                 && !self.is_comma(input_bytes)
-                && !self.is_newline(input_bytes)  {
+                && !self.is_newline(input_bytes) 
+                && !self.is_quote(input_bytes) {
             self.consume();
         }
-        // println!("{} {}", start, self.position);
         Token::Atom((start, self.position))
     }
 
