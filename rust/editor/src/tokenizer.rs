@@ -1,4 +1,4 @@
-use std::{str::from_utf8, cmp::min};
+use std::{str::from_utf8};
 
 #[derive(Debug)]
 pub enum Token {
