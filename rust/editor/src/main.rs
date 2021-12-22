@@ -1,10 +1,11 @@
-use std::{cmp::{max, min}, fs, ops::{Index, IndexMut, Neg, RangeBounds}, str::from_utf8, time::Instant, convert::TryInto, process::{Command, Stdio}};
+use std::{cmp::{max, min}, fs, ops::{Index, IndexMut, Neg, RangeBounds}, str::from_utf8, time::Instant, convert::TryInto, process::{Command, Stdio, ChildStdout, Child}};
 use std::fmt::Debug;
 
 use nonblock::NonBlockingReader;
+use rand::Rng;
 use sdl2::{event::{Event, WindowEvent}, keyboard::{Keycode, Mod, Scancode}, mouse::SystemCursor, pixels::Color, rect::Rect, render::{Canvas, Texture}, video::{self}};
 use tokenizer::{Tokenizer, rust_specific_pass, RustSpecific, Token};
-use  sdl2::gfx::primitives::DrawRenderer;
+use sdl2::gfx::primitives::DrawRenderer;
 
 
 mod native;
@@ -139,6 +140,16 @@ enum SideEffectAction {
     Play(String),
 }
 
+enum PerFrameAction {
+    ReadCommand(String, Child, NonBlockingReader<ChildStdout>),
+    DisplayError(String, String),
+}
+
+
+enum PerFrameActionResult {
+    RemoveAction(usize),
+    Noop,
+}
 
 #[derive(Debug, Clone)]
 enum EditAction {
@@ -1284,6 +1295,7 @@ impl TextBuffer {
             line.0 = line.0.saturating_sub(1);
             line.1 = line.1.saturating_sub(1);
         }
+        // TODO: I had a crash here
         EditAction::Delete((cursor_line, cursor_column),
                             from_utf8(&[result]).unwrap().to_string())
     }
@@ -1352,7 +1364,9 @@ impl PaneManager {
             }
         }
         self.active_pane = new_active_pane;
-        self.panes.get_mut(self.active_pane).unwrap().set_active(true);
+        if let Some(pane) = self.panes.get_mut(self.active_pane){
+            pane.set_active(true);
+        }
         if new_active_pane != self.active_pane {
             if let Some(pane) = self.panes.get_mut(old_active) {
                 pane.set_active(false);
@@ -1529,7 +1543,8 @@ impl PaneManager {
             let width = (current_x - position_x) as usize;
             let height = (current_y - position_y) as usize;
 
-            self.create_pane_raw("temp".to_string(), (position_x, position_y), width, height);
+            let mut rng = rand::thread_rng();
+            self.create_pane_raw(format!("temp-{}", rng.gen::<u32>()).to_string(), (position_x, position_y), width, height);
             self.active_pane = self.panes.len() - 1;
         }
     }
@@ -1572,6 +1587,7 @@ impl PaneManager {
         }
         None
     }
+
 
 }
 
@@ -1684,6 +1700,11 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                             }
                         }
                     }
+                    (Keycode::Return, _) if cmd_is_pressed => {
+                        if let Some(pane) = pane_manager.get_active_pane_mut() {
+                            actions.push(SideEffectAction::Play(pane.name.clone()))
+                        }
+                    }
                     (Keycode::Return, _) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
 
@@ -1751,38 +1772,44 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
             // Which probably means changing cursor representation
 
 
-            Event::MouseButtonDown { x, y, .. } => {
-                if ctrl_is_pressed && alt_is_pressed && cmd_is_pressed {
-                    pane_manager.delete_pane_at_mouse((x, y), bounds);
-                } else if ctrl_is_pressed && cmd_is_pressed {
-                    if let Some(pane) = pane_manager.get_pane_at_mouse_mut((x,y), bounds) {
-                        pane.editing_name = true;
-                    }
-                } else if ctrl_is_pressed && alt_is_pressed {
-                    let found = pane_manager.set_resize_start((x,y), bounds);
-                    if !found {
-                        pane_manager.set_create_start((x,y));
-                    }
-                } else if cmd_is_pressed && alt_is_pressed {
-                    if let Some(i) = pane_manager.get_pane_index_at_mouse((x, y), bounds) {
-                        let mut pane = pane_manager.panes[i].clone();
-                        pane.position = (pane.position.0 + 20, pane.position.1 + 20);
-                        pane_manager.panes.push(pane);
-                    }
-                } else if ctrl_is_pressed {
-                    let found = pane_manager.set_dragging_start((x, y), bounds);
-                    if !found {
-                        pane_manager.set_create_start((x,y));
-                    }
-                } else {
+            Event::MouseButtonDown { x, y, .. } if ctrl_is_pressed && alt_is_pressed && cmd_is_pressed => {
+                pane_manager.delete_pane_at_mouse((x, y), bounds);
+            }
 
-                    pane_manager.set_active_from_click_coords((x, y), bounds);
-                    if let Some(pane) = pane_manager.get_active_pane_mut() {
-                        pane.on_click((x, y), bounds).map(|action| {
-                            actions.push(action);
-                        });
-                    }
-                   
+            Event::MouseButtonDown { x, y, .. }  if ctrl_is_pressed && cmd_is_pressed  => {
+                if let Some(pane) = pane_manager.get_pane_at_mouse_mut((x,y), bounds) {
+                    pane.editing_name = true;
+                }
+            }
+
+            Event::MouseButtonDown { x, y, .. } if ctrl_is_pressed && alt_is_pressed => {
+                let found = pane_manager.set_resize_start((x,y), bounds);
+                if !found {
+                    pane_manager.set_create_start((x,y));
+                }
+            } 
+
+            Event::MouseButtonDown { x, y, .. } if cmd_is_pressed && alt_is_pressed => {
+                if let Some(i) = pane_manager.get_pane_index_at_mouse((x, y), bounds) {
+                    let mut pane = pane_manager.panes[i].clone();
+                    pane.position = (pane.position.0 + 20, pane.position.1 + 20);
+                    pane_manager.panes.push(pane);
+                }
+            } 
+
+            Event::MouseButtonDown { x, y, .. } if ctrl_is_pressed => {
+                let found = pane_manager.set_dragging_start((x, y), bounds);
+                if !found {
+                    pane_manager.set_create_start((x,y));
+                }
+            }
+
+            Event::MouseButtonDown { x, y, .. } => {
+                pane_manager.set_active_from_click_coords((x, y), bounds);
+                if let Some(pane) = pane_manager.get_active_pane_mut() {
+                    pane.on_click((x, y), bounds).map(|action| {
+                        actions.push(action);
+                    });
                 }
 
                 if !(ctrl_is_pressed && cmd_is_pressed) {
@@ -1793,6 +1820,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         pane.editing_name = false;
                     }
                 }
+                
             }
 
             Event::MouseMotion{x, y, .. } => {
@@ -2045,22 +2073,90 @@ fn main() -> Result<(), String> {
         create_pane_current: (0, 0),
     };
 
+    let mut per_frame_actions = vec![];
+
 
     loop {
         renderer.set_cursor_ibeam();
         handle_transaction_pane(&mut pane_manager);
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
-        let actions = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds);
-        for action in actions {
-            handle_action(&mut pane_manager, action);
+        let side_effects = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds);
+        
+
+
+        for side_effect in side_effects {
+            handle_side_effects(&mut pane_manager, side_effect, &mut per_frame_actions);
+        }
+
+        let mut per_frame_action_results = vec![];
+        for (i, per_frame_action) in per_frame_actions.iter_mut().enumerate() {
+            per_frame_action_results.push(
+                handle_per_frame_actions(i, &mut pane_manager, per_frame_action)
+            );
+        }
+        for per_frame_action_result in per_frame_action_results {
+            match per_frame_action_result {
+                PerFrameActionResult::RemoveAction(i) => {
+                    per_frame_actions.swap_remove(i);
+                },
+                PerFrameActionResult::Noop => {}
+            }
+        }
+
+        
+    }
+}
+
+fn handle_per_frame_actions(index: usize, pane_manager: &mut PaneManager, per_frame_action: &mut PerFrameAction) -> PerFrameActionResult {
+    match per_frame_action {
+        PerFrameAction::ReadCommand(output_pane_name, _child, non_blocking_reader) => {
+            let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
+            if !output_pane.is_some() {
+                return PerFrameActionResult::Noop
+            }
+            let output_pane = output_pane.unwrap();
+
+            let max_attempts = 100;
+            let mut i = 0;
+            let mut buf = String::new();
+            while !non_blocking_reader.is_eof() {
+                if i > max_attempts {
+                    break;
+                }
+                let length = non_blocking_reader.read_available_to_string(&mut buf).unwrap();
+                if length == 0 {
+                    break;
+                }
+                i += 1;
+            }
+            if buf.contains('\x0c') {
+                output_pane.text_buffer.chars.clear();
+                buf = buf[0..buf.chars().position(|x| x == '\x0c').unwrap()].to_string();
+            }
+
+            if buf.len() > 0 {
+                // TODO: Have mode for if it should clear or have history
+                // Or maybe just don't clear and always have scroll history
+                // output_pane.text_buffer.chars.clear();
+                output_pane.text_buffer.chars.extend(buf.as_bytes().to_vec());
+                output_pane.text_buffer.parse_lines();
+
+            }
+            if non_blocking_reader.is_eof() {
+                PerFrameActionResult::RemoveAction(index)
+            } else {
+                PerFrameActionResult::Noop
+            }
+        }
+        PerFrameAction::DisplayError(_pane_name, _error_text) => {
+            PerFrameActionResult::Noop
         }
     }
 }
 
-fn handle_action(pane_manager: &mut PaneManager, action: SideEffectAction) {
-    match action {
+fn handle_side_effects(pane_manager: &mut PaneManager, side_effect: SideEffectAction, per_frame_actions: &mut Vec<PerFrameAction>) {
+    match side_effect {
         SideEffectAction::Play(pane_name) => {
-            println!("Playing {}", pane_name);
             // TODO: think about multiple panes of same name
             let pane_contents = {
                 if let Some(pane) = pane_manager.get_pane_by_name_mut(pane_name.clone()) {
@@ -2070,19 +2166,53 @@ fn handle_action(pane_manager: &mut PaneManager, action: SideEffectAction) {
                 }
             };
 
-            if let Some(pane_contents) = pane_contents{
+            if let Some(pane_contents) = pane_contents {
                
                 let output_pane_name = format!("{}-output", pane_name).to_string();
-                let output_pane = {
-                    let mut existing_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
-                    if existing_pane.is_none() {
-                        let pane_index = pane_manager.create_pane_raw(output_pane_name, (0, 0), 300, 300);
-                        existing_pane =pane_manager.get_pane_mut(pane_index)
+                let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
+                if output_pane.is_none() {
+                    // TODO: Do this in a better way. Just doing this to appease borrow checker
+                    let existing_pane = pane_manager.get_pane_by_name(pane_name.clone());
+                    let position = {
+                        if existing_pane.is_some() {
+                            let existing_pane = existing_pane.unwrap();
+                            (existing_pane.position.0 + existing_pane.width as i32 + 10, existing_pane.position.1)
+                        } else {
+                            (0, 0)
+                        }
+                    };
+                    pane_manager.create_pane_raw(output_pane_name.to_string(), position, 300, 300);
+                } else {
+                    // This causes a flash to happen
+                    // Which is actually useful from a user experience perspective
+                    // but it was unintentional. 
+                    // Makes me think something is taking longer to render
+                    // than I thought.
+                    // I guess it makes sense in some ways though.
+                    // ls for example takes some amount of time,
+                    // and then I have to fetch that data and render.
+                    let output_pane = output_pane.unwrap();
+                    output_pane.text_buffer.chars.clear();
+                    output_pane.text_buffer.parse_lines();
+                }
+
+                let current_running_action = per_frame_actions.iter().enumerate().find(|(_i, x)| 
+                    if let PerFrameAction::ReadCommand(name, _, _) = x {
+                        *name == output_pane_name
+                    } else {
+                        false
                     }
-                    existing_pane
-                }.unwrap();
+                );
+                if let Some((i, _)) = current_running_action {
+                    let action = per_frame_actions.swap_remove(i);
+                    if let PerFrameAction::ReadCommand(name, mut child, _) = action {
+                        // TODO: Get rid of this unwrap!
+
+                        child.kill().unwrap();
+                    }
+                }
                 
-                let mut command = pane_contents;
+                let command = pane_contents;
                 // need to handle error
                 let child = Command::new(format!("bash"))
                     .arg("-c")
@@ -2093,22 +2223,13 @@ fn handle_action(pane_manager: &mut PaneManager, action: SideEffectAction) {
                 match child {
                     Ok(mut child) => {
                         let stdout = child.stdout.take().unwrap();
-                        let mut noblock_stdout = NonBlockingReader::from_fd(stdout).unwrap();
-                        // TODO: Make this actually non-blocking
-                        let mut buf = String::new();
-                        while !noblock_stdout.is_eof() {
-                            noblock_stdout.read_available_to_string(&mut buf).unwrap();
-                        }
-                        output_pane.text_buffer.chars.clear();
-                        output_pane.text_buffer.chars.extend(buf.as_bytes().to_vec());
-                        output_pane.text_buffer.parse_lines();
+                        let noblock_stdout = NonBlockingReader::from_fd(stdout).unwrap();
+                        per_frame_actions.push(PerFrameAction::ReadCommand(output_pane_name, child, noblock_stdout))
                     } 
                     Err(e) => {
-                        output_pane.text_buffer.chars.clear();
-                        output_pane.text_buffer.chars.extend(format!("error {:?}", e).as_bytes().to_vec());
-                        output_pane.text_buffer.parse_lines();
+                        per_frame_actions.push(PerFrameAction::DisplayError(output_pane_name, format!("error {:?}", e)))
                     }
-                } 
+                }
             }
         },
     }
