@@ -30,7 +30,7 @@ pub fn setup_sdl(width: usize, height: usize) -> Result<(sdl2::ttf::Sdl2TtfConte
     Ok((ttf_context, canvas, event_pump, texture_creator))
 }
 
-pub fn draw_font_texture<'a>(texture_creator: &'a TextureCreator<WindowContext>, ttf_context: sdl2::ttf::Sdl2TtfContext) -> Result<(Texture<'a>, usize, usize), String> {
+pub fn draw_font_texture(texture_creator: &TextureCreator<WindowContext>, ttf_context: sdl2::ttf::Sdl2TtfContext) -> Result<(Texture<>, usize, usize), String> {
     let font_path = "/Users/jimmyhmiller/Library/Fonts/UbuntuMono-Regular.ttf";
     let font = ttf_context.load_font(font_path, 16)?;
     let mut text = String::new();

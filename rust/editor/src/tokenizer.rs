@@ -70,14 +70,14 @@ pub enum RustSpecific {
 }
 
 
-static ZERO: u8 = '0' as u8;
-static NINE: u8 = '9' as u8;
-static SPACE: u8 = ' ' as u8;
-static NEW_LINE: u8 = '\n' as u8;
-static DOUBLE_QUOTE: u8 = '"' as u8;
-static OPEN_PAREN: u8 = '(' as u8;
-static CLOSE_PAREN: u8 = ')' as u8;
-static PERIOD: u8 = '.' as u8;
+static ZERO: u8 = b'0';
+static NINE: u8 = b'9';
+static SPACE: u8 = b' ';
+static NEW_LINE: u8 = b'\n';
+static DOUBLE_QUOTE: u8 = b'"';
+static OPEN_PAREN: u8 = b'(';
+static CLOSE_PAREN: u8 = b')';
+static PERIOD: u8 = b'.';
 
 
 
@@ -111,7 +111,7 @@ impl<'a> Tokenizer {
         Token::Comment((start, self.position))
     }
 
-    pub fn consume(&mut self) -> () {
+    pub fn consume(&mut self) {
         self.position += 1;
     }
 
@@ -153,19 +153,19 @@ impl<'a> Tokenizer {
     }
 
     pub fn is_open_curly(&self, input_bytes: &[u8]) -> bool {
-        self.current_byte(input_bytes) == '{' as u8
+        self.current_byte(input_bytes) == b'{'
     }
 
     pub fn is_close_curly(&self, input_bytes: &[u8]) -> bool {
-        self.current_byte(input_bytes) == '}' as u8
+        self.current_byte(input_bytes) == b'}'
     }
 
     pub fn is_open_bracket(&self, input_bytes: &[u8]) -> bool {
-        self.current_byte(input_bytes) == '[' as u8
+        self.current_byte(input_bytes) == b'['
     }
 
     pub fn is_close_bracket(&self, input_bytes: &[u8]) -> bool {
-        self.current_byte(input_bytes) == ']' as u8
+        self.current_byte(input_bytes) == b']'
     }
 
     pub fn parse_spaces(&mut self, input_bytes: &[u8]) -> Token {
@@ -279,11 +279,11 @@ impl<'a> Tokenizer {
     }
 
     pub fn is_semi_colon(&self, input_bytes: &[u8]) -> bool {
-        self.current_byte(input_bytes) == ';' as u8
+        self.current_byte(input_bytes) == b';'
     }
 
     pub fn is_colon(&self, input_bytes: &[u8]) -> bool {
-        self.current_byte(input_bytes) == ':' as u8
+        self.current_byte(input_bytes) == b':'
     }
 
     pub fn is_newline(&self, input_bytes: &[u8]) -> bool {
@@ -291,7 +291,7 @@ impl<'a> Tokenizer {
     }
 
     pub fn is_comma(&self, input_bytes: &[u8]) -> bool {
-        self.current_byte(input_bytes) == ',' as u8
+        self.current_byte(input_bytes) == b','
     }
 
     pub fn skip_lines(&mut self, n: usize, input_bytes: &[u8]) -> &mut Self {

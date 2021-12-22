@@ -354,11 +354,8 @@ fn text_space_from_screen_space(scroller: &Scroller, mut x: usize, y: usize, tex
         }
         return Some(Cursor(line_number, column_number));
     }
-    if line_number > text_buffer.line_count() {
-        if text_buffer.last_line().is_some() {
-           return Some(Cursor(text_buffer.line_count() - 1, text_buffer.line_length(text_buffer.line_count() - 1)));
-        }
-
+    if line_number > text_buffer.line_count() && text_buffer.last_line().is_some() {
+        return Some(Cursor(text_buffer.line_count() - 1, text_buffer.line_length(text_buffer.line_count() - 1)));
     }
     None
 }
@@ -552,7 +549,7 @@ impl Scroller {
         self.lines_above_fold(bounds) + self.viewing_lines(height, bounds) >= text_buffer.line_count() + 3
     }
 
-    fn to_the_top(&mut self) {
+    fn move_to_the_top(&mut self) {
         self.offset_y = 0;
     }
 
@@ -1544,7 +1541,7 @@ impl PaneManager {
             let height = (current_y - position_y) as usize;
 
             let mut rng = rand::thread_rng();
-            self.create_pane_raw(format!("temp-{}", rng.gen::<u32>()).to_string(), (position_x, position_y), width, height);
+            self.create_pane_raw(format!("temp-{}", rng.gen::<u32>()), (position_x, position_y), width, height);
             self.active_pane = self.panes.len() - 1;
         }
     }
@@ -1555,7 +1552,7 @@ impl PaneManager {
         if i < self.active_pane {
             self.active_pane -= 1;
         }
-        return pane;
+        pane
     }
 
     fn insert(&mut self, i: usize, pane: Pane) {
@@ -1566,7 +1563,7 @@ impl PaneManager {
     }
 
 
-    fn get_pane_mut(&mut self, index: usize) -> Option<&mut Pane> {
+    fn _get_pane_mut(&mut self, index: usize) -> Option<&mut Pane> {
         self.panes.get_mut(index)
     }
 
@@ -1681,12 +1678,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                             // Maybe a non-mutating method?
                             // How to deal with optional aspect here?
                             if let Some(current_cursor) = pane.cursor_context.cursor {
-                                // BUG:
-                                // This is not working quite correctly.
-                                // Delete at the end of a line with a non-empty above.
-                                // Try undoing the delete and then redoing.
-                                // The cursor is all wrong.
-                                let mut old_cursor = current_cursor.clone();
+                                let mut old_cursor = current_cursor;
                                 // We do this move_left first, because otherwise we might end up at the end
                                 // of the new line we formed from the deletion, rather than the old end of the line.
                                 let cursor_action = old_cursor.move_left(&pane.text_buffer);
@@ -1740,7 +1732,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                             let text = native::open_file_dialog();
                             if let Some(text) = text {
                                 pane.text_buffer.set_contents(text.as_bytes());
-                                pane.scroller.to_the_top();
+                                pane.scroller.move_to_the_top();
                             }
                         }
                     }
@@ -1807,9 +1799,9 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
             Event::MouseButtonDown { x, y, .. } => {
                 pane_manager.set_active_from_click_coords((x, y), bounds);
                 if let Some(pane) = pane_manager.get_active_pane_mut() {
-                    pane.on_click((x, y), bounds).map(|action| {
-                        actions.push(action);
-                    });
+                    if let Some(action) = pane.on_click((x, y), bounds) { 
+                        actions.push(action); 
+                    }
                 }
 
                 if !(ctrl_is_pressed && cmd_is_pressed) {
@@ -1913,7 +1905,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     sdl2::mouse::MouseWheelDirection::Unknown(x) => x as i32
                 };
                 if let Some(pane) = pane_manager.get_scroll_active_pane_mut() {
-                    pane.scroller.scroll_x(pane.width, x * direction_multiplier * -1, &mut pane.text_buffer, bounds);
+                    pane.scroller.scroll_x(pane.width, x * direction_multiplier.neg(), &mut pane.text_buffer, bounds);
                     pane.scroller.scroll_y(pane.height, y * direction_multiplier, &pane.text_buffer, bounds);
                 }
 
@@ -2111,7 +2103,7 @@ fn handle_per_frame_actions(index: usize, pane_manager: &mut PaneManager, per_fr
     match per_frame_action {
         PerFrameAction::ReadCommand(output_pane_name, _child, non_blocking_reader) => {
             let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
-            if !output_pane.is_some() {
+            if output_pane.is_none() {
                 return PerFrameActionResult::Noop
             }
             let output_pane = output_pane.unwrap();
@@ -2134,7 +2126,7 @@ fn handle_per_frame_actions(index: usize, pane_manager: &mut PaneManager, per_fr
                 buf = buf[0..buf.chars().position(|x| x == '\x0c').unwrap()].to_string();
             }
 
-            if buf.len() > 0 {
+            if !buf.is_empty(){
                 // TODO: Have mode for if it should clear or have history
                 // Or maybe just don't clear and always have scroll history
                 // output_pane.text_buffer.chars.clear();
@@ -2168,33 +2160,35 @@ fn handle_side_effects(pane_manager: &mut PaneManager, side_effect: SideEffectAc
 
             if let Some(pane_contents) = pane_contents {
                
-                let output_pane_name = format!("{}-output", pane_name).to_string();
+                let output_pane_name = format!("{}-output", pane_name);
                 let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
-                if output_pane.is_none() {
-                    // TODO: Do this in a better way. Just doing this to appease borrow checker
-                    let existing_pane = pane_manager.get_pane_by_name(pane_name.clone());
-                    let position = {
-                        if existing_pane.is_some() {
-                            let existing_pane = existing_pane.unwrap();
-                            (existing_pane.position.0 + existing_pane.width as i32 + 10, existing_pane.position.1)
-                        } else {
-                            (0, 0)
-                        }
-                    };
-                    pane_manager.create_pane_raw(output_pane_name.to_string(), position, 300, 300);
-                } else {
-                    // This causes a flash to happen
-                    // Which is actually useful from a user experience perspective
-                    // but it was unintentional. 
-                    // Makes me think something is taking longer to render
-                    // than I thought.
-                    // I guess it makes sense in some ways though.
-                    // ls for example takes some amount of time,
-                    // and then I have to fetch that data and render.
-                    let output_pane = output_pane.unwrap();
-                    output_pane.text_buffer.chars.clear();
-                    output_pane.text_buffer.parse_lines();
-                }
+                match output_pane {
+
+                    None => {
+                        let existing_pane = pane_manager.get_pane_by_name(pane_name);
+                        let position = {
+                            match existing_pane {
+                                Some(pane) =>  {
+                                    (pane.position.0 + pane.width as i32 + 10, pane.position.1)
+                                }
+                                None => (0, 0)
+                            }
+                        };
+                        pane_manager.create_pane_raw(output_pane_name.to_string(), position, 300, 300);
+                    }
+                    Some(output_pane) => {
+                        // This causes a flash to happen
+                        // Which is actually useful from a user experience perspective
+                        // but it was unintentional. 
+                        // Makes me think something is taking longer to render
+                        // than I thought.
+                        // I guess it makes sense in some ways though.
+                        // ls for example takes some amount of time,
+                        // and then I have to fetch that data and render.
+                        output_pane.text_buffer.chars.clear();
+                        output_pane.text_buffer.parse_lines();
+                    }
+                } 
 
                 let current_running_action = per_frame_actions.iter().enumerate().find(|(_i, x)| 
                     if let PerFrameAction::ReadCommand(name, _, _) = x {
@@ -2205,7 +2199,7 @@ fn handle_side_effects(pane_manager: &mut PaneManager, side_effect: SideEffectAc
                 );
                 if let Some((i, _)) = current_running_action {
                     let action = per_frame_actions.swap_remove(i);
-                    if let PerFrameAction::ReadCommand(name, mut child, _) = action {
+                    if let PerFrameAction::ReadCommand(_name, mut child, _) = action {
                         // TODO: Get rid of this unwrap!
 
                         child.kill().unwrap();
@@ -2214,7 +2208,7 @@ fn handle_side_effects(pane_manager: &mut PaneManager, side_effect: SideEffectAc
                 
                 let command = pane_contents;
                 // need to handle error
-                let child = Command::new(format!("bash"))
+                let child = Command::new("bash")
                     .arg("-c")
                     .arg(command)
                     .stdout(Stdio::piped())
