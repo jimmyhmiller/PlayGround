@@ -7,7 +7,7 @@ pub fn setup_sdl(width: usize, height: usize) -> Result<(sdl2::ttf::Sdl2TtfConte
     let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string())?;
     let sdl_window = sdl_context
         .video()?
-        .window("Example", width as u32, height as u32)
+        .window("Lith", width as u32, height as u32)
         // .opengl()
         .resizable()
         .build()
