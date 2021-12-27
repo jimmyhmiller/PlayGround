@@ -363,15 +363,17 @@ fn text_space_from_screen_space(scroller: &Scroller, mut x: usize, y: usize, tex
 
 // TODO:
 // Add some spacing between letters!
-// Need to add a real parser or I can try messing with tree sitter.
 // It would be pretty cool to add a minimap
-// Need to be able to resize panes
-// Need create new pane
 // Need toggle line numbers
-// Need running bash scripts
 // Need references to panes
 // Need canvas scrolling?
 // Need to think about undo and pane positions
+// I need copy and paste
+// I need to experiment with panes being a surface
+// I need to experiment with non-text panes
+// I also need to think about the coordinate system
+// It being upside down is annoying
+// I need to think about afterburner text decorations
 
 
 struct FpsCounter {
@@ -735,6 +737,7 @@ impl Pane {
     }
 
     fn draw(&mut self, renderer: &mut Renderer) -> Result<(), String> {
+        
         // It would be great if we normalized the drawing here
         // to be relative to the pane itself.
         // Could simplify quite a lot.
@@ -1123,6 +1126,7 @@ fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCo
     // Is it global?
     // Need to think about the UI
     renderer.draw_column_line(pane_manager)?;
+    handle_draw_panes(pane_manager, renderer)?;
     renderer.present();
 
     Ok(())
@@ -2071,6 +2075,8 @@ fn main() -> Result<(), String> {
     loop {
         renderer.set_cursor_ibeam();
         handle_transaction_pane(&mut pane_manager);
+        handle_token_pane(&mut pane_manager);
+
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
         let side_effects = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds);
         
@@ -2259,6 +2265,100 @@ fn handle_transaction_pane(pane_manager: &mut PaneManager) {
             pane_manager.insert(i, transaction_pane);
         }
     }
+}
+
+
+
+fn handle_token_pane(pane_manager: &mut PaneManager) {
+    let mut token_pane_index = None;
+    for (i, pane) in pane_manager.panes.iter().enumerate() {
+        if pane.name == "token_pane" {
+            token_pane_index = Some(i);
+        }
+    }
+    if Some(pane_manager.active_pane) != token_pane_index {
+
+        if let Some(i) = token_pane_index  { 
+            let mut token_pane = pane_manager.remove(i);
+            token_pane.text_buffer.chars.clear();
+        
+            // I am doing this every frame.
+            // I really need a nice way of handling non-every frame events
+            if let Some(active_pane) = pane_manager.get_active_pane_mut() {
+                let tokenizer = &mut active_pane.text_buffer.tokenizer;
+                while !tokenizer.at_end(&active_pane.text_buffer.chars) {
+                    let token = tokenizer.parse_single(&active_pane.text_buffer.chars);
+                    if let Some(token) = token {
+                        token_pane.text_buffer.chars.extend(format!("{:?} ", token).as_bytes());
+                        if matches!(token, Token::NewLine) {
+                            token_pane.text_buffer.chars.extend(b"\n");
+                        }
+                    }
+                }
+                tokenizer.position = 0;
+            }
+            
+            token_pane.text_buffer.parse_lines();
+            pane_manager.insert(i, token_pane);
+        }
+    }
+}
+
+fn get_i32_from_token(token: &Token, chars: &[u8]) -> Option<i32> {
+    if let Token::Integer((s, e)) = token {
+        let string_value = from_utf8(&chars[*s..*e]).ok()?;
+        let int_value: i32 = string_value.parse().ok()?;
+        Some(int_value)
+    } else {
+        None
+    }
+   
+}
+
+fn parse_rect(tokenizer: &mut Tokenizer, chars: &[u8]) -> Option<Rect> {
+    let _ = tokenizer.parse_single(chars)?;
+    let x_token = tokenizer.parse_single(chars)?;
+    let x = get_i32_from_token(&x_token, chars)?;
+    let _ = tokenizer.parse_single(chars)?;
+    let y_token = tokenizer.parse_single(chars)?;
+    let y = get_i32_from_token(&y_token, chars)?;
+    let _ = tokenizer.parse_single(chars)?;
+    let width_token = tokenizer.parse_single(chars)?;
+    let width = get_i32_from_token(&width_token, chars)?;
+    let _ = tokenizer.parse_single(chars)?;
+    let height_token = tokenizer.parse_single(chars)?;
+    let height = get_i32_from_token(&height_token, chars)?;
+    Some(Rect::new(x, y, width as u32, height as u32))
+}
+
+// This happens every frame. Can I do better? 
+// I tokenize yet again here
+// I probably want to cache the tokens
+// and only retokenize on change
+fn handle_draw_panes(pane_manager: &mut PaneManager, renderer: &mut Renderer) -> Result<(), String> {
+    for pane in pane_manager.panes.iter_mut() {
+        if !pane.name.ends_with("_draw") {
+            continue;
+        }
+        renderer.set_draw_color(CURSOR_COLOR);
+        let tokenizer = &mut pane.text_buffer.tokenizer;
+        let chars = &pane.text_buffer.chars;
+        while !tokenizer.at_end( chars) {
+            if let Some(Token::Atom((start, end))) = tokenizer.parse_single(chars) {
+                let atom = &chars[start..end];
+                if atom == b"rect" {
+                    if let Some(rect) = parse_rect(tokenizer, chars) {
+                        renderer.draw_rect(&rect)?;
+                    }
+                    
+                }
+            }
+        }
+
+        tokenizer.position = 0;
+
+    }
+    Ok(())
 }
 
 
