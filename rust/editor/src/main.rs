@@ -3,7 +3,7 @@ use std::fmt::Debug;
 
 use nonblock::NonBlockingReader;
 use rand::Rng;
-use sdl2::{event::{Event, WindowEvent}, keyboard::{Keycode, Mod, Scancode}, mouse::SystemCursor, pixels::Color, rect::Rect, render::{Canvas, Texture}, video::{self}};
+use sdl2::{event::{Event, WindowEvent}, keyboard::{Keycode, Mod, Scancode}, mouse::SystemCursor, pixels::{Color, PixelFormatEnum}, rect::Rect, render::{Canvas, Texture, TargetRenderError}, video::{self}, surface::Surface, sys};
 use tokenizer::{Tokenizer, rust_specific_pass, RustSpecific, Token};
 use sdl2::gfx::primitives::DrawRenderer;
 
@@ -596,7 +596,7 @@ impl<'a> Renderer<'a> {
     fn set_initial_rendering_location(&mut self, scroller: &Scroller) {
         self.target = Rect::new(
             self.bounds.editor_left_margin as i32,
-            (scroller.line_fraction_y(&self.bounds) as i32).neg(),
+            (scroller.line_fraction_y(&self.bounds) as i32).neg() + self.bounds.letter_height as i32 * 2,
             self.bounds.letter_width as u32,
             self.bounds.letter_height as u32
         );
@@ -736,6 +736,32 @@ impl Pane {
         self.height / bounds.letter_height as usize
     }
 
+    fn draw_with_texture(&mut self, renderer: &mut Renderer) -> Result<(), String> {
+        let texture_creator = renderer.canvas.texture_creator();
+        let mut texture = &mut texture_creator.create_texture_target(renderer.canvas.default_pixel_format(), self.width as u32, self.height as u32).unwrap();
+
+        if renderer.canvas.render_target_supported() {
+            let target = unsafe { sys::SDL_GetRenderTarget(renderer.canvas.raw()) };
+            unsafe {
+                if sys::SDL_SetRenderTarget(renderer.canvas.raw(), texture.raw()) != 0 {
+                    panic!("Failed to set render target");
+                }
+            }
+
+            self.draw(renderer)?;
+
+            unsafe {
+                if sys::SDL_SetRenderTarget(renderer.canvas.raw(), target) != 0 {
+                    panic!("Failed to set render target");
+                }
+            }
+            
+        }
+        renderer.canvas.copy(&texture, None, Rect::new(self.position.0, self.position.1, self.width as u32, self.height as u32))?;
+
+        Ok(())
+    }
+
     fn draw(&mut self, renderer: &mut Renderer) -> Result<(), String> {
         
         // It would be great if we normalized the drawing here
@@ -746,11 +772,11 @@ impl Pane {
         let line_number_digits = renderer.bounds.line_number_digits(&self.text_buffer);
 
         renderer.set_draw_color(Color::RGBA(42, 45, 62, 255));
-
+        renderer.set_y(0);
         renderer.fill_rect(
             &Rect::new(
-                self.position.0,
-                self.position.1,
+                0,
+                0,
                 self.width as u32,
                 self.height as u32
             )
@@ -760,8 +786,8 @@ impl Pane {
 
 
         renderer.set_initial_rendering_location(&self.scroller);
-        renderer.move_right(self.position.0 as i32);
-        renderer.move_down(self.position.1 as i32);
+        // renderer.move_right(self.position.0 as i32);
+        // renderer.move_down(self.position.1 as i32);
 
         let number_of_lines = min(self.scroller.lines_above_fold(&renderer.bounds) + self.max_lines_per_page(&renderer.bounds) + 2, self.text_buffer.line_count());
         let starting_line = self.scroller.lines_above_fold(&renderer.bounds);
@@ -771,7 +797,7 @@ impl Pane {
 
         for line in starting_line as usize..number_of_lines {
             renderer.set_color_mod(STANDARD_TEXT_COLOR);
-            renderer.set_x(editor_left_margin as i32 + self.position.0 as i32);
+            renderer.set_x(editor_left_margin as i32);
 
             if self.width > renderer.bounds.line_number_padding(&self.text_buffer)  {
                 self.draw_line_numbers(renderer, line_number_digits, line)?;
@@ -798,30 +824,30 @@ impl Pane {
         
         renderer.fill_rect(
             &Rect::new(
-                self.position.0 as i32, 
-                self.position.1 as i32 - renderer.bounds.letter_height as i32,
+                0, 
+                0,
                 (self.width + renderer.bounds.letter_width) as u32, 
                 renderer.bounds.letter_height as u32))?;
         // bottom
         renderer.fill_rect(
             &Rect::new(
-                self.position.0 as i32, 
-                self.position.1 + self.height as i32 + renderer.bounds.letter_height as i32,
+                0,
+                self.height as i32 - renderer.bounds.letter_height as i32,
                 self.width as u32, 
                 renderer.bounds.letter_height as u32))?;
 
         // left
         renderer.fill_rect(
             &Rect::new(
-                self.position.0 as i32 + renderer.bounds.line_number_padding(&self.text_buffer) as i32 - renderer.bounds.letter_width as i32, 
-                (self.position.1) as i32, 
+                 renderer.bounds.line_number_padding(&self.text_buffer) as i32 - renderer.bounds.letter_width as i32, 
+                0,
                 renderer.bounds.letter_width as u32, 
                 self.height as u32))?;
 
         // right
         renderer.fill_rect(&Rect::new(
-            self.position.0 as i32 + self.width as i32 - renderer.bounds.letter_width as i32,
-            self.position.1 as i32, 
+            self.width as i32 - renderer.bounds.letter_width as i32,
+            0,
             (renderer.bounds.letter_width * 2) as u32,
             self.height as u32 + (renderer.bounds.letter_height * 2) as u32))?;
 
@@ -830,21 +856,21 @@ impl Pane {
         // Really need to think about split vs freefloating
         if self.position.0 != 0 {
 
-            renderer.fill_rect(&Rect::new(self.position.0 as i32, self.position.1 as i32, 2, self.height as u32))?;
-            renderer.fill_rect(&Rect::new(self.position.0 as i32 + self.width as i32 - 2, self.position.1 as i32, 2, self.height as u32))?;
+            renderer.fill_rect(&Rect::new(0,  0, 2, self.height as u32))?;
+            renderer.fill_rect(&Rect::new(self.width as i32 - 2, 0, 2, self.height as u32))?;
         }
 
         renderer.fill_rect(
                 &Rect::new(
-                    self.position.0 as i32, 
-                    self.position.1 as i32 - renderer.bounds.letter_height as i32,
+                    0,
+                    0,
                     self.width as u32, 
                     renderer.bounds.letter_height as u32))?;
 
         renderer.fill_rect(
             &Rect::new(
-                self.position.0 as i32, 
-                self.position.1 + self.height as i32, 
+                0,
+                self.height as i32 - renderer.bounds.letter_height as i32, 
                 self.width as u32, 
                 renderer.bounds.letter_height as u32))?;
 
@@ -853,14 +879,14 @@ impl Pane {
             let padding = 5;
             renderer.set_draw_color(CURSOR_COLOR);
             renderer.draw_rect(&Rect::new(
-                self.position.0 as i32 + self.width as i32 - (renderer.bounds.letter_width * (self.name.len() + 2)) as i32 - padding,
-                self.position.1 as i32 - renderer.bounds.letter_height as i32,
+                self.width as i32 - (renderer.bounds.letter_width * (self.name.len() + 2)) as i32 - padding,
+                0,
                 renderer.bounds.letter_width as u32 * (self.name.len() + 1) as u32 + padding as u32,
                 renderer.bounds.letter_height as u32 + padding as u32))?;
         }
         renderer.set_color_mod(STANDARD_TEXT_COLOR);
-        renderer.set_x(self.position.0 as i32 + self.width as i32 - (renderer.bounds.letter_width * (self.name.len() + 3)) as i32);
-        renderer.set_y(self.position.1 as i32 - renderer.bounds.letter_height as i32);
+        renderer.set_x(self.width as i32 - (renderer.bounds.letter_width * (self.name.len() + 3)) as i32);
+        renderer.set_y(0);
         renderer.draw_string(&self.name)?;
 
         // I hate that this requires i16.
@@ -868,8 +894,8 @@ impl Pane {
         fn into_i16(x: i32) -> i16 {
             x.try_into().unwrap()
         }
-        let play_button_x = self.position.0 + renderer.bounds.letter_width as i32;
-        let play_button_y = self.position.1 - renderer.bounds.letter_height as i32 + 4;
+        let play_button_x = renderer.bounds.letter_width as i32;
+        let play_button_y = 4;
 
         renderer.draw_triangle(into_i16(play_button_x),into_i16(play_button_y), STANDARD_TEXT_COLOR)?;
 
@@ -907,7 +933,7 @@ impl Pane {
         }
         if let Some(cursor) = self.cursor_context.cursor {
             if cursor.0 == line {
-                let cursor_x = cursor.1 as i32  * renderer.bounds.letter_width as i32 + line_number_padding as i32 + self.position.0 as i32;
+                let cursor_x = cursor.1 as i32  * renderer.bounds.letter_width as i32 + line_number_padding as i32;
                 let cursor_y = renderer.target.y();
 
                 renderer.set_draw_color(CURSOR_COLOR);
@@ -1096,7 +1122,7 @@ fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCo
     renderer.set_draw_color(BACKGROUND_COLOR);
     renderer.clear();
     for pane in pane_manager.panes.iter_mut() {
-        pane.draw(renderer)?;
+        pane.draw_with_texture(renderer)?;
     }
 
     if pane_manager.create_pane_activated {
