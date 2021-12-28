@@ -323,7 +323,7 @@ impl EditorBounds{
     }
     fn line_number_padding(&self, text_buffer: &TextBuffer) -> usize {
         self.line_number_digits(text_buffer) * self.letter_width as usize
-            + self.line_number_gutter_width 
+            + self.line_number_gutter_width
             + self.editor_left_margin
             + self.letter_width as usize
     }
@@ -341,10 +341,10 @@ fn text_space_from_screen_space(scroller: &Scroller, mut x: usize, y: usize, tex
 
     // Still crash here
     // Didn't realize it could do that without the unwrap
-    let line_number : usize = (((y as f32 / letter_height as f32) 
-        + (scroller.line_fraction_y(bounds) as f32 / bounds.letter_height as f32)).floor() as i32 
+    let line_number : usize = (((y as f32 / letter_height as f32)
+        + (scroller.line_fraction_y(bounds) as f32 / bounds.letter_height as f32)).floor() as i32
         + scroller.lines_above_fold(bounds) as i32) as usize;
-    
+
 
     if (x as i32) < line_number_padding && (x as i32) > line_number_padding - 20  {
         x = line_number_padding as usize;
@@ -484,14 +484,14 @@ impl CursorContext {
             }
         }
     }
-    
+
     fn copy_selection(&self, clipboard: &ClipboardUtil, text_buffer: &TextBuffer) -> Option<()> {
         if let Some(((start_line, start_column), (end_line, end_column))) = self.selection {
             let start = text_buffer.char_position_from_line_column(start_line, start_column)?;
             let end = text_buffer.char_position_from_line_column(end_line, end_column)?;
-            clipboard.set_clipboard_text(from_utf8(&text_buffer.chars[start..end]).unwrap()).ok()?;  
+            clipboard.set_clipboard_text(from_utf8(&text_buffer.chars[start..end]).unwrap()).ok()?;
         }
-        
+
         Some(())
     }
 
@@ -521,7 +521,7 @@ impl CursorContext {
         }
 
     }
-    
+
     fn paste(&mut self, clipboard: &ClipboardUtil, text_buffer: &mut TextBuffer) -> Option<String> {
         if let Some(Cursor(line, column)) = self.cursor {
             let position = text_buffer.char_position_from_line_column(line, column)?;
@@ -745,6 +745,7 @@ struct Pane {
     transaction_manager: TransactionManager,
     editing_name: bool,
     mouse_pos: Option<(i32, i32)>,
+    rects: Vec<Rect>,
 }
 
 // Thoughts:
@@ -770,6 +771,7 @@ impl Pane {
     fn max_lines_per_page(&self, bounds: &EditorBounds) -> usize {
         self.height / bounds.letter_height as usize
     }
+    
 
     fn draw_with_texture(&mut self, renderer: &mut Renderer) -> Result<(), String> {
         let texture_creator = renderer.canvas.texture_creator();
@@ -791,7 +793,6 @@ impl Pane {
                     panic!("Failed to set render target");
                 }
             }
-            
         }
         renderer.canvas.copy(&texture, None, Rect::new(self.position.0, self.position.1, self.width as u32, self.height as u32))?;
 
@@ -799,7 +800,7 @@ impl Pane {
     }
 
     fn draw(&mut self, renderer: &mut Renderer) -> Result<(), String> {
-        
+
         // It would be great if we normalized the drawing here
         // to be relative to the pane itself.
         // Could simplify quite a lot.
@@ -818,7 +819,7 @@ impl Pane {
             )
         )?;
 
-        
+
 
 
         renderer.set_initial_rendering_location(&self.scroller);
@@ -827,8 +828,8 @@ impl Pane {
 
         let number_of_lines = min(self.scroller.lines_above_fold(&renderer.bounds) + self.max_lines_per_page(&renderer.bounds) + 2, self.text_buffer.line_count());
         let starting_line = self.scroller.lines_above_fold(&renderer.bounds);
-        
-        
+
+
         self.text_buffer.tokenizer.skip_lines(starting_line, &self.text_buffer.chars);
 
         for line in starting_line as usize..number_of_lines {
@@ -849,36 +850,44 @@ impl Pane {
 
             renderer.move_down_one_line();
         }
+        
 
+        renderer.set_draw_color(CURSOR_COLOR);
+        for rect in self.rects.iter_mut() {
+            rect.set_x(rect.x() - self.scroller.offset_x + renderer.bounds.letter_width as i32);
+            rect.set_y(rect.y() - self.scroller.offset_y + renderer.bounds.letter_height as i32);
+            renderer.draw_rect(rect)?;
+        }
+        self.rects.clear();
 
         renderer.set_draw_color(Color::RGBA(42, 45, 62, 255));
 
         // Ummm, why don't I just draw an unfilled rectangle?
         // Is it becasue I want some sides different?
         // probably not for part of this.
+       
         // top
-        
         renderer.fill_rect(
             &Rect::new(
-                0, 
                 0,
-                (self.width + renderer.bounds.letter_width) as u32, 
+                0,
+                (self.width + renderer.bounds.letter_width) as u32,
                 renderer.bounds.letter_height as u32))?;
         // bottom
         renderer.fill_rect(
             &Rect::new(
                 0,
                 self.height as i32 - renderer.bounds.letter_height as i32,
-                self.width as u32, 
+                self.width as u32,
                 renderer.bounds.letter_height as u32))?;
 
         // left
-        renderer.fill_rect(
-            &Rect::new(
-                 renderer.bounds.line_number_padding(&self.text_buffer) as i32 - renderer.bounds.letter_width as i32, 
-                0,
-                renderer.bounds.letter_width as u32, 
-                self.height as u32))?;
+        // renderer.fill_rect(
+        //     &Rect::new(
+        //          renderer.bounds.line_number_padding(&self.text_buffer) as i32 - renderer.bounds.letter_width as i32,
+        //         0,
+        //         renderer.bounds.letter_width as u32,
+        //         self.height as u32))?;
 
         // right
         renderer.fill_rect(&Rect::new(
@@ -900,14 +909,14 @@ impl Pane {
                 &Rect::new(
                     0,
                     0,
-                    self.width as u32, 
+                    self.width as u32,
                     renderer.bounds.letter_height as u32))?;
 
         renderer.fill_rect(
             &Rect::new(
                 0,
-                self.height as i32 - renderer.bounds.letter_height as i32, 
-                self.width as u32, 
+                self.height as i32 - renderer.bounds.letter_height as i32,
+                self.width as u32,
                 renderer.bounds.letter_height as u32))?;
 
 
@@ -940,8 +949,8 @@ impl Pane {
                 renderer.set_cursor_pointer();
             }
         }
-       
-        
+
+
 
         // TODO: do something better
         self.text_buffer.tokenizer.position = 0;
@@ -981,7 +990,7 @@ impl Pane {
 
     fn draw_selection(&mut self, renderer: &mut Renderer, line: usize, line_number_padding: usize) -> Result<(), String> {
 
-        
+
         // TODO: Really think about this and make it work properly.
         // I need some way of looking at a character and easily deciding where it is
         // if it is visible, etc.
@@ -997,10 +1006,10 @@ impl Pane {
                 } else {
                     line_number_padding as i32
                 };
-                start_x = start_x 
+                start_x = start_x
                     - (self.scroller.scroll_x_character(&renderer.bounds) as i32 * renderer.bounds.letter_width as i32)
                     - self.scroller.line_fraction_x(&renderer.bounds) as i32;
-                
+
 
                 let mut width = if start_line == end_line {
                     (end_column - start_column) * renderer.bounds.letter_width
@@ -1078,7 +1087,7 @@ impl Pane {
                     if position < start && position + text.len() < start {
                         None
                     } else if position < start {
-                        Some(start - position) 
+                        Some(start - position)
                     } else {
                         Some(0)
                     }
@@ -1113,7 +1122,7 @@ impl Pane {
         }
         Ok(())
 
-        
+
     }
 
     fn is_mouse_over(&self, (x, y): (i32, i32), bounds: &EditorBounds) -> bool {
@@ -1144,7 +1153,7 @@ impl Pane {
             self.cursor_context.clear_selection();
             None
         }
-      
+
     }
 
 
@@ -1153,6 +1162,7 @@ impl Pane {
 fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCounter) -> Result<(), String> {
     renderer.set_draw_color(BACKGROUND_COLOR);
     renderer.clear();
+    handle_draw_panes(pane_manager, renderer)?;
     for pane in pane_manager.panes.iter_mut() {
         pane.draw_with_texture(renderer)?;
     }
@@ -1168,7 +1178,7 @@ fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCo
         let width = (current_x - position_x) as u32;
         let height = (current_y - position_y) as u32;
 
-        
+
         renderer.draw_rect(&Rect::new(
             position_x,
             position_y,
@@ -1184,7 +1194,7 @@ fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCo
     // Is it global?
     // Need to think about the UI
     renderer.draw_column_line(pane_manager)?;
-    handle_draw_panes(pane_manager, renderer)?;
+
     renderer.present();
 
     Ok(())
@@ -1377,7 +1387,7 @@ impl TextBuffer {
         } else {
             None
         }
-        
+
     }
 
     fn line_column_from_char_position(&self, position: usize) -> Option<Cursor> {
@@ -1388,7 +1398,7 @@ impl TextBuffer {
         }
         None
     }
-    
+
 }
 
 
@@ -1415,7 +1425,7 @@ impl PaneManager {
             pane.mouse_pos = Some(mouse_pos);
         }
     }
-    
+
     fn delete_pane_at_mouse(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) {
         if let Some(closest_pane) = self.get_pane_index_at_mouse(mouse_pos, bounds) {
             self.panes.remove(closest_pane);
@@ -1554,7 +1564,7 @@ impl PaneManager {
 
             let width = x - current_x;
             let height = y - current_y;
-    
+
             pane.width = width as usize;
             pane.height = height as usize;
         }
@@ -1587,7 +1597,7 @@ impl PaneManager {
         let cursor_context = CursorContext {
             cursor: None,
             mouse_down: None,
-            selection: None, 
+            selection: None,
         };
 
         self.panes.push(Pane {
@@ -1607,6 +1617,7 @@ impl PaneManager {
             mouse_pos: None,
             transaction_manager: TransactionManager::new(),
             editing_name: false,
+            rects: vec![],
         });
         self.panes.len() - 1
     }
@@ -1615,7 +1626,7 @@ impl PaneManager {
         if self.create_pane_activated {
             self.create_pane_activated = false;
 
-            
+
             let position_x = min(self.create_pane_start.0, self.create_pane_current.0);
             let position_y = min(self.create_pane_start.1, self.create_pane_current.1);
             let current_x = max(self.create_pane_start.0, self.create_pane_current.0);
@@ -1736,7 +1747,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                                 continue;
                             }
                             // Need to deal with this in a nicer way
-                            
+
                             if let Some(current_selection) = pane.cursor_context.selection {
                                 let (start, end) = current_selection;
                                 let (start_line, start_column) = start;
@@ -1821,7 +1832,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                             // TODO: I NEED UNDO!
                             if let Some(inserted_string) = pane.cursor_context.paste(&clipboard, &mut pane.text_buffer) {
                                 if let Some(Cursor(cursor_line, cursor_column)) = pane.cursor_context.cursor {
-                                    pane.transaction_manager.add_action(EditAction::Insert((cursor_line, cursor_column), inserted_string));   
+                                    pane.transaction_manager.add_action(EditAction::Insert((cursor_line, cursor_column), inserted_string));
                                 }
                             }
                         }
@@ -1879,7 +1890,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                 if !found {
                     pane_manager.set_create_start((x,y));
                 }
-            } 
+            }
 
             Event::MouseButtonDown { x, y, .. } if cmd_is_pressed && alt_is_pressed => {
                 if let Some(i) = pane_manager.get_pane_index_at_mouse((x, y), bounds) {
@@ -1887,7 +1898,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                     pane.position = (pane.position.0 + 20, pane.position.1 + 20);
                     pane_manager.panes.push(pane);
                 }
-            } 
+            }
 
             Event::MouseButtonDown { x, y, .. } if ctrl_is_pressed => {
                 let found = pane_manager.set_dragging_start((x, y), bounds);
@@ -1899,8 +1910,8 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
             Event::MouseButtonDown { x, y, .. } => {
                 pane_manager.set_active_from_click_coords((x, y), bounds);
                 if let Some(pane) = pane_manager.get_active_pane_mut() {
-                    if let Some(action) = pane.on_click((x, y), bounds) { 
-                        actions.push(action); 
+                    if let Some(action) = pane.on_click((x, y), bounds) {
+                        actions.push(action);
                     }
                 }
 
@@ -1912,7 +1923,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                         pane.editing_name = false;
                     }
                 }
-                
+
             }
 
             Event::MouseMotion{x, y, .. } => {
@@ -2016,7 +2027,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
             pane.cursor_context.fix_cursor(&pane.text_buffer);
         }
     }
-    actions  
+    actions
 }
 
 
@@ -2029,12 +2040,12 @@ fn color_for_token(token: &RustSpecific, input_bytes: &[u8]) -> Color {
                 Token::Comment(_) => {
                     COMMENT_TEXT_COLOR
                 },
-                Token::OpenBracket | 
-                Token::CloseBracket | 
-                Token::OpenParen | 
-                Token::CloseParen | 
-                Token::OpenCurly | 
-                Token::CloseCurly | 
+                Token::OpenBracket |
+                Token::CloseBracket |
+                Token::OpenParen |
+                Token::CloseParen |
+                Token::OpenCurly |
+                Token::CloseCurly |
                 Token::Comma => {
                     LIGHT_BLUE_TEXT_COLOR
                 },
@@ -2132,6 +2143,7 @@ fn main() -> Result<(), String> {
         mouse_pos: None,
         transaction_manager: TransactionManager::new(),
         editing_name: false,
+        rects: vec![],
     };
 
     let pane2 = Pane {
@@ -2146,6 +2158,7 @@ fn main() -> Result<(), String> {
         mouse_pos: None,
         transaction_manager: TransactionManager::new(),
         editing_name: false,
+        rects: vec![],
     };
 
 
@@ -2183,7 +2196,7 @@ fn main() -> Result<(), String> {
 
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
         let side_effects = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds, &clipboard);
-        
+
 
 
         for side_effect in side_effects {
@@ -2205,7 +2218,7 @@ fn main() -> Result<(), String> {
             }
         }
 
-        
+
     }
 }
 
@@ -2269,7 +2282,7 @@ fn handle_side_effects(pane_manager: &mut PaneManager, side_effect: SideEffectAc
             };
 
             if let Some(pane_contents) = pane_contents {
-               
+
                 let output_pane_name = format!("{}-output", pane_name);
                 let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
                 match output_pane {
@@ -2289,7 +2302,7 @@ fn handle_side_effects(pane_manager: &mut PaneManager, side_effect: SideEffectAc
                     Some(output_pane) => {
                         // This causes a flash to happen
                         // Which is actually useful from a user experience perspective
-                        // but it was unintentional. 
+                        // but it was unintentional.
                         // Makes me think something is taking longer to render
                         // than I thought.
                         // I guess it makes sense in some ways though.
@@ -2298,9 +2311,9 @@ fn handle_side_effects(pane_manager: &mut PaneManager, side_effect: SideEffectAc
                         output_pane.text_buffer.chars.clear();
                         output_pane.text_buffer.parse_lines();
                     }
-                } 
+                }
 
-                let current_running_action = per_frame_actions.iter().enumerate().find(|(_i, x)| 
+                let current_running_action = per_frame_actions.iter().enumerate().find(|(_i, x)|
                     if let PerFrameAction::ReadCommand(name, _, _) = x {
                         *name == output_pane_name
                     } else {
@@ -2315,7 +2328,7 @@ fn handle_side_effects(pane_manager: &mut PaneManager, side_effect: SideEffectAc
                         child.kill().unwrap();
                     }
                 }
-                
+
                 let command = pane_contents;
                 // need to handle error
                 let child = Command::new("bash")
@@ -2329,7 +2342,7 @@ fn handle_side_effects(pane_manager: &mut PaneManager, side_effect: SideEffectAc
                         let stdout = child.stdout.take().unwrap();
                         let noblock_stdout = NonBlockingReader::from_fd(stdout).unwrap();
                         per_frame_actions.push(PerFrameAction::ReadCommand(output_pane_name, child, noblock_stdout))
-                    } 
+                    }
                     Err(e) => {
                         per_frame_actions.push(PerFrameAction::DisplayError(output_pane_name, format!("error {:?}", e)))
                     }
@@ -2349,13 +2362,13 @@ fn handle_transaction_pane(pane_manager: &mut PaneManager) {
     }
     if Some(pane_manager.active_pane) != transaction_pane_index {
 
-        if let Some(i) = transaction_pane_index  { 
+        if let Some(i) = transaction_pane_index  {
             let mut transaction_pane = pane_manager.remove(i);
             transaction_pane.text_buffer.chars.clear();
-        
+
             if let Some(active_pane) = pane_manager.get_active_pane_mut() {
                 let transaction_manager = &active_pane.transaction_manager;
-            
+
                 transaction_pane.text_buffer.chars.extend(format!("current: {}, pointer: {}\n",
                     transaction_manager.current_transaction,
                     transaction_manager.transaction_pointer).as_bytes());
@@ -2364,7 +2377,7 @@ fn handle_transaction_pane(pane_manager: &mut PaneManager) {
                     transaction_pane.text_buffer.chars.extend(format!("{:?}\n", transaction).as_bytes());
                 }
             }
-            
+
             transaction_pane.text_buffer.parse_lines();
             pane_manager.insert(i, transaction_pane);
         }
@@ -2382,10 +2395,10 @@ fn handle_token_pane(pane_manager: &mut PaneManager) {
     }
     if Some(pane_manager.active_pane) != token_pane_index {
 
-        if let Some(i) = token_pane_index  { 
+        if let Some(i) = token_pane_index  {
             let mut token_pane = pane_manager.remove(i);
             token_pane.text_buffer.chars.clear();
-        
+
             // I am doing this every frame.
             // I really need a nice way of handling non-every frame events
             if let Some(active_pane) = pane_manager.get_active_pane_mut() {
@@ -2401,7 +2414,7 @@ fn handle_token_pane(pane_manager: &mut PaneManager) {
                 }
                 tokenizer.position = 0;
             }
-            
+
             token_pane.text_buffer.parse_lines();
             pane_manager.insert(i, token_pane);
         }
@@ -2416,12 +2429,22 @@ fn get_i32_from_token(token: &Token, chars: &[u8]) -> Option<i32> {
     } else {
         None
     }
-   
+
 }
 
-fn parse_rect(tokenizer: &mut Tokenizer, chars: &[u8]) -> Option<Rect> {
+fn parse_rect(tokenizer: &mut Tokenizer, chars: &[u8]) -> Option<(Option<String>, Rect)> {
+    let mut pane_name = None;
+
     let _ = tokenizer.parse_single(chars)?;
-    let x_token = tokenizer.parse_single(chars)?;
+    let next_token = tokenizer.parse_single(chars)?;
+    let x_token;
+    if let Token::Atom((start, end)) = next_token {
+        pane_name = Some(from_utf8(&chars[start..end]).ok()?.to_string());
+        let _ = tokenizer.parse_single(chars)?;
+        x_token = tokenizer.parse_single(chars)?;
+    } else {
+        x_token = next_token;
+    }
     let x = get_i32_from_token(&x_token, chars)?;
     let _ = tokenizer.parse_single(chars)?;
     let y_token = tokenizer.parse_single(chars)?;
@@ -2432,14 +2455,15 @@ fn parse_rect(tokenizer: &mut Tokenizer, chars: &[u8]) -> Option<Rect> {
     let _ = tokenizer.parse_single(chars)?;
     let height_token = tokenizer.parse_single(chars)?;
     let height = get_i32_from_token(&height_token, chars)?;
-    Some(Rect::new(x, y, width as u32, height as u32))
+    Some((pane_name, Rect::new(x, y, width as u32, height as u32)))
 }
 
-// This happens every frame. Can I do better? 
+// This happens every frame. Can I do better?
 // I tokenize yet again here
 // I probably want to cache the tokens
 // and only retokenize on change
 fn handle_draw_panes(pane_manager: &mut PaneManager, renderer: &mut Renderer) -> Result<(), String> {
+    let mut panes_with_rects = vec![];
     for pane in pane_manager.panes.iter_mut() {
         if !pane.name.ends_with("_draw") {
             continue;
@@ -2451,17 +2475,27 @@ fn handle_draw_panes(pane_manager: &mut PaneManager, renderer: &mut Renderer) ->
             if let Some(Token::Atom((start, end))) = tokenizer.parse_single(chars) {
                 let atom = &chars[start..end];
                 if atom == b"rect" {
-                    if let Some(rect) = parse_rect(tokenizer, chars) {
-                        renderer.draw_rect(&rect)?;
+                    if let Some((pane_name, rect))= parse_rect(tokenizer, chars) {
+                        if let Some(pane_name) = pane_name  {
+                            panes_with_rects.push((pane_name, rect));
+                        } else {
+                            renderer.draw_rect(&rect)?;
+                        }
+                        
                     }
-                    
+
                 }
             }
         }
 
         tokenizer.position = 0;
-
     }
+    for (pane_name, rect) in panes_with_rects {
+        if let Some(pane) = pane_manager.get_pane_by_name_mut(pane_name) {
+            pane.rects.push(rect)
+        }
+    }
+
     Ok(())
 }
 
