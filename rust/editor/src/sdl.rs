@@ -1,12 +1,23 @@
 use std::convert::TryInto;
 
-use sdl2::{pixels::Color, render::*, video::{self, WindowContext}};
+use sdl2::{pixels::Color, render::*, video::{self, WindowContext}, VideoSubsystem};
 
-pub fn setup_sdl(width: usize, height: usize) -> Result<(sdl2::ttf::Sdl2TtfContext, Canvas<video::Window>, sdl2::EventPump, TextureCreator<WindowContext>), String> {
+pub struct SdlContext {
+    pub ttf_context: sdl2::ttf::Sdl2TtfContext, 
+    pub canvas: Canvas<video::Window>, 
+    pub event_pump: sdl2::EventPump,
+    pub texture_creator: TextureCreator<WindowContext>,
+    pub video: VideoSubsystem,
+}
+
+pub fn setup_sdl(width: usize, height: usize) -> Result<SdlContext, String> {
     let sdl_context = sdl2::init()?;
     let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string())?;
-    let sdl_window = sdl_context
-        .video()?
+    let video = sdl_context
+        .video()?;
+      
+    let sdl_window =   
+        video
         .window("Lith", width as u32, height as u32)
         // .opengl()
         .resizable()
@@ -26,8 +37,13 @@ pub fn setup_sdl(width: usize, height: usize) -> Result<(sdl2::ttf::Sdl2TtfConte
     let texture_creator = canvas.texture_creator();
 
 
-
-    Ok((ttf_context, canvas, event_pump, texture_creator))
+   Ok(SdlContext {
+        ttf_context,
+        canvas,
+        event_pump,
+        texture_creator,
+        video,
+    })
 }
 
 pub fn draw_font_texture(texture_creator: &TextureCreator<WindowContext>, ttf_context: sdl2::ttf::Sdl2TtfContext) -> Result<(Texture<>, usize, usize), String> {

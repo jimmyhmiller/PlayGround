@@ -3,7 +3,7 @@ use std::fmt::Debug;
 
 use nonblock::NonBlockingReader;
 use rand::Rng;
-use sdl2::{event::{Event, WindowEvent}, keyboard::{Keycode, Mod, Scancode}, mouse::SystemCursor, pixels::{Color, PixelFormatEnum}, rect::Rect, render::{Canvas, Texture, TargetRenderError}, video::{self}, surface::Surface, sys};
+use sdl2::{event::{Event, WindowEvent}, keyboard::{Keycode, Mod, Scancode}, mouse::SystemCursor, pixels::{Color}, rect::Rect, render::{Canvas, Texture}, video::{self}, sys, clipboard::{ClipboardUtil}};
 use tokenizer::{Tokenizer, rust_specific_pass, RustSpecific, Token};
 use sdl2::gfx::primitives::DrawRenderer;
 
@@ -165,11 +165,13 @@ enum EditAction {
 impl EditAction  {
     fn undo(&self, cursor_context: &mut CursorContext, text_buffer: &mut TextBuffer) {
         match self {
-            EditAction::Insert((start, end), _text_to_insert) => {
+            EditAction::Insert((start, end), text_to_insert) => {
                 let mut new_position = Cursor(*start, *end);
                 new_position.move_right(text_buffer);
-                text_buffer.remove_char(new_position);
-                new_position.move_left(text_buffer);
+                for _ in 0..text_to_insert.len() {
+                    text_buffer.remove_char(new_position);
+                    new_position.move_left(text_buffer);
+                }
                 cursor_context.set_cursor(new_position);
             },
             EditAction::Delete((start, end), text_to_delete) => {
@@ -339,7 +341,11 @@ fn text_space_from_screen_space(scroller: &Scroller, mut x: usize, y: usize, tex
 
     // Still crash here
     // Didn't realize it could do that without the unwrap
-    let line_number : usize = (((y as f32 / letter_height as f32) + (scroller.line_fraction_y(bounds) as f32 / bounds.letter_height as f32)).floor() as i32 + scroller.lines_above_fold(bounds) as i32) as usize;
+    let line_number : usize = (((y as f32 / letter_height as f32) 
+        + (scroller.line_fraction_y(bounds) as f32 / bounds.letter_height as f32)).floor() as i32 
+        + scroller.lines_above_fold(bounds) as i32) as usize;
+    
+
     if (x as i32) < line_number_padding && (x as i32) > line_number_padding - 20  {
         x = line_number_padding as usize;
     }
@@ -478,6 +484,17 @@ impl CursorContext {
             }
         }
     }
+    
+    fn copy_selection(&self, clipboard: &ClipboardUtil, text_buffer: &TextBuffer) -> Option<()> {
+        if let Some(((start_line, start_column), (end_line, end_column))) = self.selection {
+            let start = text_buffer.char_position_from_line_column(start_line, start_column)?;
+            let end = text_buffer.char_position_from_line_column(end_line, end_column)?;
+            clipboard.set_clipboard_text(from_utf8(&text_buffer.chars[start..end]).unwrap()).ok()?;  
+        }
+        
+        Some(())
+    }
+
     fn mouse_down(&mut self) {
         self.mouse_down = self.cursor;
     }
@@ -503,6 +520,24 @@ impl CursorContext {
             EditAction::Noop
         }
 
+    }
+    
+    fn paste(&mut self, clipboard: &ClipboardUtil, text_buffer: &mut TextBuffer) -> Option<String> {
+        if let Some(Cursor(line, column)) = self.cursor {
+            let position = text_buffer.char_position_from_line_column(line, column)?;
+            let before = &text_buffer.chars[..position];
+            let after = &text_buffer.chars[position..];
+            let from_clipboard = clipboard.clipboard_text().ok()?;
+            let new_chars = [before, from_clipboard.as_bytes(), after].concat();
+            text_buffer.chars = new_chars;
+            text_buffer.parse_lines();
+            if let Some(cursor) = text_buffer.line_column_from_char_position(position + from_clipboard.len()) {
+                self.set_cursor(cursor);
+            }
+            Some(from_utf8(from_clipboard.as_bytes()).unwrap().to_string())
+        } else {
+            None
+        }
     }
 }
 
@@ -717,8 +752,8 @@ struct Pane {
 // I need to think about that here.
 impl Pane {
 
-    fn adjust_position(&self, x: i32, y: i32) -> (usize, usize) {
-        (max(0, x - self.position.0) as usize, max(0,y - self.position.1) as usize)
+    fn adjust_position(&self, x: i32, y: i32, bounds: &EditorBounds) -> (usize, usize) {
+        (max(0, x - self.position.0) as usize, max(0,y - self.position.1 - (bounds.letter_height * 2) as i32) as usize)
     }
 
     fn max_characters_per_line(&self, bounds: &EditorBounds) -> usize {
@@ -738,9 +773,10 @@ impl Pane {
 
     fn draw_with_texture(&mut self, renderer: &mut Renderer) -> Result<(), String> {
         let texture_creator = renderer.canvas.texture_creator();
-        let mut texture = &mut texture_creator.create_texture_target(renderer.canvas.default_pixel_format(), self.width as u32, self.height as u32).unwrap();
+        let texture = &mut texture_creator.create_texture_target(renderer.canvas.default_pixel_format(), self.width as u32, self.height as u32).unwrap();
 
         if renderer.canvas.render_target_supported() {
+            // TODO: This is some ugly code I should isolate;
             let target = unsafe { sys::SDL_GetRenderTarget(renderer.canvas.raw()) };
             unsafe {
                 if sys::SDL_SetRenderTarget(renderer.canvas.raw(), texture.raw()) != 0 {
@@ -945,7 +981,6 @@ impl Pane {
 
     fn draw_selection(&mut self, renderer: &mut Renderer, line: usize, line_number_padding: usize) -> Result<(), String> {
 
-
         
         // TODO: Really think about this and make it work properly.
         // I need some way of looking at a character and easily deciding where it is
@@ -984,7 +1019,6 @@ impl Pane {
                 };
 
                 start_x = max(start_x, line_number_padding as i32);
-                start_x += self.position.0;
 
 
                 let start_y = renderer.target.y();
@@ -999,8 +1033,6 @@ impl Pane {
         Ok(())
     }
 
-
-    // TODO: OFF BY ONE ON DRAW! OR TOKEN OR SOMETHING
 
     fn draw_code(&mut self, renderer: &mut Renderer, line: usize) -> Result<(), String> {
 
@@ -1106,7 +1138,7 @@ impl Pane {
         if self.mouse_over_play_button(mouse_pos, bounds) {
             Some(SideEffectAction::Play(self.name.clone()))
         } else {
-            let (x, y) = self.adjust_position(mouse_pos.0, mouse_pos.1);
+            let (x, y) = self.adjust_position(mouse_pos.0, mouse_pos.1, bounds);
             self.cursor_context.move_cursor_from_screen_position(&self.scroller, x, y, &self.text_buffer, bounds);
             self.cursor_context.mouse_down();
             self.cursor_context.clear_selection();
@@ -1334,6 +1366,27 @@ impl TextBuffer {
         }
         self.max_line_width_cache = self.line_range.iter().map(|(start,end)| end - start).max().unwrap_or(0);
         self.max_line_width_cache
+    }
+
+    fn char_position_from_line_column(&self, line_number: usize, column_number: usize) -> Option<usize> {
+        if let Some((start_line, end_line))  = self.line_range.get(line_number) {
+            if (end_line - start_line) < column_number {
+                return None;
+            }
+            Some(start_line + column_number)
+        } else {
+            None
+        }
+        
+    }
+
+    fn line_column_from_char_position(&self, position: usize) -> Option<Cursor> {
+        for (i, (start, end)) in self.line_range.iter().enumerate() {
+            if position >= *start && position <= *end {
+                return Some(Cursor(i, position - start));
+            }
+        }
+        None
     }
     
 }
@@ -1599,7 +1652,7 @@ impl PaneManager {
 
     fn get_pane_by_name_mut(&mut self, pane_name: String) -> Option<&mut Pane> {
         for pane in self.panes.iter_mut() {
-            if pane.name == pane_name {
+            if pane.name.starts_with(&pane_name) {
                 return Some(pane);
             }
         }
@@ -1608,7 +1661,7 @@ impl PaneManager {
 
     fn get_pane_by_name(&mut self, pane_name: String) -> Option<&Pane> {
         for pane in self.panes.iter() {
-            if pane.name == pane_name {
+            if pane.name.starts_with(&pane_name) {
                 return Some(pane);
             }
         }
@@ -1621,7 +1674,8 @@ impl PaneManager {
 
 fn handle_events(event_pump: &mut sdl2::EventPump,
                  pane_manager: &mut PaneManager,
-                 bounds: &EditorBounds) -> Vec<SideEffectAction> {
+                 bounds: &EditorBounds,
+                 clipboard: &ClipboardUtil) -> Vec<SideEffectAction> {
     let mut is_text_input = false;
 
     // Is allocating here bad?
@@ -1757,6 +1811,22 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
 
                     },
 
+                    (Keycode::C, Mod::LGUIMOD | Mod::RGUIMOD) => {
+                        if let Some(pane) = pane_manager.get_active_pane_mut() {
+                            pane.cursor_context.copy_selection(&clipboard, &pane.text_buffer);
+                        }
+                    },
+                    (Keycode::V, Mod::LGUIMOD | Mod::RGUIMOD) => {
+                        if let Some(pane) = pane_manager.get_active_pane_mut() {
+                            // TODO: I NEED UNDO!
+                            if let Some(inserted_string) = pane.cursor_context.paste(&clipboard, &mut pane.text_buffer) {
+                                if let Some(Cursor(cursor_line, cursor_column)) = pane.cursor_context.cursor {
+                                    pane.transaction_manager.add_action(EditAction::Insert((cursor_line, cursor_column), inserted_string));   
+                                }
+                            }
+                        }
+                    },
+
                     (Keycode::O, Mod::LGUIMOD | Mod::RGUIMOD) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
                             let text = native::open_file_dialog();
@@ -1858,7 +1928,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
 
 
                 if let Some(pane) = pane_manager.get_active_pane_mut() {
-                    let (x2, y2) = pane.adjust_position(x, y);
+                    let (x2, y2) = pane.adjust_position(x, y, bounds);
 
 
                     if let Some(Cursor(start_line, mut start_column)) = pane.cursor_context.mouse_down {
@@ -1886,7 +1956,7 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                 pane_manager.stop_resizing();
                 pane_manager.create_pane();
                 if let Some(pane) = pane_manager.get_active_pane_mut() {
-                    let (x, y) = pane.adjust_position(x, y);
+                    let (x, y) = pane.adjust_position(x, y, bounds);
                     if let Some(Cursor(start_line, mut start_column)) = pane.cursor_context.mouse_down {
                         pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer, bounds);
                         if pane.cursor_context.selection.is_some() {
@@ -1998,7 +2068,14 @@ fn main() -> Result<(), String> {
         height: 800,
     };
 
-    let (ttf_context, canvas, mut event_pump, texture_creator) = sdl::setup_sdl(window.width as usize, window.height as usize)?;
+    let sdl::SdlContext {
+        mut event_pump,
+        canvas,
+        texture_creator,
+        ttf_context,
+        video,
+    } = sdl::setup_sdl(window.width as usize, window.height as usize)?;
+
     let (mut texture, letter_width, letter_height) = sdl::draw_font_texture(&texture_creator, ttf_context)?;
     texture.set_color_mod(167, 174, 210);
 
@@ -2006,6 +2083,7 @@ fn main() -> Result<(), String> {
     let cursor = sdl2::mouse::Cursor::from_system(SystemCursor::IBeam).unwrap();
     cursor.set();
 
+    let clipboard = video.clipboard();
 
     let bounds = EditorBounds {
         editor_left_margin: 10,
@@ -2104,7 +2182,7 @@ fn main() -> Result<(), String> {
         handle_token_pane(&mut pane_manager);
 
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
-        let side_effects = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds);
+        let side_effects = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds, &clipboard);
         
 
 
