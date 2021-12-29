@@ -881,6 +881,7 @@ impl Pane {
                 self.width as u32,
                 renderer.bounds.letter_height as u32))?;
 
+        // Do I need this???
         // left
         // renderer.fill_rect(
         //     &Rect::new(
