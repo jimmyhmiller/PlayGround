@@ -41,6 +41,12 @@ fn handle_events(event_pump: &mut sdl2::EventPump){
 }
 
 
+// Idea. Either 128x128 or 256x256.
+// Make it so that each pixel can be addressed by a single number
+// or a 2d coordinate. Then I can merely increment a single number
+// to write anywhere on the screen.
+// Might make some of the initial stuff way easier.
+
 fn main() -> Result<(), String> {
     let window = Window {
         width: 1200,
