@@ -1,6 +1,6 @@
 use std::fs;
 
-use sdl2::{event::Event, rect::Rect, pixels::Color, render::Canvas, video::{self}};
+use sdl2::{event::Event, rect::Rect, pixels::Color, render::{Canvas, Texture}, video::{self}};
 
 
 mod sdl;
@@ -40,6 +40,22 @@ fn handle_events(event_pump: &mut sdl2::EventPump){
     }
 }
 
+fn char_position_in_atlas(c: char, letter_width: u32, letter_height: u32) -> Rect {
+    Rect::new(letter_width as i32 * (c as i32 - 33), 0, letter_width as u32, letter_height)
+}
+
+fn move_right_one_char(target: &mut Rect, letter_width: u32) {
+    target.set_x(target.x + letter_width as i32);
+}
+
+fn draw_string(canvas: &mut Canvas<video::Window>, font_texture: &Texture, target: &mut Rect,letter_width: usize, letter_height: usize, text: &str) -> Result<(), String> {
+    for char in text.chars() {
+        move_right_one_char(target, letter_width as u32);
+        canvas.copy(font_texture, char_position_in_atlas(char, letter_width as u32, letter_height as u32), *target)?
+    }
+    Ok(())
+}
+
 
 // Idea. Either 128x128 or 256x256.
 // Make it so that each pixel can be addressed by a single number
@@ -76,10 +92,12 @@ fn main() -> Result<(), String> {
     let sdl::SdlContext {
         mut event_pump,
         mut canvas,
-        texture_creator: _,
-        ttf_context: _,
+        texture_creator,
+        ttf_context,
         video: _,
     } = sdl::setup_sdl(window.width as usize, window.height as usize)?;
+
+    let (mut texture, letter_width, letter_height) = sdl::draw_font_texture(&texture_creator, ttf_context)?;
 
     loop {
         canvas.set_draw_color(Color::BLACK);
@@ -98,7 +116,8 @@ fn main() -> Result<(), String> {
         }
         canvas.set_draw_color(Color::WHITE);
         canvas.fill_rect(Rect::new(window.width - 140, 20, 128, 128)).unwrap();
-        draw_word(&mut canvas, fs::read_to_string("font.txt").unwrap().as_str());
+        let mut target = Rect::new(200, 200, letter_width as u32, letter_height as u32);
+        draw_string(&mut canvas, &texture, &mut target, letter_width, letter_height, "Add x 1")?;
         canvas.present();
         handle_events(&mut event_pump);
     }
