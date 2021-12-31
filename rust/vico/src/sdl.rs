@@ -46,9 +46,9 @@ pub fn setup_sdl(width: usize, height: usize) -> Result<SdlContext, String> {
     })
 }
 
-pub fn _draw_font_texture(texture_creator: &TextureCreator<WindowContext>, ttf_context: sdl2::ttf::Sdl2TtfContext) -> Result<(Texture<>, usize, usize), String> {
-    let font_path = "/Users/jimmyhmiller/Library/Fonts/UbuntuMono-Regular.ttf";
-    let font = ttf_context.load_font(font_path, 16)?;
+pub fn draw_font_texture(texture_creator: &TextureCreator<WindowContext>, ttf_context: sdl2::ttf::Sdl2TtfContext) -> Result<(Texture<>, usize, usize), String> {
+    let font_path = "/Users/jimmyhmiller/Library/Fonts/Pico-8 mono.ttf";
+    let font = ttf_context.load_font(font_path, 12)?;
     let mut text = String::new();
     for i  in 33..127 {
         text.push(i as u8 as char);
