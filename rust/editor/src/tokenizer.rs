@@ -294,6 +294,16 @@ impl<'a> Tokenizer {
         self.current_byte(input_bytes) == b','
     }
 
+    pub fn get_line(&mut self, input_bytes: &[u8]) -> Vec<Token> {
+        let mut result = Vec::new();
+        while !self.at_end(input_bytes) {
+            if let Some(token) = self.parse_single(input_bytes) {
+                result.push(token);
+            }
+        }
+        result
+    }
+
     pub fn skip_lines(&mut self, n: usize, input_bytes: &[u8]) -> &mut Self {
         for _ in 0..n {
             while !self.at_end(input_bytes) && !self.is_newline(input_bytes) {
