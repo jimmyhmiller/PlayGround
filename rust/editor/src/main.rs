@@ -381,6 +381,7 @@ fn text_space_from_screen_space(scroller: &Scroller, mut x: usize, y: usize, tex
 // It being upside down is annoying
 // I need to think about afterburner text decorations
 // I could have queries and panes as the results of those queries
+// Need a command interface. But what to do it enso style
 
 struct FpsCounter {
     start_time: Instant,
@@ -808,11 +809,11 @@ impl Pane {
     fn draw(&mut self, renderer: &mut Renderer) -> Result<(), String> {
 
 
-        let mut line_decorations : Vec<((i32, i32), Rect)> = vec![];
+        let mut line_decorations : Vec<(i32, i32, i32, i32, i32)> = vec![];
         for draw_command in self.draw_commands.iter() {
             match draw_command {
-                &DrawCommand::RectOnPaneAtLocation(_, line_number, column_number, rect) => {
-                    line_decorations.push(((line_number, column_number), rect));
+                &DrawCommand::RectOnPaneAtLocation(_, start_line, start_column, end_line, end_column, height) => {
+                    line_decorations.push((start_line, start_column, end_line, end_column, height));
                 }
                 _ => {}
             }
@@ -864,22 +865,45 @@ impl Pane {
             self.draw_selection(renderer, line, line_number_padding)?;
 
             renderer.move_left(self.scroller.line_fraction_x(&renderer.bounds) as i32);
+            let initial_x_position = renderer.target.x;
             self.draw_code(renderer, line)?;
+            let left_most_character = self.scroller.scroll_x_character(&renderer.bounds);
 
-            // TODO: Actually set position correctly.
-            // Deal with line location and scroll stuff
-            // Maybe should be in draw_code.
+            // This is all bad. I need a way of dealing with scrolling and positions of things
+            // It really shouldn't be that hard, but my brain doesn't seem to like it.
             for decoration in line_decorations
                     .iter_mut()
-                    .filter(|((line_number, _), _)| *line_number == line as i32) {
+                    .filter(|(line_number, _, _, _, _)| *line_number == line as i32) {
                 renderer.set_draw_color(CURSOR_COLOR);
-                let rect = &mut decoration.1;
+
+
+                let (_line_start, start_column, _line_end, end_column, height) = *decoration;
+
+                let start = if start_column <= left_most_character as i32 {
+                    // Didnt want to think about why this is +1
+                    // But it seems to work.
+                    left_most_character + 1
+                } else {
+                    start_column as usize
+                };
+
+                let end = min(end_column as usize, start + self.max_characters_per_line(&renderer.bounds));
+                let start = min(start, end);
+
+                let characters_before_start = start.saturating_sub(left_most_character);
+                
+                let mut rect = Rect::new(0,0,0,height as u32);
                 let target = renderer.target;
-                rect.set_x(target.x + rect.x);
+                rect.set_x(initial_x_position + characters_before_start as i32 * renderer.bounds.letter_width as i32);
                 rect.set_y(target.y + rect.y);
+                let letter_width = end.saturating_sub(start);
+                if letter_width > 0 {
+                    rect.set_width(letter_width as u32 * renderer.bounds.letter_width as u32);
+                    renderer.draw_rect(&rect)?;
+                }
+                
                 
 
-                renderer.draw_rect(&decoration.1)?;
             }
 
             renderer.move_down_one_line();
@@ -2173,6 +2197,14 @@ fn main() -> Result<(), String> {
     };
     text_buffer.parse_lines();
 
+    let mut text_buffer2 = TextBuffer {
+        chars: "rect canvas 2 1 2 4 1".as_bytes().to_vec(),
+        line_range: vec![],
+        max_line_width_cache: 0,
+        tokenizer: Tokenizer::new(),
+    };
+    text_buffer2.parse_lines();
+
     let cursor_context = CursorContext {
         cursor: None,
         mouse_down: None,
@@ -2186,10 +2218,10 @@ fn main() -> Result<(), String> {
     };
 
     let pane1 = Pane {
-        name: "pane1".to_string(),
+        name: "test_draw".to_string(),
         scroller: scroller.clone(),
         cursor_context: cursor_context.clone(),
-        text_buffer: text_buffer.clone(),
+        text_buffer: text_buffer2,
         position: (100, 100),
         width: 500,
         height: 500,
@@ -2201,7 +2233,7 @@ fn main() -> Result<(), String> {
     };
 
     let pane2 = Pane {
-        name: "pane2".to_string(),
+        name: "canvas".to_string(),
         scroller,
         cursor_context,
         text_buffer,
@@ -2490,7 +2522,7 @@ fn get_i32_from_token(token: &Token, chars: &[u8]) -> Option<i32> {
 enum DrawCommand {
     Rect(Rect),
     RectOnPane(String, Rect),
-    RectOnPaneAtLocation(String, i32, i32, Rect),
+    RectOnPaneAtLocation(String, i32, i32, i32, i32, i32),
 }
 
 
@@ -2526,7 +2558,7 @@ fn parse_rect(tokenizer: &mut Tokenizer, chars: &[u8]) -> Option<DrawCommand> {
                 )
             )
         }
-        14 => {
+        12 => {
             let (s, e) = match line[1] {
                 Token::Atom((s, e)) => Some((s, e)),
                 _ => return None,
@@ -2536,12 +2568,9 @@ fn parse_rect(tokenizer: &mut Tokenizer, chars: &[u8]) -> Option<DrawCommand> {
                pane_name,
                 get_i32_from_token(&line[3], chars)?,
                 get_i32_from_token(&line[5], chars)?,
-                Rect::new(
-                    get_i32_from_token(&line[7], chars)?,
-                    get_i32_from_token(&line[9], chars)?,
-                    get_i32_from_token(&line[11], chars)? as u32,
-                    get_i32_from_token(&line[13], chars)? as u32,
-                )
+                get_i32_from_token(&line[7], chars)?,
+                get_i32_from_token(&line[9], chars)?,
+                get_i32_from_token(&line[11], chars)?,
             ))
         }
 
@@ -2595,7 +2624,7 @@ fn handle_draw_panes(pane_manager: &mut PaneManager, renderer: &mut Renderer) ->
                         match draw_command {
                             DrawCommand::Rect(rect) => renderer.draw_rect(&rect)?,
                             DrawCommand::RectOnPane(_, _) => panes_with_rects.push(draw_command),
-                            DrawCommand::RectOnPaneAtLocation(_, _, _, _) => panes_with_rects.push(draw_command),
+                            DrawCommand::RectOnPaneAtLocation(_, _, _, _, _, _) => panes_with_rects.push(draw_command),
                         }
                         
                     }
@@ -2615,7 +2644,7 @@ fn handle_draw_panes(pane_manager: &mut PaneManager, renderer: &mut Renderer) ->
                     pane.draw_commands.push(draw_command.clone())
                 }
             }
-            DrawCommand::RectOnPaneAtLocation(pane_name, _, _, _) => {
+            DrawCommand::RectOnPaneAtLocation(pane_name, _, _, _, _, _) => {
                 if let Some(pane) = pane_manager.get_pane_by_name_mut(pane_name.clone()) {
                     pane.draw_commands.push(draw_command.clone())
                 }

@@ -296,7 +296,7 @@ impl<'a> Tokenizer {
 
     pub fn get_line(&mut self, input_bytes: &[u8]) -> Vec<Token> {
         let mut result = Vec::new();
-        while !self.at_end(input_bytes) {
+        while !self.at_end(input_bytes) && !self.is_newline(input_bytes) {
             if let Some(token) = self.parse_single(input_bytes) {
                 result.push(token);
             }
