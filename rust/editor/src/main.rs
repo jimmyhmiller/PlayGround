@@ -367,7 +367,7 @@ fn text_space_from_screen_space(scroller: &Scroller, mut x: usize, y: usize, tex
 }
 
 
-// TODO:
+// TODO LIST:
 // Add some spacing between letters!
 // It would be pretty cool to add a minimap
 // Need toggle line numbers
@@ -380,7 +380,7 @@ fn text_space_from_screen_space(scroller: &Scroller, mut x: usize, y: usize, tex
 // I also need to think about the coordinate system
 // It being upside down is annoying
 // I need to think about afterburner text decorations
-
+// I could have queries and panes as the results of those queries
 
 struct FpsCounter {
     start_time: Instant,
@@ -454,6 +454,12 @@ impl CursorContext {
     fn start_of_line(&mut self) {
         if let Some(cursor) = self.cursor.as_mut() {
             cursor.start_of_line();
+        }
+    }
+
+    fn end_of_line(&mut self, text_buffer: &TextBuffer) {
+        if let Some(cursor) = self.cursor.as_mut() {
+            cursor.1 = text_buffer.line_length(cursor.0);
         }
     }
 
@@ -745,7 +751,7 @@ struct Pane {
     transaction_manager: TransactionManager,
     editing_name: bool,
     mouse_pos: Option<(i32, i32)>,
-    rects: Vec<Rect>,
+    draw_commands: Vec<DrawCommand>,
 }
 
 // Thoughts:
@@ -801,6 +807,18 @@ impl Pane {
 
     fn draw(&mut self, renderer: &mut Renderer) -> Result<(), String> {
 
+
+        let mut line_decorations : Vec<((i32, i32), Rect)> = vec![];
+        for draw_command in self.draw_commands.iter() {
+            match draw_command {
+                &DrawCommand::RectOnPaneAtLocation(_, line_number, column_number, rect) => {
+                    line_decorations.push(((line_number, column_number), rect));
+                }
+                _ => {}
+            }
+        }
+
+
         // It would be great if we normalized the drawing here
         // to be relative to the pane itself.
         // Could simplify quite a lot.
@@ -848,17 +866,39 @@ impl Pane {
             renderer.move_left(self.scroller.line_fraction_x(&renderer.bounds) as i32);
             self.draw_code(renderer, line)?;
 
+            // TODO: Actually set position correctly.
+            // Deal with line location and scroll stuff
+            // Maybe should be in draw_code.
+            for decoration in line_decorations
+                    .iter_mut()
+                    .filter(|((line_number, _), _)| *line_number == line as i32) {
+                renderer.set_draw_color(CURSOR_COLOR);
+                let rect = &mut decoration.1;
+                let target = renderer.target;
+                rect.set_x(target.x + rect.x);
+                rect.set_y(target.y + rect.y);
+                
+
+                renderer.draw_rect(&decoration.1)?;
+            }
+
             renderer.move_down_one_line();
         }
         
 
         renderer.set_draw_color(CURSOR_COLOR);
-        for rect in self.rects.iter_mut() {
-            rect.set_x(rect.x() - self.scroller.offset_x + renderer.bounds.letter_width as i32);
-            rect.set_y(rect.y() - self.scroller.offset_y + renderer.bounds.letter_height as i32);
-            renderer.draw_rect(rect)?;
+        for draw_command in self.draw_commands.iter_mut() {
+            match draw_command {
+                DrawCommand::RectOnPane(_, rect) => {
+                    rect.set_x(rect.x() - self.scroller.offset_x + renderer.bounds.letter_width as i32);
+                    rect.set_y(rect.y() - self.scroller.offset_y + renderer.bounds.letter_height as i32);
+                    renderer.draw_rect(rect)?;
+                }
+                _ => {}
+            }
+           
         }
-        self.rects.clear();
+        self.draw_commands.clear();
 
         renderer.set_draw_color(Color::RGBA(42, 45, 62, 255));
 
@@ -1618,7 +1658,7 @@ impl PaneManager {
             mouse_pos: None,
             transaction_manager: TransactionManager::new(),
             editing_name: false,
-            rects: vec![],
+            draw_commands: vec![],
         });
         self.panes.len() - 1
     }
@@ -1821,6 +1861,19 @@ fn handle_events(event_pump: &mut sdl2::EventPump,
                             }
                         }
 
+                    },
+
+                    (Keycode::A, Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                        
+                        if let Some(pane) = pane_manager.get_active_pane_mut() {
+                            pane.cursor_context.start_of_line()
+                        }
+                    },
+                    (Keycode::E, Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                        
+                        if let Some(pane) = pane_manager.get_active_pane_mut() {
+                            pane.cursor_context.end_of_line(&pane.text_buffer);
+                        }
                     },
 
                     (Keycode::C, Mod::LGUIMOD | Mod::RGUIMOD) => {
@@ -2144,7 +2197,7 @@ fn main() -> Result<(), String> {
         mouse_pos: None,
         transaction_manager: TransactionManager::new(),
         editing_name: false,
-        rects: vec![],
+        draw_commands: vec![],
     };
 
     let pane2 = Pane {
@@ -2159,7 +2212,7 @@ fn main() -> Result<(), String> {
         mouse_pos: None,
         transaction_manager: TransactionManager::new(),
         editing_name: false,
-        rects: vec![],
+        draw_commands: vec![],
     };
 
 
@@ -2433,30 +2486,92 @@ fn get_i32_from_token(token: &Token, chars: &[u8]) -> Option<i32> {
 
 }
 
-fn parse_rect(tokenizer: &mut Tokenizer, chars: &[u8]) -> Option<(Option<String>, Rect)> {
-    let mut pane_name = None;
+#[derive(Debug, Clone)]
+enum DrawCommand {
+    Rect(Rect),
+    RectOnPane(String, Rect),
+    RectOnPaneAtLocation(String, i32, i32, Rect),
+}
 
-    let _ = tokenizer.parse_single(chars)?;
-    let next_token = tokenizer.parse_single(chars)?;
-    let x_token;
-    if let Token::Atom((start, end)) = next_token {
-        pane_name = Some(from_utf8(&chars[start..end]).ok()?.to_string());
-        let _ = tokenizer.parse_single(chars)?;
-        x_token = tokenizer.parse_single(chars)?;
-    } else {
-        x_token = next_token;
+
+// rect canvas 10 100 10 10 100 100
+
+fn parse_rect(tokenizer: &mut Tokenizer, chars: &[u8]) -> Option<DrawCommand> {
+
+    let line = tokenizer.get_line(chars);
+    match line.len() {
+        8 => Some(
+            DrawCommand::Rect(Rect::new(
+            get_i32_from_token(&line[1], chars)?,
+            get_i32_from_token(&line[3], chars)?,
+            get_i32_from_token(&line[5], chars)? as u32,
+            get_i32_from_token(&line[7], chars)? as u32,
+        ))),
+        10 => {
+            let (s, e) = match line[1] {
+                Token::Atom((s, e)) => Some((s, e)),
+                _ => return None,
+            }?;
+
+            let pane_name = from_utf8(&chars[s..e]).ok()?.to_string();
+            Some(
+                DrawCommand::RectOnPane(
+                    pane_name,
+                    Rect::new(
+                        get_i32_from_token(&line[3], chars)?,
+                        get_i32_from_token(&line[5], chars)?,
+                        get_i32_from_token(&line[7], chars)? as u32,
+                        get_i32_from_token(&line[9], chars)? as u32,
+                    )
+                )
+            )
+        }
+        14 => {
+            let (s, e) = match line[1] {
+                Token::Atom((s, e)) => Some((s, e)),
+                _ => return None,
+            }?;
+            let pane_name = from_utf8(&chars[s..e]).ok()?.to_string();
+            Some(DrawCommand::RectOnPaneAtLocation(
+               pane_name,
+                get_i32_from_token(&line[3], chars)?,
+                get_i32_from_token(&line[5], chars)?,
+                Rect::new(
+                    get_i32_from_token(&line[7], chars)?,
+                    get_i32_from_token(&line[9], chars)?,
+                    get_i32_from_token(&line[11], chars)? as u32,
+                    get_i32_from_token(&line[13], chars)? as u32,
+                )
+            ))
+        }
+
+        _ => None
+
     }
-    let x = get_i32_from_token(&x_token, chars)?;
-    let _ = tokenizer.parse_single(chars)?;
-    let y_token = tokenizer.parse_single(chars)?;
-    let y = get_i32_from_token(&y_token, chars)?;
-    let _ = tokenizer.parse_single(chars)?;
-    let width_token = tokenizer.parse_single(chars)?;
-    let width = get_i32_from_token(&width_token, chars)?;
-    let _ = tokenizer.parse_single(chars)?;
-    let height_token = tokenizer.parse_single(chars)?;
-    let height = get_i32_from_token(&height_token, chars)?;
-    Some((pane_name, Rect::new(x, y, width as u32, height as u32)))
+
+    
+
+    // let _ = tokenizer.parse_single(chars)?;
+    // let next_token = tokenizer.parse_single(chars)?;
+    // let x_token;
+    // if let Token::Atom((start, end)) = next_token {
+    //     pane_name = Some(from_utf8(&chars[start..end]).ok()?.to_string());
+    //     let _ = tokenizer.parse_single(chars)?;
+    //     x_token = tokenizer.parse_single(chars)?;
+    // } else {
+    //     x_token = next_token;
+    // }
+    // let x = get_i32_from_token(&x_token, chars)?;
+    // let _ = tokenizer.parse_single(chars)?;
+    // let y_token = tokenizer.parse_single(chars)?;
+    // let y = get_i32_from_token(&y_token, chars)?;
+    // let _ = tokenizer.parse_single(chars)?;
+    // let width_token = tokenizer.parse_single(chars)?;
+    // let width = get_i32_from_token(&width_token, chars)?;
+    // let _ = tokenizer.parse_single(chars)?;
+    // let height_token = tokenizer.parse_single(chars)?;
+    // let height = get_i32_from_token(&height_token, chars)?;
+    // Some((pane_name, Rect::new(x, y, width as u32, height as u32)))
 }
 
 // This happens every frame. Can I do better?
@@ -2476,11 +2591,11 @@ fn handle_draw_panes(pane_manager: &mut PaneManager, renderer: &mut Renderer) ->
             if let Some(Token::Atom((start, end))) = tokenizer.parse_single(chars) {
                 let atom = &chars[start..end];
                 if atom == b"rect" {
-                    if let Some((pane_name, rect))= parse_rect(tokenizer, chars) {
-                        if let Some(pane_name) = pane_name  {
-                            panes_with_rects.push((pane_name, rect));
-                        } else {
-                            renderer.draw_rect(&rect)?;
+                    if let Some(draw_command) = parse_rect(tokenizer, chars) {
+                        match draw_command {
+                            DrawCommand::Rect(rect) => renderer.draw_rect(&rect)?,
+                            DrawCommand::RectOnPane(_, _) => panes_with_rects.push(draw_command),
+                            DrawCommand::RectOnPaneAtLocation(_, _, _, _) => panes_with_rects.push(draw_command),
                         }
                         
                     }
@@ -2491,9 +2606,21 @@ fn handle_draw_panes(pane_manager: &mut PaneManager, renderer: &mut Renderer) ->
 
         tokenizer.position = 0;
     }
-    for (pane_name, rect) in panes_with_rects {
-        if let Some(pane) = pane_manager.get_pane_by_name_mut(pane_name) {
-            pane.rects.push(rect)
+    
+    // TODO: Get rid of these clones
+    for draw_command in panes_with_rects.iter() {
+        match draw_command {
+            DrawCommand::RectOnPane(pane_name, _rect) => {
+                if let Some(pane) = pane_manager.get_pane_by_name_mut(pane_name.clone()) {
+                    pane.draw_commands.push(draw_command.clone())
+                }
+            }
+            DrawCommand::RectOnPaneAtLocation(pane_name, _, _, _) => {
+                if let Some(pane) = pane_manager.get_pane_by_name_mut(pane_name.clone()) {
+                    pane.draw_commands.push(draw_command.clone())
+                }
+            }
+            DrawCommand::Rect(_) => {}
         }
     }
 
