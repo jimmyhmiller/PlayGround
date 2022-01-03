@@ -8,10 +8,11 @@ use tokenizer::{Tokenizer, rust_specific_pass, RustSpecific, Token};
 use sdl2::gfx::primitives::DrawRenderer;
 
 
+// cargo build --message-format=json | jq 'select(.reason == "compiler-message")' | jq '.message' | jq '.spans' | jq ".[]" | jq '"rect canvas \(.line_start) \(.column_start) \(.line_end) \(.column_end) 1"'  | tr -d '"'
+
 mod native;
 mod sdl;
 mod tokenizer;
-
 
 const BACKGROUND_COLOR: Color = Color::RGB(0x29, 0x2D, 0x3E);
 const STANDARD_TEXT_COLOR: Color = Color::RGB(0x95, 0x9D, 0xCB);
@@ -382,6 +383,7 @@ fn text_space_from_screen_space(scroller: &Scroller, mut x: usize, y: usize, tex
 // I need to think about afterburner text decorations
 // I could have queries and panes as the results of those queries
 // Need a command interface. But what to do it enso style
+// Multi line bash commands
 
 struct FpsCounter {
     start_time: Instant,
