@@ -1013,6 +1013,9 @@ impl Pane {
 
         renderer.draw_triangle(into_i16(play_button_x),into_i16(play_button_y), STANDARD_TEXT_COLOR)?;
 
+        // TODO: I translated play_button_x and play_button_y to local coords
+        // But mouse_pos is not locally translated.
+        // Need to do this better in general.
         if let Some(mouse_pos) = self.mouse_pos {
             if in_square(mouse_pos, (play_button_x, play_button_y), 10) {
                 renderer.set_cursor_pointer();
@@ -2160,6 +2163,7 @@ fn color_for_token(token: &RustSpecific, input_bytes: &[u8]) -> Color {
 }
 
 
+
 fn main() -> Result<(), String> {
     native::set_smooth_scroll();
 
@@ -2288,6 +2292,7 @@ fn main() -> Result<(), String> {
 
     let server = Server::http("0.0.0.0:8000").unwrap();
 
+
     enum HttpRoutes {
         GetPane
     }
@@ -2296,33 +2301,23 @@ fn main() -> Result<(), String> {
     matcher.insert("/panes/:pane_name", HttpRoutes::GetPane).ok();
 
     loop {
-        
-        if let Ok(Some(request)) = server.try_recv() {
-            println!("received request! method: {:?}, url: {:?}, headers: {:?}",
-                request.method(),
-                request.url(),
-                request.headers()
-            );
-            if let Some(route) = matcher.at(request.url()).ok() {
-                match route.value {
-                    HttpRoutes::GetPane => {
-                        if let Some(pane) = pane_manager.get_pane_by_name(route.params.get("pane_name").unwrap().to_string()) {
-                            let response = Response::from_string(pane.text_buffer.get_text());
-                            request.respond(response).ok();
-                        } else {
-                            let response = Response::from_string("Not Found").with_status_code(404);
-                            request.respond(response).ok();
-                        }
 
-                    }
+
+        // Silly little pattern for dealing with a locally scoped
+        // optional. Once try try blocks are stable don't need this iffe
+        (|| {
+            let request = server.try_recv().ok()??;
+            let route = matcher.at(request.url()).ok();
+            match route.map(|x| (x.value, x.params)) {
+                Some((HttpRoutes::GetPane, params)) => {
+                    let pane = pane_manager.get_pane_by_name(params.get("pane_name")?.to_string())?;
+                    let response = Response::from_string(pane.text_buffer.get_text());
+                    request.respond(response).ok()?;
+                    return Some(());
                 }
-            } else {
-                let response = Response::from_string("Not Found").with_status_code(404);
-                request.respond(response).ok();
+                None => request.respond(Response::from_string("Not Found").with_status_code(404)).ok()
             }
-
-
-        }
+        })();
 
         renderer.set_cursor_ibeam();
         handle_transaction_pane(&mut pane_manager);
