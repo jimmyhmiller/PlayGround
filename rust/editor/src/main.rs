@@ -7,6 +7,8 @@ use sdl2::{event::{Event, WindowEvent}, keyboard::{Keycode, Mod, Scancode}, mous
 use tokenizer::{Tokenizer, rust_specific_pass, RustSpecific, Token};
 use sdl2::gfx::primitives::DrawRenderer;
 
+use tiny_http::{Server, Response};
+use matchit::Node;
 
 // cargo build --message-format=json | jq 'select(.reason == "compiler-message")' | jq '.message' | jq '.spans' | jq ".[]" | jq '"rect canvas \(.line_start) \(.column_start) \(.line_end) \(.column_end) 1"'  | tr -d '"'
 
@@ -1372,6 +1374,9 @@ impl TextBuffer {
         }
         let line_start = self[cursor_line].0;
         let char_pos = line_start + cursor_column;
+        // TODO:
+        // I have panic here. I think it is when I delete a selection
+        // and try to undo because I don't capture deleting selections in the transaction system.
         self.chars.splice(char_pos..char_pos, to_insert.to_vec());
 
         let mut lines_to_skip = 1;
@@ -1464,6 +1469,10 @@ impl TextBuffer {
             }
         }
         None
+    }
+
+    fn get_text(&self) -> &str {
+        from_utf8(&self.chars).unwrap()
     }
 
 }
@@ -2277,7 +2286,44 @@ fn main() -> Result<(), String> {
     let mut per_frame_actions = vec![];
 
 
+    let server = Server::http("0.0.0.0:8000").unwrap();
+
+    enum HttpRoutes {
+        GetPane
+    }
+
+    let mut matcher = Node::new();
+    matcher.insert("/panes/:pane_name", HttpRoutes::GetPane).ok();
+
     loop {
+        
+        if let Ok(Some(request)) = server.try_recv() {
+            println!("received request! method: {:?}, url: {:?}, headers: {:?}",
+                request.method(),
+                request.url(),
+                request.headers()
+            );
+            if let Some(route) = matcher.at(request.url()).ok() {
+                match route.value {
+                    HttpRoutes::GetPane => {
+                        if let Some(pane) = pane_manager.get_pane_by_name(route.params.get("pane_name").unwrap().to_string()) {
+                            let response = Response::from_string(pane.text_buffer.get_text());
+                            request.respond(response).ok();
+                        } else {
+                            let response = Response::from_string("Not Found").with_status_code(404);
+                            request.respond(response).ok();
+                        }
+
+                    }
+                }
+            } else {
+                let response = Response::from_string("Not Found").with_status_code(404);
+                request.respond(response).ok();
+            }
+
+
+        }
+
         renderer.set_cursor_ibeam();
         handle_transaction_pane(&mut pane_manager);
         handle_token_pane(&mut pane_manager);
