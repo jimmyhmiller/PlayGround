@@ -199,8 +199,6 @@ impl Pane {
         )?;
 
 
-
-
         renderer.set_initial_rendering_location(&self.scroller);
         // renderer.move_right(self.position.0 as i32);
         // renderer.move_down(self.position.1 as i32);
