@@ -386,10 +386,26 @@ pub fn handle_events(event_pump: &mut sdl2::EventPump,
 }
 
 
+pub fn handle_per_frame_actions(per_frame_actions: &mut Vec<PerFrameAction>, pane_manager: &mut PaneManager) {
+    let mut per_frame_action_results = vec![];
+    for (i, per_frame_action) in per_frame_actions.iter_mut().enumerate() {
+        per_frame_action_results.push(
+            handle_per_frame_action(i, pane_manager, per_frame_action)
+        );
+    }
+    for per_frame_action_result in per_frame_action_results {
+        match per_frame_action_result {
+            PerFrameActionResult::RemoveAction(i) => {
+                per_frame_actions.swap_remove(i);
+            },
+            PerFrameActionResult::Noop => {}
+        }
+    }
+}
 
 
 
-pub fn handle_per_frame_actions(index: usize, pane_manager: &mut PaneManager, per_frame_action: &mut PerFrameAction) -> PerFrameActionResult {
+pub fn handle_per_frame_action(index: usize, pane_manager: &mut PaneManager, per_frame_action: &mut PerFrameAction) -> PerFrameActionResult {
     match per_frame_action {
         PerFrameAction::ReadCommand(output_pane_name, _child, non_blocking_reader) => {
             let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
@@ -436,85 +452,87 @@ pub fn handle_per_frame_actions(index: usize, pane_manager: &mut PaneManager, pe
     }
 }
 
-pub fn handle_side_effects(pane_manager: &mut PaneManager, side_effect: SideEffectAction, per_frame_actions: &mut Vec<PerFrameAction>) {
-    match side_effect {
-        SideEffectAction::Play(pane_name) => {
-            // TODO: think about multiple panes of same name
-            let pane_contents = {
-                if let Some(pane) = pane_manager.get_pane_by_name_mut(pane_name.clone()) {
-                    Some(from_utf8(&pane.text_buffer.chars).unwrap().to_string())
-                } else {
-                    None
-                }
-            };
-
-            if let Some(pane_contents) = pane_contents {
-
-                let output_pane_name = format!("{}-output", pane_name);
-                let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
-                match output_pane {
-
-                    None => {
-                        let existing_pane = pane_manager.get_pane_by_name(pane_name);
-                        let position = {
-                            match existing_pane {
-                                Some(pane) =>  {
-                                    (pane.position.0 + pane.width as i32 + 10, pane.position.1)
-                                }
-                                None => (0, 0)
-                            }
-                        };
-                        pane_manager.create_pane_raw(output_pane_name.to_string(), position, 300, 300);
-                    }
-                    Some(output_pane) => {
-                        // This causes a flash to happen
-                        // Which is actually useful from a user experience perspective
-                        // but it was unintentional.
-                        // Makes me think something is taking longer to render
-                        // than I thought.
-                        // I guess it makes sense in some ways though.
-                        // ls for example takes some amount of time,
-                        // and then I have to fetch that data and render.
-                        output_pane.text_buffer.chars.clear();
-                        output_pane.text_buffer.parse_lines();
-                    }
-                }
-
-                let current_running_action = per_frame_actions.iter().enumerate().find(|(_i, x)|
-                    if let PerFrameAction::ReadCommand(name, _, _) = x {
-                        *name == output_pane_name
+pub fn handle_side_effects(pane_manager: &mut PaneManager, side_effects: Vec<SideEffectAction>, per_frame_actions: &mut Vec<PerFrameAction>) {
+    for side_effect in side_effects.iter() {
+        match side_effect {
+            SideEffectAction::Play(pane_name) => {
+                // TODO: think about multiple panes of same name
+                let pane_contents = {
+                    if let Some(pane) = pane_manager.get_pane_by_name_mut(pane_name.clone()) {
+                        Some(from_utf8(&pane.text_buffer.chars).unwrap().to_string())
                     } else {
-                        false
+                        None
                     }
-                );
-                if let Some((i, _)) = current_running_action {
-                    let action = per_frame_actions.swap_remove(i);
-                    if let PerFrameAction::ReadCommand(_name, mut child, _) = action {
-                        // TODO: Get rid of this unwrap!
+                };
 
-                        child.kill().unwrap();
+                if let Some(pane_contents) = pane_contents {
+
+                    let output_pane_name = format!("{}-output", pane_name);
+                    let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
+                    match output_pane {
+
+                        None => {
+                            let existing_pane = pane_manager.get_pane_by_name(pane_name);
+                            let position = {
+                                match existing_pane {
+                                    Some(pane) =>  {
+                                        (pane.position.0 + pane.width as i32 + 10, pane.position.1)
+                                    }
+                                    None => (0, 0)
+                                }
+                            };
+                            pane_manager.create_pane_raw(output_pane_name.to_string(), position, 300, 300);
+                        }
+                        Some(output_pane) => {
+                            // This causes a flash to happen
+                            // Which is actually useful from a user experience perspective
+                            // but it was unintentional.
+                            // Makes me think something is taking longer to render
+                            // than I thought.
+                            // I guess it makes sense in some ways though.
+                            // ls for example takes some amount of time,
+                            // and then I have to fetch that data and render.
+                            output_pane.text_buffer.chars.clear();
+                            output_pane.text_buffer.parse_lines();
+                        }
+                    }
+
+                    let current_running_action = per_frame_actions.iter().enumerate().find(|(_i, x)|
+                        if let PerFrameAction::ReadCommand(name, _, _) = x {
+                            *name == output_pane_name
+                        } else {
+                            false
+                        }
+                    );
+                    if let Some((i, _)) = current_running_action {
+                        let action = per_frame_actions.swap_remove(i);
+                        if let PerFrameAction::ReadCommand(_name, mut child, _) = action {
+                            // TODO: Get rid of this unwrap!
+
+                            child.kill().unwrap();
+                        }
+                    }
+
+                    let command = pane_contents;
+                    // need to handle error
+                    let child = Command::new("bash")
+                        .arg("-c")
+                        .arg(command)
+                        .stdout(Stdio::piped())
+                        .spawn();
+
+                    match child {
+                        Ok(mut child) => {
+                            let stdout = child.stdout.take().unwrap();
+                            let noblock_stdout = NonBlockingReader::from_fd(stdout).unwrap();
+                            per_frame_actions.push(PerFrameAction::ReadCommand(output_pane_name, child, noblock_stdout))
+                        }
+                        Err(e) => {
+                            per_frame_actions.push(PerFrameAction::DisplayError(output_pane_name, format!("error {:?}", e)))
+                        }
                     }
                 }
-
-                let command = pane_contents;
-                // need to handle error
-                let child = Command::new("bash")
-                    .arg("-c")
-                    .arg(command)
-                    .stdout(Stdio::piped())
-                    .spawn();
-
-                match child {
-                    Ok(mut child) => {
-                        let stdout = child.stdout.take().unwrap();
-                        let noblock_stdout = NonBlockingReader::from_fd(stdout).unwrap();
-                        per_frame_actions.push(PerFrameAction::ReadCommand(output_pane_name, child, noblock_stdout))
-                    }
-                    Err(e) => {
-                        per_frame_actions.push(PerFrameAction::DisplayError(output_pane_name, format!("error {:?}", e)))
-                    }
-                }
-            }
-        },
+            },
+        }
     }
 }

@@ -1,13 +1,14 @@
 use std::convert::TryInto;
 
-use sdl2::{pixels::Color, render::*, video::{self, WindowContext}, VideoSubsystem};
+use sdl2::{pixels::Color, render::*, video::{self, WindowContext}, clipboard::ClipboardUtil, mouse::SystemCursor};
 
 pub struct SdlContext {
     pub ttf_context: sdl2::ttf::Sdl2TtfContext, 
     pub canvas: Canvas<video::Window>, 
     pub event_pump: sdl2::EventPump,
     pub texture_creator: TextureCreator<WindowContext>,
-    pub video: VideoSubsystem,
+    pub clipboard: ClipboardUtil,
+    pub system_cursor: sdl2::mouse::Cursor,
 }
 
 pub fn setup_sdl(width: usize, height: usize) -> Result<SdlContext, String> {
@@ -36,13 +37,18 @@ pub fn setup_sdl(width: usize, height: usize) -> Result<SdlContext, String> {
 
     let texture_creator = canvas.texture_creator();
 
+    let clipboard = video.clipboard();
 
-   Ok(SdlContext {
+    let system_cursor = sdl2::mouse::Cursor::from_system(SystemCursor::IBeam).unwrap();
+    system_cursor.set();
+
+    Ok(SdlContext {
         ttf_context,
         canvas,
         event_pump,
         texture_creator,
-        video,
+        clipboard,
+        system_cursor,
     })
 }
 
