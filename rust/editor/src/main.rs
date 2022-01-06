@@ -2,7 +2,7 @@ use std::{cmp::{max, min}, fs, str::from_utf8, convert::TryInto};
 use std::fmt::Debug;
 
 use rand::Rng;
-use sdl2::{mouse::SystemCursor, pixels::{Color}, rect::Rect, sys};
+use sdl2::{pixels::{Color}, rect::Rect, sys};
 use tokenizer::{Tokenizer, rust_specific_pass, RustSpecific, Token};
 
 
@@ -29,7 +29,7 @@ use text_buffer::TextBuffer;
 use transaction::{EditAction, TransactionManager};
 use cursor::{Cursor, CursorContext};
 use fps::FpsCounter;
-use event::{SideEffectAction, handle_events, handle_side_effects, handle_per_frame_actions, PerFrameActionResult};
+use event::{SideEffectAction, handle_events, handle_side_effects, handle_per_frame_actions, PerFrameAction};
 
 // I really want so debugging panels.
 // Should probably invest in that.
@@ -643,6 +643,23 @@ pub struct PaneManager {
 
 impl PaneManager {
 
+    fn new(panes: Vec<Pane>, window: Window) -> Self {
+        PaneManager {
+            panes,
+            window,
+            active_pane: 0,
+            scroll_active_pane: 0,
+            dragging_pane: None,
+            dragging_start: (0, 0),
+            dragging_pane_start: (0, 0),
+            resize_pane: None,
+            resize_start: (0, 0),
+            create_pane_activated: false,
+            create_pane_start: (0, 0),
+            create_pane_current: (0, 0),
+        }
+    }
+
     fn set_mouse_pos(&mut self, mouse_pos: (i32, i32)) {
         if let Some(pane) = self.panes.get_mut(self.scroll_active_pane) {
             pane.mouse_pos = Some(mouse_pos);
@@ -884,7 +901,7 @@ impl PaneManager {
         None
     }
 
-    fn get_pane_by_name(&mut self, pane_name: String) -> Option<&Pane> {
+    fn get_pane_by_name(&mut self, pane_name: &str) -> Option<&Pane> {
         for pane in self.panes.iter() {
             if pane.name.starts_with(&pane_name) {
                 return Some(pane);
@@ -986,9 +1003,6 @@ enum DrawCommand {
     RectOnPaneAtLocation(String, i32, i32, i32, i32, i32),
 }
 
-
-// rect canvas 10 100 10 10 100 100
-
 fn parse_rect(tokenizer: &mut Tokenizer, chars: &[u8]) -> Option<DrawCommand> {
 
     let line = tokenizer.get_line(chars);
@@ -1038,30 +1052,6 @@ fn parse_rect(tokenizer: &mut Tokenizer, chars: &[u8]) -> Option<DrawCommand> {
         _ => None
 
     }
-
-    
-
-    // let _ = tokenizer.parse_single(chars)?;
-    // let next_token = tokenizer.parse_single(chars)?;
-    // let x_token;
-    // if let Token::Atom((start, end)) = next_token {
-    //     pane_name = Some(from_utf8(&chars[start..end]).ok()?.to_string());
-    //     let _ = tokenizer.parse_single(chars)?;
-    //     x_token = tokenizer.parse_single(chars)?;
-    // } else {
-    //     x_token = next_token;
-    // }
-    // let x = get_i32_from_token(&x_token, chars)?;
-    // let _ = tokenizer.parse_single(chars)?;
-    // let y_token = tokenizer.parse_single(chars)?;
-    // let y = get_i32_from_token(&y_token, chars)?;
-    // let _ = tokenizer.parse_single(chars)?;
-    // let width_token = tokenizer.parse_single(chars)?;
-    // let width = get_i32_from_token(&width_token, chars)?;
-    // let _ = tokenizer.parse_single(chars)?;
-    // let height_token = tokenizer.parse_single(chars)?;
-    // let height = get_i32_from_token(&height_token, chars)?;
-    // Some((pane_name, Rect::new(x, y, width as u32, height as u32)))
 }
 
 // This happens every frame. Can I do better?
@@ -1118,6 +1108,24 @@ fn handle_draw_panes(pane_manager: &mut PaneManager, renderer: &mut Renderer) ->
 }
 
 
+enum HttpRoutes {
+    GetPane
+}
+
+fn process_http_request(server: &Server, matcher: &Node<HttpRoutes>, pane_manager: &mut PaneManager) -> Option<()> {
+    let request = server.try_recv().ok()??;
+    let route = matcher.at(request.url()).ok();
+    match route.map(|x| (x.value, x.params)) {
+        Some((HttpRoutes::GetPane, params)) => {
+            let pane = pane_manager.get_pane_by_name(params.get("pane_name")?)?;
+            let response = Response::from_string(pane.text_buffer.get_text());
+            request.respond(response).ok()?;
+            Some(())
+        }
+        None => request.respond(Response::from_string("Not Found").with_status_code(404)).ok()
+    }
+}
+
 
 
 
@@ -1134,18 +1142,14 @@ fn main() -> Result<(), String> {
         canvas,
         texture_creator,
         ttf_context,
-        video,
+        clipboard,
+        system_cursor,
     } = sdl::setup_sdl(window.width as usize, window.height as usize)?;
 
     let (mut texture, letter_width, letter_height) = sdl::draw_font_texture(&texture_creator, ttf_context)?;
     texture.set_color_mod(167, 174, 210);
 
     // If this gets dropped, the cursor resets.
-    let system_cursor = sdl2::mouse::Cursor::from_system(SystemCursor::IBeam).unwrap();
-    system_cursor.set();
-
-    let clipboard = video.clipboard();
-
     let bounds = EditorBounds {
         editor_left_margin: 10,
         line_number_gutter_width : 20,
@@ -1161,6 +1165,7 @@ fn main() -> Result<(), String> {
     let pane1 = Pane::new("test_draw".to_string(), (100, 100), (500, 500), "rect canvas 2 1 2 4 1", true);
     let pane2 = Pane::new("canvas".to_string(), (650, 100), (500, 500), &text, false);
 
+
     let mut renderer = Renderer {
         canvas,
         texture,
@@ -1169,82 +1174,35 @@ fn main() -> Result<(), String> {
         system_cursor,
     };
 
-    let mut pane_manager = PaneManager {
-        panes: vec![pane1, pane2],
-        active_pane: 0,
-        scroll_active_pane: 0,
+    let mut pane_manager = PaneManager::new(
+        vec![pane1, pane2],
         window,
-        dragging_pane: None,
-        dragging_start: (0, 0),
-        dragging_pane_start: (0, 0),
-        resize_pane: None,
-        resize_start: (0, 0),
-        create_pane_activated: false,
-        create_pane_start: (0, 0),
-        create_pane_current: (0, 0),
-    };
+    );
 
-    let mut per_frame_actions = vec![];
+    let mut per_frame_actions: Vec<PerFrameAction> = vec![];
 
-
+    // TODO: HTTP Server Struct?
     let server = Server::http("0.0.0.0:8000").unwrap();
-
-
-    enum HttpRoutes {
-        GetPane
-    }
-
     let mut matcher = Node::new();
     matcher.insert("/panes/:pane_name", HttpRoutes::GetPane).ok();
 
     loop {
 
-
-        // Silly little pattern for dealing with a locally scoped
-        // optional. Once try try blocks are stable don't need this iffe
-        (|| {
-            let request = server.try_recv().ok()??;
-            let route = matcher.at(request.url()).ok();
-            match route.map(|x| (x.value, x.params)) {
-                Some((HttpRoutes::GetPane, params)) => {
-                    let pane = pane_manager.get_pane_by_name(params.get("pane_name")?.to_string())?;
-                    let response = Response::from_string(pane.text_buffer.get_text());
-                    request.respond(response).ok()?;
-                    Some(())
-                }
-                None => request.respond(Response::from_string("Not Found").with_status_code(404)).ok()
-            }
-        })();
-
+        process_http_request(&server, &matcher, &mut pane_manager);
+      
+        // Set this each frame so that something can change it if they want
         renderer.set_cursor_ibeam();
+
         handle_transaction_pane(&mut pane_manager);
         handle_token_pane(&mut pane_manager);
 
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
+        
+        
         let side_effects = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds, &clipboard);
-
-
-
-        for side_effect in side_effects {
-            handle_side_effects(&mut pane_manager, side_effect, &mut per_frame_actions);
-        }
-
-        let mut per_frame_action_results = vec![];
-        for (i, per_frame_action) in per_frame_actions.iter_mut().enumerate() {
-            per_frame_action_results.push(
-                handle_per_frame_actions(i, &mut pane_manager, per_frame_action)
-            );
-        }
-        for per_frame_action_result in per_frame_action_results {
-            match per_frame_action_result {
-                PerFrameActionResult::RemoveAction(i) => {
-                    per_frame_actions.swap_remove(i);
-                },
-                PerFrameActionResult::Noop => {}
-            }
-        }
+        handle_side_effects(&mut pane_manager, side_effects, &mut per_frame_actions);
+        handle_per_frame_actions(&mut per_frame_actions, &mut pane_manager);
 
 
     }
 }
-
