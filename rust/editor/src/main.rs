@@ -34,6 +34,10 @@ use event::{SideEffectAction, handle_events, handle_side_effects, handle_per_fra
 // I really want so debugging panels.
 // Should probably invest in that.
 // Make it work automatically with Debug.
+// Is there any generic way we could do this?
+// Expose all of state (would that get into infinite loop territory?)
+// What would that look like? Would it be useful?
+// Also, can we have a generic tree view component easily?
 
 
 
