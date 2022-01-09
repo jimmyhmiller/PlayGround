@@ -5,14 +5,14 @@
 
 
 (def markdown
-  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/CDD and the Non-Linearity of Discovery.md"))
+  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/Towards Aesthetics Elements of Programming.md"))
 
 
 (defmulti transform
   (fn [data] (when (vector? data)
                (first data))))
 
-(defn heading [size [_ _ content]] 
+(defn heading [size [_ _ content]]
   [:Heading {:text content
              :size size}])
 
