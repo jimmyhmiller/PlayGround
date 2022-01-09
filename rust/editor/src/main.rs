@@ -49,8 +49,6 @@ use event::{SideEffectAction, handle_events, handle_side_effects, handle_per_fra
 // Need references to panes
 // Need canvas scrolling?
 // Need to think about undo and pane positions
-// I need copy and paste
-// I need to experiment with panes being a surface
 // I need to experiment with non-text panes
 // I also need to think about the coordinate system
 // It being upside down is annoying
