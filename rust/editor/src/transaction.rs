@@ -107,6 +107,10 @@ impl TransactionManager {
         self.current_transaction += 1;
     }
 
+    pub fn next(&mut self) {
+        self.current_transaction += 1;
+    }
+
 }
 
 
