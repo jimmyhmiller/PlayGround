@@ -107,7 +107,7 @@ impl TransactionManager {
         self.current_transaction += 1;
     }
 
-    pub fn next(&mut self) {
+    pub fn next_transaction(&mut self) {
         self.current_transaction += 1;
     }
 
@@ -158,8 +158,14 @@ impl EditAction  {
 
     pub fn redo(&self, cursor_context: &mut CursorContext, text_buffer: &mut TextBuffer) {
 
+        // TODO:
+        // Are these start and end?
+        // Or are they line and column?
+        // We call them start and end here,
+        // But insert_char takes a cursor, which is line and column.
         match self {
             EditAction::Insert((start, end), text_to_insert) => {
+                // TODO: We can panic here if we paste do some undo and redo stuff.
                 text_buffer.insert_char(Cursor(*start, *end), text_to_insert.as_bytes());
             },
             EditAction::Delete((start, end), _text_to_delete) => {

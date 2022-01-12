@@ -29,7 +29,7 @@ use text_buffer::TextBuffer;
 use transaction::{EditAction, TransactionManager};
 use cursor::{Cursor, CursorContext};
 use fps::FpsCounter;
-use event::{SideEffectAction, handle_events, handle_side_effects, handle_per_frame_actions, PerFrameAction};
+use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions, PerFrameAction};
 
 // I really want so debugging panels.
 // Should probably invest in that.
@@ -85,6 +85,7 @@ fn in_square(mouse_pos: (i32, i32), square_pos: (i32, i32), square_size: i32) ->
 
 #[derive(Debug, Clone)]
 struct Pane {
+    id: usize,
     name: String,
     scroller: Scroller,
     cursor_context: CursorContext,
@@ -104,9 +105,10 @@ struct Pane {
 // I need to think about that here.
 impl Pane {
 
-    fn new(name: String, (x, y): (i32, i32), (width, height): (usize, usize), text: &str, active: bool) -> Self {
+    fn new(id: usize, name: String, (x, y): (i32, i32), (width, height): (usize, usize), text: &str, active: bool) -> Self {
 
         Pane {
+            id,
             name,
             scroller: Scroller::new(),
             cursor_context: CursorContext::new(),
@@ -571,10 +573,11 @@ impl Pane {
         in_square(mouse_pos, (play_button_x, play_button_y), 10)
     }
 
-    fn on_click(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<SideEffectAction> {
+    fn on_click(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<Action> {
         if self.mouse_over_play_button(mouse_pos, bounds) {
-            Some(SideEffectAction::Play(self.name.clone()))
+            Some(Action::RunPane(self.id))
         } else {
+            // We could generate actions here instead of doing things.
             let (x, y) = self.adjust_position(mouse_pos.0, mouse_pos.1, bounds);
             self.cursor_context.move_cursor_from_screen_position(&self.scroller, x, y, &self.text_buffer, bounds);
             self.cursor_context.mouse_down();
@@ -641,6 +644,7 @@ pub struct PaneManager {
     create_pane_activated: bool,
     create_pane_start: (i32, i32),
     create_pane_current: (i32, i32),
+    pane_id_counter: usize,
 }
 
 impl PaneManager {
@@ -659,6 +663,7 @@ impl PaneManager {
             create_pane_activated: false,
             create_pane_start: (0, 0),
             create_pane_current: (0, 0),
+            pane_id_counter: 0,
         }
     }
 
@@ -706,7 +711,7 @@ impl PaneManager {
         }
     }
 
-    fn get_pane_index_at_mouse(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<usize> {
+    fn get_pane_index_at_mouse(&self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<usize> {
         for (i, pane) in self.panes.iter().enumerate().rev() {
             if pane.is_mouse_over(mouse_pos, bounds) {
                 return Some(i);
@@ -718,6 +723,12 @@ impl PaneManager {
     fn get_pane_at_mouse_mut(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<&mut Pane> {
         if let Some(i) = self.get_pane_index_at_mouse(mouse_pos, bounds) {
             return self.panes.get_mut(i);
+        }
+        None
+    }
+    fn get_pane_at_mouse(&self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<&Pane> {
+        if let Some(i) = self.get_pane_index_at_mouse(mouse_pos, bounds) {
+            return self.panes.get(i);
         }
         None
     }
@@ -833,7 +844,10 @@ impl PaneManager {
         let scroller = Scroller::new();
         let cursor_context = CursorContext::new();
 
+        let id = self.new_pane_id();
+
         self.panes.push(Pane {
+            id,
             name: pane_name,
             position,
             width,
@@ -903,6 +917,16 @@ impl PaneManager {
         None
     }
 
+
+    fn get_pane_by_id_mut(&mut self, pane_id: usize) -> Option<&mut Pane> {
+        for pane in self.panes.iter_mut() {
+            if pane.id == pane_id {
+                return Some(pane);
+            }
+        }
+        None
+    }
+
     fn get_pane_by_name(&mut self, pane_name: &str) -> Option<&Pane> {
         for pane in self.panes.iter() {
             if pane.name.starts_with(&pane_name) {
@@ -910,6 +934,11 @@ impl PaneManager {
             }
         }
         None
+    }
+
+    fn new_pane_id(&mut self) -> usize {
+        self.pane_id_counter += 1;
+        self.pane_id_counter
     }
 
 
@@ -947,6 +976,35 @@ fn handle_transaction_pane(pane_manager: &mut PaneManager) {
             transaction_pane.text_buffer.parse_lines();
             pane_manager.insert(i, transaction_pane);
         }
+    }
+}
+
+// I need to think about how to generalize this
+fn handle_action_pane(pane_manager: &mut PaneManager, actions: &Vec<Action>) {
+    let mut action_pane_index = None;
+    for (i, pane) in pane_manager.panes.iter().enumerate() {
+        if pane.name == "action_pane" {
+            action_pane_index = Some(i);
+        }
+    }
+  
+    if let Some(i) = action_pane_index  {
+        let mut action_pane = pane_manager.remove(i);
+        action_pane.text_buffer.chars.clear();
+
+
+        for action in actions.iter() {
+            if matches!(action, Action::MoveMouse(_)) {
+                continue;
+            }
+            if Some(action_pane.id) == action.pane_id() {
+                continue;
+            }
+            action_pane.text_buffer.chars.extend(format!("{:?}\n", action).as_bytes());
+        }
+
+        action_pane.text_buffer.parse_lines();
+        pane_manager.insert(i, action_pane);
     }
 }
 
@@ -1164,8 +1222,10 @@ fn main() -> Result<(), String> {
 
     let mut fps = FpsCounter::new();
 
-    let pane1 = Pane::new("test_draw".to_string(), (100, 100), (500, 500), "rect canvas 2 1 2 4 1", true);
-    let pane2 = Pane::new("canvas".to_string(), (650, 100), (500, 500), &text, false);
+    // ids are large enough we shouldn't have duplicates here.
+    // This is of course just test code.
+    let pane1 = Pane::new(12352353, "test_draw".to_string(), (100, 100), (500, 500), "rect canvas 2 1 2 4 1", true);
+    let pane2 = Pane::new(12352353353, "canvas".to_string(), (650, 100), (500, 500), &text, false);
 
 
     let mut renderer = Renderer {
@@ -1188,6 +1248,9 @@ fn main() -> Result<(), String> {
     let mut matcher = Node::new();
     matcher.insert("/panes/:pane_name", HttpRoutes::GetPane).ok();
 
+
+    let mut all_actions = vec![];
+
     loop {
 
         process_http_request(&server, &matcher, &mut pane_manager);
@@ -1197,14 +1260,16 @@ fn main() -> Result<(), String> {
 
         handle_transaction_pane(&mut pane_manager);
         handle_token_pane(&mut pane_manager);
+        handle_action_pane(&mut pane_manager, &all_actions);
 
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
         
         
-        let side_effects = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds, &clipboard);
-        handle_side_effects(&mut pane_manager, side_effects, &mut per_frame_actions);
+        let actions = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds, &clipboard);
+        all_actions.extend(actions.clone());
+        handle_side_effects(&mut pane_manager, actions, &mut per_frame_actions);
         handle_per_frame_actions(&mut per_frame_actions, &mut pane_manager);
-
+        
 
     }
 }
