@@ -6,13 +6,12 @@ use sdl2::{clipboard::ClipboardUtil, keyboard::{Scancode, Keycode, Mod}, event::
 use crate::{PaneManager, renderer::EditorBounds, cursor::Cursor, transaction::EditAction, native};
 
 
-enum _Action {
+#[derive(Debug, Clone)]
+pub enum Action {
     MoveCursorUp(usize),
     MoveCursorDown(usize),
     MoveCursorLeft(usize),
     MoveCursorRight(usize),
-    SetCursor(usize, (i32, i32)),
-    // Set cursor line/col?
     Delete(usize),
     RunPane(usize),
     InsertNewline(usize),
@@ -23,31 +22,74 @@ enum _Action {
     Copy(usize),
     Paste(usize),
     OpenFile(usize),
+    SelectAll(usize),
     TextInput(usize, String),
     DeletePane(usize),
     StartEditPaneName(usize),
     EndEditPaneName(usize),
     StartResizePane(usize, (i32, i32)),
-    EndResizePane(usize, (i32, i32)),
-    StartCreatePane(usize, (i32, i32)),
-    EndCreatePane(usize, (i32, i32)),
-    MovePane(usize, (i32, i32)),
+    EndResizePane((i32, i32)),
+    StartCreatePane((i32, i32)),
+    EndCreatePane((i32, i32)),
+    StartMovePane(usize, (i32, i32)),
+    EndMovePane((i32, i32)),
+    DuplicatePane(usize),
     SetPaneActive(usize),
     SetScrollPane(usize),
-    OnClick(usize, (i32, i32)),
-    MoveMouse(usize, (i32, i32)),
-    StartSelection(usize, (i32, i32)),
-    EndSelection(usize, (i32, i32)),
-    WindowResized(i32, i32),
+    MouseDown(usize, (i32, i32)),
+    MoveMouse((i32, i32)),
+    ResizeWindow(i32, i32),
     Scroll(usize),
     Quit,
+
+    // TODO:
+    // These depend on the state of the system
+    // For example, a click on a pane might more might not
+    // set a cursor. We should generate these,
+    // but they would be on a second pass.
+
+    // SetCursor(usize, (i32, i32)),
+    // // Set cursor line/col?
+    // StartSelection(usize, (i32, i32)),
+    // EndSelection(usize, (i32, i32)),
+
     
 }
 
-#[derive(Debug)]
-pub enum SideEffectAction {
-    Play(String),
+impl Action {
+    pub fn pane_id(&self) -> Option<usize> {
+        match self {
+            Action::MoveCursorUp(id) |
+            Action::MoveCursorDown(id) |
+            Action::MoveCursorLeft(id) |
+            Action::MoveCursorRight(id) |
+            Action::Delete(id) |
+            Action::RunPane(id) |
+            Action::InsertNewline(id) |
+            Action::Undo(id) |
+            Action::Redo(id) |
+            Action::MoveCursorToLineStart(id) |
+            Action::MoveCursorToLineEnd(id) |
+            Action::Copy(id) |
+            Action::Paste(id) |
+            Action::OpenFile(id) |
+            Action::SelectAll(id) |
+            Action::TextInput(id, _) |
+            Action::DeletePane(id) |
+            Action::StartEditPaneName(id) |
+            Action::EndEditPaneName(id) |
+            Action::StartResizePane(id, _) |
+            Action::StartMovePane(id, _) |
+            Action::DuplicatePane(id) |
+            Action::SetPaneActive(id) |
+            Action::SetScrollPane(id) |
+            Action::MouseDown(id, _) |
+            Action::Scroll(id) => Some(*id),
+            _ => None,
+        }
+    }
 }
+
 
 pub enum PerFrameAction {
     ReadCommand(String, Child, NonBlockingReader<ChildStdout>),
@@ -67,11 +109,10 @@ pub fn handle_events(
         event_pump: &mut sdl2::EventPump,
         pane_manager: &mut PaneManager,
         bounds: &EditorBounds,
-        clipboard: &ClipboardUtil) -> Vec<SideEffectAction> {
+        clipboard: &ClipboardUtil) -> Vec<Action> {
     let mut is_text_input = false;
 
-    // Is allocating here bad?
-    let mut actions: Vec<SideEffectAction> = vec![];
+    let mut actions: Vec<Action> = vec![];
 
     // let text_buffer = &mut pane.text_buffer;
     // let cursor_context = &mut pane.cursor_context;
@@ -88,7 +129,10 @@ pub fn handle_events(
     for event in event_pump.poll_iter() {
         // println!("frame: {}, event {:?}", frame_counter, event);
         match event {
-            Event::Quit { .. } => ::std::process::exit(0),
+            Event::Quit { .. } => {
+                actions.push(Action::Quit);
+                ::std::process::exit(0);
+            },
             // Note: These work I can do enso style quasimodal input
             // Event::KeyUp {keycode, ..} => {
             //     println!("{:?}", keycode);
@@ -103,25 +147,30 @@ pub fn handle_events(
                     (Keycode::Up, _) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
                             pane.cursor_context.move_up(&pane.text_buffer);
+                            actions.push(Action::MoveCursorUp(pane.id));
                         }
                     },
                     (Keycode::Down, _) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
                             pane.cursor_context.move_down(&pane.text_buffer);
+                            actions.push(Action::MoveCursorDown(pane.id));
                         }
                     },
                     (Keycode::Left, _) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
                             pane.cursor_context.move_left(&pane.text_buffer);
+                            actions.push(Action::MoveCursorLeft(pane.id));
                         }
                     },
                     (Keycode::Right, _) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
                             pane.cursor_context.move_right(&pane.text_buffer);
+                            actions.push(Action::MoveCursorRight(pane.id));
                         }
                     },
                     (Keycode::Backspace, _) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
+                            actions.push(Action::Delete(pane.id));
 
                             if pane.editing_name {
                                 pane.name.pop();
@@ -170,7 +219,7 @@ pub fn handle_events(
                     }
                     (Keycode::Return, _) if cmd_is_pressed => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
-                            actions.push(SideEffectAction::Play(pane.name.clone()))
+                            actions.push(Action::RunPane(pane.id));
                         }
                     }
                     (Keycode::Return, _) => {
@@ -178,55 +227,68 @@ pub fn handle_events(
 
                             if pane.editing_name {
                                 pane.editing_name = false;
+                                actions.push(Action::EndEditPaneName(pane.id));
                                 continue;
                             }
                             // refactor to be better
                             let action = pane.cursor_context.handle_insert(&[b'\n'], &mut pane.text_buffer);
                             pane.transaction_manager.add_action(action);
                             pane.cursor_context.start_of_line();
+                            actions.push(Action::InsertNewline(pane.id));
                         }
                     },
 
 
-                    (Keycode::Z, key_mod) => {
+                     (Keycode::Z, key_mod) if key_mod == Mod::LGUIMOD || keymod == Mod::RGUIMOD => {
                         // I should think about the fact that I might not have an active editor
                         // Should undo undo pane movement?
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
-                            if key_mod == Mod::LGUIMOD || keymod == Mod::RGUIMOD {
-                                pane.transaction_manager.undo(&mut pane.cursor_context, &mut pane.text_buffer);
-                            } else if key_mod == (Mod::LSHIFTMOD | Mod::LGUIMOD) {
-                                pane.transaction_manager.redo(&mut pane.cursor_context, &mut pane.text_buffer);
-                            } else {
-                                is_text_input = true
-                            }
+                            pane.transaction_manager.undo(&mut pane.cursor_context, &mut pane.text_buffer);
+                            actions.push(Action::Undo(pane.id));
                         }
+                     }
 
+                     (Keycode::Z, key_mod) if key_mod == (Mod::LSHIFTMOD | Mod::LGUIMOD) => {
+                        if let Some(pane) = pane_manager.get_active_pane_mut() {
+                            pane.transaction_manager.redo(&mut pane.cursor_context, &mut pane.text_buffer);
+                            actions.push(Action::Redo(pane.id));
+                        }
+                     }
+
+
+                    (Keycode::Z, _key_mod) => {
+                        is_text_input = true
                     },
 
                     (Keycode::A, Mod::LCTRLMOD | Mod::RCTRLMOD) => {
                         
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
-                            pane.cursor_context.start_of_line()
+                            pane.cursor_context.start_of_line();
+                            actions.push(Action::MoveCursorToLineStart(pane.id));
                         }
                     },
                     (Keycode::E, Mod::LCTRLMOD | Mod::RCTRLMOD) => {
                         
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
                             pane.cursor_context.end_of_line(&pane.text_buffer);
+                            actions.push(Action::MoveCursorToLineEnd(pane.id));
                         }
                     },
 
                     (Keycode::C, Mod::LGUIMOD | Mod::RGUIMOD) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
                             pane.cursor_context.copy_selection(&clipboard, &pane.text_buffer);
+                            actions.push(Action::Copy(pane.id));
                         }
                     },
                     (Keycode::V, Mod::LGUIMOD | Mod::RGUIMOD) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
                             // TODO: I NEED UNDO!
+                            actions.push(Action::Paste(pane.id));
                             if let Some(inserted_string) = pane.cursor_context.paste(&clipboard, &mut pane.text_buffer) {
                                 if let Some(Cursor(cursor_line, cursor_column)) = pane.cursor_context.cursor {
                                     pane.transaction_manager.add_action(EditAction::Insert((cursor_line, cursor_column), inserted_string));
+                                    pane.transaction_manager.next_transaction();
                                 }
                             }
                         }
@@ -234,6 +296,7 @@ pub fn handle_events(
 
                     (Keycode::O, Mod::LGUIMOD | Mod::RGUIMOD) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
+                            actions.push(Action::OpenFile(pane.id));
                             let text = native::open_file_dialog();
                             if let Some(text) = text {
                                 pane.text_buffer.set_contents(text.as_bytes());
@@ -243,8 +306,9 @@ pub fn handle_events(
                     }
                     (Keycode::A, Mod::LGUIMOD | Mod::RGUIMOD) => {
                         if let Some(pane) = pane_manager.get_active_pane_mut() {
-                        // This is super ugly, fix.
+                            // This is super ugly, fix.
                             pane.cursor_context.set_selection(((0,0), (pane.text_buffer.line_count()-1, pane.text_buffer.line_length(pane.text_buffer.line_count()-1))));
+                            actions.push(Action::SelectAll(pane.id));
                         }
                     }
 
@@ -253,6 +317,7 @@ pub fn handle_events(
             }
             Event::TextInput{text, ..} => {
                 if let Some(pane) = pane_manager.get_active_pane_mut() {
+                    actions.push(Action::TextInput(pane.id, text.to_string()));
                     if is_text_input && pane.editing_name {
                         pane.name.push_str(&text);
                     } else if is_text_input {
@@ -270,16 +335,25 @@ pub fn handle_events(
 
 
             Event::MouseButtonDown { x, y, .. } if ctrl_is_pressed && alt_is_pressed && cmd_is_pressed => {
+                if let Some(pane) = pane_manager.get_pane_at_mouse((x,y), bounds) {
+                    actions.push(Action::DeletePane(pane.id));
+                }
                 pane_manager.delete_pane_at_mouse((x, y), bounds);
             }
 
             Event::MouseButtonDown { x, y, .. }  if ctrl_is_pressed && cmd_is_pressed  => {
                 if let Some(pane) = pane_manager.get_pane_at_mouse_mut((x,y), bounds) {
                     pane.editing_name = true;
+                    actions.push(Action::StartEditPaneName(pane.id));
                 }
             }
 
             Event::MouseButtonDown { x, y, .. } if ctrl_is_pressed && alt_is_pressed => {
+                if let Some(pane) = pane_manager.get_pane_at_mouse((x,y), bounds) {
+                    actions.push(Action::StartResizePane(pane.id, (x, y)));
+                } else {
+                    actions.push(Action::StartCreatePane((x, y)));
+                }
                 let found = pane_manager.set_resize_start((x,y), bounds);
                 if !found {
                     pane_manager.set_create_start((x,y));
@@ -289,12 +363,19 @@ pub fn handle_events(
             Event::MouseButtonDown { x, y, .. } if cmd_is_pressed && alt_is_pressed => {
                 if let Some(i) = pane_manager.get_pane_index_at_mouse((x, y), bounds) {
                     let mut pane = pane_manager.panes[i].clone();
+                    actions.push(Action::DuplicatePane(pane.id));
                     pane.position = (pane.position.0 + 20, pane.position.1 + 20);
                     pane_manager.panes.push(pane);
+
                 }
             }
 
             Event::MouseButtonDown { x, y, .. } if ctrl_is_pressed => {
+                if let Some(pane) = pane_manager.get_pane_at_mouse((x,y), bounds) {
+                    actions.push(Action::StartMovePane(pane.id, (x, y)));
+                } else {
+                    actions.push(Action::StartCreatePane((x, y)));
+                }
                 let found = pane_manager.set_dragging_start((x, y), bounds);
                 if !found {
                     pane_manager.set_create_start((x,y));
@@ -302,12 +383,17 @@ pub fn handle_events(
             }
 
             Event::MouseButtonDown { x, y, .. } => {
+                if let Some(pane) = pane_manager.get_pane_at_mouse((x,y), bounds) {
+                    actions.push(Action::SetPaneActive(pane.id));
+                }
+                // These x,y coords are in global space, maybe want to make them pane relative
                 pane_manager.set_active_from_click_coords((x, y), bounds);
                 if let Some(pane) = pane_manager.get_active_pane_mut() {
+                    actions.push(Action::MouseDown(pane.id, (x, y)));
                     if let Some(action) = pane.on_click((x, y), bounds) {
                         actions.push(action);
                     }
-                    pane.transaction_manager.next();
+                    pane.transaction_manager.next_transaction();
                 }
 
                 if !(ctrl_is_pressed && cmd_is_pressed) {
@@ -315,6 +401,9 @@ pub fn handle_events(
                     // that are not at the mouse point
                     // But this is a temporary binding anyways.
                     for pane in pane_manager.panes.iter_mut() {
+                        if pane.editing_name == true {
+                            actions.push(Action::EndEditPaneName(pane.id));
+                        }
                         pane.editing_name = false;
                     }
                 }
@@ -323,6 +412,7 @@ pub fn handle_events(
 
             Event::MouseMotion{x, y, .. } => {
 
+                actions.push(Action::MoveMouse((x, y)));
                 pane_manager.update_dragging_position((x, y));
                 pane_manager.update_resize_size((x, y));
                 pane_manager.update_create_pane((x, y));
@@ -331,8 +421,12 @@ pub fn handle_events(
                 // distinguish between active and scrolling.
                 // Mouse over is enough for scrolling, but not for active.
                 pane_manager.set_scroll_active_if_mouse_over((x, y), bounds);
+                if let Some(pane) = pane_manager.get_pane_at_mouse((x,y), bounds) {
+                    actions.push(Action::SetScrollPane(pane.id));
+                }
 
 
+                // Make a selection
                 if let Some(pane) = pane_manager.get_active_pane_mut() {
                     let (x2, y2) = pane.adjust_position(x, y, bounds);
 
@@ -359,8 +453,13 @@ pub fn handle_events(
 
             Event::MouseButtonUp{x, y, ..} => {
                 pane_manager.stop_dragging();
+                actions.push(Action::EndMovePane((x, y)));
                 pane_manager.stop_resizing();
+                actions.push(Action::EndResizePane((x, y)));
                 pane_manager.create_pane();
+                actions.push(Action::EndCreatePane((x, y)));
+                
+                // Setting a selection
                 if let Some(pane) = pane_manager.get_active_pane_mut() {
                     let (x, y) = pane.adjust_position(x, y, bounds);
                     if let Some(Cursor(start_line, mut start_column)) = pane.cursor_context.mouse_down {
@@ -397,6 +496,7 @@ pub fn handle_events(
                 //     }
                 // }
                 pane_manager.window.resize(width, height);
+                actions.push(Action::ResizeWindow(width, height));
 
             }
 
@@ -413,6 +513,7 @@ pub fn handle_events(
                 if let Some(pane) = pane_manager.get_scroll_active_pane_mut() {
                     pane.scroller.scroll_x(pane.width, x * direction_multiplier.neg(), &mut pane.text_buffer, bounds);
                     pane.scroller.scroll_y(pane.height, y * direction_multiplier, &pane.text_buffer, bounds);
+                    actions.push(Action::Scroll(pane.id));
                 }
 
             }
@@ -492,21 +593,21 @@ pub fn handle_per_frame_action(index: usize, pane_manager: &mut PaneManager, per
     }
 }
 
-pub fn handle_side_effects(pane_manager: &mut PaneManager, side_effects: Vec<SideEffectAction>, per_frame_actions: &mut Vec<PerFrameAction>) {
+pub fn handle_side_effects(pane_manager: &mut PaneManager, side_effects: Vec<Action>, per_frame_actions: &mut Vec<PerFrameAction>) {
     for side_effect in side_effects.iter() {
         match side_effect {
-            SideEffectAction::Play(pane_name) => {
+            Action::RunPane(pane_id) => {
                 // TODO: think about multiple panes of same name
                 let pane_contents = {
-                    if let Some(pane) = pane_manager.get_pane_by_name_mut(pane_name.clone()) {
-                        Some(from_utf8(&pane.text_buffer.chars).unwrap().to_string())
+                    if let Some(pane) = pane_manager.get_pane_by_id_mut(*pane_id) {
+                        Some((from_utf8(&pane.text_buffer.chars).unwrap().to_string(), pane.name.to_string()))
                     } else {
                         None
                     }
                 };
 
-                if let Some(pane_contents) = pane_contents {
-
+                if let Some((pane_contents, pane_name)) = pane_contents {
+                    let pane_name = &pane_name;
                     let output_pane_name = format!("{}-output", pane_name);
                     let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
                     match output_pane {
@@ -573,6 +674,7 @@ pub fn handle_side_effects(pane_manager: &mut PaneManager, side_effects: Vec<Sid
                     }
                 }
             },
+            _ => {}
         }
     }
 }
