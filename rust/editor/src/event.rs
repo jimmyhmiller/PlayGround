@@ -6,6 +6,44 @@ use sdl2::{clipboard::ClipboardUtil, keyboard::{Scancode, Keycode, Mod}, event::
 use crate::{PaneManager, renderer::EditorBounds, cursor::Cursor, transaction::EditAction, native};
 
 
+enum _Action {
+    MoveCursorUp(usize),
+    MoveCursorDown(usize),
+    MoveCursorLeft(usize),
+    MoveCursorRight(usize),
+    SetCursor(usize, (i32, i32)),
+    // Set cursor line/col?
+    Delete(usize),
+    RunPane(usize),
+    InsertNewline(usize),
+    Undo(usize),
+    Redo(usize),
+    MoveCursorToLineStart(usize),
+    MoveCursorToLineEnd(usize),
+    Copy(usize),
+    Paste(usize),
+    OpenFile(usize),
+    TextInput(usize, String),
+    DeletePane(usize),
+    StartEditPaneName(usize),
+    EndEditPaneName(usize),
+    StartResizePane(usize, (i32, i32)),
+    EndResizePane(usize, (i32, i32)),
+    StartCreatePane(usize, (i32, i32)),
+    EndCreatePane(usize, (i32, i32)),
+    MovePane(usize, (i32, i32)),
+    SetPaneActive(usize),
+    SetScrollPane(usize),
+    OnClick(usize, (i32, i32)),
+    MoveMouse(usize, (i32, i32)),
+    StartSelection(usize, (i32, i32)),
+    EndSelection(usize, (i32, i32)),
+    WindowResized(i32, i32),
+    Scroll(usize),
+    Quit,
+    
+}
+
 #[derive(Debug)]
 pub enum SideEffectAction {
     Play(String),
@@ -25,10 +63,11 @@ pub enum PerFrameActionResult {
 
 
 
-pub fn handle_events(event_pump: &mut sdl2::EventPump,
-                 pane_manager: &mut PaneManager,
-                 bounds: &EditorBounds,
-                 clipboard: &ClipboardUtil) -> Vec<SideEffectAction> {
+pub fn handle_events(
+        event_pump: &mut sdl2::EventPump,
+        pane_manager: &mut PaneManager,
+        bounds: &EditorBounds,
+        clipboard: &ClipboardUtil) -> Vec<SideEffectAction> {
     let mut is_text_input = false;
 
     // Is allocating here bad?
@@ -268,6 +307,7 @@ pub fn handle_events(event_pump: &mut sdl2::EventPump,
                     if let Some(action) = pane.on_click((x, y), bounds) {
                         actions.push(action);
                     }
+                    pane.transaction_manager.next();
                 }
 
                 if !(ctrl_is_pressed && cmd_is_pressed) {
