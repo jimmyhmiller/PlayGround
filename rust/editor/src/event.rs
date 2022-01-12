@@ -401,7 +401,7 @@ pub fn handle_events(
                     // that are not at the mouse point
                     // But this is a temporary binding anyways.
                     for pane in pane_manager.panes.iter_mut() {
-                        if pane.editing_name == true {
+                        if pane.editing_name {
                             actions.push(Action::EndEditPaneName(pane.id));
                         }
                         pane.editing_name = false;
