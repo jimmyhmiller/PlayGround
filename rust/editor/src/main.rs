@@ -1,3 +1,5 @@
+#![allow(clippy::single_match)]
+
 use std::{cmp::{max, min}, fs, str::from_utf8, convert::TryInto};
 use std::fmt::Debug;
 
@@ -30,6 +32,8 @@ use transaction::{EditAction, TransactionManager};
 use cursor::{Cursor, CursorContext};
 use fps::FpsCounter;
 use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions, PerFrameAction};
+
+
 
 // I really want so debugging panels.
 // Should probably invest in that.
@@ -980,7 +984,7 @@ fn handle_transaction_pane(pane_manager: &mut PaneManager) {
 }
 
 // I need to think about how to generalize this
-fn handle_action_pane(pane_manager: &mut PaneManager, actions: &Vec<Action>) {
+fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action]) {
     let mut action_pane_index = None;
     for (i, pane) in pane_manager.panes.iter().enumerate() {
         if pane.name == "action_pane" {
@@ -994,9 +998,9 @@ fn handle_action_pane(pane_manager: &mut PaneManager, actions: &Vec<Action>) {
 
 
         for action in actions.iter() {
-            if matches!(action, Action::MoveMouse(_)) {
-                continue;
-            }
+            // if matches!(action, Action::MoveMouse(_)) {
+            //     continue;
+            // }
             if Some(action_pane.id) == action.pane_id() {
                 continue;
             }
@@ -1249,7 +1253,8 @@ fn main() -> Result<(), String> {
     matcher.insert("/panes/:pane_name", HttpRoutes::GetPane).ok();
 
 
-    let mut all_actions = vec![];
+    // Might not want to keep all of these around forever.
+    let mut all_actions: Vec<Action> = vec![];
 
     loop {
 
