@@ -566,10 +566,6 @@ impl Pane {
         y < self.position.1 + self.height as i32 + bounds.letter_height  as i32
     }
 
-    fn set_active(&mut self, active: bool) {
-        self.active = active;
-    }
-
     fn mouse_over_play_button(&self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> bool {
         // probably better to make this work with adjusted positions
         let play_button_x = self.position.0 + bounds.letter_width as i32;
@@ -577,19 +573,6 @@ impl Pane {
         in_square(mouse_pos, (play_button_x, play_button_y), 10)
     }
 
-    fn on_click(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<Action> {
-        if self.mouse_over_play_button(mouse_pos, bounds) {
-            Some(Action::RunPane(self.id))
-        } else {
-            // We could generate actions here instead of doing things.
-            let (x, y) = self.adjust_position(mouse_pos.0, mouse_pos.1, bounds);
-            self.cursor_context.move_cursor_from_screen_position(&self.scroller, x, y, &self.text_buffer, bounds);
-            self.cursor_context.mouse_down();
-            self.cursor_context.clear_selection();
-            None
-        }
-
-    }
 
 
 }
@@ -634,6 +617,16 @@ fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCo
 
     Ok(())
 }
+
+
+#[derive(Debug, Clone)]
+pub enum PaneSelector {
+    Active,
+    Id(usize),
+    AtMouse((i32, i32)),
+    Scroll,
+}
+
 // Need a draw order for z-index purposes.
 pub struct PaneManager {
     panes: Vec<Pane>,
@@ -671,47 +664,35 @@ impl PaneManager {
         }
     }
 
-    fn set_mouse_pos(&mut self, mouse_pos: (i32, i32)) {
-        if let Some(pane) = self.panes.get_mut(self.scroll_active_pane) {
-            pane.mouse_pos = Some(mouse_pos);
+    fn get_pane_index_by_id(&self, pane_id: usize) -> Option<usize> {
+        for (index, pane) in self.panes.iter().enumerate() {
+            if pane.id == pane_id {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    fn delete_pane(&mut self, pane_id: usize) {
+        if let Some(pane) = self.get_pane_index_by_id(pane_id) {
+            self.panes.remove(pane);
         }
     }
 
-    fn delete_pane_at_mouse(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) {
-        if let Some(closest_pane) = self.get_pane_index_at_mouse(mouse_pos, bounds) {
-            self.panes.remove(closest_pane);
+
+
+    fn set_active_by_id(&mut self, pane_id: usize) {
+        if let Some(i) = self.get_pane_index_by_id(pane_id) {
+            self.active_pane = i;
+            if let Some(pane) = self.panes.get_mut(i) {
+                pane.active = true;
+            }
         }
     }
 
-    fn set_scroll_active_if_mouse_over(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) {
-        let mut new_active_pane = self.scroll_active_pane;
-        for (i, pane) in self.panes.iter().enumerate() {
-            if pane.is_mouse_over(mouse_pos, bounds) {
-                new_active_pane = i;
-            }
-        }
-        if new_active_pane != self.scroll_active_pane {
-            self.scroll_active_pane = new_active_pane;
-        }
-        self.set_mouse_pos(mouse_pos)
-    }
-
-    fn set_active_from_click_coords(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) {
-        let old_active = self.active_pane;
-        let mut new_active_pane = self.active_pane;
-        for (i, pane) in self.panes.iter().enumerate() {
-            if pane.is_mouse_over(mouse_pos, bounds) {
-                new_active_pane = i;
-            }
-        }
-        self.active_pane = new_active_pane;
-        if let Some(pane) = self.panes.get_mut(self.active_pane){
-            pane.set_active(true);
-        }
-        if new_active_pane != self.active_pane {
-            if let Some(pane) = self.panes.get_mut(old_active) {
-                pane.set_active(false);
-            }
+    fn set_scroll_active_by_id(&mut self, pane_id: usize) {
+        if let Some(i) = self.get_pane_index_by_id(pane_id) {
+            self.scroll_active_pane = i;
         }
     }
 
@@ -745,9 +726,11 @@ impl PaneManager {
     fn get_scroll_active_pane_mut(&mut self) -> Option<&mut Pane> {
         self.panes.get_mut(self.scroll_active_pane)
     }
+    fn get_scroll_active_pane(&self) -> Option<&Pane> {
+        self.panes.get(self.scroll_active_pane)
+    }
 
-
-    fn get_active_pane(&mut self) -> Option<&Pane> {
+    fn get_active_pane(&self) -> Option<&Pane> {
         self.panes.get(self.active_pane)
     }
 
@@ -797,8 +780,8 @@ impl PaneManager {
         self.dragging_pane = None;
     }
 
-    fn set_resize_start(&mut self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> bool {
-        if let Some(i) = self.get_pane_index_at_mouse(mouse_pos, bounds) {
+    fn set_resize_start(&mut self, mouse_pos: (i32, i32), pane_id: usize) -> bool {
+        if let Some(i) = self.get_pane_index_by_id(pane_id) {
             self.resize_start = mouse_pos;
             self.resize_pane = Some(i);
             self.update_resize_size(mouse_pos);
@@ -930,6 +913,14 @@ impl PaneManager {
         }
         None
     }
+    fn get_pane_by_id(&self, pane_id: usize) -> Option<&Pane> {
+        for pane in self.panes.iter() {
+            if pane.id == pane_id {
+                return Some(pane);
+            }
+        }
+        None
+    }
 
     fn get_pane_by_name(&mut self, pane_name: &str) -> Option<&Pane> {
         for pane in self.panes.iter() {
@@ -943,6 +934,24 @@ impl PaneManager {
     fn new_pane_id(&mut self) -> usize {
         self.pane_id_counter += 1;
         self.pane_id_counter
+    }
+
+    fn get_pane_by_selector_mut(&mut self, pane_selector: &PaneSelector, editor_bounds: &EditorBounds) -> Option<&mut Pane> {
+        match pane_selector {
+            PaneSelector::Active => self.get_active_pane_mut(),
+            PaneSelector::Id(id) => self.get_pane_by_id_mut(*id),
+            PaneSelector::AtMouse(mouse_pos) => self.get_pane_at_mouse_mut(*mouse_pos, editor_bounds),
+            PaneSelector::Scroll => self.get_scroll_active_pane_mut(),
+        }
+    }
+
+    fn get_pane_by_selector(&self, pane_selector: &PaneSelector, editor_bounds: &EditorBounds) -> Option<&Pane> {
+        match pane_selector {
+            PaneSelector::Active => self.get_active_pane(),
+            PaneSelector::Id(id) => self.get_pane_by_id(*id),
+            PaneSelector::AtMouse(mouse_pos) => self.get_pane_at_mouse(*mouse_pos, editor_bounds),
+            PaneSelector::Scroll => self.get_scroll_active_pane(),
+        }
     }
 
 
@@ -984,13 +993,14 @@ fn handle_transaction_pane(pane_manager: &mut PaneManager) {
 }
 
 // I need to think about how to generalize this
-fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action]) {
+fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action], editor_bounds: &EditorBounds) {
     let mut action_pane_index = None;
     for (i, pane) in pane_manager.panes.iter().enumerate() {
         if pane.name == "action_pane" {
             action_pane_index = Some(i);
         }
     }
+    let scroll_pane_index = pane_manager.scroll_active_pane;
   
     if let Some(i) = action_pane_index  {
         let mut action_pane = pane_manager.remove(i);
@@ -1001,7 +1011,12 @@ fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action]) {
             // if matches!(action, Action::MoveMouse(_)) {
             //     continue;
             // }
-            if Some(action_pane.id) == action.pane_id() {
+            if let Action::Scroll(PaneSelector::Scroll, _) = action {
+                if scroll_pane_index == i {
+                    continue;
+                }
+            }
+            if Some(action_pane.id) == action.pane_id(pane_manager, editor_bounds) {
                 continue;
             }
             action_pane.text_buffer.chars.extend(format!("{:?}\n", action).as_bytes());
@@ -1228,7 +1243,7 @@ fn main() -> Result<(), String> {
 
     // ids are large enough we shouldn't have duplicates here.
     // This is of course just test code.
-    let pane1 = Pane::new(12352353, "test_draw".to_string(), (100, 100), (500, 500), "rect canvas 2 1 2 4 1", true);
+    let pane1 = Pane::new(12352353, "test_draw".to_string(), (100, 100), (500, 500), "rect canvas 3 1 2 4 1", true);
     let pane2 = Pane::new(12352353353, "canvas".to_string(), (650, 100), (500, 500), &text, false);
 
 
@@ -1265,14 +1280,17 @@ fn main() -> Result<(), String> {
 
         handle_transaction_pane(&mut pane_manager);
         handle_token_pane(&mut pane_manager);
-        handle_action_pane(&mut pane_manager, &all_actions);
+        handle_action_pane(&mut pane_manager, &all_actions, &renderer.bounds);
 
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
         
         
-        let actions = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds, &clipboard);
+        let actions = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds);
+        for action in actions.iter() {
+            action.process(&mut pane_manager, &renderer.bounds, &clipboard);
+        }
         all_actions.extend(actions.clone());
-        handle_side_effects(&mut pane_manager, actions, &mut per_frame_actions);
+        handle_side_effects(&mut pane_manager, &renderer.bounds, actions, &mut per_frame_actions);
         handle_per_frame_actions(&mut per_frame_actions, &mut pane_manager);
         
 
