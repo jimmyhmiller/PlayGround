@@ -182,7 +182,7 @@ impl Action {
                 }
             },
             Action::RunPane(_) => {
-
+                // TODO: Do this here rather than side-effects
             },
             Action::InsertNewline(_) => {
                 let pane_selector = self.pane_selector()?;
