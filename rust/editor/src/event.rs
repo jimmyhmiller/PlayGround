@@ -183,23 +183,31 @@ impl Action {
                 // TODO: Delete with transactions
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
-                if let Some(current_selection) = pane.cursor_context.selection {
-                    let (start, end) = current_selection;
-                    let (start_line, start_column) = start;
-                    let (end_line, end_column) = end;
-                    if let Some((line_start, _line_end)) = pane.text_buffer.get_line(start_line as usize) {
-                        let char_start_pos = line_start + start_column as usize ;
-                        if let Some((end_line_start, _line_end)) = pane.text_buffer.get_line(end_line as usize) {
-                            let char_end_pos = end_line_start + end_column as usize;
-                            pane.text_buffer.chars.drain(char_start_pos as usize..char_end_pos as usize);
-                            // Probably shouldn't reparse the whole file.
+                
 
-                            pane.text_buffer.parse_lines();
-                            pane.cursor_context.clear_selection();
-                            pane.cursor_context.fix_cursor(&pane.text_buffer);
-                        }
-                    }
-                }
+                let current_selection = pane.cursor_context.selection?;
+                let (start, end) = current_selection;
+                let (start_line, start_column) = start;
+                let (end_line, end_column) = end;
+                
+                let (line_start, _line_end) = pane.text_buffer.get_line(start_line as usize)?;
+                let char_start_pos = line_start + start_column as usize;
+                let (end_line_start, _line_end) = pane.text_buffer.get_line(end_line as usize)?;
+                    let char_end_pos = end_line_start + end_column as usize;
+                    let text: Vec<u8> = pane.text_buffer.chars.drain(char_start_pos as usize..char_end_pos as usize).collect();
+                    pane.transaction_manager.add_action(EditAction::Delete((char_start_pos, char_end_pos), from_utf8(&text).unwrap().to_string()));
+                    let cursor = pane.cursor_context.cursor?;
+                    pane.transaction_manager.add_action(EditAction::CursorPosition(cursor));
+                    pane.transaction_manager.next_transaction();
+
+                    pane.text_buffer.parse_lines();
+
+                    // TODO:
+                    // Thinking about how selections fit into transactions
+                    // I guess I should restore them?
+                    pane.cursor_context.clear_selection();
+                    pane.cursor_context.fix_cursor(&pane.text_buffer);
+
             }
             Action::DeleteChar(_) => {
                 // I probably want to deal with transactions orthogonally.
@@ -208,18 +216,17 @@ impl Action {
                 // Is there a better way to do this other than clone?
                 // Maybe a non-mutating method?
                 // How to deal with optional aspect here?
-                if let Some(current_cursor) = pane.cursor_context.cursor {
-                    let mut old_cursor = current_cursor;
-                    // We do this move_left first, because otherwise we might end up at the end
-                    // of the new line we formed from the deletion, rather than the old end of the line.
-                    let cursor_action = old_cursor.move_left(&pane.text_buffer);
-                    let action = pane.text_buffer.remove_char(current_cursor);
+                let current_cursor = pane.cursor_context.cursor?;
+                let mut old_cursor = current_cursor;
+                // We do this move_left first, because otherwise we might end up at the end
+                // of the new line we formed from the deletion, rather than the old end of the line.
+                let cursor_action = old_cursor.move_left(&pane.text_buffer);
+                let action = pane.text_buffer.remove_char(current_cursor);
 
-                    pane.transaction_manager.add_action(action);
-                    pane.transaction_manager.add_action(cursor_action);
+                pane.transaction_manager.add_action(action);
+                pane.transaction_manager.add_action(cursor_action);
 
-                    pane.cursor_context.set_cursor(old_cursor);
-                }
+                pane.cursor_context.set_cursor(old_cursor);
             }
             Action::RunPane(_) => {
                 // Should I do this here rather than side-effects?
@@ -230,13 +237,12 @@ impl Action {
             },
 
             Action::Enter(_) => {
-                 let pane_selector = self.pane_selector()?;
-                 if let Some(pane) = pane_manager.get_pane_by_selector_mut(pane_selector, bounds) {
-                    if pane.editing_name {
-                        actions.push(Action::EndEditPaneName(PaneSelector::Active));
-                    } else {
-                        actions.push(Action::InsertNewline(PaneSelector::Active));
-                    }
+                let pane_selector = self.pane_selector()?;
+                let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
+                if pane.editing_name {
+                    actions.push(Action::EndEditPaneName(PaneSelector::Active));
+                } else {
+                    actions.push(Action::InsertNewline(PaneSelector::Active));
                 }
             }
             Action::InsertNewline(_) => {
@@ -274,24 +280,19 @@ impl Action {
             Action::Paste(_) => {
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
-                if let Some(Cursor(cursor_line, cursor_column)) = pane.cursor_context.cursor {
-                    if let Some(inserted_string) = pane.cursor_context.paste(&clipboard, &mut pane.text_buffer) {
-                        pane.transaction_manager.add_action(EditAction::Insert((cursor_line, cursor_column), inserted_string));
-                        if let Some(cursor) = pane.cursor_context.cursor {
-                            pane.transaction_manager.add_action(EditAction::CursorPosition(cursor))
-                        }
-                        pane.transaction_manager.next_transaction();
-                    }
-                }
+                let Cursor(cursor_line, cursor_column) = pane.cursor_context.cursor?;
+                let inserted_string = pane.cursor_context.paste(&clipboard, &mut pane.text_buffer)?;
+                pane.transaction_manager.add_action(EditAction::Insert((cursor_line, cursor_column), inserted_string));
+                let cursor = pane.cursor_context.cursor?;
+                pane.transaction_manager.add_action(EditAction::CursorPosition(cursor));
+                pane.transaction_manager.next_transaction();
             },
             Action::OpenFile(_) => {
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
-                let text = native::open_file_dialog();
-                if let Some(text) = text {
-                    pane.text_buffer.set_contents(text.as_bytes());
-                    pane.scroller.move_to_the_top();
-                }
+                let text = native::open_file_dialog()?;
+                pane.text_buffer.set_contents(text.as_bytes());
+                pane.scroller.move_to_the_top();
             },
             Action::SelectAll(_) => {
                 let pane_selector = self.pane_selector()?;
@@ -368,13 +369,12 @@ impl Action {
             Action::DuplicatePane(_) => {
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector(pane_selector, bounds)?;
-                if let Some(i) = pane_manager.get_pane_index_by_id(pane.id) {
-                    let mut pane = pane_manager.panes[i].clone();
-                    pane.position = (pane.position.0 + 20, pane.position.1 + 20);
-                    pane.id = pane_manager.new_pane_id();
-                    pane_manager.panes.push(pane);
-                }
-            },
+                let i = pane_manager.get_pane_index_by_id(pane.id)?;
+                let mut pane = pane_manager.panes[i].clone();
+                pane.position = (pane.position.0 + 20, pane.position.1 + 20);
+                pane.id = pane_manager.new_pane_id();
+                pane_manager.panes.push(pane);
+        },
             Action::SetPaneActive(_) => {
                 let pane_selector = self.pane_selector()?;
                 let id = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?.id;
@@ -428,29 +428,36 @@ impl Action {
                     actions.push(Action::EndCreatePane(*mouse_pos));
                 }
 
-                let pane = pane_manager.get_active_pane_mut()?;
-                let (x, y) = *mouse_pos;
-                let (x, y) = pane.adjust_position(x, y, bounds);
-                if let Some(Cursor(start_line, mut start_column)) = pane.cursor_context.mouse_down {
+                // I have to do this because otherwise
+                // it returns none for the whole function
+                // I hate this hack and really wish
+                // rust would implemnent options in blocks
+                // The other option would be to pass in
+                // actions as a mutable vector
+                // Which might be better anyways
+                (|| {
+                    let pane = pane_manager.get_active_pane_mut()?;
+                    let (x, y) = *mouse_pos;
+                    let (x, y) = pane.adjust_position(x, y, bounds);
+                    let Cursor(start_line, mut start_column) = pane.cursor_context.mouse_down?;
                     pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer, bounds);
                     if pane.cursor_context.selection.is_some() {
-                        if let Some(Cursor(line, mut column)) = pane.cursor_context.cursor {
-                            let new_start_line = start_line.min(line);
-                            let line = line.max(start_line);
-                            if new_start_line != start_line || start_line == line && start_column > column {
-                                let temp = start_column;
-                                start_column = column;
-                                column = temp as usize;
-                            }
-
-                            pane.cursor_context.set_selection(((new_start_line, start_column), (line, column)));
-                            // TODO: Set Cursor
+                        let Cursor(line, mut column) = pane.cursor_context.cursor?;
+                        let new_start_line = start_line.min(line);
+                        let line = line.max(start_line);
+                        if new_start_line != start_line || start_line == line && start_column > column {
+                            let temp = start_column;
+                            start_column = column;
+                            column = temp as usize;
                         }
+
+                        pane.cursor_context.set_selection(((new_start_line, start_column), (line, column)));
+                        // TODO: Set Cursor
                     }
 
-                }
-
-                pane.cursor_context.clear_mouse_down();
+                    pane.cursor_context.clear_mouse_down();
+                    Some(())
+                })();
             }
             Action::MoveMouse(mouse_pos) => {
                 pane_manager.update_dragging_position(*mouse_pos);
@@ -462,23 +469,20 @@ impl Action {
 
                 let (x2, y2) = pane.adjust_position(x, y, bounds);
 
-                if let Some(Cursor(start_line, mut start_column)) = pane.cursor_context.mouse_down {
-                    pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x2, y2, &pane.text_buffer, bounds);
-                    // TODO: Get my int types correct!
-                    if let Some(Cursor(line, mut column)) = pane.cursor_context.cursor {
-                        let new_start_line = start_line.min(line);
-                        let line = line.max(start_line);
-                        if new_start_line != start_line || start_line == line && start_column > column {
-                            let temp = start_column;
-                            start_column = column;
-                            column = temp as usize;
-                        }
-
-                        // ugly refactor
-                        pane.cursor_context.set_selection(((new_start_line, start_column), (line, column)));
-
-                    }
+                let Cursor(start_line, mut start_column) = pane.cursor_context.mouse_down?;
+                pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x2, y2, &pane.text_buffer, bounds);
+                // TODO: Get my int types correct!
+                let Cursor(line, mut column) = pane.cursor_context.cursor?;
+                let new_start_line = start_line.min(line);
+                let line = line.max(start_line);
+                if new_start_line != start_line || start_line == line && start_column > column {
+                    let temp = start_column;
+                    start_column = column;
+                    column = temp as usize;
                 }
+
+                // ugly refactor
+                pane.cursor_context.set_selection(((new_start_line, start_column), (line, column)));
 
             },
             Action::ResizeWindow(width, height) => {
@@ -519,19 +523,15 @@ pub enum PerFrameActionResult {
 
 
 
+// This should return two things
+// 1. A resolution of all panes
+// 2. A list of actions that need to be performed
 
 pub fn handle_events(event_pump: &mut sdl2::EventPump) -> Vec<Action> {
     let mut is_text_input = false;
 
+    // Consider moving this allocation
     let mut actions: Vec<Action> = vec![];
-
-    // let text_buffer = &mut pane.text_buffer;
-    // let cursor_context = &mut pane.cursor_context;
-    // let scroller = &mut pane.scroller;
-
-    // This whole way of handling things is wrong.
-    // We probably need a pane manager.
-    // Maybe good chance for a pun?
 
     let ctrl_is_pressed = event_pump.keyboard_state().is_scancode_pressed(Scancode::LCtrl);
     let alt_is_pressed = event_pump.keyboard_state().is_scancode_pressed(Scancode::LAlt);
@@ -654,10 +654,6 @@ pub fn handle_events(event_pump: &mut sdl2::EventPump) -> Vec<Action> {
             }
             _ => {}
         }
-        // Do I need this?
-        // if let Some(pane) = pane_manager.get_active_pane_mut() {
-        //     pane.cursor_context.fix_cursor(&pane.text_buffer);
-        // }
     }
     actions
 }
@@ -729,93 +725,82 @@ pub fn handle_per_frame_action(index: usize, pane_manager: &mut PaneManager, per
     }
 }
 
-pub fn handle_side_effects(pane_manager: &mut PaneManager, bounds: &EditorBounds, side_effects: Vec<Action>, per_frame_actions: &mut Vec<PerFrameAction>) {
+pub fn handle_side_effects(pane_manager: &mut PaneManager, bounds: &EditorBounds, side_effects: Vec<Action>, per_frame_actions: &mut Vec<PerFrameAction>) -> Option<()> {
     for side_effect in side_effects.iter() {
         match side_effect {
             Action::RunPane(pane_selector) => {
                 // TODO: think about multiple panes of same name
-                let pane_contents = {
-                    if let Some(pane_id) = pane_manager.get_pane_by_selector_mut(pane_selector, bounds).map(|p| p.id) {
-                        if let Some(pane) = pane_manager.get_pane_by_id_mut(pane_id) {
-                            Some((from_utf8(&pane.text_buffer.chars).unwrap().to_string(), pane.name.to_string()))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                    
+                let (pane_contents, pane_name) = {
+                    let pane_id = pane_manager.get_pane_by_selector_mut(pane_selector, bounds).map(|p| p.id)?;
+                    let pane = pane_manager.get_pane_by_id_mut(pane_id)?;
+                    (from_utf8(&pane.text_buffer.chars).unwrap().to_string(), &pane.name.to_string()) 
                 };
 
-                if let Some((pane_contents, pane_name)) = pane_contents {
-                    let pane_name = &pane_name;
-                    let output_pane_name = format!("{}-output", pane_name);
-                    let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
-                    match output_pane {
+                let output_pane_name = format!("{}-output", pane_name);
+                let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
+                match output_pane {
 
-                        None => {
-                            let existing_pane = pane_manager.get_pane_by_name(pane_name);
-                            let position = {
-                                match existing_pane {
-                                    Some(pane) =>  {
-                                        (pane.position.0 + pane.width as i32 + 10, pane.position.1)
-                                    }
-                                    None => (0, 0)
+                    None => {
+                        let existing_pane = pane_manager.get_pane_by_name(pane_name);
+                        let position = {
+                            match existing_pane {
+                                Some(pane) =>  {
+                                    (pane.position.0 + pane.width as i32 + 10, pane.position.1)
                                 }
-                            };
-                            pane_manager.create_pane_raw(output_pane_name.to_string(), position, 300, 300);
-                        }
-                        Some(output_pane) => {
-                            // This causes a flash to happen
-                            // Which is actually useful from a user experience perspective
-                            // but it was unintentional.
-                            // Makes me think something is taking longer to render
-                            // than I thought.
-                            // I guess it makes sense in some ways though.
-                            // ls for example takes some amount of time,
-                            // and then I have to fetch that data and render.
-                            output_pane.text_buffer.chars.clear();
-                            output_pane.text_buffer.parse_lines();
-                        }
+                                None => (0, 0)
+                            }
+                        };
+                        pane_manager.create_pane_raw(output_pane_name.to_string(), position, 300, 300);
                     }
-
-                    let current_running_action = per_frame_actions.iter().enumerate().find(|(_i, x)|
-                        if let PerFrameAction::ReadCommand(name, _, _) = x {
-                            *name == output_pane_name
-                        } else {
-                            false
-                        }
-                    );
-                    if let Some((i, _)) = current_running_action {
-                        let action = per_frame_actions.swap_remove(i);
-                        if let PerFrameAction::ReadCommand(_pane_name, mut child, _) = action {
-                            // TODO: Get rid of this unwrap!
-
-                            child.kill().unwrap();
-                        }
+                    Some(output_pane) => {
+                        // This causes a flash to happen
+                        // Which is actually useful from a user experience perspective
+                        // but it was unintentional.
+                        // Makes me think something is taking longer to render
+                        // than I thought.
+                        // I guess it makes sense in some ways though.
+                        // ls for example takes some amount of time,
+                        // and then I have to fetch that data and render.
+                        output_pane.text_buffer.chars.clear();
+                        output_pane.text_buffer.parse_lines();
                     }
+                }
 
-                    let command = pane_contents;
-                    // need to handle error
-                    let child = Command::new("bash")
-                        .arg("-c")
-                        .arg(command)
-                        .stdout(Stdio::piped())
-                        .spawn();
+                let current_running_action = per_frame_actions.iter().enumerate().find(|(_i, x)|
+                    if let PerFrameAction::ReadCommand(name, _, _) = x {
+                        *name == output_pane_name
+                    } else {
+                        false
+                    }
+                );
+                let (i, _) = current_running_action?;
+                let action = per_frame_actions.swap_remove(i);
+                if let PerFrameAction::ReadCommand(_pane_name, mut child, _) = action {
+                    // TODO: Get rid of this unwrap!
+                    child.kill().unwrap();
+                }
 
-                    match child {
-                        Ok(mut child) => {
-                            let stdout = child.stdout.take().unwrap();
-                            let noblock_stdout = NonBlockingReader::from_fd(stdout).unwrap();
-                            per_frame_actions.push(PerFrameAction::ReadCommand(output_pane_name, child, noblock_stdout))
-                        }
-                        Err(e) => {
-                            per_frame_actions.push(PerFrameAction::DisplayError(output_pane_name, format!("error {:?}", e)))
-                        }
+                let command = pane_contents;
+                // need to handle error
+                let child = Command::new("bash")
+                    .arg("-c")
+                    .arg(command)
+                    .stdout(Stdio::piped())
+                    .spawn();
+
+                match child {
+                    Ok(mut child) => {
+                        let stdout = child.stdout.take().unwrap();
+                        let noblock_stdout = NonBlockingReader::from_fd(stdout).unwrap();
+                        per_frame_actions.push(PerFrameAction::ReadCommand(output_pane_name, child, noblock_stdout))
+                    }
+                    Err(e) => {
+                        per_frame_actions.push(PerFrameAction::DisplayError(output_pane_name, format!("error {:?}", e)))
                     }
                 }
             },
             _ => {}
         }
     }
+    Some(())
 }

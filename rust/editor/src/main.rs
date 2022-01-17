@@ -884,7 +884,7 @@ impl PaneManager {
         }
     }
 
-    fn remove(&mut self, i: usize) -> Pane {
+    fn _remove(&mut self, i: usize) -> Pane {
         // Should swap_remove but more complicated
         let pane = self.panes.remove(i);
         if i < self.active_pane {
@@ -893,8 +893,8 @@ impl PaneManager {
         pane
     }
 
-    fn insert(&mut self, i: usize, pane: Pane) {
-        if pane.active == true {
+    fn _insert(&mut self, i: usize, pane: Pane) {
+        if pane.active {
             self.active_pane = i;
         }
         self.panes.insert(i, pane);
@@ -967,29 +967,26 @@ impl PaneManager {
 
 
 
+// I can very easily generalize this.
 
-// I need to think about how to generalize this
 fn handle_transaction_pane(pane_manager: &mut PaneManager) -> Option<()> {
 
     let mut chars: Vec<u8> = Vec::new();
 
     let transaction_pane_id = pane_manager.get_pane_by_name( "transaction_pane")?.id;
- 
 
-    if let Some(active_pane) = pane_manager.get_active_pane_mut() {
-        let transaction_manager = &active_pane.transaction_manager;
+    let active_pane = pane_manager.get_active_pane_mut()?;
+    let transaction_manager = &active_pane.transaction_manager;
 
-        chars.extend(format!("current: {}, pointer: {}\n",
-            transaction_manager.current_transaction,
-            transaction_manager.transaction_pointer).as_bytes());
+    chars.extend(format!("current: {}, pointer: {}\n",
+        transaction_manager.current_transaction,
+        transaction_manager.transaction_pointer).as_bytes());
 
-        for transaction in active_pane.transaction_manager.transactions.iter() {
-            chars.extend(format!("{:?}\n", transaction).as_bytes());
-        }
+    for transaction in active_pane.transaction_manager.transactions.iter() {
+        chars.extend(format!("{:?}\n", transaction).as_bytes());
     }
    
     let mut transaction_pane = pane_manager.get_pane_by_id_mut(transaction_pane_id)?;
-    transaction_pane.text_buffer.chars.clear();
     transaction_pane.text_buffer.chars = chars;
     transaction_pane.text_buffer.parse_lines();
     Some(())
@@ -1026,39 +1023,28 @@ fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action], editor
 
 
 
-fn handle_token_pane(pane_manager: &mut PaneManager) {
-    let mut token_pane_index = None;
-    for (i, pane) in pane_manager.panes.iter().enumerate() {
-        if pane.name == "token_pane" {
-            token_pane_index = Some(i);
+fn handle_token_pane(pane_manager: &mut PaneManager) -> Option<()> {
+
+    let mut chars: Vec<u8> = Vec::new();
+
+    let token_pane_id = pane_manager.get_pane_by_name( "token_pane")?.id;
+ 
+    let active_pane = pane_manager.get_active_pane_mut()?;
+    let tokenizer = &mut active_pane.text_buffer.tokenizer;
+    while !tokenizer.at_end(&active_pane.text_buffer.chars) {
+        let token = tokenizer.parse_single(&active_pane.text_buffer.chars)?;
+        chars.extend(format!("{:?} ", token).as_bytes());
+        if matches!(token, Token::NewLine) {
+            chars.extend(b"\n");
         }
     }
-    if Some(pane_manager.active_pane) != token_pane_index {
+    tokenizer.position = 0;
 
-        if let Some(i) = token_pane_index  {
-            let mut token_pane = pane_manager.remove(i);
-            token_pane.text_buffer.chars.clear();
+    let mut token_pane = pane_manager.get_pane_by_id_mut(token_pane_id)?;
+    token_pane.text_buffer.chars = chars;
+    token_pane.text_buffer.parse_lines();
 
-            // I am doing this every frame.
-            // I really need a nice way of handling non-every frame events
-            if let Some(active_pane) = pane_manager.get_active_pane_mut() {
-                let tokenizer = &mut active_pane.text_buffer.tokenizer;
-                while !tokenizer.at_end(&active_pane.text_buffer.chars) {
-                    let token = tokenizer.parse_single(&active_pane.text_buffer.chars);
-                    if let Some(token) = token {
-                        token_pane.text_buffer.chars.extend(format!("{:?} ", token).as_bytes());
-                        if matches!(token, Token::NewLine) {
-                            token_pane.text_buffer.chars.extend(b"\n");
-                        }
-                    }
-                }
-                tokenizer.position = 0;
-            }
-
-            token_pane.text_buffer.parse_lines();
-            pane_manager.insert(i, token_pane);
-        }
-    }
+    Some(())
 }
 
 fn get_i32_from_token(token: &Token, chars: &[u8]) -> Option<i32> {
