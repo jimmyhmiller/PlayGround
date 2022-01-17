@@ -14,7 +14,11 @@ pub enum Action {
     MoveCursorLeft(PaneSelector),
     MoveCursorRight(PaneSelector),
     Delete(PaneSelector),
+    DeletePaneName(PaneSelector),
+    DeleteSelection(PaneSelector),
+    DeleteChar(PaneSelector),
     RunPane(PaneSelector),
+    Enter(PaneSelector),
     InsertNewline(PaneSelector),
     Undo(PaneSelector),
     Redo(PaneSelector),
@@ -38,6 +42,8 @@ pub enum Action {
     SetPaneActive(PaneSelector),
     SetScrollPane(PaneSelector),
     MouseDown(PaneSelector, (i32, i32)),
+    CtrlMouseDown(PaneSelector, (i32, i32)),
+    CtrlAltMouseDown(PaneSelector, (i32, i32)),
     MouseUp(PaneSelector, (i32, i32)),
     MoveMouse((i32, i32)),
     ResizeWindow(i32, i32),
@@ -102,15 +108,35 @@ impl Action {
             Action::SetPaneActive(pane_selector) |
             Action::SetScrollPane(pane_selector) |
             Action::MouseDown(pane_selector, _) |
-            Action::Scroll(pane_selector, _) => {
+            Action::Scroll(pane_selector, _) |
+            Action::DeletePaneName(pane_selector) |
+            Action::DeleteSelection(pane_selector) |
+            Action::DeleteChar(pane_selector) |
+            Action::Enter(pane_selector) |
+            Action::CtrlMouseDown(pane_selector, _) |
+            Action::CtrlAltMouseDown(pane_selector, _) => {
                 Some(pane_selector)
             }
-            _ => None,
+
+            Action::EndResizePane(_) |
+            Action::StartCreatePane(_) |
+            Action::EndCreatePane(_) |
+            Action::EndMovePane(_) |
+            Action::MouseUp(_, _) |
+            Action::MoveMouse(_) |
+            Action::ResizeWindow(_, _) |
+            Action::Quit => {
+                None
+            }
+            
         }
     }
 
-    pub fn process(&self, pane_manager: &mut PaneManager, bounds: &EditorBounds, clipboard: &ClipboardUtil) -> Option<()> {
+    pub fn process(&self, pane_manager: &mut PaneManager, bounds: &EditorBounds, clipboard: &ClipboardUtil) -> Option<Vec<Action>> {
 
+        // TODO:
+        // Should I move this allocation out somewhere else?
+        let mut actions = vec![];
         match self {
 
             Action::MoveCursorUp(_) => {
@@ -139,11 +165,24 @@ impl Action {
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
                 if pane.editing_name {
-                    pane.name.pop();
-                    return Some(())
+                    actions.push(Action::DeletePaneName(pane_selector.clone()));
                 }
-                // Need to deal with this in a nicer way
-
+                else if pane.cursor_context.selection.is_some() {
+                    actions.push(Action::DeleteSelection(pane_selector.clone()));
+                }
+                else {
+                    actions.push(Action::DeleteChar(pane_selector.clone()));
+                }
+            },
+            Action::DeletePaneName(_) => {
+                let pane_selector = self.pane_selector()?;
+                let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
+                pane.name.pop();
+            }
+            Action::DeleteSelection(_) => {
+                // TODO: Delete with transactions
+                let pane_selector = self.pane_selector()?;
+                let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
                 if let Some(current_selection) = pane.cursor_context.selection {
                     let (start, end) = current_selection;
                     let (start_line, start_column) = start;
@@ -158,12 +197,14 @@ impl Action {
                             pane.text_buffer.parse_lines();
                             pane.cursor_context.clear_selection();
                             pane.cursor_context.fix_cursor(&pane.text_buffer);
-                            return Some(())
                         }
                     }
                 }
-
-
+            }
+            Action::DeleteChar(_) => {
+                // I probably want to deal with transactions orthogonally.
+                let pane_selector = self.pane_selector()?;
+                let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
                 // Is there a better way to do this other than clone?
                 // Maybe a non-mutating method?
                 // How to deal with optional aspect here?
@@ -180,10 +221,25 @@ impl Action {
 
                     pane.cursor_context.set_cursor(old_cursor);
                 }
-            },
+            }
             Action::RunPane(_) => {
-                // TODO: Do this here rather than side-effects
+                // Should I do this here rather than side-effects?
+                // How do I communicate that things need to keep
+                // being done? Do I pass in per frame actions?
+                // I mean that might make sense
+                // Honestly not sure.
             },
+
+            Action::Enter(_) => {
+                 let pane_selector = self.pane_selector()?;
+                 if let Some(pane) = pane_manager.get_pane_by_selector_mut(pane_selector, bounds) {
+                    if pane.editing_name {
+                        actions.push(Action::EndEditPaneName(PaneSelector::Active));
+                    } else {
+                        actions.push(Action::InsertNewline(PaneSelector::Active));
+                    }
+                }
+            }
             Action::InsertNewline(_) => {
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
@@ -271,6 +327,14 @@ impl Action {
                 pane.editing_name = false;
  
             },
+            Action::CtrlMouseDown(_, mouse_pos) => {
+                let pane_selector = self.pane_selector()?;
+                if let Some(_pane) = pane_manager.get_pane_by_selector_mut(pane_selector, bounds) {
+                    actions.push(Action::StartMovePane(PaneSelector::AtMouse(*mouse_pos), *mouse_pos));
+                } else {
+                    actions.push(Action::StartCreatePane(*mouse_pos));
+                }
+            }
             Action::StartResizePane(_, mouse_pos) => {
                 let pane_selector = self.pane_selector()?;
                 let id = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?.id;
@@ -285,6 +349,14 @@ impl Action {
             Action::EndCreatePane(_mouse_pos) => {
                 pane_manager.create_pane();
             },
+            Action::CtrlAltMouseDown(_, mouse_pos) => {
+                let pane_selector = self.pane_selector()?;
+                if let Some(_pane) = pane_manager.get_pane_by_selector_mut(pane_selector, bounds) {
+                    actions.push(Action::StartResizePane(PaneSelector::AtMouse(*mouse_pos), *mouse_pos));
+                } else {
+                    actions.push(Action::StartCreatePane(*mouse_pos));
+                }
+            },
             Action::StartMovePane(_, mouse_pos) => {
                 pane_manager.set_dragging_start(*mouse_pos, bounds);
             },
@@ -297,6 +369,7 @@ impl Action {
                 if let Some(i) = pane_manager.get_pane_index_by_id(pane.id) {
                     let mut pane = pane_manager.panes[i].clone();
                     pane.position = (pane.position.0 + 20, pane.position.1 + 20);
+                    pane.id = pane_manager.new_pane_id();
                     pane_manager.panes.push(pane);
                 }
             },
@@ -311,6 +384,17 @@ impl Action {
                 pane_manager.set_scroll_active_by_id(id);
             },
             Action::MouseDown(_, mouse_pos) => {
+                {
+                    // This is really not great. I shouldn't
+                    // have to do this all the time.
+                    for pane in pane_manager.panes.iter_mut() {
+                        if pane.editing_name {
+                            actions.push(Action::EndEditPaneName(PaneSelector::Id(pane.id)));
+                        }
+                        pane.editing_name = false;
+                    }
+                }
+
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
                 // I kind of want to capture these things as actions. But how to do that?
@@ -396,7 +480,7 @@ impl Action {
             },
         }
 
-        Some(())
+        Some(actions)
     }
 }
 
@@ -420,10 +504,7 @@ pub enum PerFrameActionResult {
 
 
 
-pub fn handle_events(
-        event_pump: &mut sdl2::EventPump,
-        pane_manager: &mut PaneManager,
-        bounds: &EditorBounds) -> Vec<Action> {
+pub fn handle_events(event_pump: &mut sdl2::EventPump) -> Vec<Action> {
     let mut is_text_input = false;
 
     let mut actions: Vec<Action> = vec![];
@@ -471,16 +552,7 @@ pub fn handle_events(
                         actions.push(Action::RunPane(PaneSelector::Active));                   
                     }
                     (Keycode::Return, _) => {
-                        // TODO: Fix
-                        if let Some(pane) = pane_manager.get_active_pane_mut() {
-
-                            if pane.editing_name {
-                                actions.push(Action::EndEditPaneName(PaneSelector::Active));
-                                continue;
-                            }
-                          
-                            actions.push(Action::InsertNewline(PaneSelector::Active));
-                        }
+                        actions.push(Action::Enter(PaneSelector::Active));
                     },
                     (Keycode::Z, key_mod) if key_mod == Mod::LGUIMOD || keymod == Mod::RGUIMOD => {
                         actions.push(Action::Undo(PaneSelector::Active));                   
@@ -524,52 +596,25 @@ pub fn handle_events(
                 actions.push(Action::StartEditPaneName(PaneSelector::AtMouse((x, y))));
             }
             Event::MouseButtonDown { x, y, .. } if ctrl_is_pressed && alt_is_pressed => {
-                // TODO: Fix
-                // Conceptually maybe this should be resize or create? And I chose which based
-                // on the pane in process?
-                if let Some(_pane) = pane_manager.get_pane_at_mouse((x,y), bounds) {
-                    actions.push(Action::StartResizePane(PaneSelector::AtMouse((x, y)), (x, y)));
-                } else {
-                    actions.push(Action::StartCreatePane((x, y)));
-                }
+                actions.push(Action::CtrlAltMouseDown(PaneSelector::AtMouse((x, y)), (x, y)));
             }
             Event::MouseButtonDown { x, y, .. } if ctrl_is_pressed => {
-                // TODO: Fix
-                if let Some(_pane) = pane_manager.get_pane_at_mouse((x,y), bounds) {
-                    actions.push(Action::StartMovePane(PaneSelector::AtMouse((x, y)), (x, y)));
-                } else {
-                    actions.push(Action::StartCreatePane((x, y)));
-                }
+                actions.push(Action::CtrlMouseDown(PaneSelector::AtMouse((x, y)), (x, y)));
             }
-
             Event::MouseButtonDown { x, y, .. } if cmd_is_pressed && alt_is_pressed => {
                 actions.push(Action::DuplicatePane(PaneSelector::AtMouse((x, y))));
             }
             Event::MouseButtonDown { x, y, .. } => {
-
                 actions.push(Action::SetPaneActive(PaneSelector::AtMouse((x, y))));
                 actions.push(Action::MouseDown(PaneSelector::Active, (x, y)));
-
-                // Todo: move
-                if !(ctrl_is_pressed && cmd_is_pressed) {
-                    // Really I want this to work even if this is pressed, just for all panes
-                    // that are not at the mouse point
-                    // But this is a temporary binding anyways.
-                    for pane in pane_manager.panes.iter_mut() {
-                        if pane.editing_name {
-                            actions.push(Action::EndEditPaneName(PaneSelector::Id(pane.id)));
-                        }
-                        pane.editing_name = false;
-                    }
-                }
             }
-
             Event::MouseMotion{x, y, .. } => {
                 actions.push(Action::MoveMouse((x, y)));
                 actions.push(Action::SetScrollPane(PaneSelector::AtMouse((x, y))));
             }
-
             Event::MouseButtonUp{x, y, ..} => {
+                // I think I only want to push these
+                // in process if they really apply.
                 actions.push(Action::EndMovePane((x, y)));
                 actions.push(Action::EndResizePane((x, y)));
                 actions.push(Action::EndCreatePane((x, y)));
@@ -581,7 +626,6 @@ pub fn handle_events(
             Event::Window {win_event: WindowEvent::Resized(width, height), ..} => {
                 actions.push(Action::ResizeWindow(width, height));
             }
-
             Event::MouseWheel {x, y, direction , timestamp: _, .. } => {
                 // mouse state does not update when not focused.
                 // Need to fix that some how.
@@ -600,9 +644,9 @@ pub fn handle_events(
             _ => {}
         }
         // Do I need this?
-        if let Some(pane) = pane_manager.get_active_pane_mut() {
-            pane.cursor_context.fix_cursor(&pane.text_buffer);
-        }
+        // if let Some(pane) = pane_manager.get_active_pane_mut() {
+        //     pane.cursor_context.fix_cursor(&pane.text_buffer);
+        // }
     }
     actions
 }
