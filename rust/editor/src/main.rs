@@ -687,6 +687,11 @@ impl PaneManager {
             if let Some(pane) = self.panes.get_mut(i) {
                 pane.active = true;
             }
+            for pane in self.panes.iter_mut() {
+                if pane.id != pane_id {
+                    pane.active = false;
+                }
+            }
         }
     }
 
@@ -884,8 +889,8 @@ impl PaneManager {
     }
 
     fn insert(&mut self, i: usize, pane: Pane) {
-        if i <= self.active_pane {
-            self.active_pane += 1;
+        if pane.active == true {
+            self.active_pane = i;
         }
         self.panes.insert(i, pane);
     }
@@ -922,7 +927,7 @@ impl PaneManager {
         None
     }
 
-    fn get_pane_by_name(&mut self, pane_name: &str) -> Option<&Pane> {
+    fn get_pane_by_name(&self, pane_name: &str) -> Option<&Pane> {
         for pane in self.panes.iter() {
             if pane.name.starts_with(&pane_name) {
                 return Some(pane);
@@ -953,8 +958,6 @@ impl PaneManager {
             PaneSelector::Scroll => self.get_scroll_active_pane(),
         }
     }
-
-
 }
 
 
@@ -993,38 +996,28 @@ fn handle_transaction_pane(pane_manager: &mut PaneManager) {
 }
 
 // I need to think about how to generalize this
-fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action], editor_bounds: &EditorBounds) {
-    let mut action_pane_index = None;
-    for (i, pane) in pane_manager.panes.iter().enumerate() {
-        if pane.name == "action_pane" {
-            action_pane_index = Some(i);
+fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action], editor_bounds: &EditorBounds) -> Option<()>{
+
+    let mut chars: Vec<u8> = Vec::new();
+
+    let action_pane_id = pane_manager.get_pane_by_name( "action_pane")?.id;
+ 
+    for action in actions.iter() {
+        if matches!(action, Action::MoveMouse(_)) {
+            continue;
         }
-    }
-    let scroll_pane_index = pane_manager.scroll_active_pane;
-  
-    if let Some(i) = action_pane_index  {
-        let mut action_pane = pane_manager.remove(i);
-        action_pane.text_buffer.chars.clear();
-
-
-        for action in actions.iter() {
-            // if matches!(action, Action::MoveMouse(_)) {
-            //     continue;
-            // }
-            if let Action::Scroll(PaneSelector::Scroll, _) = action {
-                if scroll_pane_index == i {
-                    continue;
-                }
-            }
-            if Some(action_pane.id) == action.pane_id(pane_manager, editor_bounds) {
-                continue;
-            }
-            action_pane.text_buffer.chars.extend(format!("{:?}\n", action).as_bytes());
+        // I might need scroll index?
+        if Some(action_pane_id) == action.pane_id(pane_manager, editor_bounds) {
+            continue;
         }
-
-        action_pane.text_buffer.parse_lines();
-        pane_manager.insert(i, action_pane);
+        chars.extend(format!("{:?}\n", action).as_bytes());
     }
+
+    let mut action_pane = pane_manager.get_pane_by_id_mut(action_pane_id)?;
+    action_pane.text_buffer.chars = chars;
+    action_pane.text_buffer.parse_lines();
+
+    Some(())
 }
 
 
@@ -1243,7 +1236,7 @@ fn main() -> Result<(), String> {
 
     // ids are large enough we shouldn't have duplicates here.
     // This is of course just test code.
-    let pane1 = Pane::new(12352353, "test_draw".to_string(), (100, 100), (500, 500), "rect canvas 3 1 2 4 1", true);
+    let pane1 = Pane::new(12352353, "action_pane".to_string(), (100, 100), (500, 500), "rect canvas 3 1 2 4 1", true);
     let pane2 = Pane::new(12352353353, "canvas".to_string(), (650, 100), (500, 500), &text, false);
 
 
@@ -1281,13 +1274,24 @@ fn main() -> Result<(), String> {
         handle_transaction_pane(&mut pane_manager);
         handle_token_pane(&mut pane_manager);
         handle_action_pane(&mut pane_manager, &all_actions, &renderer.bounds);
+      
 
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
         
         
-        let actions = handle_events(&mut event_pump, &mut pane_manager, &renderer.bounds);
-        for action in actions.iter() {
-            action.process(&mut pane_manager, &renderer.bounds, &clipboard);
+        let mut actions = handle_events(&mut event_pump);
+        let mut i = 0;
+        while i < actions.len() {
+            // I might need to resolve all of these selectors to id
+            // selectors before I process? Or After? It isn't clear.
+            // But I will need to record the ids at some point
+            // So I can know which panes changed for my dependencies
+            if let Some(new_actions) = actions[i].process(&mut pane_manager, &renderer.bounds, &clipboard) {
+                for (j, action) in new_actions.into_iter().enumerate() {
+                    actions.insert(i + j + 1, action);
+                }
+            }
+            i += 1;
         }
         all_actions.extend(actions.clone());
         handle_side_effects(&mut pane_manager, &renderer.bounds, actions, &mut per_frame_actions);

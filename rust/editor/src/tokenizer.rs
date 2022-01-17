@@ -318,9 +318,6 @@ impl<'a> Tokenizer {
 
 }
 
-
-
-
 pub fn rust_specific_pass(token: Token, input_bytes: &[u8]) -> RustSpecific {
 
         match token {
