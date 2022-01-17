@@ -1006,7 +1006,11 @@ fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action], editor
         if matches!(action, Action::MoveMouse(_) | Action::SetScrollPane(_)) {
             continue;
         }
-        // I might need scroll index?
+       
+        // TODO:
+        // I need to resolve these ids but keep around the fact that
+        // these were using meta-selectors
+        // Otherwise these things will be wrong.
         if Some(action_pane_id) == action.pane_id(pane_manager, editor_bounds) {
             continue;
         }

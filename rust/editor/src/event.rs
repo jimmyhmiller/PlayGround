@@ -427,8 +427,6 @@ impl Action {
                 if pane_manager.create_pane_activated {
                     actions.push(Action::EndCreatePane(*mouse_pos));
                 }
-                
-                
 
                 let pane = pane_manager.get_active_pane_mut()?;
                 let (x, y) = *mouse_pos;
