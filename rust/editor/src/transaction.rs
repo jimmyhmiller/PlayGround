@@ -92,7 +92,6 @@ impl TransactionManager {
             .rev()
             .find(|t| t.parent_pointer == self.transaction_pointer);
 
-        // My cursor is one off! But this seems to be close to correct for the small cases I tried.
         if let Some(Transaction{ transaction_number: last_transaction, ..}) = last_undo {
             for (i, transaction) in self.transactions.iter().enumerate() {
                 if transaction.transaction_number == *last_transaction {
@@ -128,17 +127,20 @@ pub enum EditAction {
 impl EditAction  {
     pub fn undo(&self, cursor_context: &mut CursorContext, text_buffer: &mut TextBuffer) {
         match self {
-            EditAction::Insert((start, end), text_to_insert) => {
-                let mut new_position = Cursor(*start, *end);
-                new_position.move_right(text_buffer);
+            EditAction::Insert((line, column), text_to_insert) => {
+                let mut new_position = Cursor(*line, *column);
+                // TODO: Make faster
+                for _ in 0..text_to_insert.len() {
+                    new_position.move_right(text_buffer);
+                }
                 for _ in 0..text_to_insert.len() {
                     text_buffer.remove_char(new_position);
                     new_position.move_left(text_buffer);
                 }
                 cursor_context.set_cursor(new_position);
             },
-            EditAction::Delete((start, end), text_to_delete) => {
-                let mut new_position = Cursor(*start, *end);
+            EditAction::Delete((line, column), text_to_delete) => {
+                let mut new_position = Cursor(*line, *column);
                 new_position.move_left(text_buffer);
                 // I have a panic here
                 text_buffer.insert_char(new_position, text_to_delete.as_bytes());
