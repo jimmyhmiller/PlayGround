@@ -627,6 +627,11 @@ pub enum PaneSelector {
     Scroll,
 }
 
+// I should consider changing pane_manager to use ids
+// instead of indexes
+// Then should they be a map? Or is it still better
+// to have an array?
+
 // Need a draw order for z-index purposes.
 pub struct PaneManager {
     panes: Vec<Pane>,
@@ -964,35 +969,30 @@ impl PaneManager {
 
 
 // I need to think about how to generalize this
-fn handle_transaction_pane(pane_manager: &mut PaneManager) {
-    let mut transaction_pane_index = None;
-    for (i, pane) in pane_manager.panes.iter().enumerate() {
-        if pane.name == "transaction_pane" {
-            transaction_pane_index = Some(i);
+fn handle_transaction_pane(pane_manager: &mut PaneManager) -> Option<()> {
+
+    let mut chars: Vec<u8> = Vec::new();
+
+    let transaction_pane_id = pane_manager.get_pane_by_name( "transaction_pane")?.id;
+ 
+
+    if let Some(active_pane) = pane_manager.get_active_pane_mut() {
+        let transaction_manager = &active_pane.transaction_manager;
+
+        chars.extend(format!("current: {}, pointer: {}\n",
+            transaction_manager.current_transaction,
+            transaction_manager.transaction_pointer).as_bytes());
+
+        for transaction in active_pane.transaction_manager.transactions.iter() {
+            chars.extend(format!("{:?}\n", transaction).as_bytes());
         }
     }
-    if Some(pane_manager.active_pane) != transaction_pane_index {
-
-        if let Some(i) = transaction_pane_index  {
-            let mut transaction_pane = pane_manager.remove(i);
-            transaction_pane.text_buffer.chars.clear();
-
-            if let Some(active_pane) = pane_manager.get_active_pane_mut() {
-                let transaction_manager = &active_pane.transaction_manager;
-
-                transaction_pane.text_buffer.chars.extend(format!("current: {}, pointer: {}\n",
-                    transaction_manager.current_transaction,
-                    transaction_manager.transaction_pointer).as_bytes());
-
-                for transaction in active_pane.transaction_manager.transactions.iter() {
-                    transaction_pane.text_buffer.chars.extend(format!("{:?}\n", transaction).as_bytes());
-                }
-            }
-
-            transaction_pane.text_buffer.parse_lines();
-            pane_manager.insert(i, transaction_pane);
-        }
-    }
+   
+    let mut transaction_pane = pane_manager.get_pane_by_id_mut(transaction_pane_id)?;
+    transaction_pane.text_buffer.chars.clear();
+    transaction_pane.text_buffer.chars = chars;
+    transaction_pane.text_buffer.parse_lines();
+    Some(())
 }
 
 // I need to think about how to generalize this
@@ -1003,7 +1003,7 @@ fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action], editor
     let action_pane_id = pane_manager.get_pane_by_name( "action_pane")?.id;
  
     for action in actions.iter() {
-        if matches!(action, Action::MoveMouse(_)) {
+        if matches!(action, Action::MoveMouse(_) | Action::SetScrollPane(_)) {
             continue;
         }
         // I might need scroll index?

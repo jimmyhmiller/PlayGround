@@ -192,6 +192,7 @@ impl CursorContext {
     pub fn paste(&mut self, clipboard: &ClipboardUtil, text_buffer: &mut TextBuffer) -> Option<String> {
         if let Some(Cursor(line, column)) = self.cursor {
             let position = text_buffer.char_position_from_line_column(line, column)?;
+            // I could probably just use splice
             let before = &text_buffer.chars[..position];
             let after = &text_buffer.chars[position..];
             let from_clipboard = clipboard.clipboard_text().ok()?;

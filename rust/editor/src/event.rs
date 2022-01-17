@@ -218,7 +218,6 @@ impl Action {
                     pane.transaction_manager.add_action(action);
                     pane.transaction_manager.add_action(cursor_action);
 
-
                     pane.cursor_context.set_cursor(old_cursor);
                 }
             }
@@ -275,9 +274,12 @@ impl Action {
             Action::Paste(_) => {
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
-                if let Some(inserted_string) = pane.cursor_context.paste(&clipboard, &mut pane.text_buffer) {
-                    if let Some(Cursor(cursor_line, cursor_column)) = pane.cursor_context.cursor {
+                if let Some(Cursor(cursor_line, cursor_column)) = pane.cursor_context.cursor {
+                    if let Some(inserted_string) = pane.cursor_context.paste(&clipboard, &mut pane.text_buffer) {
                         pane.transaction_manager.add_action(EditAction::Insert((cursor_line, cursor_column), inserted_string));
+                        if let Some(cursor) = pane.cursor_context.cursor {
+                            pane.transaction_manager.add_action(EditAction::CursorPosition(cursor))
+                        }
                         pane.transaction_manager.next_transaction();
                     }
                 }
@@ -412,6 +414,22 @@ impl Action {
                 pane.transaction_manager.next_transaction();
             },
             Action::MouseUp(_, mouse_pos) => {
+
+
+                if pane_manager.dragging_pane.is_some() {
+                    actions.push(Action::EndMovePane(*mouse_pos));
+                }
+                
+                if pane_manager.resize_pane.is_some() {
+                    actions.push(Action::EndResizePane(*mouse_pos));
+                }
+
+                if pane_manager.create_pane_activated {
+                    actions.push(Action::EndCreatePane(*mouse_pos));
+                }
+                
+                
+
                 let pane = pane_manager.get_active_pane_mut()?;
                 let (x, y) = *mouse_pos;
                 let (x, y) = pane.adjust_position(x, y, bounds);
@@ -613,11 +631,6 @@ pub fn handle_events(event_pump: &mut sdl2::EventPump) -> Vec<Action> {
                 actions.push(Action::SetScrollPane(PaneSelector::AtMouse((x, y))));
             }
             Event::MouseButtonUp{x, y, ..} => {
-                // I think I only want to push these
-                // in process if they really apply.
-                actions.push(Action::EndMovePane((x, y)));
-                actions.push(Action::EndResizePane((x, y)));
-                actions.push(Action::EndCreatePane((x, y)));
                 actions.push(Action::MouseUp(PaneSelector::Active, (x, y)));
                 
             }
