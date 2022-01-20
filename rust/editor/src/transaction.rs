@@ -138,13 +138,23 @@ impl EditAction  {
                     new_position.move_left(text_buffer);
                 }
                 cursor_context.set_cursor(new_position);
+                text_buffer.parse_lines();
             },
             EditAction::Delete((line, column), text_to_delete) => {
                 let mut new_position = Cursor(*line, *column);
-                new_position.move_left(text_buffer);
+                // TODO: Make faster
+                for _ in 0..text_to_delete.len() {
+                    new_position.move_left(text_buffer);
+                }
                 // I have a panic here
                 text_buffer.insert_char(new_position, text_to_delete.as_bytes());
-                new_position.move_right(text_buffer);
+
+                // TODO: Make faster
+                for _ in 0..text_to_delete.len() {
+                    new_position.move_right(text_buffer);
+                }
+
+                text_buffer.parse_lines();
                 cursor_context.set_cursor(new_position);
             },
             EditAction::CursorPosition(old_cursor) => {
@@ -158,20 +168,22 @@ impl EditAction  {
         }
     }
 
-    pub fn redo(&self, cursor_context: &mut CursorContext, text_buffer: &mut TextBuffer) {
+    pub fn redo(&self, cursor_context: &mut CursorContext, text_buffer: &mut TextBuffer) -> Option<()> {
 
-        // TODO:
-        // Are these start and end?
-        // Or are they line and column?
-        // We call them start and end here,
-        // But insert_char takes a cursor, which is line and column.
         match self {
-            EditAction::Insert((start, end), text_to_insert) => {
-                // TODO: We can panic here if we paste do some undo and redo stuff.
-                text_buffer.insert_char(Cursor(*start, *end), text_to_insert.as_bytes());
+            EditAction::Insert((line, column), text_to_insert) => {
+                let new_position = Cursor(*line, *column);
+                cursor_context.set_cursor(new_position);
+                cursor_context.handle_insert(text_to_insert.as_bytes(), text_buffer);
+                text_buffer.parse_lines();
             },
-            EditAction::Delete((start, end), _text_to_delete) => {
-                text_buffer.remove_char(Cursor(*start, *end));
+            EditAction::Delete((line, column), text_to_delete) => {
+                let (line_start, _line_end) = text_buffer.get_line(*line as usize)?;
+                let char_end_pos = line_start + column;
+                let char_start_pos = char_end_pos - text_to_delete.len();
+                text_buffer.chars.drain(char_start_pos as usize..char_end_pos as usize);
+                text_buffer.parse_lines();
+                cursor_context.set_cursor(Cursor(*line, *column));
             },
             EditAction::CursorPosition(new_cursor) => {
                 cursor_context.set_cursor(*new_cursor);
@@ -182,6 +194,7 @@ impl EditAction  {
             }
             EditAction::Noop => {}
         }
+        Some(())
     }
 
     pub fn combine_insert_and_cursor(self, cursor_action: EditAction) -> EditAction {
