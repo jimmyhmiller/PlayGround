@@ -182,6 +182,7 @@ impl CursorContext {
             } else {
                 self.move_right(text_buffer)
             };
+            
             main_action.combine_insert_and_cursor(cursor_action)
         } else {
             EditAction::Noop

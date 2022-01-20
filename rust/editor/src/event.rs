@@ -180,7 +180,7 @@ impl Action {
                 pane.name.pop();
             }
             Action::DeleteSelection(_) => {
-                // TODO: Delete with transactions
+                // TODO: Make this better
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
                 
@@ -193,20 +193,21 @@ impl Action {
                 let (line_start, _line_end) = pane.text_buffer.get_line(start_line as usize)?;
                 let char_start_pos = line_start + start_column as usize;
                 let (end_line_start, _line_end) = pane.text_buffer.get_line(end_line as usize)?;
-                    let char_end_pos = end_line_start + end_column as usize;
-                    let text: Vec<u8> = pane.text_buffer.chars.drain(char_start_pos as usize..char_end_pos as usize).collect();
-                    pane.transaction_manager.add_action(EditAction::Delete((char_start_pos, char_end_pos), from_utf8(&text).unwrap().to_string()));
-                    let cursor = pane.cursor_context.cursor?;
-                    pane.transaction_manager.add_action(EditAction::CursorPosition(cursor));
-                    pane.transaction_manager.next_transaction();
+                let char_end_pos = end_line_start + end_column as usize;
+                let text: Vec<u8> = pane.text_buffer.chars.drain(char_start_pos as usize..char_end_pos as usize).collect();
+                pane.transaction_manager.add_action(EditAction::Delete((end_line, end_column), from_utf8(&text).unwrap().to_string()));
+                pane.transaction_manager.add_action(EditAction::CursorPosition(Cursor(start_line, start_column)));
 
-                    pane.text_buffer.parse_lines();
+                pane.transaction_manager.next_transaction();
+                pane.text_buffer.parse_lines();
 
-                    // TODO:
-                    // Thinking about how selections fit into transactions
-                    // I guess I should restore them?
-                    pane.cursor_context.clear_selection();
-                    pane.cursor_context.fix_cursor(&pane.text_buffer);
+
+                // TODO:
+                // Thinking about how selections fit into transactions
+                // I guess I should restore them?
+                pane.cursor_context.clear_selection();
+                pane.cursor_context.set_cursor(Cursor(start_line, start_column));
+                // pane.cursor_context.fix_cursor(&pane.text_buffer);
 
             }
             Action::DeleteChar(_) => {

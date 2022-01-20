@@ -450,6 +450,7 @@ impl Pane {
                 } else if line == end_line {
                     end_column * renderer.bounds.letter_width as usize
                 } else if line == start_line {
+                    // I have a panic here not sure why
                     (self.text_buffer.line_length(line) - start_column) * renderer.bounds.letter_width as usize
                 } else {
                     self.text_buffer.line_length(line)  * renderer.bounds.letter_width
