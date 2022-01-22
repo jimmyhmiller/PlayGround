@@ -64,6 +64,45 @@ use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions
 // Tab should work
 // Think about auto indention
 // paredit
+// Auto close brackets
+// comment line
+// cut
+// paste isn't working first try everytime
+// rename not making pane active
+
+// Bug
+// For some reason when running a program the stdout stops at a certain length
+// Example program
+// #!/usr/bin/env node
+
+
+// const sleep = (millis) => {
+//    return new Promise(resolve => {
+//       setTimeout(resolve, millis)  
+//    })
+// }
+// let size = 100;
+// let width = 1000;
+// let height = 1000;
+// let x = 0;
+// let y = 0;
+// let vx = 4;
+// let vy = 10;
+
+// const myFunction = async () => {
+//     while (true) {
+//         x += vx;
+//         y += vy;
+//         if (x >= width || x < 0) { vx *= -1}
+//         if (y >= width || y < 0) { vy *= -1}
+//         await sleep(32)
+//        // console.log('\x0c')
+//         console.log(`rect ${x} ${y} 100 100`)
+//    }
+// }
+
+
+// myFunction()
 
 
 

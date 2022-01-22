@@ -702,8 +702,12 @@ pub fn handle_per_frame_action(index: usize, pane_manager: &mut PaneManager, per
                 i += 1;
             }
             if buf.contains('\x0c') {
-                output_pane.text_buffer.chars.clear();
-                buf = buf[0..buf.chars().position(|x| x == '\x0c').unwrap()].to_string();
+                // output_pane.text_buffer.chars.clear();
+                buf = buf[buf.chars().position(|x| x == '\x0c').unwrap() + 1..].to_string();
+                println!("{}", buf);
+                output_pane.text_buffer.chars = buf.as_bytes().to_vec();
+                output_pane.text_buffer.parse_lines();
+                return PerFrameActionResult::Noop
             }
 
             if !buf.is_empty(){
@@ -785,8 +789,10 @@ pub fn handle_side_effects(pane_manager: &mut PaneManager, bounds: &EditorBounds
 
                 let command = pane_contents;
 
+                let mut has_stdin = false;
+
                 let child = if command.starts_with("#!") {
-                    
+                    has_stdin = true;
                     let mut lines = command.lines();
                     let mut command_name = lines.nth(0).unwrap().trim_start_matches("#!").trim();
                     let mut args = vec![];
@@ -824,8 +830,11 @@ pub fn handle_side_effects(pane_manager: &mut PaneManager, bounds: &EditorBounds
                 // need to handle error
                     Ok(mut child) => {
                         let stdout = child.stdout.take().unwrap();
-                        let stdin = child.stdin.take().unwrap();
-                        drop(stdin);
+                        // got crash here when trying to run nothing
+                        if has_stdin {
+                            let stdin = child.stdin.take().unwrap();
+                            drop(stdin);
+                        }
                         let noblock_stdout = NonBlockingReader::from_fd(stdout).unwrap();
                         per_frame_actions.push(PerFrameAction::ReadCommand(output_pane_name, child, noblock_stdout))
                     }
