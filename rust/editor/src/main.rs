@@ -60,6 +60,10 @@ use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions
 // I could have queries and panes as the results of those queries
 // Need a command interface. But what to do it enso style
 // Multi line bash commands
+// Select word via multiclick
+// Tab should work
+// Think about auto indention
+// paredit
 
 
 
@@ -491,6 +495,7 @@ impl Pane {
             if let Some(token) = tokenizer.parse_single(&self.text_buffer.chars) {
                 let token = rust_specific_pass(token, &self.text_buffer.chars);
                 let color = color::color_for_token(&token, &self.text_buffer.chars);
+                // Should move into tokenizer
                 let text = from_utf8(match token {
                     RustSpecific::Keyword((s, e)) => &self.text_buffer.chars[s..e],
                     RustSpecific::Token(t) => {
