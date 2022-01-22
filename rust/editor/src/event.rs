@@ -1,4 +1,4 @@
-use std::{process::{Child, ChildStdout, Command, Stdio}, ops::Neg, str::from_utf8};
+use std::{process::{Child, ChildStdout, Command, Stdio}, ops::Neg, str::from_utf8, io::Write};
 
 use nonblock::NonBlockingReader;
 use sdl2::{clipboard::ClipboardUtil, keyboard::{Scancode, Keycode, Mod}, event::{Event, WindowEvent}};
@@ -774,24 +774,58 @@ pub fn handle_side_effects(pane_manager: &mut PaneManager, bounds: &EditorBounds
                         false
                     }
                 );
-                let (i, _) = current_running_action?;
-                let action = per_frame_actions.swap_remove(i);
-                if let PerFrameAction::ReadCommand(_pane_name, mut child, _) = action {
-                    // TODO: Get rid of this unwrap!
-                    child.kill().unwrap();
+                if let Some((i, _)) = current_running_action {
+                    let action = per_frame_actions.swap_remove(i);
+                    if let PerFrameAction::ReadCommand(_pane_name, mut child, _) = action {
+                        // TODO: Get rid of this unwrap!
+                        child.kill().unwrap();
+                    }
                 }
+                
 
                 let command = pane_contents;
-                // need to handle error
-                let child = Command::new("bash")
+
+                let child = if command.starts_with("#!") {
+                    
+                    let mut lines = command.lines();
+                    let mut command_name = lines.nth(0).unwrap().trim_start_matches("#!").trim();
+                    let mut args = vec![];
+                    if command_name.starts_with("/usr/bin/env") {
+                        args = command_name.split_whitespace().skip(1).map(|x| x.to_string()).collect();
+                        command_name = "/usr/bin/env";
+                    }
+                    let rest_lines = lines.collect::<Vec<&str>>().join("\n");
+
+                    let child = Command::new(command_name)
+                        .args(args)
+                        .stdout(Stdio::piped())
+                        .stdin(Stdio::piped())
+                        .spawn();
+
+                    if let Ok(mut child) = child {
+                        let child_stdin = child.stdin.as_mut().unwrap();
+                        child_stdin.write_all(rest_lines.as_bytes()).unwrap();
+                        child_stdin.flush().unwrap();
+                        Ok(child)
+                    } else {
+                        child
+                    }
+
+                } else {
+                    Command::new("bash")
                     .arg("-c")
                     .arg(command)
                     .stdout(Stdio::piped())
-                    .spawn();
+                    .spawn()
+                };
+
 
                 match child {
+                // need to handle error
                     Ok(mut child) => {
                         let stdout = child.stdout.take().unwrap();
+                        let stdin = child.stdin.take().unwrap();
+                        drop(stdin);
                         let noblock_stdout = NonBlockingReader::from_fd(stdout).unwrap();
                         per_frame_actions.push(PerFrameAction::ReadCommand(output_pane_name, child, noblock_stdout))
                     }
