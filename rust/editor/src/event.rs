@@ -64,6 +64,18 @@ pub enum Action {
     
 }
 
+fn stop_pane_name_edits(pane_manager: &mut PaneManager, actions: &mut Vec<Action>) {
+    // This is really not great. I shouldn't
+    // have to do this all the time.
+    for pane in pane_manager.panes.iter_mut() {
+        if pane.editing_name {
+            actions.push(Action::EndEditPaneName(PaneSelector::Id(pane.id)));
+        }
+    }
+}
+
+
+
 impl Action {
     pub fn pane_id(&self, pane_manager: &PaneManager, editor_bounds: &EditorBounds) -> Option<usize> {
 
@@ -321,15 +333,16 @@ impl Action {
                 pane_manager.delete_pane(id);
             },
             Action::StartEditPaneName(_) => {
+                stop_pane_name_edits(pane_manager, &mut actions);
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
                 pane.editing_name = true;
+                actions.push(Action::SetPaneActive(pane_selector.clone()));
             },
             Action::EndEditPaneName(_) => {
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
                 pane.editing_name = false;
- 
             },
             Action::CtrlMouseDown(_, mouse_pos) => {
                 let pane_selector = self.pane_selector()?;
@@ -375,7 +388,7 @@ impl Action {
                 pane.position = (pane.position.0 + 20, pane.position.1 + 20);
                 pane.id = pane_manager.new_pane_id();
                 pane_manager.panes.push(pane);
-        },
+            },
             Action::SetPaneActive(_) => {
                 let pane_selector = self.pane_selector()?;
                 let id = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?.id;
@@ -387,17 +400,7 @@ impl Action {
                 pane_manager.set_scroll_active_by_id(id);
             },
             Action::MouseDown(_, mouse_pos) => {
-                {
-                    // This is really not great. I shouldn't
-                    // have to do this all the time.
-                    for pane in pane_manager.panes.iter_mut() {
-                        if pane.editing_name {
-                            actions.push(Action::EndEditPaneName(PaneSelector::Id(pane.id)));
-                        }
-                        pane.editing_name = false;
-                    }
-                }
-
+                stop_pane_name_edits(pane_manager, &mut actions);
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
                 // I kind of want to capture these things as actions. But how to do that?
