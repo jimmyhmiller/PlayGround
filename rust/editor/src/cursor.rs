@@ -136,7 +136,7 @@ impl CursorContext {
         self.selection = Some(selection);
     }
 
-    pub fn fix_cursor(&mut self, text_buffer: &TextBuffer) {
+    pub fn _fix_cursor(&mut self, text_buffer: &TextBuffer) {
         // Need to do sanity checks for cursor column
         if let Some(Cursor(cursor_line, cursor_column)) = self.cursor {
             match text_buffer.get_line(cursor_line) {

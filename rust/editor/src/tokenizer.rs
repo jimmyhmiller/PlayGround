@@ -387,7 +387,7 @@ impl<'a> Tokenizer {
         result
     }
 
-    pub fn skip_lines(&mut self, n: usize, input_bytes: &[u8]) -> &mut Self {
+    pub fn _skip_lines(&mut self, n: usize, input_bytes: &[u8]) -> &mut Self {
         for _ in 0..n {
             while !self.at_end(input_bytes) && !self.is_newline(input_bytes) {
                 self.consume();

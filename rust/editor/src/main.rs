@@ -5,7 +5,7 @@ use std::fmt::Debug;
 
 use rand::Rng;
 use sdl2::{pixels::{Color}, rect::Rect, sys};
-use tokenizer::{Tokenizer, rust_specific_pass, RustSpecific, Token};
+use tokenizer::{Tokenizer, rust_specific_pass, Token};
 
 
 use tiny_http::{Server, Response};
@@ -145,6 +145,7 @@ struct Pane {
     editing_name: bool,
     mouse_pos: Option<(i32, i32)>,
     draw_commands: Vec<DrawCommand>,
+    tokens: Vec<Token>,
 }
 
 
@@ -155,7 +156,7 @@ impl Pane {
 
     fn new(id: usize, name: String, (x, y): (i32, i32), (width, height): (usize, usize), text: &str, active: bool) -> Self {
 
-        Pane {
+        let mut pane = Pane {
             id,
             name,
             scroller: Scroller::new(),
@@ -169,7 +170,10 @@ impl Pane {
             transaction_manager: TransactionManager::new(),
             editing_name: false,
             draw_commands: vec![],
-        }
+            tokens: vec![],
+        };
+        pane.parse_all();
+        pane
     }
 
     fn adjust_position(&self, x: i32, y: i32, bounds: &EditorBounds) -> (usize, usize) {
@@ -218,6 +222,10 @@ impl Pane {
         Ok(())
     }
 
+    fn parse_all(&mut self) {
+        self.tokens = self.text_buffer.tokenizer.parse_all(&self.text_buffer.chars);
+    }
+
     fn draw(&mut self, renderer: &mut Renderer) -> Result<(), String> {
 
 
@@ -262,11 +270,11 @@ impl Pane {
         // This whole lines vs tokenizer thing needs to go. I need to get rid of line parsing.
 
         // Now I could cache this if the pane doesn't change
-        let tokens = self.text_buffer.tokenizer.parse_all(&self.text_buffer.chars);
+        self.parse_all();
         
         let mut token_position = 0;
         let mut new_lines_found = 0;
-        for token in tokens.iter() {
+        for token in self.tokens.iter() {
             if new_lines_found == starting_line {
                 break;
             }
@@ -292,7 +300,7 @@ impl Pane {
 
             renderer.move_left(self.scroller.line_fraction_x(&renderer.bounds) as i32);
             let initial_x_position = renderer.target.x;
-            token_position = self.draw_code(renderer, line, &tokens, token_position)?;
+            token_position = self.draw_code(renderer, line, token_position)?;
             let left_most_character = self.scroller.scroll_x_character(&renderer.bounds);
 
             // This is all bad. I need a way of dealing with scrolling and positions of things
@@ -535,8 +543,9 @@ impl Pane {
     }
 
 
-    fn draw_code(&mut self, renderer: &mut Renderer, line: usize, tokens: &Vec<Token>, token_position: usize) -> Result<usize, String> {
+    fn draw_code(&mut self, renderer: &mut Renderer, line: usize, token_position: usize) -> Result<usize, String> {
 
+        let tokens = &self.tokens;
         let (line_start, line_end) = self.text_buffer[line];
         let start = min(line_start + self.scroller.scroll_x_character(&renderer.bounds), line_end);
         let end = min(line_end, start + self.max_characters_per_line(&renderer.bounds));
@@ -893,6 +902,8 @@ impl PaneManager {
 
         let id = self.new_pane_id();
 
+
+        // Can I use Pane::new here?
         self.panes.push(Pane {
             id,
             name: pane_name,
@@ -912,6 +923,7 @@ impl PaneManager {
             transaction_manager: TransactionManager::new(),
             editing_name: false,
             draw_commands: vec![],
+            tokens: vec![],
         });
         self.panes.len() - 1
     }
