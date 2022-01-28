@@ -147,6 +147,7 @@ struct Pane {
     draw_commands: Vec<DrawCommand>,
 }
 
+
 // Thoughts:
 // I don't have any notion of bounds to stop rendering at.
 // I need to think about that here.
@@ -258,7 +259,23 @@ impl Pane {
         let starting_line = self.scroller.lines_above_fold(&renderer.bounds);
 
 
-        self.text_buffer.tokenizer.skip_lines(starting_line, &self.text_buffer.chars);
+        // This whole lines vs tokenizer thing needs to go. I need to get rid of line parsing.
+
+        // Now I could cache this if the pane doesn't change
+        let tokens = self.text_buffer.tokenizer.parse_all(&self.text_buffer.chars);
+        
+        let mut token_position = 0;
+        let mut new_lines_found = 0;
+        for token in tokens.iter() {
+            if new_lines_found == starting_line {
+                break;
+            }
+            if matches!(token, Token::NewLine) {
+                new_lines_found += 1;
+            }
+            token_position += 1;
+        }
+
 
         for line in starting_line as usize..number_of_lines {
             renderer.set_color_mod(color::STANDARD_TEXT_COLOR);
@@ -275,7 +292,7 @@ impl Pane {
 
             renderer.move_left(self.scroller.line_fraction_x(&renderer.bounds) as i32);
             let initial_x_position = renderer.target.x;
-            self.draw_code(renderer, line)?;
+            token_position = self.draw_code(renderer, line, &tokens, token_position)?;
             let left_most_character = self.scroller.scroll_x_character(&renderer.bounds);
 
             // This is all bad. I need a way of dealing with scrolling and positions of things
@@ -428,9 +445,6 @@ impl Pane {
         }
 
 
-
-        // TODO: do something better
-        self.text_buffer.tokenizer.position = 0;
         Ok(())
     }
 
@@ -521,85 +535,76 @@ impl Pane {
     }
 
 
-    fn draw_code(&mut self, renderer: &mut Renderer, line: usize) -> Result<(), String> {
+    fn draw_code(&mut self, renderer: &mut Renderer, line: usize, tokens: &Vec<Token>, token_position: usize) -> Result<usize, String> {
 
         let (line_start, line_end) = self.text_buffer[line];
         let start = min(line_start + self.scroller.scroll_x_character(&renderer.bounds), line_end);
         let end = min(line_end, start + self.max_characters_per_line(&renderer.bounds));
-        // Super awkward hacky approach. But fine for now
         let mut position = line_start;
-        let tokenizer = &mut self.text_buffer.tokenizer;
 
-        while !tokenizer.at_end(&self.text_buffer.chars) && !tokenizer.is_newline(&self.text_buffer.chars) {
-            if let Some(token) = tokenizer.parse_single(&self.text_buffer.chars) {
-                let token = rust_specific_pass(token, &self.text_buffer.chars);
-                let color = color::color_for_token(&token, &self.text_buffer.chars);
-                // Should move into tokenizer
-                let text = from_utf8(match token {
-                    RustSpecific::Keyword((s, e)) => &self.text_buffer.chars[s..e],
-                    RustSpecific::Token(t) => {
-                        match t {
-                            Token::OpenParen => &[b'('],
-                            Token::CloseParen => &[b')'],
-                            Token::OpenCurly => &[b'{'],
-                            Token::CloseCurly => &[b'}'],
-                            Token::OpenBracket => &[b'['],
-                            Token::CloseBracket => &[b']'],
-                            Token::SemiColon => &[b';'],
-                            Token::Colon => &[b':'],
-                            Token::Comma => &[b','],
-                            Token::NewLine => &[],
-                            Token::Comment((s, e))
-                            | Token::Spaces((s, e))
-                            | Token::String((s, e))
-                            | Token::Integer((s, e))
-                            | Token::Float((s, e))
-                            | Token::Atom((s, e)) => &self.text_buffer.chars[s..e],
-                        }
-                    }
-                }).unwrap();
+        // I need to handle multi line tokens. So, I would be looking at start and deciding to draw part of the token.
+        // Will get there eventually.
+        
+        let mut is_multi_line = false;
 
-                if position > end {
-                    continue;
-                }
-                let token_start = {
-                    if position < start && position + text.len() < start {
-                        None
-                    } else if position < start {
-                        Some(start - position)
-                    } else {
-                        Some(0)
-                    }
-                };
+        let mut token_position = token_position;
+        let mut current_token = tokens.get(token_position);
+        while current_token.is_some() && !matches!(current_token, Some(Token::NewLine)) && token_position < tokens.len() && !is_multi_line {
+            let token = current_token.unwrap();
+            let token = rust_specific_pass(*token, &self.text_buffer.chars);
+            let color = color::color_for_token(&token, &self.text_buffer.chars);
+            let mut text = token.to_string(&self.text_buffer.chars);
+        
 
+            let initial_token_start = token.get_token_start(position);
 
-                let token_end = {
-                    if position + text.len() > end {
-                        min(end - position, text.len())
-                    } else {
-                        text.len()
-                    }
-                };
-
-
-                if let Some(token_start) = token_start {
-
-                    let token = &text[token_start..token_end];
-                    renderer.set_color_mod(color);
-                    renderer.draw_string(token)?;
-                }
-
-                position += text.len();
-
-
-
+            if line_start > initial_token_start {
+                text = from_utf8(&self.text_buffer.chars[line_start..token.get_token_end(initial_token_start)]).unwrap();
             }
 
+            let token_start = {
+                if position < start && position + text.len() < start {
+                    None
+                } else if position <= start {
+                    Some(start - position)
+                } else {
+                    Some(0)
+                }
+            };
+            
+    
+            // Revisit this
+            let token_end = {
+                if position + text.len() > end {
+                    min(end.saturating_sub(position), text.len())
+                } else {
+                    text.len()
+                }
+            };
+
+            if let Some(token_start) = token_start {
+                let token = &text[token_start..token_end];
+                renderer.set_color_mod(color);
+                renderer.draw_string(token)?;
+            }
+            
+
+            position += text.len();
+            if let Some(token_start) = token_start {
+                if text[token_start..].contains("\n") {
+                    is_multi_line = true;
+                }
+            }
+            if !is_multi_line {
+                token_position += 1;
+                current_token = tokens.get(token_position);
+            }
         }
-        if !tokenizer.at_end(&self.text_buffer.chars) {
-            tokenizer.consume();
+        if matches!(current_token, Some(Token::NewLine)) {
+            token_position += 1;
         }
-        Ok(())
+
+        Ok(token_position)
 
 
     }

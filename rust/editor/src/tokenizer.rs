@@ -1,6 +1,6 @@
 use std::{str::from_utf8};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum Token {
     OpenParen,
     CloseParen,
@@ -22,6 +22,9 @@ pub enum Token {
     Float((usize, usize)),
     Atom((usize, usize)),
 }
+
+
+
 
 #[derive(Debug, Clone)]
 pub struct Tokenizer {
@@ -67,6 +70,86 @@ pub enum RustSpecific {
     // While,
     Token(Token),
     Keyword((usize, usize)),
+}
+
+impl RustSpecific {
+    pub fn to_string<'a>(&self, chars: &'a Vec<u8>) -> &'a str {
+        from_utf8(match self {
+            RustSpecific::Keyword((s, e)) => &chars[*s..*e],
+            RustSpecific::Token(t) => {
+                match t {
+                    Token::OpenParen => &[b'('],
+                    Token::CloseParen => &[b')'],
+                    Token::OpenCurly => &[b'{'],
+                    Token::CloseCurly => &[b'}'],
+                    Token::OpenBracket => &[b'['],
+                    Token::CloseBracket => &[b']'],
+                    Token::SemiColon => &[b';'],
+                    Token::Colon => &[b':'],
+                    Token::Comma => &[b','],
+                    Token::NewLine => &[],
+                    Token::Comment((s, e))
+                    | Token::Spaces((s, e))
+                    | Token::String((s, e))
+                    | Token::Integer((s, e))
+                    | Token::Float((s, e))
+                    | Token::Atom((s, e)) => &chars[*s..*e],
+                }
+            }
+        }).unwrap()
+    }
+
+    pub fn get_token_start(&self, default_start: usize) -> usize {
+        match self {
+            RustSpecific::Keyword((s, _e)) => *s,
+            RustSpecific::Token(t) => {
+                match t {
+                    Token::OpenParen |
+                    Token::CloseParen |
+                    Token::OpenCurly |
+                    Token::CloseCurly |
+                    Token::OpenBracket |
+                    Token::CloseBracket |
+                    Token::SemiColon |
+                    Token::Colon |
+                    Token::Comma |
+                    Token::NewLine => default_start,
+                    Token::Comment((s, _e))
+                    | Token::Spaces((s, _e))
+                    | Token::String((s, _e))
+                    | Token::Integer((s, _e))
+                    | Token::Float((s, _e))
+                    | Token::Atom((s, _e)) => *s
+                }
+            }
+        }
+    }
+
+    pub fn get_token_end(&self, start: usize) -> usize {
+        match self {
+            RustSpecific::Keyword((_s, e)) => *e,
+            RustSpecific::Token(t) => {
+                match t {
+                    Token::OpenParen |
+                    Token::CloseParen |
+                    Token::OpenCurly |
+                    Token::CloseCurly |
+                    Token::OpenBracket |
+                    Token::CloseBracket |
+                    Token::SemiColon |
+                    Token::Colon |
+                    Token::Comma |
+                    Token::NewLine => start + 1,
+                    Token::Comment((_s, e))
+                    | Token::Spaces((_s, e))
+                    | Token::String((_s, e))
+                    | Token::Integer((_s, e))
+                    | Token::Float((_s, e))
+                    | Token::Atom((_s, e)) => *e
+                }
+            }
+        }
+    }
 }
 
 
@@ -131,7 +214,7 @@ impl<'a> Tokenizer {
         self.current_byte(input_bytes) == DOUBLE_QUOTE
     }
 
-    pub fn parse_string(&mut self, input_bytes: &[u8]) -> Token {// skip open quote
+    pub fn parse_string(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
         self.consume();
         while !self.at_end(input_bytes) && !self.is_quote(input_bytes) {
@@ -315,6 +398,20 @@ impl<'a> Tokenizer {
         }
         self
     }
+
+    // The downside of this approach is that I will parse very large buffers
+    // all the way at once.
+    pub fn parse_all(&mut self, input_bytes: &[u8]) -> Vec<Token> {
+        let mut result = Vec::new();
+        while !self.at_end(input_bytes) {
+            if let Some(token) = self.parse_single(input_bytes) {
+                result.push(token);
+            }
+        }
+        self.position = 0;
+        result
+    }
+
 
 }
 
