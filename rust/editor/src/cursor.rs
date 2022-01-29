@@ -50,6 +50,13 @@ impl Cursor {
         EditAction::CursorPosition(*self)
     }
 
+
+    pub fn to_the_left(self, text_buffer: &TextBuffer) -> Cursor {
+        let mut new_cursor = self.clone();
+        new_cursor.move_left(text_buffer);
+        new_cursor
+    }
+
     pub fn to_the_right(self, text_buffer: &TextBuffer) -> Cursor {
         let mut new_cursor = self.clone();
         new_cursor.move_right(text_buffer);
@@ -231,10 +238,22 @@ impl CursorContext {
     }
 
     pub fn handle_insert(&mut self, to_insert: &[u8], text_buffer : &mut TextBuffer) -> EditAction {
+        // TODO: Simplify
         if let Some(cursor) = self.cursor {
             if Self::is_open_bracket(to_insert) {
                 self.auto_bracket_insert(to_insert, text_buffer, cursor)
-            } else {
+            } else if Self::is_close_bracket(to_insert) {
+                let right_of_cursor = text_buffer.byte_at_pos(cursor);
+                let left_of_cursor = text_buffer.byte_at_pos(cursor.to_the_left(text_buffer));
+
+                match (left_of_cursor, right_of_cursor) {
+                    (Some(left), Some(right)) if Self::is_open_bracket(&[*left]) && Self::is_close_bracket(&[*right]) => {
+                        self.move_right(text_buffer)
+                    }
+                    _ => self.insert_normal_text(to_insert, text_buffer, cursor)
+                }
+            }
+            else {
                 self.insert_normal_text(to_insert, text_buffer, cursor)
             }
         } else {

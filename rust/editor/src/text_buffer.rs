@@ -182,7 +182,7 @@ impl TextBuffer {
 
     // TODO: better name?
     pub fn byte_at_pos(&self, cursor: Cursor) -> Option<&u8> {
-        let byte = self.chars.get(self.char_position_from_cursor(cursor)? - 1)?;
+        let byte = self.chars.get(self.char_position_from_cursor(cursor)?)?;
         Some(byte)
     }
 

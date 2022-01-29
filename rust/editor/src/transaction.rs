@@ -28,6 +28,21 @@ impl TransactionManager {
         }
     }
 
+    pub fn get_last_action_ignoring_cursor(&self) -> Option<&EditAction> {
+        let mut transaction_pointer = self.transaction_pointer;
+        let current_transaction_number = self.current_transaction;
+        loop {
+            let last_transaction = self.transactions.get(transaction_pointer)?;
+            if last_transaction.transaction_number != current_transaction_number {
+                return None
+            }
+            if !matches!(last_transaction.action, EditAction::CursorPosition(_)) {
+                return Some(&last_transaction.action);
+            }
+            transaction_pointer = last_transaction.parent_pointer;
+        }
+    }
+
     pub fn add_action(&mut self, action: EditAction) {
 
         match &action {
@@ -44,10 +59,13 @@ impl TransactionManager {
                 }
             }
             EditAction::Delete(_, _) => {
-                // Delete isn't quite right. I kind of want strings
-                // of deletes to coalesce.
-                // Maybe I should have some compact functions?
-                self.current_transaction += 1;
+                match self.get_last_action_ignoring_cursor() {
+                    None => {},
+                    Some(EditAction::Delete(_,_)) => {},
+                    Some(_) => {
+                        self.current_transaction += 1;
+                    }
+                }
             }
             EditAction::CursorPosition(_) => {}
         }
@@ -80,7 +98,6 @@ impl TransactionManager {
 
     }
 
-    // How do I redo?
 
     pub fn redo(&mut self, cursor_context: &mut CursorContext, text_buffer: &mut TextBuffer) {
 
@@ -149,6 +166,11 @@ impl EditAction  {
                 // I have a panic here
                 text_buffer.insert_char(new_position, text_to_delete.as_bytes());
 
+                // TODO: This isn't quite right.
+                // I could have been at a different position before the delete
+                // For example, if I delete a matching brace
+                // How should I find the cursor position?
+                // Maybe look at the cursor position before the transaction?
                 // TODO: Make faster
                 for _ in 0..text_to_delete.len() {
                     new_position.move_right(text_buffer);

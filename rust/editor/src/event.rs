@@ -232,18 +232,20 @@ impl Action {
 
                 let current_cursor = pane.cursor_context.cursor?;
                 let mut old_cursor = current_cursor;
+                // Character is to the right of the cursor
+                let cursor_before = current_cursor.to_the_left(&pane.text_buffer);
 
-
-                // Need to make these happen on the same transaction
-                if let Some(left_char) = pane.text_buffer.byte_at_pos(current_cursor) {
-                    if let Some(right_char) = pane.text_buffer.byte_at_pos(current_cursor.to_the_right(&pane.text_buffer)) {
+                if let Some(left_char) = pane.text_buffer.byte_at_pos(cursor_before) {
+                    if let Some(right_char) = pane.text_buffer.byte_at_pos(current_cursor) {
                         if CursorContext::is_open_bracket(&[*left_char]) && CursorContext::is_close_bracket(&[*right_char])  {
                             let next_char_position = current_cursor.to_the_right(&pane.text_buffer);
                             let action = pane.text_buffer.remove_char(next_char_position);
+
+                            pane.transaction_manager.next_transaction();
+                            pane.transaction_manager.add_action(EditAction::CursorPosition(current_cursor));
                             pane.transaction_manager.add_action(action);
                         }
                     }
-
                 }
 
                 // We do this move_left first, because otherwise we might end up at the end

@@ -43,8 +43,6 @@ use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions
 // What would that look like? Would it be useful?
 // Also, can we have a generic tree view component easily?
 
-
-
 // TODO LIST:
 // Add some spacing between letters!
 // It would be pretty cool to add a minimap
@@ -63,7 +61,7 @@ use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions
 // Tab should work with selection
 // Think about auto indention
 // paredit
-// Auto close brackets
+// When auto close brackets, don't type close bracket
 // comment line
 // cut
 // paste isn't working first try everytime
@@ -1292,7 +1290,7 @@ fn main() -> Result<(), String> {
 
     // ids are large enough we shouldn't have duplicates here.
     // This is of course just test code.
-    let pane1 = Pane::new(12352353, "action_pane".to_string(), (100, 100), (500, 500), "rect canvas 3 1 2 4 1", true);
+    let pane1 = Pane::new(12352353, "transaction_pane".to_string(), (100, 100), (500, 500), "", true);
     let pane2 = Pane::new(12352353353, "canvas".to_string(), (650, 100), (500, 500), &text, false);
 
 
