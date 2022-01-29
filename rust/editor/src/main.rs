@@ -45,7 +45,6 @@ use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions
 
 
 
-
 // TODO LIST:
 // Add some spacing between letters!
 // It would be pretty cool to add a minimap
@@ -61,7 +60,7 @@ use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions
 // Need a command interface. But what to do it enso style
 // Multi line bash commands
 // Select word via multiclick
-// Tab should work
+// Tab should work with selection
 // Think about auto indention
 // paredit
 // Auto close brackets
@@ -69,6 +68,7 @@ use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions
 // cut
 // paste isn't working first try everytime
 // rename not making pane active
+// Highlight matching brackets
 
 // Bug
 // For some reason when running a program the stdout stops at a certain length
@@ -177,7 +177,7 @@ impl Pane {
     }
 
     fn adjust_position(&self, x: i32, y: i32, bounds: &EditorBounds) -> (usize, usize) {
-        (max(0, x - self.position.0) as usize, max(0,y - self.position.1 - (bounds.letter_height * 2) as i32) as usize)
+        (max(0, x - self.position.0) as usize, max(0, y - self.position.1 - (bounds.letter_height * 2) as i32) as usize)
     }
 
     fn max_characters_per_line(&self, bounds: &EditorBounds) -> usize {
@@ -223,6 +223,7 @@ impl Pane {
     }
 
     fn parse_all(&mut self) {
+        // I could allocate less here.
         self.tokens = self.text_buffer.tokenizer.parse_all(&self.text_buffer.chars);
     }
 
@@ -874,8 +875,8 @@ impl PaneManager {
             let width = x - current_x;
             let height = y - current_y;
 
-            pane.width = width as usize;
-            pane.height = height as usize;
+            pane.width = max(width as usize, 20);
+            pane.height = max(height as usize, 20);
         }
     }
 
@@ -939,6 +940,9 @@ impl PaneManager {
             let current_y = max(self.create_pane_start.1, self.create_pane_current.1);
             let width = (current_x - position_x) as usize;
             let height = (current_y - position_y) as usize;
+            if width < 20 || height < 20 {
+                return;
+            }
 
             let mut rng = rand::thread_rng();
             self.create_pane_raw(format!("temp-{}", rng.gen::<u32>()), (position_x, position_y), width, height);
