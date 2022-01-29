@@ -50,6 +50,12 @@ impl Cursor {
         EditAction::CursorPosition(*self)
     }
 
+    pub fn to_the_right(self, text_buffer: &TextBuffer) -> Cursor {
+        let mut new_cursor = self.clone();
+        new_cursor.move_right(text_buffer);
+        new_cursor
+    }
+
     pub fn move_right(&mut self, text_buffer: &TextBuffer) -> EditAction  {
         let Cursor(cursor_line, cursor_column) = *self;
         if let Some((_line_start, _line_end)) = text_buffer.get_line(cursor_line) {
@@ -174,16 +180,63 @@ impl CursorContext {
         self.cursor = scroller.text_space_from_screen_space(x, y, text_buffer, bounds);
     }
 
+    // TODO: Move this some where else?
+    // I probably already have things like this in tokenizer
+    pub fn is_open_bracket(byte: &[u8]) -> bool {
+        match byte {
+            b"(" | b"[" | b"{" | b"\"" => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_close_bracket(byte: &[u8]) -> bool {
+        match byte {
+            b")" | b"]" | b"}" | b"\"" => true,
+            _ => false,
+        }
+    }
+
+
+    pub fn auto_bracket_insert(&mut self, to_insert: &[u8], text_buffer : &mut TextBuffer, cursor: Cursor) -> EditAction {
+        // TODO:
+        // Consider only doing this if not in a string or comment
+        let to_insert = match to_insert {
+            b"(" => b"()",
+            b"[" => b"[]",
+            b"{" => b"{}",
+            b"\"" => b"\"\"",
+            _ => to_insert,
+        };
+
+        let main_action = text_buffer.insert_char(cursor, to_insert);
+
+        let cursor_action = self.move_right(text_buffer);
+        main_action.combine_insert_and_cursor(cursor_action)
+
+    }
+
+    pub fn insert_normal_text(&mut self, to_insert: &[u8], text_buffer : &mut TextBuffer, cursor: Cursor) -> EditAction {
+        let main_action = text_buffer.insert_char(cursor, to_insert);
+        let cursor_action = if to_insert == b"\n" {
+            self.move_down(text_buffer)
+        } else {
+            // TODO: Do this more efficiently
+            for _ in 0..(to_insert.len() - 1) {
+                self.move_right(text_buffer);
+            }
+            self.move_right(text_buffer)
+        };
+        
+        main_action.combine_insert_and_cursor(cursor_action)
+    }
+
     pub fn handle_insert(&mut self, to_insert: &[u8], text_buffer : &mut TextBuffer) -> EditAction {
         if let Some(cursor) = self.cursor {
-            let main_action = text_buffer.insert_char(cursor, to_insert);
-            let cursor_action = if to_insert == b"\n" {
-                self.move_down(text_buffer)
+            if Self::is_open_bracket(to_insert) {
+                self.auto_bracket_insert(to_insert, text_buffer, cursor)
             } else {
-                self.move_right(text_buffer)
-            };
-            
-            main_action.combine_insert_and_cursor(cursor_action)
+                self.insert_normal_text(to_insert, text_buffer, cursor)
+            }
         } else {
             EditAction::Noop
         }

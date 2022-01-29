@@ -3,7 +3,7 @@ use std::{process::{Child, ChildStdout, Command, Stdio}, ops::Neg, str::from_utf
 use nonblock::NonBlockingReader;
 use sdl2::{clipboard::ClipboardUtil, keyboard::{Scancode, Keycode, Mod}, event::{Event, WindowEvent}};
 
-use crate::{PaneManager, PaneSelector, renderer::EditorBounds, cursor::Cursor, transaction::EditAction, native};
+use crate::{PaneManager, PaneSelector, renderer::EditorBounds, cursor::{Cursor, CursorContext}, transaction::EditAction, native};
 
 
 
@@ -20,6 +20,8 @@ pub enum Action {
     RunPane(PaneSelector),
     Enter(PaneSelector),
     InsertNewline(PaneSelector),
+    TextInput(PaneSelector, String),
+    Tab(PaneSelector),
     Undo(PaneSelector),
     Redo(PaneSelector),
     MoveCursorToLineStart(PaneSelector),
@@ -28,7 +30,6 @@ pub enum Action {
     Paste(PaneSelector),
     OpenFile(PaneSelector),
     SelectAll(PaneSelector),
-    TextInput(PaneSelector, String),
     DeletePane(PaneSelector),
     StartEditPaneName(PaneSelector),
     EndEditPaneName(PaneSelector),
@@ -126,7 +127,8 @@ impl Action {
             Action::DeleteChar(pane_selector) |
             Action::Enter(pane_selector) |
             Action::CtrlMouseDown(pane_selector, _) |
-            Action::CtrlAltMouseDown(pane_selector, _) => {
+            Action::CtrlAltMouseDown(pane_selector, _) |
+            Action::Tab(pane_selector) => {
                 Some(pane_selector)
             }
 
@@ -226,18 +228,33 @@ impl Action {
                 // I probably want to deal with transactions orthogonally.
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
-                // Is there a better way to do this other than clone?
-                // Maybe a non-mutating method?
-                // How to deal with optional aspect here?
+
+
                 let current_cursor = pane.cursor_context.cursor?;
                 let mut old_cursor = current_cursor;
+
+
+                // Need to make these happen on the same transaction
+                if let Some(left_char) = pane.text_buffer.byte_at_pos(current_cursor) {
+                    if let Some(right_char) = pane.text_buffer.byte_at_pos(current_cursor.to_the_right(&pane.text_buffer)) {
+                        if CursorContext::is_open_bracket(&[*left_char]) && CursorContext::is_close_bracket(&[*right_char])  {
+                            let next_char_position = current_cursor.to_the_right(&pane.text_buffer);
+                            let action = pane.text_buffer.remove_char(next_char_position);
+                            pane.transaction_manager.add_action(action);
+                        }
+                    }
+
+                }
+
                 // We do this move_left first, because otherwise we might end up at the end
                 // of the new line we formed from the deletion, rather than the old end of the line.
                 let cursor_action = old_cursor.move_left(&pane.text_buffer);
                 let action = pane.text_buffer.remove_char(current_cursor);
 
+
                 pane.transaction_manager.add_action(action);
                 pane.transaction_manager.add_action(cursor_action);
+                
 
                 pane.cursor_context.set_cursor(old_cursor);
             }
@@ -264,6 +281,29 @@ impl Action {
                 let action = pane.cursor_context.handle_insert(&[b'\n'], &mut pane.text_buffer);
                 pane.transaction_manager.add_action(action);
                 pane.cursor_context.start_of_line();
+            },
+            Action::Tab(_) => {
+                    let pane_selector = self.pane_selector()?;
+                    let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
+
+                    // TODO: Deal with tab when selection exists
+                    // should add spaces to each line.
+
+                    let action = pane.cursor_context.handle_insert("    ".as_bytes(), &mut pane.text_buffer);
+                    pane.transaction_manager.add_action(action);
+            }
+            Action::TextInput(_, text) => {
+                let pane_selector = self.pane_selector()?;
+                let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
+ 
+                if pane.editing_name {
+                    pane.name.push_str(&text);
+                } else {
+                    // TODO: Replace with actually deleting the selection.
+                    pane.cursor_context.clear_selection();
+                    let action = pane.cursor_context.handle_insert(text.as_bytes(), &mut pane.text_buffer);
+                    pane.transaction_manager.add_action(action);
+                }
             },
             Action::Undo(_) => {
                 let pane_selector = self.pane_selector()?;
@@ -312,20 +352,6 @@ impl Action {
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
                 // This is super ugly, fix.
                 pane.cursor_context.set_selection(((0,0), (pane.text_buffer.line_count()-1, pane.text_buffer.line_length(pane.text_buffer.line_count()-1))));
-            },
-            Action::TextInput(_, text) => {
-                let pane_selector = self.pane_selector()?;
-                let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
- 
-                if pane.editing_name {
-                    pane.name.push_str(&text);
-                } else {
-                    // TODO: Replace with actually deleting the selection.
-                    pane.cursor_context.clear_selection();
-
-                    let action = pane.cursor_context.handle_insert(text.as_bytes(), &mut pane.text_buffer);
-                    pane.transaction_manager.add_action(action);
-                }
             },
             Action::DeletePane(_) => {
                 let pane_selector = self.pane_selector()?;
@@ -574,6 +600,9 @@ pub fn handle_events(event_pump: &mut sdl2::EventPump) -> Vec<Action> {
                     (Keycode::Return, _) => {
                         actions.push(Action::Enter(PaneSelector::Active));
                     },
+                    (Keycode::Tab, _) => {
+                        actions.push(Action::Tab(PaneSelector::Active));
+                    }
                     (Keycode::Z, key_mod) if key_mod == Mod::LGUIMOD || keymod == Mod::RGUIMOD => {
                         actions.push(Action::Undo(PaneSelector::Active));                   
                     }

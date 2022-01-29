@@ -161,7 +161,10 @@ impl TextBuffer {
         } else {
             None
         }
+    }
 
+    pub fn char_position_from_cursor(&self, cursor: Cursor) -> Option<usize> {
+        self.char_position_from_line_column(cursor.0, cursor.1)
     }
 
     pub fn line_column_from_char_position(&self, position: usize) -> Option<Cursor> {
@@ -175,6 +178,12 @@ impl TextBuffer {
 
     pub fn get_text(&self) -> &str {
         from_utf8(&self.chars).unwrap()
+    }
+
+    // TODO: better name?
+    pub fn byte_at_pos(&self, cursor: Cursor) -> Option<&u8> {
+        let byte = self.chars.get(self.char_position_from_cursor(cursor)? - 1)?;
+        Some(byte)
     }
 
 }
