@@ -73,40 +73,46 @@ impl Scroller {
 
 
 // This probably belongs in scroller
-pub fn text_space_from_screen_space(&self, mut x: usize, y: usize, text_buffer: &TextBuffer, bounds: &EditorBounds) -> Option<Cursor> {
-    // Slightly off probably due to rounding.
-    // println!("{}", y as f32 / letter_height as f32);
+    pub fn text_space_from_screen_space(&self, mut x: usize, y: usize, text_buffer: &TextBuffer, bounds: &EditorBounds) -> Option<Cursor> {
 
-    // Probably should move some/all of this to the scroller.
-    let EditorBounds {letter_height, letter_width, ..} = *bounds;
-    let line_number_padding = bounds.line_number_padding(text_buffer) as i32;
+        // TODO:
+        // Refactor this
 
-    // Still crash here
-    // Didn't realize it could do that without the unwrap
-    let line_number : usize = (((y as f32 / letter_height as f32)
-        + (self.line_fraction_y(bounds) as f32 / bounds.letter_height as f32)).floor() as i32
-        + self.lines_above_fold(bounds) as i32) as usize;
+        // Slightly off probably due to rounding.
+        // println!("{}", y as f32 / letter_height as f32);
+
+        
+        // Probably should move some/all of this to the scroller.
+        let EditorBounds {letter_height, letter_width, ..} = *bounds;
+        let line_number_padding = bounds.line_number_padding(text_buffer) as i32;
+
+        // Still crash here
+        // Didn't realize it could do that without the unwrap
+        let line_number : usize = (((y as f32 / letter_height as f32)
+            + (self.line_fraction_y(bounds) as f32 / bounds.letter_height as f32)).floor() as i32
+            + self.lines_above_fold(bounds) as i32) as usize;
 
 
-    if (x as i32) < line_number_padding && (x as i32) > line_number_padding - 20  {
-        x = line_number_padding as usize;
-    }
-    if x < line_number_padding as usize {
-        return None;
-    }
-    let mut column_number : usize = (x - line_number_padding as usize) / letter_width as usize;
-
-    if let Some((line_start, line_end)) = text_buffer.get_line(line_number) {
-        if column_number > line_end - line_start {
-            column_number = text_buffer[line_number].1 - text_buffer[line_number].0;
+        if (x as i32) < line_number_padding && (x as i32) > line_number_padding - 20  {
+            x = line_number_padding as usize;
         }
-        return Some(Cursor(line_number, column_number));
+        if x < line_number_padding as usize {
+            return None;
+        }
+        let mut column_number : usize = (x - line_number_padding as usize) / letter_width as usize;
+
+        if let Some((line_start, line_end)) = text_buffer.get_line(line_number) {
+            if column_number > line_end - line_start {
+                column_number = text_buffer[line_number].1 - text_buffer[line_number].0;
+            }
+            return Some(Cursor(line_number, column_number));
+        }
+        if line_number >= text_buffer.line_count() && text_buffer.last_line().is_some() {
+            return Some(Cursor(text_buffer.line_count() - 1, text_buffer.line_length(text_buffer.line_count() - 1)));
+        }
+        
+        None
     }
-    if line_number > text_buffer.line_count() && text_buffer.last_line().is_some() {
-        return Some(Cursor(text_buffer.line_count() - 1, text_buffer.line_length(text_buffer.line_count() - 1)));
-    }
-    None
-}
 
 }
 

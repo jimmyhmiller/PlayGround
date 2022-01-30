@@ -21,7 +21,8 @@ pub enum Action {
     Enter(PaneSelector),
     InsertNewline(PaneSelector),
     TextInput(PaneSelector, String),
-    Tab(PaneSelector),
+    Indent(PaneSelector),
+    DeIndent(PaneSelector),
     Undo(PaneSelector),
     Redo(PaneSelector),
     MoveCursorToLineStart(PaneSelector),
@@ -128,7 +129,8 @@ impl Action {
             Action::Enter(pane_selector) |
             Action::CtrlMouseDown(pane_selector, _) |
             Action::CtrlAltMouseDown(pane_selector, _) |
-            Action::Tab(pane_selector) => {
+            Action::Indent(pane_selector) |
+            Action::DeIndent(pane_selector) => {
                 Some(pane_selector)
             }
 
@@ -284,15 +286,27 @@ impl Action {
                 pane.transaction_manager.add_action(action);
                 pane.cursor_context.start_of_line();
             },
-            Action::Tab(_) => {
-                    let pane_selector = self.pane_selector()?;
-                    let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
+            Action::Indent(_) => {
+                let pane_selector = self.pane_selector()?;
+                let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
 
-                    // TODO: Deal with tab when selection exists
-                    // should add spaces to each line.
-
+                // TODO: Deal with tab when selection exists
+                // should add spaces to each line.
+                if let Some(((start_line, _), (end_line, _))) =  pane.cursor_context.selection {
+                    let current_cursor = pane.cursor_context.cursor;
+                    for line in start_line..end_line + 1 {
+                        pane.cursor_context.cursor = Some(Cursor(line, 0));
+                        let action = pane.cursor_context.handle_insert("    ".as_bytes(), &mut pane.text_buffer);
+                        pane.transaction_manager.add_action(action);
+                    }
+                    pane.cursor_context.cursor = current_cursor;
+                } else {
                     let action = pane.cursor_context.handle_insert("    ".as_bytes(), &mut pane.text_buffer);
                     pane.transaction_manager.add_action(action);
+                }
+            }
+            Action::DeIndent(_) => {
+                // TODO: Implement
             }
             Action::TextInput(_, text) => {
                 let pane_selector = self.pane_selector()?;
@@ -430,20 +444,30 @@ impl Action {
             Action::MouseDown(_, mouse_pos) => {
                 stop_pane_name_edits(pane_manager, &mut actions);
                 let pane_selector = self.pane_selector()?;
+                let mouse_pane_id = pane_manager.get_pane_at_mouse(*mouse_pos, bounds).map(|p| p.id);
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
                 // I kind of want to capture these things as actions. But how to do that?
                 // Maybe this function actually just returns more actions
                 // that are queued up immediately?
-                if pane.mouse_over_play_button(*mouse_pos, bounds) {
-                    // run pane
-                } else {
-                    // We could generate actions here instead of doing things.
-                    let (x, y) = pane.adjust_position(mouse_pos.0, mouse_pos.1, bounds);
-                    pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer, bounds);
-                    pane.cursor_context.mouse_down();
-                    pane.cursor_context.clear_selection();
+                if Some(pane.id) == mouse_pane_id {
+                    if pane.mouse_over_play_button(*mouse_pos, bounds) {
+                        // run pane
+                    } else {
+                        // We could generate actions here instead of doing things.
+                        let (x, y) = pane.adjust_position(mouse_pos.0, mouse_pos.1, bounds);
+                        
+                        pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer, bounds);
+                        pane.cursor_context.mouse_down();
+                        pane.cursor_context.clear_selection();
+                    }
                 }
-                pane.transaction_manager.next_transaction();
+
+
+                if mouse_pane_id.is_none() {
+                    pane_manager.clear_active();
+                }
+                // Why did I have this here?
+                // pane.transaction_manager.next_transaction();
             },
             Action::MouseUp(_, mouse_pos) => {
 
@@ -602,8 +626,11 @@ pub fn handle_events(event_pump: &mut sdl2::EventPump) -> Vec<Action> {
                     (Keycode::Return, _) => {
                         actions.push(Action::Enter(PaneSelector::Active));
                     },
+                    (Keycode::Tab, Mod::LSHIFTMOD) => {
+                        actions.push(Action::DeIndent(PaneSelector::Active));
+                    },
                     (Keycode::Tab, _) => {
-                        actions.push(Action::Tab(PaneSelector::Active));
+                        actions.push(Action::Indent(PaneSelector::Active));
                     }
                     (Keycode::Z, key_mod) if key_mod == Mod::LGUIMOD || keymod == Mod::RGUIMOD => {
                         actions.push(Action::Undo(PaneSelector::Active));                   
