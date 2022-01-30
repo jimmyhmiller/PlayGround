@@ -56,7 +56,6 @@ use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions
 // I need to think about afterburner text decorations
 // I could have queries and panes as the results of those queries
 // Need a command interface. But what to do it enso style
-// Multi line bash commands
 // Select word via multiclick
 // Think about auto indention
 // paredit
@@ -65,6 +64,9 @@ use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions
 // paste isn't working first try everytime (or was this the active bug?)
 // Highlight matching brackets
 // Deindent
+// At some point I made scroll not as smooth. There are no fractional top lines
+// Scroll left and right with arrow keys
+// LOTS of cpu usage. Need to debug and optimize
 
 
 // Bug

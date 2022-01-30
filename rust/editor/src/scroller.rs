@@ -20,6 +20,34 @@ impl Scroller {
         }
     }
 
+    pub fn last_line_visible(&self, height: usize, bounds: &EditorBounds) -> usize {
+        self.viewing_lines(height, bounds) + self.lines_above_fold(bounds)
+    }
+
+    pub fn move_down(&mut self, cursor: Cursor, height: usize, bounds: &EditorBounds) {
+        let last_line = self.last_line_visible(height, bounds);
+        // cursor is 0 indexed
+        if cursor.0 > last_line - 1 {
+            self.offset_y += bounds.letter_height as i32;
+        }
+    }
+
+    pub fn move_up(&mut self, cursor: Cursor, bounds: &EditorBounds) {
+        // If I change scrolling to be smoother, might need to fix this.
+        let first_line = self.lines_above_fold(bounds);
+        if cursor.0 < first_line{
+            self.offset_y = self.offset_y.saturating_sub(bounds.letter_height as i32);
+        }
+    }
+
+    pub fn _move_right(&mut self, _cursor: Cursor, _width: usize, _bounds: &EditorBounds) {
+
+    }
+
+    pub fn _move_left(&mut self, _cursor: Cursor, _width: usize, _bounds: &EditorBounds) {
+        
+    }
+
     pub fn scroll_y(&mut self, height: usize, amount: i32, text_buffer: &TextBuffer, bounds: &EditorBounds) {
         if !self.at_end(height, text_buffer, bounds) || amount < 0 {
             self.offset_y += amount * self.scroll_speed;
@@ -46,7 +74,18 @@ impl Scroller {
     }
 
     pub fn viewing_lines(&self, height: usize, bounds: &EditorBounds) -> usize {
-       height / bounds.letter_height
+        // Some times lines are peeking out and I need to account for that.
+        let viewable_area = height.saturating_sub(bounds.letter_height * 2);
+        let view_lines =  viewable_area / bounds.letter_height;
+        let line_peak = viewable_area % bounds.letter_height;
+        // Number chosen by looking at the running app.
+        // Probably wrong and should be based on something like
+        // line_spacing.
+        if line_peak >= 5 {
+            view_lines - 1
+        } else {
+            view_lines
+        }
     }
 
     pub fn lines_above_fold(&self, bounds: &EditorBounds) -> usize {
@@ -69,10 +108,6 @@ impl Scroller {
         self.offset_x as usize % bounds.letter_width as usize
     }
 
-
-
-
-// This probably belongs in scroller
     pub fn text_space_from_screen_space(&self, mut x: usize, y: usize, text_buffer: &TextBuffer, bounds: &EditorBounds) -> Option<Cursor> {
 
         // TODO:
@@ -110,7 +145,7 @@ impl Scroller {
         if line_number >= text_buffer.line_count() && text_buffer.last_line().is_some() {
             return Some(Cursor(text_buffer.line_count() - 1, text_buffer.line_length(text_buffer.line_count() - 1)));
         }
-        
+
         None
     }
 

@@ -159,11 +159,19 @@ impl Action {
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
                 pane.cursor_context.move_up(&pane.text_buffer);
+                                // ? is fine here only because there is nothing 
+                // below this that I want to do that doesn't rely on cursor
+                // If that changes, remove the ?
+                pane.scroller.move_up(pane.cursor_context.cursor?, bounds)
             }
             Action::MoveCursorDown(_) => {
                 let pane_selector = self.pane_selector()?;
                 let pane = pane_manager.get_pane_by_selector_mut(pane_selector, bounds)?;
                 pane.cursor_context.move_down(&pane.text_buffer);
+                // ? is fine here only because there is nothing 
+                // below this that I want to do that doesn't rely on cursor
+                // If that changes, remove the ?
+                pane.scroller.move_down(pane.cursor_context.cursor?, pane.height, bounds)
             },
             Action::MoveCursorLeft(_) => {
                 let pane_selector = self.pane_selector()?;
