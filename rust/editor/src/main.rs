@@ -58,15 +58,14 @@ use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions
 // Need a command interface. But what to do it enso style
 // Multi line bash commands
 // Select word via multiclick
-// Tab should work with selection
 // Think about auto indention
 // paredit
-// When auto close brackets, don't type close bracket
 // comment line
 // cut
-// paste isn't working first try everytime
-// rename not making pane active
+// paste isn't working first try everytime (or was this the active bug?)
 // Highlight matching brackets
+// Deindent
+
 
 // Bug
 // For some reason when running a program the stdout stops at a certain length
@@ -1025,6 +1024,13 @@ impl PaneManager {
             PaneSelector::Id(id) => self.get_pane_by_id(*id),
             PaneSelector::AtMouse(mouse_pos) => self.get_pane_at_mouse(*mouse_pos, editor_bounds),
             PaneSelector::Scroll => self.get_scroll_active_pane(),
+        }
+    }
+
+    fn clear_active(&mut self) {
+        self.active_pane = 0;
+        for pane in self.panes.iter_mut() {
+            pane.active = false;
         }
     }
 }
