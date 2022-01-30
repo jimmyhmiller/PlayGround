@@ -71,6 +71,9 @@ impl<'a> Renderer<'a> {
     }
 
     pub fn set_initial_rendering_location(&mut self, scroller: &Scroller) {
+        // TODO:
+        // Abstract out where we start drawing
+        // so we could change pane look easily
         self.target = Rect::new(
             self.bounds.editor_left_margin as i32,
             (scroller.line_fraction_y(&self.bounds) as i32).neg() + self.bounds.letter_height as i32 * 2,
