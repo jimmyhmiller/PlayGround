@@ -270,12 +270,20 @@ impl Action {
 
                 pane.cursor_context.set_cursor(old_cursor);
             }
-            Action::RunPane(_) => {
+            Action::RunPane(pane_selector) => {
+                let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
+                *pane_selector = PaneSelector::Id(pane.id);
+                
                 // Should I do this here rather than side-effects?
                 // How do I communicate that things need to keep
                 // being done? Do I pass in per frame actions?
                 // I mean that might make sense
                 // Honestly not sure.
+
+                // Also should make an action for updating the output pane
+                // Really should capture that in detail, but even just a placeholder
+                // would be a good idea.
+
             },
 
             Action::Enter(pane_selector) => {
