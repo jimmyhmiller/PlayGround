@@ -66,7 +66,7 @@ use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions
 // Deindent
 // At some point I made scroll not as smooth. There are no fractional top lines
 // Scroll left and right with arrow keys
-// LOTS of cpu usage. Need to debug and optimize
+// Lots of cpu usage. Need to debug and optimize
 
 
 // Bug
@@ -678,7 +678,7 @@ fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCo
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum PaneSelector {
     Active,
     Id(usize),
@@ -1298,7 +1298,7 @@ fn main() -> Result<(), String> {
 
     // ids are large enough we shouldn't have duplicates here.
     // This is of course just test code.
-    let pane1 = Pane::new(12352353, "transaction_pane".to_string(), (100, 100), (500, 500), "", true);
+    let pane1 = Pane::new(12352353, "action_pane".to_string(), (100, 100), (500, 500), "", true);
     let pane2 = Pane::new(12352353353, "canvas".to_string(), (650, 100), (500, 500), &text, false);
 
 
@@ -1344,10 +1344,6 @@ fn main() -> Result<(), String> {
         let mut actions = handle_events(&mut event_pump);
         let mut i = 0;
         while i < actions.len() {
-            // I might need to resolve all of these selectors to id
-            // selectors before I process? Or After? It isn't clear.
-            // But I will need to record the ids at some point
-            // So I can know which panes changed for my dependencies
             if let Some(new_actions) = actions[i].process(&mut pane_manager, &renderer.bounds, &clipboard) {
                 for (j, action) in new_actions.into_iter().enumerate() {
                     actions.insert(i + j + 1, action);
@@ -1356,6 +1352,9 @@ fn main() -> Result<(), String> {
             i += 1;
         }
         all_actions.extend(actions.clone());
+        // Now that I have made my actions resolve to ids
+        // I need to make side effects actually be reified as actions
+        // Once I do that, I can track dependencies and not reparse/rerender things so often
         handle_side_effects(&mut pane_manager, &renderer.bounds, actions, &mut per_frame_actions);
         handle_per_frame_actions(&mut per_frame_actions, &mut pane_manager);
         
