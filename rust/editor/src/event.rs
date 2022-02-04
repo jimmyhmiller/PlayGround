@@ -150,6 +150,12 @@ impl Action {
 
     pub fn process<'a>(&mut self, pane_manager: &mut PaneManager, bounds: &EditorBounds, clipboard: &ClipboardUtil, actions: &'a mut Vec<Action>) -> Option<()> {
 
+
+        // TODO:
+        // If the pane does not resolve,
+        // should I change the selector?
+        // or just leave it as is?
+
         match self {
 
             Action::MoveCursorUp(pane_selector) => {
@@ -383,6 +389,8 @@ impl Action {
                 pane.cursor_context.set_selection(((0,0), (pane.text_buffer.line_count()-1, pane.text_buffer.line_length(pane.text_buffer.line_count()-1))));
             },
             Action::DeletePane(pane_selector) => {
+                let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
+                *pane_selector = PaneSelector::Id(pane.id);
                 let id = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?.id;
                 pane_manager.delete_pane(id);
             },
@@ -399,13 +407,16 @@ impl Action {
                 pane.editing_name = false;
             },
             Action::CtrlMouseDown(pane_selector, mouse_pos) => {
-                if let Some(_pane) = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds) {
+                if let Some(pane) = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds) {
+                    *pane_selector = PaneSelector::Id(pane.id);
                     actions.push(Action::StartMovePane(PaneSelector::AtMouse(*mouse_pos), *mouse_pos));
                 } else {
                     actions.push(Action::StartCreatePane(*mouse_pos));
                 }
             }
             Action::StartResizePane(pane_selector, mouse_pos) => {
+                let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
+                *pane_selector = PaneSelector::Id(pane.id);
                 let id = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?.id;
                 pane_manager.set_resize_start(*mouse_pos, id);
             },
@@ -419,20 +430,26 @@ impl Action {
                 pane_manager.create_pane();
             },
             Action::CtrlAltMouseDown(pane_selector, mouse_pos) => {
-                if let Some(_pane) = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds) {
+                if let Some(pane) = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds) {
+                    *pane_selector = PaneSelector::Id(pane.id);
                     actions.push(Action::StartResizePane(PaneSelector::AtMouse(*mouse_pos), *mouse_pos));
                 } else {
                     actions.push(Action::StartCreatePane(*mouse_pos));
                 }
             },
-            Action::StartMovePane(_, mouse_pos) => {
+            Action::StartMovePane(pane_selector, mouse_pos) => {
+                let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
+                *pane_selector = PaneSelector::Id(pane.id);
                 pane_manager.set_dragging_start(*mouse_pos, bounds);
             },
             Action::EndMovePane(_mouse_pos) => {
+                // TODO:
+                // Do I need to capture the pane here?
                 pane_manager.stop_dragging();
             },
             Action::DuplicatePane(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector(&pane_selector, bounds)?;
+                *pane_selector = PaneSelector::Id(pane.id);
                 let i = pane_manager.get_pane_index_by_id(pane.id)?;
                 let mut pane = pane_manager.panes[i].clone();
                 pane.position = (pane.position.0 + 20, pane.position.1 + 20);
@@ -440,10 +457,14 @@ impl Action {
                 pane_manager.panes.push(pane);
             },
             Action::SetPaneActive(pane_selector) => {
+                let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
+                *pane_selector = PaneSelector::Id(pane.id);
                 let id = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?.id;
                 pane_manager.set_active_by_id(id);    
             },
             Action::SetScrollPane(pane_selector) => {
+                let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
+                *pane_selector = PaneSelector::Id(pane.id);
                 let id = pane_manager.get_pane_by_selector(&pane_selector, bounds)?.id;
                 pane_manager.set_scroll_active_by_id(id);
             },
@@ -475,8 +496,9 @@ impl Action {
                 // Why did I have this here?
                 // pane.transaction_manager.next_transaction();
             },
-            Action::MouseUp(_, mouse_pos) => {
-
+            Action::MouseUp(pane_selector, mouse_pos) => {
+                let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
+                *pane_selector = PaneSelector::Id(pane.id);
 
                 if pane_manager.dragging_pane.is_some() {
                     actions.push(Action::EndMovePane(*mouse_pos));
