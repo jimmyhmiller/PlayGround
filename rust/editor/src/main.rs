@@ -31,7 +31,7 @@ use text_buffer::TextBuffer;
 use transaction::{EditAction, TransactionManager};
 use cursor::{Cursor, CursorContext};
 use fps::FpsCounter;
-use event::{Action, handle_events, handle_side_effects, handle_per_frame_actions, PerFrameAction};
+use event::{Action, handle_events, handle_per_frame_actions, PerFrameAction};
 
 
 
@@ -1343,19 +1343,23 @@ fn main() -> Result<(), String> {
         
         let mut actions = handle_events(&mut event_pump);
         let mut i = 0;
+
         while i < actions.len() {
-            if let Some(new_actions) = actions[i].process(&mut pane_manager, &renderer.bounds, &clipboard) {
-                for (j, action) in new_actions.into_iter().enumerate() {
-                    actions.insert(i + j + 1, action);
-                }
+            // Would love this to be outside the loop. Will deal for now
+            let mut more_actions = vec![];
+            // Side effects might also produce actions. Should consider passing the vector rather than making it?
+            // That some times gets weird in a loop though.
+            actions[i].process(&mut pane_manager, &renderer.bounds, &clipboard, &mut more_actions);
+            actions[i].handle_side_effect(&mut pane_manager, &renderer.bounds, &mut per_frame_actions, &mut more_actions);
+           
+           
+            for (j, action) in more_actions.into_iter().enumerate() {
+                actions.insert(i + j + 1, action);
             }
             i += 1;
         }
         all_actions.extend(actions.clone());
-        // Now that I have made my actions resolve to ids
-        // I need to make side effects actually be reified as actions
-        // Once I do that, I can track dependencies and not reparse/rerender things so often
-        handle_side_effects(&mut pane_manager, &renderer.bounds, actions, &mut per_frame_actions);
+        // Need to make per frame actions also emit new actions.
         handle_per_frame_actions(&mut per_frame_actions, &mut pane_manager);
         
 
