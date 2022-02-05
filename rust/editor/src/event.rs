@@ -38,6 +38,7 @@ pub enum Action {
     EndResizePane((i32, i32)),
     StartCreatePane((i32, i32)),
     EndCreatePane((i32, i32)),
+    CreatePane(String, (i32, i32), usize, usize),
     StartMovePane(PaneSelector, (i32, i32)),
     EndMovePane((i32, i32)),
     DuplicatePane(PaneSelector),
@@ -50,6 +51,8 @@ pub enum Action {
     MoveMouse((i32, i32)),
     ResizeWindow(i32, i32),
     Scroll(PaneSelector, (i32, i32)),
+    ClearPane(PaneSelector),
+    PaneContentChanged(PaneSelector),
     Quit,
 
     // TODO:
@@ -130,7 +133,9 @@ impl Action {
             Action::CtrlMouseDown(pane_selector, _) |
             Action::CtrlAltMouseDown(pane_selector, _) |
             Action::Indent(pane_selector) |
-            Action::DeIndent(pane_selector) => {
+            Action::DeIndent(pane_selector) |
+            Action::ClearPane(pane_selector) |
+            Action::PaneContentChanged(pane_selector) => {
                 Some(*pane_selector)
             }
 
@@ -141,6 +146,7 @@ impl Action {
             Action::MouseUp(_, _) |
             Action::MoveMouse(_) |
             Action::ResizeWindow(_, _) |
+            Action::CreatePane(_, _, _, _) |
             Action::Quit => {
                 None
             }
@@ -288,7 +294,16 @@ impl Action {
                 // would be a good idea.
 
             },
-
+            Action::ClearPane(pane_selector) => {
+                let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
+                *pane_selector = PaneSelector::Id(pane.id);
+                pane.text_buffer.chars.clear();
+                pane.text_buffer.parse_lines();
+            }
+            Action::PaneContentChanged(pane_selector) => {
+                let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
+                *pane_selector = PaneSelector::Id(pane.id);
+            }
             Action::Enter(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
                 *pane_selector = PaneSelector::Id(pane.id);
@@ -428,7 +443,11 @@ impl Action {
             },
             Action::EndCreatePane(_mouse_pos) => {
                 pane_manager.create_pane();
+                // Should I somehow signal that the pane was created?
             },
+            Action::CreatePane(pane_name, position, width, height) => {
+                pane_manager.create_pane_raw(pane_name.to_string(), *position, *width, *height);
+            }
             Action::CtrlAltMouseDown(pane_selector, mouse_pos) => {
                 if let Some(pane) = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds) {
                     *pane_selector = PaneSelector::Id(pane.id);
@@ -484,6 +503,8 @@ impl Action {
                         let (x, y) = pane.adjust_position(mouse_pos.0, mouse_pos.1, bounds);
                         
                         pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer, bounds);
+                        // If I move the cursor, I should make a new transaction
+                        pane.transaction_manager.next_transaction();
                         pane.cursor_context.mouse_down();
                         pane.cursor_context.clear_selection();
                     }
@@ -493,12 +514,12 @@ impl Action {
                 if mouse_pane_id.is_none() {
                     pane_manager.clear_active();
                 }
-                // Why did I have this here?
-                // pane.transaction_manager.next_transaction();
             },
             Action::MouseUp(pane_selector, mouse_pos) => {
-                let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                if let Some(pane) = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds) {
+                    *pane_selector = PaneSelector::Id(pane.id);
+                }
+                
 
                 if pane_manager.dragging_pane.is_some() {
                     actions.push(Action::EndMovePane(*mouse_pos));
@@ -587,7 +608,7 @@ impl Action {
         Some(())
     }
 
-    pub fn handle_side_effect(&self, pane_manager: &mut PaneManager, bounds: &EditorBounds, per_frame_actions: &mut Vec<PerFrameAction>, _actions: &mut Vec<Action>) -> Option<()> {
+    pub fn handle_side_effect(&self, pane_manager: &mut PaneManager, bounds: &EditorBounds, per_frame_actions: &mut Vec<PerFrameAction>, actions: &mut Vec<Action>) -> Option<()> {
         match self {
             Action::RunPane(pane_selector) => {
                 // TODO: think about multiple panes of same name
@@ -611,21 +632,14 @@ impl Action {
                                 None => (0, 0)
                             }
                         };
-                        pane_manager.create_pane_raw(output_pane_name.to_string(), position, 300, 300);
+                        actions.push(Action::CreatePane(output_pane_name.to_string(), position, 300, 300));
+                        // pane_manager.create_pane_raw(output_pane_name.to_string(), position, 300, 300);
                     }
 
                     // I need to not edit these, but instead make new actions
                     Some(output_pane) => {
-                        // This causes a flash to happen
-                        // Which is actually useful from a user experience perspective
-                        // but it was unintentional.
-                        // Makes me think something is taking longer to render
-                        // than I thought.
-                        // I guess it makes sense in some ways though.
-                        // ls for example takes some amount of time,
-                        // and then I have to fetch that data and render.
-                        output_pane.text_buffer.chars.clear();
-                        output_pane.text_buffer.parse_lines();
+                        let output_pane_id = output_pane.id;
+                        actions.push(Action::ClearPane(PaneSelector::Id(output_pane_id)));
                     }
                 }
     
@@ -868,11 +882,11 @@ pub fn handle_events(event_pump: &mut sdl2::EventPump) -> Vec<Action> {
 }
 
 
-pub fn handle_per_frame_actions(per_frame_actions: &mut Vec<PerFrameAction>, pane_manager: &mut PaneManager) {
+pub fn handle_per_frame_actions(per_frame_actions: &mut Vec<PerFrameAction>, pane_manager: &mut PaneManager, actions: &mut Vec<Action>) {
     let mut per_frame_action_results = vec![];
     for (i, per_frame_action) in per_frame_actions.iter_mut().enumerate() {
         per_frame_action_results.push(
-            handle_per_frame_action(i, pane_manager, per_frame_action)
+            handle_per_frame_action(i, pane_manager, per_frame_action, actions)
         );
     }
     for per_frame_action_result in per_frame_action_results {
@@ -887,7 +901,7 @@ pub fn handle_per_frame_actions(per_frame_actions: &mut Vec<PerFrameAction>, pan
 
 
 
-pub fn handle_per_frame_action(index: usize, pane_manager: &mut PaneManager, per_frame_action: &mut PerFrameAction) -> PerFrameActionResult {
+pub fn handle_per_frame_action(index: usize, pane_manager: &mut PaneManager, per_frame_action: &mut PerFrameAction, actions: &mut Vec<Action>) -> PerFrameActionResult {
     match per_frame_action {
         PerFrameAction::ReadCommand(output_pane_name, _child, non_blocking_reader) => {
             let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
@@ -909,7 +923,8 @@ pub fn handle_per_frame_action(index: usize, pane_manager: &mut PaneManager, per
                 }
                 i += 1;
             }
-            // Need to make this write new actions
+
+            actions.push(Action::PaneContentChanged(PaneSelector::Id(output_pane.id)));
             if buf.contains('\x0c') {
                 buf = buf[buf.chars().position(|x| x == '\x0c').unwrap() + 1..].to_string();
                 output_pane.text_buffer.chars = buf.as_bytes().to_vec();
