@@ -238,7 +238,11 @@ impl CursorContext {
     }
 
     pub fn handle_insert(&mut self, to_insert: &[u8], text_buffer : &mut TextBuffer) -> EditAction {
-        // TODO: Simplify
+        // TODO:
+        // This logic is wrong.
+        // I need to really think about how to make it right
+        // If I open a bracket, type, then close, it shouldn't duplicate
+        // But I also don't check the kind of bracket here.
         if let Some(cursor) = self.cursor {
             if Self::is_open_bracket(to_insert) {
                 self.auto_bracket_insert(to_insert, text_buffer, cursor)

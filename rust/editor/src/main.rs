@@ -67,6 +67,7 @@ use event::{Action, handle_events, handle_per_frame_actions, PerFrameAction};
 // At some point I made scroll not as smooth. There are no fractional top lines
 // Scroll left and right with arrow keys
 // Lots of cpu usage. Need to debug and optimize
+// fix multiline
 
 
 // Bug
@@ -551,8 +552,13 @@ impl Pane {
         let end = min(line_end, start + self.max_characters_per_line(&renderer.bounds));
         let mut position = line_start;
 
-        // I need to handle multi line tokens. So, I would be looking at start and deciding to draw part of the token.
-        // Will get there eventually.
+        // TODO: fix multiline
+        // I handle multi line tokens
+        // but not if they are more than the view pane.
+        // Need to deal with that fact.
+        // Might be from skipping lines incorrectly?
+        // Need to look at that.
+        
         
         let mut is_multi_line = false;
 
@@ -1344,6 +1350,11 @@ fn main() -> Result<(), String> {
         let mut actions = handle_events(&mut event_pump);
         let mut i = 0;
 
+        // By moving this up, I make sure to process the actions
+        // on that same frame, instead of having to let them cross frames
+        // that would get weird for dependency tracking.
+        handle_per_frame_actions(&mut per_frame_actions, &mut pane_manager, &mut actions);
+
         while i < actions.len() {
             // Would love this to be outside the loop. Will deal for now
             let mut more_actions = vec![];
@@ -1360,7 +1371,6 @@ fn main() -> Result<(), String> {
         }
         all_actions.extend(actions.clone());
         // Need to make per frame actions also emit new actions.
-        handle_per_frame_actions(&mut per_frame_actions, &mut pane_manager);
         
 
     }
