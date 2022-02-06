@@ -3,7 +3,7 @@ use std::{process::{Child, ChildStdout, Command, Stdio}, ops::Neg, str::from_utf
 use nonblock::NonBlockingReader;
 use sdl2::{clipboard::ClipboardUtil, keyboard::{Scancode, Keycode, Mod}, event::{Event, WindowEvent}};
 
-use crate::{PaneManager, PaneSelector, renderer::EditorBounds, cursor::{Cursor, CursorContext}, transaction::EditAction, native};
+use crate::{pane_manager::PaneManager, PaneSelector, renderer::EditorBounds, cursor::{Cursor, CursorContext}, transaction::EditAction, native};
 
 
 
@@ -73,8 +73,8 @@ fn stop_pane_name_edits(pane_manager: &mut PaneManager, actions: &mut Vec<Action
     // This is really not great. I shouldn't
     // have to do this all the time.
     for pane in pane_manager.panes.iter_mut() {
-        if pane.editing_name {
-            actions.push(Action::EndEditPaneName(PaneSelector::Id(pane.id)));
+        if pane.editing_name() {
+            actions.push(Action::EndEditPaneName(PaneSelector::Id(pane.id())));
         }
     }
 }
@@ -88,10 +88,10 @@ impl Action {
             None => None,
             Some(pane_selector) => {
                 match pane_selector {
-                    PaneSelector::Active => pane_manager.get_active_pane().map(|pane| pane.id),
+                    PaneSelector::Active => pane_manager.get_active_pane().map(|pane| pane.id()),
                     PaneSelector::Id(id) => Some(id),
-                    PaneSelector::AtMouse(mouse_pos) => pane_manager.get_pane_at_mouse(mouse_pos, editor_bounds).map(|pane| pane.id),
-                    PaneSelector::Scroll => pane_manager.get_scroll_active_pane().map(|pane| pane.id),
+                    PaneSelector::AtMouse(mouse_pos) => pane_manager.get_pane_at_mouse(mouse_pos, editor_bounds).map(|pane| pane.id()),
+                    PaneSelector::Scroll => pane_manager.get_scroll_active_pane().map(|pane| pane.id()),
                 }
             }
            
@@ -166,7 +166,10 @@ impl Action {
 
             Action::MoveCursorUp(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                // TODO:
+                // Work with other pane types
+                let pane = pane.get_text_pane_mut()?;
                 pane.cursor_context.move_up(&pane.text_buffer);
                                 // ? is fine here only because there is nothing 
                 // below this that I want to do that doesn't rely on cursor
@@ -175,7 +178,8 @@ impl Action {
             }
             Action::MoveCursorDown(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 pane.cursor_context.move_down(&pane.text_buffer);
                 // ? is fine here only because there is nothing 
                 // below this that I want to do that doesn't rely on cursor
@@ -184,23 +188,30 @@ impl Action {
             },
             Action::MoveCursorLeft(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 pane.cursor_context.move_left(&pane.text_buffer);
             },
             Action::MoveCursorRight(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 pane.cursor_context.move_right(&pane.text_buffer);
             },
             Action::Delete(pane_selector) => {
                 // TODO:
                 // Do better
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
-                if pane.editing_name {
+                *pane_selector = PaneSelector::Id(pane.id());
+                // TODO: editing name works without text pane
+                // but I'm just shortcutting for now.
+
+                let text_pane = pane.get_text_pane()?;
+                
+                if pane.editing_name() {
                     actions.push(Action::DeletePaneName(pane_selector.clone()));
                 }
-                else if pane.cursor_context.selection.is_some() {
+                else if text_pane.cursor_context.selection.is_some() {
                     actions.push(Action::DeleteSelection(pane_selector.clone()));
                 }
                 else {
@@ -209,14 +220,15 @@ impl Action {
             },
             Action::DeletePaneName(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
-                pane.name.pop();
+                *pane_selector = PaneSelector::Id(pane.id());
+                pane.name().pop();
             }
             Action::DeleteSelection(pane_selector) => {
                 // TODO: Make this better
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
                 
+                let pane = pane.get_text_pane_mut()?;
 
                 let current_selection = pane.cursor_context.selection?;
                 let (start, end) = current_selection;
@@ -246,9 +258,10 @@ impl Action {
             Action::DeleteChar(pane_selector) => {
                 // I probably want to deal with transactions orthogonally.
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
 
 
+                let pane = pane.get_text_pane_mut()?;
                 let current_cursor = pane.cursor_context.cursor?;
                 let mut old_cursor = current_cursor;
                 // Character is to the right of the cursor
@@ -281,7 +294,8 @@ impl Action {
             }
             Action::RunPane(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                
                 
                 // Should I do this here rather than side-effects?
                 // How do I communicate that things need to keep
@@ -296,17 +310,19 @@ impl Action {
             },
             Action::ClearPane(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 pane.text_buffer.chars.clear();
                 pane.text_buffer.parse_lines();
             }
             Action::PaneContentChanged(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
             }
             Action::Enter(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane()?;
                 if pane.editing_name {
                     actions.push(Action::EndEditPaneName(PaneSelector::Active));
                 } else {
@@ -315,15 +331,18 @@ impl Action {
             }
             Action::InsertNewline(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 let action = pane.cursor_context.handle_insert(&[b'\n'], &mut pane.text_buffer);
                 pane.transaction_manager.add_action(action);
                 pane.cursor_context.start_of_line();
             },
             Action::Indent(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
 
+
+                let pane = pane.get_text_pane_mut()?;
                 // TODO: Deal with tab when selection exists
                 // should add spaces to each line.
                 if let Some(((start_line, _), (end_line, _))) =  pane.cursor_context.selection {
@@ -344,7 +363,9 @@ impl Action {
             }
             Action::TextInput(pane_selector, text) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+
+                let pane = pane.get_text_pane_mut()?;
  
                 if pane.editing_name {
                     pane.name.push_str(&text);
@@ -357,32 +378,38 @@ impl Action {
             },
             Action::Undo(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 pane.transaction_manager.undo(&mut pane.cursor_context, &mut pane.text_buffer);
             },
             Action::Redo(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 pane.transaction_manager.redo(&mut pane.cursor_context, &mut pane.text_buffer);
             },
             Action::MoveCursorToLineStart(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                 let pane = pane.get_text_pane_mut()?;
                 pane.cursor_context.start_of_line();
             },
             Action::MoveCursorToLineEnd(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 pane.cursor_context.end_of_line(&pane.text_buffer);
             },
             Action::Copy(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane()?;
                 pane.cursor_context.copy_selection(&clipboard, &pane.text_buffer);
             },
             Action::Paste(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 let Cursor(cursor_line, cursor_column) = pane.cursor_context.cursor?;
                 let inserted_string = pane.cursor_context.paste(&clipboard, &mut pane.text_buffer)?;
                 pane.transaction_manager.add_action(EditAction::Insert((cursor_line, cursor_column), inserted_string));
@@ -392,38 +419,42 @@ impl Action {
             },
             Action::OpenFile(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 let text = native::open_file_dialog()?;
                 pane.text_buffer.set_contents(text.as_bytes());
                 pane.scroller.move_to_the_top();
             },
             Action::SelectAll(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 // This is super ugly, fix.
                 pane.cursor_context.set_selection(((0,0), (pane.text_buffer.line_count()-1, pane.text_buffer.line_length(pane.text_buffer.line_count()-1))));
             },
             Action::DeletePane(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
-                let id = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?.id;
+                *pane_selector = PaneSelector::Id(pane.id());
+                let id = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?.id();
                 pane_manager.delete_pane(id);
             },
             Action::StartEditPaneName(pane_selector) => {
                 stop_pane_name_edits(pane_manager, actions);
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 pane.editing_name = true;
                 actions.push(Action::SetPaneActive(pane_selector.clone()));
             },
             Action::EndEditPaneName(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 pane.editing_name = false;
             },
             Action::CtrlMouseDown(pane_selector, mouse_pos) => {
                 if let Some(pane) = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds) {
-                    *pane_selector = PaneSelector::Id(pane.id);
+                    *pane_selector = PaneSelector::Id(pane.id());
                     actions.push(Action::StartMovePane(PaneSelector::AtMouse(*mouse_pos), *mouse_pos));
                 } else {
                     actions.push(Action::StartCreatePane(*mouse_pos));
@@ -431,8 +462,8 @@ impl Action {
             }
             Action::StartResizePane(pane_selector, mouse_pos) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
-                let id = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?.id;
+                *pane_selector = PaneSelector::Id(pane.id());
+                let id = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?.id();
                 pane_manager.set_resize_start(*mouse_pos, id);
             },
             Action::EndResizePane(_mouse_pos) => {
@@ -450,7 +481,7 @@ impl Action {
             }
             Action::CtrlAltMouseDown(pane_selector, mouse_pos) => {
                 if let Some(pane) = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds) {
-                    *pane_selector = PaneSelector::Id(pane.id);
+                    *pane_selector = PaneSelector::Id(pane.id());
                     actions.push(Action::StartResizePane(PaneSelector::AtMouse(*mouse_pos), *mouse_pos));
                 } else {
                     actions.push(Action::StartCreatePane(*mouse_pos));
@@ -458,7 +489,7 @@ impl Action {
             },
             Action::StartMovePane(pane_selector, mouse_pos) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
                 pane_manager.set_dragging_start(*mouse_pos, bounds);
             },
             Action::EndMovePane(_mouse_pos) => {
@@ -468,33 +499,34 @@ impl Action {
             },
             Action::DuplicatePane(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
-                let i = pane_manager.get_pane_index_by_id(pane.id)?;
+                *pane_selector = PaneSelector::Id(pane.id());
+                let i = pane_manager.get_pane_index_by_id(pane.id())?;
                 let mut pane = pane_manager.panes[i].clone();
-                pane.position = (pane.position.0 + 20, pane.position.1 + 20);
-                pane.id = pane_manager.new_pane_id();
+                pane.set_position(pane.position().0 + 20, pane.position().1 + 20);
+                pane.set_id(pane_manager.new_pane_id());
                 pane_manager.panes.push(pane);
             },
             Action::SetPaneActive(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
-                let id = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?.id;
+                *pane_selector = PaneSelector::Id(pane.id());
+                let id = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?.id();
                 pane_manager.set_active_by_id(id);    
             },
             Action::SetScrollPane(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
-                let id = pane_manager.get_pane_by_selector(&pane_selector, bounds)?.id;
+                *pane_selector = PaneSelector::Id(pane.id());
+                let id = pane_manager.get_pane_by_selector(&pane_selector, bounds)?.id();
                 pane_manager.set_scroll_active_by_id(id);
             },
             Action::MouseDown(pane_selector, mouse_pos) => {
                 stop_pane_name_edits(pane_manager, actions);
-                let mouse_pane_id = pane_manager.get_pane_at_mouse(*mouse_pos, bounds).map(|p| p.id);
+                let mouse_pane_id = pane_manager.get_pane_at_mouse(*mouse_pos, bounds).map(|p| p.id());
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
                 // I kind of want to capture these things as actions. But how to do that?
                 // Maybe this function actually just returns more actions
                 // that are queued up immediately?
+                let pane = pane.get_text_pane_mut()?;
                 if Some(pane.id) == mouse_pane_id {
                     if pane.mouse_over_play_button(*mouse_pos, bounds) {
                         // run pane
@@ -517,7 +549,7 @@ impl Action {
             },
             Action::MouseUp(pane_selector, mouse_pos) => {
                 if let Some(pane) = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds) {
-                    *pane_selector = PaneSelector::Id(pane.id);
+                    *pane_selector = PaneSelector::Id(pane.id());
                 }
                 
 
@@ -544,6 +576,7 @@ impl Action {
                     let pane = pane_manager.get_active_pane_mut()?;
                     let (x, y) = *mouse_pos;
                     let (x, y) = pane.adjust_position(x, y, bounds);
+                    let pane = pane.get_text_pane_mut()?;
                     let Cursor(start_line, mut start_column) = pane.cursor_context.mouse_down?;
                     pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x, y, &pane.text_buffer, bounds);
                     if pane.cursor_context.selection.is_some() {
@@ -573,7 +606,7 @@ impl Action {
                 let pane = pane_manager.get_active_pane_mut()?;
 
                 let (x2, y2) = pane.adjust_position(x, y, bounds);
-
+                let pane = pane.get_text_pane_mut()?;
                 let Cursor(start_line, mut start_column) = pane.cursor_context.mouse_down?;
                 pane.cursor_context.move_cursor_from_screen_position(&pane.scroller, x2, y2, &pane.text_buffer, bounds);
                 // TODO: Get my int types correct!
@@ -586,8 +619,12 @@ impl Action {
                     column = temp as usize;
                 }
 
-                // ugly refactor
-                pane.cursor_context.set_selection(((new_start_line, start_column), (line, column)));
+                // TODO:
+                // This should almost certainly be a separate action
+                if new_start_line != line || start_column != column {
+                    pane.cursor_context.set_selection(((new_start_line, start_column), (line, column)));
+                }
+
 
             },
             Action::ResizeWindow(width, height) => {
@@ -595,7 +632,8 @@ impl Action {
             },
             Action::Scroll(pane_selector, (x_scroll, y_scroll)) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id);
+                *pane_selector = PaneSelector::Id(pane.id());
+                let pane = pane.get_text_pane_mut()?;
                 pane.scroller.scroll_x(pane.width, *x_scroll, &mut pane.text_buffer, bounds);
                 pane.scroller.scroll_y(pane.height, *y_scroll, &pane.text_buffer, bounds);
 
@@ -613,8 +651,9 @@ impl Action {
             Action::RunPane(pane_selector) => {
                 // TODO: think about multiple panes of same name
                 let (pane_contents, pane_name) = {
-                    let pane_id = pane_manager.get_pane_by_selector_mut(pane_selector, bounds).map(|p| p.id)?;
+                    let pane_id = pane_manager.get_pane_by_selector_mut(pane_selector, bounds).map(|p| p.id())?;
                     let pane = pane_manager.get_pane_by_id_mut(pane_id)?;
+                    let pane = pane.get_text_pane()?;
                     (from_utf8(&pane.text_buffer.chars).unwrap().to_string(), &pane.name.to_string()) 
                 };
     
@@ -627,6 +666,7 @@ impl Action {
                         let position = {
                             match existing_pane {
                                 Some(pane) =>  {
+                                    let pane = pane.get_text_pane()?;
                                     (pane.position.0 + pane.width as i32 + 10, pane.position.1)
                                 }
                                 None => (0, 0)
@@ -638,7 +678,7 @@ impl Action {
 
                     // I need to not edit these, but instead make new actions
                     Some(output_pane) => {
-                        let output_pane_id = output_pane.id;
+                        let output_pane_id = output_pane.id();
                         actions.push(Action::ClearPane(PaneSelector::Id(output_pane_id)));
                     }
                 }
@@ -904,7 +944,8 @@ pub fn handle_per_frame_actions(per_frame_actions: &mut Vec<PerFrameAction>, pan
 pub fn handle_per_frame_action(index: usize, pane_manager: &mut PaneManager, per_frame_action: &mut PerFrameAction, actions: &mut Vec<Action>) -> PerFrameActionResult {
     match per_frame_action {
         PerFrameAction::ReadCommand(output_pane_name, _child, non_blocking_reader) => {
-            let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone());
+            let output_pane = pane_manager.get_pane_by_name_mut(output_pane_name.clone())
+                .and_then(|pane| pane.get_text_pane_mut());
             if output_pane.is_none() {
                 return PerFrameActionResult::Noop
             }
