@@ -142,7 +142,7 @@ impl<'a> Renderer<'a> {
 
      pub fn draw_column_line(&mut self, pane_manager: &mut PaneManager) -> Result<(), String> {
         self.target = Rect::new(pane_manager.window.width - (self.bounds.letter_width * 22) as i32, pane_manager.window.height-self.bounds.letter_height as i32, self.bounds.letter_width as u32, self.bounds.letter_height as u32);
-        if let Some(pane) = pane_manager.get_active_pane() {
+        if let Some(pane) = pane_manager.get_active_pane().and_then(|pane| pane.get_text_pane()) {
             if let Some(Cursor(cursor_line, cursor_column)) = pane.cursor_context.cursor {
                 self.draw_string( &format!("Line {}, Column {}", cursor_line, cursor_column))?;
             }
