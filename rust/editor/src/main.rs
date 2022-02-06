@@ -68,7 +68,10 @@ use event::{Action, handle_events, handle_per_frame_actions, PerFrameAction};
 // Scroll left and right with arrow keys
 // Lots of cpu usage. Need to debug and optimize
 // fix multiline
-
+// capture stderr
+// Got some weird undo around new lines
+// Got weird tab tabbing wrong long
+// x scroll doesn't adjust cursor
 
 // Bug
 // For some reason when running a program the stdout stops at a certain length
@@ -516,8 +519,8 @@ impl Pane {
                 } else if line == end_line {
                     end_column * renderer.bounds.letter_width as usize
                 } else if line == start_line {
-                    // I have a panic here not sure why
-                    (self.text_buffer.line_length(line) - start_column) * renderer.bounds.letter_width as usize
+                    // had a panic. Changed to saturating sub
+                    (self.text_buffer.line_length(line).saturating_sub(start_column)) * renderer.bounds.letter_width as usize
                 } else {
                     self.text_buffer.line_length(line)  * renderer.bounds.letter_width
                 };
@@ -1207,13 +1210,24 @@ fn handle_draw_panes(pane_manager: &mut PaneManager, renderer: &mut Renderer) ->
         renderer.set_draw_color(color::CURSOR_COLOR);
         let tokenizer = &mut pane.text_buffer.tokenizer;
         let chars = &pane.text_buffer.chars;
+        let mut filled = false;
         while !tokenizer.at_end( chars) {
             if let Some(Token::Atom((start, end))) = tokenizer.parse_single(chars) {
                 let atom = &chars[start..end];
-                if atom == b"rect" {
+                if atom == b"filled" {
+                    filled = true;
+                } else if atom == b"unfilled" {
+                    filled = false;
+                } else if atom == b"rect" {
                     if let Some(draw_command) = parse_rect(tokenizer, chars) {
                         match draw_command {
-                            DrawCommand::Rect(rect) => renderer.draw_rect(&rect)?,
+                            DrawCommand::Rect(rect) => {
+                                if filled { 
+                                    renderer.fill_rect(&rect)?
+                                } else {
+                                    renderer.draw_rect(&rect)?
+                                }
+                            },
                             DrawCommand::RectOnPane(_, _) => panes_with_rects.push(draw_command),
                             DrawCommand::RectOnPaneAtLocation(_, _, _, _, _, _) => panes_with_rects.push(draw_command),
                         }
@@ -1370,7 +1384,6 @@ fn main() -> Result<(), String> {
             i += 1;
         }
         all_actions.extend(actions.clone());
-        // Need to make per frame actions also emit new actions.
         
 
     }
