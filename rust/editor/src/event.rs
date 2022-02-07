@@ -221,7 +221,9 @@ impl Action {
             Action::DeletePaneName(pane_selector) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
                 *pane_selector = PaneSelector::Id(pane.id());
-                pane.name().pop();
+                let mut name = pane.name();
+                name.pop();
+                pane.set_name(name);
             }
             Action::DeleteSelection(pane_selector) => {
                 // TODO: Make this better

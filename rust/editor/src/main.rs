@@ -74,6 +74,7 @@ use event::{Action, handle_events, handle_per_frame_actions, PerFrameAction};
 // capture stderr
 // Got some weird undo around new lines
 // Clean up this file
+// Fix token pane
 
 
 // Example program
@@ -176,35 +177,63 @@ fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCo
 
 
 
+fn special_pane_by_name(pane_manager: &mut PaneManager, name: &str, text_builder: fn(&mut TextPane, &mut Vec<u8>) -> Option<()>) -> Option<()> {
+    let mut chars: Vec<u8> = Vec::new();
+    let pane_id = pane_manager.get_pane_by_name( name)?.id();
+
+    let active_pane = pane_manager.get_active_pane_mut()?;
+    let active_pane = active_pane.get_text_pane_mut()?;
+
+    text_builder(active_pane, &mut chars);
+
+    let pane = pane_manager.get_pane_by_id_mut(pane_id)?;
+    let pane = pane.get_text_pane_mut()?;
+    pane.text_buffer.chars = chars;
+    pane.text_buffer.parse_lines();
+
+    Some(())
+}
+
+
 
 // I can very easily generalize this.
 
 fn handle_transaction_pane(pane_manager: &mut PaneManager) -> Option<()> {
 
-    let mut chars: Vec<u8> = Vec::new();
-
-    let transaction_pane_id = pane_manager.get_pane_by_name( "transaction_pane")?.id();
-
-    let active_pane = pane_manager.get_active_pane_mut()?;
-    let active_pane = active_pane.get_text_pane()?;
-    let transaction_manager = &active_pane.transaction_manager;
-
-    chars.extend(format!("current: {}, pointer: {}\n",
+    special_pane_by_name(pane_manager, "transaction_pane", |pane, chars| {
+        let transaction_manager = &pane.transaction_manager;
+        chars.extend(format!("current: {}, pointer: {}\n",
         transaction_manager.current_transaction,
         transaction_manager.transaction_pointer).as_bytes());
 
-    for transaction in active_pane.transaction_manager.transactions.iter() {
-        chars.extend(format!("{:?}\n", transaction).as_bytes());
-    }
-   
-    let transaction_pane = pane_manager.get_pane_by_id_mut(transaction_pane_id)?;
-    let transaction_pane = transaction_pane.get_text_pane_mut()?;
-    transaction_pane.text_buffer.chars = chars;
-    transaction_pane.text_buffer.parse_lines();
-    Some(())
+        for transaction in pane.transaction_manager.transactions.iter() {
+            chars.extend(format!("{:?}\n", transaction).as_bytes());
+        }
+        Some(())
+    })
 }
 
-// I need to think about how to generalize this
+
+
+// TODO: THIS IS BROKEN!
+fn handle_token_pane(pane_manager: &mut PaneManager) -> Option<()> {
+
+    special_pane_by_name(pane_manager, "token_pane", |pane, chars| {
+
+        let tokenizer = &mut pane.text_buffer.tokenizer;
+        while !tokenizer.at_end(&pane.text_buffer.chars) {
+            let token = tokenizer.parse_single(&pane.text_buffer.chars)?;
+            chars.extend(format!("{:?} ", token).as_bytes());
+            if matches!(token, Token::NewLine) {
+                chars.extend(b"\n");
+            }
+        }
+        tokenizer.position = 0;
+        Some(())
+    })
+}
+
+// Can't use special because I need actions
 fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action], editor_bounds: &EditorBounds) -> Option<()>{
 
     let mut chars: Vec<u8> = Vec::new();
@@ -235,32 +264,6 @@ fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action], editor
 }
 
 
-
-fn handle_token_pane(pane_manager: &mut PaneManager) -> Option<()> {
-
-    let mut chars: Vec<u8> = Vec::new();
-
-    let token_pane_id = pane_manager.get_pane_by_name( "token_pane")?.id();
- 
-    let active_pane = pane_manager.get_active_pane_mut()?;
-    let active_pane = active_pane.get_text_pane_mut()?;
-    let tokenizer = &mut active_pane.text_buffer.tokenizer;
-    while !tokenizer.at_end(&active_pane.text_buffer.chars) {
-        let token = tokenizer.parse_single(&active_pane.text_buffer.chars)?;
-        chars.extend(format!("{:?} ", token).as_bytes());
-        if matches!(token, Token::NewLine) {
-            chars.extend(b"\n");
-        }
-    }
-    tokenizer.position = 0;
-
-    let token_pane = pane_manager.get_pane_by_id_mut(token_pane_id)?;
-    let token_pane = token_pane.get_text_pane_mut()?;
-    token_pane.text_buffer.chars = chars;
-    token_pane.text_buffer.parse_lines();
-
-    Some(())
-}
 
 fn get_i32_from_token(token: &Token, chars: &[u8]) -> Option<i32> {
     if let Token::Integer((s, e)) = token {
