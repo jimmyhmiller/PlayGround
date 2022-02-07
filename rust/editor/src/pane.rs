@@ -154,7 +154,7 @@ impl Pane {
         }
     }
 
-    pub fn _set_name(&mut self, name: String) {
+    pub fn set_name(&mut self, name: String) {
         match self {
             Pane::Text(tp) => tp.name = name,
             Pane::_Empty(ep) => ep.name = name,
