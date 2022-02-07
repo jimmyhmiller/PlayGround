@@ -2,7 +2,18 @@ use std::cmp::{max, min};
 
 use rand::Rng;
 
-use crate::{pane::{TextPane, Pane}, Window, renderer::EditorBounds, scroller::Scroller, cursor::CursorContext, text_buffer::TextBuffer, tokenizer::Tokenizer, transaction::TransactionManager, PaneSelector};
+use crate::{pane::{TextPane, Pane}, Window, renderer::EditorBounds};
+
+
+#[derive(Debug, Clone, Copy)]
+pub enum PaneSelector {
+    Active,
+    Id(usize),
+    AtMouse((i32, i32)),
+    Scroll,
+}
+
+
 
 pub struct PaneManager {
     pub panes: Vec<Pane>,
@@ -186,8 +197,8 @@ impl PaneManager {
             let width = x - current_x;
             let height = y - current_y;
 
-            pane.set_width(max(width as u32, 20));
-            pane.set_height(max(height as u32, 20));
+            pane.set_width(max(width as usize, 20));
+            pane.set_height(max(height as usize, 20));
         }
     }
 
@@ -208,35 +219,23 @@ impl PaneManager {
     }
 
     pub fn create_pane_raw(&mut self, pane_name: String, position: (i32, i32), width: usize, height: usize) -> usize{
-        // This is duplicate code
-        let scroller = Scroller::new();
-        let cursor_context = CursorContext::new();
-
         let id = self.new_pane_id();
+        // Maybe I should have a pane type selector here.
 
+        // self.panes.push(Pane::Empty(EmptyPane {
+        //     id,
+        //     name: pane_name,
+        //     position,
+        //     width,
+        //     height,
+        //     active: true,
+        // }));
 
         // Can I use Pane::new here?
-        self.panes.push(Pane::Text(TextPane {
-            id,
-            name: pane_name,
-            position,
-            width,
-            height,
-            active: true,
-            scroller,
-            cursor_context,
-            text_buffer: TextBuffer {
-                line_range: vec![(0,0)],
-                chars: vec![],
-                max_line_width_cache: 0,
-                tokenizer: Tokenizer::new(),
-            },
-            mouse_pos: None,
-            transaction_manager: TransactionManager::new(),
-            editing_name: false,
-            draw_commands: vec![],
-            tokens: vec![],
-        }));
+        
+        self.panes.push(Pane::Text(
+            TextPane::new(id, pane_name, position, (width, height), "", true)
+        ));
         self.panes.len() - 1
     }
 
@@ -271,7 +270,7 @@ impl PaneManager {
     }
 
     pub fn _insert(&mut self, i: usize, pane: Pane) {
-        if pane.active() {
+        if pane._active() {
             self.active_pane = i;
         }
         self.panes.insert(i, pane);

@@ -3,7 +3,7 @@ use std::{process::{Child, ChildStdout, Command, Stdio}, ops::Neg, str::from_utf
 use nonblock::NonBlockingReader;
 use sdl2::{clipboard::ClipboardUtil, keyboard::{Scancode, Keycode, Mod}, event::{Event, WindowEvent}};
 
-use crate::{pane_manager::PaneManager, PaneSelector, renderer::EditorBounds, cursor::{Cursor, CursorContext}, transaction::EditAction, native};
+use crate::{pane_manager::{PaneManager, PaneSelector}, renderer::EditorBounds, cursor::{Cursor, CursorContext}, transaction::EditAction, native};
 
 
 

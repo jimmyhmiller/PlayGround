@@ -2,7 +2,7 @@ use std::{cmp::{max, min}, str::from_utf8, convert::TryInto};
 
 use sdl2::{sys, rect::Rect, pixels::Color};
 
-use crate::{scroller::Scroller, cursor::CursorContext, text_buffer::TextBuffer, transaction::TransactionManager, DrawCommand, tokenizer::{Token, rust_specific_pass}, renderer::{EditorBounds, Renderer, digit_count}, color, in_square};
+use crate::{scroller::Scroller, cursor::CursorContext, text_buffer::TextBuffer, transaction::TransactionManager, DrawCommand, tokenizer::{Token, rust_specific_pass}, renderer::{EditorBounds, Renderer, digit_count}, color};
 
 
 // TODO:
@@ -23,19 +23,31 @@ use crate::{scroller::Scroller, cursor::CursorContext, text_buffer::TextBuffer, 
 // we can just make them go through a get_text_pane
 // function and not return anything if they expect a text pane.
 
+
+
+
+fn in_square(mouse_pos: (i32, i32), square_pos: (i32, i32), square_size: i32) -> bool {
+    let (x, y) = mouse_pos;
+    let (x_pos, y_pos) = square_pos;
+    let size = square_size;
+    x >= x_pos && x <= x_pos + size && y >= y_pos && y <= y_pos + size
+}
+
+
+
 #[derive(Debug, Clone)]
 pub struct EmptyPane {
-    name: String,
-    id: usize,
-    position: (i32, i32),
-    width: u32,
-    height: u32,
-    active: bool,
+    pub name: String,
+    pub id: usize,
+    pub position: (i32, i32),
+    pub width: usize,
+    pub height: usize,
+    pub active: bool,
 }
 
 impl EmptyPane {
     pub fn draw_with_texture(&self, renderer: &mut Renderer) -> Result<(), String> {
-        let rect = Rect::new(self.position.0, self.position.1, self.width, self.height);
+        let rect = Rect::new(self.position.0, self.position.1, self.width as u32, self.height as u32);
         renderer.set_draw_color(color::CURSOR_COLOR);
         renderer.draw_rect(&rect)?;
         Ok(())
@@ -51,7 +63,7 @@ impl EmptyPane {
 #[derive(Debug, Clone)]
 pub enum Pane {
     Text(TextPane),
-    Empty(EmptyPane),
+    _Empty(EmptyPane),
 }
 // I could also do this as a trait instead
 // Not sure which is better
@@ -83,90 +95,90 @@ impl Pane {
     pub fn id(&self) -> usize {
         match self {
             Pane::Text(tp) => tp.id,
-            Pane::Empty(ep) => ep.id,
+            Pane::_Empty(ep) => ep.id,
         }
     }
 
     pub fn set_id(&mut self, id: usize) {
         match self {
             Pane::Text(tp) => tp.id = id,
-            Pane::Empty(ep) => ep.id = id,
+            Pane::_Empty(ep) => ep.id = id,
         }
     }
     
     pub fn position(&self) -> (i32, i32) {
         match self {
             Pane::Text(tp) => tp.position,
-            Pane::Empty(ep) => ep.position,
+            Pane::_Empty(ep) => ep.position,
         }
     }
 
     pub fn set_position(&mut self, x: i32, y: i32) {
         match self {
             Pane::Text(tp) => tp.position = (x, y),
-            Pane::Empty(ep) => ep.position = (x, y),
+            Pane::_Empty(ep) => ep.position = (x, y),
         }
     }
-    pub fn width(&self) -> u32 {
+    pub fn width(&self) -> usize {
         match self {
-            Pane::Text(tp) => tp.width as u32,
-            Pane::Empty(ep) => ep.width,
-        }
-    }
-
-    pub fn set_width(&mut self, width: u32) {
-        match self {
-            Pane::Text(tp) => tp.width = width as usize,
-            Pane::Empty(ep) => ep.width = width,
+            Pane::Text(tp) => tp.width,
+            Pane::_Empty(ep) => ep.width,
         }
     }
 
-    pub fn height(&self) -> u32 {
+    pub fn set_width(&mut self, width: usize) {
         match self {
-            Pane::Text(tp) => tp.height as u32,
-            Pane::Empty(ep) => ep.height,
+            Pane::Text(tp) => tp.width = width,
+            Pane::_Empty(ep) => ep.width = width,
         }
     }
 
-    pub fn set_height(&mut self, height: u32) {
+    pub fn height(&self) -> usize {
         match self {
-            Pane::Text(tp) => tp.height = height as usize,
-            Pane::Empty(ep) => ep.height = height,
+            Pane::Text(tp) => tp.height,
+            Pane::_Empty(ep) => ep.height,
+        }
+    }
+
+    pub fn set_height(&mut self, height: usize) {
+        match self {
+            Pane::Text(tp) => tp.height = height,
+            Pane::_Empty(ep) => ep.height = height,
         }
     }
 
     pub fn name(&self) -> String {
         match self {
             Pane::Text(tp) => tp.name.clone(),
-            Pane::Empty(ep) => ep.name.clone(),
+            Pane::_Empty(ep) => ep.name.clone(),
         }
     }
 
-    pub fn set_name(&mut self, name: String) {
+    pub fn _set_name(&mut self, name: String) {
         match self {
             Pane::Text(tp) => tp.name = name,
-            Pane::Empty(ep) => ep.name = name,
+            Pane::_Empty(ep) => ep.name = name,
         }
     }
 
     pub fn draw_with_texture(&mut self, renderer: &mut Renderer) -> Result<(), String> {
         match self {
             Pane::Text(tp) => tp.draw_with_texture(renderer),
-            Pane::Empty(ep) => ep.draw_with_texture(renderer),
+            Pane::_Empty(ep) => ep.draw_with_texture(renderer),
         }
     }
 
-    pub fn active(&self) -> bool {
+    pub fn _active(&self) -> bool {
         match self {
             Pane::Text(tp) => tp.active,
-            Pane::Empty(ep) => ep.active,
+            Pane::_Empty(ep) => ep.active,
         }
     }
 
     pub fn set_active(&mut self, active: bool) {
         match self {
             Pane::Text(tp) => tp.active = active,
-            Pane::Empty(ep) => ep.active = active,
+            Pane::_Empty(ep) => ep.active = active,
         }
     }
 
@@ -181,7 +193,7 @@ impl Pane {
     pub fn adjust_position(&self, x: i32, y: i32, bounds: &EditorBounds) -> (usize, usize) {
         match self {
             Pane::Text(tp) => tp.adjust_position(x, y, bounds),
-            Pane::Empty(ep) => ep.adjust_position(x, y, bounds),
+            Pane::_Empty(ep) => ep.adjust_position(x, y, bounds),
         }
     }
 

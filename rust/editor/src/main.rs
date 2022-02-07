@@ -125,16 +125,6 @@ impl Window {
 }
 
 
-
-fn in_square(mouse_pos: (i32, i32), square_pos: (i32, i32), square_size: i32) -> bool {
-    let (x, y) = mouse_pos;
-    let (x_pos, y_pos) = square_pos;
-    let size = square_size;
-    x >= x_pos && x <= x_pos + size && y >= y_pos && y <= y_pos + size
-}
-
-
-
 fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCounter) -> Result<(), String> {
     renderer.set_draw_color(color::BACKGROUND_COLOR);
     renderer.clear();
@@ -176,14 +166,6 @@ fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCo
     Ok(())
 }
 
-
-#[derive(Debug, Clone, Copy)]
-pub enum PaneSelector {
-    Active,
-    Id(usize),
-    AtMouse((i32, i32)),
-    Scroll,
-}
 
 // I should consider changing pane_manager to use ids
 // instead of indexes
