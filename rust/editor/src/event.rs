@@ -3,7 +3,7 @@ use std::{process::{Child, ChildStdout, Command, Stdio}, ops::Neg, str::from_utf
 use nonblock::NonBlockingReader;
 use sdl2::{clipboard::ClipboardUtil, keyboard::{Scancode, Keycode, Mod}, event::{Event, WindowEvent}};
 
-use crate::{pane_manager::{PaneManager, PaneSelector}, renderer::EditorBounds, cursor::{Cursor, CursorContext}, transaction::EditAction, native};
+use crate::{pane_manager::{PaneManager, PaneSelector}, pane::{AdjustablePosition}, renderer::EditorBounds, cursor::{Cursor, CursorContext}, transaction::EditAction, native};
 
 
 
@@ -46,9 +46,11 @@ pub enum Action {
     SetScrollPane(PaneSelector),
     MouseDown(PaneSelector, (i32, i32)),
     CtrlMouseDown(PaneSelector, (i32, i32)),
+    CmdMouseDown((i32, i32)),
     CtrlAltMouseDown(PaneSelector, (i32, i32)),
     MouseUp(PaneSelector, (i32, i32)),
     MoveMouse((i32, i32)),
+    MoveMouseCmd((i32, i32)),
     ResizeWindow(i32, i32),
     Scroll(PaneSelector, (i32, i32)),
     ClearPane(PaneSelector),
@@ -82,7 +84,7 @@ fn stop_pane_name_edits(pane_manager: &mut PaneManager, actions: &mut Vec<Action
 
 
 impl Action {
-    pub fn pane_id(&self, pane_manager: &PaneManager, editor_bounds: &EditorBounds) -> Option<usize> {
+    pub fn _pane_id(&self, pane_manager: &PaneManager, editor_bounds: &EditorBounds) -> Option<usize> {
 
         match self.pane_selector() {
             None => None,
@@ -147,6 +149,8 @@ impl Action {
             Action::MoveMouse(_) |
             Action::ResizeWindow(_, _) |
             Action::CreatePane(_, _, _, _) |
+            Action::CmdMouseDown(_) |
+            Action::MoveMouseCmd(_) |
             Action::Quit => {
                 None
             }
@@ -462,6 +466,9 @@ impl Action {
                     actions.push(Action::StartCreatePane(*mouse_pos));
                 }
             }
+            Action::CmdMouseDown(mouse_pos) => {
+                pane_manager.ink_manager.start_drawing(*mouse_pos)
+            }
             Action::StartResizePane(pane_selector, mouse_pos) => {
                 let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
                 *pane_selector = PaneSelector::Id(pane.id());
@@ -554,6 +561,7 @@ impl Action {
                     *pane_selector = PaneSelector::Id(pane.id());
                 }
                 
+                pane_manager.ink_manager.end_drawing();
 
                 if pane_manager.dragging_pane.is_some() {
                     actions.push(Action::EndMovePane(*mouse_pos));
@@ -599,10 +607,20 @@ impl Action {
                     Some(())
                 })();
             }
+            Action::MoveMouseCmd(mouse_pos) => {
+                pane_manager.ink_manager.add_to_current_drawing(*mouse_pos);
+            }
             Action::MoveMouse(mouse_pos) => {
                 pane_manager.update_dragging_position(*mouse_pos);
                 pane_manager.update_resize_size(*mouse_pos);
                 pane_manager.update_create_pane(*mouse_pos);
+                
+
+                if pane_manager.get_pane_index_at_mouse(*mouse_pos, bounds).is_none() {
+                    pane_manager.clear_scroll_active();
+                }
+
+
                 let (x, y) = *mouse_pos;
 
                 let pane = pane_manager.get_active_pane_mut()?;
@@ -633,12 +651,16 @@ impl Action {
                 pane_manager.window.resize(*width, *height);
             },
             Action::Scroll(pane_selector, (x_scroll, y_scroll)) => {
-                let pane = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds)?;
-                *pane_selector = PaneSelector::Id(pane.id());
-                let pane = pane.get_text_pane_mut()?;
-                pane.scroller.scroll_x(pane.width, *x_scroll, &mut pane.text_buffer, bounds);
-                pane.scroller.scroll_y(pane.height, *y_scroll, &pane.text_buffer, bounds);
-
+                if let Some(pane) = pane_manager.get_pane_by_selector_mut(&pane_selector, bounds){
+                    *pane_selector = PaneSelector::Id(pane.id());
+                    let pane = pane.get_text_pane_mut()?;
+                    pane.scroller.scroll_x(pane.width, *x_scroll, &mut pane.text_buffer, bounds);
+                    pane.scroller.scroll_y(pane.height, *y_scroll, &pane.text_buffer, bounds);
+    
+                } else {
+                    // pane_manager.scale_factor += *y_scroll as f32 * 0.1;
+                }
+              
             },
             Action::Quit => {
                 ::std::process::exit(0);
@@ -882,6 +904,9 @@ pub fn handle_events(event_pump: &mut sdl2::EventPump) -> Vec<Action> {
             Event::MouseButtonDown { x, y, .. } if ctrl_is_pressed => {
                 actions.push(Action::CtrlMouseDown(PaneSelector::AtMouse((x, y)), (x, y)));
             }
+            Event::MouseButtonDown { x, y, .. } if cmd_is_pressed => {
+                actions.push(Action::CmdMouseDown((x, y)));
+            }
             Event::MouseButtonDown { x, y, .. } if cmd_is_pressed && alt_is_pressed => {
                 actions.push(Action::DuplicatePane(PaneSelector::AtMouse((x, y))));
             }
@@ -889,13 +914,15 @@ pub fn handle_events(event_pump: &mut sdl2::EventPump) -> Vec<Action> {
                 actions.push(Action::SetPaneActive(PaneSelector::AtMouse((x, y))));
                 actions.push(Action::MouseDown(PaneSelector::Active, (x, y)));
             }
+            Event::MouseMotion{x, y, .. } if cmd_is_pressed => {
+                actions.push(Action::MoveMouseCmd((x, y)));
+            }
             Event::MouseMotion{x, y, .. } => {
                 actions.push(Action::MoveMouse((x, y)));
                 actions.push(Action::SetScrollPane(PaneSelector::AtMouse((x, y))));
             }
             Event::MouseButtonUp{x, y, ..} => {
                 actions.push(Action::MouseUp(PaneSelector::Active, (x, y)));
-                
             }
             // Continuous resize in sdl2 is a bit weird
             // Would need to watch events or something

@@ -2,7 +2,7 @@ use std::cmp::{max, min};
 
 use rand::Rng;
 
-use crate::{pane::{TextPane, Pane}, Window, renderer::EditorBounds};
+use crate::{pane::{TextPane, Pane, AdjustablePosition}, Window, renderer::EditorBounds, ink::InkManager};
 
 
 #[derive(Debug, Clone, Copy)]
@@ -14,11 +14,13 @@ pub enum PaneSelector {
 }
 
 
-
+ // Does the manager include the blank space?
+ // That might be a good conceptual model as I try to do things like ink.
+ // Maybe if I had boards like muse, each pane manager would be each board
 pub struct PaneManager {
     pub panes: Vec<Pane>,
     pub active_pane: usize,
-    pub scroll_active_pane: usize,
+    pub scroll_active_pane: Option<usize>,
     pub window: Window,
     pub dragging_start: (i32, i32),
     pub dragging_pane: Option<usize>,
@@ -29,6 +31,8 @@ pub struct PaneManager {
     pub create_pane_start: (i32, i32),
     pub create_pane_current: (i32, i32),
     pub pane_id_counter: usize,
+    pub scale_factor: f32,
+    pub ink_manager: InkManager,
 }
 
 impl PaneManager {
@@ -38,7 +42,7 @@ impl PaneManager {
             panes,
             window,
             active_pane: 0,
-            scroll_active_pane: 0,
+            scroll_active_pane: None,
             dragging_pane: None,
             dragging_start: (0, 0),
             dragging_pane_start: (0, 0),
@@ -48,6 +52,8 @@ impl PaneManager {
             create_pane_start: (0, 0),
             create_pane_current: (0, 0),
             pane_id_counter: 0,
+            scale_factor: 1.0,
+            ink_manager: InkManager::new(),
         }
     }
 
@@ -84,13 +90,17 @@ impl PaneManager {
 
     pub fn set_scroll_active_by_id(&mut self, pane_id: usize) {
         if let Some(i) = self.get_pane_index_by_id(pane_id) {
-            self.scroll_active_pane = i;
+            self.scroll_active_pane = Some(i);
         }
+    }
+
+    pub fn clear_scroll_active(&mut self) {
+        self.scroll_active_pane = None;
     }
 
     pub fn get_pane_index_at_mouse(&self, mouse_pos: (i32, i32), bounds: &EditorBounds) -> Option<usize> {
         for (i, pane) in self.panes.iter().enumerate().rev() {
-            if pane.is_mouse_over(mouse_pos, bounds) {
+            if pane.is_mouse_over(mouse_pos, bounds, self.scale_factor) {
                 return Some(i);
             }
         }
@@ -116,10 +126,10 @@ impl PaneManager {
     }
 
     pub fn get_scroll_active_pane_mut(&mut self) -> Option<&mut Pane> {
-        self.panes.get_mut(self.scroll_active_pane)
+        self.panes.get_mut(self.scroll_active_pane?)
     }
     pub fn get_scroll_active_pane(&self) -> Option<&Pane> {
-        self.panes.get(self.scroll_active_pane)
+        self.panes.get(self.scroll_active_pane?)
     }
 
     pub fn get_active_pane(&self) -> Option<&Pane> {

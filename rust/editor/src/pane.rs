@@ -45,6 +45,27 @@ pub struct EmptyPane {
     pub active: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct PickerPane {
+    pub name: String,
+    pub id: usize,
+    pub position: (i32, i32),
+    pub width: usize,
+    pub height: usize,
+    pub active: bool,
+}
+
+impl PickerPane {
+    pub fn draw_with_texture(&self, renderer: &mut Renderer) -> Result<(), String> {
+        let rect = Rect::new(self.position.0, self.position.1, self.width as u32, self.height as u32);
+        renderer.set_draw_color(color::GREEN_TEXT_COLOR);
+        renderer.fill_rect(&rect)?;
+        Ok(())
+    }
+}
+
+
+
 impl EmptyPane {
     pub fn draw_with_texture(&self, renderer: &mut Renderer) -> Result<(), String> {
         let rect = Rect::new(self.position.0, self.position.1, self.width as u32, self.height as u32);
@@ -52,18 +73,39 @@ impl EmptyPane {
         renderer.draw_rect(&rect)?;
         Ok(())
     }
+}
 
-    // This is duplicated. It is all a bit weird.
-    pub fn adjust_position(&self, x: i32, y: i32, bounds: &EditorBounds) -> (usize, usize) {
-        (max(0, x - self.position.0) as usize, max(0, y - self.position.1 - (bounds.letter_height * 2) as i32) as usize)
+
+// Trying out this trait to see if this is a good idea.
+// Still not sure.
+pub trait AdjustablePosition {
+    fn position(&self) -> (i32, i32);
+    fn adjust_position(&self, x: i32, y: i32, bounds: &EditorBounds) -> (usize, usize) {
+        let position = self.position();
+        (max(0, x - position.0) as usize, max(0, y - position.1 - (bounds.letter_height * 2) as i32) as usize)
     }
 }
+
+
+// Wouldn't it be great to be able to duck type here?
+impl AdjustablePosition for Pane {
+    fn position(&self) -> (i32, i32) {
+        match self {
+            Pane::Text(tp) => tp.position,
+            Pane::_Empty(ep) => ep.position,
+            Pane::_PanePicker(pp) => pp.position,
+        }
+    }
+}
+
+
 
 
 #[derive(Debug, Clone)]
 pub enum Pane {
     Text(TextPane),
     _Empty(EmptyPane),
+    _PanePicker(PickerPane)
 }
 // I could also do this as a trait instead
 // Not sure which is better
@@ -96,6 +138,7 @@ impl Pane {
         match self {
             Pane::Text(tp) => tp.id,
             Pane::_Empty(ep) => ep.id,
+            Pane::_PanePicker(pp) => pp.id,
         }
     }
 
@@ -103,13 +146,7 @@ impl Pane {
         match self {
             Pane::Text(tp) => tp.id = id,
             Pane::_Empty(ep) => ep.id = id,
-        }
-    }
-    
-    pub fn position(&self) -> (i32, i32) {
-        match self {
-            Pane::Text(tp) => tp.position,
-            Pane::_Empty(ep) => ep.position,
+            Pane::_PanePicker(pp) => pp.id = id,
         }
     }
 
@@ -117,12 +154,14 @@ impl Pane {
         match self {
             Pane::Text(tp) => tp.position = (x, y),
             Pane::_Empty(ep) => ep.position = (x, y),
+            Pane::_PanePicker(pp) => pp.position = (x, y),
         }
     }
     pub fn width(&self) -> usize {
         match self {
             Pane::Text(tp) => tp.width,
             Pane::_Empty(ep) => ep.width,
+            Pane::_PanePicker(pp) => pp.width,
         }
     }
 
@@ -130,6 +169,7 @@ impl Pane {
         match self {
             Pane::Text(tp) => tp.width = width,
             Pane::_Empty(ep) => ep.width = width,
+            Pane::_PanePicker(pp) => pp.width = width,
         }
     }
 
@@ -137,6 +177,7 @@ impl Pane {
         match self {
             Pane::Text(tp) => tp.height,
             Pane::_Empty(ep) => ep.height,
+            Pane::_PanePicker(pp) => pp.height,
         }
     }
 
@@ -144,6 +185,7 @@ impl Pane {
         match self {
             Pane::Text(tp) => tp.height = height,
             Pane::_Empty(ep) => ep.height = height,
+            Pane::_PanePicker(pp) => pp.height = height,
         }
     }
 
@@ -151,6 +193,7 @@ impl Pane {
         match self {
             Pane::Text(tp) => tp.name.clone(),
             Pane::_Empty(ep) => ep.name.clone(),
+            Pane::_PanePicker(pp) => pp.name.clone(),
         }
     }
 
@@ -158,6 +201,7 @@ impl Pane {
         match self {
             Pane::Text(tp) => tp.name = name,
             Pane::_Empty(ep) => ep.name = name,
+            Pane::_PanePicker(pp) => pp.name = name,
         }
     }
 
@@ -165,6 +209,7 @@ impl Pane {
         match self {
             Pane::Text(tp) => tp.draw_with_texture(renderer),
             Pane::_Empty(ep) => ep.draw_with_texture(renderer),
+            Pane::_PanePicker(pp) => pp.draw_with_texture(renderer),
         }
     }
 
@@ -172,6 +217,7 @@ impl Pane {
         match self {
             Pane::Text(tp) => tp.active,
             Pane::_Empty(ep) => ep.active,
+            Pane::_PanePicker(pp) => pp.active,
         }
     }
 
@@ -179,25 +225,25 @@ impl Pane {
         match self {
             Pane::Text(tp) => tp.active = active,
             Pane::_Empty(ep) => ep.active = active,
+            Pane::_PanePicker(pp) => pp.active = active,
         }
     }
 
 
-    pub fn is_mouse_over(&self, (x, y): (i32, i32), bounds: &EditorBounds) -> bool {
-        x > self.position().0  &&
-        x < self.position().0 + self.width() as i32 &&
-        y > self.position().1 - bounds.letter_height as i32 &&
-        y < self.position().1 + self.height() as i32 + bounds.letter_height  as i32
+    pub fn is_mouse_over(&self, (x, y): (i32, i32), bounds: &EditorBounds, scale_factor: f32) -> bool {
+        let x = x as f32;
+        let y = y as f32;
+        let position = self.position();
+        let position_x = position.0 as f32; // * scale_factor;
+        let position_y = position.1 as f32; // * scale_factor;
+        let width = self.width() as f32; // * scale_factor;
+        let height = self.height() as f32; // * scale_factor;
+        
+        x > position_x &&
+        x < position_x + width &&
+        y > position_y - bounds.letter_height as f32 * scale_factor &&
+        y < position_y + height + bounds.letter_height  as f32 * scale_factor
     }
-
-    pub fn adjust_position(&self, x: i32, y: i32, bounds: &EditorBounds) -> (usize, usize) {
-        match self {
-            Pane::Text(tp) => tp.adjust_position(x, y, bounds),
-            Pane::_Empty(ep) => ep.adjust_position(x, y, bounds),
-        }
-    }
-
-    
 }
 
 

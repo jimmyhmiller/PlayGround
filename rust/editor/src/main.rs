@@ -4,7 +4,7 @@ use std::{cmp::{max, min}, fs, str::from_utf8};
 use std::fmt::Debug;
 
 use pane::{TextPane, Pane};
-use pane_manager::PaneManager;
+use pane_manager::{PaneManager, PaneSelector};
 use sdl2::{pixels::{Color}, rect::Rect};
 use tokenizer::{Tokenizer, Token};
 
@@ -27,6 +27,7 @@ mod color;
 mod event;
 mod pane;
 mod pane_manager;
+mod ink;
 
 use renderer::{Renderer, EditorBounds};
 use scroller::Scroller;
@@ -75,6 +76,7 @@ use event::{Action, handle_events, handle_per_frame_actions, PerFrameAction};
 // Got some weird undo around new lines
 // Clean up this file
 // Fix token pane
+// Actually implment pane selection
 
 
 // Example program
@@ -152,6 +154,7 @@ fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCo
             width,
             height))?;
     }
+    pane_manager.ink_manager.draw(renderer)?;
 
     // TODO:
     // Fix this whole scroller weirdness.
@@ -161,6 +164,8 @@ fn draw(renderer: &mut Renderer, pane_manager: &mut PaneManager, fps: &mut FpsCo
     // Is it global?
     // Need to think about the UI
     renderer.draw_column_line(pane_manager)?;
+
+    renderer.canvas.set_scale(pane_manager.scale_factor, pane_manager.scale_factor)?;
 
     renderer.present();
 
@@ -234,11 +239,11 @@ fn handle_token_pane(pane_manager: &mut PaneManager) -> Option<()> {
 }
 
 // Can't use special because I need actions
-fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action], editor_bounds: &EditorBounds) -> Option<()>{
+fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action]) -> Option<()>{
 
     let mut chars: Vec<u8> = Vec::new();
 
-    let action_pane_id = pane_manager.get_pane_by_name( "action_pane")?.id();
+    let action_pane_id = pane_manager.get_pane_by_name("action_pane")?.id();
  
     for action in actions.iter() {
         if matches!(action, Action::MoveMouse(_) | Action::SetScrollPane(_)) {
@@ -249,8 +254,11 @@ fn handle_action_pane(pane_manager: &mut PaneManager, actions: &[Action], editor
         // I need to resolve these ids but keep around the fact that
         // these were using meta-selectors
         // Otherwise these things will be wrong.
-        if Some(action_pane_id) == action.pane_id(pane_manager, editor_bounds) {
-            continue;
+        match action.pane_selector() {
+            Some(PaneSelector::Id(id)) if id == action_pane_id  => {
+                continue;
+            }
+            _ => {}
         }
         chars.extend(format!("{:?}\n", action).as_bytes());
     }
@@ -499,7 +507,7 @@ fn main() -> Result<(), String> {
 
         handle_transaction_pane(&mut pane_manager);
         handle_token_pane(&mut pane_manager);
-        handle_action_pane(&mut pane_manager, &all_actions, &renderer.bounds);
+        handle_action_pane(&mut pane_manager, &all_actions);
       
 
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
