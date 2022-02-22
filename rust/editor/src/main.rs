@@ -452,6 +452,8 @@ fn main() -> Result<(), String> {
         system_cursor,
     } = sdl::setup_sdl(window.width as usize, window.height as usize)?;
 
+    let skia = sdl::setup_skia(&canvas);
+
     let (mut texture, letter_width, letter_height) = sdl::draw_font_texture(&texture_creator, ttf_context)?;
     texture.set_color_mod(167, 174, 210);
 
