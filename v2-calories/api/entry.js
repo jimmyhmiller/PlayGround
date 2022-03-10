@@ -31,23 +31,23 @@ const db = {
 }
 
 
-const getTotal = () => {
+const getTotal = (entries) => {
   return q.Sum(
       q.Select(
         "data",
         q.Map(
-          q.Paginate(q.Match("all_entry"), {size: 10000}),
+          entries,
           q.Lambda("x", q.Select(["data", "calories"], q.Get(q.Var("x"))))
         )
       )
     )
 };
 
-const numberOfDays = () => {
+const numberOfDays = (entries) => {
   return q.Count(
     q.Distinct(q.Select("data", 
       q.Map(
-        q.Paginate(q.Match("all_entry"), {size: 10000}),
+        entries,
         q.Lambda("x", q.Select(["data", "date"], q.Get(q.Var("x"))))))));
 }
 
@@ -57,22 +57,14 @@ const bmrDiff = bmr - 2260
 // 500 = 1lb per week;
 const goal = 500;
 
-const getPounds = () => {
-  return q.Let({
-        total: getTotal(),
-        days: numberOfDays(),
-      },
-    q.Divide(q.ToDouble(q.Subtract(q.Multiply(q.Var("days"), bmr), q.Var("total"))), 3500.0))
+const getPounds = (total, numberOfDays) => {
+  return q.Divide(q.ToDouble(q.Subtract(q.Multiply(numberOfDays, bmr), total)), 3500.0)
 
 }
 
 
-const extraCalories = () => {
-  return q.Let({
-        total: getTotal(),
-         days: numberOfDays(),
-      },
-   q.Subtract(q.Multiply(q.Var("days"), bmr - goal), q.Var("total")))
+const extraCalories = (total, numberOfDays) => {
+  return q.Subtract(q.Multiply(numberOfDays, bmr - goal), total)
 }
 
 
@@ -80,11 +72,12 @@ const timeZone = 'America/New_York'
 const today = () => formatDate(utcToZonedTime(new Date(), timeZone), "yyyy-MM-dd", { timeZone });
 
 
-const getRemainingToday = () => {
+// There has to be a better way. I should probably make an index by day?
+const getRemainingToday = (entries) => {
   return q.Let({total: q.Sum(
                         q.Select("data", q.Map(
                           q.Filter(
-                            q.Paginate(q.Match("all_entry"), {size: 10000}),
+                            entries,
                             q.Lambda("x", q.Equals(today(), q.Select(["data", "date"], q.Get(q.Var("x")))))),
                           q.Lambda("x", q.Select(["data", "calories"], q.Get(q.Var("x")))))),
                       )},
@@ -95,11 +88,12 @@ const getRemainingToday = () => {
 const summary = () => {
   return client.query(
     q.Let({
-      days: numberOfDays(),
-      remaining: getRemainingToday(),
-      extra: extraCalories(),
-      total: getTotal(),
-      pounds: getPounds(),
+      entries: q.Paginate(q.Match("all_entry"), {size: 10000}),
+      total: getTotal(q.Var("entries")),
+      days: numberOfDays(q.Var("entries")),
+      remaining: getRemainingToday(q.Var("entries")),
+      extra: extraCalories(q.Var("total"), q.Var("days")),
+      pounds: getPounds(q.Var("total"), q.Var("days")),
       two: q.Subtract(q.Var("extra"), q.Multiply(q.Var("days"), 500)),
     },
       q.ToObject([
