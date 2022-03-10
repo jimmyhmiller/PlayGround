@@ -1,0 +1,6 @@
+# The Space Between Programs
+The Space Between Programs is the most overlooked and yet often the most important. By this I don’t mean the interface that the program exposes. Nor do I mean the means of communication (http, a queue, a log etc). I  am instead looking at something more amorphous. If we think about programs and their connectors taking up space on a 2d plane, what I want to talk about is the negative space. Or in other words, what do our program leave out, what do our programs leave room for, and what, by their existence, have they excluded?
+
+These are the question we rarely ask ourselves when drawing an architecture diagram, and yet these problems crop up time and time again. There are simple examples, the monolith that takes up all our conceptual space, nothing else can exist. Then there are complex interactions between parts that cause constraints. The placements of these three services makes it so that our new service must live in a crevice shoved between them all. 
+
+This goes beyond the technical and conceptual into the social. Programs that live too close or too far from each other, affect the distance their respective teams live as well. Improper spacing of code can lead to improper organization relations (a sort of reverse Conway’s law). Finding the correct amount of space is incredibly difficult.
