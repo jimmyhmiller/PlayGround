@@ -6,6 +6,7 @@ use std::fmt::Debug;
 use pane::{TextPane, Pane};
 use pane_manager::{PaneManager, PaneSelector};
 use sdl2::{pixels::{Color}, rect::Rect};
+use skia_safe::{Color4f, ColorSpace};
 use tokenizer::{Tokenizer, Token};
 
 
@@ -452,7 +453,11 @@ fn main() -> Result<(), String> {
         system_cursor,
     } = sdl::setup_sdl(window.width as usize, window.height as usize)?;
 
-    let skia = sdl::setup_skia(&canvas);
+    let mut skia = sdl::setup_skia(&canvas);
+    let skia_canvas = skia.canvas();
+    skia_canvas.draw_rect(skia_safe::Rect::new(10.0, 10.0, 200.0, 200.0), &skia_safe::paint::Paint::new(Color4f::new(1.0, 0.2, 1.0, 1.0), &ColorSpace::new_srgb()));
+
+    
 
     let (mut texture, letter_width, letter_height) = sdl::draw_font_texture(&texture_creator, ttf_context)?;
     texture.set_color_mod(167, 174, 210);
