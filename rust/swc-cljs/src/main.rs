@@ -1,4 +1,4 @@
-use std::{str::from_utf8, time::Instant};
+use std::{str::from_utf8, time::Instant, fs, error::Error};
 
 
 
@@ -9,6 +9,7 @@ use std::{str::from_utf8, time::Instant};
 // Import SWC and use it to codegen
 // Consider if the edn -> clj step is wise
 // Parse more than one top level form
+// Need to parse char
 
 
 
@@ -28,6 +29,7 @@ pub enum Token {
     CloseCurly,
     OpenBracket,
     CloseBracket,
+    Hash,
     // Probably can get rid of this one sense it is comment
     SemiColon,
     Colon,
@@ -62,6 +64,23 @@ impl<'a> Tokenizer {
             Some(input_bytes[self.position + 1])
         } else {
             None
+        }
+    }
+
+    fn is_previous_escape(&self, input_bytes: &[u8]) -> bool {
+        if self.position > 0 {
+            let previous_byte = input_bytes[self.position - 1];
+            previous_byte == b'\\' && !self.is_previous_escape_explicit(input_bytes, self.position - 1)
+        } else {
+            false
+        }
+    }
+    fn is_previous_escape_explicit(&self, input_bytes: &[u8], position: usize) -> bool {
+        if position > 0 {
+            let previous_byte = input_bytes[position - 1];
+            previous_byte == b'\\' && !self.is_previous_escape_explicit(input_bytes, position - 1)
+        } else {
+            false
         }
     }
 
@@ -101,7 +120,7 @@ impl<'a> Tokenizer {
     pub fn parse_string(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
         self.consume();
-        while !self.at_end(input_bytes) && !self.is_quote(input_bytes) {
+        while !self.at_end(input_bytes) && (!self.is_quote(input_bytes) || (self.is_previous_escape(input_bytes) && self.is_quote(input_bytes))) {
             self.consume();
         }
         // TODO: Deal with escapes
@@ -135,18 +154,23 @@ impl<'a> Tokenizer {
         self.current_byte(input_bytes) == b']'
     }
 
+    pub fn is_hash(&self, input_bytes: &[u8]) -> bool {
+        self.current_byte(input_bytes) == b'#'
+    }
+
     pub fn parse_spaces(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
         while !self.at_end(input_bytes) && self.is_space(input_bytes) {
             self.consume();
         }
         Token::Spaces((start, self.position))
-
     }
 
     pub fn is_valid_number_char(&mut self, input_bytes: &[u8]) -> bool {
-        self.current_byte(input_bytes) >= b'0' && self.current_byte(input_bytes) <= b'9' || self.current_byte(input_bytes) == b'-'
+        self.current_byte(input_bytes) >= b'0' && self.current_byte(input_bytes) <= b'9'
+         || (self.current_byte(input_bytes) == b'-' && !self.at_end(input_bytes) && self.peek(input_bytes).unwrap() >= b'0' && self.peek(input_bytes).unwrap() <= b'9')
     }
+    
 
     pub fn parse_number(&mut self, input_bytes: &[u8]) -> Token {
         let mut is_float = false;
@@ -179,6 +203,7 @@ impl<'a> Tokenizer {
                 && !self.is_colon(input_bytes)
                 && !self.is_comma(input_bytes)
                 && !self.is_newline(input_bytes) 
+                && !self.is_hash(input_bytes)
                 && !self.is_quote(input_bytes) {
             self.consume();
         }
@@ -238,6 +263,10 @@ impl<'a> Tokenizer {
             // println!("close bracket");
             self.consume();
             Token::CloseBracket
+        } else if self.is_hash(input_bytes) {
+            // println!("close bracket");
+            self.consume();
+            Token::Hash
         } else {
             // println!("identifier");
             self.parse_identifier(input_bytes)
@@ -322,6 +351,7 @@ enum Edn {
     Number(String),
     Char(char),
     Bool(bool),
+    Comment(String),
     // Inst(String),
     // Uuid(String),
     NamespacedMap(String, Vec<(Edn, Edn)>),
@@ -329,9 +359,59 @@ enum Edn {
 }
 
 impl Edn {
+    // TODO: Probably shouldn't change from spans to strings
     fn parse(tokenizer: &mut Tokenizer, input_bytes: &[u8]) -> Option<Self> {
         let token = tokenizer.parse_single(input_bytes)?;
         match token {
+            Token::Hash => {
+                // Need to deal with tagged values
+                let mut result = Vec::new();
+                let next_token = tokenizer.parse_single(input_bytes);
+                match next_token {
+                    Some(Token::OpenCurly) => {}
+                    Some(Token::Symbol(span)) => {
+                        while !tokenizer.at_end(input_bytes) && !tokenizer.is_close_curly(input_bytes) {
+                            if let Some(edn) = Edn::parse(tokenizer, input_bytes) {
+                                return Some(Edn::Tagged(string_from_bytes(input_bytes, span), Box::new(edn)));
+                            }
+                        }
+                    }
+                    // What to do with functions?
+                    Some(Token::OpenParen) => {
+                        while !tokenizer.at_end(input_bytes) && !tokenizer.is_close_curly(input_bytes) {
+                            if let Some(edn) = Edn::parse(tokenizer, input_bytes) {
+                                // TODO: Fix
+                                return Some(Edn::Tagged("fn".to_string(), Box::new(edn)));
+                            }
+                        }
+                    }
+                    Some(Token::String(span)) => {
+                        // TODO: Fix
+                        return Some(Edn::Tagged("regex".to_string(), Box::new(Edn::Str(string_from_bytes(input_bytes, span)))));
+                    }
+                    
+                    Some(Token::Hash) => {
+                        let next_token = tokenizer.parse_single(input_bytes);
+                        match next_token {
+                            Some(Token::Symbol(span)) => {
+                                return Some(Edn::Number(string_from_bytes(input_bytes, span)))
+                            }
+                            token => panic!("Hash that isn't defined{:?}", token)
+                        }
+                    }
+                    token => panic!("Hash that isn't defined {:?}", token)
+                }
+                while !tokenizer.at_end(input_bytes) && !tokenizer.is_close_curly(input_bytes) {
+                    if let Some(edn) = Edn::parse(tokenizer, input_bytes) {
+                        result.push(edn);
+                    }
+                }
+                if !tokenizer.at_end(input_bytes) && tokenizer.is_close_curly(input_bytes) {
+                    tokenizer.consume();
+                }
+
+                Some(Edn::Set(result))
+            },
             Token::OpenParen => {
                 let mut result = Vec::new();
                 while !tokenizer.at_end(input_bytes) && !tokenizer.is_close_paren(input_bytes) {
@@ -339,7 +419,7 @@ impl Edn {
                         result.push(edn);
                     }
                 }
-                if tokenizer.is_close_paren(input_bytes) {
+                if !tokenizer.at_end(input_bytes) && tokenizer.is_close_paren(input_bytes) {
                     tokenizer.consume();
                 }
 
@@ -353,12 +433,15 @@ impl Edn {
                 while !tokenizer.at_end(input_bytes) && !tokenizer.is_close_curly(input_bytes) {
                     // Need to detect uneven numbers of things.
                     if let Some(key) = Edn::parse(tokenizer, input_bytes) {
-                        if let Some(value) = Edn::parse(tokenizer, input_bytes) {
-                            result.push((key, value));
+                        while !tokenizer.at_end(input_bytes) {
+                            if let Some(value) = Edn::parse(tokenizer, input_bytes) {
+                                result.push((key, value));
+                                break;
+                            }
                         }
                     }
                 }
-                if tokenizer.is_close_curly(input_bytes) {
+                if !tokenizer.at_end(input_bytes) && tokenizer.is_close_curly(input_bytes) {
                     tokenizer.consume();
                 }
                 return Some(Edn::Map(result));
@@ -371,7 +454,7 @@ impl Edn {
                         result.push(edn);
                     }
                 }
-                if tokenizer.is_close_bracket(input_bytes) {
+                if !tokenizer.at_end(input_bytes) && tokenizer.is_close_bracket(input_bytes) {
                     tokenizer.consume();
                 }
                 return Some(Edn::Vector(result));
@@ -384,12 +467,20 @@ impl Edn {
                 // Just want to get something going.
                 match tokenizer.parse_single(input_bytes) {
                     Some(Token::Symbol(span)) => Some(Edn::Keyword(string_from_bytes(input_bytes, span))),
+                    // TODO: Make this better
+                    Some(Token::Colon) => {
+                        match tokenizer.parse_single(input_bytes) {
+                            // TODO: Make this qualified
+                            Some(Token::Symbol(span)) => Some(Edn::Keyword(string_from_bytes(input_bytes, span))),
+                            x => panic!("Invalid token after colon {:?}", x),
+                        }
+                    }
                     x => panic!("Invalid token after colon {:?}", x),
                 }
             }
             Token::Comma => None,
             Token::NewLine => None,
-            Token::Comment(_) => None,
+            Token::Comment(span) => Some(Edn::Comment(string_from_bytes(input_bytes, span))),
             Token::Spaces(_) => None,
             Token::String(span) => Some(Edn::Str(string_from_bytes(input_bytes, span))),
             Token::Integer(span) => Some(Edn::Number(string_from_bytes(input_bytes, span))),
@@ -434,6 +525,7 @@ enum Clojure {
     Var(Var),
     Vector(Vector),
     WithMeta(WithMeta),
+    Comment(String),
 }
 
 
@@ -449,6 +541,7 @@ impl Clojure {
     // Consider being smarter
     fn from_edn(edn: Edn) -> Self {
         match edn {
+            Edn::Comment(s) => Clojure::Comment(s),
             Edn::Tagged(_, _) => todo!(),
             Edn::Vector(v) => Clojure::Vector(Vector{ items: v.into_iter().map(Clojure::from_edn).collect()}),
             Edn::Set(_) => todo!(),
@@ -676,16 +769,42 @@ fn generate_large_vector(n: usize) -> String {
     result
 }
 
+fn take_half<T>(v: &mut Vec<T>) -> Vec<T> {
+    let half = 2;
+    v.drain(half..).collect()
+}
 
-fn main() {   
 
-    let expr = generate_large_vector(100000);
+fn main() -> Result<(), Box<dyn Error>> {   
+
+    let expr = fs::read_to_string("/Users/jimmyhmiller/Downloads/core.cljs")?;
+    // let expr = generate_large_vector(100000);
+    let expr = fs::read_to_string("/Users/jimmyhmiller/Downloads/test.clj")?;
+
+    let mut parsed_forms: Vec<Edn> = vec![];
+    let mut tokenizer = Tokenizer::new();
+    let input_bytes = expr.as_bytes();
+
+    // println!("{:?}", tokenizer.parse_all(input_bytes));
+    // tokenizer.position = 0;
+
+    while !tokenizer.at_end(input_bytes) {
+        if let Some(edn)= Edn::parse(&mut tokenizer, input_bytes) {
+            println!("{:#?}\n\n", edn);
+            // parsed_forms.push(edn);
+        }
+    }
+    println!("done\n\n\n\n\n");
+
+    // for form in parsed_forms {
+    //     println!("{:?}", Clojure::from_edn(form));
+    // }
+
+    
 
     let start_time = Instant::now();
-    let result = Clojure::from_edn(Edn::parse(&mut Tokenizer::new(), expr.as_bytes()).unwrap());
     println!("{:?}", start_time.elapsed());
 
-    if let Clojure::Vector(_) = result {
-        println!("yep");
-    }
+
+    Ok(())
 }
