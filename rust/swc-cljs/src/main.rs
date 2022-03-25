@@ -35,6 +35,8 @@ pub enum Token {
     Colon,
     Comma,
     NewLine,
+    SingleQuote,
+    Char(usize),
     Comment((usize, usize)),
     Spaces((usize, usize)),
     String((usize, usize)),
@@ -87,7 +89,7 @@ impl<'a> Tokenizer {
     fn is_comment_start(&self, input_bytes: &[u8]) -> bool {
         input_bytes[self.position] == b';'
     }
-    
+
     fn parse_comment(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
         while !self.at_end(input_bytes) && !self.is_newline(input_bytes) {
@@ -158,6 +160,14 @@ impl<'a> Tokenizer {
         self.current_byte(input_bytes) == b'#'
     }
 
+    pub fn is_backslash(&self, input_bytes: &[u8]) -> bool {
+        self.current_byte(input_bytes) == b'\\'
+    }
+
+    pub fn is_single_quote(&self, input_bytes: &[u8]) -> bool {
+        self.current_byte(input_bytes) == b'\''
+    }
+
     pub fn parse_spaces(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
         while !self.at_end(input_bytes) && self.is_space(input_bytes) {
@@ -170,7 +180,7 @@ impl<'a> Tokenizer {
         self.current_byte(input_bytes) >= b'0' && self.current_byte(input_bytes) <= b'9'
          || (self.current_byte(input_bytes) == b'-' && !self.at_end(input_bytes) && self.peek(input_bytes).unwrap() >= b'0' && self.peek(input_bytes).unwrap() <= b'9')
     }
-    
+
 
     pub fn parse_number(&mut self, input_bytes: &[u8]) -> Token {
         let mut is_float = false;
@@ -192,7 +202,7 @@ impl<'a> Tokenizer {
     pub fn parse_identifier(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
         while !self.at_end(input_bytes)
-                && !self.is_space(input_bytes) 
+                && !self.is_space(input_bytes)
                 && !self.is_open_paren(input_bytes)
                 && !self.is_close_paren(input_bytes)
                 && !self.is_open_curly(input_bytes)
@@ -202,8 +212,9 @@ impl<'a> Tokenizer {
                 && !self.is_semi_colon(input_bytes)
                 && !self.is_colon(input_bytes)
                 && !self.is_comma(input_bytes)
-                && !self.is_newline(input_bytes) 
+                && !self.is_newline(input_bytes)
                 && !self.is_hash(input_bytes)
+                && !self.is_backslash(input_bytes)
                 && !self.is_quote(input_bytes) {
             self.consume();
         }
@@ -211,7 +222,7 @@ impl<'a> Tokenizer {
     }
 
     pub fn parse_single(&mut self, input_bytes: &[u8]) -> Option<Token> {
-        
+
         if self.at_end(input_bytes) {
             return None
         }
@@ -263,10 +274,17 @@ impl<'a> Tokenizer {
             // println!("close bracket");
             self.consume();
             Token::CloseBracket
+        } else if self.is_backslash(input_bytes) {
+            self.consume();
+            self.consume();
+            Token::Char(self.position)
         } else if self.is_hash(input_bytes) {
             // println!("close bracket");
             self.consume();
             Token::Hash
+        } else if self.is_single_quote(input_bytes) {
+            self.consume();
+            Token::SingleQuote
         } else {
             // println!("identifier");
             self.parse_identifier(input_bytes)
@@ -329,13 +347,15 @@ impl<'a> Tokenizer {
 }
 
 fn string_from_bytes(bytes: &[u8], span: (usize, usize)) -> String {
+    // Half of my time is spent doing this. I should probably not do it.
+    // I should probably keep my spans instead of strings
     from_utf8(&bytes[span.0..span.1]).unwrap().to_string()
 }
 
 
 // TODO: Should capture line and column information.
 
-// I'm still not sure about making this go from 
+// I'm still not sure about making this go from
 // token -> edn -> clojure. But worth trying it.
 // TODO: Add Comment
 #[derive(Debug, Clone, PartialEq)]
@@ -352,6 +372,7 @@ enum Edn {
     Char(char),
     Bool(bool),
     Comment(String),
+    Quoted(Box<Edn>),
     // Inst(String),
     // Uuid(String),
     NamespacedMap(String, Vec<(Edn, Edn)>),
@@ -363,8 +384,17 @@ impl Edn {
     fn parse(tokenizer: &mut Tokenizer, input_bytes: &[u8]) -> Option<Self> {
         let token = tokenizer.parse_single(input_bytes)?;
         match token {
+            Token::SingleQuote => {
+                while !tokenizer.at_end(input_bytes) {
+                    if let Some(edn) = Edn::parse(tokenizer, input_bytes) {
+                        return Some(Edn::Quoted(Box::new(edn)))
+                    }
+                }
+                panic!("Nothing after single quote")
+            },
+            Token::Char(pos) => Some(Edn::Char(input_bytes[pos].into())),
             Token::Hash => {
-                // Need to deal with tagged values
+                // TODO: CLEAN THIS CODE UP!
                 let mut result = Vec::new();
                 let next_token = tokenizer.parse_single(input_bytes);
                 match next_token {
@@ -378,7 +408,8 @@ impl Edn {
                     }
                     // What to do with functions?
                     Some(Token::OpenParen) => {
-                        while !tokenizer.at_end(input_bytes) && !tokenizer.is_close_curly(input_bytes) {
+                        tokenizer.position -= 1;
+                        while !tokenizer.at_end(input_bytes) {
                             if let Some(edn) = Edn::parse(tokenizer, input_bytes) {
                                 // TODO: Fix
                                 return Some(Edn::Tagged("fn".to_string(), Box::new(edn)));
@@ -389,7 +420,7 @@ impl Edn {
                         // TODO: Fix
                         return Some(Edn::Tagged("regex".to_string(), Box::new(Edn::Str(string_from_bytes(input_bytes, span)))));
                     }
-                    
+
                     Some(Token::Hash) => {
                         let next_token = tokenizer.parse_single(input_bytes);
                         match next_token {
@@ -526,6 +557,7 @@ enum Clojure {
     Vector(Vector),
     WithMeta(WithMeta),
     Comment(String),
+    Todo,
 }
 
 
@@ -541,10 +573,11 @@ impl Clojure {
     // Consider being smarter
     fn from_edn(edn: Edn) -> Self {
         match edn {
+            Edn::Quoted(_) => Clojure::Todo,
             Edn::Comment(s) => Clojure::Comment(s),
-            Edn::Tagged(_, _) => todo!(),
+            Edn::Tagged(_, _) => Clojure::Todo,
             Edn::Vector(v) => Clojure::Vector(Vector{ items: v.into_iter().map(Clojure::from_edn).collect()}),
-            Edn::Set(_) => todo!(),
+            Edn::Set(_) => Clojure::Todo,
             Edn::Map(items) => Clojure::Map(Map{ items: items.into_iter().map(|(k, v)| (Clojure::from_edn(k), Clojure::from_edn(v))).collect()}),
             Edn::Seq(mut items) => {
                 match items.first() {
@@ -557,7 +590,7 @@ impl Clojure {
                                 let then = items.pop().unwrap();
                                 let test = items.pop().unwrap();
 
-    
+
                                 Clojure::If(If {
                                     test: Clojure::boxed_from_edn(test),
                                     then: Clojure::boxed_from_edn(then),
@@ -578,16 +611,16 @@ impl Clojure {
                             args: items.into_iter().skip(1).map(Clojure::from_edn).collect(),
                         })
                     }
-                    _ => todo!(),
+                    _ => Clojure::Todo,
                 }
             },
             Edn::Keyword(s) => Clojure::Const(Const::Keyword(s)),
             Edn::Symbol(s) => Clojure::Const(Const::Symbol(s)),
             Edn::Str(s) => Clojure::Const(Const::String(s)),
             Edn::Number(s) => Clojure::Const(Const::Number(s)),
-            Edn::Char(_) => todo!(),
+            Edn::Char(_) => Clojure::Todo,
             Edn::Bool(b) => Clojure::Const(Const::Bool(b)),
-            Edn::NamespacedMap(_, _) => todo!(),
+            Edn::NamespacedMap(_, _) => Clojure::Todo,
             Edn::Nil => Clojure::Const(Const::Nil),
         }
     }
@@ -769,17 +802,15 @@ fn generate_large_vector(n: usize) -> String {
     result
 }
 
-fn take_half<T>(v: &mut Vec<T>) -> Vec<T> {
-    let half = 2;
-    v.drain(half..).collect()
-}
 
 
-fn main() -> Result<(), Box<dyn Error>> {   
-
+fn main() -> Result<(), Box<dyn Error>> {
+    let start_time = Instant::now();
     let expr = fs::read_to_string("/Users/jimmyhmiller/Downloads/core.cljs")?;
+    // let expr = fs::read_to_string("/Users/jimmyhmiller/Downloads/core_large.cljs")?;
     // let expr = generate_large_vector(100000);
-    let expr = fs::read_to_string("/Users/jimmyhmiller/Downloads/test.clj")?;
+    // let expr = fs::read_to_string("/Users/jimmyhmiller/Downloads/test.clj")?;
+
 
     let mut parsed_forms: Vec<Edn> = vec![];
     let mut tokenizer = Tokenizer::new();
@@ -790,8 +821,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     while !tokenizer.at_end(input_bytes) {
         if let Some(edn)= Edn::parse(&mut tokenizer, input_bytes) {
-            println!("{:#?}\n\n", edn);
-            // parsed_forms.push(edn);
+            // println!("{:?}\n\n", edn);
+            parsed_forms.push(edn);
         }
     }
     println!("done\n\n\n\n\n");
@@ -800,9 +831,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     //     println!("{:?}", Clojure::from_edn(form));
     // }
 
-    
 
-    let start_time = Instant::now();
+    println!("{}", parsed_forms.len());
+
     println!("{:?}", start_time.elapsed());
 
 
