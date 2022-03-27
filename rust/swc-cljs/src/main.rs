@@ -827,12 +827,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("done\n\n\n\n\n");
 
-    // for form in parsed_forms {
-    //     println!("{:?}", Clojure::from_edn(form));
-    // }
+    for form in parsed_forms {
+        println!("{:?}", Clojure::from_edn(form));
+    }
 
 
-    println!("{}", parsed_forms.len());
+    // println!("{}", parsed_forms.len());
 
     println!("{:?}", start_time.elapsed());
 
