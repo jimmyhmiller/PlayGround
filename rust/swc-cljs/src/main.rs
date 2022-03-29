@@ -586,6 +586,7 @@ impl Clojure {
                             "if" => {
                                 // TODO: Need to actually check if I have that many arms of the if
                                 // Doing clones where was incredibly slow.
+                                
                                 let else_ = items.pop().unwrap();
                                 let then = items.pop().unwrap();
                                 let test = items.pop().unwrap();
@@ -597,6 +598,40 @@ impl Clojure {
                                     else_: Clojure::boxed_from_edn(else_),
                                 })
                             },
+                            "fn" => {
+                                let mut params_location = 1;
+                                let name = if let Some(Edn::Symbol(s)) = items.get(1) {
+                                    params_location +=1 ;
+                                    Some(s.to_string())
+                                } else {
+                                    None
+                                };
+                                if let Some(Edn::Seq(_)) = items.get(params_location) {
+                                    // multi-arity
+                                    // TODO: Need to handle this
+                                } else if let Some(Edn::Vector(_)) = items.get(params_location) {
+                                    // A bit ugly
+                                    let params;
+                                    if let Edn::Vector(p) = items.remove(params_location) {
+                                        params = p;
+                                    } else { panic!("not reachable")}
+
+                                    return Clojure::Fn(Fn {
+                                        name,
+                                        definition: FunctionDefinition::SingleArity(FunctionArity{
+                                            params: params.into_iter().map(Clojure::from_edn).collect(),
+                                            body: items.into_iter().skip(params_location).map(Clojure::from_edn).collect(),
+                                        })
+                                    });
+                                } else {
+                                    return Clojure::Invoke(Invoke {
+                                        func: Box::new(Clojure::from_edn(f.clone())),
+                                        args: items.into_iter().skip(1).map(Clojure::from_edn).collect(),
+                                    })
+                                }
+
+                                Clojure::Todo
+                            }
                             _ => {
                                 Clojure::Invoke(Invoke {
                                     func: Box::new(Clojure::from_edn(f.clone())),
@@ -659,11 +694,20 @@ struct Def {
 
 #[derive(Debug, Clone, PartialEq)]
 struct Fn {
-    name: String,
-    meta: Option<Edn>,
-    doc: Option<String>,
-    params: Vec<String>,
-    body: Vec<Clojure>,
+    name: Option<String>,
+    definition: FunctionDefinition
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum FunctionDefinition {
+    SingleArity(FunctionArity),
+    MultiArity(Vec<FunctionArity>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct FunctionArity {
+    params: Vec<Clojure>,
+    body: Vec<Clojure>
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -827,11 +871,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("done\n\n\n\n\n");
 
+    let mut clojure_forms = vec![];
     for form in parsed_forms {
-        println!("{:?}", Clojure::from_edn(form));
+        let clojure = Clojure::from_edn(form);
+        clojure_forms.push(clojure);
+        // println!("{:?}", clojure);
     }
 
-
+    println!("{}", clojure_forms.len());
     // println!("{}", parsed_forms.len());
 
     println!("{:?}", start_time.elapsed());
