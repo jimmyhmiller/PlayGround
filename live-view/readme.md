@@ -4,4 +4,4 @@ Quick prototype of making a phoenix live-view like library for clojure. Definite
 
 One bit I'm really happy with those is the live code inspector. You can inspect any namespace and see all the function calls being performed live. So you can watch for example the flappy bird port I made and see exactly how each function works and when they are called. It is definitely a rough interface, but super fun to play with and requires zero code changes in the application itself. In fact, it is a completely generic code inspector that works for any clojure code.
 
-![code-view](/Users/jimmyhmiller/Documents/Code/PlayGround/live-view/code-view.png)
+![code-view](./code-view.png)
