@@ -901,14 +901,14 @@ pub fn handle_events(event_pump: &mut sdl2::EventPump) -> Vec<Action> {
             Event::MouseButtonDown { x, y, .. } if ctrl_is_pressed && alt_is_pressed => {
                 actions.push(Action::CtrlAltMouseDown(PaneSelector::AtMouse((x, y)), (x, y)));
             }
+            Event::MouseButtonDown { x, y, .. } if cmd_is_pressed && alt_is_pressed => {
+                actions.push(Action::DuplicatePane(PaneSelector::AtMouse((x, y))));
+            }
             Event::MouseButtonDown { x, y, .. } if ctrl_is_pressed => {
                 actions.push(Action::CtrlMouseDown(PaneSelector::AtMouse((x, y)), (x, y)));
             }
             Event::MouseButtonDown { x, y, .. } if cmd_is_pressed => {
                 actions.push(Action::CmdMouseDown((x, y)));
-            }
-            Event::MouseButtonDown { x, y, .. } if cmd_is_pressed && alt_is_pressed => {
-                actions.push(Action::DuplicatePane(PaneSelector::AtMouse((x, y))));
             }
             Event::MouseButtonDown { x, y, .. } => {
                 actions.push(Action::SetPaneActive(PaneSelector::AtMouse((x, y))));
