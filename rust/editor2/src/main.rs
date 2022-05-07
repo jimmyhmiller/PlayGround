@@ -3,15 +3,11 @@ fn main() {
     println!("This example is only supported on macos")
 }
 
-#[cfg(all(target_os = "macos", not(feature = "metal")))]
-fn main() {
-    println!("To run this example, invoke cargo with --features \"metal\".")
-}
 
-#[cfg(all(target_os = "macos", feature = "metal"))]
+#[cfg(all(target_os = "macos"))]
 use skia_safe::{scalar, Canvas, Color4f, ColorType, Paint, Point, Rect, Size, Surface};
 
-#[cfg(all(target_os = "macos", feature = "metal"))]
+#[cfg(all(target_os = "macos"))]
 fn main() {
     use cocoa::{appkit::NSView, base::id as cocoa_id};
 
@@ -32,7 +28,7 @@ fn main() {
         window::WindowBuilder,
     };
 
-    let size = LogicalSize::new(800, 600);
+    let size = LogicalSize::new(800 as i32, 600 as i32);
 
     let events_loop = EventLoop::new();
 
@@ -117,7 +113,7 @@ fn main() {
                         draw(surface.canvas());
 
                         surface.flush_and_submit();
-                        drop(surface);
+                        // drop(surface);
 
                         let command_buffer = command_queue.new_command_buffer();
                         command_buffer.present_drawable(drawable);
@@ -131,7 +127,7 @@ fn main() {
 }
 
 /// Renders a rectangle that occupies exactly half of the canvas
-#[cfg(all(target_os = "macos", feature = "metal"))]
+#[cfg(all(target_os = "macos"))]
 fn draw(canvas: &mut Canvas) {
     let canvas_size = Size::from(canvas.base_layer_size());
 

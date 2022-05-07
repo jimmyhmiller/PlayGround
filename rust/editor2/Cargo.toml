@@ -6,4 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-skia-safe = { version = "0.49.1", features = ["metal"] }
+skia-safe = { version = "0.47.0", features = ["metal"] }
+metal-rs = { package = "metal", version = "0.23.1" }
+winit = "0.26.1"
+objc = "0.2.7"
+cocoa = "0.24.0"
+core-graphics-types = "0.1.1"
+foreign-types-shared = "0.1.1"
