@@ -1,18 +1,18 @@
 # My Experience Building an Editor in Rust
 
-I've always wanted to build a text editor. I've played around before with trying to modify existing editors like codemirror. But ultimately those just felt incredibly unsatisfying. While I was able to make some fun little experiments with them, I was just gluing code together. As I started to play with Rust, it seemed like the perfect opportunity to go beyond glue code. To write a GUI text editor from "scratch". Overall, I'd say it worked out pretty here's a screenshot of where things are right now. (We'll explain what you see in a bit.)
+I've always wanted to build a text editor. I've played around before with trying to modify existing editors like codemirror. But ultimately those just felt incredibly unsatisfying. While I was able to make some fun little experiments with them, I was just gluing code together. As I started to play with Rust, it seemed like the perfect opportunity to go beyond glue code. To write a GUI text editor from "scratch". Overall, I'd say it worked out pretty well. Here's a screenshot of where things are right now. (We'll explain what you see in a bit.)
 
-![editor](/Users/jimmyhmiller/Downloads/editor.png)
+![editor](/images/editor-intro.png)
 
 The question of course is, what does "scratch". In my case, I decided that "scratch" was going to be defined as using sdl2 as my set of primitives. So I had a fairly high-level way of dealing with things like drawing to a screen and rendering fonts, but nothing text editor specific. This choice I think was pretty good for me to get stuff going. I have no experience with graphics APIs and had I started there, I might have just stayed there. 
 
 From the other angle, sdl2 was also good in that it didn't do too many things for me. There were no text edit widgets I was trying to control, no framework, just a library for windowing, drawing, font rendering, and eventing.
 
-## Background and Goals
+## Background and Goals and Building
 
 Before we talk about the general path I took, let's talk about my goals. Initially, my goal was to just build an editor. I wanted color syntax, I wanted general editing capabilities, that was about it. As time grew on, my goals became less and less clear. What I discovered as I kept developing is that building a text editor was a bit more finicky than I had expected, but also way easier than I ever imagined. 
 
-Rust is a really fast language. In my career, I've mostly worked in slow languages. Most worked on problems where speed was important, but not the most important. For this project I wanted performance. I use emacs to do my Clojure development and to be honest, it's terrible. I like paredit, I like my cider setup, but emacs freezes constantly. When I try to print data out in the repl, I can completely lock the editor. That wasn't something I'd allow my editor to do, so I thought I'd have to be super clever to make that happen. Turns out, I don't.
+Rust is a really fast language. In my career, I've mostly worked in slow languages. I mostly worked on problems where speed was important, but not the most important. For this project I wanted performance. I use emacs to do my Clojure development and to be honest, it's terrible. I like paredit, I like my cider setup, but emacs freezes constantly. When I try to print data out in the repl, I can completely lock the editor. That wasn't something I'd allow my editor to do, so I thought I'd have to be super clever to make that happen. Turns out, I didn't.
 
 ### Influences
 
@@ -30,7 +30,7 @@ Modern computers are way faster than I think many of us realize. I was able to i
 
 ### Color Syntax
 
-At this point, I had edit and display, but no color syntax. To figure outline breaks, I parsed the and made a very inefficient line array of tuples with `(start, end)`. I think this is one of those choices I wish I had done differently, mostly just on how I wrote the code, but it worked. One thing it let me do was only render the visible lines, so my first instinct for color syntax was to take advantage of that. I knew that editors like sublime use a regex-based solution that only looks a line at a time. So I thought, maybe I should just use that approach and take something off the shelf.
+At this point, I had edit and display, but no color syntax. To figure out line breaks, I parsed the buffer and made a very inefficient line array of tuples with `(start, end)`. I think this is one of those choices I wish I had done differently, mostly just on how I wrote the code, but it worked. One thing it let me do was only render the visible lines, so my first instinct for color syntax was to take advantage of that. I knew that editors like sublime use a regex-based solution that only looks a line at a time. So I thought, maybe I should just use that approach and take something off the shelf.
 
 ### Failed Attempts
 
@@ -52,31 +52,31 @@ I started with the simplest possible thing I could do, make a custom tokenizer a
 
 ## Moving Beyond the Traditional Editor
 
-At this point, I had the basics and wanted to play. First question, since I'm a big fan of [Muse](https://museapp.com/), what if my text editor was a canvas. Implementing that was very straightforward, if a bit finicky, and moved me directly into the more interesting things I  now wanted to do. 
+At this point, I had the basics and wanted to play. First question, since I'm a big fan of [Muse](https://museapp.com/), I thought what if my text editor was a canvas? Implementing that was very straightforward, if a bit finicky, and moved me directly into the more interesting things I  now wanted to do. 
 
 ### Token Pane
 
-![Screen Shot 2022-04-28 at 6.39.23 PM](/Users/jimmyhmiller/Desktop/Screen Shot 2022-04-28 at 6.39.23 PM.png)
+![](/images/token-pane.png)
 
 As I was working on my tokenizer, I wanted to be able to see the output of the tokens right in the app. So I created what I called the token pane. If there is a pane called `token_pane` Its contents are defined as the raw tokens of the active pane. So now I could see exactly what things were tokenizing into. Incredibly useful for debugging.
 
 ### Action Pane
 
-![Screen Shot 2022-04-28 at 6.41.52 PM](/Users/jimmyhmiller/Desktop/Screen Shot 2022-04-28 at 6.41.52 PM.png)Next was the action pane. Quite a bit trickier. Here I would display every action that happened in the app. But, what about scrolling the action pane? Well, if I did that, then as I scrolled the action pane would constantly get new actions. The whole thing was a bit of a mess. 
+![](/images/action-pane.png)Next was the action pane. Quite a bit trickier. Here I would display every action that happened in the app. But, what about scrolling the action pane? Well, if I did that, then as I scrolled the action pane would constantly get new actions. The whole thing was a bit of a mess. 
 
-The other hard part of this setup was that I originally didn't have a great way to refer to panes. My actions would be something like "MoveActivePane". But what was the active pane, or more precisely, when? Well, if I was looking at the action_pane, it was the active pane, so now as I'm filtering out action_pane actions, I would filter out all active pane actions! not what I wanted. So I had to set up a system where your actions resolve to ids. 
+The other hard part of this setup was that I originally didn't have a great way to refer to panes. My actions would be something like "MoveActivePane". But what was the active pane, or more precisely, when? Well, if I was looking at the action_pane, it was the active pane, so now as I'm filtering out action_pane actions, I would filter out all active pane actions! Not what I wanted. So I had to set up a system where your actions resolve to ids. 
 
 ### Draw Panes
 
-Ultimately what I want out of an editor more than anything was captured in this early blog post on [LightTable.](http://lighttable.com/2012/05/21/the-future-is-specific/). In it, they imagine an editor configurable in itself. But I wanted a different flavor. What if you could extend the editor in any language? I already had seen ways of taking the internals of the editor and using panes as output. What if I could do the opposite, use panes as input?  I later discovered a nice name for this, [afterburner rendering ala Mary Rose Cook](https://maryrosecook.notion.site/Afterburner-To-Dos-129f967a4d1343f390b78a56fc0fc7a0).  Here's an example. What you can see here is some javascript that prints output like `rect 4 10 100 100`, that output is then parsed by the editor and drawn as rectangles to the screen.
+Ultimately what I want out of an editor more than anything was captured in this early blog post on [LightTable.](http://lighttable.com/2012/05/21/the-future-is-specific/). In it, they imagine an editor configurable in itself. But I wanted a different flavor. What if you could extend the editor in any language? I already had seen ways of seeing the internals of the editor and using panes as output. What if I could do the opposite, use panes as input?  I later discovered a nice name for this, [afterburner rendering ala Mary Rose Cook](https://maryrosecook.notion.site/Afterburner-To-Dos-129f967a4d1343f390b78a56fc0fc7a0).  Here's an example. What you can see here is some javascript that prints output like `rect 4 10 100 100`, that output is then parsed by the editor and drawn as rectangles to the screen.
 
-![Screen Shot 2022-04-28 at 6.51.57 PM](/Users/jimmyhmiller/Desktop/Screen Shot 2022-04-28 at 6.51.57 PM.png)
+![/images/editor-draw.png]()
 
 ### Text Space Drawing
 
 Obviously, rectangles aren't the most useful thing to draw. But I also played with rendering in text space. For example, here is a quick proof of concept of underlining text mentioned in rust compiler output. On the right, you see some unused imports. On the left, a quick bash script for drawing that to the screen.
 
-![Screen Shot 2022-04-28 at 6.58.15 PM](/Users/jimmyhmiller/Desktop/Screen Shot 2022-04-28 at 6.58.15 PM.png)
+![](/images/text-space.png)
 
 The dream is that as things evolved, your editor could gain new powers simply by code you have running in panes. No need for an extension language. Simply output things to stdout and you can control and extend the editor. What I found with this experiment is that even with the most naive, unoptimized code doing things that way was entirely possible.
 
@@ -84,7 +84,7 @@ The dream is that as things evolved, your editor could gain new powers simply by
 
 One fun experiment I played with was a way for any language to get the contents of a pane. Obviously, if a pane is backed by a file, you can read that file. But that wasn't good enough for me. I want you to be able to access the contents before changes have been saved. Further, you should be able to access it with just standard tools. So, I exposed the editor as an http service.
 
-![Screen Shot 2022-04-29 at 11.10.40 AM](/Users/jimmyhmiller/Desktop/Screen Shot 2022-04-29 at 11.10.40 AM.png)
+![](/images/editor-http.png)
 
 Honestly, as weird as it may seem, it was pretty easy to do, not expensive computationally, and made it easy to access the data. Ultimately, I'd love to even expose more things. Like being able to control the editor via http requests. Now, external programs can interact with the editor in a way I've never seen supported. Once we have that, it means we have the full Unix power accessible in our editor in a very first class way. 
 
@@ -98,7 +98,7 @@ One thing I really have grown to enjoy is rusts explicit clones. Without GC, clo
 
 ### SDL
 
-SDL2 was easy to get going on this project. From day one I had things drawing on the screen. The primitives SDL provides where just what I needed to focus on my task and not worry about the details.
+SDL2 was easy to get going on this project. From day one I had things drawing on the screen. The primitives SDL provides were just what I needed to focus on my task and not worry about the details.
 
 ### My Willingness to Let the Code be Messy
 
@@ -108,7 +108,7 @@ I often get to a point in projects where things just stall out because I want to
 
 ### My Messy Code
 
-While my willingness to let the code get messy was definitely. good. The actual messiness of the code did cause some quality issues. I never went back and changed my line parsing to take advantage of my tokenizing code. So I loop through each file twice per frame. Because I was doing things hacky from the beginning, it took me a while to get to the point where I could track changes and know if I need to do things like reparse a file. The code now has that ability, but hooking it up was a decent amount of work and I never did it.
+While my willingness to let the code get messy was definitely good. The actual messiness of the code did cause some quality issues. I never went back and changed my line parsing to take advantage of my tokenizing code. So I loop through each file twice per frame. Because I was doing things hacky from the beginning, it took me a while to get to the point where I could track changes and know if I need to do things like reparse a file. The code now has that ability, but hooking it up was a decent amount of work and I never did it.
 
 ### Lack of Action Reification From the Beginning
 
@@ -118,13 +118,13 @@ I spent a lot of time refactoring code to emit data when an action happened. Thi
 
 ### External Extensibility
 
-I really had a blast making this. It went in entirely different directions than I expected. I think this idea of an editor extensible via its own pane contents is really interesting. Of course, emacs is perhaps the ultimate example of an extensible editor, but it is still via elisp. Admittedly, I am sure there are parts where keeping things external may become a bottleneck. If that became the case, it might be interesting to explore webassembly extension points. But what I would find more interesting is to try and continue down that path. Perhaps there is a nice binary format that makes these things not too slow. Could you for example implement a language server protocol library in the editor without it needing to be built in and without it needing to use an extension library? 
+I really had a blast making this. It went in entirely different directions than I expected. I think this idea of an editor extensible via its own pane contents is really interesting. Of course, emacs is perhaps the ultimate example of an extensible editor, but it is still via elisp. Admittedly, I am sure there are parts where keeping things external may become a bottleneck. If that became the case, it might be interesting to explore webassembly extension points. But what I would find more interesting is to try and continue down this path. Perhaps there is a nice binary format that makes these things not too slow. Could you for example implement a language server protocol library in the editor without it needing to be built in and without it needing to use an extension library? 
 
 Focusing on external extensibility also means that these extensions could be used by other editors. Basically, this work would expose an editor IR. An idea I find incredibly interesting and perhaps incredibly powerful.
 
 ### Non-Traditional Layout
 
-I never took my canvas idea very far. I didn't even implement panning around on the canvas. But I found myself loving these layouts. I did some code live in the editor for things like Conway's game of life. And being able to move my panes around and resize panes based on my focus were very nice interactions. I always have been a bit of a messy worker and I find having positions for things helps me out tremendously. 
+I never took my canvas idea very far. I didn't even implement panning around on the canvas. But I found myself loving these layouts. I did some code live in the editor for things like Conway's game of life, and being able to move my panes around and resize panes based on my focus were very nice interactions. I always have been a bit of a messy worker and I find having positions for things helps me out tremendously. 
 
 ## Conclusion
 
