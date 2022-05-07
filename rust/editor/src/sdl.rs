@@ -2,12 +2,9 @@ use std::ptr;
 use std::{convert::TryInto};
 use foreign_types::ForeignType;
 use foreign_types::ForeignTypeRef;
-use metal::CAMetalLayer;
 // use sdl2_sys::*;
 use metal::Device;
-use metal::MTLPixelFormat;
 use metal::MetalLayer;
-use metal::MetalLayerRef;
 use metal::{MetalDrawableRef};
 
 use sdl2::{pixels::Color, render::*, video::{self, WindowContext, Window}, clipboard::ClipboardUtil, mouse::SystemCursor};
@@ -114,39 +111,23 @@ pub fn draw_font_texture(texture_creator: &TextureCreator<WindowContext>, ttf_co
 //     .unwrap()
 // }
 
-fn create_surface(ctx: &mut DirectContext, window: &Window, drawable: &MetalDrawableRef) -> Surface {
-    println!("create_surface start");
-    let draw_size = window.size();
-    let t_info = unsafe { TextureInfo::new(drawable.texture().as_ptr() as *const _) };
-    let target = BackendRenderTarget::new_metal((draw_size.0 as i32, draw_size.1 as i32), 4, &t_info);
 
-    // TODO: let color_type = layer.pixel_format();
 
-    let surface = Surface::from_backend_render_target(
-                                                      ctx,
-                                                      &target,
-                                                      SurfaceOrigin::BottomLeft,
-                                                      ColorType::BGRA8888,
-                                                      ColorSpace::new_srgb(),
-                                                      None,
-    ).unwrap();
-
-    surface
+pub struct SkiaContext<'a> {
+    pub surface: skia_safe::Surface,
+    pub drawable: &'a MetalDrawableRef,
+    pub command_queue: metal::CommandQueue,
 }
 
-pub fn setup_skia(canvas: &Canvas<Window>) -> skia_safe::Surface {
-    let device = Device::system_default().expect("no device found");
+pub fn setup_skia<'a>(device: &'a Device, layer: &'a MetalLayer, canvas: &'a Canvas<Window>) -> SkiaContext<'a> {
 
-    let layer = unsafe { sdl2_sys::SDL_RenderGetMetalLayer(canvas.raw())} as *mut CAMetalLayer;
-    let layer = unsafe {  MetalLayer::from_ptr(layer) };
-
-	// layer.set_device(&device);
+	layer.set_device(&device);
 	// layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-	// layer.set_presents_with_transaction(false);
+	// layer.set_presents_with_transaction(false);a
 	// layer.display_sync_enabled();
 
 	// layer.set_framebuffer_only(false);
-	// layer.set_opaque(true);
+	layer.set_opaque(true);
 
 	// layer.set_maximum_drawable_count(3);
 
@@ -166,9 +147,8 @@ pub fn setup_skia(canvas: &Canvas<Window>) -> skia_safe::Surface {
 
     let drawable = layer.next_drawable().unwrap();
 
-	let mut ctx = unsafe {
-		DirectContext::new_metal(&backend, None).expect("Unable to create direct context")
-	};
+	let mut ctx = DirectContext::new_metal(&backend, None).expect("Unable to create direct context");
+	
     let t_info = unsafe { TextureInfo::new(drawable.texture().as_ptr() as *const _) };
     let target = BackendRenderTarget::new_metal((canvas.window().size().0 as i32, canvas.window().size().1 as i32), 4, &t_info);
 
@@ -181,6 +161,11 @@ pub fn setup_skia(canvas: &Canvas<Window>) -> skia_safe::Surface {
             None,
     );
 
-    surface.unwrap()
+    SkiaContext {
+        surface: surface.unwrap(),
+        drawable,
+        command_queue: queue,
+    }
+   
 }
 

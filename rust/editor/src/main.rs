@@ -2,12 +2,15 @@
 
 use std::{cmp::{max, min}, fs, str::from_utf8};
 use std::fmt::Debug;
+use foreign_types::ForeignType;
 
+use metal::{Device, MetalLayer, CAMetalLayer};
 use pane::{TextPane, Pane};
 use pane_manager::{PaneManager, PaneSelector};
 use sdl2::{pixels::{Color}, rect::Rect};
 use skia_safe::{Color4f, ColorSpace};
 use tokenizer::{Tokenizer, Token};
+
 
 
 use tiny_http::{Server, Response};
@@ -453,9 +456,13 @@ fn main() -> Result<(), String> {
         system_cursor,
     } = sdl::setup_sdl(window.width as usize, window.height as usize)?;
 
-    let mut skia = sdl::setup_skia(&canvas);
-    let skia_canvas = skia.canvas();
-    skia_canvas.draw_rect(skia_safe::Rect::new(10.0, 10.0, 200.0, 200.0), &skia_safe::paint::Paint::new(Color4f::new(1.0, 0.2, 1.0, 1.0), &ColorSpace::new_srgb()));
+    let device = Device::system_default().expect("no device found");
+
+    let layer = unsafe { sdl2_sys::SDL_RenderGetMetalLayer(canvas.raw())} as *mut CAMetalLayer;
+    let layer = unsafe {  MetalLayer::from_ptr(layer) };
+
+
+    
 
     
 
@@ -517,7 +524,18 @@ fn main() -> Result<(), String> {
         handle_action_pane(&mut pane_manager, &all_actions);
       
 
+
+
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
+
+        let mut skia = sdl::setup_skia(&device, &layer, &renderer.canvas);
+        let skia_canvas = skia.surface.canvas();
+        skia_canvas.draw_rect(skia_safe::Rect::new(10.0, 10.0, 500.0, 500.0), &skia_safe::paint::Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), &ColorSpace::new_srgb()));
+
+        skia.surface.flush_and_submit();
+        let command_buffer = skia.command_queue.new_command_buffer();
+        command_buffer.present_drawable(skia.drawable);
+        command_buffer.commit();
         
         
         let mut actions = handle_events(&mut event_pump);
@@ -543,7 +561,10 @@ fn main() -> Result<(), String> {
             i += 1;
         }
         all_actions.extend(actions.clone());
-        
+
+
+
+            
 
     }
 }
