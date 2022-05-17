@@ -113,7 +113,6 @@ fn main() {
                         draw(surface.canvas());
 
                         surface.flush_and_submit();
-                        // drop(surface);
 
                         let command_buffer = command_queue.new_command_buffer();
                         command_buffer.present_drawable(drawable);
@@ -143,3 +142,27 @@ fn draw(canvas: &mut Canvas) {
     );
     canvas.draw_rect(rect, &Paint::new(Color4f::new(0.0, 0.0, 1.0, 1.0), None));
 }
+
+
+
+
+// Thoughts on what to do
+// Focus on panes and moving things around.
+// Panes should be able to draw anything on them
+// Allowing drawing on the background of the current pane
+// Allow nested panes ala muse
+// Allow drawing lots of different things
+// Consider tables and graphs before messing with text editing
+// Maybe even start with a code viewer?
+// Be sure to capture all actions as data
+// Be sure to have a reaction system
+// Consider how undo and redo work with such an application
+// Consider ink and arrows
+// Consider rendering markdown
+
+
+
+
+
+
+
