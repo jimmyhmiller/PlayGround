@@ -7,7 +7,7 @@ export default function Document() {
       <Head>
         <style type="text/css">{`
           g {
-            pointer-events: bounding-box;
+            pointer-events: all;
             cursor: pointer;
           }
           body {
