@@ -9,6 +9,10 @@ import localforage from 'localforage';
 // TODO: get method by name not index
 
 
+// NOTE: Looks like I can get true duplicate blocks?
+// Only difference is series number
+
+
 // console.log(d3)
 
 // const Graphviz = dynamic(() => import('graphviz-react'), { ssr: false });
@@ -78,14 +82,14 @@ const mod = (m, n) => {
 const useLocalForage = (key, initialValue) => {
   const [storedValue, setStoredValue] = useState(initialValue);
 
-  // useEffect(() => {
-  //   (async () => {
-  //     const item = await localforage.getItem(key);
-  //     if (item) {
-  //       setStoredValue(item);
-  //     }
-  //   })()
-  // }, [])
+  useEffect(() => {
+    (async () => {
+      const item = await localforage.getItem(key);
+      if (item) {
+        setStoredValue(item);
+      }
+    })()
+  }, [])
 
 
   const setValue = (value) => {
@@ -110,48 +114,6 @@ const useLocalForage = (key, initialValue) => {
 
 
 
-// Hook
-function useLocalStorage(key, initialValue) {
-  // State to store our value
-  // Pass initial state function to useState so logic is only executed once
-  const [storedValue, setStoredValue] = useState(() => {
-    if (typeof window === "undefined") {
-      return initialValue;
-    }
-
-    try {
-      // Get from local storage by key
-      const item = window.localStorage.getItem(key);
-      // Parse stored json or if none return initialValue
-      return item ? JSON.parse(item) : initialValue;
-    } catch (error) {
-      // If error also return initialValue
-      console.log(error);
-      return initialValue;
-    }
-  });
-
-  // Return a wrapped version of useState's setter function that ...
-  // ... persists the new value to localStorage.
-  const setValue = (value) => {
-    try {
-      // Allow value to be a function so we have same API as useState
-      const valueToStore =
-        value instanceof Function ? value(storedValue) : value;
-      // Save state
-      setStoredValue(valueToStore);
-      // Save to local storage
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem(key, JSON.stringify(valueToStore));
-      }
-    } catch (error) {
-      // A more advanced implementation would handle the error case
-      console.log(error);
-    }
-  };
-
-  return [storedValue, setValue];
-}
 
 
 const range = (size, startAt=0) => {
@@ -221,7 +183,7 @@ const makeGraphs = (blocks) => {
     }).join("\n")}
 
    
-    ${blocks.flatMap(addEpochEdges).map(([x, y]) => `"${x}" -> "${y}"`).join('\n')}
+    ${distinct(blocks.flatMap(addEpochEdges).map(([x, y]) => `"${x}" -> "${y}"`)).join('\n')}
 
   `
 }
@@ -314,13 +276,27 @@ const makeSimplifiedGraph = (blocks) => {
         return `"${hash}-${epoch}" [label="block", shape="square"]`
       }).join("\n")}
 
-      ${blocks.flatMap(addEpochEdges).map(x => x[1]).filter(x => x.length < 18).map(x => `"${x}" [label="stub"]`).join("\n")}
+      ${distinct(blocks.flatMap(addEpochEdges).map(x => x[1]).filter(x => x.length < 18).map(x => `"${x}" [label="stub"]`)).join("\n")}
 
-      ${blocks.flatMap(addEpochEdges).map(([x, y]) => `"${x}" -> "${y}"`).join('\n')}
+      ${distinct(blocks.flatMap(addEpochEdges).map(([x, y]) => `"${x}" -> "${y}"`)).join('\n')}
 
     }
 
   `
+}
+
+// Doesn't work for objects
+const distinct = (array) => {
+  let result = [];
+  let seen = new Set();
+  for (let elem of array) {
+    if (seen.has(elem)) {
+      continue;
+    }
+    result.push(elem)
+    seen.add(elem)
+  }
+  return result;
 }
 
 const sortBy = (array, f) => {
@@ -435,7 +411,7 @@ const DetailView = ({ blocks, name, setMethod }) => {
   const epochs = blocksByEpochAccending(largestIseq);
 
 
-
+  console.log(epochs)
 
   const lastGroup = epochs[epochs.length - 1 - epoch] || [];
 
@@ -471,11 +447,12 @@ const DetailView = ({ blocks, name, setMethod }) => {
            </datalist>
         </div>
         <div key={index} style={{height: "81vh", overflow: "scroll", marginRight: 20}}>
-          <div  id="codeList">
+          <div id="codeList">
             {lastGroup.filter(block => block.instructions.length !== 0).map((block, i) => {
               const id = `block-${block.hash}-${block.epoch}`;
               return (
                 <div id={id} key={id} style={{backgroundColor: id === selected ? "#eee" : "white" , padding: "10px 20px 10px 20px", marginBottom: 10}}>
+                  <p>{id}</p>
                   <pre>
                     {block.instructions.map(x => `${x.type === "comment" ? "#" : ""} ${x.value}`).join("\n")}
                   </pre>
@@ -534,17 +511,20 @@ const ListView = ({ names, messagesByName, setName, cache, setCache }) => {
         const messages = messagesByName[name];
         const messagesByIseq = groupBy(messages, x => x.iseq_hash);
         const sortByCount = sortBy(Object.entries(messagesByIseq), x => x[1].length);
-        const largestIseq = sortByCount[sortByCount.length - 1][1];
+        const largestIseq = sortByCount[0][1];
         // console.log(messagesByIseq, sortByCount, largestIseq)
         const epochs = blocksByEpochAccending(largestIseq);
+        const epoch = epochs[epochs.length - 1];
+
         return (
           <div style={{margin: 20, boxShadow: "4px 4px 4px 4px #e8e9eb", backgroundColor: "#fff"}} onClick={(e) => setName(name)} key={name}>
             <div style={{borderBottom: "2px solid rgb(232, 233, 235)", display: "flex"}}>
               <h3 style={{padding: "0px 20px 10px 20px", maxWidth: 200}}>{messages[0].name}</h3>
+              {epoch.filter(x => x.instructions.length !== 0).length !== new Set(epoch.map(x => x.hash)).size ? "Versions": ""}
               <CountBadges iseqs={sortByCount} />
             </div>
             <div style={{padding: 10}}>
-                <Graphviz cache={cache} setCache={setCache} id={`graph-${name}-${i}`} dot={makeSimplifiedGraph(epochs[epochs.length - 1])} options={{width: 300, height: 300, fit: true }} />
+                <Graphviz cache={cache} setCache={setCache} id={`graph-${name}-${i}`} dot={makeSimplifiedGraph(epoch)} options={{width: 300, height: 300, fit: true }} />
             </div>
           </div>  
         )
