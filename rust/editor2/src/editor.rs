@@ -2,7 +2,7 @@
 use crate::fps_counter::FpsCounter;
 
 
-use skia_safe::{RRect, ColorSpace};
+use skia_safe::{RRect};
 use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
 
 
@@ -77,7 +77,7 @@ pub struct Editor {
 
 
 #[cfg(all(target_os = "macos"))]
-use skia_safe::{Canvas, Color4f, Paint, Point, Rect, Size};
+use skia_safe::{Canvas, Color4f, Paint, Point, Rect};
 
 
 
@@ -105,14 +105,11 @@ impl<'a> Editor {
     pub fn draw(&mut self, canvas: &mut Canvas) {  
         self.fps_counter.tick();
         use skia_safe::{FontStyle, Font, Typeface};
-
-        let canvas_size = Size::from(canvas.base_layer_size());
     
         let gray = parse_hex("#333333");
         
         canvas.clear(gray.color4f());
     
-        let rect_size = canvas_size / 2.0;
         let rect = Rect::from_xywh(30.0, 30.0, 1200.0, 400.0);
         let mut rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
 
