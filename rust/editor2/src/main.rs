@@ -13,22 +13,9 @@ fn main() {
 #[cfg(all(target_os = "macos"))]
 fn main() {
     use editor::Editor;
-    use editor::ViewPane;
-    use fps_counter::FpsCounter;
 
-    use editor::Position;
-
-    let editor = Editor {
-        events: Vec::new(),
-        fps_counter: FpsCounter::new(),
-        view_pane: ViewPane {
-            resetting: false,
-            position: Position {
-                x: 0.0,
-                y: 0.0
-            },
-        },
-    };
+    let mut editor = Editor::new();
+    editor.setup();
 
     window::setup_window(editor);
 }
