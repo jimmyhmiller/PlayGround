@@ -14,7 +14,7 @@ pub enum Event {
     RightMouseDown { x: f32, y: f32 },
     RightMouseUp { x: f32, y: f32 },
     Scroll { x: f64, y: f64 },
-    ClickedWidget { widget_id: usize },
+    ClickedWidget { widget_id: WidgetId },
 }
 
 // Need a global store of widgets
@@ -140,6 +140,7 @@ impl Widget {
 }
 
 struct Widget {
+    pub id: WidgetId,
     pub position: Position,
     pub size: Size,
     // Children might make sense
@@ -149,7 +150,7 @@ struct Widget {
 
 
 struct Scene {
-    widgets: Vec<Widget>,
+    widgets: Vec<WidgetId>,
 }
 
 struct Context {
@@ -159,13 +160,17 @@ struct Context {
 }
 
 
+type WidgetId = usize;
+
 pub struct Editor {
     pub events: Vec<Event>,
     pub fps_counter: FpsCounter,
     scenes: Vec<Scene>,
     current_scene: usize,
     context: Context,
-    scene_selector: Vec<Widget>,
+    widgets: Vec<Widget>,
+    next_widget_id: WidgetId,
+    scene_selector: Vec<WidgetId>,
 }
 
 
@@ -192,43 +197,64 @@ fn parse_hex(hex: &str) -> Paint {
 
 impl<'a> Editor {
 
+    fn get_widget_by_id(&self, id: WidgetId) -> &Widget {
+        // This means I never gc widgets
+        // But I could of course free them and keep
+        // a free list around.
+        // or use a map. Or do a linear search.
+        // But fine for now
+        &self.widgets[id - 1]
+    }
+
+    fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
+        let id = self.next_widget_id;
+        widget.id = id;
+        self.widgets.push(widget);
+        self.next_widget_id += 1;
+        id
+    }
+
 
     pub fn setup(&mut self) {
+
+        let id = self.add_widget(Widget {
+            id: 0,
+            position: Position { x: 200.0, y: 200.0 },
+            size: Size { width: 200.0, height: 100.0 },
+            data: WidgetData::Noop,
+        });
         self.scenes.push(Scene {
-            widgets: vec![
-                Widget {
-                    position: Position { x: 200.0, y: 200.0 },
-                    size: Size { width: 200.0, height: 100.0 },
-                    data: WidgetData::Noop,
-                }
-            ]
+            widgets: vec![id
+]
+        });
+
+        let id = self.add_widget(Widget {
+            id: 0,
+            position: Position { x: 300.0, y: 300.0 },
+            size: Size { width: 100.0, height: 100.0 },
+            data: WidgetData::Noop,
         });
 
         self.scenes.push(Scene {
-            widgets: vec![
-                Widget {
-                    position: Position { x: 0.0, y: 0.0 },
-                    size: Size { width: 100.0, height: 100.0 },
-                    data: WidgetData::Noop,
-                }
-            ]
+            widgets: vec![id]
         });
 
 
-        for (i, _scene) in self.scenes.iter().enumerate() {
-
-            self.scene_selector.push(Widget {
+        for i in 0..self.scenes.len() {
+            let id = self.add_widget(Widget {
+                id: 0,
                 position: Position { x: 20.0, y: i as f32 * 120.0 + 20.0 },
                 size: Size { width: 100.0, height: 100.0 },
                 data: WidgetData::Noop,
             });
+            self.scene_selector.push(id);
             
         }
 
     }
 
     pub fn update(&mut self) {
-       
+        // println!("scene {}", self.current_scene);
     }
 
     pub fn new() -> Self {
@@ -243,6 +269,8 @@ impl<'a> Editor {
                 right_mouse_down: false,
             },
             scene_selector: vec![],
+            widgets: vec![],
+            next_widget_id: 1,
         }
     }
 
@@ -273,7 +301,8 @@ impl<'a> Editor {
         // a widget if the mouse is over it?
         // Or do I want the widget to look at the mouse position?
         // Maybe allow for both?
-        for widget in self.scene_selector.iter() {
+        for widget_id in self.scene_selector.iter() {
+            let widget = self.get_widget_by_id(*widget_id);
             let rect = Rect::from_xywh(widget.position.x, widget.position.y, widget.size.width, widget.size.height);
             let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
             let purple = parse_hex("#1c041e");
@@ -299,7 +328,8 @@ impl<'a> Editor {
         }
 
         let scene = &self.scenes[self.current_scene];
-        for widget in scene.widgets.iter() {
+        for widget_id in scene.widgets.iter() {
+            let widget = self.get_widget_by_id(*widget_id);
             widget.draw(canvas);
         }
 
@@ -327,47 +357,70 @@ impl<'a> Editor {
     }
 
     pub fn add_event(&mut self, event: &winit::event::Event<'_, ()>) {
-        if let Some(mut event) = Event::from_winit_event(&event) {
-            event.patch_mouse_event(&self.context.mouse_position);
-            match event {
-                // Should this even happen?
-                Event::ClickedWidget { widget_id: _ } => {
-                    println!("Clicked widget");
-                }
-                Event::Noop => {},
-                Event::MouseMove { x, y } => {
-                    // Not pushing the event because there are too many
-                    self.context.mouse_position = Position { x, y };
-                },
-                Event::LeftMouseDown {..} => {
-                    self.events.push(event);
-                    self.context.left_mouse_down = true;
-                },
-                Event::LeftMouseUp {..} => {
-                    self.events.push(event);
-                    self.context.left_mouse_down = false;
-                    // Probably not the right place.
-                    // Maybe need events on last cycle?
+        if let Some(event) = Event::from_winit_event(&event) {
+            self.respond_to_event(event);
+        }
+    }
 
-                    self.add_clicks();
-                },
-                Event::RightMouseDown {..} => {
-                    self.events.push(event);
-                    self.context.right_mouse_down = true;
-                },
-                Event::RightMouseUp {..} => {
-                    self.events.push(event);
-                    self.context.right_mouse_down = false;
-                },
-                Event::Scroll { x: _, y: _ } => {
-                    self.events.push(event);
+    fn respond_to_event(&mut self, mut event: Event) {
+        event.patch_mouse_event(&self.context.mouse_position);
+        match event {
+            Event::ClickedWidget { widget_id } => {
+
+                // Not going to be the plan going forward, but let's do this for now    
+                for (i, scene_selector) in self.scene_selector.iter().enumerate() {
+                    if *scene_selector == widget_id {
+                        self.current_scene = i;
+                        break;
+                    }
                 }
+                println!("Clicked widget {}", widget_id);
+                self.events.push(event);
+            }
+            Event::Noop => {},
+            Event::MouseMove { x, y } => {
+                // Not pushing the event because there are too many
+                self.context.mouse_position = Position { x, y };
+            },
+            Event::LeftMouseDown {..} => {
+                self.events.push(event);
+                self.context.left_mouse_down = true;
+            },
+            Event::LeftMouseUp {..} => {
+                self.events.push(event);
+                self.context.left_mouse_down = false;
+                // Probably not the right place.
+                // Maybe need events on last cycle?
+
+                self.add_clicks();
+            },
+            Event::RightMouseDown {..} => {
+                self.events.push(event);
+                self.context.right_mouse_down = true;
+            },
+            Event::RightMouseUp {..} => {
+                self.events.push(event);
+                self.context.right_mouse_down = false;
+            },
+            Event::Scroll { x: _, y: _ } => {
+                self.events.push(event);
             }
         }
     }
 
     fn add_clicks(&mut self) -> () {
-      
+        let mut clicked = vec![];
+        for widget in self.widgets.iter() {
+            if widget.mouse_over(&self.context.mouse_position) {
+                clicked.push(widget.id);
+            }
+        }
+        for id in clicked {
+            self.respond_to_event(Event::ClickedWidget { widget_id: id });
+        }
+        
+
+
     }
 }
 

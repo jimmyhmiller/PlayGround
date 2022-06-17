@@ -82,14 +82,14 @@ const mod = (m, n) => {
 const useLocalForage = (key, initialValue) => {
   const [storedValue, setStoredValue] = useState(initialValue);
 
-  useEffect(() => {
-    (async () => {
-      const item = await localforage.getItem(key);
-      if (item) {
-        setStoredValue(item);
-      }
-    })()
-  }, [])
+  // useEffect(() => {
+  //   (async () => {
+  //     const item = await localforage.getItem(key);
+  //     if (item) {
+  //       setStoredValue(item);
+  //     }
+  //   })()
+  // }, [])
 
 
   const setValue = (value) => {
