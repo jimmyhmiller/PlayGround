@@ -7,22 +7,61 @@ enum OpCode {
 
 type Value = f64;
 
-fn store_constant(constant_pool: &mut Vec<Value>, value: Value) -> u8 {
-    constant_pool.push(value);
-    return (constant_pool.len() - 1).try_into().unwrap();
-}
 
-
-struct Code {
+struct Chunk {
     instructions: Vec<u8>,
     lines: Vec<usize>,
+    constants: Vec<Value>,
+}
+
+impl Chunk {
+    fn add_constant(&mut self, value: Value) -> u8 {
+        self.constants.push(value);
+        return (self.constants.len() - 1).try_into().unwrap();
+    }
+
+    fn write_byte(&mut self, byte: u8, line: usize) {
+        self.instructions.push(byte);
+        self.lines.push(line);
+    }
+
+    fn disassemble(&self, offset: usize) -> usize {
+        let mut new_offset = offset;
+    
+        print!("{:04} ", offset);
+        if offset > 0 && self.lines[offset] == self.lines[offset-1] {
+            print!("   | ");
+        } else {
+            print!("{:4} ", self.lines[offset]);
+        }
+    
+        let op_code = self.instructions[offset];
+        
+        match op_code {
+            0 => { 
+                print!("Constant {}", self.constants[self.instructions[offset+1] as usize]);
+                new_offset += 2;
+            },
+            1 => {
+                print!("Return");
+                new_offset += 1;
+            },
+            _ => {
+                print!("Unknown opcode: {}", op_code);
+                new_offset += 1;
+            },
+        }
+    
+        println!("");
+    
+        new_offset
+    }
+    
+    
 }
 
 
-fn write_byte(code: &mut Code, byte: u8, line: usize) {
-    code.instructions.push(byte);
-    code.lines.push(line);
-}
+
 
 // fn assemble(code: &mut Code, op_code: OpCode) {
 //     match op_code {
@@ -37,57 +76,25 @@ fn write_byte(code: &mut Code, byte: u8, line: usize) {
 // }
 
 
-fn disassemble(code: &Code, offset: usize, constant_pool: &Vec<Value>) -> usize {
-    let mut new_offset = offset;
-
-    print!("{:04} ", offset);
-    if offset > 0 && code.lines[offset] == code.lines[offset-1] {
-        print!("   | ");
-    } else {
-        print!("{:4} ", code.lines[offset]);
-    }
-
-    let op_code = code.instructions[offset];
-    
-    match op_code {
-        0 => { 
-            print!("Constant {}", constant_pool[code.instructions[offset+1] as usize]);
-            new_offset += 2;
-        },
-        1 => {
-            print!("Return");
-            new_offset += 1;
-        },
-        _ => {
-            print!("Unknown opcode: {}", op_code);
-            new_offset += 1;
-        },
-    }
-
-    println!("");
-
-    new_offset
-}
 
 
 
 fn main() {
-    let mut code = Code {
+    let mut chunk = Chunk {
         instructions: vec![],
         lines: vec![],
+        constants: vec![],
     };
 
-    let mut constant_pool = vec![];
-
-    let constant = store_constant(&mut constant_pool, 3.1);
+    let constant = chunk.add_constant(3.1);
     
-    write_byte(&mut code, OpCode::Constant as u8, 123);
-    write_byte(&mut code, constant, 123);
-    write_byte(&mut code, OpCode::Return as u8, 123);
+    chunk.write_byte(OpCode::Constant as u8, 123);
+    chunk.write_byte(constant, 123);
+    chunk.write_byte(OpCode::Return as u8, 123);
 
     let mut offset = 0;
-    while offset < code.instructions.len() {
-        offset = disassemble(&code, offset, &constant_pool);
+    while offset < chunk.instructions.len() {
+        offset = chunk.disassemble(offset);
     }
     
 
