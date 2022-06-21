@@ -138,12 +138,13 @@ impl Vm {
     }
 
     fn compile(&mut self, source: Vec<u8>, chunk: &mut Chunk) -> bool {
-        let mut parser = Parser::new(source);
+        let mut parser = Parser::new(source, chunk);
         parser.advance();
         self.expression();
         parser.consume(TokenKind::Eof, "Expected end of expression");
         return true
     }
+
 
     fn expression(&mut self) {
 
@@ -249,15 +250,30 @@ struct Token {
     line: usize,
 }
 
-struct Parser {
+enum Precedence {
+    None,
+    Assignment,
+    Or,
+    And,
+    Equality,
+    Comparison,
+    Term,
+    Factor,
+    Unary,
+    Call,
+    Primary,
+}
+
+struct Parser<'a> {
     scanner: Scanner,
     current: Token,
     previous: Token,
     had_error: bool,
+    chunk: &'a mut Chunk,
 }
 
-impl Parser {
-    fn new(source: Vec<u8>) -> Parser {
+impl<'a> Parser<'a> {
+    fn new(source: Vec<u8>, chunk: &'a mut Chunk) -> Parser<'a> {
         Parser {
             scanner: Scanner::new(source),
             current: Token {
@@ -273,6 +289,7 @@ impl Parser {
                 line: 0,
             },
             had_error: false,
+            chunk,
         }
     }
 
@@ -306,6 +323,71 @@ impl Parser {
             self.error_at_current(message);
         }
     }
+
+    fn emit_byte(&mut self, byte: u8) {
+        self.chunk.write_byte(byte, self.previous.line);
+    }
+
+    fn end_compiler(&mut self) {
+        self.emit_return();
+    }
+    
+    fn emit_return(&mut self) {
+        self.emit_byte(OpCode::Return as u8);
+    }
+
+    fn emit_bytes(&mut self, byte1: u8, byte2: u8) {
+        self.emit_byte(byte1);
+        self.emit_byte(byte2);
+    }
+
+    fn get_slice_from_token(&self) -> &str {
+        from_utf8(&self.scanner.source[ self.previous.start..self.previous.start +  self.previous.length]).unwrap()
+    }
+
+    fn number(&mut self) {
+        let slice = self.get_slice_from_token();
+        let value = slice.parse::<Value>().unwrap();
+        self.emit_constant(value);
+    }
+
+    fn emit_constant(&mut self, value: Value) {
+        let constant_index = self.make_constant(value);
+        self.emit_bytes(OpCode::Constant as u8, constant_index);
+    }
+
+    fn make_constant(&mut self, value: Value) -> u8 {
+        self.chunk.add_constant(value)
+    }
+
+    fn grouping(&mut self) {
+        self.expression();
+        self.consume(TokenKind::RightParen, "Expected ')' after expression");
+    }
+
+    fn unary(&mut self) {
+       self.parse_precedence(Precedence::Unary);
+       match self.previous.kind {
+           TokenKind::Minus => {
+               self.emit_byte(OpCode::Negate as u8);
+           }
+           _ => {}
+        }
+    }
+
+    fn parse_precedence(&mut self, precedence: Precedence) {
+
+    }
+
+    fn expression(&mut self) {
+        self.parse_precedence(Precedence::Assignment);
+    }
+
+    fn binary(&mut self) {
+        // let rule = self.previous.kind.get_rule();
+    }
+
+    
 }
 
 struct Scanner {
