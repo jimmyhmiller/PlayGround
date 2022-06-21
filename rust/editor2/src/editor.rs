@@ -385,6 +385,7 @@ impl<'a> Editor {
             Event::LeftMouseDown {..} => {
                 self.events.push(event);
                 self.context.left_mouse_down = true;
+                self.add_clicks();
             },
             Event::LeftMouseUp {..} => {
                 self.events.push(event);
@@ -392,7 +393,7 @@ impl<'a> Editor {
                 // Probably not the right place.
                 // Maybe need events on last cycle?
 
-                self.add_clicks();
+ 
             },
             Event::RightMouseDown {..} => {
                 self.events.push(event);
