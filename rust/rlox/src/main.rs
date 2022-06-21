@@ -127,10 +127,26 @@ impl Vm {
         return self.stack[self.stack_top];
     }
 
-    fn interpret(&mut self, chunk: Chunk) -> InterpretResult {
+    fn interpret(&mut self, source: Vec<u8>) -> InterpretResult {
+        let mut chunk = Chunk::new();
+        if !self.compile(source, &mut chunk) {
+            return InterpretResult::CompileError("Error compiling".to_string());
+        }
         self.chunk = chunk;
         self.ip = 0;
         self.run()
+    }
+
+    fn compile(&mut self, source: Vec<u8>, chunk: &mut Chunk) -> bool {
+        let mut parser = Parser::new(source);
+        parser.advance();
+        self.expression();
+        parser.consume(TokenKind::Eof, "Expected end of expression");
+        return true
+    }
+
+    fn expression(&mut self) {
+
     }
 
     fn run(&mut self) -> InterpretResult {
@@ -179,6 +195,7 @@ impl Vm {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum TokenKind {
     LeftParen,
     RightParen,
@@ -224,11 +241,71 @@ enum TokenKind {
     Eof,
 }
 
+#[derive(Debug, Clone)]
 struct Token {
     kind: TokenKind,
     start: usize,
     length: usize,
     line: usize,
+}
+
+struct Parser {
+    scanner: Scanner,
+    current: Token,
+    previous: Token,
+    had_error: bool,
+}
+
+impl Parser {
+    fn new(source: Vec<u8>) -> Parser {
+        Parser {
+            scanner: Scanner::new(source),
+            current: Token {
+                kind: TokenKind::Eof,
+                start: 0,
+                length: 0,
+                line: 0,
+            },
+            previous: Token {
+                kind: TokenKind::Eof,
+                start: 0,
+                length: 0,
+                line: 0,
+            },
+            had_error: false,
+        }
+    }
+
+    fn advance(&mut self) {
+        // TODO: Get rid of clone
+        self.previous = self.current.clone();
+        loop {
+            self.current = self.scanner.scan_token();
+            match self.current.kind {
+                TokenKind::Error(_) => {
+                    println!("Error: {:?}", self.current);
+                }
+                _ => break,
+            }
+        }
+    }
+
+    fn error_at_current(&mut self, message: &str) {
+        self.error_at(message);
+    }
+
+    fn error_at(&mut self, message: &str) {
+        println!("Error at line {:?}: {}", self.current, message);
+        self.had_error = true;
+    }
+
+    fn consume(&mut self, kind: TokenKind, message: &str) {
+        if self.current.kind == kind {
+            self.advance();
+        } else {
+            self.error_at_current(message);
+        }
+    }
 }
 
 struct Scanner {
@@ -239,12 +316,12 @@ struct Scanner {
 }
 
 impl Scanner {
-    fn new(source: Vec<u8>, start: usize, current: usize, line: usize) -> Scanner {
+    fn new(source: Vec<u8>) -> Scanner {
         Scanner {
             source,
-            start,
-            current,
-            line,
+            start: 0,
+            current: 0,
+            line: 1,
         }
     }
 
@@ -442,7 +519,9 @@ fn main() {
     chunk.write_byte(OpCode::Return as u8, 123);
 
     let mut vm = Vm::new();
-    vm.interpret(chunk);
+
+    let source: Vec<u8> = "2 + 2".as_bytes().into();
+    vm.interpret(source);
 
 
     // let mut offset = 0;
