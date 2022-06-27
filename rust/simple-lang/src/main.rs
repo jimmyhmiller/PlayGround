@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::{time::Instant, fmt::Formatter, error::Error};
 use std::fmt::Debug;
 
@@ -7,6 +8,7 @@ enum ValueKind {
     Int,
     Float,
     Bool,
+    Object,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -15,6 +17,7 @@ enum Value {
     Float(f64),
     True,
     False,
+    Object(usize),
 }
 
 impl Value {
@@ -24,6 +27,7 @@ impl Value {
             Value::Float(_) => ValueKind::Float,
             Value::True => ValueKind::Bool,
             Value::False => ValueKind::Bool,
+            Value::Object(_) => ValueKind::Object,
         }
     }
 
@@ -33,6 +37,7 @@ impl Value {
             Value::Float(f) => *f as i64,
             Value::True => 1,
             Value::False => 0,
+            Value::Object(i) => panic!("Object value {} is not an integer", i),
         }
     }
 
@@ -42,6 +47,7 @@ impl Value {
             Value::Float(f) => *f,
             Value::True => 1.0,
             Value::False => 0.0,
+            Value::Object(i) => panic!("Object value {} is not a float", i),
         }
     }
 
@@ -61,6 +67,13 @@ impl Value {
             (Value::Int(_), Value::Float(_)) => Box::new(Value::add_int),
             (Value::Float(_), Value::Int(_)) => Box::new(Value::add_float),
             _ => panic!("Invalid types for addition"),
+        }
+    }
+
+    fn get_id(&self) -> usize {
+        match self {
+            Value::Object(i) => *i,
+            _ => panic!("Value is not an object"),
         }
     }
 
@@ -104,6 +117,9 @@ enum Instruction {
     Jump(usize),
     JumpT(usize),
     JumpF(usize),
+    CreateObject,
+    GetField(String),
+    SetField(String),
 }
 
 
@@ -119,6 +135,9 @@ enum Expr {
     Div(Box<Expr>, Box<Expr>),
     Eq(Box<Expr>, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
+    Object(Vec<(String, Expr)>),
+    GetField(Box<Expr>, String),
+    SetField(Box<Expr>, String, Box<Expr>),
     Ret,
 }
 
@@ -180,16 +199,38 @@ impl Expr {
                 instructions.push(Jump(exit_location));
                 instructions.extend(else_);
             }
+            Expr::Object(fields) => {
+                instructions.push(CreateObject);
+                for (name, expr) in fields {
+                    instructions.extend(expr.compile());
+                    instructions.push(SetField(name.clone()));
+                }
+            }
+            Expr::GetField(obj, name) => {
+                instructions.extend(obj.compile());
+                instructions.push(GetField(name.clone()));
+            }
+            Expr::SetField(obj, name, value) => {
+                instructions.extend(obj.compile());
+                instructions.extend(value.compile());
+                instructions.push(SetField(name.clone()));
+            }
         }
         instructions
     }
 }
 
 
+struct ObjectInfo {
+    fields: HashMap<String, Value>,
+}
+
+
 
 struct Vm {
     pc: usize,
-    memory: [Value; 4096],
+    memory: Vec<Option<ObjectInfo>>,
+    next_object_id: usize,
     stack: Vec<Value>,
     code: Vec<Instruction>,
 }
@@ -198,9 +239,10 @@ impl Vm {
     fn new() -> Vm {
         Vm {
             pc: 0,
-            memory: [Value::Int(0); 4096],
+            memory: Vec::new(),
             stack: Vec::new(),
             code: Vec::new(),
+            next_object_id: 0,
         }
     }
 
@@ -325,6 +367,31 @@ impl Vm {
                     });
                     self.pc += 1;
                 }
+
+                Instruction::CreateObject => {
+                    let object_id = self.next_object_id;
+                    self.next_object_id += 1;
+                    self.memory.push(Some(ObjectInfo {
+                        fields: HashMap::new(),
+                    }));
+                    self.stack.push(Value::Object(object_id));
+                    self.pc += 1;
+                }
+                Instruction::GetField(s) => {
+                    let object_id = self.stack.pop().unwrap();
+                    let object = self.memory[object_id.get_id() as usize].as_ref().unwrap();
+                    let field = object.fields.get(s).unwrap();
+                    self.stack.push(field.clone());
+                    self.pc += 1;
+                }
+                Instruction::SetField(s) => {
+                    let value = self.stack.pop().unwrap();
+                    let object = self.stack.pop().unwrap();
+                    let object_info = self.memory[object.get_id() as usize].as_mut().unwrap();
+                    object_info.fields.insert(s.clone(), value);
+                    self.stack.push(object);
+                    self.pc += 1;
+                }
             }
         }
     }
@@ -366,6 +433,18 @@ macro_rules! lang {
     ((= $arg1:tt $arg2:tt)) => {
         Expr::Eq(Box::new(lang!($arg1)), Box::new(lang!($arg2)))
     };
+    ({ $attr:tt : $value:tt, $($attr2:tt : $value2:tt),* }) => {
+        Expr::Object(vec![
+            ($attr.to_string(), lang!($value)),
+            $(($attr2.to_string(), lang!($value2))),*
+        ])
+    };
+    ((. $obj:tt $attr:tt)) => {
+        Expr::GetField(Box::new(lang!($obj)), $attr.to_string())
+    };
+    ((.set $obj:tt $attr:tt $value:tt)) => {
+        Expr::SetField(Box::new(lang!($obj)), $attr.to_string(), Box::new(lang!($value)))
+    };
     // How should I handle return?
     (ret) => {
         Expr::Ret
@@ -384,10 +463,29 @@ fn main() {
         (++ (++ (f 2.0) 2) (++ 3 (f 4.0)))
     );
 
+    let my_expr3 = lang!(
+        (. (.set {
+                "a": 1,
+                "b": 2,
+                "c": 3
+            } "a" 3)
+        "a")
+    );
+
 
     let mut vm = Vm::new();
     vm.code = my_expr.compile();
     println!("{:?}", vm.code);
+
+
+
+    let mut vm = Vm::new();
+    vm.code = my_expr3.compile();
+    println!("{:?}", vm.code);
+    vm.run();
+    println!("{:?}", vm.get_ret());
+
+
 
 
     let mut result = 0;
