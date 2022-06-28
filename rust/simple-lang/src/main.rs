@@ -256,7 +256,6 @@ impl Vm {
     }
 
     fn run(&mut self) {
-        let mut should_assign_cache: Option<ValueKind> = None;
         while self.pc < self.code.len() {
             // println!("{:?}, {} {}", self.stack, self.pc, self.code.len());
             let instruction = &self.code[self.pc];
