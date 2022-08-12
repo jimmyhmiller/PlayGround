@@ -13,7 +13,7 @@ fn write_first(file: &mut File) -> std::io::Result<usize> {
 }
 
 fn write_second(file: &mut File) -> std::io::Result<usize> {
-    file.write(format!("Hello, others!{}\n", epoch_as_string()).as_bytes())
+    file.write(format!("Hello, others! {}\n", epoch_as_string()).as_bytes())
 }
 
 fn delete(path: &str) -> std::io::Result<()> {
