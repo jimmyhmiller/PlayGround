@@ -1,7 +1,7 @@
 
 use lldb::*;
 use lldb_sys as sys;
-use std::{ffi::{CString}, os::raw::c_char, thread, time::Duration};
+use std::{ffi::{CString, CStr}, os::raw::c_char, thread, time::Duration};
 
 
 
@@ -99,6 +99,39 @@ fn main() {
                 println!("here {:?} {:?} {:?} {:?} {:?}", process, process.exit_status(), process.is_alive(), process.is_running(), process.state());
                 // thread::sleep(Duration::from_secs(10));
                 loop {
+                    wait_for_enter();
+                     for thread in process.threads() {
+                        if !thread.is_valid() { println!("Not valid"); continue; }
+                        for frame in thread.frames() {
+                            if !frame.is_valid() { continue; }
+                            println!("{:?}", frame.function());
+                            println!("{:?}", frame.display_function_name());
+                            for var in frame.all_variables().iter() {
+                                unsafe {
+                                    match CStr::from_ptr(sys::SBValueGetName(var.raw)).to_str() {
+                                        Ok(name) => {
+                                            println!("{:?}", name)
+                                        },
+                                        Err(e) => println!("{:?}", e),
+                                    }
+                                }
+
+                                unsafe {
+                                    let value = sys::SBValueGetValue(var.raw);
+                                    if value.is_null() { continue; }
+                                    match CStr::from_ptr(value).to_str() {
+                                        Ok(s) => {
+                                            println!("{:?}", s);
+                                        },
+                                        _ => panic!("Invalid string?"),
+                                    }
+                                }
+                                println!("A variable");
+                                if !var.is_valid() { continue; }
+                                println!("{:?}: {:?}", var.name(), var.value());
+                            }
+                        }
+                    }
                     wait_for_enter();
                     process.continue_execution();
 
