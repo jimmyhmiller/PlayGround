@@ -77,15 +77,15 @@ fn main() {
         //     sys::SBLaunchInfoSetArguments(launchinfo.raw, args, true);
         // };
 
-    //    println!("functions!");
-    //     for function in target.find_functions("write_second", 2).iter() {
-    //         println!("Func {:?}", function);
-    //         let address = function.function().start_address();
-    //         let breakpoint = breakpoint_create_by_sbaddress(&target, address);
-    //         breakpoint.set_enabled(true);
-    //     }
-    //     println!("{:?}", target.breakpoints().collect::<Vec<_>>());
-    //     target.enable_all_breakpoints();
+        println!("functions!");
+        for function in target.find_functions("write_second", 2).iter() {
+            println!("Func {:?}", function);
+            let address = function.function().start_address();
+            let breakpoint = breakpoint_create_by_sbaddress(&target, address);
+            breakpoint.set_enabled(true);
+        }
+        println!("{:?}", target.breakpoints().collect::<Vec<_>>());
+        target.enable_all_breakpoints();
         println!("End functions");
         // launchinfo.set_arguments(&["/Users/jimmyhmiller/Documents/open-source/ruby/ruby"]);
         match target.launch(launchinfo) {
