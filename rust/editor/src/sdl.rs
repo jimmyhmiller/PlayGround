@@ -113,12 +113,15 @@ pub fn draw_font_texture(texture_creator: &TextureCreator<WindowContext>, ttf_co
 
 
 
+
+#[allow(dead_code)]
 pub struct SkiaContext<'a> {
     pub surface: skia_safe::Surface,
     pub drawable: &'a MetalDrawableRef,
     pub command_queue: metal::CommandQueue,
 }
 
+#[allow(dead_code)]
 pub fn setup_skia<'a>(device: &'a Device, layer: &'a MetalLayer, canvas: &'a Canvas<Window>) -> SkiaContext<'a> {
 
 	layer.set_device(&device);

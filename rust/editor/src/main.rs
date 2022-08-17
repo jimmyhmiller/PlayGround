@@ -2,13 +2,13 @@
 
 use std::{cmp::{max, min}, fs, str::from_utf8};
 use std::fmt::Debug;
-use foreign_types::ForeignType;
+// use foreign_types::ForeignType;
 
-use metal::{Device, MetalLayer, CAMetalLayer};
+// use metal::{Device, MetalLayer, CAMetalLayer};
 use pane::{TextPane, Pane};
 use pane_manager::{PaneManager, PaneSelector};
 use sdl2::{pixels::{Color}, rect::Rect};
-use skia_safe::{Color4f, ColorSpace};
+// use skia_safe::{Color4f, ColorSpace};
 use tokenizer::{Tokenizer, Token};
 
 
@@ -456,10 +456,10 @@ fn main() -> Result<(), String> {
         system_cursor,
     } = sdl::setup_sdl(window.width as usize, window.height as usize)?;
 
-    let device = Device::system_default().expect("no device found");
+    // let device = Device::system_default().expect("no device found");
 
-    let layer = unsafe { sdl2_sys::SDL_RenderGetMetalLayer(canvas.raw())} as *mut CAMetalLayer;
-    let layer = unsafe {  MetalLayer::from_ptr(layer) };
+    // let layer = unsafe { sdl2_sys::SDL_RenderGetMetalLayer(canvas.raw())} as *mut CAMetalLayer;
+    // let layer = unsafe {  MetalLayer::from_ptr(layer) };
 
 
     
@@ -528,14 +528,14 @@ fn main() -> Result<(), String> {
 
         draw(&mut renderer, &mut pane_manager, &mut fps)?;
 
-        let mut skia = sdl::setup_skia(&device, &layer, &renderer.canvas);
-        let skia_canvas = skia.surface.canvas();
-        skia_canvas.draw_rect(skia_safe::Rect::new(10.0, 10.0, 500.0, 500.0), &skia_safe::paint::Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), &ColorSpace::new_srgb()));
+        // let mut skia = sdl::setup_skia(&device, &layer, &renderer.canvas);
+        // let skia_canvas = skia.surface.canvas();
+        // skia_canvas.draw_rect(skia_safe::Rect::new(10.0, 10.0, 500.0, 500.0), &skia_safe::paint::Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), &ColorSpace::new_srgb()));
 
-        skia.surface.flush_and_submit();
-        let command_buffer = skia.command_queue.new_command_buffer();
-        command_buffer.present_drawable(skia.drawable);
-        command_buffer.commit();
+        // skia.surface.flush_and_submit();
+        // let command_buffer = skia.command_queue.new_command_buffer();
+        // command_buffer.present_drawable(skia.drawable);
+        // command_buffer.commit();
         
         
         let mut actions = handle_events(&mut event_pump);
