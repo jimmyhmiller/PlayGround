@@ -29,7 +29,7 @@ pub fn setup_window(mut editor: editor::Editor) {
 
     let window = WindowBuilder::new()
         .with_inner_size(size)
-        .with_title("Skia Metal Winit Example".to_string())
+        .with_title("Lith2".to_string())
         .build(&events_loop)
         .unwrap();
 
