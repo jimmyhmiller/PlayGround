@@ -1,8 +1,10 @@
 
+use std::{fs::File, io::Read, cell::Cell};
+
 use crate::fps_counter::FpsCounter;
 
 
-use skia_safe::{RRect, Font, Typeface, FontStyle, PaintStyle};
+use skia_safe::{RRect, Font, Typeface, FontStyle, PaintStyle, Image, Bitmap, Codec, Data};
 use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
 
 
@@ -103,27 +105,82 @@ struct Size {
     height: f32,
 }
 
+struct Widget {
+    pub id: WidgetId,
+    pub position: Position,
+    pub size: Size,
+    // Children might make sense
+    // pub children: Vec<Widget>,
+    pub data : WidgetData
+}
+
+
+
+
 // I could go the interface route here.
 // I like enums. Will consider it later.
 enum WidgetData {
-    Noop
+    Noop,
+    Circle {
+        radius: f32,
+        color: Color4f,
+    },
+    Compound {
+        children: Vec<WidgetId>,
+    },
+    Image {
+        path: String,
+        cache: Cell<Option<Image>>,
+    },
 }
 
 
 impl Widget {
-    fn draw(&self, canvas: &mut Canvas) {
-        match self.data {
+    fn draw(&self, canvas: &mut Canvas, widgets: &WidgetStore) {
+        match &self.data {
             WidgetData::Noop => {
-
+                
                 let rect = Rect::from_xywh(self.position.x + 10.0, self.position.y + 10.0, self.size.width, self.size.height);
                 let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
                 let purple = parse_hex("#1c041e");
-                canvas.draw_rrect(rrect, &purple);
+                canvas.draw_rrect(rrect, &to_paint(purple));
 
                 let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
                 let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-                canvas.draw_str("noop", Point::new(self.position.x + 30.0, self.position.y + 40.0), &font, white);
-                
+                canvas.draw_str("noop", Point::new(self.position.x + 30.0, self.position.y + 40.0), &font, white); 
+            }
+
+            WidgetData::Circle { radius, color } => {
+                let center = Point::new(self.position.x + radius, self.position.y + radius);
+                canvas.draw_circle(center, *radius, &to_paint(*color));
+            }
+            
+            WidgetData::Compound { children } => {
+                for child in children.iter() {
+                    // Need to set coords to be relative to the parent widget?
+                    // Or maybe I need two notions of position
+                    // Or maybe there should be a distinction between a compound widget
+                    // and a container or a scene or something.
+                    let child_widget = widgets.get(*child).unwrap();
+                    child_widget.draw(canvas, widgets);
+                }
+            }
+            WidgetData::Image { path, cache } => {
+                // TODO: This is probably terrible
+                // I am cloning and doing weird things.
+                if let Some(image) = cache.take() {
+                    canvas.draw_image(image.clone(), (self.position.x, self.position.y), None);
+                    cache.set(Some(image));
+                } else {
+
+                    let mut file = File::open(path).unwrap();
+                    let mut image_data = vec![];
+                    file.read_to_end(&mut image_data).unwrap();
+                    // let codec = Codec::from_data().unwrap();
+                    let image = Image::from_encoded(Data::new_copy(image_data.as_ref())).unwrap();
+                    cache.set(Some(image.clone()));
+                    canvas.draw_image(image, Point::new(400.0, 400.0), None);
+                }
             }
         }
     }
@@ -139,14 +196,6 @@ impl Widget {
     }
 }
 
-struct Widget {
-    pub id: WidgetId,
-    pub position: Position,
-    pub size: Size,
-    // Children might make sense
-    // pub children: Vec<Widget>,
-    pub data : WidgetData
-}
 
 
 struct Scene {
@@ -162,16 +211,43 @@ struct Context {
 
 type WidgetId = usize;
 
+struct WidgetStore {
+    widgets: Vec<Widget>,
+    next_id: WidgetId,
+}
+
+impl WidgetStore {
+    fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
+        let id = self.next_id;
+        self.next_id += 1;
+        widget.id = id;
+        self.widgets.push(widget);
+        id
+    }
+
+    fn get(&self, id: usize) -> Option<&Widget> {
+        // Is it -1?
+        self.widgets.get(id)
+    }
+
+    fn new() -> WidgetStore {
+        WidgetStore {
+            widgets: Vec::new(),
+            next_id: 0,
+        }
+    }
+}
+
 pub struct Editor {
     pub events: Vec<Event>,
     pub fps_counter: FpsCounter,
     scenes: Vec<Scene>,
     current_scene: usize,
     context: Context,
-    widgets: Vec<Widget>,
-    next_widget_id: WidgetId,
     scene_selector: Vec<WidgetId>,
+    widget_store: WidgetStore,
 }
+
 
 
 
@@ -181,7 +257,7 @@ use skia_safe::{Canvas, Color4f, Paint, Point, Rect};
 
 
 
-fn parse_hex(hex: &str) -> Paint {
+fn parse_hex(hex: &str) -> Color4f {
 
     let mut start = 0;
     if hex.starts_with("#") {
@@ -191,26 +267,27 @@ fn parse_hex(hex: &str) -> Paint {
     let r = i64::from_str_radix(&hex[start..start+2], 16).unwrap() as f32;
     let g = i64::from_str_radix(&hex[start+2..start+4], 16).unwrap() as f32;
     let b = i64::from_str_radix(&hex[start+4..start+6], 16).unwrap() as f32;
-    return Paint::new(Color4f::new(r / 255.0, g / 255.0, b / 255.0, 1.0), None);
+    return Color4f::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
+}
+
+fn to_paint(color: Color4f) -> Paint {
+    Paint::new(color, None)
 }
 
 
 impl<'a> Editor {
 
-    fn get_widget_by_id(&self, id: WidgetId) -> &Widget {
+    fn get_widget_by_id(&self, id: WidgetId) -> Option<&Widget> {
         // This means I never gc widgets
         // But I could of course free them and keep
         // a free list around.
         // or use a map. Or do a linear search.
         // But fine for now
-        &self.widgets[id - 1]
+        self.widget_store.get(id)
     }
 
-    fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
-        let id = self.next_widget_id;
-        widget.id = id;
-        self.widgets.push(widget);
-        self.next_widget_id += 1;
+    fn add_widget(&mut self, widget: Widget) -> WidgetId {
+        let id = self.widget_store.add_widget(widget);
         id
     }
 
@@ -223,9 +300,19 @@ impl<'a> Editor {
             size: Size { width: 200.0, height: 100.0 },
             data: WidgetData::Noop,
         });
+
+        let image_id = self.add_widget(Widget {
+            id: 0,
+            position: Position { x: 400.0, y: 400.0 },
+            size: Size { width: 200.0, height: 100.0 },
+            data: WidgetData::Image {
+                path: "/Users/jimmyhmiller/Downloads/Jimmy’s new iPad/files/20479ab6a77feae4060e5ea19beee525_original.png".to_string(),
+                cache: Cell::new(None),
+            },
+        });
+
         self.scenes.push(Scene {
-            widgets: vec![id
-]
+            widgets: vec![id, image_id],
         });
 
         let id = self.add_widget(Widget {
@@ -235,8 +322,22 @@ impl<'a> Editor {
             data: WidgetData::Noop,
         });
 
+        let id_circle = self.add_widget(Widget {
+            id: 0,
+            position: Position { x: 500.0, y: 500.0 },
+            size: Size { width: 100.0, height: 100.0 },
+            data: WidgetData::Circle { radius: 10.0, color: parse_hex("#ff0000") },
+        });
+
+        let id_compound = self.add_widget(Widget {
+            id: 0,
+            position: Position { x: 500.0, y: 500.0 },
+            size: Size { width: 100.0, height: 100.0 },
+            data: WidgetData::Compound { children: vec![id, id_circle] },
+        });
+
         self.scenes.push(Scene {
-            widgets: vec![id]
+            widgets: vec![id_compound]
         });
 
 
@@ -269,8 +370,7 @@ impl<'a> Editor {
                 right_mouse_down: false,
             },
             scene_selector: vec![],
-            widgets: vec![],
-            next_widget_id: 1,
+            widget_store: WidgetStore::new()
         }
     }
 
@@ -285,7 +385,7 @@ impl<'a> Editor {
         use skia_safe::{Size};
 
         let gray = parse_hex("#333333");
-        canvas.clear(gray.color4f());
+        canvas.clear(gray);
 
 
         let canvas_size = Size::from(canvas.base_layer_size());
@@ -302,10 +402,10 @@ impl<'a> Editor {
         // Or do I want the widget to look at the mouse position?
         // Maybe allow for both?
         for widget_id in self.scene_selector.iter() {
-            let widget = self.get_widget_by_id(*widget_id);
+            let widget = self.get_widget_by_id(*widget_id).unwrap();
             let rect = Rect::from_xywh(widget.position.x, widget.position.y, widget.size.width, widget.size.height);
             let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
-            let purple = parse_hex("#1c041e");
+            let purple = &to_paint(parse_hex("#1c041e"));
            
             if widget.mouse_over(&self.context.mouse_position) {
                 let mut outline = white.clone();
@@ -321,7 +421,7 @@ impl<'a> Editor {
                     widget.size.height - 10.0
                 );
                 let rrect = RRect::new_rect_xy(rect, 15.0, 15.0);
-                canvas.draw_rrect(rrect, &purple);
+                canvas.draw_rrect(rrect, purple);
             } else {
                 canvas.draw_rrect(rrect, &purple);
             }
@@ -329,8 +429,8 @@ impl<'a> Editor {
 
         let scene = &self.scenes[self.current_scene];
         for widget_id in scene.widgets.iter() {
-            let widget = self.get_widget_by_id(*widget_id);
-            widget.draw(canvas);
+            let widget = self.get_widget_by_id(*widget_id).unwrap();
+            widget.draw(canvas, &self.widget_store);
         }
 
 
@@ -392,8 +492,6 @@ impl<'a> Editor {
                 self.context.left_mouse_down = false;
                 // Probably not the right place.
                 // Maybe need events on last cycle?
-
- 
             },
             Event::RightMouseDown {..} => {
                 self.events.push(event);
@@ -411,7 +509,8 @@ impl<'a> Editor {
 
     fn add_clicks(&mut self) -> () {
         let mut clicked = vec![];
-        for widget in self.widgets.iter() {
+        // I would need some sort of hierarchy here
+        for widget in self.widget_store.widgets.iter() {
             if widget.mouse_over(&self.context.mouse_position) {
                 clicked.push(widget.id);
             }
@@ -419,9 +518,6 @@ impl<'a> Editor {
         for id in clicked {
             self.respond_to_event(Event::ClickedWidget { widget_id: id });
         }
-        
-
-
     }
 }
 
