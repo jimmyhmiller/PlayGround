@@ -191,7 +191,12 @@ fn special_pane_by_name(pane_manager: &mut PaneManager, name: &str, text_builder
     let pane_id = pane_manager.get_pane_by_name( name)?.id();
 
     let active_pane = pane_manager.get_active_pane_mut()?;
+    if pane_id == active_pane.id() {
+        println!("{} is active", name);
+        return None
+    }
     let active_pane = active_pane.get_text_pane_mut()?;
+
 
     text_builder(active_pane, &mut chars);
 
@@ -226,6 +231,8 @@ fn handle_transaction_pane(pane_manager: &mut PaneManager) -> Option<()> {
 
 // TODO: THIS IS BROKEN!
 fn handle_token_pane(pane_manager: &mut PaneManager) -> Option<()> {
+
+    let token_pane_id = pane_manager.get_pane_by_name("token_pane")?.id();
 
     special_pane_by_name(pane_manager, "token_pane", |pane, chars| {
 
