@@ -1,10 +1,10 @@
 
-use std::{fs::File, io::Read, cell::Cell};
+use std::{fs::File, io::Read, cell::{RefCell}};
 
 use crate::fps_counter::FpsCounter;
 
 
-use skia_safe::{RRect, Font, Typeface, FontStyle, PaintStyle, Image, Bitmap, Codec, Data};
+use skia_safe::{RRect, Font, Typeface, FontStyle, PaintStyle, Image, Data};
 use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
 
 
@@ -129,9 +129,37 @@ enum WidgetData {
         children: Vec<WidgetId>,
     },
     Image {
-        path: String,
-        cache: Cell<Option<Image>>,
+       data: ImageData
     },
+}
+
+
+struct ImageData {
+    path: String,
+    // I am not sure about having this local
+    // One thing I should maybe consider is only have
+    // images in memory if they are visible.
+    // How to do that though? Do I have a lifecycle for widgets
+    // no longer being visible?
+    cache: RefCell<Option<Image>>,
+}
+
+impl ImageData {
+    fn new(path: String) -> Self {
+        Self {
+            path,
+            cache: RefCell::new(None),
+        }
+    }
+
+    fn load_image(&self) {
+        let mut file = File::open(&self.path).unwrap();
+        let mut image_data = vec![];
+        file.read_to_end(&mut image_data).unwrap();
+        let image = Image::from_encoded(Data::new_copy(image_data.as_ref())).unwrap();
+        self.cache.replace(Some(image));
+    }
+
 }
 
 
@@ -165,22 +193,19 @@ impl Widget {
                     child_widget.draw(canvas, widgets);
                 }
             }
-            WidgetData::Image { path, cache } => {
-                // TODO: This is probably terrible
-                // I am cloning and doing weird things.
-                if let Some(image) = cache.take() {
-                    canvas.draw_image(image.clone(), (self.position.x, self.position.y), None);
-                    cache.set(Some(image));
-                } else {
-
-                    let mut file = File::open(path).unwrap();
-                    let mut image_data = vec![];
-                    file.read_to_end(&mut image_data).unwrap();
-                    // let codec = Codec::from_data().unwrap();
-                    let image = Image::from_encoded(Data::new_copy(image_data.as_ref())).unwrap();
-                    cache.set(Some(image.clone()));
-                    canvas.draw_image(image, Point::new(400.0, 400.0), None);
+            WidgetData::Image { data } => {
+                // I tried to abstract this out and ran into the issue of returning a ref.
+                // Can't use a closure, could box, but seems unnecessary. Maybe this data belongs elsewhere?
+                // I mean the interior mutability is gross anyway.
+                let image = data.cache.borrow();
+                if image.is_none() {
+                    // Need to drop because we just borrowed.
+                    drop(image);
+                    data.load_image();
                 }
+                let image = data.cache.borrow();
+                let image = image.as_ref().unwrap();
+                canvas.draw_image(image, (self.position.x, self.position.y), None);
             }
         }
     }
@@ -306,8 +331,7 @@ impl<'a> Editor {
             position: Position { x: 400.0, y: 400.0 },
             size: Size { width: 200.0, height: 100.0 },
             data: WidgetData::Image {
-                path: "/Users/jimmyhmiller/Downloads/Jimmy’s new iPad/files/20479ab6a77feae4060e5ea19beee525_original.png".to_string(),
-                cache: Cell::new(None),
+                data: ImageData::new("/Users/jimmyhmiller/Downloads/Jimmy’s new iPad/files/20479ab6a77feae4060e5ea19beee525_original.png".to_string()),
             },
         });
 
@@ -520,5 +544,41 @@ impl<'a> Editor {
         }
     }
 }
+
+
+
+
+// I need a way for processes to add widgets
+// I don't want them to need to remove widgets by holding onto a reference or something
+// It should work like react, always rendering the whole thing.
+// At the same time, there are effects that processes might want to run and we need to distinguish between these.
+
+// If a process gives me some output that are the widgets I should render
+// how do I store them? If they clear that output, I should remove them
+// But that implies that I have a way to identify them.
+
+// I could instead each frame add the widgets of each process. 
+// Then I would have a mostly blank list of widgets
+
+
+// You might also want to have widgets that outlive the process.
+// Widgets that stay only when the processes output is saved might not be desirable.
+// Or is it? 
+// The process itself can be gone, but the output can still be there.
+// In fact, is there really a distinction? Is the widget not just the code that generates it?
+
+// But it is possible that it would be better/faster
+// to keep track of what widgets some output produced.
+// I hold onto some ids. If the output is gone, I remove the widgets.
+// If the output changes, I remove the widgets and add the new ones.
+// I could then maybe do some sort of key based diffing algorithm.
+
+
+
+
+
+
+
+
 
 
