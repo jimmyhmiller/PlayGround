@@ -23,7 +23,7 @@ pub fn setup_window(mut editor: editor::Editor) {
         window::WindowBuilder,
     };
 
-    let size = LogicalSize::new(800 as i32, 600 as i32);
+    let size = LogicalSize::new(1600 as i32, 1600 as i32);
 
     let events_loop = EventLoop::new();
 
