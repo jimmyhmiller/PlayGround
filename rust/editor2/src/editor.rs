@@ -8,6 +8,32 @@ use skia_safe::{RRect, Font, Typeface, FontStyle, PaintStyle, Image, Data};
 use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
 
 
+const MY_STRING : &str =
+"asdfjknsdva
+sdvasdklnv'asdm
+asdmv
+asdkg;klasdjnvjlkasdnvkljansdkljcnalksjdnvjklasndvljkansdjlkvnasldjknvaljksdnvljkasdnljkvansdjklvnasdlkjvnalskjdnvakljsdnvljkasdn
+vma
+sd;lvma
+sd;lvmas
+d;lvma
+sdlvma
+sd;lvmas
+dlvma
+;dlsmv
+asldmv
+alsdmv
+alsdmva;lsdmv
+asl;dmv
+alsdmv
+;alsmd
+valsdl;l;asldl;gal;sd;lfl;asl;dfl;asdlkfasldkfl;askd
+fla;skd
+f;laksd'lfka'sdl;ka'dls;kf'als;d
+";
+
+
+
 pub enum Event {
     Noop,
     MouseMove { x: f32, y: f32 },
@@ -131,6 +157,9 @@ enum WidgetData {
     Image {
        data: ImageData
     },
+    TextPane {
+        contents: Vec<u8>
+    }
 }
 
 
@@ -206,6 +235,15 @@ impl Widget {
                 let image = data.cache.borrow();
                 let image = image.as_ref().unwrap();
                 canvas.draw_image(image, (self.position.x, self.position.y), None);
+            }
+            WidgetData::TextPane { contents } => {
+                // TODO: Try out clip
+                let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
+                let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
+                let text = std::str::from_utf8(contents).unwrap();
+                for (i, line) in text.split('\n').enumerate() {
+                    canvas.draw_str(line, Point::new(self.position.x, self.position.y + (i as f32 * 40.0)), &font, white);
+                }
             }
         }
     }
@@ -353,6 +391,15 @@ impl<'a> Editor {
             data: WidgetData::Circle { radius: 10.0, color: parse_hex("#ff0000") },
         });
 
+        let text_id = self.add_widget(Widget { 
+            id: 0,
+            position: Position { x: 500.0, y: 600.0 },
+            size: Size { width: 100.0, height: 100.0 },
+            data: WidgetData::TextPane {
+                contents: MY_STRING.as_bytes().to_vec(),
+            },
+        });
+
         let id_compound = self.add_widget(Widget {
             id: 0,
             position: Position { x: 500.0, y: 500.0 },
@@ -361,7 +408,7 @@ impl<'a> Editor {
         });
 
         self.scenes.push(Scene {
-            widgets: vec![id_compound]
+            widgets: vec![id_compound, text_id]
         });
 
 
@@ -525,7 +572,8 @@ impl<'a> Editor {
                 self.events.push(event);
                 self.context.right_mouse_down = false;
             },
-            Event::Scroll { x: _, y: _ } => {
+            Event::Scroll { x, y } => {
+                println!("Scroll {} {}", x,y );
                 self.events.push(event);
             }
         }
@@ -573,7 +621,15 @@ impl<'a> Editor {
 // If the output changes, I remove the widgets and add the new ones.
 // I could then maybe do some sort of key based diffing algorithm.
 
+// I also want the ability to start from data and make visualizations
+// That data might be persisted or in  buffer
+// Maybe I should start with some json and making visualizations?
+// This is the biggest problem, the space is so big, I don't want to rabbit hole on something.
 
+// Another thing I'm struggling with is what should be built in
+// vs what should be extension based
+// Maybe I should default to built-in and then move to extension afterwards?
+// Probably will have more to show for it.
 
 
 
