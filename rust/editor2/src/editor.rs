@@ -249,8 +249,10 @@ impl Widget {
                 let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
                 let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
                 let text = std::str::from_utf8(contents).unwrap();
+                canvas.clip_rect(self.bounding_rect().with_inset((20,20)), None, None);
+                canvas.translate((self.position.x, self.position.y));
                 for (i, line) in text.split('\n').enumerate() {
-                    canvas.draw_str(line, Point::new(self.position.x, self.position.y + 40.0 + (i as f32 * 40.0)), &font, white);
+                    canvas.draw_str(line, Point::new(20.0, 50.0 + (i as f32 * 40.0)), &font, white);
                 }
                 canvas.restore();
             }
