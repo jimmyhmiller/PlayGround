@@ -193,11 +193,16 @@ impl ImageData {
 
 
 impl Widget {
+
+    fn bounding_rect(&self) -> Rect {
+        Rect::from_xywh(self.position.x, self.position.y, self.size.width, self.size.height)
+    }
+
     fn draw(&self, canvas: &mut Canvas, widgets: &WidgetStore) {
         match &self.data {
             WidgetData::Noop => {
                 
-                let rect = Rect::from_xywh(self.position.x + 10.0, self.position.y + 10.0, self.size.width, self.size.height);
+                let rect = self.bounding_rect();
                 let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
                 let purple = parse_hex("#1c041e");
                 canvas.draw_rrect(rrect, &to_paint(purple));
@@ -237,13 +242,17 @@ impl Widget {
                 canvas.draw_image(image, (self.position.x, self.position.y), None);
             }
             WidgetData::TextPane { contents } => {
-                // TODO: Try out clip
+                canvas.save();
+                canvas.clip_rect(self.bounding_rect(), None, None);
+                let purple = parse_hex("#1c041e");
+                canvas.draw_rect(self.bounding_rect(), &to_paint(purple));
                 let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
                 let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
                 let text = std::str::from_utf8(contents).unwrap();
                 for (i, line) in text.split('\n').enumerate() {
-                    canvas.draw_str(line, Point::new(self.position.x, self.position.y + (i as f32 * 40.0)), &font, white);
+                    canvas.draw_str(line, Point::new(self.position.x, self.position.y + 40.0 + (i as f32 * 40.0)), &font, white);
                 }
+                canvas.restore();
             }
         }
     }
@@ -394,7 +403,7 @@ impl<'a> Editor {
         let text_id = self.add_widget(Widget { 
             id: 0,
             position: Position { x: 500.0, y: 600.0 },
-            size: Size { width: 100.0, height: 100.0 },
+            size: Size { width: 300.0, height: 300.0 },
             data: WidgetData::TextPane {
                 contents: MY_STRING.as_bytes().to_vec(),
             },
@@ -408,7 +417,7 @@ impl<'a> Editor {
         });
 
         self.scenes.push(Scene {
-            widgets: vec![id_compound, text_id]
+            widgets: vec![text_id, id_compound]
         });
 
 
