@@ -1,5 +1,5 @@
 
-use std::{fs::File, io::Read, cell::{RefCell}};
+use std::{fs::File, io::{Read}, cell::{RefCell}, str::Split};
 
 use crate::fps_counter::FpsCounter;
 
@@ -158,10 +158,41 @@ enum WidgetData {
        data: ImageData
     },
     TextPane {
-        contents: Vec<u8>
+        text_pane: TextPane,
     }
 }
 
+
+struct TextPane {
+    contents: Vec<u8>,
+    line_height: f32,
+}
+
+
+impl TextPane {
+    fn new(contents: Vec<u8>, line_height: f32) -> Self {
+        Self {
+            contents,
+            line_height,
+        }
+    }
+
+    fn number_of_visible_lines(&self, height: f32) -> usize {
+        (height / self.line_height).ceil() as usize
+    }
+
+    fn get_lines(&self) -> Split<char> {
+        let text = std::str::from_utf8(&self.contents).unwrap();
+        let mut lines = text.split('\n');
+        return lines;
+    }
+
+    fn visible_lines(&self, height: f32) -> std::iter::Take<Split<char>> {
+        self.get_lines().take(self.number_of_visible_lines(height))
+    }
+
+
+}
 
 struct ImageData {
     path: String,
@@ -170,6 +201,7 @@ struct ImageData {
     // images in memory if they are visible.
     // How to do that though? Do I have a lifecycle for widgets
     // no longer being visible?
+    // If I handled this globally all of that might be easier.
     cache: RefCell<Option<Image>>,
 }
 
@@ -241,19 +273,23 @@ impl Widget {
                 let image = image.as_ref().unwrap();
                 canvas.draw_image(image, (self.position.x, self.position.y), None);
             }
-            WidgetData::TextPane { contents } => {
+            WidgetData::TextPane { text_pane } => {
                 canvas.save();
                 canvas.clip_rect(self.bounding_rect(), None, None);
                 let purple = parse_hex("#1c041e");
                 canvas.draw_rect(self.bounding_rect(), &to_paint(purple));
                 let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
                 let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-                let text = std::str::from_utf8(contents).unwrap();
+
+
                 canvas.clip_rect(self.bounding_rect().with_inset((20,20)), None, None);
                 canvas.translate((self.position.x, self.position.y));
-                for (i, line) in text.split('\n').enumerate() {
-                    canvas.draw_str(line, Point::new(20.0, 50.0 + (i as f32 * 40.0)), &font, white);
+
+                for line in text_pane.visible_lines(self.size.height) {
+                    canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
+                    canvas.translate((0.0, text_pane.line_height));
                 }
+
                 canvas.restore();
             }
         }
@@ -407,7 +443,7 @@ impl<'a> Editor {
             position: Position { x: 500.0, y: 600.0 },
             size: Size { width: 300.0, height: 300.0 },
             data: WidgetData::TextPane {
-                contents: MY_STRING.as_bytes().to_vec(),
+                text_pane: TextPane::new(MY_STRING.as_bytes().to_vec(), 40.0)
             },
         });
 
@@ -643,6 +679,11 @@ impl<'a> Editor {
 // Probably will have more to show for it.
 
 
+
+// I think for events, I should have a per frame list of events.
+// I can do this while keeping the vec of events flat just by keeping an index
+// Then update gets a list of events that happened on that frame
+// and can respond to them.
 
 
 
