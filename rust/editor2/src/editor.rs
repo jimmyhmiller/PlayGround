@@ -121,6 +121,8 @@ impl Event {
     }
 }
 
+
+#[derive(Copy, Clone)]
 pub struct Position {
     pub x: f32,
     pub y: f32,
@@ -189,6 +191,10 @@ impl TextPane {
 
     fn visible_lines(&self, height: f32) -> std::iter::Take<Split<char>> {
         self.get_lines().take(self.number_of_visible_lines(height))
+    }
+
+    fn scroll(&mut self, x: f64, y: f64) {
+        println!("Scrolling: {}, {}", x, y);
     }
 
 
@@ -349,13 +355,49 @@ impl WidgetStore {
 }
 
 pub struct Editor {
-    pub events: Vec<Event>,
+    events: Events,
     pub fps_counter: FpsCounter,
     scenes: Vec<Scene>,
     current_scene: usize,
     context: Context,
     scene_selector: Vec<WidgetId>,
     widget_store: WidgetStore,
+}
+
+
+struct Events {
+    events: Vec<Event>,
+    frame_start_index: usize,
+    frame_end_index: usize, // exclusive
+}
+
+
+// It might be unnecessary to have start and end.
+// But I like the explicitness for now.
+impl Events {
+    fn new() -> Events {
+        Events {
+            events: Vec::new(),
+            frame_start_index: 0,
+            frame_end_index: 0,
+        }
+    }
+
+    fn push(&mut self, event: Event) {
+        self.events.push(event);
+    }
+
+    fn events_for_frame(&self) -> &[Event] {
+        &self.events[self.frame_start_index..self.frame_end_index]
+    }
+
+    fn next_frame(&mut self) {
+        self.frame_start_index = self.frame_end_index;
+    }
+
+    fn end_frame(&mut self) {
+        self.frame_end_index = self.events.len();
+    }
 }
 
 
@@ -399,6 +441,14 @@ impl<'a> Editor {
     fn add_widget(&mut self, widget: Widget) -> WidgetId {
         let id = self.widget_store.add_widget(widget);
         id
+    }
+
+    pub fn end_frame(&mut self) {
+        self.events.end_frame();
+    }
+
+    pub fn next_frame(&mut self) {
+        self.events.next_frame();
     }
 
 
@@ -473,12 +523,30 @@ impl<'a> Editor {
     }
 
     pub fn update(&mut self) {
-        // println!("scene {}", self.current_scene);
+        for event in self.events.events_for_frame() {
+            match event {
+                Event::Scroll { x, y } => {
+                    let mouse = self.context.mouse_position;
+                    for widget in self.widget_store.widgets.iter_mut() {
+                        if widget.mouse_over(&mouse) {
+                            match &mut widget.data {
+                                WidgetData::TextPane { text_pane } => {
+                                    text_pane.scroll(*x, *y);
+                                },
+                                _ => {}
+                            }
+                        }
+                    }
+                    println!("Scroll: {}, {}", x, y);
+                }
+                _ => {}
+            }
+        }
     }
 
     pub fn new() -> Self {
         Self {
-            events: Vec::new(),
+            events: Events::new(),
             fps_counter: FpsCounter::new(),
             scenes: vec![],
             current_scene: 0,
@@ -638,6 +706,7 @@ impl<'a> Editor {
             self.respond_to_event(Event::ClickedWidget { widget_id: id });
         }
     }
+
 }
 
 

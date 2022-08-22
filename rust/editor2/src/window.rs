@@ -87,6 +87,7 @@ pub fn setup_window(mut editor: editor::Editor) {
                     window.request_redraw();
                 }
                 Event::RedrawRequested(_) => {
+                    editor.end_frame();
                     editor.update();
                     if let Some(drawable) = metal_layer.next_drawable() {
                         let drawable_size = {
@@ -123,6 +124,7 @@ pub fn setup_window(mut editor: editor::Editor) {
                         command_buffer.present_drawable(drawable);
                         command_buffer.commit();
                     }
+                    editor.next_frame();
                 }
                 _ => {}
             }
