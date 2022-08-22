@@ -183,7 +183,7 @@ impl TextPane {
 
     fn get_lines(&self) -> Split<char> {
         let text = std::str::from_utf8(&self.contents).unwrap();
-        let mut lines = text.split('\n');
+        let lines = text.split('\n');
         return lines;
     }
 
