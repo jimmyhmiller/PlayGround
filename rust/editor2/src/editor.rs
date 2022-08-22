@@ -1,5 +1,5 @@
 
-use std::{fs::File, io::{Read}, cell::{RefCell}, str::Split};
+use std::{fs::File, io::{Read}, cell::{RefCell}};
 
 use crate::fps_counter::FpsCounter;
 
@@ -168,6 +168,7 @@ enum WidgetData {
 struct TextPane {
     contents: Vec<u8>,
     line_height: f32,
+    offset: Position,
 }
 
 
@@ -176,25 +177,52 @@ impl TextPane {
         Self {
             contents,
             line_height,
+            offset: Position { x: 0.0, y: 0.0 },
         }
+    }
+
+    fn lines_above_scroll(&self) -> usize {
+        (self.offset.y / self.line_height).floor() as usize
     }
 
     fn number_of_visible_lines(&self, height: f32) -> usize {
         (height / self.line_height).ceil() as usize
     }
 
-    fn get_lines(&self) -> Split<char> {
+    // TODO: obviously need to not compute this everytime.
+    fn get_lines(&self) -> impl std::iter::Iterator<Item=&str> + '_ {
         let text = std::str::from_utf8(&self.contents).unwrap();
         let lines = text.split('\n');
         return lines;
     }
-
-    fn visible_lines(&self, height: f32) -> std::iter::Take<Split<char>> {
-        self.get_lines().take(self.number_of_visible_lines(height))
+    
+    fn number_of_lines(&self) -> usize {
+        self.get_lines().count()
+    }
+    
+    fn visible_lines(&self, height: f32) -> impl std::iter::Iterator<Item=&str> + '_  {
+        self.get_lines().skip(self.lines_above_scroll()).take(self.number_of_visible_lines(height))
     }
 
-    fn scroll(&mut self, x: f64, y: f64) {
-        println!("Scrolling: {}, {}", x, y);
+    fn scroll(&mut self, x: f64, y: f64, height: f32) {
+        self.offset.x += x as f32;
+        if self.offset.x < 0.0 {
+            self.offset.x = 0.0;
+        }
+        // TODO: Handle x scrolling too far
+        self.offset.y -= y as f32;
+        if self.lines_above_scroll() + self.number_of_visible_lines(height) >= self.number_of_lines() {
+            self.offset.y = (self.number_of_lines() - self.number_of_visible_lines(height)) as f32 * self.line_height;
+        }
+        if self.offset.y < 0.0 {
+            self.offset.y = 0.0;
+        }
+        println!("offset: {}", self.offset.y);
+
+    }
+
+    fn fractional_line_offset(&self) -> f32 {
+        self.offset.y % self.line_height
     }
 
 
@@ -289,7 +317,8 @@ impl Widget {
 
 
                 canvas.clip_rect(self.bounding_rect().with_inset((20,20)), None, None);
-                canvas.translate((self.position.x, self.position.y));
+                let fractional_offset = text_pane.fractional_line_offset();
+                canvas.translate((self.position.x + 30.0 - text_pane.offset.x, self.position.y - fractional_offset));
 
                 for line in text_pane.visible_lines(self.size.height) {
                     canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
@@ -491,7 +520,7 @@ impl<'a> Editor {
         let text_id = self.add_widget(Widget { 
             id: 0,
             position: Position { x: 500.0, y: 600.0 },
-            size: Size { width: 300.0, height: 300.0 },
+            size: Size { width: 500.0, height: 500.0 },
             data: WidgetData::TextPane {
                 text_pane: TextPane::new(MY_STRING.as_bytes().to_vec(), 40.0)
             },
@@ -523,6 +552,10 @@ impl<'a> Editor {
     }
 
     pub fn update(&mut self) {
+
+        // Todo: Need to test that I am not missing any
+        // events with my start and end
+
         for event in self.events.events_for_frame() {
             match event {
                 Event::Scroll { x, y } => {
@@ -531,7 +564,7 @@ impl<'a> Editor {
                         if widget.mouse_over(&mouse) {
                             match &mut widget.data {
                                 WidgetData::TextPane { text_pane } => {
-                                    text_pane.scroll(*x, *y);
+                                    text_pane.scroll(*x, *y, widget.size.height);
                                 },
                                 _ => {}
                             }
@@ -758,4 +791,10 @@ impl<'a> Editor {
 
 
 
+// Example demos
+// Build my own powerpoint
+// Bind properties to each other
+// Build a platformer, that uses widgets as the level editor
+// YJS as an external addition
+// Browser based stuff
 
