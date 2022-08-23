@@ -161,7 +161,18 @@ enum WidgetData {
     },
     TextPane {
         text_pane: TextPane,
+    },
+    Text {
+        text: String,
+        text_options: TextOptions,
     }
+}
+
+struct TextOptions {
+    font_family: String,
+    font_style: FontStyle,
+    size: f32,
+    color: Color4f,
 }
 
 
@@ -312,7 +323,7 @@ impl Widget {
                 canvas.clip_rect(self.bounding_rect(), None, None);
                 let purple = parse_hex("#1c041e");
                 canvas.draw_rect(self.bounding_rect(), &to_paint(purple));
-                let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
+                let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(), 32.0);
                 let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
 
 
@@ -327,6 +338,12 @@ impl Widget {
 
                 canvas.restore();
             }
+            WidgetData::Text { text, text_options } => {
+                let font = Font::new(Typeface::new(text_options.font_family.clone(), text_options.font_style).unwrap(), text_options.size);
+                let color = &Paint::new(text_options.color, None);
+                canvas.draw_str(text, (self.position.x, self.position.y), &font, color);
+            }
+            
         }
     }
 
