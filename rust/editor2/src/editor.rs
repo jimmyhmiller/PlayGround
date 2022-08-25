@@ -1,12 +1,9 @@
 
-use std::{fs::File, io::{Read}, cell::{RefCell}};
-
-use crate::fps_counter::FpsCounter;
-
+use crate::{fps_counter::FpsCounter, widget::{WidgetId, Position, WidgetStore, Widget, Size, WidgetData, ImageData, parse_hex, TextPane, TextOptions, FontWeight}};
 
 use ron::ser::PrettyConfig;
-use serde::{Serialize, Deserialize};
-use skia_safe::{RRect, Font, Typeface, FontStyle, PaintStyle, Image, Data, font_style::{Weight, Width, Slant}};
+
+use skia_safe::{RRect, Font, Typeface, FontStyle, PaintStyle};
 use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
 
 
@@ -99,323 +96,6 @@ impl Event {
 }
 
 
-#[derive(Copy, Clone, Serialize, Deserialize)]
-pub struct Position {
-    pub x: f32,
-    pub y: f32,
-}
-
-impl Into<Point> for Position {
-    fn into(self) -> Point {
-        Point { x: self.x, y: self.y }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct Size {
-    width: f32,
-    height: f32,
-}
-
-#[derive(Serialize, Deserialize)]
-struct Widget {
-    #[serde(skip)]
-    pub id: WidgetId,
-    pub position: Position,
-    pub size: Size,
-    // Children might make sense
-    // pub children: Vec<Widget>,
-    pub data : WidgetData
-}
-
-#[derive(Serialize, Deserialize)]
-struct Color {
-    r: f32,
-    g: f32,
-    b: f32,
-    a: f32,
-}
-
-impl Color {
-    fn to_paint(&self) -> Paint {
-        Paint::new(Color4f::new(self.r, self.g, self.b, self.a), None)
-    }
-
-    fn to_color4f(&self) -> Color4f {
-        Color4f::new(self.r, self.g, self.b, self.a)
-    }
-
-    fn new(r: f32, g: f32, b: f32, a: f32) -> Color {
-        Color { r, g, b, a }
-    }
-}
-
-
-
-
-// I could go the interface route here.
-// I like enums. Will consider it later.
-#[derive(Serialize, Deserialize)]
-enum WidgetData {
-    Noop,
-    Circle {
-        radius: f32,
-        color: Color,
-    },
-    Compound {
-        children: Vec<WidgetId>,
-    },
-    Image {
-       data: ImageData
-    },
-    TextPane {
-        text_pane: TextPane,
-    },
-    Text {
-        text: String,
-        text_options: TextOptions,
-    }
-}
-
-#[derive(Copy, Clone, Serialize, Deserialize)]
-enum FontWeight {
-    Light,
-    Normal,
-    Bold,
-}
-
-impl Into<FontStyle> for FontWeight {
-    fn into(self) -> FontStyle {
-        match self {
-            FontWeight::Light => FontStyle::new(Weight::LIGHT, Width::NORMAL, Slant::Upright),
-            FontWeight::Normal => FontStyle::normal(),
-            FontWeight::Bold => FontStyle::bold(),
-        }
-    }
-}
-
-
-#[derive(Serialize, Deserialize)]
-struct TextOptions {
-    font_family: String,
-    font_weight: FontWeight,
-    size: f32,
-    color: Color,
-}
-
-
-#[derive(Serialize, Deserialize)]
-struct TextPane {
-    contents: Vec<u8>,
-    line_height: f32,
-    offset: Position,
-}
-
-
-impl TextPane {
-    fn new(contents: Vec<u8>, line_height: f32) -> Self {
-        Self {
-            contents,
-            line_height,
-            offset: Position { x: 0.0, y: 0.0 },
-        }
-    }
-
-    fn lines_above_scroll(&self) -> usize {
-        (self.offset.y / self.line_height).floor() as usize
-    }
-
-    // TODO: Deal with margin!
-    fn number_of_visible_lines(&self, height: f32) -> usize {
-        ((height - 40.0) / self.line_height).ceil() as usize
-    }
-
-    // TODO: obviously need to not compute this everytime.
-    fn get_lines(&self) -> impl std::iter::Iterator<Item=&str> + '_ {
-        let text = std::str::from_utf8(&self.contents).unwrap();
-        let lines = text.split('\n');
-        return lines;
-    }
-    
-    fn number_of_lines(&self) -> usize {
-        self.get_lines().count()
-    }
-    
-    fn visible_lines(&self, height: f32) -> impl std::iter::Iterator<Item=&str> + '_  {
-        self.get_lines().skip(self.lines_above_scroll()).take(self.number_of_visible_lines(height))
-    }
-
-    fn scroll(&mut self, x: f64, y: f64, height: f32) {
-
-        // this is all terribly wrong. I don't get the bounds correctly.
-        // Need to deal with that.
-
-
-        self.offset.x += x as f32;
-        if self.offset.x < 0.0 {
-            self.offset.x = 0.0;
-        }
-        // TODO: Handle x scrolling too far
-        self.offset.y -= y as f32;
-
-        let offset_before = self.offset.y;
-
-
-        // Need to account for margin
-        let scroll_with_last_line_visible =
-            self.number_of_lines().saturating_sub(self.number_of_visible_lines(height)) as f32 * self.line_height;
-
-        println!("{} {} {}", self.number_of_lines(), self.number_of_visible_lines(height), scroll_with_last_line_visible / self.line_height);
-    
-
-        if self.offset.y > scroll_with_last_line_visible + 20.0 {
-            self.offset.y = scroll_with_last_line_visible + 20.0 ;
-        }
-
-
-
-        println!("{}, {}", offset_before, self.offset.y);
-
-
-        // if (self.lines_above_scroll() + self.number_of_visible_lines(height) - 1) as f32 * self.line_height + self.fractional_line_offset()  >= (self.number_of_lines() as f32 * self.line_height) {
-        //     self.offset.y = (self.number_of_lines().saturating_sub(self.number_of_visible_lines(height) + 1)) as f32 * self.line_height + 20.0 // TODO handle margin
-        // }
-        if self.offset.y < 0.0 {
-            self.offset.y = 0.0;
-        }
-
-    }
-
-    fn fractional_line_offset(&self) -> f32 {
-        self.offset.y % self.line_height
-    }
-
-
-}
-
-#[derive(Serialize, Deserialize)]
-struct ImageData {
-    path: String,
-    // I am not sure about having this local
-    // One thing I should maybe consider is only have
-    // images in memory if they are visible.
-    // How to do that though? Do I have a lifecycle for widgets
-    // no longer being visible?
-    // If I handled this globally all of that might be easier.
-    #[serde(skip)]
-    cache: RefCell<Option<Image>>,
-}
-
-impl ImageData {
-    fn new(path: String) -> Self {
-        Self {
-            path,
-            cache: RefCell::new(None),
-        }
-    }
-
-    fn load_image(&self) {
-        let mut file = File::open(&self.path).unwrap();
-        let mut image_data = vec![];
-        file.read_to_end(&mut image_data).unwrap();
-        let image = Image::from_encoded(Data::new_copy(image_data.as_ref())).unwrap();
-        self.cache.replace(Some(image));
-    }
-
-}
-
-
-impl Widget {
-
-    fn bounding_rect(&self) -> Rect {
-        Rect::from_xywh(self.position.x, self.position.y, self.size.width, self.size.height)
-    }
-
-    fn draw(&self, canvas: &mut Canvas, widgets: &WidgetStore) {
-        match &self.data {
-            WidgetData::Noop => {
-                
-                let rect = self.bounding_rect();
-                let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
-                let purple = parse_hex("#1c041e");
-                canvas.draw_rrect(rrect, &purple.to_paint());
-
-                let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
-                let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-                canvas.draw_str("noop", Point::new(self.position.x + 30.0, self.position.y + 40.0), &font, white); 
-            }
-
-            WidgetData::Circle { radius, color } => {
-                let center = Point::new(self.position.x + radius, self.position.y + radius);
-                canvas.draw_circle(center, *radius, &color.to_paint());
-            }
-            
-            WidgetData::Compound { children } => {
-                for child in children.iter() {
-                    // Need to set coords to be relative to the parent widget?
-                    // Or maybe I need two notions of position
-                    // Or maybe there should be a distinction between a compound widget
-                    // and a container or a scene or something.
-                    let child_widget = widgets.get(*child).unwrap();
-                    child_widget.draw(canvas, widgets);
-                }
-            }
-            WidgetData::Image { data } => {
-                // I tried to abstract this out and ran into the issue of returning a ref.
-                // Can't use a closure, could box, but seems unnecessary. Maybe this data belongs elsewhere?
-                // I mean the interior mutability is gross anyway.
-                let image = data.cache.borrow();
-                if image.is_none() {
-                    // Need to drop because we just borrowed.
-                    drop(image);
-                    data.load_image();
-                }
-                let image = data.cache.borrow();
-                let image = image.as_ref().unwrap();
-                canvas.draw_image(image, self.position, None);
-            }
-            WidgetData::TextPane { text_pane } => {
-                canvas.save();
-                canvas.clip_rect(self.bounding_rect(), None, None);
-                let purple = parse_hex("#1c041e");
-                let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);
-                canvas.draw_rrect(rrect, &purple.to_paint());
-                let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(), 32.0);
-                let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-
-
-                canvas.clip_rect(self.bounding_rect().with_inset((20,20)), None, None);
-                let fractional_offset = text_pane.fractional_line_offset();
-                canvas.translate((self.position.x + 30.0 - text_pane.offset.x, self.position.y + text_pane.line_height - fractional_offset + 10.0));
-
-                for line in text_pane.visible_lines(self.size.height) {
-                    canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
-                    canvas.translate((0.0, text_pane.line_height));
-                }
-
-                canvas.restore();
-            }
-            WidgetData::Text { text, text_options } => {
-                let font = Font::new(Typeface::new(text_options.font_family.clone(), text_options.font_weight.into()).unwrap(), text_options.size);
-                let paint = text_options.color.to_paint();
-                canvas.draw_str(text, (self.position.x, self.position.y), &font, &paint);
-            }
-            
-        }
-    }
-
-    fn mouse_over(&self, position: &Position) -> bool {
-        let x = position.x;
-        let y = position.y;
-        let x_min = self.position.x;
-        let x_max = self.position.x + self.size.width;
-        let y_min = self.position.y;
-        let y_max = self.position.y + self.size.height;
-        x >= x_min && x <= x_max && y >= y_min && y <= y_max
-    }
-}
-
-
 
 struct Scene {
     widgets: Vec<WidgetId>,
@@ -428,34 +108,7 @@ struct Context {
 }
 
 
-type WidgetId = usize;
 
-struct WidgetStore {
-    widgets: Vec<Widget>,
-    next_id: WidgetId,
-}
-
-impl WidgetStore {
-    fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
-        let id = self.next_id;
-        self.next_id += 1;
-        widget.id = id;
-        self.widgets.push(widget);
-        id
-    }
-
-    fn get(&self, id: usize) -> Option<&Widget> {
-        // Is it -1?
-        self.widgets.get(id)
-    }
-
-    fn new() -> WidgetStore {
-        WidgetStore {
-            widgets: Vec::new(),
-            next_id: 0,
-        }
-    }
-}
 
 pub struct Editor {
     events: Events,
@@ -512,18 +165,6 @@ use skia_safe::{Canvas, Color4f, Paint, Point, Rect};
 
 
 
-fn parse_hex(hex: &str) -> Color {
-
-    let mut start = 0;
-    if hex.starts_with("#") {
-        start = 1;
-    }
-
-    let r = i64::from_str_radix(&hex[start..start+2], 16).unwrap() as f32;
-    let g = i64::from_str_radix(&hex[start+2..start+4], 16).unwrap() as f32;
-    let b = i64::from_str_radix(&hex[start+4..start+6], 16).unwrap() as f32;
-    return Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
-}
 
 
 impl<'a> Editor {
@@ -551,6 +192,10 @@ impl<'a> Editor {
     }
 
 
+    // TODO: Figure out a better setup for this
+    // part of the problem is that scenes are not first class widgets
+    // I need to figure out that hierarchy.
+    // It will be useful for something like slideshow software
     pub fn setup(&mut self) {
 
         let id = self.add_widget(Widget {
@@ -625,16 +270,16 @@ impl<'a> Editor {
         // Should I have a custom serialization if we reference other widgets?
         // Right now compound just points to id. A little weird for external systems
         // That is general is something we have to figure out
-        let compound_widget = self.widget_store.widgets.get(id_compound).unwrap();
+        let compound_widget = self.widget_store.get(id_compound).unwrap();
         let compound_ron = ron::ser::to_string_pretty(compound_widget, PrettyConfig::default().struct_names(true)).unwrap();
 
-        let text_widget = self.widget_store.widgets.get_mut(text_pane_id).unwrap();
+        let text_widget = self.widget_store.get_mut(text_pane_id).unwrap();
         match text_widget.data {
             WidgetData::TextPane { ref mut text_pane } => {
                 // let contents = text_pane.contents.clone();
                 // let str_contents = from_utf8(&contents).unwrap();
                 // let new_contents = str_contents.replace(MY_STRING, &compound_ron);
-                text_pane.contents = compound_ron.as_bytes().to_vec();
+                text_pane.set_contents(compound_ron.as_bytes().to_vec());
             }
             _ => {
                 println!("Not a text pane");
@@ -668,7 +313,7 @@ impl<'a> Editor {
             match event {
                 Event::Scroll { x, y } => {
                     let mouse = self.context.mouse_position;
-                    for widget in self.widget_store.widgets.iter_mut() {
+                    for widget in self.widget_store.iter_mut() {
                         if widget.mouse_over(&mouse) {
                             match &mut widget.data {
                                 WidgetData::TextPane { text_pane } => {
@@ -827,8 +472,7 @@ impl<'a> Editor {
                 self.events.push(event);
                 self.context.right_mouse_down = false;
             },
-            Event::Scroll { x, y } => {
-                println!("Scroll {} {}", x,y );
+            Event::Scroll { x:_, y:_ } => {
                 self.events.push(event);
             }
         }
@@ -837,7 +481,7 @@ impl<'a> Editor {
     fn add_clicks(&mut self) -> () {
         let mut clicked = vec![];
         // I would need some sort of hierarchy here
-        for widget in self.widget_store.widgets.iter() {
+        for widget in self.widget_store.iter() {
             if widget.mouse_over(&self.context.mouse_position) {
                 clicked.push(widget.id);
             }
