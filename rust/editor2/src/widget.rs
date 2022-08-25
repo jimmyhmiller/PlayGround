@@ -1,4 +1,4 @@
-use std::{fs::File, process::ChildStdout, cell::RefCell, io::Read};
+use std::{fs::File, process::ChildStdout, cell::RefCell, io::Read, path::PathBuf};
 
 use nonblock::NonBlockingReader;
 use serde::{Serialize, Deserialize};
@@ -152,11 +152,21 @@ pub enum WidgetData {
 // TODO: watch for file changes
 #[derive(Serialize, Deserialize)]
 pub struct Process {
-    file_path: String,
+    file_path: PathBuf,
     #[serde(skip)]
     file: Option<File>,
     #[serde(skip)]
     stdout: Option<NonBlockingReader<ChildStdout>>
+}
+
+impl Process {
+    pub fn new(file_path: PathBuf) -> Process {
+        Process {
+            file_path,
+            file: None,
+            stdout: None,
+        }
+    }
 }
 
 
@@ -378,7 +388,10 @@ impl Widget {
                 canvas.draw_str(text, (self.position.x, self.position.y), &font, &paint);
             }
             WidgetData::Process { process } => {
-
+                let file_name = process.file_path.file_name().unwrap().to_str().unwrap();
+                let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
+                let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
+                canvas.draw_str(file_name, Point::new(self.position.x, self.position.y), &font, white);
             }
             WidgetData::HoverFile { path } => {
                 let purple = Color::parse_hex("#1c041e");
