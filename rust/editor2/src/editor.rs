@@ -1,5 +1,5 @@
 
-use crate::{fps_counter::FpsCounter, widget::{WidgetId, Position, WidgetStore, Widget, Size, WidgetData, ImageData, parse_hex, TextPane, TextOptions, FontWeight}};
+use crate::{fps_counter::FpsCounter, widget::{WidgetId, Position, WidgetStore, Widget, Size, WidgetData, ImageData, TextPane, TextOptions, FontWeight, Color}};
 
 use ron::ser::PrettyConfig;
 
@@ -16,6 +16,9 @@ pub enum Event {
     RightMouseDown { x: f32, y: f32 },
     RightMouseUp { x: f32, y: f32 },
     Scroll { x: f64, y: f64 },
+    HoveredFile { path: String, x: f32, y: f32 },
+    DroppedFile { path: String, x: f32, y: f32 },
+    HoveredFileCancelled,
     ClickedWidget { widget_id: WidgetId },
 }
 
@@ -50,6 +53,14 @@ impl Event {
                 *x = mouse_pos.x;
                 *y = mouse_pos.y;
             },
+            Event::HoveredFile { x, y, .. } => {
+                *x = mouse_pos.x;
+                *y = mouse_pos.y;
+            }
+            Event::DroppedFile { x, y, .. } => {
+                *x = mouse_pos.x;
+                *y = mouse_pos.y;
+            }
             _ => {},
         }
     }
@@ -82,6 +93,9 @@ impl Event {
 
                     }
                     CursorMoved { position, .. }  => Some(Event::MouseMove { x: position.x as f32, y: position.y as f32 }),
+                    HoveredFile(path) => Some(Event::HoveredFile { path: path.to_str().unwrap().to_string(), x: -0.0, y: -0.0 }),
+                    DroppedFile(path) => Some(Event::DroppedFile { path: path.to_str().unwrap().to_string(), x: -0.0, y: -0.0 }),
+                    HoveredFileCancelled => Some(Event::HoveredFileCancelled),
                     _ => {
                         println!("Unhandled event: {:?}", event);
                         None
@@ -178,10 +192,6 @@ impl<'a> Editor {
         self.widget_store.get(id)
     }
 
-    fn add_widget(&mut self, widget: Widget) -> WidgetId {
-        let id = self.widget_store.add_widget(widget);
-        id
-    }
 
     pub fn end_frame(&mut self) {
         self.events.end_frame();
@@ -198,14 +208,14 @@ impl<'a> Editor {
     // It will be useful for something like slideshow software
     pub fn setup(&mut self) {
 
-        let id = self.add_widget(Widget {
+        let id = self.widget_store.add_widget(Widget {
             id: 0,
             position: Position { x: 200.0, y: 200.0 },
             size: Size { width: 200.0, height: 100.0 },
             data: WidgetData::Noop,
         });
 
-        let image_id = self.add_widget(Widget {
+        let image_id = self.widget_store.add_widget(Widget {
             id: 0,
             position: Position { x: 400.0, y: 400.0 },
             size: Size { width: 200.0, height: 100.0 },
@@ -218,23 +228,23 @@ impl<'a> Editor {
             widgets: vec![id, image_id],
         });
 
-        let id = self.add_widget(Widget {
+        let id = self.widget_store.add_widget(Widget {
             id: 0,
             position: Position { x: 300.0, y: 300.0 },
             size: Size { width: 100.0, height: 100.0 },
             data: WidgetData::Noop,
         });
 
-        let id_circle = self.add_widget(Widget {
+        let id_circle = self.widget_store.add_widget(Widget {
             id: 0,
             position: Position { x: 500.0, y: 500.0 },
             size: Size { width: 100.0, height: 100.0 },
-            data: WidgetData::Circle { radius: 10.0, color: parse_hex("#ff0000") },
+            data: WidgetData::Circle { radius: 10.0, color: Color::parse_hex("#ff0000") },
         });
 
 
 
-        let text_pane_id = self.add_widget(Widget { 
+        let text_pane_id = self.widget_store.add_widget(Widget { 
             id: 0,
             position: Position { x: 500.0, y: 600.0 },
             size: Size { width: 500.0, height: 500.0 },
@@ -243,7 +253,7 @@ impl<'a> Editor {
             },
         });
 
-        let text_id = self.add_widget(Widget { 
+        let text_id = self.widget_store.add_widget(Widget { 
             id: 0,
             position: Position { x: 600.0, y: 100.0 },
             size: Size { width: 1000.0, height: 1000.0 },
@@ -251,7 +261,7 @@ impl<'a> Editor {
                 text: "Lith".to_string(),
                 text_options: TextOptions {
                     size: 120.0,
-                    color: parse_hex("#ffffff00"),
+                    color: Color::parse_hex("#ffffff00"),
                     font_weight: FontWeight::Bold,
                     font_family: "Ubuntu Mono".to_string(),
                 },
@@ -260,7 +270,7 @@ impl<'a> Editor {
 
 
 
-        let id_compound = self.add_widget(Widget {
+        let id_compound = self.widget_store.add_widget(Widget {
             id: 0,
             position: Position { x: 500.0, y: 500.0 },
             size: Size { width: 100.0, height: 100.0 },
@@ -292,7 +302,7 @@ impl<'a> Editor {
 
 
         for i in 0..self.scenes.len() {
-            let id = self.add_widget(Widget {
+            let id = self.widget_store.add_widget(Widget {
                 id: 0,
                 position: Position { x: 20.0, y: i as f32 * 120.0 + 20.0 },
                 size: Size { width: 100.0, height: 100.0 },
@@ -308,9 +318,36 @@ impl<'a> Editor {
 
         // Todo: Need to test that I am not missing any
         // events with my start and end
+        
 
         for event in self.events.events_for_frame() {
             match event {
+
+                Event::HoveredFile { path, x, y } => {
+                    println!("HOVERED!");
+                    let hovered = self.widget_store.add_widget(Widget {
+                        id: 0,
+                        position: Position { x: *x, y: *y },
+                        size: Size { width: 200.0, height: 100.0 },
+                        data: WidgetData::HoverFile { path: path.clone() },
+                    });
+                    self.scenes[self.current_scene].widgets.push(hovered);
+                }
+
+                Event::HoveredFileCancelled => {
+                    let mut found = None;
+                    for widget in self.widget_store.iter() {
+                        if let WidgetData::HoverFile{..} = widget.data {
+                            found = Some(widget.id);
+                            break;
+                        }
+                    }
+
+                    if let Some(found) = found {
+                        self.widget_store.remove(found);
+                    }
+                }
+
                 Event::Scroll { x, y } => {
                     let mouse = self.context.mouse_position;
                     for widget in self.widget_store.iter_mut() {
@@ -323,6 +360,17 @@ impl<'a> Editor {
                             }
                         }
                     }
+                }
+                _ => {}
+            }
+        }
+
+
+        for widget in self.widget_store.iter_mut() {
+            match &widget.data {
+                WidgetData::HoverFile { path: _ } => {
+                    widget.position.x = self.context.mouse_position.x;
+                    widget.position.y = self.context.mouse_position.y;
                 }
                 _ => {}
             }
@@ -355,7 +403,7 @@ impl<'a> Editor {
         self.fps_counter.tick();
         use skia_safe::{Size};
 
-        let gray = parse_hex("#333333");
+        let gray = Color::parse_hex("#333333");
         canvas.clear(gray.to_color4f());
 
 
@@ -376,7 +424,7 @@ impl<'a> Editor {
             let widget = self.get_widget_by_id(*widget_id).unwrap();
             let rect = Rect::from_xywh(widget.position.x, widget.position.y, widget.size.width, widget.size.height);
             let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
-            let purple = &parse_hex("#1c041e").to_paint();
+            let purple = &Color::parse_hex("#1c041e").to_paint();
            
             if widget.mouse_over(&self.context.mouse_position) {
                 let mut outline = white.clone();
@@ -400,8 +448,9 @@ impl<'a> Editor {
 
         let scene = &self.scenes[self.current_scene];
         for widget_id in scene.widgets.iter() {
-            let widget = self.get_widget_by_id(*widget_id).unwrap();
-            widget.draw(canvas, &self.widget_store);
+            if let Some(widget) = self.get_widget_by_id(*widget_id) {
+                widget.draw(canvas, &self.widget_store);
+            }
         }
 
 
@@ -473,6 +522,15 @@ impl<'a> Editor {
                 self.context.right_mouse_down = false;
             },
             Event::Scroll { x:_, y:_ } => {
+                self.events.push(event);
+            }
+            Event::HoveredFile { ref path, x, y } => {
+                self.events.push(event);
+            }
+            Event::DroppedFile { ref path, x, y } => {
+                self.events.push(event);
+            }
+            Event::HoveredFileCancelled => {
                 self.events.push(event);
             }
         }

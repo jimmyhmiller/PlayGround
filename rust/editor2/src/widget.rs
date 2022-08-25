@@ -74,6 +74,12 @@ impl WidgetStore {
     pub fn iter(&self) -> impl Iterator<Item = &Widget> {
         self.widgets.iter()
     }
+
+    pub fn remove(&mut self, found: usize) {
+        self.widgets.remove(found);
+        // TODO: This should probably be monotonic?
+        self.next_id -= 1;
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -96,22 +102,20 @@ impl Color {
     pub fn new(r: f32, g: f32, b: f32, a: f32) -> Color {
         Color { r, g, b, a }
     }
-}
 
-// TODO: Move to color
-pub fn parse_hex(hex: &str) -> Color {
+    pub fn parse_hex(hex: &str) -> Color {
 
-    let mut start = 0;
-    if hex.starts_with("#") {
-        start = 1;
+        let mut start = 0;
+        if hex.starts_with("#") {
+            start = 1;
+        }
+    
+        let r = i64::from_str_radix(&hex[start..start+2], 16).unwrap() as f32;
+        let g = i64::from_str_radix(&hex[start+2..start+4], 16).unwrap() as f32;
+        let b = i64::from_str_radix(&hex[start+4..start+6], 16).unwrap() as f32;
+        return Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
     }
-
-    let r = i64::from_str_radix(&hex[start..start+2], 16).unwrap() as f32;
-    let g = i64::from_str_radix(&hex[start+2..start+4], 16).unwrap() as f32;
-    let b = i64::from_str_radix(&hex[start+4..start+6], 16).unwrap() as f32;
-    return Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
 }
-
 
 
 
@@ -140,9 +144,12 @@ pub enum WidgetData {
     Process {
         process: Process,
     },
+    HoverFile {
+        path: String,
+    }
 }
 
-// Will need to watch for file changes
+// TODO: watch for file changes
 #[derive(Serialize, Deserialize)]
 pub struct Process {
     file_path: String,
@@ -307,7 +314,7 @@ impl Widget {
                 
                 let rect = self.bounding_rect();
                 let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
-                let purple = parse_hex("#1c041e");
+                let purple = Color::parse_hex("#1c041e");
                 canvas.draw_rrect(rrect, &purple.to_paint());
 
                 let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
@@ -347,7 +354,7 @@ impl Widget {
             WidgetData::TextPane { text_pane } => {
                 canvas.save();
                 canvas.clip_rect(self.bounding_rect(), None, None);
-                let purple = parse_hex("#1c041e");
+                let purple = Color::parse_hex("#1c041e");
                 let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);
                 canvas.draw_rrect(rrect, &purple.to_paint());
                 let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(), 32.0);
@@ -372,6 +379,10 @@ impl Widget {
             }
             WidgetData::Process { process } => {
 
+            }
+            WidgetData::HoverFile { path } => {
+                let purple = Color::parse_hex("#1c041e");
+                canvas.draw_rect(self.bounding_rect(), &purple.to_paint());
             }
             
         }
