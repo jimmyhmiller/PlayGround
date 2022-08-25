@@ -1,3 +1,6 @@
+
+// use cacao::{webview::{WebView, WebViewConfig, WebViewDelegate}, layer::Layer, layout::LayoutAnchorX, view::View};
+
 #[cfg(all(target_os = "macos"))]
 use skia_safe::{scalar, ColorType, Size, Surface};
 
@@ -23,9 +26,13 @@ pub fn setup_window(mut editor: editor::Editor) {
         window::WindowBuilder,
     };
 
+
+
     let size = LogicalSize::new(1600 as i32, 1600 as i32);
 
     let events_loop = EventLoop::new();
+
+
 
     let window = WindowBuilder::new()
         .with_inner_size(size)
@@ -54,6 +61,33 @@ pub fn setup_window(mut editor: editor::Editor) {
         layer.set_drawable_size(CGSize::new(draw_size.width as f64, draw_size.height as f64));
         layer
     };
+
+
+    // #[derive(Default)]
+    // pub struct WebViewInstance;
+
+    // impl WebViewDelegate for WebViewInstance {
+    //     fn did_load(&mut self, _webview: WebView) {
+    //         println!("did load");
+    //     }
+    //     fn did_appear(&self) {
+    //         println!("did appear");
+    //     }
+    // }
+
+
+    // let mut webview = WebView::with(
+    //     WebViewConfig::default(),
+    //     WebViewInstance::default(),
+    // );
+    // webview.load_url("https://google.com");
+    // webview.width.constraint_equal_to_constant(600.0);
+    // webview.height.constraint_equal_to_constant(600.0);
+
+    
+
+    // webview.layer = Layer::wrap(metal_layer.as_ptr() as *mut _);
+    
 
     let command_queue = device.new_command_queue();
 
