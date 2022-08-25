@@ -330,7 +330,6 @@ impl<'a> Editor {
             match event {
 
                 Event::DroppedFile { path, x, y } => {
-                    println!("HOVERED!");
                     let hovered = self.widget_store.add_widget(Widget {
                         id: 0,
                         position: Position { x: *x, y: *y },
@@ -506,7 +505,6 @@ impl<'a> Editor {
             Event::Noop => {},
             Event::MouseMove { x, y } => {
                 // Not pushing the event because there are too many
-                println!("Move");
                 self.context.mouse_position = Position { x, y };
             },
             Event::LeftMouseDown {..} => {
@@ -626,5 +624,8 @@ impl<'a> Editor {
 // and add widgets
 // We could also parse events this way to inject events into the system
 // I like RON in general. But should consider some other format. Sad about toml
+// It should almost certainly parse json
+// I need to have an event system for buffers changing. But also a per frame
+// event system for reading from stdout
 //
 // Make my own react renderer that talks on a socket and produces widgets
