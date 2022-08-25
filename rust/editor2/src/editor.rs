@@ -1,5 +1,7 @@
 
-use crate::{fps_counter::FpsCounter, widget::{WidgetId, Position, WidgetStore, Widget, Size, WidgetData, ImageData, TextPane, TextOptions, FontWeight, Color}};
+use std::path::PathBuf;
+
+use crate::{fps_counter::FpsCounter, widget::{WidgetId, Position, WidgetStore, Widget, Size, WidgetData, ImageData, TextPane, TextOptions, FontWeight, Color, Process}};
 
 use ron::ser::PrettyConfig;
 
@@ -16,8 +18,8 @@ pub enum Event {
     RightMouseDown { x: f32, y: f32 },
     RightMouseUp { x: f32, y: f32 },
     Scroll { x: f64, y: f64 },
-    HoveredFile { path: String, x: f32, y: f32 },
-    DroppedFile { path: String, x: f32, y: f32 },
+    HoveredFile { path: PathBuf, x: f32, y: f32 },
+    DroppedFile { path: PathBuf, x: f32, y: f32 },
     HoveredFileCancelled,
     ClickedWidget { widget_id: WidgetId },
 }
@@ -93,8 +95,8 @@ impl Event {
 
                     }
                     CursorMoved { position, .. }  => Some(Event::MouseMove { x: position.x as f32, y: position.y as f32 }),
-                    HoveredFile(path) => Some(Event::HoveredFile { path: path.to_str().unwrap().to_string(), x: -0.0, y: -0.0 }),
-                    DroppedFile(path) => Some(Event::DroppedFile { path: path.to_str().unwrap().to_string(), x: -0.0, y: -0.0 }),
+                    HoveredFile(path) => Some(Event::HoveredFile { path: path.to_path_buf(), x: -0.0, y: -0.0 }),
+                    DroppedFile(path) => Some(Event::DroppedFile { path: path.to_path_buf(), x: -0.0, y: -0.0 }),
                     HoveredFileCancelled => Some(Event::HoveredFileCancelled),
                     _ => {
                         println!("Unhandled event: {:?}", event);
@@ -182,6 +184,10 @@ use skia_safe::{Canvas, Color4f, Paint, Point, Rect};
 
 
 impl<'a> Editor {
+
+    pub fn set_mouse_position(&mut self, x: f32, y: f32) {
+        self.context.mouse_position = Position { x, y };
+    }
 
     fn get_widget_by_id(&self, id: WidgetId) -> Option<&Widget> {
         // This means I never gc widgets
@@ -323,13 +329,13 @@ impl<'a> Editor {
         for event in self.events.events_for_frame() {
             match event {
 
-                Event::HoveredFile { path, x, y } => {
+                Event::DroppedFile { path, x, y } => {
                     println!("HOVERED!");
                     let hovered = self.widget_store.add_widget(Widget {
                         id: 0,
                         position: Position { x: *x, y: *y },
                         size: Size { width: 200.0, height: 100.0 },
-                        data: WidgetData::HoverFile { path: path.clone() },
+                        data: WidgetData::Process { process: Process::new(path.to_path_buf()) },
                     });
                     self.scenes[self.current_scene].widgets.push(hovered);
                 }
@@ -500,6 +506,7 @@ impl<'a> Editor {
             Event::Noop => {},
             Event::MouseMove { x, y } => {
                 // Not pushing the event because there are too many
+                println!("Move");
                 self.context.mouse_position = Position { x, y };
             },
             Event::LeftMouseDown {..} => {
@@ -524,10 +531,10 @@ impl<'a> Editor {
             Event::Scroll { x:_, y:_ } => {
                 self.events.push(event);
             }
-            Event::HoveredFile { ref path, x, y } => {
+            Event::HoveredFile { path: _, x: _, y: _ } => {
                 self.events.push(event);
             }
-            Event::DroppedFile { ref path, x, y } => {
+            Event::DroppedFile { path: _, x: _, y: _ } => {
                 self.events.push(event);
             }
             Event::HoveredFileCancelled => {

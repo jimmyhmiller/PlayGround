@@ -1,8 +1,10 @@
 
 // use cacao::{webview::{WebView, WebViewConfig, WebViewDelegate}, layer::Layer, layout::LayoutAnchorX, view::View};
 
+use cocoa::appkit::NSWindow;
 #[cfg(all(target_os = "macos"))]
 use skia_safe::{scalar, ColorType, Size, Surface};
+use winit::dpi::LogicalPosition;
 
 use crate::editor;
 
@@ -28,7 +30,7 @@ pub fn setup_window(mut editor: editor::Editor) {
 
 
 
-    let size = LogicalSize::new(1600 as i32, 1600 as i32);
+    let mut size = LogicalSize::new(1600 as i32, 1600 as i32);
 
     let events_loop = EventLoop::new();
 
@@ -61,7 +63,6 @@ pub fn setup_window(mut editor: editor::Editor) {
         layer.set_drawable_size(CGSize::new(draw_size.width as f64, draw_size.height as f64));
         layer
     };
-
 
     // #[derive(Default)]
     // pub struct WebViewInstance;
@@ -102,7 +103,6 @@ pub fn setup_window(mut editor: editor::Editor) {
     let mut context = DirectContext::new_metal(&backend, None).unwrap();
 
 
-
     events_loop.run(move |event, _, control_flow| {
         autoreleasepool(|| {
             *control_flow = ControlFlow::Wait;
@@ -110,17 +110,34 @@ pub fn setup_window(mut editor: editor::Editor) {
             match event {
                 Event::WindowEvent { event, .. } => match event {
                     WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
-                    WindowEvent::Resized(size) => {
+                    WindowEvent::Resized(current_size) => {
                         metal_layer
-                            .set_drawable_size(CGSize::new(size.width as f64, size.height as f64));
-                        window.request_redraw()
+                            .set_drawable_size(CGSize::new(current_size.width as f64, current_size.height as f64));
+
+                        size.width = current_size.width as i32;
+                        size.height = current_size.height as i32;
+                        window.request_redraw();
+
                     }
                     _ => (),
                 },
                 Event::MainEventsCleared => {
+                    
                     window.request_redraw();
                 }
                 Event::RedrawRequested(_) => {
+                    // TODO: Determine if this is a good idea or not.
+                    // I am also setting this with move. Maybe I shouldn't?
+                    // This lets me drop things in the correct spot
+                    unsafe {
+                        let size = window.inner_size();
+                        let point = NSWindow::mouseLocationOutsideOfEventStream(window.ns_window() as cocoa_id);
+                        let logical_height = size.to_logical::<i32>(window.scale_factor()).height;
+                        let logical_point = LogicalPosition::new(point.x as i32, logical_height - point.y as i32);
+                        let physical_point = logical_point.to_physical::<i32>(window.scale_factor());
+
+                        editor.set_mouse_position(physical_point.x as f32, physical_point.y as f32);
+                    }
                     editor.end_frame();
                     editor.update();
                     if let Some(drawable) = metal_layer.next_drawable() {
