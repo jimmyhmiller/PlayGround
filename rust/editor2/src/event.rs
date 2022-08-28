@@ -107,6 +107,8 @@ impl Event {
 // HideWidget { widget: One<WidgetSelector> }
 // AddClick { action: [Action] }
 // RemoveClick { action: [Action] }
+// SendEvent { process: One<ProcessId> }
+
 
 
 // I need to think about my abstractions here

@@ -263,7 +263,6 @@ impl<'a> Editor {
                     let widget_ids = selector.select(&self.widget_store);
                     for widget_id in widget_ids {
                         if let Some(widget) = self.widget_store.get_mut(widget_id) {
-                            println!("Move {:?}", widget.id);
                             widget.position.x += x;
                             widget.position.y += y;
                         }
