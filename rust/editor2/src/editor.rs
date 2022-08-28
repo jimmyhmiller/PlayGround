@@ -1,28 +1,13 @@
 
-use std::path::PathBuf;
 
-use crate::{fps_counter::FpsCounter, widget::{WidgetId, Position, WidgetStore, Widget, Size, WidgetData, ImageData, TextPane, TextOptions, FontWeight, Color, Process}};
+use crate::{fps_counter::FpsCounter, widget::{WidgetId, Position, WidgetStore, Widget, Size, WidgetData, ImageData, TextPane, TextOptions, FontWeight, Color, Process, WidgetSelector}, event::Event};
 
 use ron::ser::PrettyConfig;
 
 use skia_safe::{RRect, Font, Typeface, FontStyle, PaintStyle};
-use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
 
 
 
-pub enum Event {
-    Noop,
-    MouseMove { x: f32, y: f32 },
-    LeftMouseDown { x: f32, y: f32 },
-    LeftMouseUp { x: f32, y: f32 },
-    RightMouseDown { x: f32, y: f32 },
-    RightMouseUp { x: f32, y: f32 },
-    Scroll { x: f64, y: f64 },
-    HoveredFile { path: PathBuf, x: f32, y: f32 },
-    DroppedFile { path: PathBuf, x: f32, y: f32 },
-    HoveredFileCancelled,
-    ClickedWidget { widget_id: WidgetId },
-}
 
 // Need a global store of widgets
 // Then anything else refers to widgets by their id
@@ -33,84 +18,6 @@ pub enum Event {
 // If there are a large number of widgets, this could be a bottle neck
 // So I could keep the hierachy. Like I know if the widget is not
 // on the current scene then I am not going to click on it.
-
-
-impl Event {
-
-    fn patch_mouse_event(&mut self, mouse_pos: &Position) {
-        match self {
-            Event::LeftMouseDown { x, y } => {
-                *x = mouse_pos.x;
-                *y = mouse_pos.y;
-            },
-            Event::LeftMouseUp { x, y } => {
-                *x = mouse_pos.x;
-                *y = mouse_pos.y;
-            },
-            Event::RightMouseDown { x, y } => {
-                *x = mouse_pos.x;
-                *y = mouse_pos.y;
-            },
-            Event::RightMouseUp { x, y } => {
-                *x = mouse_pos.x;
-                *y = mouse_pos.y;
-            },
-            Event::HoveredFile { x, y, .. } => {
-                *x = mouse_pos.x;
-                *y = mouse_pos.y;
-            }
-            Event::DroppedFile { x, y, .. } => {
-                *x = mouse_pos.x;
-                *y = mouse_pos.y;
-            }
-            _ => {},
-        }
-    }
-
-    fn from_winit_event(event: &WinitEvent<'_, ()>) -> Option<Self> {
-        match event {
-            WinitEvent::WindowEvent { event, .. } => {
-                use WinitWindowEvent::*;
-                match event {
-                    CloseRequested => Some(Event::Noop),
-                    TouchpadPressure {device_id: _, pressure: _, stage: _} => Some(Event::Noop),
-                    MouseWheel { delta, .. } => {
-                        match delta {
-                            winit::event::MouseScrollDelta::LineDelta(_, _) => panic!("What is line delta?"),
-                            winit::event::MouseScrollDelta::PixelDelta(delta) => Some(Event::Scroll { x: delta.x, y: delta.y })
-                        }
-                        
-                    }
-                    MouseInput { state, button, .. } => {
-                        use winit::event::MouseButton::*;
-                        use winit::event::ElementState::*;
-                        match (state, button) {
-                            // Silly hack for the fact that I don't know positions here.
-                            (Pressed, Left) => Some(Event::LeftMouseDown { x: -0.0, y: -0.0 }),
-                            (Released, Left) => Some(Event::LeftMouseUp { x: -0.0, y: -0.0 }),
-                            (Pressed, Right) => Some(Event::RightMouseDown { x: -0.0, y: -0.0 }),
-                            (Released, Right) => Some(Event::RightMouseUp { x: -0.0, y: -0.0 }),
-                            _ => None,
-                        }
-
-                    }
-                    CursorMoved { position, .. }  => Some(Event::MouseMove { x: position.x as f32, y: position.y as f32 }),
-                    HoveredFile(path) => Some(Event::HoveredFile { path: path.to_path_buf(), x: -0.0, y: -0.0 }),
-                    DroppedFile(path) => Some(Event::DroppedFile { path: path.to_path_buf(), x: -0.0, y: -0.0 }),
-                    HoveredFileCancelled => Some(Event::HoveredFileCancelled),
-                    _ => {
-                        println!("Unhandled event: {:?}", event);
-                        None
-                    }
-                }
-            },
-            _ => {
-                None
-            },
-        }
-    }
-}
-
 
 
 struct Scene {
@@ -189,16 +96,6 @@ impl<'a> Editor {
         self.context.mouse_position = Position { x, y };
     }
 
-    fn get_widget_by_id(&self, id: WidgetId) -> Option<&Widget> {
-        // This means I never gc widgets
-        // But I could of course free them and keep
-        // a free list around.
-        // or use a map. Or do a linear search.
-        // But fine for now
-        self.widget_store.get(id)
-    }
-
-
     pub fn end_frame(&mut self) {
         self.events.end_frame();
     }
@@ -216,6 +113,7 @@ impl<'a> Editor {
 
         let id = self.widget_store.add_widget(Widget {
             id: 0,
+            on_click: vec![],
             position: Position { x: 200.0, y: 200.0 },
             size: Size { width: 200.0, height: 100.0 },
             data: WidgetData::Noop,
@@ -223,6 +121,7 @@ impl<'a> Editor {
 
         let image_id = self.widget_store.add_widget(Widget {
             id: 0,
+            on_click: vec![],
             position: Position { x: 400.0, y: 400.0 },
             size: Size { width: 200.0, height: 100.0 },
             data: WidgetData::Image {
@@ -236,6 +135,7 @@ impl<'a> Editor {
 
         let id = self.widget_store.add_widget(Widget {
             id: 0,
+            on_click: vec![],
             position: Position { x: 300.0, y: 300.0 },
             size: Size { width: 100.0, height: 100.0 },
             data: WidgetData::Noop,
@@ -243,6 +143,7 @@ impl<'a> Editor {
 
         let id_circle = self.widget_store.add_widget(Widget {
             id: 0,
+            on_click: vec![],
             position: Position { x: 500.0, y: 500.0 },
             size: Size { width: 100.0, height: 100.0 },
             data: WidgetData::Circle { radius: 10.0, color: Color::parse_hex("#ff0000") },
@@ -252,6 +153,7 @@ impl<'a> Editor {
 
         let text_pane_id = self.widget_store.add_widget(Widget { 
             id: 0,
+            on_click: vec![],
             position: Position { x: 500.0, y: 600.0 },
             size: Size { width: 500.0, height: 500.0 },
             data: WidgetData::TextPane {
@@ -261,6 +163,7 @@ impl<'a> Editor {
 
         let text_id = self.widget_store.add_widget(Widget { 
             id: 0,
+            on_click: vec![],
             position: Position { x: 600.0, y: 100.0 },
             size: Size { width: 1000.0, height: 1000.0 },
             data: WidgetData::Text {
@@ -278,6 +181,7 @@ impl<'a> Editor {
 
         let id_compound = self.widget_store.add_widget(Widget {
             id: 0,
+            on_click: vec![],
             position: Position { x: 500.0, y: 500.0 },
             size: Size { width: 100.0, height: 100.0 },
             data: WidgetData::Compound { children: vec![id, id_circle, text_id] },
@@ -310,6 +214,7 @@ impl<'a> Editor {
         for i in 0..self.scenes.len() {
             let id = self.widget_store.add_widget(Widget {
                 id: 0,
+                on_click: vec![],
                 position: Position { x: 20.0, y: i as f32 * 120.0 + 20.0 },
                 size: Size { width: 100.0, height: 100.0 },
                 data: WidgetData::Noop,
@@ -332,25 +237,13 @@ impl<'a> Editor {
                 Event::DroppedFile { path, x, y } => {
                     let hovered = self.widget_store.add_widget(Widget {
                         id: 0,
+                        // TODO: Temp for testing
+                        on_click: vec![Event::MoveWidgetRelative { selector: WidgetSelector::ById(1), x: 10.0, y: 10.0 }],
                         position: Position { x: *x, y: *y },
                         size: Size { width: 200.0, height: 100.0 },
                         data: WidgetData::Process { process: Process::new(path.to_path_buf()) },
                     });
                     self.scenes[self.current_scene].widgets.push(hovered);
-                }
-
-                Event::HoveredFileCancelled => {
-                    let mut found = None;
-                    for widget in self.widget_store.iter() {
-                        if let WidgetData::HoverFile{..} = widget.data {
-                            found = Some(widget.id);
-                            break;
-                        }
-                    }
-
-                    if let Some(found) = found {
-                        self.widget_store.remove(found);
-                    }
                 }
 
                 Event::Scroll { x, y } => {
@@ -366,16 +259,15 @@ impl<'a> Editor {
                         }
                     }
                 }
-                _ => {}
-            }
-        }
-
-
-        for widget in self.widget_store.iter_mut() {
-            match &widget.data {
-                WidgetData::HoverFile { path: _ } => {
-                    widget.position.x = self.context.mouse_position.x;
-                    widget.position.y = self.context.mouse_position.y;
+                Event::MoveWidgetRelative { selector, x, y } => {
+                    let widget_ids = selector.select(&self.widget_store);
+                    for widget_id in widget_ids {
+                        if let Some(widget) = self.widget_store.get_mut(widget_id) {
+                            println!("Move {:?}", widget.id);
+                            widget.position.x += x;
+                            widget.position.y += y;
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -426,7 +318,7 @@ impl<'a> Editor {
         // Or do I want the widget to look at the mouse position?
         // Maybe allow for both?
         for widget_id in self.scene_selector.iter() {
-            let widget = self.get_widget_by_id(*widget_id).unwrap();
+            let widget = self.widget_store.get(*widget_id).unwrap();
             let rect = Rect::from_xywh(widget.position.x, widget.position.y, widget.size.width, widget.size.height);
             let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
             let purple = &Color::parse_hex("#1c041e").to_paint();
@@ -453,7 +345,7 @@ impl<'a> Editor {
 
         let scene = &self.scenes[self.current_scene];
         for widget_id in scene.widgets.iter() {
-            if let Some(widget) = self.get_widget_by_id(*widget_id) {
+            if let Some(widget) = self.widget_store.get(*widget_id) {
                 widget.draw(canvas, &self.widget_store);
             }
         }
@@ -505,6 +397,9 @@ impl<'a> Editor {
             Event::Noop => {},
             Event::MouseMove { x, y } => {
                 // Not pushing the event because there are too many
+                // TODO: Do I need this? I have my own way of setting
+                // this in render because it has weird properties for when
+                // it updates
                 self.context.mouse_position = Position { x, y };
             },
             Event::LeftMouseDown {..} => {
@@ -538,6 +433,9 @@ impl<'a> Editor {
             Event::HoveredFileCancelled => {
                 self.events.push(event);
             }
+            Event::MoveWidgetRelative { .. } => {
+            
+            }
         }
     }
 
@@ -547,6 +445,10 @@ impl<'a> Editor {
         for widget in self.widget_store.iter() {
             if widget.mouse_over(&self.context.mouse_position) {
                 clicked.push(widget.id);
+                for event in widget.on_click.iter() {
+                    println!("{:?}", event);
+                    self.events.push(event.clone());
+                }
             }
         }
         for id in clicked {
@@ -629,3 +531,17 @@ impl<'a> Editor {
 // event system for reading from stdout
 //
 // Make my own react renderer that talks on a socket and produces widgets
+//
+// I need a way to track on click handlers
+// But the question is what do they do?
+// I'm guessing they push an event into the queue?
+// But they might need to call a program
+// I guess they can do that via an event in the queue
+//
+// How do I deal with top level UI? Right now I have a scene
+// selector. Can I make that work generically?
+
+
+
+
+
