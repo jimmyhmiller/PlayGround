@@ -3,6 +3,7 @@ mod window;
 mod editor;
 mod fps_counter;
 mod widget;
+mod event;
 
 
 #[cfg(not(target_os = "macos"))]

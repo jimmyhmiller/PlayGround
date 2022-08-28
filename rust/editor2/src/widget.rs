@@ -4,6 +4,8 @@ use nonblock::NonBlockingReader;
 use serde::{Serialize, Deserialize};
 use skia_safe::{Point, Paint, Color4f, FontStyle, font_style::{Weight, Width, Slant}, Image, Data, Rect, Canvas, RRect, Font, Typeface};
 
+use crate::event::Event;
+
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub struct Position {
@@ -23,6 +25,8 @@ pub struct Size {
     pub height: f32,
 }
 
+
+
 pub type WidgetId = usize;
 
 #[derive(Serialize, Deserialize)]
@@ -31,6 +35,7 @@ pub struct Widget {
     pub id: WidgetId,
     pub position: Position,
     pub size: Size,
+    pub on_click: Vec<Event>,
     // Children might make sense
     // pub children: Vec<Widget>,
     pub data : WidgetData
@@ -73,12 +78,6 @@ impl WidgetStore {
 
     pub fn iter(&self) -> impl Iterator<Item = &Widget> {
         self.widgets.iter()
-    }
-
-    pub fn remove(&mut self, found: usize) {
-        self.widgets.remove(found);
-        // TODO: This should probably be monotonic?
-        self.next_id -= 1;
     }
 }
 
@@ -144,6 +143,9 @@ pub enum WidgetData {
     Process {
         process: Process,
     },
+    // I probably don't need this
+    // But I think no with my mouse fix
+    // I could do something cool with it?
     HoverFile {
         path: String,
     }
@@ -154,8 +156,10 @@ pub enum WidgetData {
 pub struct Process {
     file_path: PathBuf,
     #[serde(skip)]
+    #[allow(dead_code)]
     file: Option<File>,
     #[serde(skip)]
+    #[allow(dead_code)]
     stdout: Option<NonBlockingReader<ChildStdout>>
 }
 
@@ -393,7 +397,7 @@ impl Widget {
                 let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
                 canvas.draw_str(file_name, Point::new(self.position.x, self.position.y), &font, white);
             }
-            WidgetData::HoverFile { path } => {
+            WidgetData::HoverFile { path: _ } => {
                 let purple = Color::parse_hex("#1c041e");
                 canvas.draw_rect(self.bounding_rect(), &purple.to_paint());
             }
@@ -413,5 +417,35 @@ impl Widget {
 }
 
 
+// TODO: I might need tags or things like that
+// I need a much richer notion for widgets if I'm going
+// to let you select them. Yes I know I'm recreating a browser
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum WidgetSelector {
+    This,
+    ById(WidgetId),
+    ByName(String),
+    ByArea{ x: f32, y: f32, width: f32, height: f32 },
+}
 
 
+impl WidgetSelector {
+    // TODO: In order for this to work I need to track
+    // the originator of the event and pass it here.
+    pub fn select(&self, _widgets: &WidgetStore) -> Vec<WidgetId> {
+        match self {
+            WidgetSelector::This => {
+                todo!("Need to track event originator");
+            }
+            WidgetSelector::ById(id) => {
+                vec![*id]
+            }
+            WidgetSelector::ByName(_) => {
+                todo!("By name selector");
+            }
+            WidgetSelector::ByArea{ .. } => {
+                todo!("By area selector");
+            }
+        }
+    }
+}
