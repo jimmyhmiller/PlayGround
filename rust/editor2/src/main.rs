@@ -4,6 +4,7 @@ mod editor;
 mod fps_counter;
 mod widget;
 mod event;
+mod db;
 
 
 #[cfg(not(target_os = "macos"))]
@@ -14,6 +15,9 @@ fn main() {
 
 #[cfg(all(target_os = "macos"))]
 fn main() {
+
+
+    // db::main();
     use editor::Editor;
 
     let mut editor = Editor::new();
