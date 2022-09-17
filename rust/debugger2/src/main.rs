@@ -16,22 +16,23 @@ fn main() {
 
 
     let target = debugger.create_target(
-        "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/test-prog/target/debug/test-prog",
-        None, 
-        None, 
+        "/Users/jimmyhmiller/Documents/Code/ruby/ruby",
+        None,
+        None,
         true
     ).unwrap();
 
-    let functions = target.find_functions("write_second", FunctionNameType::Full);
-    for function in functions.iter() {
-        println!("{:?}", function);
-        let line_entry = function.line_entry();
-        let breakpoint = target.breakpoint_create_by_address(&line_entry.start_address());
-        // breakpoint.
-    }
-    
+    // let functions = target.find_functions("gen_single_block", FunctionNameType::Full);
+    // for function in functions.iter() {
+    //     println!("{:?}", function);
+    //     let line_entry = function.line_entry();
+    //     let breakpoint = target.breakpoint_create_by_address(&line_entry.start_address());
+    //     // breakpoint.
+    // }
 
-    let launch_info = SBLaunchInfo::new();
+
+    let mut launch_info = SBLaunchInfo::new();
+    launch_info.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/ruby/my_file.rb"], false);
     let process = target.launch(&launch_info).unwrap();
     loop {
         wait_for_enter();
@@ -39,5 +40,4 @@ fn main() {
     }
 
 
-    println!("Hello, world!");
 }

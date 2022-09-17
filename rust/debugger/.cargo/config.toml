@@ -1,0 +1,7 @@
+[env]
+LLVM_ROOT="/opt/homebrew/opt/llvm/"
+LLVM_BUILD_ROOT="/opt/homebrew/opt/llvm/"
+DYLD_FRAMEWORK_PATH="/Applications/Xcode.app/Contents/SharedFrameworks"
+
+[build]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/SharedFrameworks"]
