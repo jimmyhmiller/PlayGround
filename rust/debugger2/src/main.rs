@@ -1,4 +1,6 @@
-use lldb::{SBDebugger, SBLaunchInfo, FunctionNameType};
+use std::ffi::CStr;
+
+use lldb::{SBDebugger, SBLaunchInfo, FunctionNameType, RunMode, LaunchFlag, IsValid};
 
 
 pub fn wait_for_enter() {
@@ -12,6 +14,7 @@ pub fn wait_for_enter() {
 // But I might just want to make my own bindings of lldb-sys
 
 fn main() {
+    SBDebugger::initialize();
     let debugger = SBDebugger::create(true);
 
 
@@ -22,21 +25,42 @@ fn main() {
         true
     ).unwrap();
 
-    // let functions = target.find_functions("gen_single_block", FunctionNameType::Full);
-    // for function in functions.iter() {
-    //     println!("{:?}", function);
-    //     let line_entry = function.line_entry();
-    //     let breakpoint = target.breakpoint_create_by_address(&line_entry.start_address());
-    //     // breakpoint.
-    // }
+
+    let functions = target.find_functions("main", FunctionNameType::Base);
+    for function in functions.iter() {
+        println!("{:?}", function);
+        let line_entry = function.line_entry();
+        let breakpoint = target.breakpoint_create_by_address(&line_entry.start_address());
+        for location in breakpoint.locations() {
+            location.set_enabled(true)
+        }
+    }
+
 
 
     let mut launch_info = SBLaunchInfo::new();
-    launch_info.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/ruby/my_file.rb"], false);
+    // launch_info.set_launch_flags(LaunchFlag::StopAtEntry);
+    launch_info.set_arguments(vec!["--yjit", "--yjit-call-threshold=1","/Users/jimmyhmiller/Documents/Code/ruby/my_file.rb"], true);
     let process = target.launch(&launch_info).unwrap();
+    let thread = process.thread_at_index(1);
+
     loop {
+        let mut buffer = [0; 1024];
+        let stdout = process.read_stderr(&mut buffer);
+        if stdout > 0 {
+            println!("===============\nstdout: {:?}===============", unsafe { CStr::from_ptr(buffer[..stdout as usize].as_ptr() as *const i8)});
+        }
         wait_for_enter();
-        println!("{:?}", process);
+        for thread in process.threads() {
+            for frame in thread.frames() {
+                println!("frame: {:?}", frame.pc());
+            }
+            println!("{:?}", thread.step_over(RunMode::OnlyDuringStepping));
+
+            println!("{}", thread.is_valid());
+        }
+        println!("{:?}", process.is_valid());
+        // thread.step_into(RunMode::OnlyDuringStepping)
     }
 
 

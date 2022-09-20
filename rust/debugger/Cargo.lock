@@ -19,7 +19,6 @@ name = "debugger"
 version = "0.1.0"
 dependencies = [
  "libc",
- "lldb",
  "lldb-sys",
 ]
 
@@ -30,19 +29,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04c3b4822ccebfa39c02fc03d1534441b22ead323fa0f48bb7ddd8e6ba076a40"
 
 [[package]]
-name = "lldb"
-version = "0.0.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "747a766f1da045e9741a2bc41a08e21cfff7b750c8368eb07431f3775a222c06"
-dependencies = [
- "lldb-sys",
-]
-
-[[package]]
 name = "lldb-sys"
-version = "0.0.27"
+version = "0.0.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecf5a4eb7b18e21770fb41daf9f89ee38a16fc42da877b5b25a4a517863b19c7"
+checksum = "e4823992d90809c75bb025e9666759ccd7be2362863fc88af6c21ba6916e4e5f"
 dependencies = [
  "bitflags",
  "cc",
