@@ -1,0 +1,13 @@
+[package]
+name = "lldb"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+cpp = "0.5.7"
+
+[build-dependencies]
+cpp_build = "0.5"
