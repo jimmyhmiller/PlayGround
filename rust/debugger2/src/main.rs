@@ -1,6 +1,26 @@
-use std::{ffi::CStr, thread::sleep, time::Duration};
 
-use lldb::{SBDebugger, SBLaunchInfo, FunctionNameType, RunMode, SBEvent, LaunchFlag, ProcessState, IsValid, SBProcess, SBThread, SBListener, SBTarget, SBProcessEvent, VariableOptions};
+use std::{ffi::{CStr, OsStr, CString}, thread::sleep, time::Duration, mem, os::raw::c_char};
+use lldb::{SBDebugger, SBLaunchInfo, FunctionNameType, RunMode, SBEvent, LaunchFlag, ProcessState, IsValid, SBProcess, SBThread, SBListener, SBTarget, SBProcessEvent, VariableOptions, SBType};
+
+
+fn with_cstr<R, F>(s: impl AsRef<OsStr>, f: F) -> R
+where
+    F: FnOnce(*const c_char) -> R,
+{
+    let s = s.as_ref().to_str().unwrap();
+    let allocated;
+    let mut buffer: [u8; 256] = unsafe { mem::uninitialized() };
+    let ptr: *const c_char = if s.len() < buffer.len() {
+        buffer[0..s.len()].clone_from_slice(s.as_bytes());
+        buffer[s.len()] = 0;
+        buffer.as_ptr() as *const c_char
+    } else {
+        allocated = Some(CString::new(s).unwrap());
+        allocated.as_ref().unwrap().as_ptr()
+    };
+    f(ptr)
+}
+
 
 
 pub fn wait_for_enter() {
@@ -91,6 +111,9 @@ fn main() {
                         let variables = frame.variables(&VariableOptions { arguments: true, locals: true, statics: true, in_scope_only: true });
                         variables.iter().for_each(|variable| {
                             println!("{:?}", variable);
+                            variable.children().for_each(|child| {
+                                println!("{:?}", child);
+                            });
                         });
                         println!("{:?}", thread.frames().collect::<Vec<_>>());
                         let function = frame.function_name();
@@ -151,3 +174,9 @@ fn main() {
 
 
 }
+
+
+
+// These are nice bindings but not complete.
+// Now that I know I have to listen to events
+// I should probably use lldb-sys directly
