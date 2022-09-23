@@ -106,19 +106,21 @@ fn main() {
                     let state = event.process_state();
                     println!("State: {:?}", state);
                     if state == ProcessState::Stopped {
+                        let now = std::time::Instant::now();
                         let thread = process.selected_thread();
                         let frame = thread.selected_frame();
                         let variables = frame.variables(&VariableOptions { arguments: true, locals: true, statics: true, in_scope_only: true });
                         variables.iter().for_each(|variable| {
                             println!("{:?}", variable);
-                            variable.children().for_each(|child| {
-                                println!("{:?}", child);
-                            });
+                            // variable.children().for_each(|child| {
+                            //     println!("{:?}", child);
+                            // });
                         });
-                        println!("{:?}", thread.frames().collect::<Vec<_>>());
+                        // println!("{:?}", thread.frames().collect::<Vec<_>>());
                         let function = frame.function_name();
                         let line_entry = frame.line_entry();
                         println!("{:?}:{:?}", function, line_entry);
+                        println!("Time: {:?}", now.elapsed());
                         wait_for_instruction(&process, &thread);
                     }
                 },
