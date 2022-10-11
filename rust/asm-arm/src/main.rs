@@ -1,6 +1,6 @@
 use std::mem;
-use memmap2::{MmapMut, Mmap};
-use std::io::Result;
+// use memmap2::{MmapMut, Mmap};
+use mmap_rs::{Error, MmapOptions, MmapMut, Mmap};
 
 // Notes:
 // Can't make things RWX
@@ -13,15 +13,17 @@ struct Page {
 }
 
 impl Page {
-    fn new() -> Result<Self> {
-        let mem = MmapMut::map_anon(4096)?;
+    fn new() -> Result<Self, Error> {
+        let mem = MmapOptions::new(MmapOptions::page_size().0)
+        .map_mut()?;
+
         Ok(Self {
             mem_write: Some(mem),
             mem_exec: None,
         })
     }
 
-    fn write_u32_be(&mut self, offset: usize, data: u32) -> Result<()> {
+    fn write_u32_be(&mut self, offset: usize, data: u32) -> Result<(), Error> {
         self.writeable()?;
         let memory = &mut self.mem_write.as_mut().unwrap()[..];
         for (i, byte) in data.to_be_bytes().iter().enumerate() {
@@ -30,7 +32,7 @@ impl Page {
         Ok(())
     }
 
-    fn write_u32_le(&mut self, offset: usize, data: u32) -> Result<()> {
+    fn write_u32_le(&mut self, offset: usize, data: u32) -> Result<(), Error> {
         self.writeable()?;
         let memory = &mut self.mem_write.as_mut().unwrap()[..];
         for (i, byte) in data.to_le_bytes().iter().enumerate() {
@@ -40,25 +42,30 @@ impl Page {
     }
 
 
-    fn executable(&mut self) -> Result<()> {
+    fn executable(&mut self) -> Result<(), Error> {
         if let Some(m) = self.mem_write.take() {
-            let m = m.make_exec()?;
+            let m = m.make_exec().unwrap_or_else(|(_map, e)| {
+                panic!("Failed to make mmap executable: {}", e);
+            });
             self.mem_exec = Some(m);
         }
         Ok(())
     }
 
-    fn writeable(&mut self) -> Result<()> {
+    fn writeable(&mut self) -> Result<(), Error> {
         if let Some(m) = self.mem_exec.take() {
-            let m = m.make_mut()?;
+            let m = m.make_mut().unwrap_or_else(|(_map, e)| {
+                panic!("Failed to make mmap writeable: {}", e);
+            });
             self.mem_write = Some(m);
         }
         Ok(())
     }
 
-    fn get_function(&mut self) -> Result<extern "C" fn() -> u64> {
+    fn get_function(&mut self) -> Result<extern "C" fn() -> u64, Error> {
         self.writeable()?;
-        self.mem_write.as_mut().unwrap().flush()?;
+        let size = self.mem_write.as_ref().unwrap().size();
+        self.mem_write.as_mut().unwrap().flush(0..size)?;
         self.executable()?;
         Ok(unsafe {
             mem::transmute(self.mem_exec.as_ref().unwrap().as_ptr())
@@ -137,7 +144,7 @@ fn encode_u64(destination: &Register, value: u64) -> [u32; 4] {
     result
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Error> {
 
     let mut page = Page::new()?;
     // let move_2_to_w0 = 0xE00280D2;
