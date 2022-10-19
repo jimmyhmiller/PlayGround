@@ -1,6 +1,6 @@
 import util from 'util';
 import  { XMLParser, XMLBuilder, XMLValidator} from 'fast-xml-parser';
-import groupBy from 'lodash/fp/groupby';
+import groupBy from 'lodash/fp/groupBy';
 
 
 const log = (x) => {
@@ -31,7 +31,7 @@ export default async function handler(req, res) {
 
   const feeds = Object.keys(groupBy(x => new RegExp(groupRegex).exec(x.title)[1], feed?.rss?.channel?.item))
   const host = req.headers.host
-  const urls = feeds.map(groupName => createUrl(`https://${host}/api/serve`, {url, groupName, groupRegex}))
+  const urls = feeds.map(groupName => ({name: groupName === "undefined" ? "No Group Name" : groupName, url: createUrl(`https://${host}/api/serve`, {url, groupName, groupRegex}) }))
 
   res.status(200).json(urls)
 }
