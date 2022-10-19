@@ -1,6 +1,6 @@
 import util from 'util';
 import  { XMLParser, XMLBuilder, XMLValidator} from 'fast-xml-parser';
-import groupBy from 'lodash/fp/groupby';
+import groupBy from 'lodash/fp/groupBy';
 
 
 const log = (x) => {
@@ -13,7 +13,7 @@ const log = (x) => {
   // const chosenGroup = "Time For Chaos";
 
 export default async function handler(req, res) {
-  const { url, groupRegex, chosenGroup } = req.query;
+  const { url, groupRegex, groupName } = req.query;
   const result = await fetch(url);
   const data = await result.text();
 
@@ -21,7 +21,7 @@ export default async function handler(req, res) {
   const feed = parser.parse(data);
 
   let newFeed = {...feed};
-  newFeed.rss.channel.item = groupBy(x => new RegExp(groupRegex).exec(x.title)[1], feed?.rss?.channel?.item)[chosenGroup]
+  newFeed.rss.channel.item = groupBy(x => new RegExp(groupRegex).exec(x.title)[1], feed?.rss?.channel?.item)[groupName]
 
   const builder = new XMLBuilder({ ignoreAttributes: false });
   const xmlContent = builder.build(newFeed);
