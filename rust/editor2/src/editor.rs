@@ -299,6 +299,9 @@ impl<'a> Editor {
         self.fps_counter.tick();
         use skia_safe::{Size};
 
+
+
+
         let gray = Color::parse_hex("#333333");
         canvas.clear(gray.to_color4f());
 
@@ -307,7 +310,8 @@ impl<'a> Editor {
 
         let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
         let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-        canvas.draw_str(self.fps_counter.fps.to_string(), Point::new(canvas_size.width - 60.0, 30.0), &font, white);
+
+        canvas.draw_str(self.fps_counter.fps.to_string(), Point::new(canvas_size.width - 60.0, 30.0), &font, &white);
         
 
         // Need to think in general about clicks
