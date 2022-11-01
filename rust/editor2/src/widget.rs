@@ -366,11 +366,16 @@ impl Widget {
                 canvas.draw_image(image, self.position, None);
             }
             WidgetData::TextPane { text_pane } => {
+
+                                    
+                let jungle_green = Color::parse_hex("#62b4a6");
+                let eggplant = Color::parse_hex("#530922");
+
                 canvas.save();
                 canvas.clip_rect(self.bounding_rect(), None, None);
                 let purple = Color::parse_hex("#1c041e");
                 let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);
-                canvas.draw_rrect(rrect, &purple.to_paint());
+                canvas.draw_rrect(rrect, &eggplant.to_paint());
                 let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(), 32.0);
                 let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
 
@@ -380,13 +385,14 @@ impl Widget {
                 canvas.translate((self.position.x + 30.0 - text_pane.offset.x, self.position.y + text_pane.line_height - fractional_offset + 10.0));
 
                 for line in text_pane.visible_lines(self.size.height) {
-                    canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
+                    canvas.draw_str(line, Point::new(0.0, 0.0), &font, &jungle_green.to_paint());
                     canvas.translate((0.0, text_pane.line_height));
                 }
 
                 canvas.restore();
             }
             WidgetData::Text { text, text_options } => {
+        
                 let font = Font::new(Typeface::new(text_options.font_family.clone(), text_options.font_weight.into()).unwrap(), text_options.size);
                 let paint = text_options.color.to_paint();
                 canvas.draw_str(text, (self.position.x, self.position.y), &font, &paint);
