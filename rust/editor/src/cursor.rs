@@ -30,7 +30,7 @@ impl Cursor {
     }
 
     pub fn move_down(&mut self, text_buffer: &TextBuffer) -> EditAction  {
-        self.0 = min(self.0 + 1, text_buffer.line_count() -1);
+        self.0 = min(self.0 + 1, text_buffer.line_count().saturating_sub(1));
         self.1 = min(self.1, text_buffer.line_length(self.0));
         EditAction::CursorPosition(*self)
 
@@ -239,20 +239,14 @@ impl CursorContext {
     }
 
     pub fn handle_insert(&mut self, to_insert: &[u8], text_buffer : &mut TextBuffer) -> EditAction {
-        // TODO:
-        // This logic is wrong.
-        // I need to really think about how to make it right
-        // If I open a bracket, type, then close, it shouldn't duplicate
-        // But I also don't check the kind of bracket here.
         if let Some(cursor) = self.cursor {
             if Self::is_open_bracket(to_insert) {
                 self.auto_bracket_insert(to_insert, text_buffer, cursor)
             } else if Self::is_close_bracket(to_insert) {
                 let right_of_cursor = text_buffer.byte_at_pos(cursor);
-                let left_of_cursor = text_buffer.byte_at_pos(cursor.to_the_left(text_buffer));
 
-                match (left_of_cursor, right_of_cursor) {
-                    (Some(left), Some(right)) if Self::is_open_bracket(&[*left]) && Self::is_close_bracket(&[*right]) => {
+                match right_of_cursor{
+                    Some(right) if Self::is_close_bracket(&[*right]) => {
                         self.move_right(text_buffer)
                     }
                     _ => self.insert_normal_text(to_insert, text_buffer, cursor)
