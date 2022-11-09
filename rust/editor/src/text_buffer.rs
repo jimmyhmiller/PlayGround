@@ -125,7 +125,7 @@ impl TextBuffer {
 
         let char_pos = (line.0 + cursor_column).saturating_sub(1);
 
-        if self.is_empty() || char_pos >= self.char_length( ){
+        if self.is_empty() || char_pos >= self.char_length() {
             return EditAction::Noop;
         }
         if cursor_line == 0 && cursor_column == 0 {
