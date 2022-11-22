@@ -6,7 +6,7 @@ use block::{Block, CodeLocation};
 use draw::Color;
 use itertools::Itertools;
 use serde_json::Deserializer;
-use skia_safe::{Canvas, textlayout::{FontCollection, ParagraphStyle, ParagraphBuilder, TextStyle, Paragraph}, FontMgr, Rect, PaintStyle, Font, Typeface, FontStyle, Contains, Point};
+use skia_safe::{Rect, PaintStyle, Font, Typeface, FontStyle, Contains};
 use window::Driver;
 
 mod window;
@@ -74,9 +74,9 @@ impl Driver for Visualizer {
             winit::event::Event::WindowEvent { window_id: _, event } => {
                 use winit::event::WindowEvent::*;
                 match event {
-                    MouseWheel { device_id, delta, phase, modifiers } => {
+                    MouseWheel { device_id: _, delta, phase: _, .. } => {
                         match delta {
-                            winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                            winit::event::MouseScrollDelta::LineDelta(_x, _y) => {
                                 println!("Line?");
                             }
                             winit::event::MouseScrollDelta::PixelDelta(pos) => {
@@ -241,7 +241,7 @@ impl Driver for Visualizer {
 
 
 
-fn method_to_text(method: &CodeLocation, records: &Vec<Block>) -> String {
+fn _method_to_text(method: &CodeLocation, records: &Vec<Block>) -> String {
     let mut records = records.clone();
     let mut text = String::new();
     text.push_str(&format!("{}:{}\n", method.clone().file.unwrap_or_else(|| "unknown".to_string()), method.clone().method_name.unwrap_or_else(|| "unknown".to_string())));
@@ -255,7 +255,7 @@ fn method_to_text(method: &CodeLocation, records: &Vec<Block>) -> String {
 }
 
 
-fn calculate_hash<T: Hash>(t: &T) -> String {
+fn _calculate_hash<T: Hash>(t: &T) -> String {
     let mut s = DefaultHasher::new();
     t.hash(&mut s);
     s.finish().to_string()
