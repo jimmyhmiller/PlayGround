@@ -100,7 +100,7 @@ pub struct BlockId {
 }
 
 impl BlockId {
-    fn name(&self) -> String {
+    fn _name(&self) -> String {
         format!("block_{}_{}", self.iseq, self.idx)
     }
 }
