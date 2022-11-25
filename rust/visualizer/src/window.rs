@@ -32,6 +32,7 @@ pub trait Driver {
     fn draw(&mut self, canvas: &mut Canvas);
     fn next_frame(&mut self) {}
     fn init(&mut self) {}
+    fn before_draw(&mut self) {}
 
 }
 
@@ -151,6 +152,7 @@ pub fn setup_window<D: Driver + 'static>(mut driver: D) {
                             .unwrap()
                         };
 
+                        driver.before_draw();
                         driver.draw(surface.canvas());
 
                         surface.flush_and_submit();

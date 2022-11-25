@@ -238,3 +238,29 @@
 //         .map(|x| format!("{}", x.method_name.as_ref().unwrap()))
 //         .collect::<Vec<_>>()
 //         .join("\n");
+
+
+
+    // fn draw_paragraph(&mut self, color: Color, canvas: &mut Canvas) {
+
+    //     if let Some(paragraph) = &self.paragraph {
+    //         paragraph.paint(canvas, (0, self.scroll_offset as i32));
+    //     } else {
+    //         let mut font_collection = FontCollection::new();
+    //         font_collection.set_default_font_manager(FontMgr::new(), "Ubuntu Mono");
+    //         let paragraph_style = ParagraphStyle::new();
+    //         let mut paragraph_builder = ParagraphBuilder::new(&paragraph_style, font_collection);
+    //         let mut ts = TextStyle::new();
+    //         ts.set_foreground_color(color.to_paint());
+    //         ts.set_font_size(32.0);
+    //         paragraph_builder.push_style(&ts);
+    //         paragraph_builder.add_text(&self.text);
+
+    //         let mut paragraph = paragraph_builder.build();
+    //         paragraph.layout(1024.0);
+    //         paragraph.paint(canvas, (0, self.scroll_offset as i32));
+    //         self.paragraph = Some(paragraph);
+    //     }
+
+
+    // }
