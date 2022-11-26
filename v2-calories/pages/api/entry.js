@@ -1,6 +1,7 @@
 const faunadb = require("faunadb");
 const q = faunadb.query;
 const {format: formatDate, utcToZonedTime} = require("date-fns-tz");
+const { subDays } = require("date-fns");
 
 const client = new faunadb.Client({ secret: process.env.DATABASE_SECRET });
 
@@ -69,29 +70,29 @@ const extraCalories = (total, numberOfDays) => {
 
 
 const timeZone = 'America/New_York'
-const today = () => formatDate(utcToZonedTime(new Date(), timeZone), "yyyy-MM-dd", { timeZone });
+const getDate = (dayOffset) => formatDate(utcToZonedTime(subDays(new Date(), dayOffset), timeZone), "yyyy-MM-dd", { timeZone });
 
 
 // There has to be a better way. I should probably make an index by day?
-const getRemainingToday = (entries) => {
+const getRemainingToday = (entries, dayOffset) => {
   return q.Let({total: q.Sum(
                         q.Select("data", q.Map(
                           q.Filter(
                             entries,
-                            q.Lambda("x", q.Equals(today(), q.Select(["data", "date"], q.Get(q.Var("x")))))),
+                            q.Lambda("x", q.Equals(getDate(dayOffset), q.Select(["data", "date"], q.Get(q.Var("x")))))),
                           q.Lambda("x", q.Select(["data", "calories"], q.Get(q.Var("x")))))),
                       )},
    q.Subtract(bmr, goal, q.Var("total")))
 }
 
 
-const summary = () => {
+const summary = (dayOffset) => {
   return client.query(
     q.Let({
       entries: q.Paginate(q.Match("all_entry"), {size: 10000}),
       total: getTotal(q.Var("entries")),
       days: numberOfDays(q.Var("entries")),
-      remaining: getRemainingToday(q.Var("entries")),
+      remaining: getRemainingToday(q.Var("entries"), dayOffset),
       extra: extraCalories(q.Var("total"), q.Var("days")),
       pounds: getPounds(q.Var("total"), q.Var("days")),
       two: q.Subtract(q.Var("extra"), q.Multiply(q.Var("days"), 500)),
@@ -113,10 +114,9 @@ const summary = () => {
 
 
 
-
-module.exports = async (req, res) => {
+const handler = async (req, res) => {
   if (req.method === "GET" && req.query.summary) {
-    res.json({summary: await summary()});
+    res.json({summary: await summary(req.query.dayOffset || 0)});
   }
   else if (req.method === "GET") {
     res.send(await db.getAll("entry"));
@@ -126,3 +126,6 @@ module.exports = async (req, res) => {
   }
   // Need a way to delete. Which means I need ids? Or I could just use refs.
 };
+
+
+export default handler
