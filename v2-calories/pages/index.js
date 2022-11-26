@@ -219,7 +219,6 @@ const App = () => {
       }}
     >
       <Head>
-        <link href="https://unpkg.com/superstylin@2.0.2/src/index.css" rel="stylesheet" />
         <title>Calories</title>
 
         <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png" />
@@ -243,12 +242,7 @@ const App = () => {
         }
 
       `}</style>
-      {process.browser ? 
-        <Suspense fallback={<p></p>}>
-          <Main /> 
-        </Suspense>
-        : null
-      }
+      <Main />
     </SWRConfig>
   )
 }
