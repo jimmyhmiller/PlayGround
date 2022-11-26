@@ -3,12 +3,11 @@ import Link from 'next/link'
 import Head from 'next/head'
 import useSWR, { SWRConfig, trigger, mutate } from "swr";
 // in browser we don't need time zone stuff
-import { startOfToday, format as formatDate } from "date-fns";
+import { startOfToday, format as formatDate, subDays } from "date-fns";
 
 
 
-const today = () => formatDate(startOfToday(), "yyyy-MM-dd");
-console.log(today())
+const getDate = (dayOffset) => formatDate(subDays(startOfToday(), dayOffset), "yyyy-MM-dd");
 
 const httpRequest = ({ method, body, url }) => {
   return fetch(url, {
@@ -21,7 +20,7 @@ const httpRequest = ({ method, body, url }) => {
 }
 
 
-const Entry = ({ name, calories, first, summary }) => (
+const Entry = ({ name, calories, first, summary, dayOffset }) => (
   <div>
     <button
       onClick={async () => {
@@ -32,10 +31,10 @@ const Entry = ({ name, calories, first, summary }) => (
           body: {
             calories,
             name,
-            date: today()
+            date: getDate(dayOffset)
           }
         })
-        mutate("/api/entry?summary=true", subtractRemaining({ summary, calories}));
+        mutate(`/api/entry?summary=true&dayOffset=${dayOffset}`, subtractRemaining({ summary, calories}));
       }}
       className="entry"
       style={{
@@ -84,7 +83,7 @@ const subtractRemaining = ({ summary, calories }) => {
   }
 }
 
-const AddItem = ({ calories, summary, setCalories }) => {
+const AddItem = ({ calories, summary, setCalories, dayOffset }) => {
   return (
     <div
       onClick={async () => {
@@ -98,11 +97,11 @@ const AddItem = ({ calories, summary, setCalories }) => {
           body: {
             calories: parseInt(calories, 10),
             name: "food",
-            date: today(),
+            date: getDate(dayOffset),
           }
         })
 
-        mutate("/api/entry?summary=true", subtractRemaining({ summary, calories}));
+        mutate(`/api/entry?summary=true&dayOffset=${dayOffset}`, subtractRemaining({ summary, calories}));
         setCalories("");
       }}
       className="add-item"
@@ -153,14 +152,14 @@ const AddItem = ({ calories, summary, setCalories }) => {
   )
 }
 
-const AddEntry = ({ summary }) => {
+const AddEntry = ({ summary, dayOffset }) => {
   const [calories, setCalories] = useState("");
   return (
     <>
-      <Entry name="Bowl" calories={850} first summary={summary} />
-      <Entry name="Cortado" calories={10} summary={summary} />
-      <Entry name="Biscuit" calories={185} summary={summary} />
-      <Entry name="1 Mile Walk" calories={-100} summary={summary} />
+      <Entry name="Bowl" calories={850} first summary={summary} dayOffset={dayOffset} />
+      <Entry name="Cortado" calories={10} summary={summary} dayOffset={dayOffset} />
+      <Entry name="Biscuit" calories={185} summary={summary} dayOffset={dayOffset}/>
+      <Entry name="1 Mile Walk" calories={-100} summary={summary} dayOffset={dayOffset} />
       {/*Ugly*/}
       <input
         value={calories}
@@ -168,35 +167,43 @@ const AddEntry = ({ summary }) => {
         style={{marginTop: 30, width: "100%", borderRadius: 0}} 
         type="number" 
         placeholder="Calories" />
-      <AddItem calories={calories} setCalories={setCalories} summary={summary} />
+      <AddItem calories={calories} setCalories={setCalories} summary={summary} dayOffset={dayOffset} />
     </>
   )
 }
 
-const Summary = ({ summary }) => {
+const Summary = ({ summary, setDayOffset, dayOffset }) => {
   return (
-    <ul>
-      <li>Remaining: {summary["remaining"]}</li>
-      <li>Extra One Pound: {summary["extraOnePound"]}</li>
-      <li>Extra Two Pounds: {summary["extraTwoPounds"]}</li>
-      <li>Pounds: {summary["pounds"]}</li>
-      <li>Pounds By Weeks: {summary["projectedLoss"]}</li>
-      <li>Days: {summary["days"]}</li>
-      <li>Weeks: {summary["weeks"]}</li>
-      <li>Total: {summary["total"]}</li>
-      <li>Daily: {summary["daily"]}</li>
-    </ul>
+    <div>
+      <ul>
+        <li>Remaining: {summary["remaining"]}</li>
+        <li>Extra One Pound: {summary["extraOnePound"]}</li>
+        <li>Extra Two Pounds: {summary["extraTwoPounds"]}</li>
+        <li>Pounds: {summary["pounds"]}</li>
+        <li>Pounds By Weeks: {summary["projectedLoss"]}</li>
+        <li>Days: {summary["days"]}</li>
+        <li>Weeks: {summary["weeks"]}</li>
+        <li>Total: {summary["total"]}</li>
+        <li>Daily: {summary["daily"]}</li>
+      </ul>
+      <button onClick={e => setDayOffset(x => x + 1)}>{"<<"}</button>
+      {dayOffset}
+      <button onClick={e => setDayOffset(x => Math.max(x - 1, 0))}>{">>"}</button>
+    </div>
   )
 }
 
 
 const Main = () => {
-  const {data : { summary }} = useSWR("/api/entry?summary=true");
+  const [dayOffset, setDayOffset] = useState(0);
+  const {data : { summary }} = useSWR(`/api/entry?summary=true&dayOffset=${dayOffset}`);
   const [showSummary, setShowSummary] = useState(false);
   return (
     <div>
       <h1 onClick={() => setShowSummary(!showSummary)}>{summary.remaining} Calories</h1>
-      {showSummary ? <Summary summary={summary} /> : <AddEntry summary={summary} />}
+      {showSummary ? 
+        <Summary summary={summary} dayOffset={dayOffset} setDayOffset={setDayOffset} /> 
+        : <AddEntry summary={summary} dayOffset={dayOffset} />}
     </div>
   )
 }
