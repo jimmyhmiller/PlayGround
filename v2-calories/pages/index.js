@@ -196,7 +196,7 @@ const Summary = ({ summary, setDayOffset, dayOffset }) => {
 
 const Main = () => {
   const [dayOffset, setDayOffset] = useState(0);
-  const {data : { summary }} = useSWR(`/api/entry?summary=true&dayOffset=${dayOffset}`);
+  const {data : { summary }} = useSWR(`/api/entry?summary=true&dayOffset=${dayOffset}`, {fallbackData: { summary: {}}});
   const [showSummary, setShowSummary] = useState(false);
   return (
     <div>
