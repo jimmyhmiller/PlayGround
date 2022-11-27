@@ -283,7 +283,7 @@ impl Visualizer {
 
     }
 
-    fn draw_method(&mut self, canvas: &mut Canvas, file_name: &String, method: &Method) {
+    fn draw_method(&mut self, canvas: &mut Canvas, method: &Method) {
 
         canvas.clear(self.style.background_color.to_color4f());
 
@@ -302,7 +302,7 @@ impl Visualizer {
         canvas.draw_str(&method.name, (x as f32 + 56.0, y as f32 + 56.0), &heading_font, &text_paint);
 
         y += 100;
-        let text_font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(), 32.0);
+
         let mut text_paint = self.style.primary_text_color.to_paint();
         text_paint.set_style(PaintStyle::Fill);
 
@@ -433,8 +433,8 @@ impl Driver for Visualizer {
             Scene::Overview => {
                 self.draw_overview(canvas);
             }
-            Scene::Method { file_name, method } => {
-                self.draw_method(canvas, file_name, &method.clone());
+            Scene::Method { file_name: _, method } => {
+                self.draw_method(canvas, &method.clone());
             }
         }
     }
