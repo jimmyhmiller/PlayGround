@@ -24,6 +24,7 @@ impl Page {
         })
     }
 
+    #[allow(dead_code)]
     fn write_u32_be(&mut self, offset: usize, data: u32) -> Result<(), Error> {
         self.writeable()?;
         let memory = &mut self.mem_write.as_mut().unwrap()[..];
@@ -76,6 +77,7 @@ impl Page {
 }
 
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BitSize {
     B32,
@@ -94,229 +96,84 @@ impl BitSize {
 // Borrowed structure from zig
 
 
-// Going to try something that will use more memory than it needs
-// But I don't particularly care about that.
+#[derive(Debug, Clone, Copy)]
+struct Value<const SIZE: u8>(u32);
 
-// trait Width {
-//     fn value(&self) -> u32;
-//     fn size(&self) -> u8;
-// }
+impl<const SIZE: u8> Value<SIZE> {
+    fn value(&self) -> u32 {
+        self.0
+    }
+    const fn size(&self) -> u8 {
+        SIZE
+    }
+}
 
+#[derive(Debug, Clone, Copy)]
+struct Fixed<const SIZE: u8, const VALUE : u32>();
 
+impl<const SIZE: u8, const VALUE: u32> Fixed<SIZE, VALUE> {
+    const fn value(&self) -> u32 {
+        VALUE
+    }
+    fn size(&self) -> u8 {
+        SIZE
+    }
+}
 
+#[derive(Debug, Clone, Copy)]
+struct Register {
+    index: u8,
+    size: BitSize,
+}
 
-// struct U1(u8);
-// impl Width for U1 {
-//     fn value(&self) -> u32 {
-//         self.0 as u32
-//     }
-//     fn size(&self) -> u8 {
-//         1
-//     }
-// }
-// struct U2(u8);
-// impl Width for U2 {
-
-//     fn value(&self) -> u32 {
-//         self.0 as u32
-//     }
-//     fn size(&self) -> u8 {
-//         2
-//     }
-// }
-// struct U3(u8);
-// impl Width for U3 {
-
-//     fn value(&self) -> u32 {
-//         self.0 as u32
-//     }
-//     fn size(&self) -> u8 {
-//         3
-//     }
-// }
-// struct U4(u8);
-// impl Width for U4 {
-
-//     fn value(&self) -> u32 {
-//         self.0 as u32
-//     }
-//     fn size(&self) -> u8 {
-//         4
-//     }
-// }
-// struct U5(u8);
-// impl Width for U5 {
-
-//     fn value(&self) -> u32 {
-//         self.0 as u32
-//     }
-//     fn size(&self) -> u8 {
-//         5
-//     }
-// }
-// struct U6(u8);
-// impl Width for U6 {
-
-//     fn value(&self) -> u32 {
-//         self.0 as u32
-//     }
-//     fn size(&self) -> u8 {
-//         6
-//     }
-// }
-// struct U7(u8);
-// impl Width for U7 {
-
-//     fn value(&self) -> u32 {
-//         self.0 as u32
-//     }
-//     fn size(&self) -> u8 {
-//         7
-//     }
-// }
+impl Register {
+    fn value(&self) -> u32 {
+        self.index as u32
+    }
+    fn size(&self) -> u8 {
+        5
+    }
+}
 
 
-// struct U12(u16);
-// impl Width for U12 {
+#[derive(Debug, Clone, Copy)]
+struct Shift(u32);
 
-//     fn value(&self) -> u32 {
-//         self.0 as u32
-//     }
-//     fn size(&self) -> u8 {
-//         12
-//     }
-// }
-// struct U19(u32);
-// impl Width for U19 {
-
-//     fn value(&self) -> u32 {
-//         self.0 as u32
-//     }
-//     fn size(&self) -> u8 {
-//         19
-//     }
-// }
-// struct U26(u32);
-// impl Width for U26 {
-
-//     fn value(&self) -> u32 {
-//         self.0 as u32
-//     }
-//     fn size(&self) -> u8 {
-//         26
-//     }
-// }
-
-// impl Width for u8 {
-//     fn value(&self) -> u32 {
-//         *self as u32
-//     }
-//     fn size(&self) -> u8 {
-//         8
-//     }
-// }
-// impl Width for u16 {
-//     fn value(&self) -> u32 {
-//         *self as u32
-//     }
-//     fn size(&self) -> u8 {
-//         16
-//     }
-// }
-
-// impl Width for u32 {
-//     fn value(&self) -> u32 {
-//         *self
-//     }
-//     fn size(&self) -> u8 {
-//         32
-//     }
-// }
-
-// fn test_stuff() {
-
-    #[derive(Debug, Clone, Copy)]
-    struct Value<const SIZE: u8>(u32);
-
-    impl<const SIZE: u8> Value<SIZE> {
-        fn value(&self) -> u32 {
-            self.0
-        }
-        const fn size(&self) -> u8 {
-            SIZE
-        }
+impl Shift {
+    fn value(&self) -> u32 {
+        self.0
+    }
+    fn size(&self) -> u8 {
+        2
     }
 
-    #[derive(Debug, Clone, Copy)]
-    struct Fixed<const SIZE: u8, const VALUE : u32>();
-
-    impl<const SIZE: u8, const VALUE: u32> Fixed<SIZE, VALUE> {
-        const fn value(&self) -> u32 {
-            VALUE
-        }
-        fn size(&self) -> u8 {
-            SIZE
-        }
+    fn shift_0() -> Shift {
+        Shift(0b00)
     }
-
-    #[derive(Debug, Clone, Copy)]
-    struct Register {
-        index: u8,
-        size: BitSize,
+    fn shift_16() -> Shift {
+        Shift(0b01)
     }
-
-    impl Register {
-        fn value(&self) -> u32 {
-            self.index as u32
-        }
-        fn size(&self) -> u8 {
-            5
-        }
+    fn shift_32() -> Shift {
+        Shift(0b10)
     }
-
-
-    #[derive(Debug, Clone, Copy)]
-    struct Shift(u32);
-
-    impl Shift {
-        fn value(&self) -> u32 {
-            self.0
-        }
-        fn size(&self) -> u8 {
-            2
-        }
-
-        fn shift_0() -> Shift {
-            Shift(0b00)
-        }
-        fn shift_16() -> Shift {
-            Shift(0b01)
-        }
-        fn shift_32() -> Shift {
-            Shift(0b10)
-        }
-        fn shift_48() -> Shift {
-            Shift(0b11)
-        }
+    fn shift_48() -> Shift {
+        Shift(0b11)
     }
+}
 
-    type U1 = Value<1>;
-    type U2 = Value<2>;
-    type U3 = Value<3>;
-    type U4 = Value<4>;
-    type U5 = Value<5>;
-    type U6 = Value<6>;
-    type U7 = Value<7>;
-    type U8 = Value<8>;
-    type U12 = Value<12>;
-    type U16 = Value<16>;
-    type U19 = Value<19>;
-    type U26 = Value<26>;
-    type U32 = Value<32>;
-
-
-// }
-
+type U1 = Value<1>;
+type U2 = Value<2>;
+type U3 = Value<3>;
+type U4 = Value<4>;
+type U5 = Value<5>;
+type U6 = Value<6>;
+type U7 = Value<7>;
+// type U8 = Value<8>;
+type U12 = Value<12>;
+type U16 = Value<16>;
+type U19 = Value<19>;
+type U26 = Value<26>;
+// type U32 = Value<32>;
 
 
 macro_rules! encode_instruction {
@@ -325,10 +182,11 @@ macro_rules! encode_instruction {
 
     };
 
-
     (@repeat $instruction:ident, $offset:ident, $head:expr, $($tail:expr,)*) => {
         $instruction |= $head.value() << $offset;
-        $offset += $head.size();
+        #[allow(unused_assignments)] {
+            $offset += $head.size();
+        }
         encode_instruction!(@repeat $instruction, $offset, $($tail,)*);
     };
 
@@ -431,7 +289,7 @@ enum BaseInstructionKind {
     PcRelativeAddress {
         rd: Register,
         immhi: U19,
-        fixed: U5, // 0b10000
+        fixed: Fixed<5, 0b10000>,
         immlo: U2,
         op: U1,
     },
@@ -443,7 +301,7 @@ enum BaseInstructionKind {
         opc: U2,
         op1: U2,
         v: U1,
-        fixed: U3, // 0b111
+        fixed: Fixed<3, 0b111>,
         size: U2,
     },
 
@@ -454,14 +312,14 @@ enum BaseInstructionKind {
         imm7: U7,
         load: U1,
         encoding: U2,
-        fixed: U5, // 0b101_0_0
+        fixed: Fixed<5, 0b101_0_0>,
         opc: U2,
     },
 
     LoadLiteral {
         rt: Register,
         imm19: U19,
-        fixed: U6, // 0b011_0_00
+        fixed: Fixed<6, 0b011_0_00>,
         opc: U2,
     },
 
@@ -614,124 +472,37 @@ enum BaseInstructionKind {
     },
 }
 
-
-// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// struct Register {
-//     index: u8,
-//     size: Bitu8,
-// }
-
-// impl Width for Register {
-
-//     fn value(&self) -> u32 {
-//         self.index as u32
-//     }
-//     fn size(&self) -> u8 {
-//         5
-//     }
-// }
-
-
-// LSL
-// #[derive(Debug, Clone, Copy)]
-// enum Shift {
-//     S0 = 0b00,
-//     S16 = 0b01,
-//     S32 = 0b10,
-//     S48 = 0b11,
-// }
-
-// impl Width for Shift {
-//     fn value(&self) -> u32 {
-//         *self as u32
-//     }
-//     fn size(&self) -> u8 {
-//         2
-//     }
-// }
-
 fn encode_ret() -> u32 {
-    let new = BaseInstructionKind::UnconditionalBranchRegister {
+    BaseInstructionKind::UnconditionalBranchRegister {
         op4: Value(0b00000),
         rn: Register { index: 30, size: BitSize::B64 },
         op3: Value(0b000000),
         op2: Value(0b11111),
         opc: Value(0b0010),
         fixed: Fixed(),
-    }.encode_instruction();
-    new
+    }.encode_instruction()
 }
-
-// opc: 0b0010
-// op2: 0b11111
-// op3: 0b000000
-// rn: Register,
-// op4: 0b00000
-
-// pub fn ret(rn: ?Register) Instruction {
-//     return unconditionalBranchRegister(0b0010, 0b11111, 0b000000, rn orelse .x30, 0b00000);
-// }
-
-// 11010110000000000111111111000010
-// 11000000000000110101111111010110
-
-
-// 1101011 0010 11111 000000 Rn    00000
-// 1101011 0010 11111 000000 11110 00000
-
-
-
-
-
-
-
 
 fn encode_movz_16(destination: Register, value: u16) -> u32 {
 
-    let new = BaseInstructionKind::MoveWideImmediate {
+    BaseInstructionKind::MoveWideImmediate {
         rd: destination,
         imm16: Value(value as u32),
-        shift: Shift(0b00),
+        shift: Shift::shift_0(),
         fixed: Fixed(),
         opc: Value(0b10),
         sf: Value(destination.size.sf() as u32),
-    }.encode_instruction();
-
-    let old = 0
-    | (destination.size.sf() as u32) << 31
-    | 0b10 << 29
-    | 0b1000 << 25
-    | 0b101 << 23
-    | (Shift::shift_0().value() as u32) << 21
-    | (value as u32) << 5
-    | destination.index as u32;
-
-    assert_eq!(new, old);
-    println!("{:#x}", new);
-    new
+    }.encode_instruction()
 }
 fn encode_movk(destination: Register, shift: Shift, value: U16) -> u32 {
-    let new = BaseInstructionKind::MoveWideImmediate {
+    BaseInstructionKind::MoveWideImmediate {
         rd: destination,
         imm16: value,
         shift,
         fixed: Fixed(),
         opc: Value(0b11),
         sf: Value(destination.size.sf() as u32),
-    }.encode_instruction();
-
-    let old = 0
-    | (destination.size.sf() as u32) << 31
-    | 0b11 << 29
-    | 0b1000 << 25
-    | 0b101 << 23
-    | (shift.value() as u32) << 21
-    | (value.value() as u32) << 5
-    | destination.index as u32;
-
-    assert_eq!(old, new);
-    println!("{:#x}", new);
-    new
+    }.encode_instruction()
 }
 
 
@@ -761,8 +532,7 @@ fn main() -> Result<(), Error> {
     page.write_u32_le(8, mov[2])?;
     page.write_u32_le(12, mov[3])?;
 
-    let ret: u32 = encode_ret();
-    page.write_u32_le(16, ret)?;
+    page.write_u32_le(16, encode_ret())?;
 
 
     let main_fn = page.get_function()?;
