@@ -1,3 +1,4 @@
+
 use std::mem;
 // use memmap2::{MmapMut, Mmap};
 use mmap_rs::{Error, MmapOptions, MmapMut, Mmap};
@@ -96,158 +97,242 @@ impl BitSize {
 // Going to try something that will use more memory than it needs
 // But I don't particularly care about that.
 
-trait Width {
-    fn value(&self) -> u32;
-    fn size(&self) -> u8;
-}
+// trait Width {
+//     fn value(&self) -> u32;
+//     fn size(&self) -> u8;
+// }
 
 
-struct U1(u8);
-impl Width for U1 {
-    fn value(&self) -> u32 {
-        self.0 as u32
-    }
-    fn size(&self) -> u8 {
-        1
-    }
-}
-struct U2(u8);
-impl Width for U2 {
-
-    fn value(&self) -> u32 {
-        self.0 as u32
-    }
-    fn size(&self) -> u8 {
-        2
-    }
-}
-struct U3(u8);
-impl Width for U3 {
-
-    fn value(&self) -> u32 {
-        self.0 as u32
-    }
-    fn size(&self) -> u8 {
-        3
-    }
-}
-struct U4(u8);
-impl Width for U4 {
-
-    fn value(&self) -> u32 {
-        self.0 as u32
-    }
-    fn size(&self) -> u8 {
-        4
-    }
-}
-struct U5(u8);
-impl Width for U5 {
-
-    fn value(&self) -> u32 {
-        self.0 as u32
-    }
-    fn size(&self) -> u8 {
-        5
-    }
-}
-struct U6(u8);
-impl Width for U6 {
-
-    fn value(&self) -> u32 {
-        self.0 as u32
-    }
-    fn size(&self) -> u8 {
-        6
-    }
-}
-struct U7(u8);
-impl Width for U7 {
-
-    fn value(&self) -> u32 {
-        self.0 as u32
-    }
-    fn size(&self) -> u8 {
-        7
-    }
-}
 
 
-struct U12(u16);
-impl Width for U12 {
+// struct U1(u8);
+// impl Width for U1 {
+//     fn value(&self) -> u32 {
+//         self.0 as u32
+//     }
+//     fn size(&self) -> u8 {
+//         1
+//     }
+// }
+// struct U2(u8);
+// impl Width for U2 {
 
-    fn value(&self) -> u32 {
-        self.0 as u32
-    }
-    fn size(&self) -> u8 {
-        12
-    }
-}
-struct U19(u32);
-impl Width for U19 {
+//     fn value(&self) -> u32 {
+//         self.0 as u32
+//     }
+//     fn size(&self) -> u8 {
+//         2
+//     }
+// }
+// struct U3(u8);
+// impl Width for U3 {
 
-    fn value(&self) -> u32 {
-        self.0 as u32
-    }
-    fn size(&self) -> u8 {
-        19
-    }
-}
-struct U26(u32);
-impl Width for U26 {
+//     fn value(&self) -> u32 {
+//         self.0 as u32
+//     }
+//     fn size(&self) -> u8 {
+//         3
+//     }
+// }
+// struct U4(u8);
+// impl Width for U4 {
 
-    fn value(&self) -> u32 {
-        self.0 as u32
-    }
-    fn size(&self) -> u8 {
-        26
-    }
-}
+//     fn value(&self) -> u32 {
+//         self.0 as u32
+//     }
+//     fn size(&self) -> u8 {
+//         4
+//     }
+// }
+// struct U5(u8);
+// impl Width for U5 {
 
-impl Width for u8 {
-    fn value(&self) -> u32 {
-        *self as u32
-    }
-    fn size(&self) -> u8 {
-        8
-    }
-}
-impl Width for u16 {
-    fn value(&self) -> u32 {
-        *self as u32
-    }
-    fn size(&self) -> u8 {
-        16
-    }
-}
+//     fn value(&self) -> u32 {
+//         self.0 as u32
+//     }
+//     fn size(&self) -> u8 {
+//         5
+//     }
+// }
+// struct U6(u8);
+// impl Width for U6 {
 
-impl Width for u32 {
-    fn value(&self) -> u32 {
-        *self
+//     fn value(&self) -> u32 {
+//         self.0 as u32
+//     }
+//     fn size(&self) -> u8 {
+//         6
+//     }
+// }
+// struct U7(u8);
+// impl Width for U7 {
+
+//     fn value(&self) -> u32 {
+//         self.0 as u32
+//     }
+//     fn size(&self) -> u8 {
+//         7
+//     }
+// }
+
+
+// struct U12(u16);
+// impl Width for U12 {
+
+//     fn value(&self) -> u32 {
+//         self.0 as u32
+//     }
+//     fn size(&self) -> u8 {
+//         12
+//     }
+// }
+// struct U19(u32);
+// impl Width for U19 {
+
+//     fn value(&self) -> u32 {
+//         self.0 as u32
+//     }
+//     fn size(&self) -> u8 {
+//         19
+//     }
+// }
+// struct U26(u32);
+// impl Width for U26 {
+
+//     fn value(&self) -> u32 {
+//         self.0 as u32
+//     }
+//     fn size(&self) -> u8 {
+//         26
+//     }
+// }
+
+// impl Width for u8 {
+//     fn value(&self) -> u32 {
+//         *self as u32
+//     }
+//     fn size(&self) -> u8 {
+//         8
+//     }
+// }
+// impl Width for u16 {
+//     fn value(&self) -> u32 {
+//         *self as u32
+//     }
+//     fn size(&self) -> u8 {
+//         16
+//     }
+// }
+
+// impl Width for u32 {
+//     fn value(&self) -> u32 {
+//         *self
+//     }
+//     fn size(&self) -> u8 {
+//         32
+//     }
+// }
+
+// fn test_stuff() {
+
+    #[derive(Debug, Clone, Copy)]
+    struct Value<const SIZE: u8>(u32);
+
+    impl<const SIZE: u8> Value<SIZE> {
+        fn value(&self) -> u32 {
+            self.0
+        }
+        const fn size(&self) -> u8 {
+            SIZE
+        }
     }
-    fn size(&self) -> u8 {
-        32
+
+    #[derive(Debug, Clone, Copy)]
+    struct Fixed<const SIZE: u8, const VALUE : u32>();
+
+    impl<const SIZE: u8, const VALUE: u32> Fixed<SIZE, VALUE> {
+        const fn value(&self) -> u32 {
+            VALUE
+        }
+        fn size(&self) -> u8 {
+            SIZE
+        }
     }
-}
+
+    #[derive(Debug, Clone, Copy)]
+    struct Register {
+        index: u8,
+        size: BitSize,
+    }
+
+    impl Register {
+        fn value(&self) -> u32 {
+            self.index as u32
+        }
+        fn size(&self) -> u8 {
+            5
+        }
+    }
+
+
+    #[derive(Debug, Clone, Copy)]
+    struct Shift(u32);
+
+    impl Shift {
+        fn value(&self) -> u32 {
+            self.0
+        }
+        fn size(&self) -> u8 {
+            2
+        }
+
+        fn shift_0() -> Shift {
+            Shift(0b00)
+        }
+        fn shift_16() -> Shift {
+            Shift(0b01)
+        }
+        fn shift_32() -> Shift {
+            Shift(0b10)
+        }
+        fn shift_48() -> Shift {
+            Shift(0b11)
+        }
+    }
+
+    type U1 = Value<1>;
+    type U2 = Value<2>;
+    type U3 = Value<3>;
+    type U4 = Value<4>;
+    type U5 = Value<5>;
+    type U6 = Value<6>;
+    type U7 = Value<7>;
+    type U8 = Value<8>;
+    type U12 = Value<12>;
+    type U16 = Value<16>;
+    type U19 = Value<19>;
+    type U26 = Value<26>;
+    type U32 = Value<32>;
+
+
+// }
+
+
 
 macro_rules! encode_instruction {
 
-    (@repeat $instruction:ident, $offset:ident,) => {
+    (@repeat $instruction:expr, $offset:expr,) => {
 
     };
 
 
-    (@repeat $instruction:ident, $offset:ident, $head:ident, $($tail:ident,)*) => {
+    (@repeat $instruction:ident, $offset:ident, $head:expr, $($tail:expr,)*) => {
         $instruction |= $head.value() << $offset;
-        // This is an incorrect warning
-        #[allow(unused_assignments)]
-        {
-            $offset += $head.size();
-        }
+        $offset += $head.size();
         encode_instruction!(@repeat $instruction, $offset, $($tail,)*);
     };
 
-    ($($n:ident),*) => {
+    ($($n:expr),*) => {
         {
             let mut instruction : u32 = 0;
             let mut offset : u8 = 0;
@@ -264,67 +349,67 @@ macro_rules! encode_instruction {
 // Mostly because I think it would be fun.
 // There is another part of me that thinks that would be a waste of time.
 
-impl BaseInstructionKinds {
+impl BaseInstructionKind {
     fn encode_instruction(&self) -> u32 {
         match self {
-            BaseInstructionKinds::MoveWideImmediate { rd, imm16, shift: hw, fixed, opc, sf } => {
+            BaseInstructionKind::MoveWideImmediate { rd, imm16, shift: hw, fixed, opc, sf } => {
                 encode_instruction!(rd, imm16, hw, fixed, opc, sf)
             }
-            BaseInstructionKinds::PcRelativeAddress { rd, immhi, fixed, immlo, op } => {
+            BaseInstructionKind::PcRelativeAddress { rd, immhi, fixed, immlo, op } => {
                 encode_instruction!(rd, immhi, fixed, immlo, op)
             }
-            BaseInstructionKinds::LoadStoreRegister { rt, rn, offset, opc, op1, v, fixed, size } => {
+            BaseInstructionKind::LoadStoreRegister { rt, rn, offset, opc, op1, v, fixed, size } => {
                 encode_instruction!(rt, rn, offset, opc, op1, v, fixed, size)
             }
-            BaseInstructionKinds::LoadStoreRegisterPair { rt1, rn, rt2, imm7, load, encoding, fixed, opc } => {
+            BaseInstructionKind::LoadStoreRegisterPair { rt1, rn, rt2, imm7, load, encoding, fixed, opc } => {
                 encode_instruction!(rt1, rn, rt2, imm7, load, encoding, fixed, opc)
             }
-            BaseInstructionKinds::LoadLiteral { rt, imm19, fixed, opc } => {
+            BaseInstructionKind::LoadLiteral { rt, imm19, fixed, opc } => {
                 encode_instruction!(rt, imm19, fixed, opc)
             }
-            BaseInstructionKinds::ExceptionGeneration { ll, op2, imm16, opc, fixed } => {
+            BaseInstructionKind::ExceptionGeneration { ll, op2, imm16, opc, fixed } => {
                 encode_instruction!(ll, op2, imm16, opc, fixed)
             }
-            BaseInstructionKinds::UnconditionalBranchRegister { op4, rn, op3, op2, opc, fixed } => {
+            BaseInstructionKind::UnconditionalBranchRegister { op4, rn, op3, op2, opc, fixed } => {
                 encode_instruction!(op4, rn, op3, op2, opc, fixed)
             }
-            BaseInstructionKinds::UnconditionalBranchImmediate { imm26, fixed, op } =>{
+            BaseInstructionKind::UnconditionalBranchImmediate { imm26, fixed, op } =>{
                 encode_instruction!(imm26, fixed, op)
             }
-            BaseInstructionKinds::NoOperation { fixed } => {
+            BaseInstructionKind::NoOperation { fixed } => {
                 encode_instruction!(fixed)
             }
-            BaseInstructionKinds::LogicalShiftedRegister { rd, rn, imm6, rm, n, shift, fixed, opc, sf } => {
+            BaseInstructionKind::LogicalShiftedRegister { rd, rn, imm6, rm, n, shift, fixed, opc, sf } => {
                 encode_instruction!(rd, rn, imm6, rm, n, shift, fixed, opc, sf)
             }
-            BaseInstructionKinds::AddSubtractImmediate { rd, rn, imm12, sh, fixed, s, op, sf } => {
+            BaseInstructionKind::AddSubtractImmediate { rd, rn, imm12, sh, fixed, s, op, sf } => {
                 encode_instruction!(rd, rn, imm12, sh, fixed, s, op, sf)
             }
-            BaseInstructionKinds::LogicalImmediate { rd, rn, imms, immr, n, fixed, opc, sf } => {
+            BaseInstructionKind::LogicalImmediate { rd, rn, imms, immr, n, fixed, opc, sf } => {
                 encode_instruction!(rd, rn, imms, immr, n, fixed, opc, sf)
             }
-            BaseInstructionKinds::Bitfield { rd, rn, imms, immr, n, fixed, opc, sf } => {
+            BaseInstructionKind::Bitfield { rd, rn, imms, immr, n, fixed, opc, sf } => {
                 encode_instruction!(rd, rn, imms, immr, n, fixed, opc, sf)
             }
-            BaseInstructionKinds::AddSubtractShiftedRegister { rd, rn, imm6, rm, fixed_1, shift, fixed_2, s, op, sf } => {
+            BaseInstructionKind::AddSubtractShiftedRegister { rd, rn, imm6, rm, fixed_1, shift, fixed_2, s, op, sf } => {
                 encode_instruction!(rd, rn, imm6, rm, fixed_1, shift, fixed_2, s, op, sf)
             }
-            BaseInstructionKinds::AddSubtractExtendedRegister { rd, rn, imm3, option, rm, fixed, s, op, sf } => {
+            BaseInstructionKind::AddSubtractExtendedRegister { rd, rn, imm3, option, rm, fixed, s, op, sf } => {
                 encode_instruction!(rd, rn, imm3, option, rm, fixed, s, op, sf)
             }
-            BaseInstructionKinds::ConditionalBranch { cond, o0, imm19, o1, fixed } => {
+            BaseInstructionKind::ConditionalBranch { cond, o0, imm19, o1, fixed } => {
                 encode_instruction!(cond, o0, imm19, o1, fixed)
             }
-            BaseInstructionKinds::CompareAndBranch { rt, imm19, op, fixed, sf } => {
+            BaseInstructionKind::CompareAndBranch { rt, imm19, op, fixed, sf } => {
                 encode_instruction!(rt, imm19, op, fixed, sf)
             }
-            BaseInstructionKinds::ConditionalSelect { rd, rn, op2, cond, rm, fixed, s, op, sf } => {
+            BaseInstructionKind::ConditionalSelect { rd, rn, op2, cond, rm, fixed, s, op, sf } => {
                 encode_instruction!(rd, rn, op2, cond, rm, fixed, s, op, sf)
             }
-            BaseInstructionKinds::DataProcessing3Source { rd, rn, ra, o0, rm, op31, fixed, op54, sf } => {
+            BaseInstructionKind::DataProcessing3Source { rd, rn, ra, o0, rm, op31, fixed, op54, sf } => {
                 encode_instruction!(rd, rn, ra, o0, rm, op31, fixed, op54, sf)
             }
-            BaseInstructionKinds::DataProcessing2Source { rd, rn, opcode, rm, fixed_1, s, fixed_2, sf } => {
+            BaseInstructionKind::DataProcessing2Source { rd, rn, opcode, rm, fixed_1, s, fixed_2, sf } => {
                 encode_instruction!(rd, rn, opcode, rm, fixed_1, s, fixed_2, sf)
             }
         }
@@ -333,12 +418,12 @@ impl BaseInstructionKinds {
 
 
 #[allow(unused)]
-enum BaseInstructionKinds {
+enum BaseInstructionKind {
     MoveWideImmediate {
         rd: Register,
-        imm16: u16,
+        imm16: U16,
         shift: Shift,
-        fixed: U6, // 0b100101
+        fixed: Fixed<6, 0b100101>,
         opc: U2,
         sf: U1,
     },
@@ -383,9 +468,9 @@ enum BaseInstructionKinds {
     ExceptionGeneration {
         ll: U2,
         op2: U3,
-        imm16: u16,
+        imm16: U16,
         opc: U3,
-        fixed: u8, // 0b1101_0100
+        fixed: Fixed<8, 0b1101_0100>
     },
 
     UnconditionalBranchRegister {
@@ -394,17 +479,17 @@ enum BaseInstructionKinds {
         op3: U6,
         op2: U5,
         opc: U4,
-        fixed: U7, // 0b1101_011
+        fixed: Fixed<7, 0b1101_011>,
     },
 
     UnconditionalBranchImmediate {
         imm26: U26,
-        fixed: U5, // 0b00101
+        fixed: Fixed<5, 0b00101>,
         op: U1,
     },
 
     NoOperation {
-        fixed: u32, // 0b1101010100_0_00_011_0010_0000_000_11111
+        fixed: Fixed<32, 0b1101010100_0_00_011_0010_0000_000_11111>,
     },
 
     LogicalShiftedRegister {
@@ -414,7 +499,7 @@ enum BaseInstructionKinds {
         rm: Register,
         n: U1,
         shift: Shift,
-        fixed: U5, // 0b01010
+        fixed: Fixed<5, 0b01010>,
         opc: U2,
         sf: U1,
     },
@@ -424,7 +509,7 @@ enum BaseInstructionKinds {
         rn: Register,
         imm12: U12,
         sh: U1,
-        fixed: U6, // 0b100010
+        fixed: Fixed<6, 0b100010>,
         s: U1,
         op: U1,
         sf: U1,
@@ -436,7 +521,7 @@ enum BaseInstructionKinds {
         imms: U6,
         immr: U6,
         n: U1,
-        fixed: U6, // 0b100100
+        fixed: Fixed<6, 0b100100>,
         opc: U2,
         sf: U1,
     },
@@ -447,7 +532,7 @@ enum BaseInstructionKinds {
         imms: U6,
         immr: U6,
         n: U1,
-        fixed: U6, // 0b100110
+        fixed: Fixed<6, 0b100110>,
         opc: U2,
         sf: U1,
     },
@@ -457,9 +542,9 @@ enum BaseInstructionKinds {
         rn: Register,
         imm6: U6,
         rm: Register,
-        fixed_1: U1, // 0b0
+        fixed_1: Fixed<1, 0b0>,
         shift: Shift,
-        fixed_2: U5, // 0b01011
+        fixed_2: Fixed<5, 0b01011>,
         s: U1,
         op: U1,
         sf: U1,
@@ -471,7 +556,7 @@ enum BaseInstructionKinds {
         imm3: U3,
         option: U3,
         rm: Register,
-        fixed: u8, // 0b01011_00_1
+        fixed: Fixed<8, 0b01011_00_1>,
         s: U1,
         op: U1,
         sf: U1,
@@ -482,14 +567,14 @@ enum BaseInstructionKinds {
         o0: U1,
         imm19: U19,
         o1: U1,
-        fixed: U7, // 0b0101010
+        fixed: Fixed<7, 0b0101010>,
     },
 
     CompareAndBranch {
         rt: Register,
         imm19: U19,
         op: U1,
-        fixed: U6, // 0b011010
+        fixed: Fixed<6, 0b011010>,
         sf: U1,
     },
 
@@ -499,7 +584,7 @@ enum BaseInstructionKinds {
         op2: U2,
         cond: U4,
         rm: Register,
-        fixed: u8, // 0b11010100
+        fixed: Fixed<8, 0b11010100>,
         s: U1,
         op: U1,
         sf: U1,
@@ -512,7 +597,7 @@ enum BaseInstructionKinds {
         o0: U1,
         rm: Register,
         op31: U3,
-        fixed: U5, // 0b11011
+        fixed: Fixed<5, 0b11011>,
         op54: U2,
         sf: U1,
     },
@@ -522,52 +607,79 @@ enum BaseInstructionKinds {
         rn: Register,
         opcode: U6,
         rm: Register,
-        fixed_1: u8, // 0b11010110
+        fixed_1: Fixed<8, 0b11010110>,
         s: U1,
-        fixed_2: U1, // 0b0
+        fixed_2: Fixed<1, 0b0>,
         sf: U1,
     },
 }
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Register {
-    index: u8,
-    size: BitSize,
-}
+// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// struct Register {
+//     index: u8,
+//     size: Bitu8,
+// }
 
-impl Width for Register {
+// impl Width for Register {
 
-    fn value(&self) -> u32 {
-        self.index as u32
-    }
-    fn size(&self) -> u8 {
-        5
-    }
-}
+//     fn value(&self) -> u32 {
+//         self.index as u32
+//     }
+//     fn size(&self) -> u8 {
+//         5
+//     }
+// }
 
 
 // LSL
-#[derive(Debug, Clone, Copy)]
-enum Shift {
-    S0 = 0b00,
-    S16 = 0b01,
-    S32 = 0b10,
-    S48 = 0b11,
-}
+// #[derive(Debug, Clone, Copy)]
+// enum Shift {
+//     S0 = 0b00,
+//     S16 = 0b01,
+//     S32 = 0b10,
+//     S48 = 0b11,
+// }
 
-impl Width for Shift {
-    fn value(&self) -> u32 {
-        *self as u32
-    }
-    fn size(&self) -> u8 {
-        2
-    }
-}
+// impl Width for Shift {
+//     fn value(&self) -> u32 {
+//         *self as u32
+//     }
+//     fn size(&self) -> u8 {
+//         2
+//     }
+// }
 
 fn encode_ret() -> u32 {
-    0xC0035FD6
+    let new = BaseInstructionKind::UnconditionalBranchRegister {
+        op4: Value(0b00000),
+        rn: Register { index: 30, size: BitSize::B64 },
+        op3: Value(0b000000),
+        op2: Value(0b11111),
+        opc: Value(0b0010),
+        fixed: Fixed(),
+    }.encode_instruction();
+    new
 }
+
+// opc: 0b0010
+// op2: 0b11111
+// op3: 0b000000
+// rn: Register,
+// op4: 0b00000
+
+// pub fn ret(rn: ?Register) Instruction {
+//     return unconditionalBranchRegister(0b0010, 0b11111, 0b000000, rn orelse .x30, 0b00000);
+// }
+
+// 11010110000000000111111111000010
+// 11000000000000110101111111010110
+
+
+// 1101011 0010 11111 000000 Rn    00000
+// 1101011 0010 11111 000000 11110 00000
+
+
 
 
 
@@ -576,13 +688,13 @@ fn encode_ret() -> u32 {
 
 fn encode_movz_16(destination: Register, value: u16) -> u32 {
 
-    let new = BaseInstructionKinds::MoveWideImmediate {
+    let new = BaseInstructionKind::MoveWideImmediate {
         rd: destination,
-        imm16: value,
-        shift:Shift::S0,
-        fixed: U6(0b100101), // TODO: Fix this
-        opc: U2(0b10),
-        sf: U1(destination.size.sf()),
+        imm16: Value(value as u32),
+        shift: Shift(0b00),
+        fixed: Fixed(),
+        opc: Value(0b10),
+        sf: Value(destination.size.sf() as u32),
     }.encode_instruction();
 
     let old = 0
@@ -590,21 +702,22 @@ fn encode_movz_16(destination: Register, value: u16) -> u32 {
     | 0b10 << 29
     | 0b1000 << 25
     | 0b101 << 23
-    | (Shift::S0 as u32) << 21
+    | (Shift::shift_0().value() as u32) << 21
     | (value as u32) << 5
     | destination.index as u32;
 
     assert_eq!(new, old);
+    println!("{:#x}", new);
     new
 }
-fn encode_movk(destination: Register, shift: Shift, value: u16) -> u32 {
-    let new = BaseInstructionKinds::MoveWideImmediate {
+fn encode_movk(destination: Register, shift: Shift, value: U16) -> u32 {
+    let new = BaseInstructionKind::MoveWideImmediate {
         rd: destination,
         imm16: value,
         shift,
-        fixed: U6(0b100101), // TODO: Fix this
-        opc: U2(0b11),
-        sf: U1(destination.size.sf()),
+        fixed: Fixed(),
+        opc: Value(0b11),
+        sf: Value(destination.size.sf() as u32),
     }.encode_instruction();
 
     let old = 0
@@ -612,11 +725,12 @@ fn encode_movk(destination: Register, shift: Shift, value: u16) -> u32 {
     | 0b11 << 29
     | 0b1000 << 25
     | 0b101 << 23
-    | (shift as u32) << 21
-    | (value as u32) << 5
+    | (shift.value() as u32) << 21
+    | (value.value() as u32) << 5
     | destination.index as u32;
 
     assert_eq!(old, new);
+    println!("{:#x}", new);
     new
 }
 
@@ -629,11 +743,11 @@ fn encode_u64(destination: Register, value: u64) -> [u32; 4] {
     let mut result = [0; 4];
     result[0] = encode_movz_16(destination, value as u16 & 0xffff);
     value >>= 16;
-    result[1] = encode_movk(destination, Shift::S16, value as u16 & 0xffff);
+    result[1] = encode_movk(destination, Shift::shift_16(), Value((value as u16 & 0xffff) as u32));
     value >>= 16;
-    result[2] = encode_movk(destination, Shift::S32, value as u16 & 0xffff);
+    result[2] = encode_movk(destination, Shift::shift_32(), Value((value as u16 & 0xffff) as u32));
     value >>= 16;
-    result[3] = encode_movk(destination, Shift::S48, value as u16 & 0xffff);
+    result[3] = encode_movk(destination, Shift::shift_48(), Value((value as u16 & 0xffff) as u32));
     result
 }
 
@@ -641,46 +755,15 @@ fn main() -> Result<(), Error> {
 
     let mut page = Page::new()?;
 
-
-    // 0
-    // | destination.size.sf() << 31
-    // | 0b10 << 29
-    // | 0b1000 << 25
-    // | 0b101 << 23
-    // | (Shift::S0 as u32) << 21
-    // | (value as u32) << 5
-    // | destination.index as u32
-
-    let reg = &Register { index: 0, size: BitSize::B64};
-    let value = 10 as u16 & 0xffff;
-
-
-    let encoded = encode_movz_16(reg.clone(), 10);
-    println!("ret: {:#x}", encoded);
-
-
-    // rd: Register,
-    // imm16: u16,
-    // hw: U2,
-    // fixed: U6, // 0b100101
-    // opc: U2,
-    // sf: U1,
-
-
-    // let move_2_to_w0 = 0xE00280D2;
-    // let movz2 = encode_movz_16(&Register { index: 0, size: BitSize::B64 }, 1);
-    // let movk2 = encode_movk(&Register { index: 0, size: BitSize::B64 }, Shift::S48, 1);
-
     let mov = encode_u64(Register { index: 0, size: BitSize::B64 }, 0x1234567890abcdef);
     page.write_u32_le(0, mov[0])?;
     page.write_u32_le(4, mov[1])?;
     page.write_u32_le(8, mov[2])?;
     page.write_u32_le(12, mov[3])?;
 
-    // println!("{:#x}", movk2);
     let ret: u32 = encode_ret();
-    // page.write_u32_le(0, movk2)?;
-    page.write_u32_be(16, ret)?;
+    page.write_u32_le(16, ret)?;
+
 
     let main_fn = page.get_function()?;
     println!("Hello, world! {:#x}", main_fn());
