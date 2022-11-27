@@ -15,10 +15,61 @@ mod block;
 mod native;
 mod draw;
 
+use syntect::{easy::HighlightLines, highlighting, parsing::SyntaxReference};
+use syntect::parsing::SyntaxSet;
+use syntect::highlighting::{ThemeSet};
+use syntect::util::{LinesWithEndings};
+
+
+fn draw_color_syntax(highlighted_code: Vec<Vec<(highlighting::Style, String)>>, canvas: &mut Canvas) -> usize {
+    // Load these once at the start of your program
+    let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(), 24.0);
+    let mut x = 0;
+    let mut y = 0;
+    for line in highlighted_code.iter() {
+        for (style, text) in line {
+            let foreground = style.foreground;
+            let color = Color::from_syntect_color(&foreground);
+            canvas.draw_str(text, (x as f32, y as f32), &font, &color.to_paint());
+            x += text.len() * 12;
+        }
+        y += 32;
+        x = 0;
+    }
+    y
+}
+
+fn color_syntax_code(code: &str, ps: &SyntaxSet, syntax: &SyntaxReference) -> Vec<Vec<(highlighting::Style, String)>> {
+    let ts = ThemeSet::load_defaults();
+
+    let mut h = HighlightLines::new(syntax, &ts.themes["base16-ocean.dark"]);
+    let mut lines = vec![];
+    for line in LinesWithEndings::from(code) {
+        let ranges = h.highlight_line(line, ps).unwrap();
+        lines.push(ranges.into_iter().map(|(style, text)| (style, text.to_string())).collect());
+    }
+    lines
+}
+
+fn color_syntax_ruby(code: &str) -> Vec<Vec<(highlighting::Style, String)>> {
+    // TODO: I'm only supposed load this once
+    let ps = SyntaxSet::load_defaults_newlines();
+    let syntax = ps.find_syntax_by_extension("rb").unwrap();
+    color_syntax_code(code, &ps, syntax)
+}
+
+fn color_syntax_arm_assembly(code: &str) -> Vec<Vec<(highlighting::Style, String)>> {
+    let ps = SyntaxSet::load_from_folder("./syntaxes").unwrap();
+    let syntax = ps.find_syntax_by_name("ARM Assembly").unwrap();
+    color_syntax_code(code, &ps, syntax)
+}
+
 
 
 struct Caches {
     ruby_source_method_cache: HashMap<Method, String>,
+    ruby_source_highlight_cache: HashMap<Method, Vec<Vec<(highlighting::Style, String)>>>,
+    assembly_highlight_cache: HashMap<Method, Vec<Vec<(highlighting::Style, String)>>>,
 }
 
 
@@ -70,9 +121,28 @@ impl Visualizer {
         None
     }
 
+    fn get_ruby_highlighted_source(&mut self, method: &Method) -> Option<Vec<Vec<(highlighting::Style, String)>>> {
+        if self.caches.ruby_source_highlight_cache.contains_key(method) {
+            return self.caches.ruby_source_highlight_cache.get(method).cloned();
+        }
+        let source = self.get_method_ruby_source(method)?;
+        let highlighted = color_syntax_ruby(&source);
+        self.caches.ruby_source_highlight_cache.insert(method.clone(), highlighted.clone());
+        Some(highlighted)
+    }
+
+    fn get_assembly_highlight_source(&mut self, method: &Method) -> Option<Vec<Vec<(highlighting::Style, String)>>> {
+        if self.caches.assembly_highlight_cache.contains_key(method) {
+            return self.caches.assembly_highlight_cache.get(method).cloned();
+        }
+        let source = method.get_assembly_source();
+        let highlighted = color_syntax_arm_assembly(&source);
+        self.caches.assembly_highlight_cache.insert(method.clone(), highlighted.clone());
+        Some(highlighted)
+    }
+
     fn mouse_clicked_at(&self, canvas: &Canvas) -> bool {
         if self.mouse_clicked {
-            println!("Yes clicked");
             if let Some(rect) = canvas.device_clip_bounds() {
                 if rect.contains(&Rect::from_xywh(self.mouse_position.0, self.mouse_position.1, 1.0, 1.0)) {
                     return true
@@ -86,18 +156,13 @@ impl Visualizer {
     fn draw_overview(&mut self, canvas: &mut Canvas) {
         canvas.translate((0.0, 100.0));
 
-        // let jungle_green = Color::parse_hex("#62b4a6");
-
 
         let width = 2600;
         let rect_width = 950.0;
         let margin = 30;
 
-
         let heading_font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
         let text_font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(), 24.0);
-
-
 
         canvas.clear(self.style.background_color.to_color4f());
 
@@ -241,30 +306,31 @@ impl Visualizer {
         let mut text_paint = self.style.primary_text_color.to_paint();
         text_paint.set_style(PaintStyle::Fill);
 
-        canvas.draw_str(&format!("{:?}", method.location), (x as f32 + 56.0, y as f32 + 56.0), &text_font, &text_paint);
+        // canvas.draw_str(&format!("{:?}", method.location), (x as f32 + 56.0, y as f32 + 56.0), &text_font, &text_paint);
         y += 100;
         {
             canvas.save();
             canvas.clip_rect(Rect::from_xywh(0.0, y as f32 - 24.0, 950.0, 1600.0), None, None);
-            let mut y = y;
-            if let Some(source) = self.get_method_ruby_source(method) {
-                for line in source.lines() {
-                    canvas.draw_str(line, (x as f32 + 56.0, y as f32 + 56.0), &text_font, &text_paint);
-                    y += 32;
-                }
+            if let Some(source) = self.get_ruby_highlighted_source(method) {
+                canvas.save();
+                canvas.translate((x as f32 + 56.0, y as f32 + 56.0));
+                let height = draw_color_syntax(source, canvas);
+                self.max_draw_height = max(self.max_draw_height as usize, height) as f64;
+                canvas.restore();
             }
-            self.max_draw_height = max(self.max_draw_height as usize, y as usize) as f64;
+
 
             canvas.restore();
         }
         x += 1000;
         {
-            let mut y = y;
-            for line in method_to_text(method).lines() {
-                canvas.draw_str(line, (x as f32 + 56.0, y as f32 + 56.0), &text_font, &text_paint);
-                y += 32;
+            if let Some(source) = self.get_assembly_highlight_source(method) {
+                canvas.save();
+                canvas.translate((x as f32 + 56.0, y as f32 + 56.0));
+                let height = draw_color_syntax(source, canvas);
+                self.max_draw_height = max(self.max_draw_height as usize, height) as f64;
+                canvas.restore();
             }
-            self.max_draw_height = max(self.max_draw_height as usize, y as usize) as f64;
         }
 
     }
@@ -383,18 +449,6 @@ impl Driver for Visualizer {
 
 
 
-fn method_to_text(method: &Method) -> String {
-    let mut records = method.blocks.clone();
-    let mut text = String::new();
-    records.sort_by_key(|x| x.block_id.idx);
-    records.dedup_by_key(|x| x.disasm.clone());
-    for record in records {
-        text.push_str(&format!("{:?}\n", record.block_id.idx));
-        text.push_str(&record.disasm);
-        text.push_str("\n");
-    }
-   return text;
-}
 
 
 fn _calculate_hash<T: Hash>(t: &T) -> String {
@@ -440,6 +494,20 @@ impl Method {
         }
         None
     }
+
+    fn get_assembly_source(&self) -> String {
+        let mut records = self.blocks.clone();
+        let mut text = String::new();
+        records.sort_by_key(|x| x.block_id.idx);
+        records.dedup_by_key(|x| x.disasm.clone());
+        for record in records {
+            text.push_str(&format!("{:?}\n", record.block_id.idx));
+            text.push_str(&record.disasm);
+            text.push_str("\n");
+        }
+       return text;
+    }
+
 }
 
 
@@ -511,8 +579,13 @@ fn main() {
         },
         caches: Caches {
             ruby_source_method_cache: HashMap::new(),
+            ruby_source_highlight_cache: HashMap::new(),
+            assembly_highlight_cache: HashMap::new(),
+
         },
     };
+
+    color_syntax_arm_assembly("test.s");
     window::setup_window(visualizer);
 
 }
