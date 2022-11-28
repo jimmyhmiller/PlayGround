@@ -115,7 +115,7 @@ impl<const SIZE: u8, const VALUE: u32> Fixed<SIZE, VALUE> {
     const fn value(&self) -> u32 {
         VALUE
     }
-    fn size(&self) -> u8 {
+    const fn size(&self) -> u8 {
         SIZE
     }
 }
@@ -130,7 +130,7 @@ impl Register {
     fn value(&self) -> u32 {
         self.index as u32
     }
-    fn size(&self) -> u8 {
+    const fn size(&self) -> u8 {
         5
     }
 }
@@ -143,7 +143,7 @@ impl Shift {
     fn value(&self) -> u32 {
         self.0
     }
-    fn size(&self) -> u8 {
+    const fn size(&self) -> u8 {
         2
     }
 
