@@ -4,21 +4,25 @@ use std::{fs::{self, File}, collections::{hash_map::DefaultHasher, HashMap}, has
 use block::{Block, CodeLocation};
 
 use draw::Color;
+use graph::{make_method_graph, call_graphviz_command_line};
 use itertools::Itertools;
 use serde::{Serialize, Deserialize};
 use serde_json::Deserializer;
-use skia_safe::{Rect, PaintStyle, Font, Typeface, FontStyle, Contains, Canvas};
+use skia_safe::{Rect, PaintStyle, Font, Typeface, FontStyle, Contains, Canvas, Image, Data, Bitmap, Pixmap, SamplingOptions, ImageInfo};
 use window::Driver;
 
 mod window;
 mod block;
 mod native;
 mod draw;
+mod graph;
+
 
 use syntect::{easy::HighlightLines, highlighting, parsing::SyntaxReference};
 use syntect::parsing::SyntaxSet;
 use syntect::highlighting::{ThemeSet};
 use syntect::util::{LinesWithEndings};
+
 
 
 fn draw_color_syntax(highlighted_code: Vec<Vec<(highlighting::Style, String)>>, canvas: &mut Canvas) -> usize {
@@ -70,6 +74,7 @@ struct Caches {
     ruby_source_method_cache: HashMap<Method, String>,
     ruby_source_highlight_cache: HashMap<Method, Vec<Vec<(highlighting::Style, String)>>>,
     assembly_highlight_cache: HashMap<Method, Vec<Vec<(highlighting::Style, String)>>>,
+    ruby_method_image_cache: HashMap<Method, Image>,
 }
 
 
@@ -91,7 +96,8 @@ struct Style {
 
 
 struct Visualizer {
-    scroll_offset: f64,
+    scroll_offset_y: f64,
+    scroll_offset_x: f64,
     code_files: Vec<CodeFile>,
     mouse_position: (f32, f32),
     max_draw_height: f64,
@@ -119,6 +125,31 @@ impl Visualizer {
             return Some(source);
         }
         None
+    }
+
+    fn get_image_for_method(&mut self, method: &Method) -> Option<Image> {
+        if self.caches.ruby_method_image_cache.contains_key(method) {
+            return self.caches.ruby_method_image_cache.get(method).cloned();
+        }
+
+        let graph = make_method_graph(method);
+        let raw_data = call_graphviz_command_line(&graph);
+        let data = Data::new_copy(&raw_data);
+        let image = Image::from_encoded(&data).unwrap();
+        // let width: usize = image.width() as usize / 2;
+        // let height: usize = image.height() as usize / 2;
+        // let image_info = ImageInfo::new_n32_premul((width as i32, height as i32), None);
+        // let row_bytes = width * 4;
+        // let pixels = vec![0; height as usize * row_bytes as usize];
+        // let pixmap = Pixmap::new(&image_info, &pixels, row_bytes);
+        // if !image.scale_pixels(&pixmap, SamplingOptions::default(), None) {
+        //     println!("Didn't scale pixels");
+        // }
+        // if let Some(image) = Image::from_raster_data(&image_info,Data::new_copy(&pixels), row_bytes) {
+        //     self.caches.ruby_method_image_cache.insert(method.clone(), image.clone());
+        // }
+        self.caches.ruby_method_image_cache.insert(method.clone(), image.clone());
+        Some(image)
     }
 
     fn get_ruby_highlighted_source(&mut self, method: &Method) -> Option<Vec<Vec<(highlighting::Style, String)>>> {
@@ -216,7 +247,7 @@ impl Visualizer {
                         // annoyed with the borrow checker. I'm sure there is a reason,
                         // but it is hard for me to see how these are different.
                         self.scene = Scene::Method { file_name: file.name.clone(), method: method.clone() };
-                        self.scroll_offset = 0.0;
+                        self.scroll_offset_y = 0.0;
                     }
 
                     canvas.save();
@@ -235,15 +266,6 @@ impl Visualizer {
 
                         for block in method.blocks.iter() {
                             let size = block.disasm.len();
-                            // let rect_width = if size < 100 {
-                            //     1.0
-                            // } else if size < 1000 {
-                            //     4.0
-                            // } else if size < 10000 {
-                            //     8.0
-                            // } else {
-                            //     16.0
-                            // };
                             let rect_width = (size / 200 + 1) as f32;
                             let rect = Rect::from_xywh(x as f32, 0.0, rect_width, 24.0);
                             canvas.draw_rect(rect, &text_paint);
@@ -272,8 +294,8 @@ impl Visualizer {
             x += rect_width as i32 + margin;
             if x > width {
                 x = 0;
-                // y += rect_height as i32 + margin;
             }
+
 
             canvas.restore();
 
@@ -333,11 +355,18 @@ impl Visualizer {
             }
         }
 
+        x += 1000;
+
+        if let Some(image) = self.get_image_for_method(method) {
+
+            canvas.draw_image(image, (x as f32 + 56.0, y as f32 + 56.0), None);
+        }
+
     }
 
     fn change_scene(&mut self, scene: Scene) {
         self.scene = scene;
-        self.scroll_offset = 0.0;
+        self.scroll_offset_y = 0.0;
     }
 
 
@@ -370,11 +399,15 @@ impl Driver for Visualizer {
     }
 
     fn update(&mut self) {
-        if self.scroll_offset > 0.0 {
-            self.scroll_offset = 0.0;
+        if self.scroll_offset_y > 0.0 {
+            self.scroll_offset_y = 0.0;
         }
-        if self.scroll_offset < -self.max_draw_height {
-            self.scroll_offset = -self.max_draw_height;
+        if self.scroll_offset_x > 0.0 {
+            self.scroll_offset_x = 0.0;
+        }
+
+        if self.scroll_offset_y < -self.max_draw_height {
+            self.scroll_offset_y = -self.max_draw_height;
         }
     }
 
@@ -393,7 +426,8 @@ impl Driver for Visualizer {
                                 println!("Line?");
                             }
                             winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                                self.scroll_offset += pos.y;
+                                self.scroll_offset_y += pos.y;
+                                self.scroll_offset_x -= pos.x;
                             }
                         }
                     }
@@ -401,12 +435,7 @@ impl Driver for Visualizer {
                         use winit::event::*;
                         match (state, button) {
                             (ElementState::Pressed, MouseButton::Left) => {
-                                // let mut rng = rand::thread_rng();
-                                // let method = self.record_by_method.keys().collect::<Vec<_>>().choose(&mut rng).unwrap().clone();
-                                // let records = &self.record_by_method[method];
 
-                                // self.text = method_to_text(method, records);
-                                // self.scroll_offset = 0.0;
                             }
                             (ElementState::Released, MouseButton::Left) => {
                                 self.mouse_clicked = true;
@@ -427,7 +456,7 @@ impl Driver for Visualizer {
 
     fn draw(&mut self, canvas: &mut Canvas) {
 
-        canvas.translate((100, self.scroll_offset as i32));
+        canvas.translate((self.scroll_offset_x as i32 + 100, self.scroll_offset_y as i32));
         let scene = self.scene.clone();
         match &scene {
             Scene::Overview => {
@@ -448,15 +477,6 @@ impl Driver for Visualizer {
 
 
 
-
-
-
-fn _calculate_hash<T: Hash>(t: &T) -> String {
-    let mut s = DefaultHasher::new();
-    t.hash(&mut s);
-    s.finish().to_string()
-}
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 struct CodeFile {
     name: String,
@@ -465,10 +485,10 @@ struct CodeFile {
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
-struct Method {
-    name: String,
-    location: CodeLocation,
-    blocks: Vec<Block>,
+pub struct Method {
+    pub name: String,
+    pub location: CodeLocation,
+    pub blocks: Vec<Block>,
 }
 
 impl Method {
@@ -548,15 +568,17 @@ fn main() {
             .group_by(|x| x.location.method_name.as_ref())
             .into_iter().for_each(|(method_name, group)| {
 
-            let group = group.collect::<Vec<_>>();
-
+            let mut group = group.collect::<Vec<_>>();
             let location = group.first().unwrap().location.clone();
+
+            group.sort_by_key(|x| (x.id, -(x.epoch as i32)));
+            let group = group.iter().dedup_by(|x, y| x.id == y.id);
 
 
             let method = Method {
                 name: (method_name.map(|x| x.clone()).unwrap_or_else(|| "unknown".to_string())).to_string(),
                 location: location.clone(),
-                blocks: group.iter().map(|x| x.clone().clone()).collect(),
+                blocks: group.map(|x| x.clone().clone()).collect(),
             };
             code_file.methods.push(method);
         });
@@ -567,7 +589,8 @@ fn main() {
     code_files.reverse();
 
     let visualizer = Visualizer {
-        scroll_offset: 0.0,
+        scroll_offset_y: 0.0,
+        scroll_offset_x: 0.0,
         code_files,
         mouse_position: (0.0, 0.0),
         max_draw_height: 0.0,
@@ -581,11 +604,11 @@ fn main() {
             ruby_source_method_cache: HashMap::new(),
             ruby_source_highlight_cache: HashMap::new(),
             assembly_highlight_cache: HashMap::new(),
+            ruby_method_image_cache: HashMap::new(),
 
         },
     };
 
-    color_syntax_arm_assembly("test.s");
     window::setup_window(visualizer);
 
 }

@@ -118,15 +118,15 @@ pub enum BranchShape {
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct Branch {
-    block_id: BlockId,
-    start_addr: Option<usize>,
-    end_addr: Option<usize>,
-    src_ctx: Context,
-    targets: [Option<BlockId>; 2],
-    target_ctxs: [Context; 2],
-    blocks: [Option<BlockId>; 2],
-    dst_addrs: [Option<usize>; 2],
-    shape: BranchShape,
+    pub block_id: BlockId,
+    pub start_addr: Option<usize>,
+    pub end_addr: Option<usize>,
+    pub src_ctx: Context,
+    pub targets: [Option<BlockId>; 2],
+    pub target_ctxs: [Context; 2],
+    pub blocks: [Option<usize>; 2],
+    pub dst_addrs: [Option<usize>; 2],
+    pub shape: BranchShape,
 }
 
 
@@ -142,6 +142,8 @@ pub struct CodeLocation {
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct Block {
     pub block_id: BlockId,
+
+    pub id: usize,
 
     pub end_idx: u32,
 
