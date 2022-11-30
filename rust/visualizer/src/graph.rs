@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -14,28 +14,39 @@ fn calculate_hash<T: Hash>(t: &T) -> String {
 }
 
 
-pub fn make_method_graph(method: &Method) -> String {
+pub fn make_method_graph(all_records: &Vec<Block>, method: &Method) -> String {
     let method_records = &method.blocks;
     let mut nodes = Vec::new();
 
+    let normal_node_color = "#5a8a5e";
+    let exit_node_color = "#fd5e53";
+
     for record in method_records.iter() {
         // make a graphviz node
-        let hash = record.id;
-        nodes.push(format!("\"{}\" [label=\"{:?}-{}\n{}\", shape=\"rectangle\", fontcolor=\"#5a8a5e\", color=\"#5a8a5e\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", hash, record.block_id, record.id, record.disasm.replace("\n", "\\l")));
+
+        if record.block_id.idx == 6 {
+            println!("Got it!");
+        }
+        let color = if record.is_exit {
+            exit_node_color
+         } else {
+            normal_node_color
+        };
+        nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", record.id, record.block_id, record.disasm.replace("\n", "\\l"), color, color));
     }
 
-    // TODO: We almost certinaly have incoming nodes from elsewhere. We need to think about how we deal with that.
-    let mut record_by_start_addr : HashMap<usize, Block> = HashMap::new();
-    for record in method_records.iter() {
-        let start_addr = record.start_addr.unwrap();
-        if record_by_start_addr.contains_key(&start_addr) {
-            let already_recorded = record_by_start_addr.get(&start_addr).unwrap();
-            if already_recorded.epoch > record.epoch {
-                continue;
-            }
-        }
-        record_by_start_addr.insert(start_addr, record.clone());
-    }
+    // // TODO: We almost certinaly have incoming nodes from elsewhere. We need to think about how we deal with that.
+    // let mut record_by_start_addr : HashMap<usize, Block> = HashMap::new();
+    // for record in method_records.iter() {
+    //     let start_addr = record.start_addr.unwrap();
+    //     if record_by_start_addr.contains_key(&start_addr) {
+    //         let already_recorded = record_by_start_addr.get(&start_addr).unwrap();
+    //         if already_recorded.epoch > record.epoch {
+    //             continue;
+    //         }
+    //     }
+    //     record_by_start_addr.insert(start_addr, record.clone());
+    // }
 
     #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
     struct EdgeInfo {
@@ -97,6 +108,10 @@ pub fn make_method_graph(method: &Method) -> String {
             if record.end_addr == other_record.start_addr {
                 add_edge(&mut edges, record.id, other_record.id, format!("label=\"{}\"", "fallthrough"));
             }
+
+            if other_record.end_addr == record.start_addr {
+                add_edge(&mut edges, other_record.id, record.id, format!("label=\"{}\"", "fallthrough"));
+            }
         }
     }
 
@@ -145,6 +160,19 @@ pub fn make_method_graph(method: &Method) -> String {
     // }
     edges.sort();
     edges.dedup();
+
+    let edge_nodes = edges.iter().map(|e| e.from).chain(edges.iter().map(|e| e.to)).collect::<HashSet<usize>>();
+    let node_set = method_records.iter().map(|r| r.id).collect::<HashSet<usize>>();
+    let missing_nodes = node_set.difference(&edge_nodes).collect::<Vec<&usize>>();
+
+    for record in all_records.iter().filter(|r| missing_nodes.contains(&&r.id)) {
+        // make a graphviz node
+        nodes.push(format!("\"{}\" [label=\"{:?}-{}\n{}\", shape=\"rectangle\", fontcolor=\"#5a8a5e\", color=\"#5a8a5e\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", record.id, record.block_id, record.id, record.disasm.replace("\n", "\\l")));
+    }
+    nodes.sort();
+    nodes.dedup();
+
+
     let edges = edges.iter()
         .map(|EdgeInfo { from, to, attributes }| format!("\"{}\" -> \"{}\" [color=\"#5a8a5e\", fontcolor=\"#5a8a5e\", {}];", from, to, attributes))
         .collect::<Vec<_>>();
@@ -181,3 +209,7 @@ pub fn call_graphviz_command_line(graph: &str) -> Vec<u8> {
     let output = child.wait_with_output().expect("failed to wait on child");
     output.stdout
 }
+
+
+// TODO:
+// Why do more exits show up in the blocks than in the graphs?

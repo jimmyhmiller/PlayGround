@@ -167,5 +167,10 @@ pub struct Block {
 
     pub epoch: usize,
 
+    #[serde(default)]
+    pub is_exit: bool,
+
+    pub created_at: usize,
+
 }
 
