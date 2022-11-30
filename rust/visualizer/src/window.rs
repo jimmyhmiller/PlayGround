@@ -33,6 +33,7 @@ pub trait Driver {
     fn next_frame(&mut self) {}
     fn init(&mut self) {}
     fn before_draw(&mut self) {}
+    fn get_title(&self) -> String;
 
 }
 
@@ -50,7 +51,7 @@ pub fn setup_window<D: Driver + 'static>(mut driver: D) {
 
     let window = WindowBuilder::new()
         .with_inner_size(size)
-        .with_title("Lith2".to_string())
+        .with_title(driver.get_title())
         .build(&events_loop)
         .unwrap();
 

@@ -4,6 +4,7 @@ use std::{fs::{self, File}, collections::{hash_map::DefaultHasher, HashMap}, has
 use block::{Block, CodeLocation};
 
 use draw::Color;
+use fps::FpsCounter;
 use graph::{make_method_graph, call_graphviz_command_line};
 use itertools::Itertools;
 use serde::{Serialize, Deserialize};
@@ -16,6 +17,7 @@ mod block;
 mod native;
 mod draw;
 mod graph;
+mod fps;
 
 
 use syntect::{easy::HighlightLines, highlighting, parsing::SyntaxReference};
@@ -105,6 +107,11 @@ struct Visualizer {
     mouse_clicked: bool,
     style: Style,
     caches: Caches,
+    records: Vec<Block>,
+    timeline: HashMap<usize, Vec<Block>>,
+    fps_counter: FpsCounter,
+    canvas_size: (i32, i32),
+    max_draw_width: f64,
 }
 
 impl Visualizer {
@@ -132,7 +139,7 @@ impl Visualizer {
             return self.caches.ruby_method_image_cache.get(method).cloned();
         }
 
-        let graph = make_method_graph(method);
+        let graph = make_method_graph(&self.records, method);
         let raw_data = call_graphviz_command_line(&graph);
         let data = Data::new_copy(&raw_data);
         let image = Image::from_encoded(&data).unwrap();
@@ -188,6 +195,60 @@ impl Visualizer {
         canvas.translate((0.0, 100.0));
 
 
+        let mut x = 0;
+
+        let mut keys = self.timeline.keys().cloned().collect::<Vec<usize>>();
+        keys.sort();
+
+        let (first, last) = (keys.first().unwrap(), keys.last().unwrap());
+
+        let exit_paint = Color::parse_hex("#fd5e53").to_paint();
+        let primary_paint = self.style.primary_text_color.to_paint();
+
+        let border = Rect::from_xywh(0.0, 0.0, 2900.0, 400.0);
+        let mut border_paint = primary_paint.clone();
+        border_paint.set_style(PaintStyle::Stroke);
+        border_paint.set_stroke_width(5.0);
+        canvas.draw_rect(border, &border_paint);
+
+        canvas.save();
+        canvas.clip_rect(border.with_inset((30.0, 30.0)), None, None);
+
+        canvas.translate((30.0, 30.0));
+
+
+        for time in *first..*last {
+            let width = 5;
+            let mut y = 400;
+            if let Some(entries) = self.timeline.get(&time) {
+
+                for block in entries.iter() {
+                    let paint = if block.is_exit {
+                        &exit_paint
+                    } else {
+                        &primary_paint
+                    };
+
+                    let height = 3;
+                    let rect = Rect::new(
+                        x as f32,
+                        y as f32 - height as f32,
+                        x as f32 + width as f32,
+                        y as f32,
+                    );
+                    canvas.draw_rect(rect, paint);
+                    y -= 1;
+                }
+            }
+            x += width + 1;
+        }
+
+        canvas.restore();
+
+        canvas.translate((0.0, 500.0));
+
+
+
         let width = 2600;
         let rect_width = 950.0;
         let margin = 30;
@@ -195,7 +256,6 @@ impl Visualizer {
         let heading_font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
         let text_font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(), 24.0);
 
-        canvas.clear(self.style.background_color.to_color4f());
 
         let mut columns: [i32; 3] = [0, 0, 0];
 
@@ -207,8 +267,20 @@ impl Visualizer {
 
 
         for file in self.code_files.iter() {
-            canvas.save();
+
             let mut y = columns[column];
+
+            if y as f64 + self.scroll_offset_y > self.canvas_size.1 as f64 {
+                self.max_draw_height = y as f64 + 500.0;
+                column = (column + 1) % columns.len();
+                x += rect_width as i32 + margin;
+                if x > width {
+                    x = 0;
+                }
+                continue;
+
+            }
+            canvas.save();
 
             let text_paint = self.style.primary_text_color.to_paint();
 
@@ -263,11 +335,15 @@ impl Visualizer {
 
                         canvas.clip_rect(Rect::from_xywh(0.0, 0.0, rect_width - 500.0 - margin as f32, 24.0), None, None);
 
-
                         for block in method.blocks.iter() {
                             let size = block.disasm.len();
                             let rect_width = (size / 200 + 1) as f32;
                             let rect = Rect::from_xywh(x as f32, 0.0, rect_width, 24.0);
+                            let text_paint = if block.is_exit {
+                                Color::parse_hex("#fd5e53").to_paint()
+                            } else {
+                                text_paint.clone()
+                            };
                             canvas.draw_rect(rect, &text_paint);
                             x += rect_width as i32 + 3;
                         }
@@ -332,7 +408,7 @@ impl Visualizer {
         y += 100;
         {
             canvas.save();
-            canvas.clip_rect(Rect::from_xywh(0.0, y as f32 - 24.0, 950.0, 1600.0), None, None);
+            canvas.clip_rect(Rect::from_xywh(0.0, y as f32 - 24.0, 950.0, 160000.0), None, None);
             if let Some(source) = self.get_ruby_highlighted_source(method) {
                 canvas.save();
                 canvas.translate((x as f32 + 56.0, y as f32 + 56.0));
@@ -344,22 +420,28 @@ impl Visualizer {
 
             canvas.restore();
         }
-        x += 1000;
-        {
-            if let Some(source) = self.get_assembly_highlight_source(method) {
-                canvas.save();
-                canvas.translate((x as f32 + 56.0, y as f32 + 56.0));
-                let height = draw_color_syntax(source, canvas);
-                self.max_draw_height = max(self.max_draw_height as usize, height) as f64;
-                canvas.restore();
-            }
-        }
+        // x += 1000;
+        // {
+        //     if let Some(source) = self.get_assembly_highlight_source(method) {
+        //         canvas.save();
+        //         canvas.translate((x as f32 + 56.0, y as f32 + 56.0));
+        //         let height = draw_color_syntax(source, canvas);
+        //         self.max_draw_height = max(self.max_draw_height as usize, height) as f64;
+        //         canvas.restore();
+        //     }
+        // }
 
         x += 1000;
 
         if let Some(image) = self.get_image_for_method(method) {
 
+            let image_height = image.height();
+            let image_width = image.width();
+            let canvas_width = self.canvas_size.0;
+            let canvas_height = self.canvas_size.1;
             canvas.draw_image(image, (x as f32 + 56.0, y as f32 + 56.0), None);
+            self.max_draw_height = max(self.max_draw_height as usize, y + image_height as usize - canvas_height as usize + 300) as f64;
+            self.max_draw_width = max(self.max_draw_width as usize, x + image_width as usize - canvas_width as usize + 300) as f64;
         }
 
     }
@@ -394,6 +476,10 @@ fn deindent(s: &str) -> String {
 
 impl Driver for Visualizer {
 
+    fn get_title(&self) -> String {
+        "Visualizer".to_string()
+    }
+
     fn set_mouse_position(&mut self, x: f32, y: f32) {
         self.mouse_position = (x, y);
     }
@@ -406,8 +492,13 @@ impl Driver for Visualizer {
             self.scroll_offset_x = 0.0;
         }
 
+
         if self.scroll_offset_y < -self.max_draw_height {
             self.scroll_offset_y = -self.max_draw_height;
+        }
+
+        if self.scroll_offset_x < -self.max_draw_width {
+            self.scroll_offset_x = -self.max_draw_width;
         }
     }
 
@@ -455,6 +546,17 @@ impl Driver for Visualizer {
     }
 
     fn draw(&mut self, canvas: &mut Canvas) {
+
+        let size = canvas.base_layer_size();
+        self.canvas_size = (size.width, size.height);
+
+        self.fps_counter.tick();
+        canvas.clear(self.style.background_color.to_color4f());
+
+        // let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
+        // let text_color = self.style.primary_text_color.to_paint();
+
+        // canvas.draw_str(self.fps_counter.fps.to_string(), (3000.0 - 60.0, 30.0), &font, &text_color);
 
         canvas.translate((self.scroll_offset_x as i32 + 100, self.scroll_offset_y as i32));
         let scene = self.scene.clone();
@@ -544,6 +646,10 @@ fn main() {
         .map(|x| x.unwrap())
         .collect();
 
+    for record in records.iter_mut() {
+        record.is_exit = record.disasm.contains("exit to interpreter");
+    }
+
     records.sort_by_key(|x| x.location.file.clone().unwrap_or_else(|| "unknown".to_string()));
 
 
@@ -588,14 +694,28 @@ fn main() {
     code_files.sort_by_key(|x| x.methods.len());
     code_files.reverse();
 
+    records.sort_by_key(|x| x.created_at);
+    let timeline : HashMap<usize, Vec<Block>> = records
+        .iter()
+        .group_by(|x| x.created_at/25)
+        .into_iter()
+        .map(|(key, group)| (key, group.map(|x| x.clone()).collect())).collect();
+
+    let fps_counter = FpsCounter::new();
+
     let visualizer = Visualizer {
         scroll_offset_y: 0.0,
         scroll_offset_x: 0.0,
+        records,
         code_files,
         mouse_position: (0.0, 0.0),
         max_draw_height: 0.0,
+        max_draw_width: 0.0,
         scene: Scene::Overview,
         mouse_clicked: false,
+        timeline,
+        fps_counter,
+        canvas_size: (0,0),
         style: Style {
             background_color: Color::parse_hex("#210522"),
             primary_text_color: Color::parse_hex("#5a8a5e"),
