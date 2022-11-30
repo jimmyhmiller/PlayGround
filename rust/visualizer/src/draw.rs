@@ -34,14 +34,19 @@ impl Color {
     pub fn parse_hex(hex: &str) -> Color {
 
         let mut start = 0;
-        if hex.starts_with("#") {
+        if hex.starts_with('#') {
             start = 1;
         }
 
         let r = i64::from_str_radix(&hex[start..start+2], 16).unwrap() as f32;
         let g = i64::from_str_radix(&hex[start+2..start+4], 16).unwrap() as f32;
         let b = i64::from_str_radix(&hex[start+4..start+6], 16).unwrap() as f32;
-        return Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
+        Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
+    }
+
+
+    pub fn to_hex(&self) -> String {
+        format!("#{:02x}{:02x}{:02x}", (self.r * 255.0) as u8, (self.g * 255.0) as u8, (self.b * 255.0) as u8)
     }
 }
 

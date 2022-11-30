@@ -1,10 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashSet};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
+use std::sync::mpsc::Receiver;
 
 
-use crate::Method;
+use crate::{Method, Style};
 use crate::block::Block;
 
 fn calculate_hash<T: Hash>(t: &T) -> String {
@@ -14,25 +15,23 @@ fn calculate_hash<T: Hash>(t: &T) -> String {
 }
 
 
-pub fn make_method_graph(all_records: &Vec<Block>, method: &Method) -> String {
+pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Method) -> String {
     let method_records = &method.blocks;
     let mut nodes = Vec::new();
 
-    let normal_node_color = "#5a8a5e";
-    let exit_node_color = "#fd5e53";
+    let normal_node_color = &style.primary_text_color.to_hex();
+    let exit_node_color = &style.exit_text_color.to_hex();
+    let outer_node_color = &style.outer_block_color.to_hex();
 
     for record in method_records.iter() {
         // make a graphviz node
 
-        if record.block_id.idx == 6 {
-            println!("Got it!");
-        }
         let color = if record.is_exit {
             exit_node_color
          } else {
             normal_node_color
         };
-        nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", record.id, record.block_id, record.disasm.replace("\n", "\\l"), color, color));
+        nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", record.id, record.block_id, record.disasm.replace('\n', "\\l"), color, color));
     }
 
     // // TODO: We almost certinaly have incoming nodes from elsewhere. We need to think about how we deal with that.
@@ -161,20 +160,21 @@ pub fn make_method_graph(all_records: &Vec<Block>, method: &Method) -> String {
     edges.sort();
     edges.dedup();
 
+
     let edge_nodes = edges.iter().map(|e| e.from).chain(edges.iter().map(|e| e.to)).collect::<HashSet<usize>>();
     let node_set = method_records.iter().map(|r| r.id).collect::<HashSet<usize>>();
-    let missing_nodes = node_set.difference(&edge_nodes).collect::<Vec<&usize>>();
+    let missing_nodes = edge_nodes.difference(&node_set).collect::<Vec<&usize>>();
 
     for record in all_records.iter().filter(|r| missing_nodes.contains(&&r.id)) {
         // make a graphviz node
-        nodes.push(format!("\"{}\" [label=\"{:?}-{}\n{}\", shape=\"rectangle\", fontcolor=\"#5a8a5e\", color=\"#5a8a5e\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", record.id, record.block_id, record.id, record.disasm.replace("\n", "\\l")));
+        nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", record.id, record.block_id, outer_node_color, outer_node_color, record.disasm.replace('\n', "\\l")));
     }
     nodes.sort();
     nodes.dedup();
 
 
     let edges = edges.iter()
-        .map(|EdgeInfo { from, to, attributes }| format!("\"{}\" -> \"{}\" [color=\"#5a8a5e\", fontcolor=\"#5a8a5e\", {}];", from, to, attributes))
+        .map(|EdgeInfo { from, to, attributes }| format!("\"{}\" -> \"{}\" [color=\"{}\", fontcolor=\"{}\", {}];", from, to, normal_node_color, normal_node_color, attributes))
         .collect::<Vec<_>>();
 
 
@@ -182,9 +182,9 @@ pub fn make_method_graph(all_records: &Vec<Block>, method: &Method) -> String {
     output.push_str("digraph {\n");
     output.push_str("bgcolor=\"#210522\"\n");
     output.push_str(&nodes.join("\n"));
-    output.push_str("\n");
+    output.push('\n');
     output.push_str(&edges.join("\n"));
-    output.push_str("\n");
+    output.push('\n');
     output.push_str("}\n");
 
 
@@ -210,6 +210,47 @@ pub fn call_graphviz_command_line(graph: &str) -> Vec<u8> {
     output.stdout
 }
 
+pub struct Promise<T> {
+    value: Option<T>,
+    receiver: Option<Receiver<T>>,
+}
 
-// TODO:
-// Why do more exits show up in the blocks than in the graphs?
+impl<T> Promise<T> {
+    pub fn new(receiver: Receiver<T>) -> Self {
+        Promise {
+            value: None,
+            receiver: Some(receiver),
+        }
+    }
+
+    pub fn ready(&mut self) -> bool {
+        if let Some(ref receiver) = self.receiver {
+            if let Ok(value) = receiver.try_recv() {
+                self.value = Some(value);
+                self.receiver = None;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn get(&mut self) -> Option<&T> {
+        self.value.as_ref()
+    }
+}
+
+
+pub fn call_graphviz_in_new_thread(graph: &str) -> Promise<Vec<u8>> {
+
+    let (sender, receiver) = std::sync::mpsc::channel::<Vec<u8>>();
+    let promise = Promise::new(receiver);
+
+    let graph = graph.to_string();
+    std::thread::spawn(move || {
+        let output = call_graphviz_command_line(&graph);
+        sender.send(output).unwrap();
+    });
+
+    promise
+
+}
