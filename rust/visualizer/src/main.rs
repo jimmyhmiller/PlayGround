@@ -1,15 +1,15 @@
-use std::{fs::{self, File}, collections::{hash_map::DefaultHasher, HashMap}, hash::{Hash, Hasher}, io::{BufReader, BufRead}, cmp::max};
+use std::{fs::{self, File}, collections::{HashMap}, hash::{Hash, Hasher}, io::{BufReader, BufRead}, cmp::max};
 
 
 use block::{Block, CodeLocation};
 
 use draw::Color;
 use fps::FpsCounter;
-use graph::{make_method_graph, call_graphviz_command_line};
+use graph::{make_method_graph, call_graphviz_command_line, call_graphviz_in_new_thread, Promise};
 use itertools::Itertools;
 use serde::{Serialize, Deserialize};
 use serde_json::Deserializer;
-use skia_safe::{Rect, PaintStyle, Font, Typeface, FontStyle, Contains, Canvas, Image, Data, Bitmap, Pixmap, SamplingOptions, ImageInfo};
+use skia_safe::{Rect, PaintStyle, Font, Typeface, FontStyle, Contains, Canvas, Image, Data};
 use window::Driver;
 
 mod window;
@@ -88,9 +88,12 @@ enum Scene {
 }
 
 
-struct Style {
-    background_color: Color,
-    primary_text_color: Color,
+pub struct Style {
+    pub background_color: Color,
+    pub primary_text_color: Color,
+    pub exit_text_color: Color,
+    pub outer_block_color: Color,
+    pub primary_rect_color: Color,
 }
 
 
@@ -112,6 +115,7 @@ struct Visualizer {
     fps_counter: FpsCounter,
     canvas_size: (i32, i32),
     max_draw_width: f64,
+    method_graph_promises: HashMap<Method, Promise<Vec<u8>>>,
 }
 
 impl Visualizer {
@@ -138,25 +142,38 @@ impl Visualizer {
         if self.caches.ruby_method_image_cache.contains_key(method) {
             return self.caches.ruby_method_image_cache.get(method).cloned();
         }
+        if self.method_graph_promises.contains_key(method) {
+            return None
+        }
 
-        let graph = make_method_graph(&self.records, method);
-        let raw_data = call_graphviz_command_line(&graph);
-        let data = Data::new_copy(&raw_data);
-        let image = Image::from_encoded(&data).unwrap();
-        // let width: usize = image.width() as usize / 2;
-        // let height: usize = image.height() as usize / 2;
-        // let image_info = ImageInfo::new_n32_premul((width as i32, height as i32), None);
-        // let row_bytes = width * 4;
-        // let pixels = vec![0; height as usize * row_bytes as usize];
-        // let pixmap = Pixmap::new(&image_info, &pixels, row_bytes);
-        // if !image.scale_pixels(&pixmap, SamplingOptions::default(), None) {
-        //     println!("Didn't scale pixels");
-        // }
-        // if let Some(image) = Image::from_raster_data(&image_info,Data::new_copy(&pixels), row_bytes) {
-        //     self.caches.ruby_method_image_cache.insert(method.clone(), image.clone());
-        // }
-        self.caches.ruby_method_image_cache.insert(method.clone(), image.clone());
-        Some(image)
+        let graph = make_method_graph(&self.style, &self.records, method);
+        let mut promise = call_graphviz_in_new_thread(&graph);
+
+        if promise.ready() {
+            let raw_data = promise.get().unwrap();
+            let data = Data::new_copy(&raw_data);
+            let image = Image::from_encoded(&data).unwrap();
+            // let width: usize = image.width() as usize / 2;
+            // let height: usize = image.height() as usize / 2;
+            // let image_info = ImageInfo::new_n32_premul((width as i32, height as i32), None);
+            // let row_bytes = width * 4;
+            // let pixels = vec![0; height as usize * row_bytes as usize];
+            // let pixmap = Pixmap::new(&image_info, &pixels, row_bytes);
+            // if !image.scale_pixels(&pixmap, SamplingOptions::default(), None) {
+            //     println!("Didn't scale pixels");
+            // }
+            // if let Some(image) = Image::from_raster_data(&image_info,Data::new_copy(&pixels), row_bytes) {
+            //     self.caches.ruby_method_image_cache.insert(method.clone(), image.clone());
+            // }
+            self.caches.ruby_method_image_cache.insert(method.clone(), image.clone());
+            return Some(image)
+        } else {
+            self.add_method_graph_promise(method.clone(), promise);
+            None
+        }
+
+
+
     }
 
     fn get_ruby_highlighted_source(&mut self, method: &Method) -> Option<Vec<Vec<(highlighting::Style, String)>>> {
@@ -192,7 +209,20 @@ impl Visualizer {
 
 
     fn draw_overview(&mut self, canvas: &mut Canvas) {
-        canvas.translate((0.0, 100.0));
+        canvas.translate((0.0, 150.0));
+
+        let exit_paint = self.style.exit_text_color.to_paint();
+        let primary_paint = self.style.primary_rect_color.to_paint();
+        let primary_text_paint = self.style.primary_text_color.to_paint();
+
+        // let heading_font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 128.0);
+        // canvas.draw_str("YJIT", (0, 0), &heading_font, &primary_paint);
+
+        // canvas.translate((0.0, 100.0));
+
+        let heading_font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 64.0);
+        canvas.draw_str("Timeline", (0, 0), &heading_font, &primary_text_paint);
+        canvas.translate((0.0, 20.0));
 
 
         let mut x = 0;
@@ -202,8 +232,7 @@ impl Visualizer {
 
         let (first, last) = (keys.first().unwrap(), keys.last().unwrap());
 
-        let exit_paint = Color::parse_hex("#fd5e53").to_paint();
-        let primary_paint = self.style.primary_text_color.to_paint();
+
 
         let border = Rect::from_xywh(0.0, 0.0, 2900.0, 400.0);
         let mut border_paint = primary_paint.clone();
@@ -214,11 +243,26 @@ impl Visualizer {
         canvas.save();
         canvas.clip_rect(border.with_inset((30.0, 30.0)), None, None);
 
+
         canvas.translate((30.0, 30.0));
 
 
-        for time in *first..*last {
-            let width = 5;
+
+        let text_font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(), 24.0);
+
+
+        let height = 3;
+
+        let y = 400.0;
+        canvas.draw_str("0", (0.0, y - 32.0 * 2.0), &text_font, &primary_paint);
+        canvas.draw_str("25", (0.0, y - 32.0 * 2.0 - height as f32 * 25.0), &text_font, &primary_text_paint);
+        canvas.draw_str("50", (0.0, y - 32.0 * 2.0 - height as f32 * 50.0), &text_font, &primary_text_paint);
+        canvas.draw_str("75", (0.0, y - 32.0 * 2.0 - height as f32 * 75.0), &text_font, &primary_text_paint);
+        canvas.draw_str("100", (0.0, y - 32.0 * 2.0 - height as f32 * 100.0), &text_font, &primary_text_paint);
+        canvas.translate((24.0*2.0 + 10.0, 0.0));
+
+        for time in (*first..*last).rev().take(220).rev() {
+            let width = 10;
             let mut y = 400;
             if let Some(entries) = self.timeline.get(&time) {
 
@@ -229,7 +273,6 @@ impl Visualizer {
                         &primary_paint
                     };
 
-                    let height = 3;
                     let rect = Rect::new(
                         x as f32,
                         y as f32 - height as f32,
@@ -240,12 +283,16 @@ impl Visualizer {
                     y -= 1;
                 }
             }
-            x += width + 1;
+            x += width + 4;
         }
 
         canvas.restore();
 
-        canvas.translate((0.0, 500.0));
+        canvas.translate((0.0, 530.0));
+
+        let heading_font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 64.0);
+        canvas.draw_str("Methods", (0, 0), &heading_font, &primary_text_paint);
+        canvas.translate((0.0, 20.0));
 
 
 
@@ -261,7 +308,7 @@ impl Visualizer {
 
 
         let mut x = 0;
-        let mut rect_paint = self.style.primary_text_color.to_paint();
+        let mut rect_paint = self.style.primary_rect_color.to_paint();
         rect_paint.set_style(PaintStyle::Stroke);
         let mut column = 0;
 
@@ -320,10 +367,11 @@ impl Visualizer {
                         // but it is hard for me to see how these are different.
                         self.scene = Scene::Method { file_name: file.name.clone(), method: method.clone() };
                         self.scroll_offset_y = 0.0;
+                        self.scroll_offset_x = 0.0;
                     }
 
                     canvas.save();
-                    canvas.clip_rect(Rect::from_xywh(0.0, y as f32 - 24.0, 480 as f32, 32.0), None, None);
+                    canvas.clip_rect(Rect::from_xywh(0.0, y as f32 - 24.0, 480_f32, 32.0), None, None);
 
                     canvas.draw_str(&method.name, (x as f32, y as f32), &text_font, &text_paint);
                     canvas.restore();
@@ -331,7 +379,7 @@ impl Visualizer {
                     {
                         let mut x = 0;
                         canvas.save();
-                        canvas.translate((x as f32 + 500.0, y as f32 - 16.0 as f32));
+                        canvas.translate((x as f32 + 500.0, y as f32 - 16.0_f32));
 
                         canvas.clip_rect(Rect::from_xywh(0.0, 0.0, rect_width - 500.0 - margin as f32, 24.0), None, None);
 
@@ -339,12 +387,13 @@ impl Visualizer {
                             let size = block.disasm.len();
                             let rect_width = (size / 200 + 1) as f32;
                             let rect = Rect::from_xywh(x as f32, 0.0, rect_width, 24.0);
-                            let text_paint = if block.is_exit {
-                                Color::parse_hex("#fd5e53").to_paint()
+                            let mut rect_paint = if block.is_exit {
+                                self.style.exit_text_color.to_paint()
                             } else {
-                                text_paint.clone()
+                                rect_paint.clone()
                             };
-                            canvas.draw_rect(rect, &text_paint);
+                            rect_paint.set_style(PaintStyle::Fill);
+                            canvas.draw_rect(rect, &rect_paint);
                             x += rect_width as i32 + 3;
                         }
                         canvas.restore();
@@ -377,7 +426,7 @@ impl Visualizer {
 
         }
 
-        self.max_draw_height = columns.iter().max().unwrap().clone() as f64;
+        self.max_draw_height = *columns.iter().max().unwrap() as f64;
 
     }
 
@@ -401,8 +450,8 @@ impl Visualizer {
 
         y += 100;
 
-        let mut text_paint = self.style.primary_text_color.to_paint();
-        text_paint.set_style(PaintStyle::Fill);
+
+        // text_paint.set_style(PaintStyle::Fill);
 
         // canvas.draw_str(&format!("{:?}", method.location), (x as f32 + 56.0, y as f32 + 56.0), &text_font, &text_paint);
         y += 100;
@@ -440,8 +489,8 @@ impl Visualizer {
             let canvas_width = self.canvas_size.0;
             let canvas_height = self.canvas_size.1;
             canvas.draw_image(image, (x as f32 + 56.0, y as f32 + 56.0), None);
-            self.max_draw_height = max(self.max_draw_height as usize, y + image_height as usize - canvas_height as usize + 300) as f64;
-            self.max_draw_width = max(self.max_draw_width as usize, x + image_width as usize - canvas_width as usize + 300) as f64;
+            self.max_draw_height = max(self.max_draw_height as usize, y + (image_height as usize).saturating_sub(canvas_height as usize) + 300) as f64;
+            self.max_draw_width = max(self.max_draw_width as usize, x + (image_width as usize).saturating_sub(canvas_width as usize) + 300) as f64;
         }
 
     }
@@ -449,6 +498,11 @@ impl Visualizer {
     fn change_scene(&mut self, scene: Scene) {
         self.scene = scene;
         self.scroll_offset_y = 0.0;
+        self.scroll_offset_x = 0.0;
+    }
+
+    fn add_method_graph_promise(&mut self, method: Method, promise: graph::Promise<Vec<u8>>)  {
+       self.method_graph_promises.insert(method, promise);
     }
 
 
@@ -485,6 +539,11 @@ impl Driver for Visualizer {
     }
 
     fn update(&mut self) {
+
+        if self.scene == Scene::Overview {
+            self.max_draw_width = 0.0;
+        }
+
         if self.scroll_offset_y > 0.0 {
             self.scroll_offset_y = 0.0;
         }
@@ -500,6 +559,24 @@ impl Driver for Visualizer {
         if self.scroll_offset_x < -self.max_draw_width {
             self.scroll_offset_x = -self.max_draw_width;
         }
+
+        let mut to_delete = vec![];
+
+        for (method, promise) in self.method_graph_promises.iter_mut() {
+            if promise.ready() {
+                to_delete.push(method.clone());
+                let raw_data = promise.get().unwrap();
+                let data = Data::new_copy(&raw_data);
+                let image = Image::from_encoded(&data).unwrap();
+                self.caches.ruby_method_image_cache.insert(method.clone(), image.clone());
+            }
+        }
+        for method in to_delete.iter() {
+            self.method_graph_promises.remove(method);
+        }
+
+
+
     }
 
     fn init(&mut self) {
@@ -606,7 +683,7 @@ impl Method {
                         // TODO: Unindent total indention but keep relative indention
                         if line >= self.location.line_start.0 && line <= self.location.line_end.0 {
                             source.push_str(&l);
-                            source.push_str("\n");
+                            source.push('\n');
                         }
                         line += 1;
                     }
@@ -625,9 +702,9 @@ impl Method {
         for record in records {
             text.push_str(&format!("{:?}\n", record.block_id.idx));
             text.push_str(&record.disasm);
-            text.push_str("\n");
+            text.push('\n');
         }
-       return text;
+       text
     }
 
 }
@@ -642,8 +719,7 @@ fn main() {
     let contents = fs::read_to_string(path).unwrap();
     let mut records: Vec<_> = Deserializer::from_str(&contents)
         .into_iter::<Block>()
-        .filter(|x| x.is_ok())
-        .map(|x| x.unwrap())
+        .filter_map(|x| x.ok())
         .collect();
 
     for record in records.iter_mut() {
@@ -659,8 +735,8 @@ fn main() {
     // TODO: Clean up
     for (file, group) in records.iter().group_by(|x| x.location.file.clone()).into_iter() {
         // let file = location.file.clone();
-        let full_path = file.map(|x| x.clone()).unwrap_or_else(|| "unknown".to_string()).to_string();
-        let name = full_path.split("/").last().unwrap().to_string();
+        let full_path = file.unwrap_or_else(|| "unknown".to_string()).to_string();
+        let name = full_path.split('/').last().unwrap().to_string();
         let mut code_file = CodeFile {
             name,
             full_path,
@@ -682,8 +758,8 @@ fn main() {
 
 
             let method = Method {
-                name: (method_name.map(|x| x.clone()).unwrap_or_else(|| "unknown".to_string())).to_string(),
-                location: location.clone(),
+                name: (method_name.cloned().unwrap_or_else(|| "unknown".to_string())),
+                location,
                 blocks: group.map(|x| x.clone().clone()).collect(),
             };
             code_file.methods.push(method);
@@ -699,9 +775,26 @@ fn main() {
         .iter()
         .group_by(|x| x.created_at/25)
         .into_iter()
-        .map(|(key, group)| (key, group.map(|x| x.clone()).collect())).collect();
+        .map(|(key, group)| (key, group.cloned().collect())).collect();
 
     let fps_counter = FpsCounter::new();
+
+    let business_style = Style {
+        background_color: Color::parse_hex("#ffffff"),
+        primary_text_color: Color::parse_hex("#474747"),
+        exit_text_color: Color::parse_hex("#fd5e53"),
+        outer_block_color: Color::parse_hex("#5e5efd"),
+        primary_rect_color: Color::parse_hex("#666666"),
+    };
+
+    let hacker_style = Style {
+        background_color: Color::parse_hex("#210522"),
+        primary_text_color: Color::parse_hex("#5a8a5e"),
+        exit_text_color: Color::parse_hex("#fd5e53"),
+        outer_block_color: Color::parse_hex("#5e5efd"),
+        primary_rect_color: Color::parse_hex("#5a8a5e"),
+    };
+
 
     let visualizer = Visualizer {
         scroll_offset_y: 0.0,
@@ -716,10 +809,7 @@ fn main() {
         timeline,
         fps_counter,
         canvas_size: (0,0),
-        style: Style {
-            background_color: Color::parse_hex("#210522"),
-            primary_text_color: Color::parse_hex("#5a8a5e"),
-        },
+        style: hacker_style,
         caches: Caches {
             ruby_source_method_cache: HashMap::new(),
             ruby_source_highlight_cache: HashMap::new(),
@@ -727,6 +817,7 @@ fn main() {
             ruby_method_image_cache: HashMap::new(),
 
         },
+        method_graph_promises: HashMap::new(),
     };
 
     window::setup_window(visualizer);

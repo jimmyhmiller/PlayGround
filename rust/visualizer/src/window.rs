@@ -43,7 +43,7 @@ pub fn setup_window<D: Driver + 'static>(mut driver: D) {
 
     driver.init();
 
-    let mut size = LogicalSize::new(1600 as i32, 1600 as i32);
+    let mut size = LogicalSize::new(1600_i32, 1600_i32);
 
     let events_loop = EventLoop::new();
 
