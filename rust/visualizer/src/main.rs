@@ -1,7 +1,7 @@
 use std::{fs::{self, File}, collections::{HashMap}, hash::{Hash, Hasher}, io::{BufReader, BufRead}, cmp::max};
 
 
-use block::{Block, CodeLocation};
+use block::{Block, CodeLocation, Branch};
 
 use draw::Color;
 use fps::FpsCounter;
@@ -741,6 +741,25 @@ fn main() {
 
     for record in records.iter_mut() {
         record.is_exit = record.disasm.contains("exit to interpreter");
+    }
+
+
+    let mut branches : HashMap<usize, Branch> = HashMap::new();
+
+    for record in records.iter() {
+        for branch in record.incoming.iter() {
+            let branch = branch.clone();
+            branches.insert(branch.id, branch);
+        }
+        for branch in record.outgoing.iter() {
+            let branch = branch.clone();
+            branches.insert(branch.id, branch);
+        }
+    }
+
+    for record in records.iter_mut() {
+        record.incoming = record.incoming.iter().map(|x| branches.get(&x.id).unwrap().clone()).collect();
+        record.outgoing = record.outgoing.iter().map(|x| branches.get(&x.id).unwrap().clone()).collect();
     }
 
     records.sort_by_key(|x| x.location.file.clone().unwrap_or_else(|| "unknown".to_string()));

@@ -31,8 +31,26 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
          } else {
             normal_node_color
         };
-        nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", record.id, record.block_id, record.disasm.replace('\n', "\\l"), color, color));
+        nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", format!("block-{}", record.id), record.block_id, record.disasm.replace('\n', "\\l"), color, color));
     }
+
+    let mut all_branches = method_records.iter().flat_map(|r| r.incoming.iter()).collect::<Vec<_>>();
+    all_branches.extend(method_records.iter().flat_map(|r| r.outgoing.iter()));
+
+
+    all_branches.sort_by_key(|b| b.id);
+    all_branches.dedup();
+
+    for record in all_branches.iter() {
+        let label = if record.disasm.is_empty() {
+            "branch".to_string()
+        } else {
+            record.disasm.replace('\n', "\\l")
+        };
+        let color = normal_node_color;
+        nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", format!("branch-{}", record.id), record.id, label, color, color));
+    }
+
 
     // // TODO: We almost certinaly have incoming nodes from elsewhere. We need to think about how we deal with that.
     // let mut record_by_start_addr : HashMap<usize, Block> = HashMap::new();
@@ -49,8 +67,8 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
 
     #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
     struct EdgeInfo {
-        from: usize,
-        to: usize,
+        from: String,
+        to: String,
         attributes: String,
     }
 
@@ -58,7 +76,7 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
     // make graphviz edges
     let mut edges: Vec<EdgeInfo> = vec![];
 
-    fn add_edge(edges: &mut Vec<EdgeInfo>, from: usize, to: usize, attributes: String) {
+    fn add_edge(edges: &mut Vec<EdgeInfo>, from: String, to: String, attributes: String) {
         edges.push(EdgeInfo {
             from,
             to,
@@ -70,17 +88,16 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
 
     for record in method_records.iter() {
         for outgoing in record.outgoing.iter() {
+            add_edge(&mut edges, format!("block-{}", record.id), format!("branch-{}", outgoing.id), format!("label=\"{}\"", "outgoing"));
             for block in outgoing.blocks.iter().flatten() {
-                add_edge(&mut edges, record.id, *block, format!("label=\"{}\"", "outgoing"));
+                add_edge(&mut edges, format!("branch-{}", outgoing.id), format!("block-{}", block), format!("label=\"{}\"", "outgoing"));
             }
         }
     }
 
     for record in method_records.iter() {
         for incoming in record.incoming.iter() {
-            for block in incoming.blocks.iter().flatten() {
-                add_edge(&mut edges, *block, record.id, format!("label=\"{}\"", "incoming"));
-            }
+            add_edge(&mut edges, format!("branch-{}", incoming.id), format!("block-{}", record.id), format!("label=\"{}\"", "incoming"));
         }
     }
 
@@ -99,20 +116,20 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
     //     }
     // }
 
-    for record in method_records.iter() {
-        for other_record in method_records.iter() {
-            if record == other_record {
-                continue;
-            }
-            if record.end_addr == other_record.start_addr {
-                add_edge(&mut edges, record.id, other_record.id, format!("label=\"{}\"", "fallthrough"));
-            }
+    // for record in method_records.iter() {
+    //     for other_record in method_records.iter() {
+    //         if record == other_record {
+    //             continue;
+    //         }
+    //         if record.end_addr == other_record.start_addr {
+    //             add_edge(&mut edges, record.id, other_record.id, format!("label=\"{}\"", "fallthrough"));
+    //         }
 
-            if other_record.end_addr == record.start_addr {
-                add_edge(&mut edges, other_record.id, record.id, format!("label=\"{}\"", "fallthrough"));
-            }
-        }
-    }
+    //         if other_record.end_addr == record.start_addr {
+    //             add_edge(&mut edges, other_record.id, record.id, format!("label=\"{}\"", "fallthrough"));
+    //         }
+    //     }
+    // }
 
     // for record in method_records.iter() {
 
@@ -161,13 +178,13 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
     edges.dedup();
 
 
-    let edge_nodes = edges.iter().map(|e| e.from).chain(edges.iter().map(|e| e.to)).collect::<HashSet<usize>>();
-    let node_set = method_records.iter().map(|r| r.id).collect::<HashSet<usize>>();
-    let missing_nodes = edge_nodes.difference(&node_set).collect::<Vec<&usize>>();
+    let edge_nodes = edges.iter().map(|e| e.from.clone()).chain(edges.iter().map(|e| e.to.clone())).filter(|e| e.starts_with("block")).collect::<HashSet<String>>();
+    let node_set = method_records.iter().map(|r| format!("block-{}", r.id),).collect::<HashSet<String>>();
+    let missing_nodes = edge_nodes.difference(&node_set).collect::<Vec<&String>>();
 
-    for record in all_records.iter().filter(|r| missing_nodes.contains(&&r.id)) {
+    for record in all_records.iter().filter(|r| missing_nodes.contains(&&format!("block-{}", r.id),)) {
         // make a graphviz node
-        nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", record.id, record.block_id, record.disasm.replace('\n', "\\l"), outer_node_color, outer_node_color));
+        nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", format!("block-{}", record.id), record.block_id, record.disasm.replace('\n', "\\l"), outer_node_color, outer_node_color));
     }
     nodes.sort();
     nodes.dedup();
