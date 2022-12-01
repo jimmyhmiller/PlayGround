@@ -103,6 +103,7 @@ pub struct Style {
 struct Visualizer {
     scroll_offset_y: f64,
     scroll_offset_x: f64,
+    overview_scroll_y: f64,
     code_files: Vec<CodeFile>,
     mouse_position: (f32, f32),
     max_draw_height: f64,
@@ -342,6 +343,7 @@ impl Visualizer {
             canvas.draw_rect(Rect::from_xywh(x as f32, y as f32 + 32.0, rect_width, 9.0), &hr_paint);
 
             {
+
                 canvas.save();
                 canvas.translate((x, 0));
 
@@ -349,6 +351,13 @@ impl Visualizer {
                 let x = 32.0;
                 y += 32 + 64;
                 for method in file.methods.iter() {
+                    let mut rect_paint = self.style.primary_rect_color.to_paint();
+                    // let mut text_paint = if method.is_leaf {
+                    //     self.style.outer_block_color.to_paint()
+                    // } else {
+                    //     self.style.primary_text_color.to_paint()
+                    // };
+
                     let mut text_paint = self.style.primary_text_color.to_paint();
 
                     canvas.save();
@@ -358,6 +367,7 @@ impl Visualizer {
                     if let Some(device_position) = canvas.device_clip_bounds() {
                         if device_position.contains(Rect::from_xywh(self.mouse_position.0, self.mouse_position.1, 1.0, 1.0)) {
                             text_paint = Color::parse_hex("#ffffff").to_paint();
+                            rect_paint = Color::parse_hex("#ffffff").to_paint();
                         }
                     }
                     if self.mouse_clicked_at(canvas) {
@@ -366,6 +376,7 @@ impl Visualizer {
                         // annoyed with the borrow checker. I'm sure there is a reason,
                         // but it is hard for me to see how these are different.
                         self.scene = Scene::Method { file_name: file.name.clone(), method: method.clone() };
+                        self.overview_scroll_y = self.scroll_offset_y;
                         self.scroll_offset_y = 0.0;
                         self.scroll_offset_x = 0.0;
                     }
@@ -374,6 +385,9 @@ impl Visualizer {
                     canvas.clip_rect(Rect::from_xywh(0.0, y as f32 - 24.0, 480_f32, 32.0), None, None);
 
                     canvas.draw_str(&method.name, (x as f32, y as f32), &text_font, &text_paint);
+                    // if method.is_leaf {
+                    //     canvas.draw_str("(leaf)", (method.name.len() as f32 * 12.0 + 42.0, y as f32), &text_font, &text_paint);
+                    // }
                     canvas.restore();
 
                     {
@@ -405,6 +419,8 @@ impl Visualizer {
                 canvas.restore();
             }
 
+            let mut rect_paint = self.style.primary_rect_color.to_paint();
+            rect_paint.set_style(PaintStyle::Stroke);
 
             let height = y - columns[column];
 
@@ -440,7 +456,7 @@ impl Visualizer {
         let text_paint = self.style.primary_text_color.to_paint();
 
         if self.mouse_clicked_at(canvas) {
-            self.change_scene(Scene::Overview);
+            self.to_overview();
         }
 
         let mut x = 0;
@@ -495,9 +511,9 @@ impl Visualizer {
 
     }
 
-    fn change_scene(&mut self, scene: Scene) {
-        self.scene = scene;
-        self.scroll_offset_y = 0.0;
+    fn to_overview(&mut self) {
+        self.scene = Scene::Overview;
+        self.scroll_offset_y = self.overview_scroll_y;
         self.scroll_offset_x = 0.0;
     }
 
@@ -668,9 +684,12 @@ pub struct Method {
     pub name: String,
     pub location: CodeLocation,
     pub blocks: Vec<Block>,
+    pub is_leaf: bool,
 }
 
 impl Method {
+
+
     fn get_ruby_source(&self) -> Option<String> {
         if let Some(file) = &self.location.file {
             if let Ok(file) = File::open(file) {
@@ -711,8 +730,6 @@ impl Method {
 
 
 fn main() {
-
-
 
     let path = "/Users/jimmyhmiller/Documents/Code/yjit-bench/yjit.log";
     // let path = "/Users/jimmyhmiller/Documents/Code/ruby/yjit.log";
@@ -756,11 +773,15 @@ fn main() {
             group.sort_by_key(|x| (x.id, -(x.epoch as i32)));
             let group = group.iter().dedup_by(|x, y| x.id == y.id);
 
+            let blocks: Vec<Block> = group.map(|x| x.clone().clone()).collect();
+            let is_leaf = blocks.iter().all(|block| !block.disasm.contains("send") && !block.disasm.contains("save") && !block.is_exit);
+            let name = method_name.cloned().unwrap_or_else(|| "unknown".to_string());
 
             let method = Method {
-                name: (method_name.cloned().unwrap_or_else(|| "unknown".to_string())),
+                name,
                 location,
-                blocks: group.map(|x| x.clone().clone()).collect(),
+                blocks,
+                is_leaf,
             };
             code_file.methods.push(method);
         });
@@ -799,6 +820,7 @@ fn main() {
     let visualizer = Visualizer {
         scroll_offset_y: 0.0,
         scroll_offset_x: 0.0,
+        overview_scroll_y: 0.0,
         records,
         code_files,
         mouse_position: (0.0, 0.0),
@@ -815,7 +837,6 @@ fn main() {
             ruby_source_highlight_cache: HashMap::new(),
             assembly_highlight_cache: HashMap::new(),
             ruby_method_image_cache: HashMap::new(),
-
         },
         method_graph_promises: HashMap::new(),
     };

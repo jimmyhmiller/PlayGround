@@ -167,7 +167,7 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
 
     for record in all_records.iter().filter(|r| missing_nodes.contains(&&r.id)) {
         // make a graphviz node
-        nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", record.id, record.block_id, outer_node_color, outer_node_color, record.disasm.replace('\n', "\\l")));
+        nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", record.id, record.block_id, record.disasm.replace('\n', "\\l"), outer_node_color, outer_node_color));
     }
     nodes.sort();
     nodes.dedup();
