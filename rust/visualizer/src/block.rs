@@ -116,9 +116,10 @@ pub enum BranchShape {
 
 
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct Branch {
-    pub block_id: BlockId,
+    pub id: usize,
+    pub block_id: usize,
     pub start_addr: Option<usize>,
     pub end_addr: Option<usize>,
     pub src_ctx: Context,
@@ -127,6 +128,7 @@ pub struct Branch {
     pub blocks: [Option<usize>; 2],
     pub dst_addrs: [Option<usize>; 2],
     pub shape: BranchShape,
+    pub disasm: String,
 }
 
 
