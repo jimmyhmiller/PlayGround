@@ -89,8 +89,10 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
     for record in method_records.iter() {
         for outgoing in record.outgoing.iter() {
             add_edge(&mut edges, format!("block-{}", record.id), format!("branch-{}", outgoing.id), format!("label=\"{}\"", "outgoing"));
-            for block in outgoing.blocks.iter().flatten() {
-                add_edge(&mut edges, format!("branch-{}", outgoing.id), format!("block-{}", block), format!("label=\"{}\"", "outgoing"));
+            for target in outgoing.targets.iter().flatten() {
+                if let Some(block) = target.block {
+                    add_edge(&mut edges, format!("branch-{}", outgoing.id), format!("block-{}", block), format!("label=\"{}\"", "outgoing"));
+                }
             }
         }
     }

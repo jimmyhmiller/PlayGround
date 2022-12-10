@@ -116,19 +116,32 @@ pub enum BranchShape {
 
 
 
+/// A place that a branch could jump to
+#[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub struct BranchTarget {
+    pub address: Option<usize>,
+    pub id: BlockId,
+    pub ctx: Context,
+    pub block: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct Branch {
     pub id: usize,
     pub block_id: usize,
     pub start_addr: Option<usize>,
     pub end_addr: Option<usize>,
-    pub src_ctx: Context,
-    pub targets: [Option<BlockId>; 2],
-    pub target_ctxs: [Context; 2],
-    pub blocks: [Option<usize>; 2],
-    pub dst_addrs: [Option<usize>; 2],
+
     pub shape: BranchShape,
+    #[serde(skip)]
+    pub writable_areas: Vec<(usize, usize)>,
     pub disasm: String,
+
+    // Branch target blocks and their contexts
+    pub targets: [Option<BranchTarget>; 2],
+
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
 }
 
 
@@ -158,8 +171,6 @@ pub struct Block {
     pub outgoing: Vec<Branch>,
 
     pub gc_object_offsets: Vec<u32>,
-
-    pub cme_dependencies: Vec<CmeDependency>,
 
     pub entry_exit: Option<usize>,
 
