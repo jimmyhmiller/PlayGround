@@ -731,14 +731,23 @@ impl Method {
 
 fn main() {
 
-    let path = "/Users/jimmyhmiller/Documents/Code/yjit-bench/yjit.log";
-    // let path = "/Users/jimmyhmiller/Documents/Code/ruby/yjit.log";
+    // let path = "/Users/jimmyhmiller/Documents/Code/yjit-bench/smaller.yjit.log";
+    let path = "/Users/jimmyhmiller/Documents/Code/ruby/yjit.log";
     let contents = fs::read_to_string(path).unwrap();
-    let mut records: Vec<_> = Deserializer::from_str(&contents)
+    let mut records = Deserializer::from_str(&contents)
         .into_iter::<Block>()
-        .filter_map(|x| x.ok())
-        .collect();
+        .map(|x| x.expect("Error"))
+        .collect::<Vec<Block>>();
 
+
+
+
+    // let mut records: Vec<Block> = records.into_iter().filter(|x| {
+    //     let file = &x.location.method_name.clone().unwrap_or("not_file".to_string());
+    //     file.contains("rack_key_for")
+    // }).collect();
+
+    assert!(records.len() > 0);
     for record in records.iter_mut() {
         record.is_exit = record.disasm.contains("exit to interpreter");
     }
@@ -809,6 +818,8 @@ fn main() {
 
     code_files.sort_by_key(|x| x.methods.len());
     code_files.reverse();
+
+    // code_files = code_files.into_iter().filter(|x| x.name == "request.rb").collect();
 
     records.sort_by_key(|x| x.created_at);
     let timeline : HashMap<usize, Vec<Block>> = records
