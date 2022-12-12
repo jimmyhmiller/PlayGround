@@ -3,9 +3,13 @@ use std::mem;
 // use memmap2::{MmapMut, Mmap};
 use mmap_rs::{Error, MmapOptions, MmapMut, Mmap};
 
+use crate::parse_ruby::read_each_file;
+
 // Notes:
 // Can't make things RWX
 // This is big endian
+
+mod parse_ruby;
 
 
 struct Page {
@@ -524,6 +528,8 @@ fn encode_u64(destination: Register, value: u64) -> [u32; 4] {
 
 fn main() -> Result<(), Error> {
 
+
+    read_each_file("/Users/jimmyhmiller/Documents/Code/aarch64/lib/aarch64/instructions");
     let mut page = Page::new()?;
 
     let mov = encode_u64(Register { index: 0, size: BitSize::B64 }, 0x1234567890abcdef);
