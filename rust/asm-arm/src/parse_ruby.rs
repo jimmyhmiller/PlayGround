@@ -1,4 +1,4 @@
-use std::{fs::{self, File}, io::Read};
+use std::{fs::{self, File}, io::Read, collections::HashMap};
 
 use regex::Regex;
 
@@ -35,6 +35,26 @@ enum Result {
     Named(String, Box<Result>),
     List(Vec<Result>),
 }
+
+impl Result {
+    fn extract_variables(&self) -> Vec<(String, Result)> {
+        match self {
+            Result::Fail => Vec::new(),
+            Result::Token(_) => Vec::new(),
+            Result::Named(name, result) => {
+                let mut results = Vec::new();
+                results.push((name.clone(), *result.clone()));
+                results.extend(result.extract_variables());
+                results
+            },
+            Result::List(results) => {
+                let results = results.iter().map(|r| r.extract_variables()).flatten().collect::<Vec<_>>();
+                results
+            }
+        }
+    }
+}
+
 
 
 
@@ -307,11 +327,11 @@ pub fn read_each_file(directory: &str) {
                     (line "def" "encode")
                     (line (named "encode_value" any)))
                 (seq
-                    (line "def" "initialize" (named "init_args" (sep_by "," any)))
+                    (line "def" "initialize" (named "init_args" (sep_by "," (named "init_arg" any))))
                     (named "initialize_body" (repeat (line (repeat (not "end")))))
                     (line "def" "encode")
-                    (line "def" any (named "encode_args" (sep_by "," any)))
-                    (named "encode_body" (repeat (line (repeat (not "end")))))))));
+                    (line "def" any (named "encode_args" (sep_by "," (named "encode_arg" any))))
+                    (named "encode_body" (repeat (named "encode_body_line" (line (repeat  (not "end"))))))))));
 
     // get file in directory
     let paths = fs::read_dir(directory).unwrap();
@@ -334,11 +354,25 @@ pub fn read_each_file(directory: &str) {
             let tokens = make_tokens(&s, regex);
 
             let (_index, result) = pattern.matches(&tokens);
-            if result == Result::Fail {
-                println!("{:?} {} {:?}", path, s, result);
-            }
-            println!("{}", i);
+            // if result == Result::Fail {
+            let vars = result.extract_variables();
+            let var_counts = vars.clone().into_iter()
+            .fold(HashMap::<String, usize>::new(), |mut m, (x, _)| {
+                *m.entry(x).or_default() += 1;
+                m
+            });
+
+            // if let Some(encode_arg) = var_counts.get("encode_arg") {
+            //     if let Some(encode_body_line) = var_counts.get("encode_body_line") {
+            //         if encode_body_line - 2 != *encode_arg {
+            //             println!("{} {} {} {}", file_name, encode_arg, encode_body_line, s);
+            //         }
+            //     }
+            // }
+            println!("{:?} {} {:#?}", path, s, vars.iter().map(|x| x.0.clone()).collect::<Vec<_>>());
+            // }
             i += 1;
+            // println!("=====================================")
         }
     }
 }

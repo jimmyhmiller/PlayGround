@@ -731,8 +731,8 @@ impl Method {
 
 fn main() {
 
-    // let path = "/Users/jimmyhmiller/Documents/Code/yjit-bench/smaller.yjit.log";
-    let path = "/Users/jimmyhmiller/Documents/Code/ruby/yjit.log";
+    // let path = "/Users/jimmyhmiller/Documents/Code/yjit-bench/yjit.log";
+    let path = "/Users/jimmyhmiller/Documents/Code/ruby/yjit-shape.log";
     let contents = fs::read_to_string(path).unwrap();
     let mut records = Deserializer::from_str(&contents)
         .into_iter::<Block>()
@@ -832,10 +832,10 @@ fn main() {
 
     let business_style = Style {
         background_color: Color::parse_hex("#ffffff"),
-        primary_text_color: Color::parse_hex("#474747"),
+        primary_text_color: Color::parse_hex("#000000"),
         exit_text_color: Color::parse_hex("#fd5e53"),
         outer_block_color: Color::parse_hex("#5e5efd"),
-        primary_rect_color: Color::parse_hex("#666666"),
+        primary_rect_color: Color::parse_hex("#000000"),
     };
 
     let hacker_style = Style {
