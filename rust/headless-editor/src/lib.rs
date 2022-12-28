@@ -5,16 +5,109 @@ use std::collections::HashMap;
 // for every time the cursor moves.
 
 
+pub struct LineIter<'a, Item> {
+    current_position: usize,
+    items: &'a [Item],
+    newline: &'a Item,
+}
+impl <'a, Item> Iterator for LineIter<'a, Item> where Item: PartialEq + Copy {
+    type Item = &'a [Item];
+    fn next(&mut self) -> Option<Self::Item> {
+        let original_position = self.current_position;
+        while self.current_position < self.items.len() {
+            let byte = self.items[self.current_position];
+            if byte == *self.newline {
+                let line = &self.items[original_position..self.current_position];
+                self.current_position += 1;
+                return Some(line);
+            }
+            self.current_position += 1;
+        }
+        None
+    }
+}
+
 
 pub trait TextBuffer {
+    type Item;
     fn line_length(&self, line: usize) -> usize;
     fn line_count(&self) -> usize;
     // Rethink bytes because of utf8
-    fn insert_bytes(&mut self, line: usize, column: usize, text: &[u8]);
-    fn byte_at_pos(&self, line: usize, column: usize) -> Option<&u8>;
+    fn insert_bytes(&mut self, line: usize, column: usize, text: &[Self::Item]);
+    fn byte_at_pos(&self, line: usize, column: usize) -> Option<&Self::Item>;
     fn delete_char(&mut self, line: usize, column: usize);
+    fn lines(&self) -> LineIter<Self::Item>;
 }
 
+pub struct SimpleTextBuffer {
+    bytes: Vec<u8>,
+}
+
+// These are really bad implementations
+// probably need to actually know where lines start
+// and stop in some data structure.
+// But trying to start with the simplest thing that works
+impl SimpleTextBuffer {
+    fn line_start(&self, line: usize) -> usize {
+        let mut line_start = 0;
+        let mut lines_seen = 0;
+
+        for byte in self.bytes.iter().skip(line_start) {
+            if *byte == b'\n' {
+                lines_seen += 1;
+                if lines_seen == line {
+                    break;
+                }
+            }
+            line_start += 1;
+        }
+        line_start
+    }
+}
+
+impl TextBuffer for SimpleTextBuffer {
+    type Item = u8;
+
+    fn line_length(&self, line: usize) -> usize {
+        let line_start = self.line_start(line);
+
+        let mut length = 0;
+        for byte in self.bytes.iter().skip(line_start) {
+            if *byte == b'\n' {
+                break;
+            }
+            length += 1;
+        }
+        length
+    }
+
+    fn line_count(&self) -> usize {
+        self.bytes.iter().filter(|&&byte| byte == b'\n').count() + 1
+    }
+
+    fn insert_bytes(&mut self, line: usize, column: usize, text: &[u8]) {
+        let start = self.line_start(line) + column;
+        self.bytes.splice(start..start, text.iter().cloned());
+    }
+
+    fn byte_at_pos(&self, line: usize, column: usize) -> Option<&u8> {
+        self.bytes.get(self.line_start(line) + column)
+    }
+
+    fn delete_char(&mut self, line: usize, column: usize) {
+        let start = self.line_start(line) + column;
+        self.bytes.remove(start);
+    }
+
+    fn lines(&self) -> LineIter<Self::Item> {
+        LineIter {
+            current_position: 0,
+            items: &self.bytes,
+            newline: &b'\n',
+        }
+    }
+
+}
 
 pub trait VirtualCursor : Clone + Debug {
     fn move_to(&mut self, line: usize, column: usize);
@@ -23,7 +116,7 @@ pub trait VirtualCursor : Clone + Debug {
     fn new(line: usize, column: usize) -> Self;
 
 
-    fn move_up<T: TextBuffer>(&mut self, buffer: &T) {
+    fn move_up<T: TextBuffer<Item=u8>>(&mut self, buffer: &T) {
         let previous_line = self.line().saturating_sub(1);
         self.move_to(
             previous_line,
@@ -63,7 +156,7 @@ pub trait VirtualCursor : Clone + Debug {
     fn start_of_line(&mut self) {
         self.move_to(self.line(), 0);
     }
-    
+
     fn end_of_line<T: TextBuffer>(&mut self, buffer: &T) {
         self.move_to(self.line(), buffer.line_length(self.line()));
     }
@@ -86,7 +179,7 @@ pub trait VirtualCursor : Clone + Debug {
         cursor
     }
 
-    fn above<T: TextBuffer>(&self, buffer: &T) -> Self {
+    fn above<T: TextBuffer<Item=u8>>(&self, buffer: &T) -> Self {
         let mut cursor = self.clone();
         cursor.move_up(buffer);
         cursor
@@ -98,7 +191,7 @@ pub trait VirtualCursor : Clone + Debug {
         cursor
     }
 
-    fn auto_bracket_insert<T: TextBuffer>(&mut self, buffer : &mut T, to_insert: &[u8]) {
+    fn auto_bracket_insert<T: TextBuffer<Item=u8>>(&mut self, buffer : &mut T, to_insert: &[u8]) {
         let to_insert = match to_insert {
             b"(" => b"()",
             b"[" => b"[]",
@@ -106,12 +199,12 @@ pub trait VirtualCursor : Clone + Debug {
             b"\"" => b"\"\"",
             _ => to_insert,
         };
-    
+
         buffer.insert_bytes(self.line(), self.column(), to_insert);
         self.move_right(buffer);
     }
 
-    fn insert_normal_text<T: TextBuffer>(&mut self, to_insert: &[u8], buffer : &mut T) {
+    fn insert_normal_text<T: TextBuffer<Item=u8>>(&mut self, to_insert: &[u8], buffer : &mut T) {
         buffer.insert_bytes(self.line(), self.column(), to_insert);
          if to_insert == b"\n" {
             self.move_down(buffer)
@@ -143,7 +236,7 @@ pub trait VirtualCursor : Clone + Debug {
         }
     }
 
-    fn handle_insert<T: TextBuffer>(&mut self, to_insert: &[u8], buffer : &mut T) {
+    fn handle_insert<T: TextBuffer<Item=u8>>(&mut self, to_insert: &[u8], buffer : &mut T) {
         if Self::is_open_bracket(to_insert) {
             // Would need to have a setting for this
             self.auto_bracket_insert(buffer, to_insert);
@@ -203,14 +296,14 @@ struct CursorWithHistory {
 }
 
 impl VirtualCursor for CursorWithHistory {
-    
+
     fn new(line: usize, column: usize) -> Self {
         Self {
             cursor: Cursor::new(line, column),
             history: Vec::new(),
         }
     }
-    
+
     fn line(&self) -> usize {
         self.cursor.line()
     }
@@ -247,7 +340,7 @@ impl MultiCursor<Cursor> {
 
 impl<C : VirtualCursor> VirtualCursor for MultiCursor<C> {
 
-    fn move_up<T: TextBuffer>(&mut self, buffer: &T) {
+    fn move_up<T: TextBuffer<Item=u8>>(&mut self, buffer: &T) {
         for cursor in &mut self.cursors {
             cursor.move_up(buffer);
         }
@@ -277,7 +370,7 @@ impl<C : VirtualCursor> VirtualCursor for MultiCursor<C> {
         }
     }
 
-    fn handle_insert<T: TextBuffer>(&mut self, to_insert: &[u8], buffer : &mut T) {
+    fn handle_insert<T: TextBuffer<Item=u8>>(&mut self, to_insert: &[u8], buffer : &mut T) {
         for cursor in &mut self.cursors {
             cursor.handle_insert(to_insert, buffer);
         }
@@ -321,7 +414,7 @@ impl<C : VirtualCursor> VirtualCursor for MultiCursor<C> {
         Self { cursors: self.cursors.iter().map(|c| c.left_of(buffer)).collect() }
     }
 
-    fn above<T: TextBuffer>(&self, buffer: &T) -> Self {
+    fn above<T: TextBuffer<Item=u8>>(&self, buffer: &T) -> Self {
         Self { cursors: self.cursors.iter().map(|c| c.above(buffer)).collect() }
     }
 
@@ -329,13 +422,13 @@ impl<C : VirtualCursor> VirtualCursor for MultiCursor<C> {
         Self { cursors: self.cursors.iter().map(|c| c.below(buffer)).collect() }
     }
 
-    fn auto_bracket_insert<T: TextBuffer>(&mut self, buffer : &mut T, to_insert: &[u8]) {
+    fn auto_bracket_insert<T: TextBuffer<Item=u8>>(&mut self, buffer : &mut T, to_insert: &[u8]) {
         for cursor in &mut self.cursors {
             cursor.auto_bracket_insert(buffer, to_insert);
         }
     }
 
-    fn insert_normal_text<T: TextBuffer>(&mut self, to_insert: &[u8], buffer : &mut T) {
+    fn insert_normal_text<T: TextBuffer<Item=u8>>(&mut self, to_insert: &[u8], buffer : &mut T) {
         for cursor in &mut self.cursors {
             cursor.insert_normal_text(to_insert, buffer);
         }
@@ -370,18 +463,22 @@ impl<C : VirtualCursor> VirtualCursor for MultiCursor<C> {
 
 struct EventTextBuffer {
     text_positions: HashMap<(usize, usize), u8>,
+    bytes: Vec<u8>,
 }
 
+// This is a weird implementation because I can insert anywhere
 #[cfg(test)]
 impl EventTextBuffer {
     fn new() -> Self {
         Self {
             text_positions: HashMap::new(),
+            bytes: Vec::new(),
         }
     }
 }
 
 impl TextBuffer for EventTextBuffer {
+    type Item = u8;
     fn line_length(&self, _line: usize) -> usize {
         80
     }
@@ -394,6 +491,9 @@ impl TextBuffer for EventTextBuffer {
         for (i, byte) in text.iter().enumerate() {
             self.text_positions.insert((line, column + i), *byte);
         }
+        let mut text_positions : Vec<(&(usize, usize), &u8)> = self.text_positions.iter().collect();
+        text_positions.sort_by_key(|x| x.0);
+        self.bytes = text_positions.iter().map(|x| *x.1).collect();
     }
 
     fn byte_at_pos(&self, line: usize, column: usize) -> Option<&u8> {
@@ -402,6 +502,16 @@ impl TextBuffer for EventTextBuffer {
 
     fn delete_char(&mut self, line: usize, column: usize) {
         self.text_positions.remove(&(line, column));
+    }
+
+    fn lines(&self) -> LineIter<'_, Self::Item> {
+
+
+        LineIter {
+            current_position: 0,
+            items: &self.bytes,
+            newline: &b'\n',
+        }
     }
 }
 
@@ -451,5 +561,22 @@ mod tests {
         }
 
         assert!(buffer.text_positions.is_empty());
+    }
+
+    #[test]
+    fn test_lines() {
+        let mut cursor = Cursor::new(0, 0);
+        let mut buffer = EventTextBuffer::new();
+        let my_string = b"Hello World";
+
+        cursor.handle_insert(my_string, &mut buffer);
+        cursor.handle_insert(b"\n", &mut buffer);
+        cursor.handle_insert(b"Hello World", &mut buffer);
+        cursor.handle_insert(b"\n", &mut buffer);
+
+        for line in buffer.lines() {
+            assert!(line == my_string)
+        }
+
     }
 }
