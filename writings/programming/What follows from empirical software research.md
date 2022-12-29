@@ -1,4 +1,4 @@
-# What follows from empirical software research?
+# What Follows from Empirical Software Research?
 
 There is a growing body of literature studying software engineering from the empirical perspective. There is perhaps no greater resource for discovering this content than [It Will Never Work in Theory](https://neverworkintheory.org/). Here you will find short reviews of countless empirical studies about software engineering. Some reviewed quite favorably, and others questioned quite vigorously.
 
