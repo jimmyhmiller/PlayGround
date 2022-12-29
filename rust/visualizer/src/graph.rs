@@ -25,6 +25,9 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
 
     for record in method_records.iter() {
         // make a graphviz node
+        if record.invalid {
+            continue;
+        }
 
         let color = if record.is_exit {
             exit_node_color
@@ -34,7 +37,9 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
         nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", format!("block-{}", record.id), record.block_id, record.disasm.replace('\n', "\\l"), color, color));
     }
 
-    let mut all_branches = method_records.iter().flat_map(|r| r.incoming.iter()).collect::<Vec<_>>();
+    let mut all_branches = method_records.iter()
+        .filter(|r| !r.invalid)
+        .flat_map(|r| r.incoming.iter()).collect::<Vec<_>>();
     all_branches.extend(method_records.iter().flat_map(|r| r.outgoing.iter()));
 
 
@@ -42,11 +47,12 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
     all_branches.dedup();
 
     for record in all_branches.iter() {
-        let label = if record.disasm.is_empty() {
-            "branch".to_string()
-        } else {
-            record.disasm.replace('\n', "\\l")
-        };
+        // let label = if record.disasm.is_empty() {
+        //     "branch".to_string()
+        // } else {
+        //     record.disasm.replace('\n', "\\l")
+        // };
+        let label = "branch".to_string();
         let color = normal_node_color;
         nodes.push(format!("\"{}\" [label=\"{:?}\n{}\", shape=\"rectangle\", fontcolor=\"{}\", color=\"{}\", fontsize=\"20pt\", fontname=\"Ubuntu Mono\"];", format!("branch-{}", record.id), record.id, label, color, color));
     }
@@ -88,10 +94,10 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
 
     for record in method_records.iter() {
         for outgoing in record.outgoing.iter() {
-            add_edge(&mut edges, format!("block-{}", record.id), format!("branch-{}", outgoing.id), format!("label=\"{}\"", "outgoing"));
+            add_edge(&mut edges, format!("block-{}", record.id), format!("branch-{}", outgoing.id), format!("label=\"{}\"", ""));
             for target in outgoing.targets.iter().flatten() {
                 if let Some(block) = target.block {
-                    add_edge(&mut edges, format!("branch-{}", outgoing.id), format!("block-{}", block), format!("label=\"{}\"", "outgoing"));
+                    add_edge(&mut edges, format!("branch-{}", outgoing.id), format!("block-{}", block), format!("label=\"{}\"", ""));
                 }
             }
         }
@@ -99,83 +105,10 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
 
     for record in method_records.iter() {
         for incoming in record.incoming.iter() {
-            add_edge(&mut edges, format!("branch-{}", incoming.id), format!("block-{}", record.id), format!("label=\"{}\"", "incoming"));
+            add_edge(&mut edges, format!("branch-{}", incoming.id), format!("block-{}", record.id), format!("label=\"{}\"", ""));
         }
     }
 
-    // for record in method_records.iter() {
-    //     for incoming in record.incoming.iter() {
-    //         for other_record in method_records.iter() {
-    //             if record == other_record {
-    //                 continue;
-    //             }
-    //             for outgoing in other_record.outgoing.iter() {
-    //                 if incoming.start_addr == outgoing.start_addr {
-    //                     add_edge(&mut edges, other_record.id, record.id, format!("label=\"{}\"", "fallthrough"));
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
-
-    // for record in method_records.iter() {
-    //     for other_record in method_records.iter() {
-    //         if record == other_record {
-    //             continue;
-    //         }
-    //         if record.end_addr == other_record.start_addr {
-    //             add_edge(&mut edges, record.id, other_record.id, format!("label=\"{}\"", "fallthrough"));
-    //         }
-
-    //         if other_record.end_addr == record.start_addr {
-    //             add_edge(&mut edges, other_record.id, record.id, format!("label=\"{}\"", "fallthrough"));
-    //         }
-    //     }
-    // }
-
-    // for record in method_records.iter() {
-
-    //     if let Some(end_addr) = record.end_addr {
-    //         if record_by_start_addr.contains_key(&end_addr) {
-    //             let next_record = record_by_start_addr.get(&end_addr).unwrap();
-    //             add_edge(&mut edges, record.id, next_record.id, format!("label=\"{}\"", record.id.shape));
-    //         }
-    //     }
-
-    //     for outgoing in record.outgoing.iter() {
-    //         let start_addr = outgoing.start_addr.unwrap();
-    //         if record_by_start_addr.contains_key(&start_addr) {
-    //             let next_record = record_by_start_addr.get(&start_addr).unwrap();
-    //             add_edge(&mut edges, record.id, next_record.id, format!("label=\"{}\"", record.id.shape));
-    //         }
-    //         for dst_addr in outgoing.dst_addrs.iter() {
-    //             if let Some(dst_addr) = dst_addr {
-    //                 if let Some(target) = record_by_start_addr.get(dst_addr) {
-
-    //                     add_edge(&mut edges, record.id, target.id, format!("label=\"{}\"", record.id.shape));
-    //                 }
-    //             }
-    //         }
-    //     }
-
-
-
-    //     for incoming in record.incoming.iter() {
-    //         let end_addr = incoming.end_addr.unwrap();
-    //         if record_by_start_addr.contains_key(&end_addr) {
-    //             let next_record = record_by_start_addr.get(&end_addr).unwrap();
-    //             add_edge(&mut edges, record.id, next_record.id, format!("label=\"{}\"", record.id.shape));
-    //         }
-    //         for dst_addr in incoming.dst_addrs.iter() {
-    //             if let Some(dst_addr) = dst_addr {
-    //                 // println!("dst_addr: {:?}", dst_addr);
-    //                 if let Some(target) = record_by_start_addr.get(dst_addr) {
-    //                     add_edge(&mut edges, target.id, record.id, format!("label=\"{}\"", target.id.shape));
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
     edges.sort();
     edges.dedup();
 
@@ -199,7 +132,7 @@ pub fn make_method_graph(style: &Style, all_records: &Vec<Block>, method: &Metho
 
     let mut output = String::new();
     output.push_str("digraph {\n");
-    output.push_str("bgcolor=\"#210522\"\n");
+    output.push_str(&format!("bgcolor=\"{}\"\n", style.background_color.to_hex()));
     output.push_str(&nodes.join("\n"));
     output.push('\n');
     output.push_str(&edges.join("\n"));
@@ -267,6 +200,8 @@ pub fn call_graphviz_in_new_thread(graph: &str) -> Promise<Vec<u8>> {
     let graph = graph.to_string();
     std::thread::spawn(move || {
         let output = call_graphviz_command_line(&graph);
+        // write binary to file
+        std::fs::write("graph.png", &output).unwrap();
         sender.send(output).unwrap();
     });
 

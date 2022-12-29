@@ -185,5 +185,7 @@ pub struct Block {
 
     pub created_at: usize,
 
+    pub invalid: bool,
+
 }
 
