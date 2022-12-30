@@ -79,6 +79,8 @@ It seems clear that just as with the positive case, there can be confounding fac
 
 So even on the contentious assumption that we have certain obligations towards not negatively impacting these metrics, it doesn’t follow from the empirical evidence that we ought not practice TDD. So what could follow? Well, we might get a hint from Greg Wilson’s quote above about his sadness regarding the conclusion TDD research has come to.
 
+### The Personal Consequence
+
 > those of us who believe [that TDD makes us more productive] might just have to accept that our self-assessment is wrong.
 
 Perhaps this is what follows. Rather than any particular action being obligated by TDD, we must have a change in belief structure. Well, there seems to be something clearly right about that. Let’s say that before I read the research I believed P(positive). If the research actually says P(negative) and the research meets my evidentiary standards, it seems I should believe P(negative). But it must be pointed out that this is markedly different from a statement like Wilson made.
@@ -93,13 +95,13 @@ It is very easy to confuse the statistical effect a study has found with a perso
 
 Now I fear what I just said will be misunderstood. Imagine this, someone does an empirical study on only me. They measure my productivity in a way I agree is a good measure, their procedures are solid, and everything is up to my standards. Imagine now that they find that I am not more productive with TDD. Is what I just said above license to ignore the finding? Of course not. The point is that we can’t go from a statistical case to a personal conclusion, not that empirical evidence has no bearing.
 
-### Should We Change Our Advocacy?
+### Change in Advocacy
 
 Perhaps instead of a change in belief, we find a change in behavior around advocacy. If we find that P(negative) is true, perhaps we shouldn’t advocate for people to practice TDD. But why exactly think that? Perhaps our advocacy was based on the belief that P(positive) was true. If so, then it would definitely make sense to rethink our behaviors. But that seems unlikely as we will explore more in a bit. Absent that, has P(negative) given us any reason to abandon our advocacy? Well no. We can clearly advocate for things that we don’t believe increase these metrics. Perhaps we simply enjoy TDD. Isn’t that enough for advocacy?
 
 But even if it doesn’t obligate us to no longer advocate for TDD, shouldn’t P(negative) lower the intensity of our advocacy? Should we be as strident in our advocacy of TDD? Well, that depends. Was our prior level of intensity determined in a substantial way by a belief that P(positive) was true? If so, then yes, it seems we should lower our level of intensity. But absent that, why think so? It is hard to see a reason why.
 
-### Do We Now Know Instead of Merely Believe?
+### Change from Belief to Knowledge
 
 If our advocacy behavior needn’t change, maybe all that has changed is our relation to the proposition. Imagine before reading the research we believed that P(positive) and after reading the research we find that in fact, we were right, the research shows that P(positive) is true. The suggestion made by some advocates of empirical software methodology is now we have gained something. Before we just “believed” that P(positive) was true, now, we “know” that P(positive) is true. Now our actions can be based on knowledge rather than “opinions” or “superstition”.
 
@@ -107,7 +109,7 @@ What is knowledge? Well for about 2000+ years it was generally regarded in the w
 
 So in this case, it is supposed that before we read the research our belief that P(positive) is true was not warranted. After we read the research our belief becomes warranted and hence is knowledge. But why think that? Perhaps we think that warrant means “has adequate evidence for” and before we read the research we lacked adequate evidence. Unfortunately in Gettier’s paper he actually shows that this definition isn’t sufficient. So just because we may have gained adequate evidence, doesn’t mean we for sure know P(positive). But I won’t argue that here, it seems pretty likely that given our belief that P(positive) is true and our acceptance of the empirical evidence for P(positive), we do in fact know P(positive).
 
-### Can We Know Without Research?
+### What We Knew Before
 
 But could we have known P(positive) without having read the research? Well, one way of taking P(positive) is a rather particular claim. It is a statistical claim about the effect of TDD on some population of engineers. Taken that way it seems unlikely that before the research anyone knew P(positive). But it is also equally unlikely that anyone believed P(positive) to be true. What they probably believed was something a bit more vague than that. They might have believed that some people could become more productive with TDD. But this isn’t the same as the claim that there would be a statistically significant result in a controlled test. It seems a rather bold claim to say we couldn’t know this absent a study. Can we know what makes ourselves more productive absent a study? Can we not know things like “dogs relieve stress for some people” without a study? It seems we can.
 
