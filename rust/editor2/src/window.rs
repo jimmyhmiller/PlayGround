@@ -1,10 +1,10 @@
 
 // use cacao::{webview::{WebView, WebViewConfig, WebViewDelegate}, layer::Layer, layout::LayoutAnchorX, view::View};
 
-use cocoa::appkit::NSWindow;
+
 #[cfg(all(target_os = "macos"))]
 use skia_safe::{scalar, ColorType, Size, Surface};
-use winit::dpi::LogicalPosition;
+
 
 use crate::editor;
 
@@ -30,7 +30,7 @@ pub fn setup_window(mut editor: editor::Editor) {
 
 
 
-    let mut size = LogicalSize::new(1600 as i32, 1600 as i32);
+    let mut size = LogicalSize::new(1600_i32, 1600_i32);
 
     let events_loop = EventLoop::new();
 
@@ -54,7 +54,7 @@ pub fn setup_window(mut editor: editor::Editor) {
         // https://thume.ca/2019/06/19/glitchless-metal-window-resizing/
 
 
-        
+
         unsafe {
             let view = window.ns_view() as cocoa_id;
             view.setWantsLayer(YES);
@@ -85,10 +85,10 @@ pub fn setup_window(mut editor: editor::Editor) {
     // webview.width.constraint_equal_to_constant(600.0);
     // webview.height.constraint_equal_to_constant(600.0);
 
-    
+
 
     // webview.layer = Layer::wrap(metal_layer.as_ptr() as *mut _);
-    
+
 
     let command_queue = device.new_command_queue();
 
@@ -122,24 +122,33 @@ pub fn setup_window(mut editor: editor::Editor) {
                     _ => (),
                 },
                 Event::MainEventsCleared => {
-                    
-                    window.request_redraw();
+
+                    editor.end_frame();
+                    editor.update();
+
+                    // This messes up fps counter
+                    // Not sure how I would fix that
+                    // I guess I could separate the editor
+                    // from the fps counter?
+                    // Really not sure
+                    if editor.should_redraw() {
+                        window.request_redraw();
+                    }
                 }
                 Event::RedrawRequested(_) => {
                     // TODO: Determine if this is a good idea or not.
                     // I am also setting this with move. Maybe I shouldn't?
                     // This lets me drop things in the correct spot
-                    unsafe {
-                        let size = window.inner_size();
-                        let point = NSWindow::mouseLocationOutsideOfEventStream(window.ns_window() as cocoa_id);
-                        let logical_height = size.to_logical::<i32>(window.scale_factor()).height;
-                        let logical_point = LogicalPosition::new(point.x as i32, logical_height - point.y as i32);
-                        let physical_point = logical_point.to_physical::<i32>(window.scale_factor());
+                    // unsafe {
+                    //     let size = window.inner_size();
+                    //     let point = NSWindow::mouseLocationOutsideOfEventStream(window.ns_window() as cocoa_id);
+                    //     let logical_height = size.to_logical::<i32>(window.scale_factor()).height;
+                    //     let logical_point = LogicalPosition::new(point.x as i32, logical_height - point.y as i32);
+                    //     let physical_point = logical_point.to_physical::<i32>(window.scale_factor());
 
-                        editor.set_mouse_position(physical_point.x as f32, physical_point.y as f32);
-                    }
-                    editor.end_frame();
-                    editor.update();
+                    //     editor.set_mouse_position(physical_point.x as f32, physical_point.y as f32);
+                    // }
+
                     if let Some(drawable) = metal_layer.next_drawable() {
                         let drawable_size = {
                             let size = metal_layer.drawable_size();
