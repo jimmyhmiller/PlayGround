@@ -1,8 +1,11 @@
 
 
-use crate::{fps_counter::FpsCounter, widget::{Position, WidgetStore, Widget, Size, WidgetData, ImageData, TextPane, TextOptions, FontWeight, Color, Process, WidgetSelector}, event::Event};
+use std::{collections::HashSet, fs::File, io::{Read}, path::Path, sync::mpsc::Receiver, thread};
 
-use ron::ser::PrettyConfig;
+use crate::{fps_counter::FpsCounter, widget::{Position, WidgetStore, Widget, Size, WidgetData, Color, Process, WidgetSelector, WidgetId}, event::Event};
+
+use notify::{Watcher, RecursiveMode, RecommendedWatcher, Config};
+
 
 use skia_safe::{Font, Typeface, FontStyle};
 
@@ -35,6 +38,8 @@ pub struct Editor {
     context: Context,
     widget_store: WidgetStore,
     should_redraw: bool,
+    selected_widgets: HashSet<WidgetId>,
+    external_receiver: Option<Receiver<Event>>,
 }
 
 
@@ -101,101 +106,57 @@ impl<'a> Editor {
     // I need to figure out that hierarchy.
     // It will be useful for something like slideshow software
     pub fn setup(&mut self) {
+        let widget_config_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/widgets.ron";
 
-        self.widget_store.add_widget(Widget {
-            id: 0,
-            on_click: vec![],
-            position: Position { x: 200.0, y: 200.0 },
-            size: Size { width: 200.0, height: 100.0 },
-            data: WidgetData::Noop,
-        });
+        self.load_widgets(widget_config_path);
 
-        self.widget_store.add_widget(Widget {
-            id: 0,
-            on_click: vec![],
-            position: Position { x: 400.0, y: 400.0 },
-            size: Size { width: 200.0, height: 100.0 },
-            data: WidgetData::Image {
-                data: ImageData::new("./resources/test.png".to_string()),
-            },
-        });
+        self.setup_file_watcher(widget_config_path);
 
+    }
 
-        let id = self.widget_store.add_widget(Widget {
-            id: 0,
-            on_click: vec![],
-            position: Position { x: 300.0, y: 300.0 },
-            size: Size { width: 100.0, height: 100.0 },
-            data: WidgetData::Noop,
-        });
+    fn setup_file_watcher(&mut self, widget_config_path: &str) {
+        let widget_config_path = widget_config_path.to_string();
+        let (watch_raw_send, watch_raw_receive) = std::sync::mpsc::channel();
+        let (sender, receiver) = std::sync::mpsc::channel::<Event>();
+        thread::spawn(move || {
+            let mut watcher = RecommendedWatcher::new(watch_raw_send, Config::default()).unwrap();
 
-        let id_circle = self.widget_store.add_widget(Widget {
-            id: 0,
-            on_click: vec![],
-            position: Position { x: 500.0, y: 500.0 },
-            size: Size { width: 100.0, height: 100.0 },
-            data: WidgetData::Circle { radius: 10.0, color: Color::parse_hex("#ff0000") },
-        });
+            watcher.watch(Path::new(&widget_config_path), RecursiveMode::NonRecursive).unwrap();
 
-
-
-        let text_pane_id = self.widget_store.add_widget(Widget {
-            id: 0,
-            on_click: vec![],
-            position: Position { x: 500.0, y: 600.0 },
-            size: Size { width: 500.0, height: 500.0 },
-            data: WidgetData::TextPane {
-                text_pane: TextPane::new("".as_bytes().to_vec(), 40.0)
-            },
-        });
-
-        let text_id = self.widget_store.add_widget(Widget {
-            id: 0,
-            on_click: vec![],
-            position: Position { x: 600.0, y: 100.0 },
-            size: Size { width: 1000.0, height: 1000.0 },
-            data: WidgetData::Text {
-                text: "Lith".to_string(),
-                text_options: TextOptions {
-                    size: 120.0,
-                    color: Color::parse_hex("#ffffff00"),
-                    font_weight: FontWeight::Bold,
-                    font_family: "Ubuntu Mono".to_string(),
-                },
-            },
-        });
-
-
-
-        let id_compound = self.widget_store.add_widget(Widget {
-            id: 0,
-            on_click: vec![],
-            position: Position { x: 500.0, y: 500.0 },
-            size: Size { width: 100.0, height: 100.0 },
-            data: WidgetData::Compound { children: vec![id, id_circle, text_id] },
-        });
-
-        // Should I have a custom serialization if we reference other widgets?
-        // Right now compound just points to id. A little weird for external systems
-        // That is general is something we have to figure out
-        let compound_widget = self.widget_store.get(id_compound).unwrap();
-        let compound_ron = ron::ser::to_string_pretty(compound_widget, PrettyConfig::default().struct_names(true)).unwrap();
-
-        let text_widget = self.widget_store.get_mut(text_pane_id).unwrap();
-        match text_widget.data {
-            WidgetData::TextPane { ref mut text_pane } => {
-                // let contents = text_pane.contents.clone();
-                // let str_contents = from_utf8(&contents).unwrap();
-                // let new_contents = str_contents.replace(MY_STRING, &compound_ron);
-                text_pane.set_contents(compound_ron.as_bytes().to_vec());
+            for res in watch_raw_receive {
+                match res {
+                    Ok(_event) => {
+                        match sender.send(Event::ReloadWidgets) {
+                            Ok(_) => {},
+                            Err(e) => println!("Failed to send event: {:?}", e),
+                        }
+                    }
+                    Err(e) => println!("watch error: {:?}", e),
+                }
             }
-            _ => {
-                println!("Not a text pane");
+        });
+        self.external_receiver = Some(receiver);
+    }
+
+    fn load_widgets(&mut self, path: &str) {
+        let mut file = File::open(path).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        let widgets : Vec<Widget> = contents.split(";")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if let Ok(widget) = ron::de::from_str(s) {
+                    widget
+                } else {
+                    println!("Failed to parse: {}", s);
+                    panic!("Failed to parse");
+                }
             }
-        };
-
-
-
+            ).collect();
+        for widget in widgets {
+            self.widget_store.add_widget(widget);
+        }
     }
 
     pub fn update(&mut self) {
@@ -203,7 +164,18 @@ impl<'a> Editor {
         // Todo: Need to test that I am not missing any
         // events with my start and end
 
-        let events = self.events.events_for_frame();
+        if let Some(receiver) = &self.external_receiver {
+            for event in receiver.try_iter() {
+                match event {
+                    _ => {
+                        self.events.push(event);
+                    }
+                }
+            }
+        }
+
+        let events = self.events.events_for_frame().to_vec();
+
         if !events.is_empty() {
             self.should_redraw = true;
         }
@@ -216,7 +188,7 @@ impl<'a> Editor {
                         id: 0,
                         // TODO: Temp for testing
                         on_click: vec![Event::MoveWidgetRelative { selector: WidgetSelector::ById(1), x: 10.0, y: 10.0 }],
-                        position: Position { x: *x, y: *y },
+                        position: Position { x: x, y: y },
                         size: Size { width: 200.0, height: 100.0 },
                         data: WidgetData::Process { process: Process::new(path.to_path_buf()) },
                     });
@@ -228,7 +200,7 @@ impl<'a> Editor {
                         if widget.mouse_over(&mouse) {
                             match &mut widget.data {
                                 WidgetData::TextPane { text_pane } => {
-                                    text_pane.scroll(*x, *y, widget.size.height);
+                                    text_pane.scroll(x, y, widget.size.height);
                                 },
                                 _ => {}
                             }
@@ -243,6 +215,18 @@ impl<'a> Editor {
                             widget.position.y += y;
                         }
                     }
+                }
+                Event::MouseMove { x_diff: x, y_diff: y, .. } => {
+                    for widget_id in self.selected_widgets.iter() {
+                        if let Some(widget) = self.widget_store.get_mut(*widget_id) {
+                            widget.position.x += x;
+                            widget.position.y += y;
+                        }
+                    }
+                }
+                Event::ReloadWidgets => {
+                    self.widget_store.clear();
+                    self.load_widgets("widgets.ron");
                 }
                 _ => {}
             }
@@ -260,6 +244,8 @@ impl<'a> Editor {
             },
             widget_store: WidgetStore::new(),
             should_redraw: true,
+            selected_widgets: HashSet::new(),
+            external_receiver: None,
         }
     }
 
@@ -296,29 +282,34 @@ impl<'a> Editor {
     fn respond_to_event(&mut self, mut event: Event) {
         event.patch_mouse_event(&self.context.mouse_position);
         match event {
-            Event::ClickedWidget { widget_id } => {
-
-                println!("Clicked widget {}", widget_id);
+            Event::WidgetMouseDown { widget_id: _ } => {
+                self.events.push(event);
+            }
+            Event::WidgetMouseUp { widget_id: _ } => {
                 self.events.push(event);
             }
             Event::Noop => {},
-            Event::MouseMove { x, y } => {
-                // Not pushing the event because there are too many
-                // TODO: Do I need this? I have my own way of setting
-                // this in render because it has weird properties for when
-                // it updates
+            Event::MouseMove { x, y, .. } => {
+                // I want to be able to respond to mouse move events
+                // I just might not want to save them?
+                // I'm not sure...
+                let x_diff = x - self.context.mouse_position.x;
+                let y_diff = y - self.context.mouse_position.y;
+                self.events.push(Event::MouseMove { x_diff, y_diff, x, y });
                 self.context.mouse_position = Position { x, y };
             },
             Event::LeftMouseDown {..} => {
                 self.events.push(event);
                 self.context.left_mouse_down = true;
-                self.add_clicks();
+                self.add_mouse_down();
             },
             Event::LeftMouseUp {..} => {
                 self.events.push(event);
-                self.context.left_mouse_down = false;
                 // Probably not the right place.
                 // Maybe need events on last cycle?
+                self.context.left_mouse_down = false;
+                self.add_mouse_up();
+
             },
             Event::RightMouseDown {..} => {
                 self.events.push(event);
@@ -343,28 +334,57 @@ impl<'a> Editor {
             Event::MoveWidgetRelative { .. } => {
 
             }
+            Event::ReloadWidgets => {
+                self.events.push(event);
+            }
         }
     }
 
-    fn add_clicks(&mut self) {
-        let mut clicked = vec![];
+    fn add_mouse_down(&mut self) {
+        let mut mouse_over = vec![];
+        // I would need some sort of hierarchy here
+        // Right now if widgets are in a stack I would say mouse down
+        // on all of them, rather than z-order
+        // But I don't have a real defined z-order
+        // Maybe I should do the first? Or the last?
+        // Not sure
+        for widget in self.widget_store.iter() {
+            if widget.mouse_over(&self.context.mouse_position) {
+                mouse_over.push(widget.id);
+                self.selected_widgets.insert(widget.id);
+            }
+        }
+        for id in mouse_over {
+            self.respond_to_event(Event::WidgetMouseDown { widget_id: id });
+        }
+    }
+
+    fn add_mouse_up(&mut self) {
+        // This is only true now. I could have a selection mode
+        // Or it could be click to select. So really not sure
+        // what to do here. But for now I just want to be able to move widgets
+
+        self.selected_widgets.clear();
+
+        let mut mouse_over = vec![];
         // I would need some sort of hierarchy here
         for widget in self.widget_store.iter() {
             if widget.mouse_over(&self.context.mouse_position) {
-                clicked.push(widget.id);
+                mouse_over.push(widget.id);
                 for event in widget.on_click.iter() {
-                    println!("{:?}", event);
+                    println!("Clicked {:?}", event);
                     self.events.push(event.clone());
                 }
             }
         }
-        for id in clicked {
-            self.respond_to_event(Event::ClickedWidget { widget_id: id });
+        for id in mouse_over {
+            self.respond_to_event(Event::WidgetMouseUp { widget_id: id });
         }
     }
 
     pub fn should_redraw(&self) -> bool {
         self.should_redraw
+        // true
     }
 
 }
@@ -454,5 +474,5 @@ impl<'a> Editor {
 
 
 
-
-
+// The idea of a compound widget does nothing right now
+// Since I don't serialize it is literally meaningless
