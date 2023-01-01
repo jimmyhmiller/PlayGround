@@ -8,7 +8,7 @@ use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Event {
     Noop,
-    MouseMove { x: f32, y: f32 },
+    MouseMove { x: f32, y: f32, x_diff: f32, y_diff: f32 },
     LeftMouseDown { x: f32, y: f32 },
     LeftMouseUp { x: f32, y: f32 },
     RightMouseDown { x: f32, y: f32 },
@@ -17,8 +17,10 @@ pub enum Event {
     HoveredFile { path: PathBuf, x: f32, y: f32 },
     DroppedFile { path: PathBuf, x: f32, y: f32 },
     HoveredFileCancelled,
-    ClickedWidget { widget_id: WidgetId },
+    WidgetMouseDown { widget_id: WidgetId },
+    WidgetMouseUp { widget_id: WidgetId },
     MoveWidgetRelative { selector: WidgetSelector, x: f32, y: f32 },
+    ReloadWidgets,
 }
 
 
@@ -67,7 +69,7 @@ impl Event {
                             winit::event::MouseScrollDelta::LineDelta(_, _) => panic!("What is line delta?"),
                             winit::event::MouseScrollDelta::PixelDelta(delta) => Some(Event::Scroll { x: delta.x, y: delta.y })
                         }
-                        
+
                     }
                     MouseInput { state, button, .. } => {
                         use winit::event::MouseButton::*;
@@ -82,7 +84,7 @@ impl Event {
                         }
 
                     }
-                    CursorMoved { position, .. }  => Some(Event::MouseMove { x: position.x as f32, y: position.y as f32 }),
+                    CursorMoved { position, .. }  => Some(Event::MouseMove { x: position.x as f32, y: position.y as f32, x_diff: 0.0, y_diff: 0.0 }),
                     HoveredFile(path) => Some(Event::HoveredFile { path: path.to_path_buf(), x: -0.0, y: -0.0 }),
                     DroppedFile(path) => Some(Event::DroppedFile { path: path.to_path_buf(), x: -0.0, y: -0.0 }),
                     HoveredFileCancelled => Some(Event::HoveredFileCancelled),
@@ -102,7 +104,7 @@ impl Event {
 
 
 // Events
-// ShowScene { widgets: [WidgetSelector]} 
+// ShowScene { widgets: [WidgetSelector]}
 // ShowWidget { widget: One<WidgetSelector> }
 // HideWidget { widget: One<WidgetSelector> }
 // AddClick { action: [Action] }

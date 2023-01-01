@@ -1,7 +1,7 @@
-use std::{fs::File, process::ChildStdout, cell::RefCell, io::Read, path::PathBuf};
+use std::{fs::File, process::ChildStdout, cell::RefCell, io::Read, path::PathBuf, str::{from_utf8}};
 
 use nonblock::NonBlockingReader;
-use serde::{Serialize, Deserialize};
+use serde::{Serialize, Deserialize, Deserializer, Serializer};
 use skia_safe::{Point, Paint, Color4f, FontStyle, font_style::{Weight, Width, Slant}, Image, Data, Rect, Canvas, RRect, Font, Typeface};
 
 use crate::event::Event;
@@ -26,7 +26,6 @@ pub struct Size {
 }
 
 
-
 pub type WidgetId = usize;
 
 #[derive(Serialize, Deserialize)]
@@ -48,6 +47,7 @@ pub struct WidgetStore {
 
 impl WidgetStore {
     pub fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
+
         let id = self.next_id;
         self.next_id += 1;
         widget.id = id;
@@ -79,6 +79,11 @@ impl WidgetStore {
     pub fn iter(&self) -> impl Iterator<Item = &Widget> {
         self.widgets.iter()
     }
+
+    pub fn clear(&mut self) {
+        self.next_id = 0;
+        self.widgets.clear();
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -105,14 +110,14 @@ impl Color {
     pub fn parse_hex(hex: &str) -> Color {
 
         let mut start = 0;
-        if hex.starts_with('#') {
+        if hex.starts_with("#") {
             start = 1;
         }
 
         let r = i64::from_str_radix(&hex[start..start+2], 16).unwrap() as f32;
         let g = i64::from_str_radix(&hex[start+2..start+4], 16).unwrap() as f32;
         let b = i64::from_str_radix(&hex[start+4..start+6], 16).unwrap() as f32;
-        Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
+        return Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
     }
 }
 
@@ -202,8 +207,28 @@ pub struct TextOptions {
 }
 
 
+fn serialize_text<S>(x: &Vec<u8>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    s.serialize_str(from_utf8(&x).unwrap())
+}
+
+fn deserialize_text<'de, D>(d: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    Ok(s.into_bytes())
+}
+
+
+
+
 #[derive(Serialize, Deserialize)]
 pub struct TextPane {
+    #[serde(serialize_with = "serialize_text")]
+    #[serde(deserialize_with = "deserialize_text")]
     contents: Vec<u8>,
     line_height: f32,
     offset: Position,
@@ -211,7 +236,7 @@ pub struct TextPane {
 
 
 impl TextPane {
-   pub fn new(contents: Vec<u8>, line_height: f32) -> Self {
+   pub fn _new(contents: Vec<u8>, line_height: f32) -> Self {
         Self {
             contents,
             line_height,
@@ -219,7 +244,7 @@ impl TextPane {
         }
     }
 
-    pub fn set_contents(&mut self, contents: Vec<u8>) {
+    pub fn _set_contents(&mut self, contents: Vec<u8>) {
         self.contents = contents;
     }
 
@@ -235,8 +260,8 @@ impl TextPane {
     // TODO: obviously need to not compute this everytime.
     fn get_lines(&self) -> impl std::iter::Iterator<Item=&str> + '_ {
         let text = std::str::from_utf8(&self.contents).unwrap();
-        
-        text.split('\n')
+        let lines = text.split('\n');
+        return lines;
     }
 
     fn number_of_lines(&self) -> usize {
@@ -298,7 +323,7 @@ pub struct ImageData {
 }
 
 impl ImageData {
-    pub fn new(path: String) -> Self {
+    pub fn _new(path: String) -> Self {
         Self {
             path,
             cache: RefCell::new(None),
@@ -393,7 +418,7 @@ impl Widget {
 
                 let font = Font::new(Typeface::new(text_options.font_family.clone(), text_options.font_weight.into()).unwrap(), text_options.size);
                 let paint = text_options.color.to_paint();
-                canvas.draw_str(text, (self.position.x, self.position.y), &font, &paint);
+                canvas.draw_str(text, (self.position.x, self.position.y + self.size.height), &font, &paint);
             }
             WidgetData::Process { process } => {
                 let file_name = process.file_path.file_name().unwrap().to_str().unwrap();
