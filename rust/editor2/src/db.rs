@@ -1,4 +1,5 @@
-use rand::{RngCore, Rng};
+#![allow(dead_code)]
+use rand::{Rng};
 
 
 
@@ -46,7 +47,7 @@ impl Database {
             .map(|index| &self.data[index].value)
     }
 
-    
+
 }
 
 pub fn main() {

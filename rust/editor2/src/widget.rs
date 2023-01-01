@@ -105,14 +105,14 @@ impl Color {
     pub fn parse_hex(hex: &str) -> Color {
 
         let mut start = 0;
-        if hex.starts_with("#") {
+        if hex.starts_with('#') {
             start = 1;
         }
-    
+
         let r = i64::from_str_radix(&hex[start..start+2], 16).unwrap() as f32;
         let g = i64::from_str_radix(&hex[start+2..start+4], 16).unwrap() as f32;
         let b = i64::from_str_radix(&hex[start+4..start+6], 16).unwrap() as f32;
-        return Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
+        Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
     }
 }
 
@@ -235,14 +235,14 @@ impl TextPane {
     // TODO: obviously need to not compute this everytime.
     fn get_lines(&self) -> impl std::iter::Iterator<Item=&str> + '_ {
         let text = std::str::from_utf8(&self.contents).unwrap();
-        let lines = text.split('\n');
-        return lines;
+        
+        text.split('\n')
     }
-    
+
     fn number_of_lines(&self) -> usize {
         self.get_lines().count()
     }
-    
+
     fn visible_lines(&self, height: f32) -> impl std::iter::Iterator<Item=&str> + '_  {
         self.get_lines().skip(self.lines_above_scroll()).take(self.number_of_visible_lines(height))
     }
@@ -259,7 +259,7 @@ impl TextPane {
         }
         // TODO: Handle x scrolling too far
         self.offset.y -= y as f32;
-        
+
         let scroll_with_last_line_visible =
             self.number_of_lines().saturating_sub(self.number_of_visible_lines(height)) as f32 * self.line_height;
 
@@ -325,7 +325,7 @@ impl Widget {
     pub fn draw(&self, canvas: &mut Canvas, widgets: &WidgetStore) {
         match &self.data {
             WidgetData::Noop => {
-                
+
                 let rect = self.bounding_rect();
                 let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
                 let purple = Color::parse_hex("#1c041e");
@@ -333,14 +333,14 @@ impl Widget {
 
                 let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
                 let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-                canvas.draw_str("noop", Point::new(self.position.x + 30.0, self.position.y + 40.0), &font, white); 
+                canvas.draw_str("noop", Point::new(self.position.x + 30.0, self.position.y + 40.0), &font, white);
             }
 
             WidgetData::Circle { radius, color } => {
                 let center = Point::new(self.position.x + radius, self.position.y + radius);
                 canvas.draw_circle(center, *radius, &color.to_paint());
             }
-            
+
             WidgetData::Compound { children } => {
                 for child in children.iter() {
                     // Need to set coords to be relative to the parent widget?
@@ -367,17 +367,15 @@ impl Widget {
             }
             WidgetData::TextPane { text_pane } => {
 
-                                    
+
                 let jungle_green = Color::parse_hex("#62b4a6");
                 let eggplant = Color::parse_hex("#530922");
 
                 canvas.save();
                 canvas.clip_rect(self.bounding_rect(), None, None);
-                let purple = Color::parse_hex("#1c041e");
                 let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);
                 canvas.draw_rrect(rrect, &eggplant.to_paint());
                 let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(), 32.0);
-                let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
 
 
                 canvas.clip_rect(self.bounding_rect().with_inset((20,20)), None, None);
@@ -392,7 +390,7 @@ impl Widget {
                 canvas.restore();
             }
             WidgetData::Text { text, text_options } => {
-        
+
                 let font = Font::new(Typeface::new(text_options.font_family.clone(), text_options.font_weight.into()).unwrap(), text_options.size);
                 let paint = text_options.color.to_paint();
                 canvas.draw_str(text, (self.position.x, self.position.y), &font, &paint);
@@ -407,7 +405,7 @@ impl Widget {
                 let purple = Color::parse_hex("#1c041e");
                 canvas.draw_rect(self.bounding_rect(), &purple.to_paint());
             }
-            
+
         }
     }
 

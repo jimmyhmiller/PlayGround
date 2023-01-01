@@ -1,10 +1,10 @@
 
 
-use crate::{fps_counter::FpsCounter, widget::{WidgetId, Position, WidgetStore, Widget, Size, WidgetData, ImageData, TextPane, TextOptions, FontWeight, Color, Process, WidgetSelector}, event::Event};
+use crate::{fps_counter::FpsCounter, widget::{Position, WidgetStore, Widget, Size, WidgetData, ImageData, TextPane, TextOptions, FontWeight, Color, Process, WidgetSelector}, event::Event};
 
 use ron::ser::PrettyConfig;
 
-use skia_safe::{RRect, Font, Typeface, FontStyle, PaintStyle};
+use skia_safe::{Font, Typeface, FontStyle};
 
 
 
@@ -20,10 +20,6 @@ use skia_safe::{RRect, Font, Typeface, FontStyle, PaintStyle};
 // on the current scene then I am not going to click on it.
 
 
-struct Scene {
-    widgets: Vec<WidgetId>,
-}
-
 struct Context {
     mouse_position: Position,
     left_mouse_down: bool,
@@ -36,11 +32,9 @@ struct Context {
 pub struct Editor {
     events: Events,
     pub fps_counter: FpsCounter,
-    scenes: Vec<Scene>,
-    current_scene: usize,
     context: Context,
-    scene_selector: Vec<WidgetId>,
     widget_store: WidgetStore,
+    should_redraw: bool,
 }
 
 
@@ -83,21 +77,18 @@ impl Events {
 
 
 #[cfg(all(target_os = "macos"))]
-use skia_safe::{Canvas, Color4f, Paint, Point, Rect};
-
-
-
-
+use skia_safe::{Canvas, Color4f, Paint, Point};
 
 
 impl<'a> Editor {
 
-    pub fn set_mouse_position(&mut self, x: f32, y: f32) {
+    pub fn _set_mouse_position(&mut self, x: f32, y: f32) {
         self.context.mouse_position = Position { x, y };
     }
 
     pub fn end_frame(&mut self) {
         self.events.end_frame();
+        self.should_redraw = false;
     }
 
     pub fn next_frame(&mut self) {
@@ -111,7 +102,7 @@ impl<'a> Editor {
     // It will be useful for something like slideshow software
     pub fn setup(&mut self) {
 
-        let id = self.widget_store.add_widget(Widget {
+        self.widget_store.add_widget(Widget {
             id: 0,
             on_click: vec![],
             position: Position { x: 200.0, y: 200.0 },
@@ -119,19 +110,16 @@ impl<'a> Editor {
             data: WidgetData::Noop,
         });
 
-        let image_id = self.widget_store.add_widget(Widget {
+        self.widget_store.add_widget(Widget {
             id: 0,
             on_click: vec![],
             position: Position { x: 400.0, y: 400.0 },
             size: Size { width: 200.0, height: 100.0 },
             data: WidgetData::Image {
-                data: ImageData::new("/Users/jimmyhmiller/Downloads/Jimmy’s new iPad/files/20479ab6a77feae4060e5ea19beee525_original.png".to_string()),
+                data: ImageData::new("./resources/test.png".to_string()),
             },
         });
 
-        self.scenes.push(Scene {
-            widgets: vec![id, image_id],
-        });
 
         let id = self.widget_store.add_widget(Widget {
             id: 0,
@@ -151,7 +139,7 @@ impl<'a> Editor {
 
 
 
-        let text_pane_id = self.widget_store.add_widget(Widget { 
+        let text_pane_id = self.widget_store.add_widget(Widget {
             id: 0,
             on_click: vec![],
             position: Position { x: 500.0, y: 600.0 },
@@ -161,7 +149,7 @@ impl<'a> Editor {
             },
         });
 
-        let text_id = self.widget_store.add_widget(Widget { 
+        let text_id = self.widget_store.add_widget(Widget {
             id: 0,
             on_click: vec![],
             position: Position { x: 600.0, y: 100.0 },
@@ -206,22 +194,7 @@ impl<'a> Editor {
             }
         };
 
-        self.scenes.push(Scene {
-            widgets: vec![text_pane_id, id_compound]
-        });
 
-
-        for i in 0..self.scenes.len() {
-            let id = self.widget_store.add_widget(Widget {
-                id: 0,
-                on_click: vec![],
-                position: Position { x: 20.0, y: i as f32 * 120.0 + 20.0 },
-                size: Size { width: 100.0, height: 100.0 },
-                data: WidgetData::Noop,
-            });
-            self.scene_selector.push(id);
-            
-        }
 
     }
 
@@ -229,13 +202,17 @@ impl<'a> Editor {
 
         // Todo: Need to test that I am not missing any
         // events with my start and end
-        
 
-        for event in self.events.events_for_frame() {
+        let events = self.events.events_for_frame();
+        if !events.is_empty() {
+            self.should_redraw = true;
+        }
+
+        for event in events {
             match event {
 
                 Event::DroppedFile { path, x, y } => {
-                    let hovered = self.widget_store.add_widget(Widget {
+                    self.widget_store.add_widget(Widget {
                         id: 0,
                         // TODO: Temp for testing
                         on_click: vec![Event::MoveWidgetRelative { selector: WidgetSelector::ById(1), x: 10.0, y: 10.0 }],
@@ -243,7 +220,6 @@ impl<'a> Editor {
                         size: Size { width: 200.0, height: 100.0 },
                         data: WidgetData::Process { process: Process::new(path.to_path_buf()) },
                     });
-                    self.scenes[self.current_scene].widgets.push(hovered);
                 }
 
                 Event::Scroll { x, y } => {
@@ -277,29 +253,21 @@ impl<'a> Editor {
         Self {
             events: Events::new(),
             fps_counter: FpsCounter::new(),
-            scenes: vec![],
-            current_scene: 0,
             context: Context {
                 mouse_position: Position { x: 0.0, y: 0.0 },
                 left_mouse_down: false,
                 right_mouse_down: false,
             },
-            scene_selector: vec![],
-            widget_store: WidgetStore::new()
+            widget_store: WidgetStore::new(),
+            should_redraw: true,
         }
     }
 
-    // let purple = parse_hex("#1c041e");
-    // let yellow = parse_hex("#2c1805");
-    // let green = parse_hex("#011b1e");
-    
 
-    pub fn draw(&mut self, canvas: &mut Canvas) {  
-        
+    pub fn draw(&mut self, canvas: &mut Canvas) {
+
         self.fps_counter.tick();
-        use skia_safe::{Size};
-
-
+        use skia_safe::Size;
 
 
         let gray = Color::parse_hex("#333333");
@@ -311,73 +279,16 @@ impl<'a> Editor {
         let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
         let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
 
-        canvas.draw_str(self.fps_counter.fps.to_string(), Point::new(canvas_size.width - 60.0, 30.0), &font, &white);
-        
+        canvas.draw_str(self.fps_counter.fps.to_string(), Point::new(canvas_size.width - 60.0, 30.0), &font, white);
 
-        // Need to think in general about clicks
-        // So I probably need to represent these as data
-        // Do I want to have something at the top level tell
-        // a widget if the mouse is over it?
-        // Or do I want the widget to look at the mouse position?
-        // Maybe allow for both?
-        for widget_id in self.scene_selector.iter() {
-            let widget = self.widget_store.get(*widget_id).unwrap();
-            let rect = Rect::from_xywh(widget.position.x, widget.position.y, widget.size.width, widget.size.height);
-            let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
-            let purple = &Color::parse_hex("#1c041e").to_paint();
-           
-            if widget.mouse_over(&self.context.mouse_position) {
-                let mut outline = white.clone();
-                // green_outline.set_stroke(Some(2.0));
-                outline.set_style(PaintStyle::Stroke);
-                outline.set_stroke_width(3.0);
-                outline.set_anti_alias(true);
-                canvas.draw_rrect(rrect, &outline);
-                let rect = Rect::from_xywh(
-                    widget.position.x + 5.0,
-                    widget.position.y + 5.0,
-                    widget.size.width - 10.0,
-                    widget.size.height - 10.0
-                );
-                let rrect = RRect::new_rect_xy(rect, 15.0, 15.0);
-                canvas.draw_rrect(rrect, purple);
-            } else {
-                canvas.draw_rrect(rrect, &purple);
-            }
+        for widget in self.widget_store.iter() {
+            widget.draw(canvas, &self.widget_store);
         }
 
-        let scene = &self.scenes[self.current_scene];
-        for widget_id in scene.widgets.iter() {
-            if let Some(widget) = self.widget_store.get(*widget_id) {
-                widget.draw(canvas, &self.widget_store);
-            }
-        }
-
-
-
-
-    
-        // let rect = Rect::from_xywh(30.0, 30.0, 1200.0, 400.0);
-        // let mut rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
-
-        // let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
-
-        // canvas.draw_rrect(rrect, &purple);
-
-        // rrect.offset((0.0, rect.height() + 30.0));
-        // canvas.draw_rrect(rrect, &yellow);
-
-
-        // rrect.offset((0.0, rect.height() + 30.0));
-        // canvas.draw_rrect(rrect, &green);
-
-
-
-        
     }
 
     pub fn add_event(&mut self, event: &winit::event::Event<'_, ()>) {
-        if let Some(event) = Event::from_winit_event(&event) {
+        if let Some(event) = Event::from_winit_event(event) {
             self.respond_to_event(event);
         }
     }
@@ -387,13 +298,6 @@ impl<'a> Editor {
         match event {
             Event::ClickedWidget { widget_id } => {
 
-                // Not going to be the plan going forward, but let's do this for now    
-                for (i, scene_selector) in self.scene_selector.iter().enumerate() {
-                    if *scene_selector == widget_id {
-                        self.current_scene = i;
-                        break;
-                    }
-                }
                 println!("Clicked widget {}", widget_id);
                 self.events.push(event);
             }
@@ -437,12 +341,12 @@ impl<'a> Editor {
                 self.events.push(event);
             }
             Event::MoveWidgetRelative { .. } => {
-            
+
             }
         }
     }
 
-    fn add_clicks(&mut self) -> () {
+    fn add_clicks(&mut self) {
         let mut clicked = vec![];
         // I would need some sort of hierarchy here
         for widget in self.widget_store.iter() {
@@ -459,6 +363,10 @@ impl<'a> Editor {
         }
     }
 
+    pub fn should_redraw(&self) -> bool {
+        self.should_redraw
+    }
+
 }
 
 
@@ -473,13 +381,13 @@ impl<'a> Editor {
 // how do I store them? If they clear that output, I should remove them
 // But that implies that I have a way to identify them.
 
-// I could instead each frame add the widgets of each process. 
+// I could instead each frame add the widgets of each process.
 // Then I would have a mostly blank list of widgets
 
 
 // You might also want to have widgets that outlive the process.
 // Widgets that stay only when the processes output is saved might not be desirable.
-// Or is it? 
+// Or is it?
 // The process itself can be gone, but the output can still be there.
 // In fact, is there really a distinction? Is the widget not just the code that generates it?
 
@@ -521,7 +429,7 @@ impl<'a> Editor {
 
 
 // Ideas:
-// 
+//
 // Make a process widget. It is a file, not text.
 // We can get via drag and drop.
 // On click runs it and makes a TextPane of the output.
