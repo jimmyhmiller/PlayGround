@@ -393,13 +393,13 @@ impl Widget {
             WidgetData::TextPane { text_pane } => {
 
 
-                let jungle_green = Color::parse_hex("#62b4a6");
-                let eggplant = Color::parse_hex("#530922");
+                let foreground = Color::parse_hex("#62b4a6");
+                let background = Color::parse_hex("#530922");
 
                 canvas.save();
                 canvas.clip_rect(self.bounding_rect(), None, None);
                 let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);
-                canvas.draw_rrect(rrect, &eggplant.to_paint());
+                canvas.draw_rrect(rrect, &background.to_paint());
                 let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(), 32.0);
 
 
@@ -408,7 +408,7 @@ impl Widget {
                 canvas.translate((self.position.x + 30.0 - text_pane.offset.x, self.position.y + text_pane.line_height - fractional_offset + 10.0));
 
                 for line in text_pane.visible_lines(self.size.height) {
-                    canvas.draw_str(line, Point::new(0.0, 0.0), &font, &jungle_green.to_paint());
+                    canvas.draw_str(line, Point::new(0.0, 0.0), &font, &foreground.to_paint());
                     canvas.translate((0.0, text_pane.line_height));
                 }
 
