@@ -236,7 +236,7 @@ pub struct TextPane {
 
 
 impl TextPane {
-   pub fn _new(contents: Vec<u8>, line_height: f32) -> Self {
+   pub fn new(contents: Vec<u8>, line_height: f32) -> Self {
         Self {
             contents,
             line_height,

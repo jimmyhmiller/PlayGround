@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, fs::File, io::{Read}, path::Path, sync::mpsc::Receiver, thread};
 
-use crate::{fps_counter::FpsCounter, widget::{Position, WidgetStore, Widget, Size, WidgetData, Color, Process, WidgetSelector, WidgetId}, event::Event};
+use crate::{fps_counter::FpsCounter, widget::{Position, WidgetStore, Widget, Size, WidgetData, Color, Process, WidgetSelector, WidgetId, TextPane}, event::Event};
 
 use notify::{Watcher, RecursiveMode, RecommendedWatcher, Config};
 
@@ -40,6 +40,7 @@ pub struct Editor {
     should_redraw: bool,
     selected_widgets: HashSet<WidgetId>,
     external_receiver: Option<Receiver<Event>>,
+    watcher: Option<RecommendedWatcher>,
 }
 
 
@@ -118,24 +119,30 @@ impl<'a> Editor {
         let widget_config_path = widget_config_path.to_string();
         let (watch_raw_send, watch_raw_receive) = std::sync::mpsc::channel();
         let (sender, receiver) = std::sync::mpsc::channel::<Event>();
-        thread::spawn(move || {
-            let mut watcher = RecommendedWatcher::new(watch_raw_send, Config::default()).unwrap();
+        let mut watcher = RecommendedWatcher::new(watch_raw_send, Config::default()).unwrap();
 
-            watcher.watch(Path::new(&widget_config_path), RecursiveMode::NonRecursive).unwrap();
+        // Probably need to debounce this
+        watcher.watch(Path::new(&widget_config_path), RecursiveMode::NonRecursive).unwrap();
+
+        thread::spawn(move || {
 
             for res in watch_raw_receive {
                 match res {
-                    Ok(_event) => {
-                        match sender.send(Event::ReloadWidgets) {
-                            Ok(_) => {},
-                            Err(e) => println!("Failed to send event: {:?}", e),
-                        }
+                    Ok(event) => {
+                        event.paths.iter().for_each(|path| {
+                            if path.to_str().unwrap() == widget_config_path {
+                                sender.send(Event::ReloadWidgets).unwrap();
+                            } else {
+                                println!("Ignoring event for: {:?}", path);
+                            }
+                        });
                     }
                     Err(e) => println!("watch error: {:?}", e),
                 }
             }
         });
         self.external_receiver = Some(receiver);
+        self.watcher = Some(watcher);
     }
 
     fn load_widgets(&mut self, path: &str) {
@@ -188,10 +195,16 @@ impl<'a> Editor {
                         id: 0,
                         // TODO: Temp for testing
                         on_click: vec![Event::MoveWidgetRelative { selector: WidgetSelector::ById(1), x: 10.0, y: 10.0 }],
-                        position: Position { x: x, y: y },
-                        size: Size { width: 200.0, height: 100.0 },
-                        data: WidgetData::Process { process: Process::new(path.to_path_buf()) },
+                        position: Position { x, y },
+                        size: Size { width: 800.0, height: 800.0 },
+                        data: WidgetData::TextPane { text_pane: TextPane::new(
+                            std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
+                            40.0,
+                        )},
                     });
+                    if let Some(watcher) = &mut self.watcher {
+                        watcher.watch(path.as_path(), RecursiveMode::NonRecursive).unwrap();
+                    }
                 }
 
                 Event::Scroll { x, y } => {
@@ -246,6 +259,7 @@ impl<'a> Editor {
             should_redraw: true,
             selected_widgets: HashSet::new(),
             external_receiver: None,
+            watcher: None,
         }
     }
 
