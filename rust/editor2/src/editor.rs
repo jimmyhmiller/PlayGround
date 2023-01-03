@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, fs::File, io::{Read}, path::Path, sync::mpsc::Receiver, thread};
 
-use crate::{fps_counter::FpsCounter, widget::{Position, WidgetStore, Widget, Size, WidgetData, Color, Process, WidgetSelector, WidgetId, TextPane}, event::Event};
+use crate::{fps_counter::FpsCounter, widget::{Position, WidgetStore, Widget, Size, WidgetData, Color, WidgetSelector, WidgetId, TextPane, Wasm}, event::Event, wasm::WasmContext};
 
 use notify::{Watcher, RecursiveMode, RecommendedWatcher, Config};
 
@@ -41,6 +41,7 @@ pub struct Editor {
     selected_widgets: HashSet<WidgetId>,
     external_receiver: Option<Receiver<Event>>,
     watcher: Option<RecommendedWatcher>,
+    wasm_context: WasmContext,
 }
 
 
@@ -86,7 +87,7 @@ impl Events {
 use skia_safe::{Canvas, Color4f, Paint, Point};
 
 
-impl<'a> Editor {
+impl Editor {
 
     pub fn _set_mouse_position(&mut self, x: f32, y: f32) {
         self.context.mouse_position = Position { x, y };
@@ -191,17 +192,29 @@ impl<'a> Editor {
             match event {
 
                 Event::DroppedFile { path, x, y } => {
-                    self.widget_store.add_widget(Widget {
-                        id: 0,
-                        // TODO: Temp for testing
-                        on_click: vec![Event::MoveWidgetRelative { selector: WidgetSelector::ById(1), x: 10.0, y: 10.0 }],
-                        position: Position { x, y },
-                        size: Size { width: 800.0, height: 800.0 },
-                        data: WidgetData::TextPane { text_pane: TextPane::new(
-                            std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
-                            40.0,
-                        )},
-                    });
+
+                    if path.extension().unwrap() == "wasm" {
+                        self.widget_store.add_widget(Widget {
+                            id: 0,
+                            on_click: vec![],
+                            position: Position { x, y },
+                            size: Size { width: 800.0, height: 800.0 },
+                            data: WidgetData::Wasm { wasm: Wasm::new(path.to_str().unwrap().to_string())},
+                        });
+                    } else {
+
+                        self.widget_store.add_widget(Widget {
+                            id: 0,
+                            // TODO: Temp for testing
+                            on_click: vec![Event::MoveWidgetRelative { selector: WidgetSelector::ById(1), x: 10.0, y: 10.0 }],
+                            position: Position { x, y },
+                            size: Size { width: 800.0, height: 800.0 },
+                            data: WidgetData::TextPane { text_pane: TextPane::new(
+                                std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
+                                40.0,
+                            )},
+                        });
+                    }
                     if let Some(watcher) = &mut self.watcher {
                         watcher.watch(path.as_path(), RecursiveMode::NonRecursive).unwrap();
                     }
@@ -247,6 +260,10 @@ impl<'a> Editor {
     }
 
     pub fn new() -> Self {
+
+        let wasm_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/extension-system/target/wasm32-wasi/debug/my_first_extension.wasm";
+
+
         Self {
             events: Events::new(),
             fps_counter: FpsCounter::new(),
@@ -260,6 +277,7 @@ impl<'a> Editor {
             selected_widgets: HashSet::new(),
             external_receiver: None,
             watcher: None,
+            wasm_context: WasmContext::new(wasm_path).unwrap(),
         }
     }
 
@@ -269,10 +287,8 @@ impl<'a> Editor {
         self.fps_counter.tick();
         use skia_safe::Size;
 
-
         let gray = Color::parse_hex("#333333");
         canvas.clear(gray.to_color4f());
-
 
         let canvas_size = Size::from(canvas.base_layer_size());
 
@@ -281,8 +297,17 @@ impl<'a> Editor {
 
         canvas.draw_str(self.fps_counter.fps.to_string(), Point::new(canvas_size.width - 60.0, 30.0), &font, white);
 
-        for widget in self.widget_store.iter() {
-            widget.draw(canvas, &self.widget_store);
+        let mut to_draw = vec![];
+        for widget in self.widget_store.iter_mut() {
+            to_draw.extend(widget.draw(canvas));
+        }
+
+        // TODO: This is bad, I need to traverse the tree. Being lazy
+        // Also not even sure about compound right now
+        for widget_id in to_draw {
+            if let Some(widget) = self.widget_store.get_mut(widget_id) {
+                widget.draw(canvas);
+            }
         }
 
     }
@@ -382,10 +407,11 @@ impl<'a> Editor {
 
         let mut mouse_over = vec![];
         // I would need some sort of hierarchy here
-        for widget in self.widget_store.iter() {
+        for widget in self.widget_store.iter_mut() {
             if widget.mouse_over(&self.context.mouse_position) {
                 mouse_over.push(widget.id);
-                for event in widget.on_click.iter() {
+                let events = widget.on_click();
+                for event in events.iter() {
                     println!("Clicked {:?}", event);
                     self.events.push(event.clone());
                 }

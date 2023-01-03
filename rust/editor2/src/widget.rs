@@ -4,7 +4,7 @@ use nonblock::NonBlockingReader;
 use serde::{Serialize, Deserialize, Deserializer, Serializer};
 use skia_safe::{Point, Paint, Color4f, FontStyle, font_style::{Weight, Width, Slant}, Image, Data, Rect, Canvas, RRect, Font, Typeface};
 
-use crate::event::Event;
+use crate::{event::Event, wasm::WasmContext};
 
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
@@ -148,6 +148,9 @@ pub enum WidgetData {
     Process {
         process: Process,
     },
+    Wasm {
+        wasm: Wasm,
+    },
     // I probably don't need this
     // But I think no with my mouse fix
     // I could do something cool with it?
@@ -169,7 +172,7 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn new(file_path: PathBuf) -> Process {
+    pub fn _new(file_path: PathBuf) -> Process {
         Process {
             file_path,
             file: None,
@@ -340,6 +343,38 @@ impl ImageData {
 
 }
 
+// I need to also keep track of how to recompile
+// things at some point.
+
+#[derive(Serialize, Deserialize)]
+pub struct Wasm {
+    path: String,
+    #[serde(skip)]
+    context: Option<WasmContext>,
+}
+
+impl Wasm {
+    pub fn new(path: String) -> Self {
+        let path_clone = path.clone();
+        Self {
+            path,
+            context: Some(WasmContext::new(path_clone.as_str()).unwrap()),
+        }
+    }
+
+    fn draw(&mut self, canvas: &mut Canvas) {
+        self.context.as_mut().unwrap().draw(canvas).unwrap();
+    }
+
+    fn on_click(&mut self) {
+        // Need to figure out a better way to provide args
+        // Or just not care about this generic case?
+        self.context.as_mut().unwrap().on_click().unwrap();
+    }
+}
+
+
+
 
 impl Widget {
 
@@ -347,7 +382,26 @@ impl Widget {
         Rect::from_xywh(self.position.x, self.position.y, self.size.width, self.size.height)
     }
 
-    pub fn draw(&self, canvas: &mut Canvas, widgets: &WidgetStore) {
+    pub fn on_click(&mut self) -> Vec<Event> {
+        match &mut self.data {
+            WidgetData::Wasm { wasm } => {
+                wasm.on_click();
+                vec![]
+            }
+            _ => self.on_click.clone()
+        }
+    }
+
+    pub fn draw(&mut self, canvas: &mut Canvas) -> Vec<WidgetId> {
+
+        // Have to do this to deal with mut stuff
+        if let WidgetData::Wasm { wasm } = &mut self.data {
+            canvas.save();
+            canvas.translate((self.position.x, self.position.y));
+            wasm.draw(canvas);
+            canvas.restore();
+        }
+
         match &self.data {
             WidgetData::Noop => {
 
@@ -367,14 +421,7 @@ impl Widget {
             }
 
             WidgetData::Compound { children } => {
-                for child in children.iter() {
-                    // Need to set coords to be relative to the parent widget?
-                    // Or maybe I need two notions of position
-                    // Or maybe there should be a distinction between a compound widget
-                    // and a container or a scene or something.
-                    let child_widget = widgets.get(*child).unwrap();
-                    child_widget.draw(canvas, widgets);
-                }
+                return children.clone()
             }
             WidgetData::Image { data } => {
                 // I tried to abstract this out and ran into the issue of returning a ref.
@@ -392,7 +439,7 @@ impl Widget {
             }
             WidgetData::TextPane { text_pane } => {
 
-
+                let text_pane = &text_pane;
                 let foreground = Color::parse_hex("#62b4a6");
                 let background = Color::parse_hex("#530922");
 
@@ -431,7 +478,9 @@ impl Widget {
                 canvas.draw_rect(self.bounding_rect(), &purple.to_paint());
             }
 
+            _ => {}
         }
+        vec![]
     }
 
     pub fn mouse_over(&self, position: &Position) -> bool {
@@ -443,6 +492,7 @@ impl Widget {
         let y_max = self.position.y + self.size.height;
         x >= x_min && x <= x_max && y >= y_min && y <= y_max
     }
+
 }
 
 

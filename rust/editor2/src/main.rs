@@ -5,11 +5,12 @@ mod fps_counter;
 mod widget;
 mod event;
 mod db;
+mod wasm;
 
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
-    println!("This example is only supported on macos")
+    println!("This is only supported on macos")
 }
 
 
