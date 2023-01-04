@@ -21,6 +21,7 @@ pub enum Event {
     WidgetMouseUp { widget_id: WidgetId },
     MoveWidgetRelative { selector: WidgetSelector, x: f32, y: f32 },
     ReloadWidgets,
+    ReloadWasm(String),
 }
 
 

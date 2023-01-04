@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, fs::File, io::{Read}, path::Path, sync::mpsc::Receiver, thread};
 
-use crate::{fps_counter::FpsCounter, widget::{Position, WidgetStore, Widget, Size, WidgetData, Color, WidgetSelector, WidgetId, TextPane, Wasm}, event::Event, wasm::WasmContext};
+use crate::{fps_counter::FpsCounter, widget::{Position, WidgetStore, Widget, Size, WidgetData, Color, WidgetSelector, WidgetId, TextPane, Wasm}, event::Event};
 
 use notify::{Watcher, RecursiveMode, RecommendedWatcher, Config};
 
@@ -41,7 +41,7 @@ pub struct Editor {
     selected_widgets: HashSet<WidgetId>,
     external_receiver: Option<Receiver<Event>>,
     watcher: Option<RecommendedWatcher>,
-    wasm_context: WasmContext,
+    event_loop_proxy: Option<EventLoopProxy<()>>,
 }
 
 
@@ -67,6 +67,11 @@ impl Events {
         self.events.push(event);
     }
 
+    fn push_current_frame(&mut self, event: Event) {
+        self.events.push(event);
+        self.frame_end_index = self.events.len();
+    }
+
     fn events_for_frame(&self) -> &[Event] {
         &self.events[self.frame_start_index..self.frame_end_index]
     }
@@ -85,6 +90,7 @@ impl Events {
 
 #[cfg(all(target_os = "macos"))]
 use skia_safe::{Canvas, Color4f, Paint, Point};
+use winit::event_loop::EventLoopProxy;
 
 
 impl Editor {
@@ -108,11 +114,6 @@ impl Editor {
     // I need to figure out that hierarchy.
     // It will be useful for something like slideshow software
     pub fn setup(&mut self) {
-        let widget_config_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/widgets.ron";
-
-        self.load_widgets(widget_config_path);
-
-        self.setup_file_watcher(widget_config_path);
 
     }
 
@@ -125,6 +126,7 @@ impl Editor {
         // Probably need to debounce this
         watcher.watch(Path::new(&widget_config_path), RecursiveMode::NonRecursive).unwrap();
 
+        let event_loop_proxy = self.event_loop_proxy.as_ref().unwrap().clone();
         thread::spawn(move || {
 
             for res in watch_raw_receive {
@@ -133,6 +135,8 @@ impl Editor {
                         event.paths.iter().for_each(|path| {
                             if path.to_str().unwrap() == widget_config_path {
                                 sender.send(Event::ReloadWidgets).unwrap();
+                            } else if path.extension().unwrap() == "wasm" {
+                                sender.send(Event::ReloadWasm(path.to_str().unwrap().to_string())).unwrap();
                             } else {
                                 println!("Ignoring event for: {:?}", path);
                             }
@@ -140,6 +144,7 @@ impl Editor {
                     }
                     Err(e) => println!("watch error: {:?}", e),
                 }
+                event_loop_proxy.send_event(()).unwrap();
             }
         });
         self.external_receiver = Some(receiver);
@@ -176,7 +181,7 @@ impl Editor {
             for event in receiver.try_iter() {
                 match event {
                     _ => {
-                        self.events.push(event);
+                        self.events.push_current_frame(event);
                     }
                 }
             }
@@ -254,16 +259,22 @@ impl Editor {
                     self.widget_store.clear();
                     self.load_widgets("widgets.ron");
                 }
+
+                Event::ReloadWasm(path) => {
+                    for widget in self.widget_store.iter_mut() {
+                        if let WidgetData::Wasm { wasm } = &mut widget.data {
+                            if path == wasm.path {
+                                wasm.reload();
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
     }
 
     pub fn new() -> Self {
-
-        let wasm_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/extension-system/target/wasm32-wasi/debug/my_first_extension.wasm";
-
-
         Self {
             events: Events::new(),
             fps_counter: FpsCounter::new(),
@@ -277,7 +288,7 @@ impl Editor {
             selected_widgets: HashSet::new(),
             external_receiver: None,
             watcher: None,
-            wasm_context: WasmContext::new(wasm_path).unwrap(),
+            event_loop_proxy: None,
         }
     }
 
@@ -376,6 +387,9 @@ impl Editor {
             Event::ReloadWidgets => {
                 self.events.push(event);
             }
+            Event::ReloadWasm(_) => {
+                self.events.push(event);
+            }
         }
     }
 
@@ -425,6 +439,13 @@ impl Editor {
     pub fn should_redraw(&self) -> bool {
         self.should_redraw
         // true
+    }
+
+    pub fn on_window_create(&mut self, event_loop_proxy: EventLoopProxy<()>) {
+       self.event_loop_proxy = Some(event_loop_proxy);
+       let widget_config_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/widgets.ron";
+       self.load_widgets(widget_config_path);
+       self.setup_file_watcher(widget_config_path);
     }
 
 }
