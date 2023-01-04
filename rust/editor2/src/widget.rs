@@ -55,13 +55,11 @@ impl WidgetStore {
         id
     }
 
-    pub fn get(&self, id: usize) -> Option<&Widget> {
-        // Is it -1?
+    pub fn _get(&self, id: usize) -> Option<&Widget> {
         self.widgets.get(id)
     }
 
     pub fn get_mut(&mut self, id: usize) -> Option<&mut Widget> {
-        // Is it -1?
         self.widgets.get_mut(id)
     }
 
@@ -348,7 +346,7 @@ impl ImageData {
 
 #[derive(Serialize, Deserialize)]
 pub struct Wasm {
-    path: String,
+    pub path: String,
     #[serde(skip)]
     context: Option<WasmContext>,
 }
@@ -371,10 +369,11 @@ impl Wasm {
         // Or just not care about this generic case?
         self.context.as_mut().unwrap().on_click().unwrap();
     }
+
+    pub fn reload(&mut self) {
+       self.context.as_mut().unwrap().reload().unwrap();
+    }
 }
-
-
-
 
 impl Widget {
 

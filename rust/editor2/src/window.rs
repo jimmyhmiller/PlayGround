@@ -34,7 +34,9 @@ pub fn setup_window(mut editor: editor::Editor) {
 
     let events_loop = EventLoop::new();
 
+    let event_loop_proxy = events_loop.create_proxy();
 
+    editor.on_window_create(event_loop_proxy);
 
     let window = WindowBuilder::new()
         .with_inner_size(size)
