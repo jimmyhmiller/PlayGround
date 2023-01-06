@@ -7,7 +7,6 @@ pub struct FpsCounter {
 }
 
 impl FpsCounter {
-
     pub fn new() -> Self {
         FpsCounter {
             start_time: Instant::now(),
@@ -15,7 +14,7 @@ impl FpsCounter {
             fps: 0,
         }
     }
-    
+
     pub fn reset(&mut self) {
         self.start_time = Instant::now();
         self.frame_count = 0;
@@ -29,5 +28,4 @@ impl FpsCounter {
         }
         self.fps
     }
-
 }

@@ -1,10 +1,7 @@
-
 // use cacao::{webview::{WebView, WebViewConfig, WebViewDelegate}, layer::Layer, layout::LayoutAnchorX, view::View};
-
 
 #[cfg(all(target_os = "macos"))]
 use skia_safe::{scalar, ColorType, Size, Surface};
-
 
 use crate::editor;
 
@@ -27,8 +24,6 @@ pub fn setup_window(mut editor: editor::Editor) {
         platform::macos::WindowExtMacOS,
         window::WindowBuilder,
     };
-
-
 
     let mut size = LogicalSize::new(1600_i32, 1600_i32);
 
@@ -55,8 +50,6 @@ pub fn setup_window(mut editor: editor::Editor) {
         // change some stuff to make resizing nice
         // https://thume.ca/2019/06/19/glitchless-metal-window-resizing/
 
-
-
         unsafe {
             let view = window.ns_view() as cocoa_id;
             view.setWantsLayer(YES);
@@ -78,7 +71,6 @@ pub fn setup_window(mut editor: editor::Editor) {
     //     }
     // }
 
-
     // let mut webview = WebView::with(
     //     WebViewConfig::default(),
     //     WebViewInstance::default(),
@@ -87,10 +79,7 @@ pub fn setup_window(mut editor: editor::Editor) {
     // webview.width.constraint_equal_to_constant(600.0);
     // webview.height.constraint_equal_to_constant(600.0);
 
-
-
     // webview.layer = Layer::wrap(metal_layer.as_ptr() as *mut _);
-
 
     let command_queue = device.new_command_queue();
 
@@ -104,27 +93,29 @@ pub fn setup_window(mut editor: editor::Editor) {
 
     let mut context = DirectContext::new_metal(&backend, None).unwrap();
 
-
     events_loop.run(move |event, _, control_flow| {
         autoreleasepool(|| {
             *control_flow = ControlFlow::Wait;
             editor.add_event(&event);
             match event {
                 Event::WindowEvent { event, .. } => match event {
-                    WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                    WindowEvent::CloseRequested => {
+                        editor.exit();
+                        *control_flow = ControlFlow::Exit
+                    }
                     WindowEvent::Resized(current_size) => {
-                        metal_layer
-                            .set_drawable_size(CGSize::new(current_size.width as f64, current_size.height as f64));
+                        metal_layer.set_drawable_size(CGSize::new(
+                            current_size.width as f64,
+                            current_size.height as f64,
+                        ));
 
                         size.width = current_size.width as i32;
                         size.height = current_size.height as i32;
                         window.request_redraw();
-
                     }
                     _ => (),
                 },
                 Event::MainEventsCleared => {
-
                     editor.end_frame();
                     editor.update();
 

@@ -1,16 +1,22 @@
+use std::{
+    collections::HashSet,
+    fs::File,
+    io::{Read, Write},
+    path::Path,
+    sync::mpsc::Receiver,
+    thread,
+};
 
+use crate::{
+    event::Event,
+    fps_counter::FpsCounter,
+    widget::{Color, Position, Size, TextPane, Wasm, Widget, WidgetData, WidgetId, WidgetStore},
+};
 
-use std::{collections::HashSet, fs::File, io::{Read}, path::Path, sync::mpsc::Receiver, thread};
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::{fps_counter::FpsCounter, widget::{Position, WidgetStore, Widget, Size, WidgetData, Color, WidgetSelector, WidgetId, TextPane, Wasm}, event::Event};
-
-use notify::{Watcher, RecursiveMode, RecommendedWatcher, Config};
-
-
-use skia_safe::{Font, Typeface, FontStyle};
-
-
-
+use ron::ser::PrettyConfig;
+use skia_safe::{Font, FontStyle, Typeface};
 
 // Need a global store of widgets
 // Then anything else refers to widgets by their id
@@ -22,15 +28,12 @@ use skia_safe::{Font, Typeface, FontStyle};
 // So I could keep the hierachy. Like I know if the widget is not
 // on the current scene then I am not going to click on it.
 
-
 struct Context {
     mouse_position: Position,
     left_mouse_down: bool,
     right_mouse_down: bool,
+    cancel_click: bool,
 }
-
-
-
 
 pub struct Editor {
     events: Events,
@@ -42,15 +45,14 @@ pub struct Editor {
     external_receiver: Option<Receiver<Event>>,
     watcher: Option<RecommendedWatcher>,
     event_loop_proxy: Option<EventLoopProxy<()>>,
+    // points: Vec<[f64; 2]>,
 }
-
 
 struct Events {
     events: Vec<Event>,
     frame_start_index: usize,
     frame_end_index: usize, // exclusive
 }
-
 
 // It might be unnecessary to have start and end.
 // But I like the explicitness for now.
@@ -85,16 +87,11 @@ impl Events {
     }
 }
 
-
-
-
 #[cfg(all(target_os = "macos"))]
 use skia_safe::{Canvas, Color4f, Paint, Point};
 use winit::event_loop::EventLoopProxy;
 
-
 impl Editor {
-
     pub fn _set_mouse_position(&mut self, x: f32, y: f32) {
         self.context.mouse_position = Position { x, y };
     }
@@ -108,14 +105,11 @@ impl Editor {
         self.events.next_frame();
     }
 
-
     // TODO: Figure out a better setup for this
     // part of the problem is that scenes are not first class widgets
     // I need to figure out that hierarchy.
     // It will be useful for something like slideshow software
-    pub fn setup(&mut self) {
-
-    }
+    pub fn setup(&mut self) {}
 
     fn setup_file_watcher(&mut self, widget_config_path: &str) {
         let widget_config_path = widget_config_path.to_string();
@@ -124,11 +118,12 @@ impl Editor {
         let mut watcher = RecommendedWatcher::new(watch_raw_send, Config::default()).unwrap();
 
         // Probably need to debounce this
-        watcher.watch(Path::new(&widget_config_path), RecursiveMode::NonRecursive).unwrap();
+        watcher
+            .watch(Path::new(&widget_config_path), RecursiveMode::NonRecursive)
+            .unwrap();
 
         let event_loop_proxy = self.event_loop_proxy.as_ref().unwrap().clone();
         thread::spawn(move || {
-
             for res in watch_raw_receive {
                 match res {
                     Ok(event) => {
@@ -136,7 +131,9 @@ impl Editor {
                             if path.to_str().unwrap() == widget_config_path {
                                 sender.send(Event::ReloadWidgets).unwrap();
                             } else if path.extension().unwrap() == "wasm" {
-                                sender.send(Event::ReloadWasm(path.to_str().unwrap().to_string())).unwrap();
+                                sender
+                                    .send(Event::ReloadWasm(path.to_str().unwrap().to_string()))
+                                    .unwrap();
                             } else {
                                 println!("Ignoring event for: {:?}", path);
                             }
@@ -155,25 +152,34 @@ impl Editor {
         let mut file = File::open(path).unwrap();
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
-        let widgets : Vec<Widget> = contents.split(";")
+        let widgets: Vec<Widget> = contents
+            .split(";")
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .map(|s| {
-                if let Ok(widget) = ron::de::from_str(s) {
+                if let Ok(mut widget) = ron::de::from_str::<Widget>(s) {
+                    widget.init();
+                    if let Some(watcher) = &mut self.watcher {
+                        let files_to_watch = widget.files_to_watch();
+                        for path in files_to_watch.iter() {
+                            watcher
+                                .watch(Path::new(path), RecursiveMode::NonRecursive)
+                                .unwrap();
+                        }
+                    }
                     widget
                 } else {
                     println!("Failed to parse: {}", s);
                     panic!("Failed to parse");
                 }
-            }
-            ).collect();
+            })
+            .collect();
         for widget in widgets {
             self.widget_store.add_widget(widget);
         }
     }
 
     pub fn update(&mut self) {
-
         // Todo: Need to test that I am not missing any
         // events with my start and end
 
@@ -195,33 +201,42 @@ impl Editor {
 
         for event in events {
             match event {
-
                 Event::DroppedFile { path, x, y } => {
-
                     if path.extension().unwrap() == "wasm" {
                         self.widget_store.add_widget(Widget {
                             id: 0,
                             on_click: vec![],
                             position: Position { x, y },
-                            size: Size { width: 800.0, height: 800.0 },
-                            data: WidgetData::Wasm { wasm: Wasm::new(path.to_str().unwrap().to_string())},
+                            size: Size {
+                                width: 800.0,
+                                height: 800.0,
+                            },
+                            data: WidgetData::Wasm {
+                                wasm: Wasm::new(path.to_str().unwrap().to_string()),
+                            },
                         });
                     } else {
-
                         self.widget_store.add_widget(Widget {
                             id: 0,
                             // TODO: Temp for testing
-                            on_click: vec![Event::MoveWidgetRelative { selector: WidgetSelector::ById(1), x: 10.0, y: 10.0 }],
+                            on_click: vec![],
                             position: Position { x, y },
-                            size: Size { width: 800.0, height: 800.0 },
-                            data: WidgetData::TextPane { text_pane: TextPane::new(
-                                std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
-                                40.0,
-                            )},
+                            size: Size {
+                                width: 800.0,
+                                height: 800.0,
+                            },
+                            data: WidgetData::TextPane {
+                                text_pane: TextPane::new(
+                                    std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
+                                    40.0,
+                                ),
+                            },
                         });
                     }
                     if let Some(watcher) = &mut self.watcher {
-                        watcher.watch(path.as_path(), RecursiveMode::NonRecursive).unwrap();
+                        watcher
+                            .watch(path.as_path(), RecursiveMode::NonRecursive)
+                            .unwrap();
                     }
                 }
 
@@ -232,7 +247,7 @@ impl Editor {
                             match &mut widget.data {
                                 WidgetData::TextPane { text_pane } => {
                                     text_pane.scroll(x, y, widget.size.height);
-                                },
+                                }
                                 _ => {}
                             }
                         }
@@ -247,7 +262,15 @@ impl Editor {
                         }
                     }
                 }
-                Event::MouseMove { x_diff: x, y_diff: y, .. } => {
+                Event::MouseMove {
+                    x_diff: x,
+                    y_diff: y,
+                    ..
+                } => {
+                    // We are dragging, so don't click
+                    if !self.selected_widgets.is_empty() && x != 0.0 && y != 0.0 {
+                        self.context.cancel_click = true;
+                    }
                     for widget_id in self.selected_widgets.iter() {
                         if let Some(widget) = self.widget_store.get_mut(*widget_id) {
                             widget.position.x += x;
@@ -259,7 +282,9 @@ impl Editor {
                     self.widget_store.clear();
                     self.load_widgets("widgets.ron");
                 }
-
+                Event::SaveWidgets => {
+                    self.save_widgets("widgets.ron");
+                }
                 Event::ReloadWasm(path) => {
                     for widget in self.widget_store.iter_mut() {
                         if let WidgetData::Wasm { wasm } = &mut widget.data {
@@ -282,6 +307,7 @@ impl Editor {
                 mouse_position: Position { x: 0.0, y: 0.0 },
                 left_mouse_down: false,
                 right_mouse_down: false,
+                cancel_click: false,
             },
             widget_store: WidgetStore::new(),
             should_redraw: true,
@@ -289,24 +315,39 @@ impl Editor {
             external_receiver: None,
             watcher: None,
             event_loop_proxy: None,
+            // points: vec![],
         }
     }
 
-
     pub fn draw(&mut self, canvas: &mut Canvas) {
-
         self.fps_counter.tick();
         use skia_safe::Size;
 
         let gray = Color::parse_hex("#333333");
         canvas.clear(gray.to_color4f());
 
+        // let points = &self.points;
+        // let stroke_points = get_stroke_points(points.clone(), StrokeOptions::new());
+        // draw_strokes(&stroke_points, canvas);
+
+        // let outline_points = get_stroke_outline_points(&stroke_points.clone(), StrokeOptions::new());
+        // draw_points(&outline_points, canvas);
+
+
         let canvas_size = Size::from(canvas.base_layer_size());
 
-        let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
+        let font = Font::new(
+            Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(),
+            32.0,
+        );
         let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
 
-        canvas.draw_str(self.fps_counter.fps.to_string(), Point::new(canvas_size.width - 60.0, 30.0), &font, white);
+        canvas.draw_str(
+            self.fps_counter.fps.to_string(),
+            Point::new(canvas_size.width - 60.0, 30.0),
+            &font,
+            white,
+        );
 
         let mut to_draw = vec![];
         for widget in self.widget_store.iter_mut() {
@@ -320,7 +361,6 @@ impl Editor {
                 widget.draw(canvas);
             }
         }
-
     }
 
     pub fn add_event(&mut self, event: &winit::event::Event<'_, ()>) {
@@ -338,53 +378,69 @@ impl Editor {
             Event::WidgetMouseUp { widget_id: _ } => {
                 self.events.push(event);
             }
-            Event::Noop => {},
+            Event::Noop => {}
             Event::MouseMove { x, y, .. } => {
                 // I want to be able to respond to mouse move events
                 // I just might not want to save them?
                 // I'm not sure...
                 let x_diff = x - self.context.mouse_position.x;
                 let y_diff = y - self.context.mouse_position.y;
-                self.events.push(Event::MouseMove { x_diff, y_diff, x, y });
+                self.events.push(Event::MouseMove {
+                    x_diff,
+                    y_diff,
+                    x,
+                    y,
+                });
                 self.context.mouse_position = Position { x, y };
-            },
-            Event::LeftMouseDown {..} => {
+                // self.points.push([x as f64, y as f64])
+            }
+            Event::LeftMouseDown { .. } => {
                 self.events.push(event);
                 self.context.left_mouse_down = true;
+                self.context.cancel_click = false;
                 self.add_mouse_down();
-            },
-            Event::LeftMouseUp {..} => {
+            }
+            Event::LeftMouseUp { .. } => {
                 self.events.push(event);
                 // Probably not the right place.
                 // Maybe need events on last cycle?
                 self.context.left_mouse_down = false;
                 self.add_mouse_up();
-
-            },
-            Event::RightMouseDown {..} => {
+                // self.points = vec![];
+            }
+            Event::RightMouseDown { .. } => {
                 self.events.push(event);
                 self.context.right_mouse_down = true;
-            },
-            Event::RightMouseUp {..} => {
+            }
+            Event::RightMouseUp { .. } => {
                 self.events.push(event);
                 self.context.right_mouse_down = false;
-            },
-            Event::Scroll { x:_, y:_ } => {
+            }
+            Event::Scroll { x: _, y: _ } => {
                 self.events.push(event);
             }
-            Event::HoveredFile { path: _, x: _, y: _ } => {
+            Event::HoveredFile {
+                path: _,
+                x: _,
+                y: _,
+            } => {
                 self.events.push(event);
             }
-            Event::DroppedFile { path: _, x: _, y: _ } => {
+            Event::DroppedFile {
+                path: _,
+                x: _,
+                y: _,
+            } => {
                 self.events.push(event);
             }
             Event::HoveredFileCancelled => {
                 self.events.push(event);
             }
-            Event::MoveWidgetRelative { .. } => {
-
-            }
+            Event::MoveWidgetRelative { .. } => {}
             Event::ReloadWidgets => {
+                self.events.push(event);
+            }
+            Event::SaveWidgets => {
                 self.events.push(event);
             }
             Event::ReloadWasm(_) => {
@@ -394,6 +450,7 @@ impl Editor {
     }
 
     fn add_mouse_down(&mut self) {
+        self.context.cancel_click = false;
         let mut mouse_over = vec![];
         // I would need some sort of hierarchy here
         // Right now if widgets are in a stack I would say mouse down
@@ -418,6 +475,10 @@ impl Editor {
         // what to do here. But for now I just want to be able to move widgets
 
         self.selected_widgets.clear();
+        if self.context.cancel_click {
+            self.context.cancel_click = false;
+            return;
+        }
 
         let mut mouse_over = vec![];
         // I would need some sort of hierarchy here
@@ -426,7 +487,6 @@ impl Editor {
                 mouse_over.push(widget.id);
                 let events = widget.on_click();
                 for event in events.iter() {
-                    println!("Clicked {:?}", event);
                     self.events.push(event.clone());
                 }
             }
@@ -442,15 +502,41 @@ impl Editor {
     }
 
     pub fn on_window_create(&mut self, event_loop_proxy: EventLoopProxy<()>) {
-       self.event_loop_proxy = Some(event_loop_proxy);
-       let widget_config_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/widgets.ron";
-       self.load_widgets(widget_config_path);
-       self.setup_file_watcher(widget_config_path);
+        self.event_loop_proxy = Some(event_loop_proxy);
+        let widget_config_path =
+            "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/widgets.ron";
+        self.setup_file_watcher(widget_config_path);
+        self.load_widgets(widget_config_path);
     }
 
+    pub fn exit(&mut self) {
+        for widget in self.widget_store.iter_mut() {
+            widget.save();
+        }
+        self.save_widgets("widgets.ron");
+    }
+
+    fn save_widgets(&mut self, path: &str) {
+        let mut file = File::create(path).unwrap();
+        let widgets = self
+            .widget_store
+            .iter_mut()
+            .map(|widget| {
+                widget.save();
+                widget
+            })
+            .collect::<Vec<_>>();
+        let mut result = String::new();
+        for widget in widgets.iter() {
+            result.push_str(&format!(
+                "{};\n",
+                ron::ser::to_string_pretty(widget, PrettyConfig::default()).unwrap()
+            ));
+        }
+
+        file.write_all(result.as_bytes()).unwrap();
+    }
 }
-
-
 
 
 // I need a way for processes to add widgets
@@ -464,7 +550,6 @@ impl Editor {
 
 // I could instead each frame add the widgets of each process.
 // Then I would have a mostly blank list of widgets
-
 
 // You might also want to have widgets that outlive the process.
 // Widgets that stay only when the processes output is saved might not be desirable.
@@ -488,16 +573,10 @@ impl Editor {
 // Maybe I should default to built-in and then move to extension afterwards?
 // Probably will have more to show for it.
 
-
-
 // I think for events, I should have a per frame list of events.
 // I can do this while keeping the vec of events flat just by keeping an index
 // Then update gets a list of events that happened on that frame
 // and can respond to them.
-
-
-
-
 
 // Example demos
 // Build my own powerpoint
@@ -505,9 +584,6 @@ impl Editor {
 // Build a platformer, that uses widgets as the level editor
 // YJS as an external addition
 // Browser based stuff
-
-
-
 
 // Ideas:
 //
@@ -532,8 +608,6 @@ impl Editor {
 //
 // How do I deal with top level UI? Right now I have a scene
 // selector. Can I make that work generically?
-
-
 
 // The idea of a compound widget does nothing right now
 // Since I don't serialize it is literally meaningless
