@@ -1,56 +1,60 @@
-Widget(
-    position: Position(
-        x: 200.0,
-        y: 200.0,
+(
+    position: (
+        x: 733.83594,
+        y: 301.4297,
     ),
-    size: Size(
+    size: (
         width: 200.0,
         height: 100.0,
     ),
-    on_click: [],
+    on_click: [
+        SaveWidgets,
+    ],
     data: Noop,
 );
-Widget(
-    position: Position(
-        x: 400.0,
-        y: 400.0,
+(
+    position: (
+        x: 1661.8125,
+        y: 1014.6953,
     ),
-    size: Size(
+    size: (
         width: 512.0,
         height: 512.0,
     ),
     on_click: [],
     data: Image(
-        data: ImageData(
+        data: (
             path: "./resources/test.png",
         ),
     ),
 );
-Widget(
-    position: Position(
+(
+    position: (
         x: 300.0,
-        y: 300.0,
+        y: 400.0,
     ),
-    size: Size(
+    size: (
         width: 100.0,
         height: 100.0,
     ),
-    on_click: [],
+    on_click: [
+        SaveWidgets,
+    ],
     data: Noop,
 );
-Widget(
-    position: Position(
-        x: 500.0,
-        y: 500.0,
+(
+    position: (
+        x: 628.3203,
+        y: 1093.2344,
     ),
-    size: Size(
+    size: (
         width: 100.0,
         height: 100.0,
     ),
     on_click: [],
     data: Circle(
         radius: 10.0,
-        color: Color(
+        color: (
             r: 1.0,
             g: 0.0,
             b: 0.0,
@@ -58,44 +62,44 @@ Widget(
         ),
     ),
 );
-Widget(
-    position: Position(
-        x: 500.0,
-        y: 600.0,
+(
+    position: (
+        x: 753.5078,
+        y: 538.27344,
     ),
-    size: Size(
+    size: (
         width: 500.0,
         height: 500.0,
     ),
     on_click: [],
     data: TextPane(
-        text_pane: TextPane(
+        text_pane: (
             contents: "Widget(\n    position: Position(\n        x: 500.0,\n        y: 500.0,\n    ),\n    size: Size(\n        width: 100.0,\n        height: 100.0,\n    ),\n    on_click: [],\n    data: Compound(\n        children: [\n            2,\n            3,\n            5,\n        ],\n    ),\n)",
             line_height: 40.0,
-            offset: Position(
+            offset: (
                 x: 0.0,
                 y: 0.0,
             ),
         ),
     ),
 );
-Widget(
-    position: Position(
-        x: 600.0,
-        y: 100.0,
+(
+    position: (
+        x: 258.8047,
+        y: 122.63281,
     ),
-    size: Size(
+    size: (
         width: 200.0,
         height: 200.0,
     ),
     on_click: [],
     data: Text(
         text: "Lith",
-        text_options: TextOptions(
+        text_options: (
             font_family: "Ubuntu Mono",
             font_weight: Bold,
             size: 120.0,
-            color: Color(
+            color: (
                 r: 1.0,
                 g: 1.0,
                 b: 1.0,
@@ -104,12 +108,12 @@ Widget(
         ),
     ),
 );
-Widget(
-    position: Position(
-        x: 500.0,
-        y: 500.0,
+(
+    position: (
+        x: 628.3203,
+        y: 1093.2344,
     ),
-    size: Size(
+    size: (
         width: 100.0,
         height: 100.0,
     ),
@@ -122,4 +126,20 @@ Widget(
         ],
     ),
 );
-
+(
+    position: (
+        x: 2003.1563,
+        y: 364.43054,
+    ),
+    size: (
+        width: 300.0,
+        height: 100.0,
+    ),
+    on_click: [],
+    data: Wasm(
+        wasm: (
+            path: "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/extension-system/target/wasm32-wasi/debug/my_first_extension.wasm",
+            state: Some("57"),
+        ),
+    ),
+);

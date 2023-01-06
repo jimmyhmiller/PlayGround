@@ -1,7 +1,5 @@
 #![allow(dead_code)]
-use rand::{Rng};
-
-
+use rand::Rng;
 
 #[derive(Debug)]
 enum Value {
@@ -21,15 +19,12 @@ struct Item {
 
 #[derive(Debug)]
 struct Database {
-    data: Vec<Item>
+    data: Vec<Item>,
 }
-
 
 impl Database {
     fn new() -> Self {
-        Self {
-            data: Vec::new(),
-        }
+        Self { data: Vec::new() }
     }
 
     fn insert_sorted(&mut self, key: String, value: Value) {
@@ -42,12 +37,11 @@ impl Database {
     }
 
     fn get(&self, key: String) -> Option<&Value> {
-        self.data.binary_search_by_key(&key, |item| item.key.clone())
+        self.data
+            .binary_search_by_key(&key, |item| item.key.clone())
             .ok()
             .map(|index| &self.data[index].value)
     }
-
-
 }
 
 pub fn main() {
@@ -63,5 +57,4 @@ pub fn main() {
     }
 
     println!("{:#?}", db.data);
-
 }

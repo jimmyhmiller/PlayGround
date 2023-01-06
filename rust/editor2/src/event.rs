@@ -1,51 +1,85 @@
 use std::path::PathBuf;
 
-use crate::widget::{WidgetId, Position, WidgetSelector};
+use crate::widget::{Position, WidgetId, WidgetSelector};
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Event {
     Noop,
-    MouseMove { x: f32, y: f32, x_diff: f32, y_diff: f32 },
-    LeftMouseDown { x: f32, y: f32 },
-    LeftMouseUp { x: f32, y: f32 },
-    RightMouseDown { x: f32, y: f32 },
-    RightMouseUp { x: f32, y: f32 },
-    Scroll { x: f64, y: f64 },
-    HoveredFile { path: PathBuf, x: f32, y: f32 },
-    DroppedFile { path: PathBuf, x: f32, y: f32 },
+    MouseMove {
+        x: f32,
+        y: f32,
+        x_diff: f32,
+        y_diff: f32,
+    },
+    LeftMouseDown {
+        x: f32,
+        y: f32,
+    },
+    LeftMouseUp {
+        x: f32,
+        y: f32,
+    },
+    RightMouseDown {
+        x: f32,
+        y: f32,
+    },
+    RightMouseUp {
+        x: f32,
+        y: f32,
+    },
+    Scroll {
+        x: f64,
+        y: f64,
+    },
+    HoveredFile {
+        path: PathBuf,
+        x: f32,
+        y: f32,
+    },
+    DroppedFile {
+        path: PathBuf,
+        x: f32,
+        y: f32,
+    },
     HoveredFileCancelled,
-    WidgetMouseDown { widget_id: WidgetId },
-    WidgetMouseUp { widget_id: WidgetId },
-    MoveWidgetRelative { selector: WidgetSelector, x: f32, y: f32 },
+    WidgetMouseDown {
+        widget_id: WidgetId,
+    },
+    WidgetMouseUp {
+        widget_id: WidgetId,
+    },
+    MoveWidgetRelative {
+        selector: WidgetSelector,
+        x: f32,
+        y: f32,
+    },
     ReloadWidgets,
     ReloadWasm(String),
+    SaveWidgets,
 }
 
-
-
 impl Event {
-
     pub fn patch_mouse_event(&mut self, mouse_pos: &Position) {
         match self {
             Event::LeftMouseDown { x, y } => {
                 *x = mouse_pos.x;
                 *y = mouse_pos.y;
-            },
+            }
             Event::LeftMouseUp { x, y } => {
                 *x = mouse_pos.x;
                 *y = mouse_pos.y;
-            },
+            }
             Event::RightMouseDown { x, y } => {
                 *x = mouse_pos.x;
                 *y = mouse_pos.y;
-            },
+            }
             Event::RightMouseUp { x, y } => {
                 *x = mouse_pos.x;
                 *y = mouse_pos.y;
-            },
+            }
             Event::HoveredFile { x, y, .. } => {
                 *x = mouse_pos.x;
                 *y = mouse_pos.y;
@@ -54,7 +88,7 @@ impl Event {
                 *x = mouse_pos.x;
                 *y = mouse_pos.y;
             }
-            _ => {},
+            _ => {}
         }
     }
 
@@ -64,17 +98,23 @@ impl Event {
                 use WinitWindowEvent::*;
                 match event {
                     CloseRequested => Some(Event::Noop),
-                    TouchpadPressure {device_id: _, pressure: _, stage: _} => Some(Event::Noop),
-                    MouseWheel { delta, .. } => {
-                        match delta {
-                            winit::event::MouseScrollDelta::LineDelta(_, _) => panic!("What is line delta?"),
-                            winit::event::MouseScrollDelta::PixelDelta(delta) => Some(Event::Scroll { x: delta.x, y: delta.y })
+                    TouchpadPressure {
+                        device_id: _,
+                        pressure: _,
+                        stage: _,
+                    } => Some(Event::Noop),
+                    MouseWheel { delta, .. } => match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, _) => {
+                            panic!("What is line delta?")
                         }
-
-                    }
+                        winit::event::MouseScrollDelta::PixelDelta(delta) => Some(Event::Scroll {
+                            x: delta.x,
+                            y: delta.y,
+                        }),
+                    },
                     MouseInput { state, button, .. } => {
-                        use winit::event::MouseButton::*;
                         use winit::event::ElementState::*;
+                        use winit::event::MouseButton::*;
                         match (state, button) {
                             // Silly hack for the fact that I don't know positions here.
                             (Pressed, Left) => Some(Event::LeftMouseDown { x: -0.0, y: -0.0 }),
@@ -83,26 +123,34 @@ impl Event {
                             (Released, Right) => Some(Event::RightMouseUp { x: -0.0, y: -0.0 }),
                             _ => None,
                         }
-
                     }
-                    CursorMoved { position, .. }  => Some(Event::MouseMove { x: position.x as f32, y: position.y as f32, x_diff: 0.0, y_diff: 0.0 }),
-                    HoveredFile(path) => Some(Event::HoveredFile { path: path.to_path_buf(), x: -0.0, y: -0.0 }),
-                    DroppedFile(path) => Some(Event::DroppedFile { path: path.to_path_buf(), x: -0.0, y: -0.0 }),
+                    CursorMoved { position, .. } => Some(Event::MouseMove {
+                        x: position.x as f32,
+                        y: position.y as f32,
+                        x_diff: 0.0,
+                        y_diff: 0.0,
+                    }),
+                    HoveredFile(path) => Some(Event::HoveredFile {
+                        path: path.to_path_buf(),
+                        x: -0.0,
+                        y: -0.0,
+                    }),
+                    DroppedFile(path) => Some(Event::DroppedFile {
+                        path: path.to_path_buf(),
+                        x: -0.0,
+                        y: -0.0,
+                    }),
                     HoveredFileCancelled => Some(Event::HoveredFileCancelled),
                     _ => {
                         println!("Unhandled event: {:?}", event);
                         None
                     }
                 }
-            },
-            _ => {
-                None
-            },
+            }
+            _ => None,
         }
     }
 }
-
-
 
 // Events
 // ShowScene { widgets: [WidgetSelector]}
@@ -111,8 +159,6 @@ impl Event {
 // AddClick { action: [Action] }
 // RemoveClick { action: [Action] }
 // SendEvent { process: One<ProcessId> }
-
-
 
 // I need to think about my abstractions here
 // A scene is a list of widgets being displayed

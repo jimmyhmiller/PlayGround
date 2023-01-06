@@ -1,11 +1,13 @@
-use std::{fs::File, process::ChildStdout, cell::RefCell, io::Read, path::PathBuf, str::{from_utf8}};
+use std::{cell::RefCell, fs::File, io::Read, path::PathBuf, process::ChildStdout, str::from_utf8};
 
 use nonblock::NonBlockingReader;
-use serde::{Serialize, Deserialize, Deserializer, Serializer};
-use skia_safe::{Point, Paint, Color4f, FontStyle, font_style::{Weight, Width, Slant}, Image, Data, Rect, Canvas, RRect, Font, Typeface};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use skia_safe::{
+    font_style::{Slant, Weight, Width},
+    Canvas, Color4f, Data, Font, FontStyle, Image, Paint, Point, RRect, Rect, Typeface,
+};
 
 use crate::{event::Event, wasm::WasmContext};
-
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub struct Position {
@@ -15,7 +17,10 @@ pub struct Position {
 
 impl Into<Point> for Position {
     fn into(self) -> Point {
-        Point { x: self.x, y: self.y }
+        Point {
+            x: self.x,
+            y: self.y,
+        }
     }
 }
 
@@ -24,7 +29,6 @@ pub struct Size {
     pub width: f32,
     pub height: f32,
 }
-
 
 pub type WidgetId = usize;
 
@@ -37,7 +41,7 @@ pub struct Widget {
     pub on_click: Vec<Event>,
     // Children might make sense
     // pub children: Vec<Widget>,
-    pub data : WidgetData
+    pub data: WidgetData,
 }
 
 pub struct WidgetStore {
@@ -47,7 +51,6 @@ pub struct WidgetStore {
 
 impl WidgetStore {
     pub fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
-
         let id = self.next_id;
         self.next_id += 1;
         widget.id = id;
@@ -106,20 +109,17 @@ impl Color {
     }
 
     pub fn parse_hex(hex: &str) -> Color {
-
         let mut start = 0;
         if hex.starts_with("#") {
             start = 1;
         }
 
-        let r = i64::from_str_radix(&hex[start..start+2], 16).unwrap() as f32;
-        let g = i64::from_str_radix(&hex[start+2..start+4], 16).unwrap() as f32;
-        let b = i64::from_str_radix(&hex[start+4..start+6], 16).unwrap() as f32;
-        return Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
+        let r = i64::from_str_radix(&hex[start..start + 2], 16).unwrap() as f32;
+        let g = i64::from_str_radix(&hex[start + 2..start + 4], 16).unwrap() as f32;
+        let b = i64::from_str_radix(&hex[start + 4..start + 6], 16).unwrap() as f32;
+        return Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0);
     }
 }
-
-
 
 // I could go the interface route here.
 // I like enums. Will consider it later.
@@ -134,7 +134,7 @@ pub enum WidgetData {
         children: Vec<WidgetId>,
     },
     Image {
-       data: ImageData
+        data: ImageData,
     },
     TextPane {
         text_pane: TextPane,
@@ -154,7 +154,7 @@ pub enum WidgetData {
     // I could do something cool with it?
     HoverFile {
         path: String,
-    }
+    },
 }
 
 // TODO: watch for file changes
@@ -166,7 +166,7 @@ pub struct Process {
     file: Option<File>,
     #[serde(skip)]
     #[allow(dead_code)]
-    stdout: Option<NonBlockingReader<ChildStdout>>
+    stdout: Option<NonBlockingReader<ChildStdout>>,
 }
 
 impl Process {
@@ -178,8 +178,6 @@ impl Process {
         }
     }
 }
-
-
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub enum FontWeight {
@@ -198,7 +196,6 @@ impl Into<FontStyle> for FontWeight {
     }
 }
 
-
 #[derive(Serialize, Deserialize)]
 pub struct TextOptions {
     pub font_family: String,
@@ -206,7 +203,6 @@ pub struct TextOptions {
     pub size: f32,
     pub color: Color,
 }
-
 
 fn serialize_text<S>(x: &Vec<u8>, s: S) -> Result<S::Ok, S::Error>
 where
@@ -223,9 +219,6 @@ where
     Ok(s.into_bytes())
 }
 
-
-
-
 #[derive(Serialize, Deserialize)]
 pub struct TextPane {
     #[serde(serialize_with = "serialize_text")]
@@ -235,9 +228,8 @@ pub struct TextPane {
     offset: Position,
 }
 
-
 impl TextPane {
-   pub fn new(contents: Vec<u8>, line_height: f32) -> Self {
+    pub fn new(contents: Vec<u8>, line_height: f32) -> Self {
         Self {
             contents,
             line_height,
@@ -259,7 +251,7 @@ impl TextPane {
     }
 
     // TODO: obviously need to not compute this everytime.
-    fn get_lines(&self) -> impl std::iter::Iterator<Item=&str> + '_ {
+    fn get_lines(&self) -> impl std::iter::Iterator<Item = &str> + '_ {
         let text = std::str::from_utf8(&self.contents).unwrap();
         let lines = text.split('\n');
         return lines;
@@ -269,15 +261,15 @@ impl TextPane {
         self.get_lines().count()
     }
 
-    fn visible_lines(&self, height: f32) -> impl std::iter::Iterator<Item=&str> + '_  {
-        self.get_lines().skip(self.lines_above_scroll()).take(self.number_of_visible_lines(height))
+    fn visible_lines(&self, height: f32) -> impl std::iter::Iterator<Item = &str> + '_ {
+        self.get_lines()
+            .skip(self.lines_above_scroll())
+            .take(self.number_of_visible_lines(height))
     }
 
     pub fn scroll(&mut self, x: f64, y: f64, height: f32) {
-
         // this is all terribly wrong. I don't get the bounds correctly.
         // Need to deal with that.
-
 
         self.offset.x += x as f32;
         if self.offset.x < 0.0 {
@@ -287,27 +279,24 @@ impl TextPane {
         self.offset.y -= y as f32;
 
         let scroll_with_last_line_visible =
-            self.number_of_lines().saturating_sub(self.number_of_visible_lines(height)) as f32 * self.line_height;
-
+            self.number_of_lines()
+                .saturating_sub(self.number_of_visible_lines(height)) as f32
+                * self.line_height;
 
         // TODO: Deal with margin properly
 
         if self.offset.y > scroll_with_last_line_visible + 20.0 {
-            self.offset.y = scroll_with_last_line_visible + 20.0 ;
+            self.offset.y = scroll_with_last_line_visible + 20.0;
         }
-
 
         if self.offset.y < 0.0 {
             self.offset.y = 0.0;
         }
-
     }
 
     fn fractional_line_offset(&self) -> f32 {
         self.offset.y % self.line_height
     }
-
-
 }
 
 #[derive(Serialize, Deserialize)]
@@ -338,7 +327,6 @@ impl ImageData {
         let image = Image::from_encoded(Data::new_copy(image_data.as_ref())).unwrap();
         self.cache.replace(Some(image));
     }
-
 }
 
 // I need to also keep track of how to recompile
@@ -349,6 +337,7 @@ pub struct Wasm {
     pub path: String,
     #[serde(skip)]
     context: Option<WasmContext>,
+    state: Option<String>,
 }
 
 impl Wasm {
@@ -357,11 +346,13 @@ impl Wasm {
         Self {
             path,
             context: Some(WasmContext::new(path_clone.as_str()).unwrap()),
+            state: None,
         }
     }
 
-    fn draw(&mut self, canvas: &mut Canvas) {
-        self.context.as_mut().unwrap().draw(canvas).unwrap();
+    fn draw(&mut self, canvas: &mut Canvas) -> Size {
+        let size = self.context.as_mut().unwrap().draw(canvas).unwrap();
+        size
     }
 
     fn on_click(&mut self) {
@@ -371,14 +362,35 @@ impl Wasm {
     }
 
     pub fn reload(&mut self) {
-       self.context.as_mut().unwrap().reload().unwrap();
+        self.context.as_mut().unwrap().reload().unwrap();
+    }
+
+    fn init(&mut self) {
+        self.context = Some(WasmContext::new(self.path.as_str()).unwrap());
+        if let Some(state) = &self.state {
+            self.context
+                .as_mut()
+                .unwrap()
+                .set_state(state.as_bytes())
+                .unwrap();
+        }
+        self.state = None;
+    }
+
+    fn save(&mut self) {
+        let state = self.context.as_mut().unwrap().get_state();
+        self.state = state;
     }
 }
 
 impl Widget {
-
     fn bounding_rect(&self) -> Rect {
-        Rect::from_xywh(self.position.x, self.position.y, self.size.width, self.size.height)
+        Rect::from_xywh(
+            self.position.x,
+            self.position.y,
+            self.size.width,
+            self.size.height,
+        )
     }
 
     pub fn on_click(&mut self) -> Vec<Event> {
@@ -387,31 +399,38 @@ impl Widget {
                 wasm.on_click();
                 vec![]
             }
-            _ => self.on_click.clone()
+            _ => self.on_click.clone(),
         }
     }
 
     pub fn draw(&mut self, canvas: &mut Canvas) -> Vec<WidgetId> {
-
         // Have to do this to deal with mut stuff
         if let WidgetData::Wasm { wasm } = &mut self.data {
             canvas.save();
             canvas.translate((self.position.x, self.position.y));
-            wasm.draw(canvas);
+            let size = wasm.draw(canvas);
+            self.size = size;
             canvas.restore();
         }
 
         match &self.data {
             WidgetData::Noop => {
-
                 let rect = self.bounding_rect();
                 let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
                 let purple = Color::parse_hex("#1c041e");
                 canvas.draw_rrect(rrect, &purple.to_paint());
 
-                let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
+                let font = Font::new(
+                    Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(),
+                    32.0,
+                );
                 let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-                canvas.draw_str("noop", Point::new(self.position.x + 30.0, self.position.y + 40.0), &font, white);
+                canvas.draw_str(
+                    "noop",
+                    Point::new(self.position.x + 30.0, self.position.y + 40.0),
+                    &font,
+                    white,
+                );
             }
 
             WidgetData::Circle { radius, color } => {
@@ -419,9 +438,7 @@ impl Widget {
                 canvas.draw_circle(center, *radius, &color.to_paint());
             }
 
-            WidgetData::Compound { children } => {
-                return children.clone()
-            }
+            WidgetData::Compound { children } => return children.clone(),
             WidgetData::Image { data } => {
                 // I tried to abstract this out and ran into the issue of returning a ref.
                 // Can't use a closure, could box, but seems unnecessary. Maybe this data belongs elsewhere?
@@ -437,7 +454,6 @@ impl Widget {
                 canvas.draw_image(image, self.position, None);
             }
             WidgetData::TextPane { text_pane } => {
-
                 let text_pane = &text_pane;
                 let foreground = Color::parse_hex("#62b4a6");
                 let background = Color::parse_hex("#530922");
@@ -446,12 +462,17 @@ impl Widget {
                 canvas.clip_rect(self.bounding_rect(), None, None);
                 let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);
                 canvas.draw_rrect(rrect, &background.to_paint());
-                let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(), 32.0);
+                let font = Font::new(
+                    Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
+                    32.0,
+                );
 
-
-                canvas.clip_rect(self.bounding_rect().with_inset((20,20)), None, None);
+                canvas.clip_rect(self.bounding_rect().with_inset((20, 20)), None, None);
                 let fractional_offset = text_pane.fractional_line_offset();
-                canvas.translate((self.position.x + 30.0 - text_pane.offset.x, self.position.y + text_pane.line_height - fractional_offset + 10.0));
+                canvas.translate((
+                    self.position.x + 30.0 - text_pane.offset.x,
+                    self.position.y + text_pane.line_height - fractional_offset + 10.0,
+                ));
 
                 for line in text_pane.visible_lines(self.size.height) {
                     canvas.draw_str(line, Point::new(0.0, 0.0), &font, &foreground.to_paint());
@@ -461,16 +482,35 @@ impl Widget {
                 canvas.restore();
             }
             WidgetData::Text { text, text_options } => {
-
-                let font = Font::new(Typeface::new(text_options.font_family.clone(), text_options.font_weight.into()).unwrap(), text_options.size);
+                let font = Font::new(
+                    Typeface::new(
+                        text_options.font_family.clone(),
+                        text_options.font_weight.into(),
+                    )
+                    .unwrap(),
+                    text_options.size,
+                );
                 let paint = text_options.color.to_paint();
-                canvas.draw_str(text, (self.position.x, self.position.y + self.size.height), &font, &paint);
+                canvas.draw_str(
+                    text,
+                    (self.position.x, self.position.y + self.size.height),
+                    &font,
+                    &paint,
+                );
             }
             WidgetData::Process { process } => {
                 let file_name = process.file_path.file_name().unwrap().to_str().unwrap();
-                let font = Font::new(Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(), 32.0);
+                let font = Font::new(
+                    Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(),
+                    32.0,
+                );
                 let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-                canvas.draw_str(file_name, Point::new(self.position.x, self.position.y), &font, white);
+                canvas.draw_str(
+                    file_name,
+                    Point::new(self.position.x, self.position.y),
+                    &font,
+                    white,
+                );
             }
             WidgetData::HoverFile { path: _ } => {
                 let purple = Color::parse_hex("#1c041e");
@@ -492,8 +532,38 @@ impl Widget {
         x >= x_min && x <= x_max && y >= y_min && y <= y_max
     }
 
-}
+    pub fn init(&mut self) {
+        match &mut self.data {
+            WidgetData::Wasm { wasm } => {
+                wasm.init();
+            }
+            _ => {}
+        }
+    }
 
+    pub fn save(&mut self) {
+        match &mut self.data {
+            WidgetData::Wasm { wasm } => {
+                wasm.save();
+            }
+            _ => {}
+        }
+    }
+
+    pub fn files_to_watch(&self) -> Vec<String> {
+        match &self.data {
+            WidgetData::Wasm { wasm } => {
+                vec![wasm.path.clone()]
+            }
+            WidgetData::Process { process } => {
+                vec![process.file_path.to_str().unwrap().to_string()]
+            }
+            _ => {
+                vec![]
+            }
+        }
+    }
+}
 
 // TODO: I might need tags or things like that
 // I need a much richer notion for widgets if I'm going
@@ -503,9 +573,13 @@ pub enum WidgetSelector {
     This,
     ById(WidgetId),
     ByName(String),
-    ByArea{ x: f32, y: f32, width: f32, height: f32 },
+    ByArea {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
 }
-
 
 impl WidgetSelector {
     // TODO: In order for this to work I need to track
@@ -521,7 +595,7 @@ impl WidgetSelector {
             WidgetSelector::ByName(_) => {
                 todo!("By name selector");
             }
-            WidgetSelector::ByArea{ .. } => {
+            WidgetSelector::ByArea { .. } => {
                 todo!("By area selector");
             }
         }

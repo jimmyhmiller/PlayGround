@@ -1,23 +1,19 @@
-
-mod window;
-mod editor;
-mod fps_counter;
-mod widget;
-mod event;
 mod db;
+mod editor;
+mod event;
+mod fps_counter;
+// mod strokes;
 mod wasm;
-
+mod widget;
+mod window;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
     println!("This is only supported on macos")
 }
 
-
 #[cfg(all(target_os = "macos"))]
 fn main() {
-
-
     // db::main();
     use editor::Editor;
 
@@ -26,15 +22,6 @@ fn main() {
 
     window::setup_window(editor);
 }
-
-
-
-
-
-
-
-
-
 
 // Thoughts on what to do
 // Focus on panes and moving things around.
@@ -49,10 +36,3 @@ fn main() {
 // Consider how undo and redo work with such an application
 // Consider ink and arrows
 // Consider rendering markdown
-
-
-
-
-
-
-

@@ -17,7 +17,7 @@
 //     fn foo(s: MyStruct) -> i32;
 // }
 
-static mut STATE: usize = 0;
+static mut STATE: isize = 0;
 
 #[link(wasm_import_module = "host")]
 extern "C" {
@@ -42,7 +42,7 @@ fn draw_str(s: &str, x: f32, y: f32) {
 
 #[no_mangle]
 pub extern "C" fn on_click() {
-    unsafe { STATE += 10; }
+    unsafe { STATE += 1; }
 }
 
 #[repr(C)]
@@ -76,7 +76,7 @@ pub extern "C" fn get_state() -> *const PointerLengthString {
 #[no_mangle]
 pub extern "C" fn set_state(ptr: i32, len: i32) {
     let s = String::from(PointerLengthString { ptr: ptr as usize, len: len as usize });
-    let state: usize = serde_json::from_str(&s).unwrap();
+    let state: isize = serde_json::from_str(&s).unwrap();
     unsafe { STATE = state; }
 }
 
@@ -84,7 +84,7 @@ pub extern "C" fn set_state(ptr: i32, len: i32) {
 pub extern "C" fn draw() {
 
     unsafe {
-        draw_rect(0.0, 0.0, 200 as f32, 100 as f32);
+        draw_rect(0.0, 0.0, 300 as f32, 100 as f32);
         draw_str(&format!("Count: {}", STATE), 40.0, 50.0);
     }
 }
