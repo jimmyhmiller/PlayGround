@@ -17,6 +17,11 @@ unsafe fn _any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
 enum Commands {
     DrawRect(f32, f32, f32, f32),
     DrawString(String, f32, f32),
+    ClipRect(f32, f32, f32, f32),
+    DrawRRect(f32, f32, f32, f32, f32),
+    Translate(f32, f32),
+    Restore,
+    Save,
 }
 
 struct State {
@@ -117,6 +122,49 @@ impl WasmContext {
                 state.commands.push(Commands::DrawString(string, x, y));
             },
         )?;
+        linker.func_wrap(
+            "host",
+            "clip_rect",
+            |mut caller: Caller<'_, State>, x: f32, y: f32, width: f32, height: f32| {
+                let state = caller.data_mut();
+                state.commands.push(Commands::ClipRect(x, y, width, height));
+            },
+        )?;
+        linker.func_wrap(
+            "host",
+            "draw_rrect",
+            |mut caller: Caller<'_, State>, x: f32, y: f32, width: f32, height: f32, radius: f32| {
+                let state = caller.data_mut();
+                state.commands.push(Commands::DrawRRect(x, y, width, height, radius));
+            },
+        )?;
+        linker.func_wrap(
+            "host",
+            "translate",
+            |mut caller: Caller<'_, State>, x: f32, y: f32| {
+                let state = caller.data_mut();
+                state.commands.push(Commands::Translate(x, y));
+            },
+        )?;
+        linker.func_wrap(
+            "host",
+            "save",
+            |mut caller: Caller<'_, State>| {
+                let state = caller.data_mut();
+                state.commands.push(Commands::Save);
+            },
+        )?;
+        linker.func_wrap(
+            "host",
+            "restore",
+            |mut caller: Caller<'_, State>| {
+                let state = caller.data_mut();
+                state.commands.push(Commands::Restore);
+            },
+        )?;
+
+        // TODO: Need to deal with paints
+
         Ok(())
     }
 
@@ -135,6 +183,7 @@ impl WasmContext {
                             skia_safe::Rect::from_xywh(*x, *y, *width, *height),
                             &skia_safe::Paint::default(),
                         );
+                        // This is not quite right because of translate and stuff.
                         if *x + *width > max_width {
                             max_width = *x + *width;
                         }
@@ -150,6 +199,34 @@ impl WasmContext {
                         // No good way right now to find bounds. Need to think about this properly
                         canvas.draw_str(str, (*x, *y), &font, &paint);
                     }
+
+                    Commands::ClipRect(x, y, width, height) => {
+                        canvas.clip_rect(
+                            skia_safe::Rect::from_xywh(*x, *y, *width, *height),
+                            None,
+                            None,
+                        );
+                    }
+                    Commands::DrawRRect(x, y, width, height, radius) => {
+                        let mut paint = skia_safe::Paint::default();
+                        paint.set_color(skia_safe::Color::WHITE);
+                        let rrect = skia_safe::RRect::new_rect_xy(
+                            skia_safe::Rect::from_xywh(*x, *y, *width, *height),
+                            *radius,
+                            *radius,
+                        );
+                        canvas.draw_rrect(&rrect, &paint);
+                    }
+                    Commands::Translate(x, y) => {
+                        canvas.translate((*x, *y));
+                    }
+                    Commands::Save => {
+                        canvas.save();
+                    }
+                    Commands::Restore => {
+                        canvas.restore();
+                    }
+
                 }
             }
             state.commands.clear();
