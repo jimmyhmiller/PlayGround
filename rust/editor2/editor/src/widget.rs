@@ -267,7 +267,7 @@ impl TextPane {
             .take(self.number_of_visible_lines(height))
     }
 
-    pub fn scroll(&mut self, x: f64, y: f64, height: f32) {
+    pub fn on_scroll(&mut self, x: f64, y: f64, height: f32) {
         // this is all terribly wrong. I don't get the bounds correctly.
         // Need to deal with that.
 
@@ -321,7 +321,15 @@ impl ImageData {
     }
 
     fn load_image(&self) {
-        let mut file = File::open(&self.path).unwrap();
+        // TODO: Get rid of clone
+        let path = if self.path.starts_with("./") {
+            let mut base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            base.push(&self.path);
+            base.to_str().unwrap().to_string()
+        } else {
+            self.path.clone()
+        };
+        let mut file = File::open(path).unwrap();
         let mut image_data = vec![];
         file.read_to_end(&mut image_data).unwrap();
         let image = Image::from_encoded(Data::new_copy(image_data.as_ref())).unwrap();
@@ -359,6 +367,10 @@ impl Wasm {
         // Need to figure out a better way to provide args
         // Or just not care about this generic case?
         self.context.as_mut().unwrap().on_click().unwrap();
+    }
+
+    pub fn on_scroll(&mut self, x: f64, y: f64) {
+        self.context.as_mut().unwrap().on_scroll(x, y).unwrap();
     }
 
     pub fn reload(&mut self) {
