@@ -1,8 +1,8 @@
 use std::{
     collections::HashSet,
-    fs::File,
+    fs::{File},
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc::Receiver,
     thread,
 };
@@ -246,7 +246,10 @@ impl Editor {
                         if widget.mouse_over(&mouse) {
                             match &mut widget.data {
                                 WidgetData::TextPane { text_pane } => {
-                                    text_pane.scroll(x, y, widget.size.height);
+                                    text_pane.on_scroll(x, y, widget.size.height);
+                                }
+                                WidgetData::Wasm { wasm } => {
+                                    wasm.on_scroll(x, y);
                                 }
                                 _ => {}
                             }
@@ -503,8 +506,9 @@ impl Editor {
 
     pub fn on_window_create(&mut self, event_loop_proxy: EventLoopProxy<()>) {
         self.event_loop_proxy = Some(event_loop_proxy);
-        let widget_config_path =
-            "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/widgets.ron";
+        let mut widget_config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        widget_config_path.push("widgets.ron");
+        let widget_config_path = widget_config_path.to_str().unwrap();
         self.setup_file_watcher(widget_config_path);
         self.load_widgets(widget_config_path);
     }

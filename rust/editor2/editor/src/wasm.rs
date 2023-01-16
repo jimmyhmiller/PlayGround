@@ -1,9 +1,9 @@
-use skia_safe::Canvas;
+use skia_safe::{Canvas, Font, FontStyle, Typeface};
 use std::error::Error;
 use wasmtime::{self, AsContextMut, Caller, Engine, Linker, Memory, Module, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
 
-use crate::widget::Size;
+use crate::widget::{Size, Color};
 
 struct PointerLengthString {
     ptr: u32,
@@ -20,6 +20,7 @@ enum Commands {
     ClipRect(f32, f32, f32, f32),
     DrawRRect(f32, f32, f32, f32, f32),
     Translate(f32, f32),
+    SetColor(f32, f32, f32, f32),
     Restore,
     Save,
 }
@@ -162,6 +163,14 @@ impl WasmContext {
                 state.commands.push(Commands::Restore);
             },
         )?;
+        linker.func_wrap(
+            "host",
+            "set_color",
+            |mut caller: Caller<'_, State>, r: f32, g: f32, b: f32, a: f32| {
+                let state = caller.data_mut();
+                state.commands.push(Commands::SetColor(r, g, b, a));
+            },
+        )?;
 
         // TODO: Need to deal with paints
 
@@ -176,12 +185,17 @@ impl WasmContext {
             func.call(&mut self.store, ())?;
             let state = &mut self.store.data_mut();
 
+            let mut paint = skia_safe::Paint::default();
+
             for command in state.commands.iter() {
                 match command {
+                    Commands::SetColor(r, g, b, a) => {
+                        paint.set_color(Color::new(*r, *g, *b, *a).to_color4f().to_color());
+                    }
                     Commands::DrawRect(x, y, width, height) => {
                         canvas.draw_rect(
                             skia_safe::Rect::from_xywh(*x, *y, *width, *height),
-                            &skia_safe::Paint::default(),
+                            &paint,
                         );
                         // This is not quite right because of translate and stuff.
                         if *x + *width > max_width {
@@ -192,10 +206,10 @@ impl WasmContext {
                         }
                     }
                     Commands::DrawString(str, x, y) => {
-                        let mut paint = skia_safe::Paint::default();
-                        paint.set_color(skia_safe::Color::WHITE);
-                        let mut font = skia_safe::Font::default();
-                        font.set_size(30.0);
+                        let font = Font::new(
+                            Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
+                            32.0,
+                        );
                         // No good way right now to find bounds. Need to think about this properly
                         canvas.draw_str(str, (*x, *y), &font, &paint);
                     }
@@ -206,10 +220,14 @@ impl WasmContext {
                             None,
                             None,
                         );
+                        if *width > max_width {
+                            max_width = *width;
+                        }
+                        if *height > max_height {
+                            max_height = *height;
+                        }
                     }
                     Commands::DrawRRect(x, y, width, height, radius) => {
-                        let mut paint = skia_safe::Paint::default();
-                        paint.set_color(skia_safe::Color::WHITE);
                         let rrect = skia_safe::RRect::new_rect_xy(
                             skia_safe::Rect::from_xywh(*x, *y, *width, *height),
                             *radius,
@@ -246,6 +264,16 @@ impl WasmContext {
             func.call(&mut self.store, ())?;
         } else {
             println!("No on_click function");
+        }
+        Ok(())
+    }
+
+    pub fn on_scroll(&mut self, x: f64, y: f64) -> Result<(), Box<dyn Error>> {
+        if let Some(func) = self.instance.get_func(&mut self.store, "on_scroll") {
+            let func = func.typed::<(f64, f64), ()>(&mut self.store)?;
+            func.call(&mut self.store, (x, y))?;
+        } else {
+            println!("No on_scroll function");
         }
         Ok(())
     }
