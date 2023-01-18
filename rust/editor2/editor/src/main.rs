@@ -6,6 +6,7 @@ mod fps_counter;
 mod wasm;
 mod widget;
 mod window;
+mod keyboard;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
