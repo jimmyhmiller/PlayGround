@@ -1,13 +1,17 @@
 use std::path::PathBuf;
 
-use crate::widget::{Position, WidgetId, WidgetSelector};
+use crate::{widget::{Position, WidgetId, WidgetSelector}, keyboard::{KeyboardInput, Modifiers, KeyCode, KeyState}};
 
 use serde::{Deserialize, Serialize};
-use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
+use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent, ModifiersState};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Event {
     Noop,
+    KeyEvent {
+        // I maybe shouldn't use this. But I'm lazy right now.
+        input: KeyboardInput,
+    },
     MouseMove {
         x: f32,
         y: f32,
@@ -141,10 +145,32 @@ impl Event {
                         y: -0.0,
                     }),
                     HoveredFileCancelled => Some(Event::HoveredFileCancelled),
-                    _ => {
-                        println!("Unhandled event: {:?}", event);
-                        None
-                    }
+
+                    KeyboardInput { device_id, input, is_synthetic  } => {
+                        // need to keep track of modifier state instead of deprecated fields
+                        let modifiers = Modifiers {
+                            shift: input.modifiers.shift(),
+                            ctrl: input.modifiers.ctrl(),
+                            option: input.modifiers.alt(),
+                            cmd: input.modifiers.logo(),
+                        };
+
+                        let key_code = input.virtual_keycode.and_then(KeyCode::map_winit_vk_to_keycode)?;
+
+                        let state = match input.state {
+                            winit::event::ElementState::Pressed => KeyState::Pressed,
+                            winit::event::ElementState::Released => KeyState::Released,
+                        };
+
+                        Some(Event::KeyEvent {
+                            input: crate::keyboard::KeyboardInput {
+                                state,
+                                key_code,
+                                modifiers,
+                            }
+                        })
+                    },
+                    _ => None,
                 }
             }
             _ => None,

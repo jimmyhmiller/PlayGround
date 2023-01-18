@@ -382,6 +382,19 @@ impl Editor {
                 self.events.push(event);
             }
             Event::Noop => {}
+            Event::KeyEvent { input } => {
+                self.events.push(event);
+                if let Some(widget_id) = self.selected_widgets.iter().next() {
+                    if let Some(widget) = self.widget_store.get_mut(*widget_id) {
+                        match widget.data {
+                            WidgetData::Wasm { ref mut wasm } => {
+                                wasm.on_key(input);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             Event::MouseMove { x, y, .. } => {
                 // I want to be able to respond to mouse move events
                 // I just might not want to save them?

@@ -7,7 +7,7 @@ use skia_safe::{
     Canvas, Color4f, Data, Font, FontStyle, Image, Paint, Point, RRect, Rect, Typeface,
 };
 
-use crate::{event::Event, wasm::WasmContext};
+use crate::{event::Event, wasm::WasmContext, keyboard::KeyboardInput};
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub struct Position {
@@ -368,6 +368,15 @@ impl Wasm {
         // Or just not care about this generic case?
         self.context.as_mut().unwrap().on_click().unwrap();
     }
+    pub fn on_key(&mut self, input: KeyboardInput) {
+        let (key_code, state, modifiers) = input.to_u32_tuple();
+        match self.context.as_mut().unwrap().on_key(key_code, state, modifiers) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("Error: {:?}", e);
+            }
+        }
+    }
 
     pub fn on_scroll(&mut self, x: f64, y: f64) {
         self.context.as_mut().unwrap().on_scroll(x, y).unwrap();
@@ -393,6 +402,8 @@ impl Wasm {
         let state = self.context.as_mut().unwrap().get_state();
         self.state = state;
     }
+
+
 }
 
 impl Widget {

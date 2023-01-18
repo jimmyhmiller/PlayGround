@@ -1,6 +1,6 @@
 use std::str::from_utf8;
 
-use framework::{App, Canvas, Color, Rect};
+use framework::{App, Canvas, Color, Rect, KeyState};
 use serde::{Serialize, Deserialize, Serializer, Deserializer};
 mod framework;
 
@@ -10,13 +10,11 @@ pub struct Position {
     pub y: f32,
 }
 
-
-
 fn serialize_text<S>(x: &Vec<u8>, s: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    s.serialize_str(from_utf8(&x).unwrap())
+    s.serialize_str(from_utf8(x).unwrap())
 }
 
 fn deserialize_text<'de, D>(d: D) -> Result<Vec<u8>, D::Error>
@@ -26,9 +24,6 @@ where
     let s = String::deserialize(d)?;
     Ok(s.into_bytes())
 }
-
-
-
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TextPane {
@@ -40,7 +35,7 @@ pub struct TextPane {
 }
 
 impl TextPane {
-    pub fn new(contents: Vec<u8>, line_height: f32) -> Self {
+    pub fn new(_contents: Vec<u8>, line_height: f32) -> Self {
         Self {
             contents: "asdfa\nasfadf\nasdfa\nasfadf\nasdfa\nasfadf\nasdfa\nasfadf\nasdfa\nasfadf\nasdfa\nasfadf\n".bytes().collect(),
             line_height,
@@ -65,7 +60,7 @@ impl TextPane {
     fn get_lines(&self) -> impl std::iter::Iterator<Item = &str> + '_ {
         let text = std::str::from_utf8(&self.contents).unwrap();
         let lines = text.split('\n');
-        return lines;
+        lines
     }
 
     fn number_of_lines(&self) -> usize {
@@ -129,6 +124,7 @@ pub struct Size {
 struct TextWidget {
     text_pane: TextPane,
     widget_data: WidgetData,
+    edit_position: usize,
 }
 
 
@@ -143,13 +139,13 @@ impl App for TextWidget {
                 position: Position { x: 0.0, y: 0.0 },
                 size: Size { width: 300.0, height: 300.0 },
             },
+            edit_position: 0,
         }
     }
 
     fn draw(&mut self) {
         let canvas = Canvas::new();
 
-        let text = "asdfasdf\\nasdfdsaf\\nasdfasdfasd\\n";
 
         let foreground = Color::parse_hex("#62b4a6");
         let background = Color::parse_hex("#530922");
@@ -192,6 +188,25 @@ impl App for TextWidget {
 
     fn on_click(&mut self) {
 
+    }
+
+    fn on_key(&mut self, input: KeyboardInput) {
+        if !matches!(input.state, KeyState::Pressed) {
+            return;
+        }
+        if self.edit_position >= self.text_pane.contents.len() {
+            self.edit_position = 0;
+        }
+        if let Some(char) = input.to_char() {
+            self.text_pane.contents[self.edit_position] = char as u8;
+            self.edit_position += 1;
+        }
+        if self.edit_position >= self.text_pane.contents.len() {
+            self.edit_position = 0;
+        }
+        while self.text_pane.contents[self.edit_position] == b'\n' {
+            self.edit_position += 1;
+        }
     }
 
     fn on_scroll(&mut self, x: f64, y: f64) {

@@ -278,6 +278,16 @@ impl WasmContext {
         Ok(())
     }
 
+    pub fn on_key(&mut self, key_code: u32, state: u32, modifiers: u32) -> Result<(), Box<dyn Error>> {
+        if let Some(func) = self.instance.get_func(&mut self.store, "on_key") {
+            let func = func.typed::<(u32, u32, u32), ()>(&mut self.store)?;
+            func.call(&mut self.store, (key_code, state, modifiers))?;
+        } else {
+            println!("No on_key function");
+        }
+        Ok(())
+    }
+
     pub fn reload(&mut self) -> Result<(), Box<dyn Error>> {
         let json_string = self.get_state().ok_or("no get state function")?;
         let data = json_string.as_bytes();
@@ -334,4 +344,5 @@ impl WasmContext {
         );
         Some(json_string)
     }
+
 }

@@ -129,6 +129,7 @@ pub trait App {
     fn init() -> Self;
     fn draw(&mut self);
     fn on_click(&mut self);
+    fn on_key(&mut self, input: KeyboardInput);
     fn on_scroll(&mut self, x: f64, y: f64);
     fn get_state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State);
@@ -140,12 +141,17 @@ mod macros {
     macro_rules! app {
         ($app:ident) => {
             use once_cell::sync::Lazy;
-            use crate::framework::{PointerLengthString};
+            use $crate::framework::{PointerLengthString, KeyboardInput};
             static mut APP : Lazy<$app> = Lazy::new(|| $app::init());
 
             #[no_mangle]
             pub extern "C" fn on_click() {
                 unsafe { APP.on_click() }
+            }
+
+            #[no_mangle]
+            pub extern "C" fn on_key(key: u32, state: u32, modifiers: u32) {
+                unsafe { APP.on_key(KeyboardInput::from_u32(key, state, modifiers)) }
             }
 
             #[no_mangle]
@@ -193,13 +199,354 @@ impl Color {
 
     pub fn parse_hex(hex: &str) -> Color {
         let mut start = 0;
-        if hex.starts_with("#") {
+        if hex.starts_with('#') {
             start = 1;
         }
 
         let r = i64::from_str_radix(&hex[start..start + 2], 16).unwrap() as f32;
         let g = i64::from_str_radix(&hex[start + 2..start + 4], 16).unwrap() as f32;
         let b = i64::from_str_radix(&hex[start + 4..start + 6], 16).unwrap() as f32;
-        return Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0);
+        Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
+    }
+}
+
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum KeyCode {
+    Key0,
+    Key1,
+    Key2,
+    Key3,
+    Key4,
+    Key5,
+    Key6,
+    Key7,
+    Key8,
+    Key9,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+    Equals,
+    Minus,
+    LeftBracket,
+    RightBracket,
+    Backslash,
+    Semicolon,
+    Apostrophe,
+    Comma,
+    Period,
+    Slash,
+    Grave,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    Escape,
+}
+
+impl KeyCode {
+    fn from_u32(key: u32) -> Option<Self> {
+        match key {
+            0 => Some(KeyCode::Key0),
+            1 => Some(KeyCode::Key1),
+            2 => Some(KeyCode::Key2),
+            3 => Some(KeyCode::Key3),
+            4 => Some(KeyCode::Key4),
+            5 => Some(KeyCode::Key5),
+            6 => Some(KeyCode::Key6),
+            7 => Some(KeyCode::Key7),
+            8 => Some(KeyCode::Key8),
+            9 => Some(KeyCode::Key9),
+            10 => Some(KeyCode::A),
+            11 => Some(KeyCode::B),
+            12 => Some(KeyCode::C),
+            13 => Some(KeyCode::D),
+            14 => Some(KeyCode::E),
+            15 => Some(KeyCode::F),
+            16 => Some(KeyCode::G),
+            17 => Some(KeyCode::H),
+            18 => Some(KeyCode::I),
+            19 => Some(KeyCode::J),
+            20 => Some(KeyCode::K),
+            21 => Some(KeyCode::L),
+            22 => Some(KeyCode::M),
+            23 => Some(KeyCode::N),
+            24 => Some(KeyCode::O),
+            25 => Some(KeyCode::P),
+            26 => Some(KeyCode::Q),
+            27 => Some(KeyCode::R),
+            28 => Some(KeyCode::S),
+            29 => Some(KeyCode::T),
+            30 => Some(KeyCode::U),
+            31 => Some(KeyCode::V),
+            32 => Some(KeyCode::W),
+            33 => Some(KeyCode::X),
+            34 => Some(KeyCode::Y),
+            35 => Some(KeyCode::Z),
+            36 => Some(KeyCode::Equals),
+            37 => Some(KeyCode::Minus),
+            38 => Some(KeyCode::LeftBracket),
+            39 => Some(KeyCode::RightBracket),
+            40 => Some(KeyCode::Backslash),
+            41 => Some(KeyCode::Semicolon),
+            42 => Some(KeyCode::Apostrophe),
+            43 => Some(KeyCode::Comma),
+            44 => Some(KeyCode::Period),
+            45 => Some(KeyCode::Slash),
+            46 => Some(KeyCode::Grave),
+            47 => Some(KeyCode::F1),
+            48 => Some(KeyCode::F2),
+            49 => Some(KeyCode::F3),
+            50 => Some(KeyCode::F4),
+            51 => Some(KeyCode::F5),
+            52 => Some(KeyCode::F6),
+            53 => Some(KeyCode::F7),
+            54 => Some(KeyCode::F8),
+            55 => Some(KeyCode::F9),
+            56 => Some(KeyCode::F10),
+            57 => Some(KeyCode::F11),
+            58 => Some(KeyCode::F12),
+            59 => Some(KeyCode::Escape),
+            _ => None,
+        }
+    }
+
+    fn to_u32(&self) -> u32 {
+        *self as u32
+    }
+
+}
+
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum KeyState {
+    Pressed,
+    Released,
+}
+
+impl KeyState {
+    pub fn to_u32(&self) -> u32 {
+        match self {
+            KeyState::Pressed => 0,
+            KeyState::Released => 1,
+        }
+    }
+
+    pub fn from_u32(value: u32) -> Self {
+        println!("KeyState::from_u32({})", value);
+        match value {
+            0 => KeyState::Pressed,
+            1 => KeyState::Released,
+            _ => panic!("Invalid value for KeyState"),
+        }
+    }
+}
+
+// Not the most efficient representation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub option: bool,
+    pub cmd: bool,
+}
+
+impl Modifiers {
+    pub fn from_u32(modifiers: u32) -> Self {
+        Self {
+            shift: (modifiers & 1) != 0,
+            ctrl: (modifiers & 2) != 0,
+            option: (modifiers & 4) != 0,
+            cmd: (modifiers & 8) != 0,
+        }
+    }
+
+    pub fn to_u32(&self) -> u32 {
+        let mut result = 0;
+        if self.shift {
+            result |= 1;
+        }
+        if self.ctrl {
+            result |= 2;
+        }
+        if self.option {
+            result |= 4;
+        }
+        if self.cmd {
+            result |= 8;
+        }
+        result
+    }
+}
+
+pub struct KeyboardInput {
+    pub state: KeyState,
+    pub key_code: KeyCode,
+    pub modifiers: Modifiers,
+}
+
+
+impl KeyboardInput {
+    pub fn from_u32(key: u32, state: u32, modifiers: u32) -> Self {
+        println!("KeyboardInput::from_u32({}, {}, {})", key, state, modifiers);
+        Self {
+            state: KeyState::from_u32(state),
+            key_code: KeyCode::from_u32(key).unwrap(),
+            modifiers: Modifiers::from_u32(modifiers),
+        }
+    }
+
+    pub fn to_u32_tuple(&self) -> (u32, u32, u32) {
+        (
+            self.key_code.to_u32(),
+            self.state.to_u32(),
+            self.modifiers.to_u32(),
+        )
+    }
+
+    pub fn to_char(&self) -> Option<char> {
+        match (self.key_code, self.modifiers.shift) {
+            (KeyCode::Key0, false) => Some('0'),
+            (KeyCode::Key1, false) => Some('1'),
+            (KeyCode::Key2, false) => Some('2'),
+            (KeyCode::Key3, false) => Some('3'),
+            (KeyCode::Key4, false) => Some('4'),
+            (KeyCode::Key5, false) => Some('5'),
+            (KeyCode::Key6, false) => Some('6'),
+            (KeyCode::Key7, false) => Some('7'),
+            (KeyCode::Key8, false) => Some('8'),
+            (KeyCode::Key9, false) => Some('9'),
+            (KeyCode::A, false) => Some('a'),
+            (KeyCode::B, false) => Some('b'),
+            (KeyCode::C, false) => Some('c'),
+            (KeyCode::D, false) => Some('d'),
+            (KeyCode::E, false) => Some('e'),
+            (KeyCode::F, false) => Some('f'),
+            (KeyCode::G, false) => Some('g'),
+            (KeyCode::H, false) => Some('h'),
+            (KeyCode::I, false) => Some('i'),
+            (KeyCode::J, false) => Some('j'),
+            (KeyCode::K, false) => Some('k'),
+            (KeyCode::L, false) => Some('l'),
+            (KeyCode::M, false) => Some('m'),
+            (KeyCode::N, false) => Some('n'),
+            (KeyCode::O, false) => Some('o'),
+            (KeyCode::P, false) => Some('p'),
+            (KeyCode::Q, false) => Some('q'),
+            (KeyCode::R, false) => Some('r'),
+            (KeyCode::S, false) => Some('s'),
+            (KeyCode::T, false) => Some('t'),
+            (KeyCode::U, false) => Some('u'),
+            (KeyCode::V, false) => Some('v'),
+            (KeyCode::W, false) => Some('w'),
+            (KeyCode::X, false) => Some('x'),
+            (KeyCode::Y, false) => Some('y'),
+            (KeyCode::Z, false) => Some('z'),
+            (KeyCode::Key0, true) => Some(')'),
+            (KeyCode::Key1, true) => Some('!'),
+            (KeyCode::Key2, true) => Some('@'),
+            (KeyCode::Key3, true) => Some('#'),
+            (KeyCode::Key4, true) => Some('$'),
+            (KeyCode::Key5, true) => Some('%'),
+            (KeyCode::Key6, true) => Some('^'),
+            (KeyCode::Key7, true) => Some('&'),
+            (KeyCode::Key8, true) => Some('*'),
+            (KeyCode::Key9, true) => Some('('),
+            (KeyCode::A, true) => Some('A'),
+            (KeyCode::B, true) => Some('B'),
+            (KeyCode::C, true) => Some('C'),
+            (KeyCode::D, true) => Some('D'),
+            (KeyCode::E, true) => Some('E'),
+            (KeyCode::F, true) => Some('F'),
+            (KeyCode::G, true) => Some('G'),
+            (KeyCode::H, true) => Some('H'),
+            (KeyCode::I, true) => Some('I'),
+            (KeyCode::J, true) => Some('J'),
+            (KeyCode::K, true) => Some('K'),
+            (KeyCode::L, true) => Some('L'),
+            (KeyCode::M, true) => Some('M'),
+            (KeyCode::N, true) => Some('N'),
+            (KeyCode::O, true) => Some('O'),
+            (KeyCode::P, true) => Some('P'),
+            (KeyCode::Q, true) => Some('Q'),
+            (KeyCode::R, true) => Some('R'),
+            (KeyCode::S, true) => Some('S'),
+            (KeyCode::T, true) => Some('T'),
+            (KeyCode::U, true) => Some('U'),
+            (KeyCode::V, true) => Some('V'),
+            (KeyCode::W, true) => Some('W'),
+            (KeyCode::X, true) => Some('X'),
+            (KeyCode::Y, true) => Some('Y'),
+            (KeyCode::Z, true) => Some('Z'),
+            (KeyCode::Equals, false) => Some('='),
+            (KeyCode::Minus, false) => Some('-'),
+            (KeyCode::LeftBracket, false) => Some('['),
+            (KeyCode::RightBracket, false) => Some(']'),
+            (KeyCode::Backslash, false) => Some('\\'),
+            (KeyCode::Semicolon, false) => Some(';'),
+            (KeyCode::Apostrophe, false) => Some('\''),
+            (KeyCode::Comma, false) => Some(','),
+            (KeyCode::Period, false) => Some('.'),
+            (KeyCode::Slash, false) => Some('/'),
+            (KeyCode::Grave, false) => Some('`'),
+            (KeyCode::F1, false) => None,
+            (KeyCode::F2, false) => None,
+            (KeyCode::F3, false) => None,
+            (KeyCode::F4, false) => None,
+            (KeyCode::F5, false) => None,
+            (KeyCode::F6, false) => None,
+            (KeyCode::F7, false) => None,
+            (KeyCode::F8, false) => None,
+            (KeyCode::F9, false) => None,
+            (KeyCode::F10, false) => None,
+            (KeyCode::F11, false) => None,
+            (KeyCode::F12, false) => None,
+            (KeyCode::Escape, false) => None,
+            (KeyCode::Equals, true) => Some('+'),
+            (KeyCode::Minus, true) => Some('_'),
+            (KeyCode::LeftBracket, true) => Some('{'),
+            (KeyCode::RightBracket, true) => Some('}'),
+            (KeyCode::Backslash, true) => Some('|'),
+            (KeyCode::Semicolon, true) => Some(':'),
+            (KeyCode::Apostrophe, true) => Some('\"'),
+            (KeyCode::Comma, true) => Some('<'),
+            (KeyCode::Period, true) => Some('>'),
+            (KeyCode::Slash, true) => Some('?'),
+            (KeyCode::Grave, true) => Some('~'),
+            _ => None,
+        }
     }
 }
