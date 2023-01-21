@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::{widget::{Position, WidgetId, WidgetSelector}, keyboard::{KeyboardInput, Modifiers, KeyCode, KeyState}};
 
 use serde::{Deserialize, Serialize};
-use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent, ModifiersState};
+use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Event {
@@ -146,8 +146,8 @@ impl Event {
                     }),
                     HoveredFileCancelled => Some(Event::HoveredFileCancelled),
 
-                    KeyboardInput { device_id, input, is_synthetic  } => {
-                        // need to keep track of modifier state instead of deprecated fields
+                    KeyboardInput {  input, ..  } => {
+                        // TODO: need to keep track of modifier state instead of deprecated fields
                         let modifiers = Modifiers {
                             shift: input.modifiers.shift(),
                             ctrl: input.modifiers.ctrl(),

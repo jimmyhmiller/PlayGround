@@ -274,6 +274,13 @@ pub enum KeyCode {
     F11,
     F12,
     Escape,
+    Space,
+    Return,
+    LeftArrow,
+    RightArrow,
+    UpArrow,
+    DownArrow,
+    BackSpace,
 }
 
 impl KeyCode {
@@ -339,6 +346,13 @@ impl KeyCode {
             57 => Some(KeyCode::F11),
             58 => Some(KeyCode::F12),
             59 => Some(KeyCode::Escape),
+            60 => Some(KeyCode::Space),
+            61 => Some(KeyCode::Return),
+            62 => Some(KeyCode::LeftArrow),
+            63 => Some(KeyCode::RightArrow),
+            64 => Some(KeyCode::UpArrow),
+            65 => Some(KeyCode::DownArrow),
+            66 => Some(KeyCode::BackSpace),
             _ => None,
         }
     }
@@ -546,6 +560,8 @@ impl KeyboardInput {
             (KeyCode::Period, true) => Some('>'),
             (KeyCode::Slash, true) => Some('?'),
             (KeyCode::Grave, true) => Some('~'),
+            (KeyCode::Space, _) => Some(' '),
+            (KeyCode::Return, _) => Some('\n'),
             _ => None,
         }
     }

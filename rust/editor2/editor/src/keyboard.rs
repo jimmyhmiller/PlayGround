@@ -17,6 +17,7 @@ impl KeyState {
         }
     }
 
+    #[allow(dead_code)]
     fn from_u32(value: u32) -> Self {
         match value {
             0 => KeyState::Pressed,
@@ -125,6 +126,13 @@ pub enum KeyCode {
     F11,
     F12,
     Escape,
+    Space,
+    Return,
+    LeftArrow,
+    RightArrow,
+    UpArrow,
+    DownArrow,
+    BackSpace,
 }
 
 
@@ -192,6 +200,13 @@ impl KeyCode {
             F11 => Some(KeyCode::F11),
             F12 => Some(KeyCode::F12),
             Escape => Some(KeyCode::Escape),
+            Space => Some(KeyCode::Space),
+            Return => Some(KeyCode::Return),
+            Left => Some(KeyCode::LeftArrow),
+            Right => Some(KeyCode::RightArrow),
+            Up => Some(KeyCode::UpArrow),
+            Down => Some(KeyCode::DownArrow),
+            Back => Some(KeyCode::BackSpace),
             _ => None,
         }
     }
@@ -258,6 +273,13 @@ impl KeyCode {
             57 => Some(KeyCode::F11),
             58 => Some(KeyCode::F12),
             59 => Some(KeyCode::Escape),
+            60 => Some(KeyCode::Space),
+            61 => Some(KeyCode::Return),
+            62 => Some(KeyCode::LeftArrow),
+            63 => Some(KeyCode::RightArrow),
+            64 => Some(KeyCode::UpArrow),
+            65 => Some(KeyCode::DownArrow),
+            66 => Some(KeyCode::BackSpace),
             _ => None,
         }
     }
@@ -278,6 +300,7 @@ pub struct KeyboardInput {
 
 
 impl KeyboardInput {
+    #[allow(dead_code)]
     pub fn from_u32(key: u32, state: u32, modifiers: u32) -> Self {
         Self {
             state: KeyState::from_u32(state),

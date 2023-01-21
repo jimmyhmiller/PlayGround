@@ -1,6 +1,7 @@
 use std::str::from_utf8;
 
-use framework::{App, Canvas, Color, Rect, KeyState};
+use framework::{App, Canvas, Color, Rect, KeyState, KeyCode};
+use headless_editor::{Cursor, TextBuffer, SimpleTextBuffer, VirtualCursor};
 use serde::{Serialize, Deserialize, Serializer, Deserializer};
 mod framework;
 
@@ -32,14 +33,18 @@ pub struct TextPane {
     contents: Vec<u8>,
     line_height: f32,
     offset: Position,
+    cursor: Cursor,
+    text_buffer: SimpleTextBuffer,
 }
 
 impl TextPane {
-    pub fn new(_contents: Vec<u8>, line_height: f32) -> Self {
+    pub fn new(contents: Vec<u8>, line_height: f32) -> Self {
         Self {
-            contents: "asdfa\nasfadf\nasdfa\nasfadf\nasdfa\nasfadf\nasdfa\nasfadf\nasdfa\nasfadf\nasdfa\nasfadf\n".bytes().collect(),
+            contents: vec![],
             line_height,
             offset: Position { x: 0.0, y: 0.0 },
+            cursor: Cursor::new(0, 0),
+            text_buffer: SimpleTextBuffer::new_with_contents("test".to_string().as_bytes()),
         }
     }
 
@@ -137,7 +142,7 @@ impl App for TextWidget {
             text_pane: TextPane::new(vec![], 30.0),
             widget_data: WidgetData {
                 position: Position { x: 0.0, y: 0.0 },
-                size: Size { width: 300.0, height: 300.0 },
+                size: Size { width: 600.0, height: 600.0 },
             },
             edit_position: 0,
         }
@@ -150,7 +155,7 @@ impl App for TextWidget {
         let foreground = Color::parse_hex("#62b4a6");
         let background = Color::parse_hex("#530922");
 
-        let bounding_rect = Rect::new(0.0, 0.0, 300.0, 300.0);
+        let bounding_rect = Rect::new(0.0, 0.0, self.widget_data.size.width, self.widget_data.size.height);
 
         canvas.save();
         canvas.set_color(background);
@@ -170,10 +175,25 @@ impl App for TextWidget {
         );
 
         canvas.set_color(foreground);
-        for line in self.text_pane.visible_lines(self.widget_data.size.height) {
-            canvas.draw_str(line, 0.0, 0.0);
+        for line in self.text_pane.text_buffer.lines() {
+            canvas.draw_str(from_utf8(line).unwrap(), 0.0, 0.0);
             canvas.translate(0.0, self.text_pane.line_height);
         }
+
+        let cursor = &self.text_pane.cursor;
+        let text_buffer = &self.text_pane.text_buffer;
+
+        let cursor_position_pane_x = self.text_pane.cursor.column() as f32 * 16.0;
+        let cursor_position_pane_y = self.text_pane.cursor.line() as f32 - 2.0 * self.text_pane.line_height;
+
+        canvas.draw_rect(
+            cursor_position_pane_x,
+            cursor_position_pane_y,
+            10.0,
+            self.text_pane.line_height,
+        );
+
+        canvas.draw_str(&format!("({}, {}) length: {}",cursor.line(), cursor.column(), text_buffer.line_length(cursor.line())), 0.0, 40.0);
         // let line_height = 30.0;
         // canvas.set_color(foreground);
         // for line in text.split("\\n") {
@@ -187,25 +207,20 @@ impl App for TextWidget {
     }
 
     fn on_click(&mut self) {
-
+        println!("Lines {:?}", self.text_pane.text_buffer.lines().collect::<Vec<&[u8]>>());
     }
 
     fn on_key(&mut self, input: KeyboardInput) {
         if !matches!(input.state, KeyState::Pressed) {
             return;
         }
-        if self.edit_position >= self.text_pane.contents.len() {
-            self.edit_position = 0;
+        if matches!(input.key_code, KeyCode::BackSpace) {
+            println!("Delete");
+            self.text_pane.cursor.delete_char(&mut self.text_pane.text_buffer);
         }
         if let Some(char) = input.to_char() {
-            self.text_pane.contents[self.edit_position] = char as u8;
-            self.edit_position += 1;
-        }
-        if self.edit_position >= self.text_pane.contents.len() {
-            self.edit_position = 0;
-        }
-        while self.text_pane.contents[self.edit_position] == b'\n' {
-            self.edit_position += 1;
+            println!("Char: {}", char);
+            self.text_pane.cursor.insert_normal_text(&[char as u8], &mut self.text_pane.text_buffer);
         }
     }
 
