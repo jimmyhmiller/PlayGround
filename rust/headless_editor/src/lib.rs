@@ -1,6 +1,7 @@
 use core::{cmp::min};
 use core::fmt::Debug;
 use std::collections::HashMap;
+use std::thread::current;
 // TODO: I probably do need to return actions here
 // for every time the cursor moves.
 
@@ -23,6 +24,10 @@ impl <'a, Item> Iterator for LineIter<'a, Item> where Item: PartialEq + Copy {
             }
             self.current_position += 1;
         }
+        if self.current_position != original_position {
+            let line = &self.items[original_position..self.current_position];
+            return Some(line);
+        }
         None
     }
 }
@@ -39,8 +44,10 @@ pub trait TextBuffer {
     fn lines(&self) -> LineIter<Self::Item>;
 }
 
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SimpleTextBuffer {
-    bytes: Vec<u8>,
+    pub bytes: Vec<u8>,
 }
 
 // These are really bad implementations
@@ -48,16 +55,33 @@ pub struct SimpleTextBuffer {
 // and stop in some data structure.
 // But trying to start with the simplest thing that works
 impl SimpleTextBuffer {
-    fn line_start(&self, line: usize) -> usize {
+    pub fn new() -> Self {
+        SimpleTextBuffer {
+            bytes: Vec::new(),
+        }
+    }
+
+    pub fn new_with_contents(contents: &[u8]) -> Self {
+        SimpleTextBuffer {
+            bytes: contents.to_vec(),
+        }
+    }
+
+    pub fn set_contents(&mut self, contents: &[u8]) {
+        self.bytes = contents.to_vec();
+    }
+
+    pub fn line_start(&self, line: usize) -> usize {
         let mut line_start = 0;
         let mut lines_seen = 0;
 
-        for byte in self.bytes.iter().skip(line_start) {
+
+        for byte in self.bytes.iter() {
+            if lines_seen == line {
+                break;
+            }
             if *byte == b'\n' {
                 lines_seen += 1;
-                if lines_seen == line {
-                    break;
-                }
             }
             line_start += 1;
         }
@@ -207,7 +231,8 @@ pub trait VirtualCursor : Clone + Debug {
     fn insert_normal_text<T: TextBuffer<Item=u8>>(&mut self, to_insert: &[u8], buffer : &mut T) {
         buffer.insert_bytes(self.line(), self.column(), to_insert);
          if to_insert == b"\n" {
-            self.move_down(buffer)
+            self.move_down(buffer);
+            self.move_to(self.line(), 0);
         } else {
             // TODO: Do this more efficiently
             for _ in 0..(to_insert.len() - 1) {
@@ -257,7 +282,7 @@ pub trait VirtualCursor : Clone + Debug {
 }
 
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Cursor {
     line: usize,
     column: usize
@@ -289,7 +314,7 @@ impl VirtualCursor for Cursor {
 
 // For right now it is a simple linear history
 // Probably want it to be a tree
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct CursorWithHistory {
     cursor: Cursor,
     history: Vec<Cursor>,
@@ -321,7 +346,7 @@ impl VirtualCursor for CursorWithHistory {
 
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MultiCursor<C: VirtualCursor> {
     cursors: Vec<C>,
 }

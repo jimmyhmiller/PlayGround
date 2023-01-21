@@ -42,6 +42,7 @@ pub struct Editor {
     widget_store: WidgetStore,
     should_redraw: bool,
     selected_widgets: HashSet<WidgetId>,
+    active_widget: Option<WidgetId>,
     external_receiver: Option<Receiver<Event>>,
     watcher: Option<RecommendedWatcher>,
     event_loop_proxy: Option<EventLoopProxy<()>>,
@@ -318,7 +319,7 @@ impl Editor {
             external_receiver: None,
             watcher: None,
             event_loop_proxy: None,
-            // points: vec![],
+            active_widget: None,
         }
     }
 
@@ -384,8 +385,8 @@ impl Editor {
             Event::Noop => {}
             Event::KeyEvent { input } => {
                 self.events.push(event);
-                if let Some(widget_id) = self.selected_widgets.iter().next() {
-                    if let Some(widget) = self.widget_store.get_mut(*widget_id) {
+                if let Some(widget_id) = self.active_widget {
+                    if let Some(widget) = self.widget_store.get_mut(widget_id) {
                         match widget.data {
                             WidgetData::Wasm { ref mut wasm } => {
                                 wasm.on_key(input);
@@ -475,9 +476,19 @@ impl Editor {
         // Maybe I should do the first? Or the last?
         // Not sure
         for widget in self.widget_store.iter() {
+            let mut found_a_widget = false;
             if widget.mouse_over(&self.context.mouse_position) {
+                found_a_widget = true;
                 mouse_over.push(widget.id);
                 self.selected_widgets.insert(widget.id);
+                // TODO: This is ugly, just setting the active widget
+                // over and over again then we will get the last one
+                // which would probably draw on top anyways.
+                // Should do better
+                self.active_widget = Some(widget.id);
+            }
+            if !found_a_widget {
+                self.active_widget = None;
             }
         }
         for id in mouse_over {
