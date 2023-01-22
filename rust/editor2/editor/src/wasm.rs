@@ -5,6 +5,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
 
 use crate::widget::{Size, Color};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct PointerLengthString {
     ptr: u32,
     len: u32,
@@ -65,14 +66,14 @@ fn get_string_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> Str
     string.to_string()
 }
 
-fn get_string_from_memory(memory: &Memory, store: &mut Store<State>, ptr: i32, len: i32) -> String {
+fn get_string_from_memory(memory: &Memory, store: &mut Store<State>, ptr: i32, len: i32) -> Option<String> {
     use core::str::from_utf8;
     let data = memory
         .data(store)
         .get(ptr as u32 as usize..)
         .and_then(|arr| arr.get(..len as u32 as usize));
-    let string = from_utf8(data.unwrap()).unwrap();
-    string.to_string()
+    let string = from_utf8(data.unwrap()).ok()?;
+    Some(string.to_string())
 }
 
 impl WasmContext {
@@ -342,7 +343,10 @@ impl WasmContext {
             json_string.ptr as i32,
             json_string.len as i32,
         );
-        Some(json_string)
+        if json_string.is_none() {
+            println!("No json string");
+        }
+        json_string
     }
 
 }

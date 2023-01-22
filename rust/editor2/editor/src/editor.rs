@@ -4,7 +4,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::Receiver,
-    thread,
+    thread, time::Duration,
 };
 
 use crate::{
@@ -13,8 +13,9 @@ use crate::{
     widget::{Color, Position, Size, TextPane, Wasm, Widget, WidgetData, WidgetId, WidgetStore},
 };
 
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher, FsEventWatcher};
 
+use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
 use skia_safe::{Font, FontStyle, Typeface};
 
@@ -44,7 +45,7 @@ pub struct Editor {
     selected_widgets: HashSet<WidgetId>,
     active_widget: Option<WidgetId>,
     external_receiver: Option<Receiver<Event>>,
-    watcher: Option<RecommendedWatcher>,
+    debounce_watcher: Option<Debouncer<FsEventWatcher>>,
     event_loop_proxy: Option<EventLoopProxy<()>>,
     // points: Vec<[f64; 2]>,
 }
@@ -116,7 +117,10 @@ impl Editor {
         let widget_config_path = widget_config_path.to_string();
         let (watch_raw_send, watch_raw_receive) = std::sync::mpsc::channel();
         let (sender, receiver) = std::sync::mpsc::channel::<Event>();
-        let mut watcher = RecommendedWatcher::new(watch_raw_send, Config::default()).unwrap();
+        let mut debouncer : Debouncer<FsEventWatcher> = new_debouncer(Duration::from_millis(250), None, watch_raw_send).unwrap();
+
+
+        let mut watcher = debouncer.watcher();
 
         // Probably need to debounce this
         watcher
@@ -128,7 +132,8 @@ impl Editor {
             for res in watch_raw_receive {
                 match res {
                     Ok(event) => {
-                        event.paths.iter().for_each(|path| {
+                        event.iter().for_each(|event| {
+                            let path = &event.path;
                             if path.to_str().unwrap() == widget_config_path {
                                 sender.send(Event::ReloadWidgets).unwrap();
                             } else if path.extension().unwrap() == "wasm" {
@@ -146,7 +151,7 @@ impl Editor {
             }
         });
         self.external_receiver = Some(receiver);
-        self.watcher = Some(watcher);
+        self.debounce_watcher = Some(debouncer);
     }
 
     fn load_widgets(&mut self, path: &str) {
@@ -160,7 +165,8 @@ impl Editor {
             .map(|s| {
                 if let Ok(mut widget) = ron::de::from_str::<Widget>(s) {
                     widget.init();
-                    if let Some(watcher) = &mut self.watcher {
+                    if let Some(watcher) = &mut self.debounce_watcher {
+                        let watcher = watcher.watcher();
                         let files_to_watch = widget.files_to_watch();
                         for path in files_to_watch.iter() {
                             watcher
@@ -234,7 +240,8 @@ impl Editor {
                             },
                         });
                     }
-                    if let Some(watcher) = &mut self.watcher {
+                    if let Some(watcher) = &mut self.debounce_watcher {
+                        let watcher = watcher.watcher();
                         watcher
                             .watch(path.as_path(), RecursiveMode::NonRecursive)
                             .unwrap();
@@ -317,7 +324,7 @@ impl Editor {
             should_redraw: true,
             selected_widgets: HashSet::new(),
             external_receiver: None,
-            watcher: None,
+            debounce_watcher: None,
             event_loop_proxy: None,
             active_widget: None,
         }

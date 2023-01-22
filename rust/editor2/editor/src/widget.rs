@@ -383,7 +383,12 @@ impl Wasm {
     }
 
     pub fn reload(&mut self) {
-        self.context.as_mut().unwrap().reload().unwrap();
+        match self.context.as_mut().unwrap().reload() {
+            Ok(_) => {}
+            Err(e) => {
+                println!("Error: {:?}", e);
+            }
+        }
     }
 
     fn init(&mut self) {

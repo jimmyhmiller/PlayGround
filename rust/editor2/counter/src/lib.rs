@@ -5,7 +5,7 @@ use headless_editor::{Cursor, TextBuffer, SimpleTextBuffer, VirtualCursor};
 use serde::{Serialize, Deserialize, Serializer, Deserializer};
 mod framework;
 
-#[derive(Copy, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
 pub struct Position {
     pub x: f32,
     pub y: f32,
@@ -26,7 +26,7 @@ where
     Ok(s.into_bytes())
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TextPane {
     #[serde(serialize_with = "serialize_text")]
     #[serde(deserialize_with = "deserialize_text")]
@@ -44,7 +44,7 @@ impl TextPane {
             line_height,
             offset: Position { x: 0.0, y: 0.0 },
             cursor: Cursor::new(0, 0),
-            text_buffer: SimpleTextBuffer::new_with_contents("test".to_string().as_bytes()),
+            text_buffer: SimpleTextBuffer::new_with_contents(&contents),
         }
     }
 
@@ -61,22 +61,10 @@ impl TextPane {
         ((height - 40.0) / self.line_height).ceil() as usize
     }
 
-    // TODO: obviously need to not compute this everytime.
-    fn get_lines(&self) -> impl std::iter::Iterator<Item = &str> + '_ {
-        let text = std::str::from_utf8(&self.contents).unwrap();
-        let lines = text.split('\n');
-        lines
-    }
-
     fn number_of_lines(&self) -> usize {
-        self.get_lines().count()
+        self.text_buffer.line_count()
     }
 
-    fn visible_lines(&self, height: f32) -> impl std::iter::Iterator<Item = &str> + '_ {
-        self.get_lines()
-            .skip(self.lines_above_scroll())
-            .take(self.number_of_visible_lines(height))
-    }
 
     pub fn on_scroll(&mut self, x: f64, y: f64, height: f32) {
         // this is all terribly wrong. I don't get the bounds correctly.
@@ -93,6 +81,8 @@ impl TextPane {
             self.number_of_lines()
                 .saturating_sub(self.number_of_visible_lines(height)) as f32
                 * self.line_height;
+
+        println!("{}", scroll_with_last_line_visible);
 
         // TODO: Deal with margin properly
 
@@ -174,26 +164,31 @@ impl App for TextWidget {
             self.widget_data.position.y + self.text_pane.line_height - fractional_offset + 20.0,
         );
 
+        canvas.save();
         canvas.set_color(foreground);
-        for line in self.text_pane.text_buffer.lines() {
+        for line in self.text_pane.text_buffer.lines()
+                .skip(self.text_pane.lines_above_scroll())
+                .take(self.text_pane.number_of_visible_lines(self.widget_data.size.height)) {
             canvas.draw_str(from_utf8(line).unwrap(), 0.0, 0.0);
             canvas.translate(0.0, self.text_pane.line_height);
         }
+        canvas.restore();
 
         let cursor = &self.text_pane.cursor;
         let text_buffer = &self.text_pane.text_buffer;
 
         let cursor_position_pane_x = self.text_pane.cursor.column() as f32 * 16.0;
-        let cursor_position_pane_y = self.text_pane.cursor.line() as f32 - 2.0 * self.text_pane.line_height;
+        let cursor_position_pane_y = (self.text_pane.cursor.line() as f32 - 1.0) * self.text_pane.line_height;
 
         canvas.draw_rect(
             cursor_position_pane_x,
             cursor_position_pane_y,
-            10.0,
+            3.0,
             self.text_pane.line_height,
         );
 
-        canvas.draw_str(&format!("({}, {}) length: {}",cursor.line(), cursor.column(), text_buffer.line_length(cursor.line())), 0.0, 40.0);
+
+        canvas.draw_str(&format!("({}, {}) length: {}",cursor.line(), cursor.column(), text_buffer.line_count()), 300.0, 500.0);
         // let line_height = 30.0;
         // canvas.set_color(foreground);
         // for line in text.split("\\n") {
@@ -206,20 +201,24 @@ impl App for TextWidget {
         // canvas.draw_str(&format!("Count: {}", self.count), 40.0, 50.0);
     }
 
+
     fn on_click(&mut self) {
-        println!("Lines {:?}", self.text_pane.text_buffer.lines().collect::<Vec<&[u8]>>());
+
     }
 
     fn on_key(&mut self, input: KeyboardInput) {
         if !matches!(input.state, KeyState::Pressed) {
             return;
         }
-        if matches!(input.key_code, KeyCode::BackSpace) {
-            println!("Delete");
-            self.text_pane.cursor.delete_char(&mut self.text_pane.text_buffer);
+        match input.key_code {
+            KeyCode::LeftArrow => self.text_pane.cursor.move_left(&self.text_pane.text_buffer),
+            KeyCode::RightArrow => self.text_pane.cursor.move_right(&self.text_pane.text_buffer),
+            KeyCode::UpArrow => self.text_pane.cursor.move_up(&self.text_pane.text_buffer),
+            KeyCode::DownArrow => self.text_pane.cursor.move_down(&self.text_pane.text_buffer),
+            KeyCode::BackSpace => self.text_pane.cursor.delete_char(&mut self.text_pane.text_buffer),
+            _ => {}
         }
         if let Some(char) = input.to_char() {
-            println!("Char: {}", char);
             self.text_pane.cursor.insert_normal_text(&[char as u8], &mut self.text_pane.text_buffer);
         }
     }
@@ -234,10 +233,7 @@ impl App for TextWidget {
 
     fn set_state(&mut self, state: Self::State) {
         self.text_pane = state;
-        self.text_pane = TextPane::new(vec![], 30.0);
     }
-
-
 
 }
 
