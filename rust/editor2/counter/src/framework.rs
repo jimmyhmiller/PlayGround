@@ -171,6 +171,8 @@ mod macros {
                 let s = String::from(PointerLengthString { ptr: ptr as usize, len: len as usize });
                 if let Ok(state) = serde_json::from_str(&s) {
                     unsafe { APP.set_state(state)}
+                } else {
+                    println!("set_state: failed to parse state");
                 }
             }
 
@@ -380,7 +382,6 @@ impl KeyState {
     }
 
     pub fn from_u32(value: u32) -> Self {
-        println!("KeyState::from_u32({})", value);
         match value {
             0 => KeyState::Pressed,
             1 => KeyState::Released,
@@ -435,7 +436,6 @@ pub struct KeyboardInput {
 
 impl KeyboardInput {
     pub fn from_u32(key: u32, state: u32, modifiers: u32) -> Self {
-        println!("KeyboardInput::from_u32({}, {}, {})", key, state, modifiers);
         Self {
             state: KeyState::from_u32(state),
             key_code: KeyCode::from_u32(key).unwrap(),

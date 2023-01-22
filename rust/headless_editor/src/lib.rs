@@ -151,7 +151,7 @@ pub trait VirtualCursor : Clone + Debug {
     fn move_down<T: TextBuffer>(&mut self, buffer: &T) {
         self.move_to(
             min(self.line().saturating_add(1), buffer.line_count()),
-            min(self.column(), buffer.line_length(self.line()))
+            min(self.column(), buffer.line_length(self.line().saturating_add(1)))
         );
     }
 
