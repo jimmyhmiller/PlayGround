@@ -58,7 +58,7 @@ impl TextPane {
 
     // TODO: Deal with margin!
     fn number_of_visible_lines(&self, height: f32) -> usize {
-        ((height - 40.0) / self.line_height).ceil() as usize
+        ((height - 40.0) / self.line_height).ceil() as usize + 1
     }
 
     fn number_of_lines(&self) -> usize {
@@ -82,12 +82,10 @@ impl TextPane {
                 .saturating_sub(self.number_of_visible_lines(height)) as f32
                 * self.line_height;
 
-        println!("{}", scroll_with_last_line_visible);
-
         // TODO: Deal with margin properly
 
-        if self.offset.y > scroll_with_last_line_visible + 20.0 {
-            self.offset.y = scroll_with_last_line_visible + 20.0;
+        if self.offset.y > scroll_with_last_line_visible + 40.0 {
+            self.offset.y = scroll_with_last_line_visible + 40.0;
         }
 
         if self.offset.y < 0.0 {
@@ -148,7 +146,7 @@ impl App for TextWidget {
         let bounding_rect = Rect::new(0.0, 0.0, self.widget_data.size.width, self.widget_data.size.height);
 
         canvas.save();
-        canvas.set_color(background);
+        canvas.set_color(&background);
         canvas.clip_rect(bounding_rect);
         canvas.draw_rrect(bounding_rect, 20.0);
         // TODO: deal with fonts
@@ -158,14 +156,23 @@ impl App for TextWidget {
         // );
 
         canvas.clip_rect(bounding_rect.with_inset((20.0, 20.0)));
+
+        canvas.translate(self.widget_data.position.x, self.widget_data.position.y);
+
+        let cursor = &self.text_pane.cursor;
+        let text_buffer = &self.text_pane.text_buffer;
+
+        canvas.set_color(&foreground);
+        canvas.draw_str(&format!("({}, {}) length: {}", cursor.line(), cursor.column(), text_buffer.line_length(cursor.line())), 300.0, 500.0);
+
         let fractional_offset = self.text_pane.fractional_line_offset();
         canvas.translate(
-            self.widget_data.position.x + 30.0 - self.text_pane.offset.x,
-            self.widget_data.position.y + self.text_pane.line_height - fractional_offset + 20.0,
+            30.0 - self.text_pane.offset.x,
+            self.text_pane.line_height - fractional_offset + 20.0,
         );
 
         canvas.save();
-        canvas.set_color(foreground);
+
         for line in self.text_pane.text_buffer.lines()
                 .skip(self.text_pane.lines_above_scroll())
                 .take(self.text_pane.number_of_visible_lines(self.widget_data.size.height)) {
@@ -174,21 +181,27 @@ impl App for TextWidget {
         }
         canvas.restore();
 
-        let cursor = &self.text_pane.cursor;
-        let text_buffer = &self.text_pane.text_buffer;
+        let lines_above = self.text_pane.lines_above_scroll();
+        let num_lines = self.text_pane.number_of_visible_lines(self.widget_data.size.height);
+        let shown_lines = lines_above..lines_above+num_lines;
 
-        let cursor_position_pane_x = self.text_pane.cursor.column() as f32 * 16.0;
-        let cursor_position_pane_y = (self.text_pane.cursor.line() as f32 - 1.0) * self.text_pane.line_height;
+        if shown_lines.contains(&cursor.line()) {
+            let nth_line = cursor.line() - lines_above;
+            let cursor_position_pane_x = cursor.column() as f32 * 16.0;
+            let cursor_position_pane_y = (nth_line as f32 - 1.0) * self.text_pane.line_height;
 
-        canvas.draw_rect(
-            cursor_position_pane_x,
-            cursor_position_pane_y,
-            3.0,
-            self.text_pane.line_height,
-        );
+            canvas.set_color(&foreground);
+            canvas.draw_rect(
+                cursor_position_pane_x,
+                cursor_position_pane_y,
+                3.0,
+                self.text_pane.line_height,
+            );
+        }
 
 
-        canvas.draw_str(&format!("({}, {}) length: {}",cursor.line(), cursor.column(), text_buffer.line_count()), 300.0, 500.0);
+
+
         // let line_height = 30.0;
         // canvas.set_color(foreground);
         // for line in text.split("\\n") {
@@ -202,7 +215,14 @@ impl App for TextWidget {
     }
 
 
-    fn on_click(&mut self) {
+    fn on_click(&mut self, x: f32, y: f32) {
+        // TODO: Need to handle margin here.
+        let margin = 20;
+        let lines_above = self.text_pane.lines_above_scroll();
+        let line = (((y - margin as f32) / self.text_pane.line_height).ceil() as usize + lines_above) - 1;
+        let char_width = 16.0;
+        let column = (((x - margin as f32) / char_width).ceil() as usize).saturating_sub((self.text_pane.offset.x / char_width) as usize) - 1;
+        self.text_pane.cursor.move_to_bounded(line, column, &self.text_pane.text_buffer);
 
     }
 
@@ -219,7 +239,20 @@ impl App for TextWidget {
             _ => {}
         }
         if let Some(char) = input.to_char() {
-            self.text_pane.cursor.insert_normal_text(&[char as u8], &mut self.text_pane.text_buffer);
+            self.text_pane.cursor.handle_insert(&[char as u8], &mut self.text_pane.text_buffer);
+        }
+
+        if self.text_pane.cursor.line() == self.text_pane.lines_above_scroll() {
+            // round down to the fraction of a line so the whole text is visible
+            self.text_pane.offset.y -= self.text_pane.fractional_line_offset();
+        } else if (self.text_pane.cursor.line() - self.text_pane.lines_above_scroll()) as f32 * self.text_pane.line_height > self.widget_data.size.height - 40.0 {
+            // not quite right yet
+            let diff = ((self.text_pane.cursor.line() - self.text_pane.lines_above_scroll()) as f32 * self.text_pane.line_height) - self.widget_data.size.height - 40.0;
+            self.text_pane.offset.y -= diff;
+        }else if self.text_pane.cursor.line() < self.text_pane.lines_above_scroll() {
+            self.text_pane.offset.y -= self.text_pane.line_height;
+        } else if self.text_pane.cursor.line() + 1 >= self.text_pane.lines_above_scroll() + self.text_pane.number_of_visible_lines(self.widget_data.size.height) {
+            self.text_pane.offset.y += self.text_pane.line_height;
         }
     }
 

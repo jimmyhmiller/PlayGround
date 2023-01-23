@@ -140,7 +140,13 @@ pub trait VirtualCursor : Clone + Debug {
     fn new(line: usize, column: usize) -> Self;
 
 
-    fn move_up<T: TextBuffer<Item=u8>>(&mut self, buffer: &T) {
+    fn move_to_bounded<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) {
+        let line = min(buffer.line_count(), line);
+        let column = min(buffer.line_length(line), column);
+        self.move_to(line, column);
+    }
+
+    fn move_up<T: TextBuffer>(&mut self, buffer: &T) {
         let previous_line = self.line().saturating_sub(1);
         self.move_to(
             previous_line,
@@ -365,7 +371,7 @@ impl MultiCursor<Cursor> {
 
 impl<C : VirtualCursor> VirtualCursor for MultiCursor<C> {
 
-    fn move_up<T: TextBuffer<Item=u8>>(&mut self, buffer: &T) {
+    fn move_up<T: TextBuffer>(&mut self, buffer: &T) {
         for cursor in &mut self.cursors {
             cursor.move_up(buffer);
         }

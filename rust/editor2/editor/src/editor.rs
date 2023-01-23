@@ -519,7 +519,7 @@ impl Editor {
         for widget in self.widget_store.iter_mut() {
             if widget.mouse_over(&self.context.mouse_position) {
                 mouse_over.push(widget.id);
-                let events = widget.on_click();
+                let events = widget.on_click(&self.context.mouse_position);
                 for event in events.iter() {
                     self.events.push(event.clone());
                 }

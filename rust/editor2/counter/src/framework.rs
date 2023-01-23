@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 
 
 #[link(wasm_import_module = "host")]
@@ -57,8 +59,8 @@ impl Rect {
         Self {
             x: self.x + x,
             y: self.y + y,
-            width: self.width - x,
-            height: self.height - y,
+            width: self.width - x * 2.0,
+            height: self.height - y * 2.0,
         }
 
     }
@@ -117,22 +119,29 @@ impl Canvas {
         }
     }
 
-    pub fn set_color(&self, color: Color) {
+    pub fn set_color(&self, color: &Color) {
         unsafe {
             set_color(color.r, color.g, color.b, color.a);
         }
     }
 }
 
+pub static mut DEBUG : Vec<String> = Vec::new();
+
 pub trait App {
     type State;
     fn init() -> Self;
     fn draw(&mut self);
-    fn on_click(&mut self);
+    fn on_click(&mut self, x: f32, y: f32);
     fn on_key(&mut self, input: KeyboardInput);
     fn on_scroll(&mut self, x: f64, y: f64);
     fn get_state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State);
+    fn add_debug<T: Debug>(&self, name: &str, value: T) {
+        unsafe {
+            DEBUG.push(format!("{}: {:?}", name, value));
+        }
+    }
 }
 
 mod macros {
@@ -142,11 +151,20 @@ mod macros {
         ($app:ident) => {
             use once_cell::sync::Lazy;
             use $crate::framework::{PointerLengthString, KeyboardInput};
+            use $crate::framework::DEBUG;
             static mut APP : Lazy<$app> = Lazy::new(|| $app::init());
 
             #[no_mangle]
-            pub extern "C" fn on_click() {
-                unsafe { APP.on_click() }
+            pub extern "C" fn on_click(x: f32, y: f32) {
+                unsafe { APP.on_click(x, y) }
+            }
+
+            pub extern "C" fn draw_debug() {
+                let mut s = String::new();
+                for line in unsafe { &DEBUG } {
+                    s.push_str(line);
+                    s.push_str("\n");
+                }
             }
 
             #[no_mangle]

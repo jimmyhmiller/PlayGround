@@ -178,10 +178,10 @@ impl WasmContext {
         Ok(())
     }
 
-    pub fn draw(&mut self, canvas: &mut Canvas) -> Result<Size, Box<dyn Error>> {
+    pub fn draw(&mut self, fn_name: &str, canvas: &mut Canvas) -> Result<Size, Box<dyn Error>> {
         let mut max_width = 0.0;
         let mut max_height = 0.0;
-        if let Some(func) = self.instance.get_func(&mut self.store, "draw") {
+        if let Some(func) = self.instance.get_func(&mut self.store, fn_name) {
             let func = func.typed::<(), ()>(&mut self.store)?;
             func.call(&mut self.store, ())?;
             let state = &mut self.store.data_mut();
@@ -259,10 +259,10 @@ impl WasmContext {
         })
     }
 
-    pub fn on_click(&mut self) -> Result<(), Box<dyn Error>> {
+    pub fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         if let Some(func) = self.instance.get_func(&mut self.store, "on_click") {
-            let func = func.typed::<(), ()>(&mut self.store)?;
-            func.call(&mut self.store, ())?;
+            let func = func.typed::<(f32, f32), ()>(&mut self.store)?;
+            func.call(&mut self.store, (x, y))?;
         } else {
             println!("No on_click function");
         }
