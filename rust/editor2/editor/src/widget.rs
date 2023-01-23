@@ -358,15 +358,41 @@ impl Wasm {
         }
     }
 
-    fn draw(&mut self, canvas: &mut Canvas) -> Size {
-        let size = self.context.as_mut().unwrap().draw(canvas).unwrap();
-        size
+    fn draw(&mut self, canvas: &mut Canvas) -> Option<Size> {
+
+         match self.context.as_mut().unwrap().draw("draw", canvas) {
+            Ok(size) => {
+                Some(size)
+            }
+            Err(e) => {
+                println!("Error: {:?}", e);
+                None
+            }
+         }
     }
 
-    fn on_click(&mut self) {
+    fn draw_debug(&mut self, canvas: &mut Canvas) -> Option<Size> {
+
+        match self.context.as_mut().unwrap().draw("draw_debug", canvas) {
+           Ok(size) => {
+               Some(size)
+           }
+           Err(e) => {
+               println!("Error: {:?}", e);
+               None
+           }
+        }
+   }
+
+    fn on_click(&mut self, position: &Position) {
         // Need to figure out a better way to provide args
         // Or just not care about this generic case?
-        self.context.as_mut().unwrap().on_click().unwrap();
+        match self.context.as_mut().unwrap().on_click(position.x, position.y) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("Error: {:?}", e)
+            }
+        }
     }
     pub fn on_key(&mut self, input: KeyboardInput) {
         let (key_code, state, modifiers) = input.to_u32_tuple();
@@ -421,10 +447,17 @@ impl Widget {
         )
     }
 
-    pub fn on_click(&mut self) -> Vec<Event> {
+    pub fn on_click(&mut self, position: &Position) -> Vec<Event> {
+
+        let widget_x = position.x - self.position.x;
+        let widget_y = position.y - self.position.y;
+        let widget_space = Position {
+            x: widget_x,
+            y: widget_y,
+        };
         match &mut self.data {
             WidgetData::Wasm { wasm } => {
-                wasm.on_click();
+                wasm.on_click(&widget_space);
                 vec![]
             }
             _ => self.on_click.clone(),
@@ -436,8 +469,9 @@ impl Widget {
         if let WidgetData::Wasm { wasm } = &mut self.data {
             canvas.save();
             canvas.translate((self.position.x, self.position.y));
-            let size = wasm.draw(canvas);
-            self.size = size;
+            if let Some(size) = wasm.draw(canvas) {
+                self.size = size;
+            }
             canvas.restore();
         }
 
