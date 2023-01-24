@@ -159,11 +159,20 @@ mod macros {
                 unsafe { APP.on_click(x, y) }
             }
 
+            #[no_mangle]
             pub extern "C" fn draw_debug() {
-                let mut s = String::new();
+                let foreground = Color::parse_hex("#62b4a6");
+                let background = Color::parse_hex("#530922");
+                let canvas = Canvas::new();
+                canvas.set_color(&background);
+                canvas.draw_rect(-20.0, 0.0, 300.0, 300.0);
+                canvas.set_color(&foreground);
+                canvas.translate(0.0, 30.0);
+                canvas.draw_str(&format!("Debug {}", unsafe { &DEBUG }.len()), 0.0, 0.0);
+                canvas.translate(0.0, 30.0);
                 for line in unsafe { &DEBUG } {
-                    s.push_str(line);
-                    s.push_str("\n");
+                    canvas.draw_str(line, 0.0, 0.0);
+                    canvas.translate(0.0, 30.0);
                 }
             }
 
