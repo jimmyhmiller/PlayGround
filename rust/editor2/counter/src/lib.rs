@@ -242,18 +242,32 @@ impl App for TextWidget {
             self.text_pane.cursor.handle_insert(&[char as u8], &mut self.text_pane.text_buffer);
         }
 
-        if self.text_pane.cursor.line() == self.text_pane.lines_above_scroll() {
-            // round down to the fraction of a line so the whole text is visible
-            self.text_pane.offset.y -= self.text_pane.fractional_line_offset();
-        } else if (self.text_pane.cursor.line() - self.text_pane.lines_above_scroll()) as f32 * self.text_pane.line_height > self.widget_data.size.height - 40.0 {
-            // not quite right yet
-            let diff = ((self.text_pane.cursor.line() - self.text_pane.lines_above_scroll()) as f32 * self.text_pane.line_height) - self.widget_data.size.height - 40.0;
-            self.text_pane.offset.y -= diff;
-        }else if self.text_pane.cursor.line() < self.text_pane.lines_above_scroll() {
-            self.text_pane.offset.y -= self.text_pane.line_height;
-        } else if self.text_pane.cursor.line() + 1 >= self.text_pane.lines_above_scroll() + self.text_pane.number_of_visible_lines(self.widget_data.size.height) {
-            self.text_pane.offset.y += self.text_pane.line_height;
+        match input.key_code {
+            KeyCode::UpArrow => {
+                if self.text_pane.cursor.line() == self.text_pane.lines_above_scroll() {
+                    // round down to the fraction of a line so the whole text is visible
+                    self.text_pane.offset.y -= self.text_pane.fractional_line_offset();
+                } else if self.text_pane.cursor.line() < self.text_pane.lines_above_scroll() {
+                    self.text_pane.offset.y -= self.text_pane.line_height;
+                }
+            }
+            KeyCode::DownArrow => {
+
+                let drawable_area_height = self.widget_data.size.height - 40.0;
+                let logical_line = self.text_pane.cursor.line() - self.text_pane.lines_above_scroll();
+                let line_top = logical_line as f32 * self.text_pane.line_height - self.text_pane.fractional_line_offset();
+                let diff = drawable_area_height - line_top;
+
+                if diff > 0.0 && diff < self.text_pane.line_height {
+                    // not quite right yet
+                    self.text_pane.offset.y += self.text_pane.line_height - diff;
+                }  else if self.text_pane.cursor.line() + 1 >= self.text_pane.lines_above_scroll() + self.text_pane.number_of_visible_lines(self.widget_data.size.height) {
+                    self.text_pane.offset.y += self.text_pane.line_height;
+                }
+            }
+            _ => {}
         }
+
     }
 
     fn on_scroll(&mut self, x: f64, y: f64) {

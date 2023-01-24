@@ -472,6 +472,11 @@ impl Widget {
             if let Some(size) = wasm.draw(canvas) {
                 self.size = size;
             }
+            canvas.translate((self.size.width, 0.0));
+            if let Some(size) = wasm.draw_debug(canvas) {
+                self.size.width += size.width;
+                self.size.height += size.height;
+            }
             canvas.restore();
         }
 

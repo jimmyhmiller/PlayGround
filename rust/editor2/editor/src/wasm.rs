@@ -250,7 +250,8 @@ impl WasmContext {
             }
             state.commands.clear();
         } else {
-            println!("No draw function");
+            println!("No {} function", fn_name
+        );
         }
 
         Ok(Size {
