@@ -161,11 +161,15 @@ mod macros {
 
             #[no_mangle]
             pub extern "C" fn draw_debug() {
+                let debug = unsafe { &DEBUG };
+                if debug.len() == 0 {
+                    return;
+                }
                 let foreground = Color::parse_hex("#62b4a6");
-                let background = Color::parse_hex("#530922");
+                let background = Color::parse_hex("#1c041e");
                 let canvas = Canvas::new();
                 canvas.set_color(&background);
-                canvas.draw_rect(-20.0, 0.0, 300.0, 300.0);
+                canvas.draw_rrect(Rect::new(0.0, 0.0, 300.0, 300.0), 20.0);
                 canvas.set_color(&foreground);
                 canvas.translate(0.0, 30.0);
                 canvas.draw_str(&format!("Debug {}", unsafe { &DEBUG }.len()), 0.0, 0.0);
