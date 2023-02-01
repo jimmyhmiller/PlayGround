@@ -24,6 +24,7 @@ fn main() {
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks))
         .whitelist_type("OpCode")
+        .rustified_enum("OpCode")
         .whitelist_type("Chunk")
         .whitelist_type("Table")
         .whitelist_type("ObjType")
