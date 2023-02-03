@@ -481,6 +481,8 @@ static InterpretResult run() {
 
       case OP_CONSTANT: {
         Value constant = READ_CONSTANT();
+        uint64_t num = AS_NUMBER(constant);
+        num++;
         push(constant);
         break;
       }
