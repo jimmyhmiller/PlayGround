@@ -137,6 +137,13 @@ impl App for TextWidget {
     }
 
     fn draw(&mut self) {
+
+        let process_id = self.start_process("test-process".to_string());
+        self.send_message(process_id, "SENDING!".to_string());
+        println!("Got Message {}", self.recieve_last_message(process_id));
+
+
+
         let canvas = Canvas::new();
 
 

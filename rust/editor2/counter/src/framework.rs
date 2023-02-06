@@ -13,6 +13,10 @@ extern "C" {
     fn draw_rrect(x: f32, y: f32, width: f32, height: f32, radius: f32);
     fn translate(x: f32, y: f32);
     fn restore();
+    fn start_process_low_level(ptr: i32, len: i32) -> i32;
+    fn send_message_low_level(process_id: i32, ptr: i32, len: i32);
+    #[allow(improper_ctypes)]
+    fn recieve_last_message_low_level(process_id: i32) -> (i32, i32);
 }
 
 #[repr(C)]
@@ -137,6 +141,25 @@ pub trait App {
     fn on_scroll(&mut self, x: f64, y: f64);
     fn get_state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State);
+    fn start_process(&mut self, process: String) -> i32 {
+        unsafe {
+            start_process_low_level(process.as_ptr() as i32, process.len() as i32)
+        }
+    }
+    fn send_message(&mut self, process_id: i32, message: String) {
+        unsafe {
+            send_message_low_level(process_id, message.as_ptr() as i32, message.len() as i32);
+        }
+    }
+    fn recieve_last_message(&mut self, process_id: i32) -> String {
+        let mut buffer = String::new();
+        unsafe {
+            let (ptr, len) = recieve_last_message_low_level(process_id);
+            println!("{} {}", ptr, len);
+            buffer = String::from_raw_parts(ptr as *mut u8, len as usize, len as usize);
+        }
+        buffer
+    }
     fn add_debug<T: Debug>(&self, name: &str, value: T) {
         unsafe {
             DEBUG.push(format!("{}: {:?}", name, value));

@@ -1,5 +1,5 @@
 use skia_safe::{Canvas, Font, FontStyle, Typeface};
-use std::error::Error;
+use std::{error::Error, collections::HashMap, hash::Hash, mem};
 use wasmtime::{self, AsContextMut, Caller, Engine, Linker, Memory, Module, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
 
@@ -15,7 +15,8 @@ unsafe fn _any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
     ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
 }
 
-enum Commands {
+#[derive(Debug)]
+enum Command {
     DrawRect(f32, f32, f32, f32),
     DrawString(String, f32, f32),
     ClipRect(f32, f32, f32, f32),
@@ -24,11 +25,17 @@ enum Commands {
     SetColor(f32, f32, f32, f32),
     Restore,
     Save,
+    StartProcess(String),
+    SendProcessMessage(i32, String),
+    ReceiveLastProcessMessage(i32),
 }
 
 struct State {
     wasi: WasiCtx,
-    commands: Vec<Commands>,
+    commands: Vec<Command>,
+    // Probably not the best structure
+    // but lets start here
+    process_messages: HashMap<i32, String>,
 }
 
 impl State {
@@ -36,6 +43,7 @@ impl State {
         Self {
             wasi,
             commands: Vec::new(),
+            process_messages: HashMap::new(),
         }
     }
 }
@@ -112,7 +120,7 @@ impl WasmContext {
             "draw_rect",
             |mut caller: Caller<'_, State>, x: f32, y: f32, width: f32, height: f32| {
                 let state = caller.data_mut();
-                state.commands.push(Commands::DrawRect(x, y, width, height));
+                state.commands.push(Command::DrawRect(x, y, width, height));
             },
         )?;
         linker.func_wrap(
@@ -121,7 +129,7 @@ impl WasmContext {
             |mut caller: Caller<'_, State>, ptr: i32, len: i32, x: f32, y: f32| {
                 let string = get_string_from_caller(&mut caller, ptr, len);
                 let state = caller.data_mut();
-                state.commands.push(Commands::DrawString(string, x, y));
+                state.commands.push(Command::DrawString(string, x, y));
             },
         )?;
         linker.func_wrap(
@@ -129,7 +137,7 @@ impl WasmContext {
             "clip_rect",
             |mut caller: Caller<'_, State>, x: f32, y: f32, width: f32, height: f32| {
                 let state = caller.data_mut();
-                state.commands.push(Commands::ClipRect(x, y, width, height));
+                state.commands.push(Command::ClipRect(x, y, width, height));
             },
         )?;
         linker.func_wrap(
@@ -137,7 +145,7 @@ impl WasmContext {
             "draw_rrect",
             |mut caller: Caller<'_, State>, x: f32, y: f32, width: f32, height: f32, radius: f32| {
                 let state = caller.data_mut();
-                state.commands.push(Commands::DrawRRect(x, y, width, height, radius));
+                state.commands.push(Command::DrawRRect(x, y, width, height, radius));
             },
         )?;
         linker.func_wrap(
@@ -145,7 +153,7 @@ impl WasmContext {
             "translate",
             |mut caller: Caller<'_, State>, x: f32, y: f32| {
                 let state = caller.data_mut();
-                state.commands.push(Commands::Translate(x, y));
+                state.commands.push(Command::Translate(x, y));
             },
         )?;
         linker.func_wrap(
@@ -153,7 +161,7 @@ impl WasmContext {
             "save",
             |mut caller: Caller<'_, State>| {
                 let state = caller.data_mut();
-                state.commands.push(Commands::Save);
+                state.commands.push(Command::Save);
             },
         )?;
         linker.func_wrap(
@@ -161,7 +169,7 @@ impl WasmContext {
             "restore",
             |mut caller: Caller<'_, State>| {
                 let state = caller.data_mut();
-                state.commands.push(Commands::Restore);
+                state.commands.push(Command::Restore);
             },
         )?;
         linker.func_wrap(
@@ -169,7 +177,53 @@ impl WasmContext {
             "set_color",
             |mut caller: Caller<'_, State>, r: f32, g: f32, b: f32, a: f32| {
                 let state = caller.data_mut();
-                state.commands.push(Commands::SetColor(r, g, b, a));
+                state.commands.push(Command::SetColor(r, g, b, a));
+            },
+        )?;
+
+        linker.func_wrap(
+            "host",
+            "start_process_low_level",
+            |mut caller: Caller<'_, State>, ptr: i32, len: i32| -> i32{
+                let process = get_string_from_caller(&mut caller, ptr, len);
+                let state = caller.data_mut();
+                state.commands.push(Command::StartProcess(process));
+                0
+            },
+        )?;
+
+        linker.func_wrap(
+            "host",
+            "send_message_low_level",
+            |mut caller: Caller<'_, State>, process_id: i32, ptr: i32, len: i32| {
+                let message = get_string_from_caller(&mut caller, ptr, len);
+                let state = caller.data_mut();
+                state.commands.push(Command::SendProcessMessage(process_id, message));
+            },
+        )?;
+
+        linker.func_wrap(
+            "host",
+            "recieve_last_message_low_level",
+            |mut caller: Caller<'_, State>, ptr: i32, process_id: i32| {
+                {
+                    let state = caller.data_mut();
+                    state.commands.push(Command::ReceiveLastProcessMessage(process_id));
+                }
+                let state = caller.data_mut();
+                let message = state.process_messages.get(&process_id).unwrap_or(&"test".to_string()).clone();
+                let message = message.as_bytes();
+                let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+                // This is wrong. I need to figure out how I'm supposed to encode this stuff
+                let store = caller.as_context_mut();
+                memory.write(store, 0, message).unwrap();
+
+                let mut bytes = [0u8; 8];
+                bytes[0..4].copy_from_slice(&(0 as i32).to_le_bytes());
+                bytes[4..8].copy_from_slice(&(message.len() as i32).to_le_bytes());
+
+                let store = caller.as_context_mut();
+                memory.write(store, ptr as usize, &bytes).unwrap();
             },
         )?;
 
@@ -190,10 +244,10 @@ impl WasmContext {
 
             for command in state.commands.iter() {
                 match command {
-                    Commands::SetColor(r, g, b, a) => {
+                    Command::SetColor(r, g, b, a) => {
                         paint.set_color(Color::new(*r, *g, *b, *a).to_color4f().to_color());
                     }
-                    Commands::DrawRect(x, y, width, height) => {
+                    Command::DrawRect(x, y, width, height) => {
                         canvas.draw_rect(
                             skia_safe::Rect::from_xywh(*x, *y, *width, *height),
                             &paint,
@@ -206,7 +260,7 @@ impl WasmContext {
                             max_height = *y + *height;
                         }
                     }
-                    Commands::DrawString(str, x, y) => {
+                    Command::DrawString(str, x, y) => {
                         let font = Font::new(
                             Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
                             32.0,
@@ -215,7 +269,7 @@ impl WasmContext {
                         canvas.draw_str(str, (*x, *y), &font, &paint);
                     }
 
-                    Commands::ClipRect(x, y, width, height) => {
+                    Command::ClipRect(x, y, width, height) => {
                         canvas.clip_rect(
                             skia_safe::Rect::from_xywh(*x, *y, *width, *height),
                             None,
@@ -228,7 +282,7 @@ impl WasmContext {
                             max_height = *height;
                         }
                     }
-                    Commands::DrawRRect(x, y, width, height, radius) => {
+                    Command::DrawRRect(x, y, width, height, radius) => {
                         let rrect = skia_safe::RRect::new_rect_xy(
                             skia_safe::Rect::from_xywh(*x, *y, *width, *height),
                             *radius,
@@ -236,14 +290,18 @@ impl WasmContext {
                         );
                         canvas.draw_rrect(&rrect, &paint);
                     }
-                    Commands::Translate(x, y) => {
+                    Command::Translate(x, y) => {
                         canvas.translate((*x, *y));
                     }
-                    Commands::Save => {
+                    Command::Save => {
                         canvas.save();
                     }
-                    Commands::Restore => {
+                    Command::Restore => {
                         canvas.restore();
+                    }
+                    c => {
+                        // Need to move things out of draw
+                        println!("Unknown command {:?}", c);
                     }
 
                 }
