@@ -24,7 +24,7 @@ Now it may seem like Wilson has some sort of anti-TDD agenda here, but Wilson is
 
 This review sets up a perfect context for our discussion. How are we to understand results like this? Particularly in relation to our own feelings about practices. How should empirical results affect the way we program?
 
-## What follows?
+## What Should We Do With Research Results?
 
 Let us set aside the precise conclusions of these studies for a moment. Let’s instead play in our imaginary world taking each possibility in turn. These possibilities are as follows:
 
@@ -53,7 +53,7 @@ So now we have a valid argument! We can further imagine pretty easily how to get
 
 So what would it look make a logically valid argument for p4? Well, we have actually come upon a classic philosophical problem, the is/ought problem. This was a question raised by David Hume where (on some readings) he showed that there is no way to go from a statement of fact “is” to a logical conclusion of what one ought to do. Not wanting to get off topic we will not dive into this issue, but it is important that we have this difficulty in mind.
 
-### A Practical Argument
+### A Practical Argument for TDD
 
 Let’s perhaps loosen our grip on searching for logical soundness and instead try to aim for a bit more practical argument. Kant makes a distinction between what is called a “Categorical Imperative” and a “Hypothetical Imperative”.  A Categorical Imperative is an ought statement that is true regardless of our intentions or desires. “Everyone ought to respect human dignity”. A Hypothetical Imperative is relative to our desires “If I want to cook at home tonight, I ought to go grocery shopping”. Hypothetical imperatives are what we use to reason about achieving our goals.
 
@@ -69,15 +69,17 @@ Perhaps not the most elegant syllogism, but I think it gets the point across.  I
 
 We could continue to Chisholm this argument by adding clauses about “all things being equal” or something like that. But I’m not sure we’d benefit from that. As we made our claim narrower and narrower we’d move further and further away from the idea we are interested in “How should we change our practice given these various empirical findings?”.  It seems that for the positive case the answer is it depends. It depends on our goals, desires, etc, and if those align. Does this result generalize beyond P(positive) to P(negative) and P(no)?
 
-#### Does this generalize?
+### Negative and Neutral Cases
 
-For the neutral case (P(no)), it is hard to see how it would be any different. If TDD made no difference in terms of the criteria listed, then how could it be anything other than a matter of perference?  But what about a negative finding? Don’t we have a greater obligation to not negatively impact testing effort, external code quality, and developer productivity? Let’s assume we do, does it follow that we ought to not practice TDD?
+For the neutral case (P(no)), it is hard to see how it would be any different. If TDD made no difference in terms of the criteria listed, then how could it be anything other than a matter of preference?  But what about a negative finding? Don’t we have a greater obligation to not negatively impact testing effort, external code quality, and developer productivity? Let’s assume we do, does it follow that we ought to not practice TDD?
 
 It seems clear that just as with the positive case, there can be confounding factors. What if TDD does in fact lower these metrics, but increases others we care about more? What if not practicing TDD causes us to feel anxiety? Imagine in the extreme case where we can’t even bring ourselves to program if we don’t do TDD. If we have an obligation to program, we would actually have an obligation to do TDD despite the empirical evidence telling us these metrics are negatively impacted.
 
-### What we can say, believe, and know
+## Other Consequences
 
 So even on the contentious assumption that we have certain obligations towards not negatively impacting these metrics, it doesn’t follow from the empirical evidence that we ought not practice TDD. So what could follow? Well, we might get a hint from Greg Wilson’s quote above about his sadness regarding the conclusion TDD research has come to.
+
+### The Personal Consequence
 
 > those of us who believe [that TDD makes us more productive] might just have to accept that our self-assessment is wrong.
 
@@ -93,13 +95,13 @@ It is very easy to confuse the statistical effect a study has found with a perso
 
 Now I fear what I just said will be misunderstood. Imagine this, someone does an empirical study on only me. They measure my productivity in a way I agree is a good measure, their procedures are solid, and everything is up to my standards. Imagine now that they find that I am not more productive with TDD. Is what I just said above license to ignore the finding? Of course not. The point is that we can’t go from a statistical case to a personal conclusion, not that empirical evidence has no bearing.
 
-#### Should we Change our Advocacy?
+### Change in Advocacy
 
 Perhaps instead of a change in belief, we find a change in behavior around advocacy. If we find that P(negative) is true, perhaps we shouldn’t advocate for people to practice TDD. But why exactly think that? Perhaps our advocacy was based on the belief that P(positive) was true. If so, then it would definitely make sense to rethink our behaviors. But that seems unlikely as we will explore more in a bit. Absent that, has P(negative) given us any reason to abandon our advocacy? Well no. We can clearly advocate for things that we don’t believe increase these metrics. Perhaps we simply enjoy TDD. Isn’t that enough for advocacy?
 
 But even if it doesn’t obligate us to no longer advocate for TDD, shouldn’t P(negative) lower the intensity of our advocacy? Should we be as strident in our advocacy of TDD? Well, that depends. Was our prior level of intensity determined in a substantial way by a belief that P(positive) was true? If so, then yes, it seems we should lower our level of intensity. But absent that, why think so? It is hard to see a reason why.
 
-#### Do we now know instead of merely believe?
+### Change from Belief to Knowledge
 
 If our advocacy behavior needn’t change, maybe all that has changed is our relation to the proposition. Imagine before reading the research we believed that P(positive) and after reading the research we find that in fact, we were right, the research shows that P(positive) is true. The suggestion made by some advocates of empirical software methodology is now we have gained something. Before we just “believed” that P(positive) was true, now, we “know” that P(positive) is true. Now our actions can be based on knowledge rather than “opinions” or “superstition”.
 
@@ -109,7 +111,7 @@ For about 2000+ years there was general agreement on what knowledge amounted to.
 
 In other words, this discussion about studies taking us from “I believe X” to “I know X” is founded on a confusion. In order to know X, we must also believe X. Further, the bringing up of supserstition has no place here. There are of course beliefs that people have on the basis of superstition, but there’s no reason here to think that is the case. So lets explore what we could have known absent a study and what we couldn’t. While we may not have an exact criteria of knowledge, for our purposes we will use the following formulation, knowledge is warranted true belief. What is warrant? Well, we aren’t sure of the details, but it is that criteria that turns “mere true belief” into knowledge. So the question becomes, what can we be warranted in believing? Let’s look at the details.
 
-#### Can we know without research?
+### What We Knew Before
 
 Could we have known P(positive) without having read the research? Well, one way of taking P(positive) is a rather particular claim. It is a statistical claim about the effect of TDD on some population of engineers. Taken that way it seems unlikely that before the research anyone knew P(positive). But it is also equally unlikely that anyone believed P(positive) to be true. What they probably believed was something a bit more vague than that. They might have believed that some people could become more productive with TDD. But this isn’t the same as the claim that there would be a statistically significant result in a controlled test.
 
@@ -127,7 +129,7 @@ It is clear we can. It is fairly common to take solid empirical evidence and ove
 
 But of course everyone recognizes this. What is usually said is that while empirical studies don’t lead us infallibly to knowledge, it is by far the best way we know to lead us to knowledge, and further it is a self-correcting mechanism. Here you will find no argument from me. In matters of fact, empirical evidence is a great mechanism. I will just highlight again that we must not mistake questions of “is” with questions of “ought”. Nor should we conflate what an empirical study shows with our everyday beliefs.
 
-#### Belief Structure
+### Superstition, Knowledge, and Rhetoric
 
 The important point to underscore here is that regardless of a change in our belief structure, what we haven’t seen is a move from “superstition” and “opinion” to knowledge. These suggestions are mere rhetoric. They oversimplify the noetic structures of human beings. Not only can we know the more modest claims we often believe without studies, our more grandiose claims don’t ever rise to the level of knowledge. Further, even if we accept a study, that doesn’t proclude us from believing on the basis of “superstition” or “opinion”. We might accept a study not on its merits, but because it makes us feel good. We are complicated believers that cannot be fit into a simple binary.
 

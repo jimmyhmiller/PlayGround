@@ -1,0 +1,145 @@
+(
+    position: (
+        x: 694.72656,
+        y: 239.69531,
+    ),
+    size: (
+        width: 200.0,
+        height: 100.0,
+    ),
+    on_click: [
+        SaveWidgets,
+    ],
+    data: Noop,
+);
+(
+    position: (
+        x: 1861.7891,
+        y: 794.66406,
+    ),
+    size: (
+        width: 512.0,
+        height: 512.0,
+    ),
+    on_click: [],
+    data: Image(
+        data: (
+            path: "./resources/test.png",
+        ),
+    ),
+);
+(
+    position: (
+        x: 362.59375,
+        y: 648.9219,
+    ),
+    size: (
+        width: 100.0,
+        height: 100.0,
+    ),
+    on_click: [
+        SaveWidgets,
+    ],
+    data: Noop,
+);
+(
+    position: (
+        x: 628.3203,
+        y: 1093.2344,
+    ),
+    size: (
+        width: 100.0,
+        height: 100.0,
+    ),
+    on_click: [],
+    data: Circle(
+        radius: 10.0,
+        color: (
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        ),
+    ),
+);
+(
+    position: (
+        x: 814.78125,
+        y: 725.7344,
+    ),
+    size: (
+        width: 500.0,
+        height: 500.0,
+    ),
+    on_click: [],
+    data: TextPane(
+        text_pane: (
+            contents: "Widget(\n    position: Position(\n        x: 500.0,\n        y: 500.0,\n    ),\n    size: Size(\n        width: 100.0,\n        height: 100.0,\n    ),\n    on_click: [],\n    data: Compound(\n        children: [\n            2,\n            3,\n            5,\n        ],\n    ),\n)",
+            line_height: 40.0,
+            offset: (
+                x: 0.0,
+                y: 0.0,
+            ),
+        ),
+    ),
+);
+(
+    position: (
+        x: 173.13281,
+        y: 54.148438,
+    ),
+    size: (
+        width: 200.0,
+        height: 200.0,
+    ),
+    on_click: [],
+    data: Text(
+        text: "Lith",
+        text_options: (
+            font_family: "Ubuntu Mono",
+            font_weight: Bold,
+            size: 120.0,
+            color: (
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            ),
+        ),
+    ),
+);
+(
+    position: (
+        x: 628.3203,
+        y: 1093.2344,
+    ),
+    size: (
+        width: 100.0,
+        height: 100.0,
+    ),
+    on_click: [],
+    data: Compound(
+        children: [
+            2,
+            3,
+            5,
+        ],
+    ),
+);
+(
+    position: (
+        x: 1789.6521,
+        y: 318.92163,
+    ),
+    size: (
+        width: 300.0,
+        height: 300.0,
+    ),
+    on_click: [],
+    data: Wasm(
+        wasm: (
+            path: "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/target/wasm32-wasi/debug/counter.wasm",
+            state: Some("{\"contents\":\"bbbbb\\nbbbbbb\\nbbbbb\\nbbbbbb\\nbbbbb\\nbbbbbb\\nbbbbb\\nbbbbbb\\nbbbba\\naaaaaa\\naaaaa\\naaabbb\\n\",\"line_height\":30.0,\"offset\":{\"x\":0.0,\"y\":0.0}}"),
+        ),
+    ),
+);
