@@ -1,19 +1,38 @@
-#[no_mangle]
-pub extern "C" fn answer(s: &MyStruct) -> i32 {
-    println!("a {} b {}", s.a, s.b);
-    (unsafe { foo(*s) }) + 42
+use framework::{App, Canvas};
+mod framework;
+
+struct Counter {
+    count: isize,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct MyStruct {
-    pub a: i32,
-    pub b: i32,
+impl App for Counter {
+    type State = isize;
+
+    fn init() -> Self {
+        Self {
+            count: 0,
+        }
+    }
+
+    fn draw(&mut self) {
+        let canvas = Canvas::new();
+        canvas.draw_rect(0.0, 0.0, 300 as f32, 100 as f32);
+        canvas.draw_str(&format!("Count: {}", self.count), 40.0, 50.0);
+    }
+
+    fn on_click(&mut self) {
+        self.count += 1;
+    }
+
+    fn get_state(&self) -> Self::State {
+        self.count
+    }
+
+    fn set_state(&mut self, state: Self::State) {
+        self.count = state;
+    }
 }
 
 
-#[link(wasm_import_module = "host")]
-extern "C" {
-    // imports the name `foo` from `the-wasm-import-module`
-    fn foo(s: MyStruct) -> i32;
-}
+app!(Counter);
+
