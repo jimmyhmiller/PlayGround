@@ -482,8 +482,8 @@ impl Editor {
         // But I don't have a real defined z-order
         // Maybe I should do the first? Or the last?
         // Not sure
+        let mut found_a_widget = false;
         for widget in self.widget_store.iter() {
-            let mut found_a_widget = false;
             if widget.mouse_over(&self.context.mouse_position) {
                 found_a_widget = true;
                 mouse_over.push(widget.id);
