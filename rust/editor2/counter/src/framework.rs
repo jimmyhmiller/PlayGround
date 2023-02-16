@@ -481,6 +481,7 @@ impl Modifiers {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct KeyboardInput {
     pub state: KeyState,
     pub key_code: KeyCode,

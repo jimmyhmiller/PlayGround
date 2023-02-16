@@ -1,9 +1,16 @@
+use futures::{executor, TryFutureExt, FutureExt, Future, future::BoxFuture, task::LocalSpawnExt};
 use skia_safe::{Canvas, Font, FontStyle, Typeface};
-use std::{error::Error, collections::HashMap, hash::Hash, mem};
-use wasmtime::{self, AsContextMut, Caller, Engine, Linker, Memory, Module, Store};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
+use std::{
+    collections::HashMap, error::Error, hash::Hash, mem, path::Path, sync::Arc, thread,
+    time::Duration, task::Poll, future::poll_fn,
+};
+use wasmtime::{
+    self, AsContext, AsContextMut, Caller, Config, Engine, Linker, Memory, Module, Store,
+    TypedFunc, WasmParams, WasmResults, Instance,
+};
+use wasmtime_wasi::{Dir, WasiCtx, WasiCtxBuilder};
 
-use crate::widget::{Size, Color};
+use crate::widget::{Color, Size};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct PointerLengthString {
@@ -48,12 +55,16 @@ impl State {
     }
 }
 
+
 pub struct WasmContext {
     instance: wasmtime::Instance,
     store: Store<State>,
-    engine: Engine,
+    engine: Arc<Engine>,
     path: String,
     linker: Linker<State>,
+    executor: crate::executor::Executor,
+    spawner: Arc<crate::executor::Spawner>,
+    futures: Vec<BoxFuture<'static, Result<(), anyhow::Error>>>,
 }
 
 fn get_string_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> String {
@@ -74,7 +85,12 @@ fn get_string_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> Str
     string.to_string()
 }
 
-fn get_string_from_memory(memory: &Memory, store: &mut Store<State>, ptr: i32, len: i32) -> Option<String> {
+fn get_string_from_memory(
+    memory: &Memory,
+    store: &mut Store<State>,
+    ptr: i32,
+    len: i32,
+) -> Option<String> {
     use core::str::from_utf8;
     let data = memory
         .data(store)
@@ -88,14 +104,23 @@ impl WasmContext {
     pub fn new(wasm_path: &str) -> Result<Self, Box<dyn Error>> {
         // An engine stores and configures global compilation settings like
         // optimization level, enabled wasm features, etc.
-        let engine = Engine::default();
+
+        let mut config = Config::new();
+        config.epoch_interruption(true);
+        config.async_support(true);
+        let engine = Arc::new(Engine::new(&config).unwrap());
 
         let mut linker: Linker<State> = Linker::new(&engine);
         wasmtime_wasi::add_to_linker(&mut linker, |s| &mut s.wasi)?;
 
+        let dir = Dir::from_std_file(
+            std::fs::File::open(Path::new(wasm_path).parent().unwrap()).unwrap(),
+        );
+
         let wasi = WasiCtxBuilder::new()
             .inherit_stdio()
             .inherit_args()?
+            .preopened_dir(dir, ".")?
             .build();
 
         Self::setup_host_functions(&mut linker)?;
@@ -103,7 +128,22 @@ impl WasmContext {
         let mut store = Store::new(&engine, State::new(wasi));
         let module = Module::from_file(&engine, wasm_path)?;
 
-        let instance = linker.instantiate(&mut store, &module)?;
+        let instance = linker.instantiate_async(&mut store, &module);
+        let instance = executor::block_on(instance)?;
+
+
+
+
+        let engine_clone = engine.clone();
+        thread::spawn(move || {
+            // With this cause problems with multiple wasm modules or reloads or anything?
+            loop {
+                thread::sleep(Duration::from_millis(4));
+                engine_clone.increment_epoch();
+            }
+        });
+
+        let (executor, spawner) = crate::executor::new_executor_and_spawner();
 
         Ok(Self {
             path: wasm_path.to_string(),
@@ -111,8 +151,61 @@ impl WasmContext {
             linker,
             store,
             engine,
+            executor,
+            spawner: Arc::new(spawner),
+            futures: Vec::new(),
         })
     }
+
+    fn call_typed_func<Params, Results>(
+        &mut self,
+        name: &str,
+        params: Params,
+        deadline: u64,
+    ) -> anyhow::Result<Results>
+        where
+        Params: WasmParams,
+        Results: WasmResults
+         {
+        self.store.epoch_deadline_async_yield_and_update(deadline * 100);
+
+        let func = self.instance.get_typed_func::<Params, Results>(&mut self.store, name)?;
+        let result = func.call_async(&mut self.store, params);
+
+        let result = executor::block_on(result);
+        result
+    }
+
+    async fn call_draw_async(
+        instance: &Instance,
+        store: &mut Store<State>,
+        name: String,
+        deadline: u64,
+    ) -> Result<(), anyhow::Error> {
+        // self.store.epoch_deadline_async_yield_and_update(deadline * 100);
+
+        let func = instance.get_typed_func::<(), ()>(store.as_context_mut(), &name).unwrap();
+        match func.call_async(store.as_context_mut(), ()).await {
+            Ok(_) => Ok(()),
+            Err(_) => Err(anyhow::anyhow!("Error calling draw function")),
+        }
+    }
+
+    // fn call_typed_func_async<Params, Results>(
+    //     &mut self,
+    //     name: &str,
+    //     params: Params,
+    //     deadline: u64,
+    // ) -> anyhow::Result<()>
+    //     where
+    //     Params: WasmParams + 'static,
+    //     Results: WasmResults + 'static
+    //     {
+    //         let result = self.call_typed_func_async_inner::<Params, Results>(name, params, deadline);
+    //         self.spawner.spawn(result.map(|_| ()));
+    //         Ok(())
+    //     }
+
 
     fn setup_host_functions(linker: &mut Linker<State>) -> Result<(), Box<dyn Error>> {
         linker.func_wrap(
@@ -143,9 +236,16 @@ impl WasmContext {
         linker.func_wrap(
             "host",
             "draw_rrect",
-            |mut caller: Caller<'_, State>, x: f32, y: f32, width: f32, height: f32, radius: f32| {
+            |mut caller: Caller<'_, State>,
+             x: f32,
+             y: f32,
+             width: f32,
+             height: f32,
+             radius: f32| {
                 let state = caller.data_mut();
-                state.commands.push(Command::DrawRRect(x, y, width, height, radius));
+                state
+                    .commands
+                    .push(Command::DrawRRect(x, y, width, height, radius));
             },
         )?;
         linker.func_wrap(
@@ -156,22 +256,14 @@ impl WasmContext {
                 state.commands.push(Command::Translate(x, y));
             },
         )?;
-        linker.func_wrap(
-            "host",
-            "save",
-            |mut caller: Caller<'_, State>| {
-                let state = caller.data_mut();
-                state.commands.push(Command::Save);
-            },
-        )?;
-        linker.func_wrap(
-            "host",
-            "restore",
-            |mut caller: Caller<'_, State>| {
-                let state = caller.data_mut();
-                state.commands.push(Command::Restore);
-            },
-        )?;
+        linker.func_wrap("host", "save", |mut caller: Caller<'_, State>| {
+            let state = caller.data_mut();
+            state.commands.push(Command::Save);
+        })?;
+        linker.func_wrap("host", "restore", |mut caller: Caller<'_, State>| {
+            let state = caller.data_mut();
+            state.commands.push(Command::Restore);
+        })?;
         linker.func_wrap(
             "host",
             "set_color",
@@ -184,7 +276,7 @@ impl WasmContext {
         linker.func_wrap(
             "host",
             "start_process_low_level",
-            |mut caller: Caller<'_, State>, ptr: i32, len: i32| -> i32{
+            |mut caller: Caller<'_, State>, ptr: i32, len: i32| -> i32 {
                 let process = get_string_from_caller(&mut caller, ptr, len);
                 let state = caller.data_mut();
                 state.commands.push(Command::StartProcess(process));
@@ -198,7 +290,9 @@ impl WasmContext {
             |mut caller: Caller<'_, State>, process_id: i32, ptr: i32, len: i32| {
                 let message = get_string_from_caller(&mut caller, ptr, len);
                 let state = caller.data_mut();
-                state.commands.push(Command::SendProcessMessage(process_id, message));
+                state
+                    .commands
+                    .push(Command::SendProcessMessage(process_id, message));
             },
         )?;
 
@@ -208,10 +302,16 @@ impl WasmContext {
             |mut caller: Caller<'_, State>, ptr: i32, process_id: i32| {
                 {
                     let state = caller.data_mut();
-                    state.commands.push(Command::ReceiveLastProcessMessage(process_id));
+                    state
+                        .commands
+                        .push(Command::ReceiveLastProcessMessage(process_id));
                 }
                 let state = caller.data_mut();
-                let message = state.process_messages.get(&process_id).unwrap_or(&"test".to_string()).clone();
+                let message = state
+                    .process_messages
+                    .get(&process_id)
+                    .unwrap_or(&"test".to_string())
+                    .clone();
                 let message = message.as_bytes();
                 let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
                 // This is wrong. I need to figure out how I'm supposed to encode this stuff
@@ -232,85 +332,114 @@ impl WasmContext {
         Ok(())
     }
 
+    async fn run_async(&mut self) {
+        let func = self.instance.get_typed_func::<(), ()>(&mut self.store, "draw").unwrap();
+        let result = func.call_async(&mut self.store, ()).await;
+    }
+
+
+    // pub fn ownership(mut self) -> Result<(), Box<dyn Error>> {
+    //     let mut local_pool = futures::executor::LocalPool::new();
+    //     let spawner = local_pool.spawner();
+    //     let func = self.instance.get_typed_func::<(), ()>(&mut self.store, "draw")?;
+    //     let mut future = Box::pin(func.call_async(&mut self.store, ()).map(|_| ()));
+    //     spawner.spawn_local(future);
+    //     Ok(())
+    // }
+
     pub fn draw(&mut self, fn_name: &str, canvas: &mut Canvas) -> Result<Size, Box<dyn Error>> {
+
+        let mut local_pool = futures::executor::LocalPool::new();
+        let spawner = local_pool.spawner();
+
+        self.executor.run(Duration::from_millis(16));
+
         let mut max_width = 0.0;
         let mut max_height = 0.0;
-        if let Some(func) = self.instance.get_func(&mut self.store, fn_name) {
-            let func = func.typed::<(), ()>(&mut self.store)?;
-            func.call(&mut self.store, ())?;
-            let state = &mut self.store.data_mut();
 
-            let mut paint = skia_safe::Paint::default();
+        let fn_name = fn_name.clone();
+        // let spawner = self.spawner.clone();
 
-            for command in state.commands.iter() {
-                match command {
-                    Command::SetColor(r, g, b, a) => {
-                        paint.set_color(Color::new(*r, *g, *b, *a).to_color4f().to_color());
-                    }
-                    Command::DrawRect(x, y, width, height) => {
-                        canvas.draw_rect(
-                            skia_safe::Rect::from_xywh(*x, *y, *width, *height),
-                            &paint,
-                        );
-                        // This is not quite right because of translate and stuff.
-                        if *x + *width > max_width {
-                            max_width = *x + *width;
-                        }
-                        if *y + *height > max_height {
-                            max_height = *y + *height;
-                        }
-                    }
-                    Command::DrawString(str, x, y) => {
-                        let font = Font::new(
-                            Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
-                            32.0,
-                        );
-                        // No good way right now to find bounds. Need to think about this properly
-                        canvas.draw_str(str, (*x, *y), &font, &paint);
-                    }
 
-                    Command::ClipRect(x, y, width, height) => {
-                        canvas.clip_rect(
-                            skia_safe::Rect::from_xywh(*x, *y, *width, *height),
-                            None,
-                            None,
-                        );
-                        if *width > max_width {
-                            max_width = *width;
-                        }
-                        if *height > max_height {
-                            max_height = *height;
-                        }
-                    }
-                    Command::DrawRRect(x, y, width, height, radius) => {
-                        let rrect = skia_safe::RRect::new_rect_xy(
-                            skia_safe::Rect::from_xywh(*x, *y, *width, *height),
-                            *radius,
-                            *radius,
-                        );
-                        canvas.draw_rrect(&rrect, &paint);
-                    }
-                    Command::Translate(x, y) => {
-                        canvas.translate((*x, *y));
-                    }
-                    Command::Save => {
-                        canvas.save();
-                    }
-                    Command::Restore => {
-                        canvas.restore();
-                    }
-                    c => {
-                        // Need to move things out of draw
-                        println!("Unknown command {:?}", c);
-                    }
+        // let func = self.instance.get_typed_func::<(), ()>(&mut self.store, "draw")?;
+        // let mut future = Box::pin(func.call_async(&mut self.store, ()).map(|_| ()));
 
-                }
-            }
-            state.commands.clear();
-        } else {
-            println!("No {} function", fn_name
-        );
-        }
+
+
+        // spawner.spawn_local(future);
+
+        local_pool.run_until(futures_timer::Delay::new(Duration::from_millis(4)));
+
+        // self.futures.push(Box::pin(result));
+
+        // let result = Self::call_draw_async(&instance, &mut store, fn_name.to_string(), 1);
+        // spawner.spawn(result);
+
+        // let state = &mut self.store.data_mut();
+
+        // let mut paint = skia_safe::Paint::default();
+
+        // for command in state.commands.iter() {
+        //     match command {
+        //         Command::SetColor(r, g, b, a) => {
+        //             paint.set_color(Color::new(*r, *g, *b, *a).to_color4f().to_color());
+        //         }
+        //         Command::DrawRect(x, y, width, height) => {
+        //             canvas.draw_rect(skia_safe::Rect::from_xywh(*x, *y, *width, *height), &paint);
+        //             // This is not quite right because of translate and stuff.
+        //             if *x + *width > max_width {
+        //                 max_width = *x + *width;
+        //             }
+        //             if *y + *height > max_height {
+        //                 max_height = *y + *height;
+        //             }
+        //         }
+        //         Command::DrawString(str, x, y) => {
+        //             let font = Font::new(
+        //                 Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
+        //                 32.0,
+        //             );
+        //             // No good way right now to find bounds. Need to think about this properly
+        //             canvas.draw_str(str, (*x, *y), &font, &paint);
+        //         }
+
+        //         Command::ClipRect(x, y, width, height) => {
+        //             canvas.clip_rect(
+        //                 skia_safe::Rect::from_xywh(*x, *y, *width, *height),
+        //                 None,
+        //                 None,
+        //             );
+        //             if *width > max_width {
+        //                 max_width = *width;
+        //             }
+        //             if *height > max_height {
+        //                 max_height = *height;
+        //             }
+        //         }
+        //         Command::DrawRRect(x, y, width, height, radius) => {
+        //             let rrect = skia_safe::RRect::new_rect_xy(
+        //                 skia_safe::Rect::from_xywh(*x, *y, *width, *height),
+        //                 *radius,
+        //                 *radius,
+        //             );
+        //             canvas.draw_rrect(&rrect, &paint);
+        //         }
+        //         Command::Translate(x, y) => {
+        //             canvas.translate((*x, *y));
+        //         }
+        //         Command::Save => {
+        //             canvas.save();
+        //         }
+        //         Command::Restore => {
+        //             canvas.restore();
+        //         }
+        //         c => {
+        //             // Need to move things out of draw
+        //             println!("Unknown command {:?}", c);
+        //         }
+        //     }
+        // }
+        // state.commands.clear();
 
         Ok(Size {
             width: max_width,
@@ -319,32 +448,24 @@ impl WasmContext {
     }
 
     pub fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
-        if let Some(func) = self.instance.get_func(&mut self.store, "on_click") {
-            let func = func.typed::<(f32, f32), ()>(&mut self.store)?;
-            func.call(&mut self.store, (x, y))?;
-        } else {
-            println!("No on_click function");
-        }
+        self.call_typed_func::<(f32, f32), ()>("on_click", (x, y), 1)?;
         Ok(())
     }
 
     pub fn on_scroll(&mut self, x: f64, y: f64) -> Result<(), Box<dyn Error>> {
-        if let Some(func) = self.instance.get_func(&mut self.store, "on_scroll") {
-            let func = func.typed::<(f64, f64), ()>(&mut self.store)?;
-            func.call(&mut self.store, (x, y))?;
-        } else {
-            println!("No on_scroll function");
-        }
+        self.call_typed_func::<(f64, f64), ()>("on_scroll", (x, y), 1)?;
         Ok(())
     }
 
-    pub fn on_key(&mut self, key_code: u32, state: u32, modifiers: u32) -> Result<(), Box<dyn Error>> {
-        if let Some(func) = self.instance.get_func(&mut self.store, "on_key") {
-            let func = func.typed::<(u32, u32, u32), ()>(&mut self.store)?;
-            func.call(&mut self.store, (key_code, state, modifiers))?;
-        } else {
-            println!("No on_key function");
-        }
+    pub fn on_key(
+        &mut self,
+        key_code: u32,
+        state: u32,
+        modifiers: u32,
+    ) -> Result<(), Box<dyn Error>> {
+
+        self.call_typed_func::<(u32, u32, u32), ()>("on_key", (key_code, state, modifiers), 1)?;
+
         Ok(())
     }
 
@@ -367,20 +488,29 @@ impl WasmContext {
             .unwrap()
             .into_memory()
             .unwrap();
+
+        let memory_size = memory.data_size(&mut self.store);
+
+        let data_length_in_64k_multiples = (data.len() as f32 / 65536.0).ceil() as usize;
+        if data_length_in_64k_multiples > memory_size {
+            let delta = data_length_in_64k_multiples - memory_size;
+            memory.grow(&mut self.store, delta as u64 + 10).unwrap();
+        }
         memory.write(&mut self.store, 0, &data).unwrap();
-        let func = self
-            .instance
-            .get_func(&mut self.store, "set_state")
-            .ok_or("no function set_state")?;
-        let func = func.typed::<(i32, i32), ()>(&mut self.store)?;
-        func.call(&mut self.store, (0, data.len() as i32))?;
+
+        self.store.set_epoch_deadline(1);
+        let engine = self.engine.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(5));
+            engine.increment_epoch();
+        });
+
+        self.call_typed_func::<(i32, i32), ()>("set_state", (0, data.len() as i32), 1)?;
         Ok(())
     }
 
     pub fn get_state(&mut self) -> Option<String> {
-        let func = self.instance.get_func(&mut self.store, "get_state")?;
-        let func = func.typed::<(), i32>(&mut self.store).ok()?;
-        let json_string_ptr = func.call(&mut self.store, ()).ok()?;
+        let json_string_ptr = self.call_typed_func::<(), i32>("get_state", (), 1).ok()?;
         let memory = self
             .instance
             .get_export(&mut self.store, "memory")
@@ -407,5 +537,4 @@ impl WasmContext {
         }
         json_string
     }
-
 }
