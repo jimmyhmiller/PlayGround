@@ -8,6 +8,7 @@ mod widget;
 mod window;
 mod keyboard;
 mod executor;
+mod wasm_messenger;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
