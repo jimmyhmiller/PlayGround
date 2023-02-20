@@ -10,7 +10,7 @@ use std::{
 use crate::{
     event::Event,
     fps_counter::FpsCounter,
-    widget::{Color, Position, Size, TextPane, Wasm, Widget, WidgetData, WidgetId, WidgetStore},
+    widget::{Color, Position, Size, TextPane, Wasm, Widget, WidgetData, WidgetId, WidgetStore}, wasm_messenger::{WasmMessenger, WasmId},
 };
 
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher, FsEventWatcher};
@@ -47,6 +47,8 @@ pub struct Editor {
     external_receiver: Option<Receiver<Event>>,
     debounce_watcher: Option<Debouncer<FsEventWatcher>>,
     event_loop_proxy: Option<EventLoopProxy<()>>,
+    wasm_messenger: WasmMessenger,
+    temp_wasm_ids: Vec<WasmId>,
     // points: Vec<[f64; 2]>,
 }
 
@@ -107,11 +109,13 @@ impl Editor {
         self.events.next_frame();
     }
 
-    // TODO: Figure out a better setup for this
-    // part of the problem is that scenes are not first class widgets
-    // I need to figure out that hierarchy.
-    // It will be useful for something like slideshow software
-    pub fn setup(&mut self) {}
+    pub fn setup(&mut self) {
+
+        let counter_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/target/wasm32-wasi/debug/counter.wasm";
+        for _ in 0..4 {
+            self.temp_wasm_ids.push(self.wasm_messenger.spawn_wasm(counter_path));
+        }
+    }
 
     fn setup_file_watcher(&mut self, widget_config_path: &str) {
         let widget_config_path = widget_config_path.to_string();
@@ -189,6 +193,10 @@ impl Editor {
     pub fn update(&mut self) {
         // Todo: Need to test that I am not missing any
         // events with my start and end
+
+
+        self.wasm_messenger.tick();
+
 
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
@@ -327,6 +335,8 @@ impl Editor {
             debounce_watcher: None,
             event_loop_proxy: None,
             active_widget: None,
+            wasm_messenger: WasmMessenger::new(),
+            temp_wasm_ids: vec![],
         }
     }
 
@@ -359,6 +369,10 @@ impl Editor {
             &font,
             white,
         );
+
+        for id in self.temp_wasm_ids.iter() {
+            self.wasm_messenger.send_draw(*id, "draw")
+        }
 
         let mut to_draw = vec![];
         for widget in self.widget_store.iter_mut() {

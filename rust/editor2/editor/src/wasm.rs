@@ -62,9 +62,6 @@ pub struct WasmContext {
     engine: Arc<Engine>,
     path: String,
     linker: Linker<State>,
-    executor: crate::executor::Executor,
-    spawner: Arc<crate::executor::Spawner>,
-    futures: Vec<BoxFuture<'static, Result<(), anyhow::Error>>>,
 }
 
 fn get_string_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> String {
@@ -132,8 +129,6 @@ impl WasmContext {
         let instance = executor::block_on(instance)?;
 
 
-
-
         let engine_clone = engine.clone();
         thread::spawn(move || {
             // With this cause problems with multiple wasm modules or reloads or anything?
@@ -143,7 +138,6 @@ impl WasmContext {
             }
         });
 
-        let (executor, spawner) = crate::executor::new_executor_and_spawner();
 
         Ok(Self {
             path: wasm_path.to_string(),
@@ -151,9 +145,6 @@ impl WasmContext {
             linker,
             store,
             engine,
-            executor,
-            spawner: Arc::new(spawner),
-            futures: Vec::new(),
         })
     }
 
@@ -167,7 +158,7 @@ impl WasmContext {
         Params: WasmParams,
         Results: WasmResults
          {
-        self.store.epoch_deadline_async_yield_and_update(deadline * 100);
+        self.store.epoch_deadline_async_yield_and_update(deadline * 10);
 
         let func = self.instance.get_typed_func::<Params, Results>(&mut self.store, name)?;
         let result = func.call_async(&mut self.store, params);
@@ -338,108 +329,79 @@ impl WasmContext {
     }
 
 
-    // pub fn ownership(mut self) -> Result<(), Box<dyn Error>> {
-    //     let mut local_pool = futures::executor::LocalPool::new();
-    //     let spawner = local_pool.spawner();
-    //     let func = self.instance.get_typed_func::<(), ()>(&mut self.store, "draw")?;
-    //     let mut future = Box::pin(func.call_async(&mut self.store, ()).map(|_| ()));
-    //     spawner.spawn_local(future);
-    //     Ok(())
-    // }
-
     pub fn draw(&mut self, fn_name: &str, canvas: &mut Canvas) -> Result<Size, Box<dyn Error>> {
 
-        let mut local_pool = futures::executor::LocalPool::new();
-        let spawner = local_pool.spawner();
-
-        self.executor.run(Duration::from_millis(16));
 
         let mut max_width = 0.0;
         let mut max_height = 0.0;
 
-        let fn_name = fn_name.clone();
-        // let spawner = self.spawner.clone();
+        let result : Result<(), anyhow::Error> = self.call_typed_func(fn_name, (), 1);
 
+        let state = &mut self.store.data_mut();
 
-        // let func = self.instance.get_typed_func::<(), ()>(&mut self.store, "draw")?;
-        // let mut future = Box::pin(func.call_async(&mut self.store, ()).map(|_| ()));
+        let mut paint = skia_safe::Paint::default();
 
+        for command in state.commands.iter() {
+            match command {
+                Command::SetColor(r, g, b, a) => {
+                    paint.set_color(Color::new(*r, *g, *b, *a).to_color4f().to_color());
+                }
+                Command::DrawRect(x, y, width, height) => {
+                    canvas.draw_rect(skia_safe::Rect::from_xywh(*x, *y, *width, *height), &paint);
+                    // This is not quite right because of translate and stuff.
+                    if *x + *width > max_width {
+                        max_width = *x + *width;
+                    }
+                    if *y + *height > max_height {
+                        max_height = *y + *height;
+                    }
+                }
+                Command::DrawString(str, x, y) => {
+                    let font = Font::new(
+                        Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
+                        32.0,
+                    );
+                    // No good way right now to find bounds. Need to think about this properly
+                    canvas.draw_str(str, (*x, *y), &font, &paint);
+                }
 
-
-        // spawner.spawn_local(future);
-
-        local_pool.run_until(futures_timer::Delay::new(Duration::from_millis(4)));
-
-        // self.futures.push(Box::pin(result));
-
-        // let result = Self::call_draw_async(&instance, &mut store, fn_name.to_string(), 1);
-        // spawner.spawn(result);
-
-        // let state = &mut self.store.data_mut();
-
-        // let mut paint = skia_safe::Paint::default();
-
-        // for command in state.commands.iter() {
-        //     match command {
-        //         Command::SetColor(r, g, b, a) => {
-        //             paint.set_color(Color::new(*r, *g, *b, *a).to_color4f().to_color());
-        //         }
-        //         Command::DrawRect(x, y, width, height) => {
-        //             canvas.draw_rect(skia_safe::Rect::from_xywh(*x, *y, *width, *height), &paint);
-        //             // This is not quite right because of translate and stuff.
-        //             if *x + *width > max_width {
-        //                 max_width = *x + *width;
-        //             }
-        //             if *y + *height > max_height {
-        //                 max_height = *y + *height;
-        //             }
-        //         }
-        //         Command::DrawString(str, x, y) => {
-        //             let font = Font::new(
-        //                 Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
-        //                 32.0,
-        //             );
-        //             // No good way right now to find bounds. Need to think about this properly
-        //             canvas.draw_str(str, (*x, *y), &font, &paint);
-        //         }
-
-        //         Command::ClipRect(x, y, width, height) => {
-        //             canvas.clip_rect(
-        //                 skia_safe::Rect::from_xywh(*x, *y, *width, *height),
-        //                 None,
-        //                 None,
-        //             );
-        //             if *width > max_width {
-        //                 max_width = *width;
-        //             }
-        //             if *height > max_height {
-        //                 max_height = *height;
-        //             }
-        //         }
-        //         Command::DrawRRect(x, y, width, height, radius) => {
-        //             let rrect = skia_safe::RRect::new_rect_xy(
-        //                 skia_safe::Rect::from_xywh(*x, *y, *width, *height),
-        //                 *radius,
-        //                 *radius,
-        //             );
-        //             canvas.draw_rrect(&rrect, &paint);
-        //         }
-        //         Command::Translate(x, y) => {
-        //             canvas.translate((*x, *y));
-        //         }
-        //         Command::Save => {
-        //             canvas.save();
-        //         }
-        //         Command::Restore => {
-        //             canvas.restore();
-        //         }
-        //         c => {
-        //             // Need to move things out of draw
-        //             println!("Unknown command {:?}", c);
-        //         }
-        //     }
-        // }
-        // state.commands.clear();
+                Command::ClipRect(x, y, width, height) => {
+                    canvas.clip_rect(
+                        skia_safe::Rect::from_xywh(*x, *y, *width, *height),
+                        None,
+                        None,
+                    );
+                    if *width > max_width {
+                        max_width = *width;
+                    }
+                    if *height > max_height {
+                        max_height = *height;
+                    }
+                }
+                Command::DrawRRect(x, y, width, height, radius) => {
+                    let rrect = skia_safe::RRect::new_rect_xy(
+                        skia_safe::Rect::from_xywh(*x, *y, *width, *height),
+                        *radius,
+                        *radius,
+                    );
+                    canvas.draw_rrect(&rrect, &paint);
+                }
+                Command::Translate(x, y) => {
+                    canvas.translate((*x, *y));
+                }
+                Command::Save => {
+                    canvas.save();
+                }
+                Command::Restore => {
+                    canvas.restore();
+                }
+                c => {
+                    // Need to move things out of draw
+                    println!("Unknown command {:?}", c);
+                }
+            }
+        }
+        state.commands.clear();
 
         Ok(Size {
             width: max_width,
