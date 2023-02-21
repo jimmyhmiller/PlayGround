@@ -46,7 +46,7 @@ impl App for AsmData {
         if self.xml_file_text.is_empty() {
             canvas.draw_str("No XML file loaded", 40.0, 40.0);
         } else {
-            canvas.draw_str(&self.xml_file_text, 40.0, 40.0);
+            canvas.draw_str(&format!("{}", &self.xml_file_text), 40.0, 40.0);
         }
 
         canvas.restore();
@@ -87,13 +87,14 @@ impl App for AsmData {
 
 impl AsmData {
     fn get_xml_stuff(&mut self) -> Result<(), Box<dyn Error>>  {
+        println!("get_xml_stuff");
         let xml_file_bytes = fs::read("onebigfile.xml")?;
         let xml_file_text = from_utf8(&xml_file_bytes)?;
         let xml = roxmltree::Document::parse(xml_file_text.clone())?;
 
         let result = xml;
         let result = result.root().tag_name();
-        self.xml_file_text = format!("name: {}", result.name().to_string());
+        self.xml_file_text = format!("Name: {}", result.name().to_string());
         Ok(())
     }
 
