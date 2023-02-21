@@ -7,7 +7,7 @@ use skia_safe::{
     Canvas, Color4f, Data, Font, FontStyle, Image, Paint, Point, RRect, Rect, Typeface,
 };
 
-use crate::{event::Event, wasm::WasmContext, keyboard::KeyboardInput};
+use crate::{event::Event, wasm::{WasmContext, self}, keyboard::KeyboardInput, wasm_messenger::{self, WasmMessenger, WasmId}};
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub struct Position {
@@ -148,6 +148,8 @@ pub enum WidgetData {
     },
     Wasm {
         wasm: Wasm,
+        #[serde(skip)]
+        wasm_id: WasmId,
     },
     // I probably don't need this
     // But I think no with my mouse fix
@@ -405,7 +407,8 @@ impl Wasm {
     }
 
     pub fn on_scroll(&mut self, x: f64, y: f64) {
-        self.context.as_mut().unwrap().on_scroll(x, y).unwrap();
+        // wasm_messenger.on_scroll(self., x, y);
+        // self.context.as_mut().unwrap().on_scroll(x, y).unwrap();
     }
 
     pub fn reload(&mut self) {
@@ -447,7 +450,7 @@ impl Widget {
         )
     }
 
-    pub fn on_click(&mut self, position: &Position) -> Vec<Event> {
+    pub fn on_click(&mut self, position: &Position, wasm_messenger: &mut WasmMessenger) -> Vec<Event> {
 
         let widget_x = position.x - self.position.x;
         let widget_y = position.y - self.position.y;
@@ -456,20 +459,21 @@ impl Widget {
             y: widget_y,
         };
         match &mut self.data {
-            WidgetData::Wasm { wasm } => {
-                wasm.on_click(&widget_space);
+            WidgetData::Wasm { wasm, wasm_id } => {
+                wasm_messenger.send_on_click(*wasm_id, &widget_space);
                 vec![]
             }
             _ => self.on_click.clone(),
         }
     }
 
-    pub fn draw(&mut self, canvas: &mut Canvas) -> Vec<WidgetId> {
+    pub fn draw(&mut self, canvas: &mut Canvas, wasm_messenger: &mut WasmMessenger) -> Vec<WidgetId> {
         // Have to do this to deal with mut stuff
-        if let WidgetData::Wasm { wasm } = &mut self.data {
+        if let WidgetData::Wasm { wasm, wasm_id } = &mut self.data {
             canvas.save();
             canvas.translate((self.position.x, self.position.y));
-            if let Some(size) = wasm.draw(canvas) {
+
+            if let Some(size) = wasm_messenger.draw_widget(*wasm_id, canvas) {
                 self.size = size;
             }
             canvas.translate((self.size.width, 0.0));
@@ -599,9 +603,14 @@ impl Widget {
         x >= x_min && x <= x_max && y >= y_min && y <= y_max
     }
 
-    pub fn init(&mut self) {
+    pub fn init(&mut self, wasm_messenger: &mut WasmMessenger) {
         match &mut self.data {
-            WidgetData::Wasm { wasm } => {
+            WidgetData::Wasm { wasm, wasm_id } => {
+                let new_wasm_id = wasm_messenger.new_instance(&wasm.path);
+                *wasm_id = new_wasm_id;
+                if let Some(state) = &wasm.state {
+                    wasm_messenger.send_set_state(*wasm_id, &state);
+                }
                 wasm.init();
             }
             _ => {}
@@ -610,7 +619,7 @@ impl Widget {
 
     pub fn save(&mut self) {
         match &mut self.data {
-            WidgetData::Wasm { wasm } => {
+            WidgetData::Wasm { wasm, .. } => {
                 wasm.save();
             }
             _ => {}
@@ -619,7 +628,7 @@ impl Widget {
 
     pub fn files_to_watch(&self) -> Vec<String> {
         match &self.data {
-            WidgetData::Wasm { wasm } => {
+            WidgetData::Wasm { wasm, .. } => {
                 vec![wasm.path.clone()]
             }
             WidgetData::Process { process } => {

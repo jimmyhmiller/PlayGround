@@ -10,7 +10,7 @@ use std::{
 use crate::{
     event::Event,
     fps_counter::FpsCounter,
-    widget::{Color, Position, Size, TextPane, Wasm, Widget, WidgetData, WidgetId, WidgetStore}, wasm_messenger::{WasmMessenger, WasmId},
+    widget::{Color, Position, Size, TextPane, Wasm, Widget, WidgetData, WidgetId, WidgetStore, self}, wasm_messenger::{WasmMessenger, WasmId},
 };
 
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher, FsEventWatcher};
@@ -113,7 +113,7 @@ impl Editor {
 
         let counter_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/target/wasm32-wasi/debug/counter.wasm";
         for _ in 0..4 {
-            self.temp_wasm_ids.push(self.wasm_messenger.spawn_wasm(counter_path));
+            self.temp_wasm_ids.push(self.wasm_messenger.new_instance(counter_path));
         }
     }
 
@@ -124,7 +124,7 @@ impl Editor {
         let mut debouncer : Debouncer<FsEventWatcher> = new_debouncer(Duration::from_millis(250), None, watch_raw_send).unwrap();
 
 
-        let mut watcher = debouncer.watcher();
+        let watcher = debouncer.watcher();
 
         // Probably need to debounce this
         watcher
@@ -168,7 +168,7 @@ impl Editor {
             .filter(|s| !s.is_empty())
             .map(|s| {
                 if let Ok(mut widget) = ron::de::from_str::<Widget>(s) {
-                    widget.init();
+                    widget.init(&mut self.wasm_messenger);
                     if let Some(watcher) = &mut self.debounce_watcher {
                         let watcher = watcher.watcher();
                         let files_to_watch = widget.files_to_watch();
@@ -195,6 +195,17 @@ impl Editor {
         // events with my start and end
 
 
+        // TODO: Put in better place
+        for widget in self.widget_store.iter_mut() {
+            match &widget.data {
+                WidgetData::Wasm { wasm, wasm_id } => {
+                    self.wasm_messenger.send_draw(*wasm_id, "draw");
+                }
+                _ => {}
+            }
+
+        }
+
         self.wasm_messenger.tick();
 
 
@@ -218,6 +229,7 @@ impl Editor {
             match event {
                 Event::DroppedFile { path, x, y } => {
                     if path.extension().unwrap() == "wasm" {
+                        let wasm_id = self.wasm_messenger.new_instance(path.to_str().unwrap());
                         self.widget_store.add_widget(Widget {
                             id: 0,
                             on_click: vec![],
@@ -228,6 +240,7 @@ impl Editor {
                             },
                             data: WidgetData::Wasm {
                                 wasm: Wasm::new(path.to_str().unwrap().to_string()),
+                                wasm_id,
                             },
                         });
                     } else {
@@ -264,8 +277,8 @@ impl Editor {
                                 WidgetData::TextPane { text_pane } => {
                                     text_pane.on_scroll(x, y, widget.size.height);
                                 }
-                                WidgetData::Wasm { wasm } => {
-                                    wasm.on_scroll(x, y);
+                                WidgetData::Wasm { wasm, wasm_id, } => {
+                                    self.wasm_messenger.send_on_scroll(*wasm_id, x, y);
                                 }
                                 _ => {}
                             }
@@ -306,9 +319,10 @@ impl Editor {
                 }
                 Event::ReloadWasm(path) => {
                     for widget in self.widget_store.iter_mut() {
-                        if let WidgetData::Wasm { wasm } = &mut widget.data {
+                        if let WidgetData::Wasm { wasm, wasm_id } = &mut widget.data {
                             if path == wasm.path {
-                                wasm.reload();
+                                self.wasm_messenger.send_reload(*wasm_id);
+                                // wasm.reload();
                             }
                         }
                     }
@@ -370,20 +384,16 @@ impl Editor {
             white,
         );
 
-        for id in self.temp_wasm_ids.iter() {
-            self.wasm_messenger.send_draw(*id, "draw")
-        }
-
         let mut to_draw = vec![];
         for widget in self.widget_store.iter_mut() {
-            to_draw.extend(widget.draw(canvas));
+            to_draw.extend(widget.draw(canvas, &mut self.wasm_messenger));
         }
 
         // TODO: This is bad, I need to traverse the tree. Being lazy
         // Also not even sure about compound right now
         for widget_id in to_draw {
             if let Some(widget) = self.widget_store.get_mut(widget_id) {
-                widget.draw(canvas);
+                widget.draw(canvas, &mut self.wasm_messenger);
             }
         }
     }
@@ -409,7 +419,8 @@ impl Editor {
                 if let Some(widget_id) = self.active_widget {
                     if let Some(widget) = self.widget_store.get_mut(widget_id) {
                         match widget.data {
-                            WidgetData::Wasm { ref mut wasm } => {
+                            WidgetData::Wasm { ref mut wasm, wasm_id } => {
+                                self.wasm_messenger.send_on_key(wasm_id, input);
                                 wasm.on_key(input);
                             }
                             _ => {}
@@ -533,7 +544,7 @@ impl Editor {
         for widget in self.widget_store.iter_mut() {
             if widget.mouse_over(&self.context.mouse_position) {
                 mouse_over.push(widget.id);
-                let events = widget.on_click(&self.context.mouse_position);
+                let events = widget.on_click(&self.context.mouse_position, &mut self.wasm_messenger);
                 for event in events.iter() {
                     self.events.push(event.clone());
                 }
@@ -545,8 +556,8 @@ impl Editor {
     }
 
     pub fn should_redraw(&self) -> bool {
-        self.should_redraw
-        // true
+        // self.should_redraw
+        true
     }
 
     pub fn on_window_create(&mut self, event_loop_proxy: EventLoopProxy<()>) {

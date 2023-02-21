@@ -1,4 +1,4 @@
-use std::{sync::{Arc}, collections::HashMap, time::Duration, thread, error::Error};
+use std::{sync::{Arc}, collections::HashMap, time::Duration, thread, error::Error, path::Path};
 
 
 use futures::{executor::LocalPool, task::LocalSpawnExt, channel::mpsc::{channel, Receiver, Sender}, StreamExt};
@@ -6,8 +6,9 @@ use futures::task::SpawnExt;
 use futures_timer::Delay;
 use skia_safe::{Canvas, Font, Typeface, FontStyle};
 use wasmtime::{Engine, Config, Instance, Store, Linker, Module, WasmParams, WasmResults, Caller, Memory, AsContextMut};
+use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
-use crate::widget::{Wasm, Size, Color};
+use crate::{widget::{Wasm, Size, Color, Position}, keyboard::KeyboardInput};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -21,8 +22,12 @@ pub type WasmId = u64;
 enum Payload {
     Noop,
     NewInstance(String),
-    OnClick,
+    OnClick(Position),
     Draw(String),
+    SetState(String),
+    OnScroll(f64, f64),
+    OnKey(KeyboardInput),
+    Reload,
 }
 
 struct Message {
@@ -50,8 +55,8 @@ pub struct WasmMessenger {
 impl WasmMessenger {
 
     pub fn new() -> Self {
-        let (sender, receiver) = channel::<Message>(1000);
-        let (out_sender, out_receiver) = channel::<OutMessage>(1000);
+        let (sender, receiver) = channel::<Message>(100000);
+        let (out_sender, out_receiver) = channel::<OutMessage>(100000);
         let local_pool = LocalPool::new();
         let local_spawner = local_pool.spawner();
 
@@ -77,13 +82,13 @@ impl WasmMessenger {
         self.last_wasm_id
     }
 
-    pub fn spawn_wasm(&mut self, wasm_path: &str) -> WasmId {
+    pub fn new_instance(&mut self, wasm_path: &str) -> WasmId {
         let id = self.next_wasm_id();
         self.sender.start_send(Message { wasm_id: id, payload: Payload::NewInstance(wasm_path.to_string()) }).unwrap();
         id
     }
 
-    pub fn draw_widget(&mut self, wasm_id: WasmId, canvas: &mut Canvas) {
+    pub fn draw_widget(&mut self, wasm_id: WasmId, canvas: &mut Canvas) -> Option<Size> {
         if let Some(commands) = self.wasm_draw_commands.get(&wasm_id) {
 
             let mut max_width = 0.0;
@@ -150,12 +155,15 @@ impl WasmMessenger {
                     }
                 }
             }
+            Some(Size{ width: max_width, height: max_height})
+        } else {
+            None
         }
     }
 
     pub fn tick(&mut self) {
         // Need a timeout instead
-        self.local_pool.run_until(Delay::new(Duration::from_millis(1)));
+        self.local_pool.run_until(Delay::new(Duration::from_millis(4)));
 
 
         // I need to do this slightly differently because I need to draw in the context
@@ -178,12 +186,28 @@ impl WasmMessenger {
         self.sender.start_send(Message { wasm_id, payload: Payload::Noop}).unwrap();
     }
 
-    pub fn send_on_click(&mut self, wasm_id: WasmId) {
-        self.sender.start_send(Message { wasm_id, payload: Payload::OnClick}).unwrap();
+    pub fn send_on_click(&mut self, wasm_id: WasmId, position: &Position) {
+        self.sender.start_send(Message { wasm_id, payload: Payload::OnClick(*position)}).unwrap();
     }
 
     pub fn send_draw(&mut self, wasm_id: WasmId, fn_name: &str) {
         self.sender.start_send(Message { wasm_id, payload: Payload::Draw(fn_name.to_string())}).unwrap();
+    }
+
+    pub fn send_set_state(&mut self, wasm_id: WasmId, state: &str) {
+        self.sender.start_send(Message { wasm_id, payload: Payload::SetState(state.to_string())}).unwrap();
+    }
+
+    pub fn send_on_scroll(&mut self, wasm_id: u64, x: f64, y: f64) {
+        self.sender.start_send(Message { wasm_id, payload: Payload::OnScroll(x, y)}).unwrap();
+    }
+
+    pub fn send_on_key(&mut self, wasm_id: u64, input: KeyboardInput) {
+        self.sender.start_send(Message { wasm_id, payload: Payload::OnKey(input)}).unwrap();
+    }
+
+    pub fn send_reload(&mut self, wasm_id: u64) {
+        self.sender.start_send(Message { wasm_id, payload: Payload::Reload}).unwrap();
     }
 
 }
@@ -210,7 +234,7 @@ impl WasmManager {
         thread::spawn(move || {
             loop {
                 engine_clone.increment_epoch();
-                thread::sleep(Duration::from_millis(1));
+                thread::sleep(Duration::from_millis(4));
             }
         });
 
@@ -224,9 +248,9 @@ impl WasmManager {
 
     pub async fn init(&mut self) {
         loop {
-            println!("Waiting for message");
+            // println!("Waiting for message");
             self.process_message().await;
-            println!("processed");
+            // println!("processed");
         }
     }
 
@@ -243,17 +267,17 @@ impl WasmManager {
                     if let Some(instance) = self.wasm_instances.get(&id) {
                         instance.fake_invoke().await;
                     } else {
-                        println!("Not found {}", id);
+                        println!("Not found nonp {}", id);
                     }
                 }
                 Payload::NewInstance(path) => {
                     self.new_instance(id, &path).await
                 }
-                Payload::OnClick => {
+                Payload::OnClick(position) => {
                     if let Some(instance) = self.wasm_instances.get_mut(&id) {
-                        instance.on_click(0.0, 0.0).await.unwrap();
+                        instance.on_click(position.x, position.y).await.unwrap();
                     } else {
-                        println!("Not found {}", id);
+                        println!("Not found onclick {}", id);
                     }
                 }
                 Payload::Draw(fn_name) => {
@@ -261,7 +285,36 @@ impl WasmManager {
                         let result = instance.draw(&fn_name).await.unwrap();
                         self.sender.start_send(OutMessage {wasm_id: id, payload: OutPayload::DrawCommands(result)}).unwrap();
                     } else {
-                        println!("Not found {}", id);
+                        println!("Not found draw {}", id);
+                    }
+                }
+                Payload::SetState(state) => {
+                    if let Some(instance) = self.wasm_instances.get_mut(&id) {
+                        instance.set_state(&state.as_bytes()).await.unwrap();
+                    } else {
+                        println!("Not found set state {}", id);
+                    }
+                }
+                Payload::OnScroll(x, y) => {
+                    if let Some(instance) = self.wasm_instances.get_mut(&id) {
+                        instance.on_scroll(x, y).await.unwrap();
+                    } else {
+                        println!("Not found on scroll {}", id);
+                    }
+                }
+                Payload::OnKey(input) => {
+                    if let Some(instance) = self.wasm_instances.get_mut(&id) {
+                        let (key_code, state, modifiers) = input.to_u32_tuple();
+                        instance.on_key(key_code, state, modifiers).await.unwrap();
+                    } else {
+                        println!("Not found on key {}", id);
+                    }
+                }
+                Payload::Reload => {
+                    if let Some(instance) = self.wasm_instances.get_mut(&id) {
+                        instance.reload().await.unwrap();
+                    } else {
+                        println!("Not found reload {}", id);
                     }
                 }
             }
@@ -351,11 +404,16 @@ impl WasmInstance {
 
     async fn new(engine: Arc<Engine>, wasm_path: &str) -> Result<Self, Box<dyn std::error::Error>>{
 
-        let wasi = wasmtime_wasi::WasiCtxBuilder::new()
+        let dir = Dir::from_std_file(
+            std::fs::File::open(Path::new(wasm_path).parent().unwrap()).unwrap(),
+        );
+
+        let wasi = WasiCtxBuilder::new()
             .inherit_stdio()
-            .inherit_stderr()
-            .inherit_env()?
+            .inherit_args()?
+            .preopened_dir(dir, ".")?
             .build();
+
 
         let mut linker: Linker<State> = Linker::new(&engine);
         wasmtime_wasi::add_to_linker(&mut linker, |s| &mut s.wasi)?;
@@ -390,7 +448,7 @@ impl WasmInstance {
         Params: WasmParams,
         Results: WasmResults
          {
-        self.store.epoch_deadline_async_yield_and_update(deadline * 10);
+        self.store.epoch_deadline_async_yield_and_update(deadline);
 
         let func = self.instance.get_typed_func::<Params, Results>(&mut self.store, name)?;
         let result = func.call_async(&mut self.store, params).await?;
@@ -567,7 +625,7 @@ impl WasmInstance {
         let data = json_string.as_bytes();
 
         let module = Module::from_file(&self.engine, &self.path)?;
-        let instance = self.linker.instantiate(&mut self.store, &module)?;
+        let instance = self.linker.instantiate_async(&mut self.store, &module).await?;
         self.instance = instance;
         self.set_state(data).await?;
 
