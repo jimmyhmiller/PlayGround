@@ -312,7 +312,14 @@ impl WasmManager {
                 }
                 Payload::Reload => {
                     if let Some(instance) = self.wasm_instances.get_mut(&id) {
-                        instance.reload().await.unwrap();
+                        match instance.reload().await {
+                            Ok(_) => {
+
+                            }
+                            Err(e) => {
+                                println!("Error reloading {}", e);
+                            }
+                        }
                     } else {
                         println!("Not found reload {}", id);
                     }
@@ -621,13 +628,19 @@ impl WasmInstance {
 
 
     pub async fn reload(&mut self) -> Result<(), Box<dyn Error>> {
-        let json_string = self.get_state().await.ok_or("no get state function")?;
-        let data = json_string.as_bytes();
+        if let Ok(json_string) = self.get_state().await.ok_or("no get state function") {
+            let data = json_string.as_bytes();
 
-        let module = Module::from_file(&self.engine, &self.path)?;
-        let instance = self.linker.instantiate_async(&mut self.store, &module).await?;
-        self.instance = instance;
-        self.set_state(data).await?;
+            let module = Module::from_file(&self.engine, &self.path)?;
+            let instance = self.linker.instantiate_async(&mut self.store, &module).await?;
+            self.instance = instance;
+            self.set_state(data).await?;
+        } else {
+            let module = Module::from_file(&self.engine, &self.path)?;
+            let instance = self.linker.instantiate_async(&mut self.store, &module).await?;
+            self.instance = instance;
+        }
+
 
         Ok(())
     }

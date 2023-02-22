@@ -35,7 +35,7 @@ impl App for AsmData {
         let foreground = Color::parse_hex("#62b4a6");
         let background = Color::parse_hex("#530922");
 
-        let bounding_rect = Rect::new(0.0, 0.0, 2000.0, 300.0);
+        let bounding_rect = Rect::new(0.0, 0.0, 2000.0, 800.0);
 
 
         canvas.save();
@@ -46,7 +46,10 @@ impl App for AsmData {
         if self.xml_file_text.is_empty() {
             canvas.draw_str("No XML file loaded", 40.0, 40.0);
         } else {
-            canvas.draw_str(&format!("{}", &self.xml_file_text), 40.0, 40.0);
+            for line in self.xml_file_text.lines() {
+                canvas.draw_str(line, 40.0, 40.0);
+                canvas.translate(0.0, 40.0);
+            }
         }
 
         canvas.restore();
@@ -87,14 +90,53 @@ impl App for AsmData {
 
 impl AsmData {
     fn get_xml_stuff(&mut self) -> Result<(), Box<dyn Error>>  {
-        println!("get_xml_stuff");
+        let before_read = std::time::Instant::now();
         let xml_file_bytes = fs::read("onebigfile.xml")?;
         let xml_file_text = from_utf8(&xml_file_bytes)?;
+        println!("Read file in {}ms", before_read.elapsed().as_millis());
+        let before_parse = std::time::Instant::now();
         let xml = roxmltree::Document::parse(xml_file_text.clone())?;
+        println!("Parsed file in {}ms", before_parse.elapsed().as_millis());
 
-        let result = xml;
-        let result = result.root().tag_name();
-        self.xml_file_text = format!("Name: {}", result.name().to_string());
+        let file_names = xml.descendants()
+            .filter(|x| x.has_tag_name("iforms"))
+            .find(|x| x.attribute("title").unwrap_or("").contains("Base Instructions"))
+            .unwrap()
+            .descendants()
+            .filter(|x| x.has_tag_name("iform"))
+            .map(|x| x.attribute("iformfile"))
+            .flatten();
+
+        let mut found_file_nodes = vec![];
+        for file_name in file_names {
+            let file_ndoe = xml.descendants().find(|x| x.attribute("file") == Some(file_name));
+            if let Some(file_node) = file_ndoe {
+                found_file_nodes.push(file_node);
+            }
+        }
+
+
+    //     basic_insn_files.each do |filename|
+    //     file_node = files_by_name[filename].first
+    //     file_node.css("instructionsection").each do |section|
+    //       asm = section.css("asmtemplate").map(&:text)
+    //       desc = section.at_css("desc > brief").text.strip
+    //       fname = section["id"].downcase
+    //       files_and_classes << [fname, section["id"]]
+    //       unless File.exist?  "lib/aarch64/instructions/#{fname}.rb"
+    //         File.binwrite "lib/aarch64/instructions/#{fname}.rb", make_encode(section["id"], section["title"], desc, asm, section.at_css("regdiagram"))
+    //       end
+    //     end
+    //   end
+
+        let name : String = found_file_nodes.iter()
+            .flat_map(|x| x.descendants().filter(|x| x.has_tag_name("instructionsection")))
+            .map(|x| x.attribute("id").unwrap_or("No file found"))
+            .map(|x| format!("{} \n", x))
+            .collect();
+
+
+        self.xml_file_text = format!("Files: {}", name);
         Ok(())
     }
 
