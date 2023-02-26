@@ -28,6 +28,7 @@ enum Payload {
     OnScroll(f64, f64),
     OnKey(KeyboardInput),
     Reload,
+    SaveState,
 }
 
 struct Message {
@@ -37,11 +38,19 @@ struct Message {
 
 enum OutPayload {
     DrawCommands(Vec<Command>),
+    Saved(SaveState),
 }
 
 struct OutMessage {
     wasm_id: WasmId,
     payload: OutPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SaveState {
+    Unsaved,
+    Empty,
+    Saved(String),
 }
 
 pub struct WasmMessenger {
@@ -50,6 +59,7 @@ pub struct WasmMessenger {
     last_wasm_id: u64,
     out_receiver: Receiver<OutMessage>,
     wasm_draw_commands: HashMap<WasmId, Vec<Command>>,
+    wasm_states: HashMap<WasmId, SaveState>,
 }
 
 impl WasmMessenger {
@@ -73,6 +83,7 @@ impl WasmMessenger {
             local_pool,
             last_wasm_id: 0,
             wasm_draw_commands: HashMap::new(),
+            wasm_states: HashMap::new(),
         }
 
     }
@@ -88,14 +99,26 @@ impl WasmMessenger {
         id
     }
 
-    pub fn draw_widget(&mut self, wasm_id: WasmId, canvas: &mut Canvas) -> Option<Size> {
+    pub fn draw_widget(&mut self, wasm_id: WasmId, canvas: &mut Canvas, bounds: Size) -> Option<Size> {
+
+
         if let Some(commands) = self.wasm_draw_commands.get(&wasm_id) {
 
             let mut max_width = 0.0;
             let mut max_height = 0.0;
 
+
             let mut paint = skia_safe::Paint::default();
             for command in commands.iter() {
+                // Going to do this unconditonally for now.
+                // Need to make this toggleable
+                if max_height > bounds.height + 300.0 {
+                    canvas.translate((400.0, -max_height));
+                    // let ugly_green = Color::new(0.0, 0.5, 0.0, 1.0);
+                    // paint.set_color(ugly_green.to_color4f().to_color());
+                    max_height = 0.0;
+                    max_width = 0.0;
+                }
                 match command {
                     Command::SetColor(r, g, b, a) => {
                         paint.set_color(Color::new(*r, *g, *b, *a).to_color4f().to_color());
@@ -103,12 +126,12 @@ impl WasmMessenger {
                     Command::DrawRect(x, y, width, height) => {
                         canvas.draw_rect(skia_safe::Rect::from_xywh(*x, *y, *width, *height), &paint);
                         // This is not quite right because of translate and stuff.
-                        if *x + *width > max_width {
-                            max_width = *x + *width;
-                        }
-                        if *y + *height > max_height {
-                            max_height = *y + *height;
-                        }
+                        // if *x + *width > max_width {
+                        //     max_width = *x + *width;
+                        // }
+                        // if *y + *height > max_height {
+                        //     max_height = *y + *height;
+                        // }
                     }
                     Command::DrawString(str, x, y) => {
                         let font = Font::new(
@@ -125,12 +148,12 @@ impl WasmMessenger {
                             None,
                             None,
                         );
-                        if *width > max_width {
-                            max_width = *width;
-                        }
-                        if *height > max_height {
-                            max_height = *height;
-                        }
+                        // if *width > max_width {
+                        //     max_width = *width;
+                        // }
+                        // if *height > max_height {
+                        //     max_height = *height;
+                        // }
                     }
                     Command::DrawRRect(x, y, width, height, radius) => {
                         let rrect = skia_safe::RRect::new_rect_xy(
@@ -141,6 +164,8 @@ impl WasmMessenger {
                         canvas.draw_rrect(&rrect, &paint);
                     }
                     Command::Translate(x, y) => {
+                        max_height += *y;
+                        max_width += *x;
                         canvas.translate((*x, *y));
                     }
                     Command::Save => {
@@ -161,6 +186,7 @@ impl WasmMessenger {
         }
     }
 
+
     pub fn tick(&mut self) {
         // Need a timeout instead
         self.local_pool.run_until(Delay::new(Duration::from_millis(4)));
@@ -177,6 +203,9 @@ impl WasmMessenger {
             match message.payload {
                 OutPayload::DrawCommands(commands) => {
                     self.wasm_draw_commands.insert(message.wasm_id, commands);
+                }
+                OutPayload::Saved(saved) => {
+                    self.wasm_states.insert(message.wasm_id, saved);
                 }
             }
         }
@@ -208,6 +237,22 @@ impl WasmMessenger {
 
     pub fn send_reload(&mut self, wasm_id: u64) {
         self.sender.start_send(Message { wasm_id, payload: Payload::Reload}).unwrap();
+    }
+
+    pub(crate) fn save_state(&mut self, wasm_id: WasmId) -> SaveState {
+        self.wasm_states.insert(wasm_id, SaveState::Unsaved);
+        self.sender.start_send(Message { wasm_id, payload: Payload::SaveState}).unwrap();
+        // TODO: Maybe not the best design, but I also want to ensure I save
+        loop {
+            self.tick();
+            if let Some(state) = self.wasm_states.get(&wasm_id) {
+                if let SaveState::Saved(_) = state {
+                    break;
+                }
+            }
+        }
+        self.wasm_states.get(&wasm_id).unwrap_or(&SaveState::Empty).clone()
+
     }
 
 }
@@ -324,6 +369,23 @@ impl WasmManager {
                         println!("Not found reload {}", id);
                     }
                 }
+                Payload::SaveState => {
+                    if let Some(instance) = self.wasm_instances.get_mut(&id) {
+                        let state = instance.get_state().await;
+                        match state {
+                            Some(state) => {
+                                self.sender.start_send(OutMessage {wasm_id: id, payload: OutPayload::Saved(SaveState::Saved(state))}).unwrap();
+                            }
+                            None => {
+                                self.sender.start_send(OutMessage {wasm_id: id, payload: OutPayload::Saved(SaveState::Empty)}).unwrap();
+                            }
+                        }
+
+                    } else {
+                        self.sender.start_send(OutMessage {wasm_id: id, payload: OutPayload::Saved(SaveState::Empty)}).unwrap();
+                        println!("Not found save state {}", id);
+                    }
+                }
             }
         }
     }
@@ -373,12 +435,14 @@ fn get_string_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> Str
     // Use the `ptr` and `len` values to get a subslice of the wasm-memory
     // which we'll attempt to interpret as utf-8.
     let store = &mut caller.as_context_mut();
+    let ptr = ptr as u32 as usize;
+    let len = len as u32 as usize;
+    // println!("caller ptr: {}, len: {}", ptr, len);
     let data = mem
         .into_memory()
         .unwrap()
         .data(store)
-        .get(ptr as u32 as usize..)
-        .and_then(|arr| arr.get(..len as u32 as usize));
+        .get(ptr..(ptr + len));
     let string = from_utf8(data.unwrap()).unwrap();
     string.to_string()
 }
@@ -390,10 +454,12 @@ fn get_string_from_memory(
     len: i32,
 ) -> Option<String> {
     use core::str::from_utf8;
+    let ptr = ptr as u32 as usize;
+    let len = len as u32 as usize;
+    println!("mem ptr: {}, len: {}", ptr, len);
     let data = memory
         .data(store)
-        .get(ptr as u32 as usize..)
-        .and_then(|arr| arr.get(..len as u32 as usize));
+        .get(ptr..(ptr + len));
     let string = from_utf8(data.unwrap()).ok()?;
     Some(string.to_string())
 }

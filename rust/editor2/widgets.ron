@@ -30,7 +30,7 @@
 );
 (
     position: (
-        x: 362.33594,
+        x: 362.59375,
         y: 648.9219,
     ),
     size: (
@@ -44,8 +44,8 @@
 );
 (
     position: (
-        x: 260.21094,
-        y: 985.14844,
+        x: 628.3203,
+        y: 1093.2344,
     ),
     size: (
         width: 100.0,
@@ -110,8 +110,8 @@
 );
 (
     position: (
-        x: 260.21094,
-        y: 985.14844,
+        x: 628.3203,
+        y: 1093.2344,
     ),
     size: (
         width: 100.0,
@@ -128,8 +128,8 @@
 );
 (
     position: (
-        x: 926.6526,
-        y: 204.54791,
+        x: 740.18384,
+        y: 388.8526,
     ),
     size: (
         width: 600.0,
@@ -145,18 +145,18 @@
 );
 (
     position: (
-        x: 425.3175,
-        y: 881.39355,
+        x: 531.09875,
+        y: 1150.6826,
     ),
     size: (
         width: 2000.0,
-        height: 800.0,
+        height: 300.0,
     ),
     on_click: [],
     data: Wasm(
         wasm: (
             path: "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/target/wasm32-wasi/release/asm.wasm",
-            state: None,
+            state: Some("\"Files: ADC \\nADCS \\nADD_addsub_ext \\nADD_addsub_imm \\nADD_addsub_shift \\nADDG \\nADDS_addsub_ext \\nADDS_addsub_imm \\nADDS_addsub_shift \\nADR \\nADRP \\nAND_log_imm \\nAND_log_shift \\nANDS_log_imm \\nANDS_log_shift \\nASR_SBFM \\nASR_ASRV \\nASRV \\nAT_SYS \\nAUTDA \\nAUTDB \\nAUTIA \\nAUTIB \\nAXFLAG \\nB_uncond \\nB_cond \\nBC_cond \\nBFC_BFM \\nBFI_BFM \\nBFM \\nBFXIL_BFM \\nBIC_log_shift \\nBICS \\nBL \\nBLR \\nBLRA \\nBR \\nBRA \\nBRK \\nBTI \\nCAS \\nCASB \\nCASH \\nCASP \\nCBNZ \\nCBZ \\nCCMN_imm \\nCCMN_reg \\nCCMP_imm \\nCCMP_reg \\nCFINV \\nCFP_SYS \\nCINC_CSINC \\nCINV_CSINV \\nCLREX \\nCLS_int \\nCLZ_int \\nCMN_ADDS_addsub_ext \\nCMN_ADDS_addsub_imm \\nCMN_ADDS_addsub_shift \\nCMP_SUBS_addsub_ext \\nCMP_SUBS_addsub_imm \\nCMP_SUBS_addsub_shift \\nCMPP_SUBPS \\nCNEG_CSNEG \\nCPP_SYS \\nCPYFP \\nCPYFPN \\nCPYFPRN \\nCPYFPRT \\nCPYFPRTN \\nCPYFPRTRN \\nCPYFPRTWN \\nCPYFPT \\nCPYFPTN \\nCPYFPTRN \\nCPYFPTWN \\nCPYFPWN \\nCPYFPWT \\nCPYFPWTN \\nCPYFPWTRN \\nCPYFPWTWN \\nCPYP \\nCPYPN \\nCPYPRN \\nCPYPRT \\nCPYPRTN \\nCPYPRTRN \\nCPYPRTWN \\nCPYPT \\nCPYPTN \\nCPYPTRN \\nCPYPTWN \\nCPYPWN \\nCPYPWT \\nCPYPWTN \\nCPYPWTRN \\nCPYPWTWN \\nCRC32 \\nCRC32C \\nCSDB \\nCSEL \\nCSET_CSINC \\nCSETM_CSINV \\nCSINC \\nCSINV \\nCSNEG \\nDC_SYS \\nDCPS1 \\nDCPS2 \\nDCPS3 \\nDGH \\nDMB \\nDRPS \\nDSB \\nDVP_SYS \\nEON \\nEOR_log_imm \\nEOR_log_shift \\nERET \\nERETA \\nESB \\nEXTR \\nGMI \\nHINT \\nHLT \\nHVC \\nIC_SYS \\nIRG \\nISB \\nLD64B \\nLDADD \\nLDADDB \\nLDADDH \\nLDAPR \\nLDAPRB \\nLDAPRH \\nLDAPUR_gen \\nLDAPURB \\nLDAPURH \\nLDAPURSB \\nLDAPURSH \\nLDAPURSW \\nLDAR \\nLDARB \\nLDARH \\nLDAXP \\nLDAXR \\nLDAXRB \\nLDAXRH \\nLDCLR \\nLDCLRB \\nLDCLRH \\nLDEOR \\nLDEORB \\nLDEORH \\nLDG \\nLDGM \\nLDLAR \\nLDLARB \\nLDLARH \\nLDNP_gen \\nLDP_gen \\nLDPSW \\nLDR_imm_gen \\nLDR_lit_gen \\nLDR_reg_gen \\nLDRA \\nLDRB_imm \\nLDRB_reg \\nLDRH_imm \\nLDRH_reg \\nLDRSB_imm \\nLDRSB_reg \\nLDRSH_imm \\nLDRSH_reg \\nLDRSW_imm \\nLDRSW_lit \\nLDRSW_reg \\nLDSET \\nLDSETB \\nLDSETH \\nLDSMAX \\nLDSMAXB \\nLDSMAXH \\nLDSMIN \\nLDSMINB \\nLDSMINH \\nLDTR \\nLDTRB \\nLDTRH \\nLDTRSB \\nLDTRSH \\nLDTRSW \\nLDUMAX \\nLDUMAXB \\nLDUMAXH \\nLDUMIN \\nLDUMINB \\nLDUMINH \\nLDUR_gen \\nLDURB \\nLDURH \\nLDURSB \\nLDURSH \\nLDURSW \\nLDXP \\nLDXR \\nLDXRB \\nLDXRH \\nLSL_UBFM \\nLSL_LSLV \\nLSLV \\nLSR_UBFM \\nLSR_LSRV \\nLSRV \\nMADD \\nMNEG_MSUB \\nMOV_ORR_log_imm \\nMOV_MOVN \\nMOV_ORR_log_shift \\nMOV_ADD_addsub_imm \\nMOV_MOVZ \\nMOVK \\nMOVN \\nMOVZ \\nMRS \\nMSR_imm \\nMSR_reg \\nMSUB \\nMUL_MADD \\nMVN_ORN_log_shift \\nNEG_SUB_addsub_shift \\nNEGS_SUBS_addsub_shift \\nNGC_SBC \\nNGCS_SBCS \\nNOP \\nORN_log_shift \\nORR_log_imm \\nORR_log_shift \\nPACDA \\nPACDB \\nPACGA \\nPACIA \\nPACIB \\nPRFM_imm \\nPRFM_lit \\nPRFM_reg \\nPRFUM \\nPSB \\nPSSBB_DSB \\nRBIT_int \\nRET \\nRETA \\nREV \\nREV16_int \\nREV32_int \\nREV64_REV \\nRMIF \\nROR_EXTR \\nROR_RORV \\nRORV \\nSB \\nSBC \\nSBCS \\nSBFIZ_SBFM \\nSBFM \\nSBFX_SBFM \\nSDIV \\nSETF \\nSETGP \\nSETGPN \\nSETGPT \\nSETGPTN \\nSETP \\nSETPN \\nSETPT \\nSETPTN \\nSEV \\nSEVL \\nSMADDL \\nSMC \\nSMNEGL_SMSUBL \\nSMSUBL \\nSMULH \\nSMULL_SMADDL \\nSSBB_DSB \\nST2G \\nST64B \\nST64BV \\nST64BV0 \\nSTADD_LDADD \\nSTADDB_LDADDB \\nSTADDH_LDADDH \\nSTCLR_LDCLR \\nSTCLRB_LDCLRB \\nSTCLRH_LDCLRH \\nSTEOR_LDEOR \\nSTEORB_LDEORB \\nSTEORH_LDEORH \\nSTG \\nSTGM \\nSTGP \\nSTLLR \\nSTLLRB \\nSTLLRH \\nSTLR \\nSTLRB \\nSTLRH \\nSTLUR_gen \\nSTLURB \\nSTLURH \\nSTLXP \\nSTLXR \\nSTLXRB \\nSTLXRH \\nSTNP_gen \\nSTP_gen \\nSTR_imm_gen \\nSTR_reg_gen \\nSTRB_imm \\nSTRB_reg \\nSTRH_imm \\nSTRH_reg \\nSTSET_LDSET \\nSTSETB_LDSETB \\nSTSETH_LDSETH \\nSTSMAX_LDSMAX \\nSTSMAXB_LDSMAXB \\nSTSMAXH_LDSMAXH \\nSTSMIN_LDSMIN \\nSTSMINB_LDSMINB \\nSTSMINH_LDSMINH \\nSTTR \\nSTTRB \\nSTTRH \\nSTUMAX_LDUMAX \\nSTUMAXB_LDUMAXB \\nSTUMAXH_LDUMAXH \\nSTUMIN_LDUMIN \\nSTUMINB_LDUMINB \\nSTUMINH_LDUMINH \\nSTUR_gen \\nSTURB \\nSTURH \\nSTXP \\nSTXR \\nSTXRB \\nSTXRH \\nSTZ2G \\nSTZG \\nSTZGM \\nSUB_addsub_ext \\nSUB_addsub_imm \\nSUB_addsub_shift \\nSUBG \\nSUBP \\nSUBPS \\nSUBS_addsub_ext \\nSUBS_addsub_imm \\nSUBS_addsub_shift \\nSVC \\nSWP \\nSWPB \\nSWPH \\nSXTB_SBFM \\nSXTH_SBFM \\nSXTW_SBFM \\nSYS \\nSYSL \\nTBNZ \\nTBZ \\nTLBI_SYS \\nTSB \\nTST_ANDS_log_imm \\nTST_ANDS_log_shift \\nUBFIZ_UBFM \\nUBFM \\nUBFX_UBFM \\nUDF_perm_undef \\nUDIV \\nUMADDL \\nUMNEGL_UMSUBL \\nUMSUBL \\nUMULH \\nUMULL_UMADDL \\nUXTB_UBFM \\nUXTH_UBFM \\nWFE \\nWFET \\nWFI \\nWFIT \\nXAFLAG \\nXPAC \\nYIELD \\n\"SIMD&"),
         ),
     ),
 );

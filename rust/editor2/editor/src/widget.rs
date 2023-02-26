@@ -24,7 +24,7 @@ impl Into<Point> for Position {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Copy, Clone, Serialize, Deserialize)]
 pub struct Size {
     pub width: f32,
     pub height: f32,
@@ -467,20 +467,23 @@ impl Widget {
         }
     }
 
-    pub fn draw(&mut self, canvas: &mut Canvas, wasm_messenger: &mut WasmMessenger) -> Vec<WidgetId> {
+    pub fn draw(&mut self, canvas: &mut Canvas, wasm_messenger: &mut WasmMessenger, bounds: Size) -> Vec<WidgetId> {
         // Have to do this to deal with mut stuff
         if let WidgetData::Wasm { wasm, wasm_id } = &mut self.data {
             canvas.save();
             canvas.translate((self.position.x, self.position.y));
 
-            if let Some(size) = wasm_messenger.draw_widget(*wasm_id, canvas) {
-                self.size = size;
-            }
+            wasm_messenger.draw_widget(*wasm_id, canvas, bounds);
+
+            // if let Some(size) = wasm_messenger.draw_widget(*wasm_id, canvas, bounds) {
+            //     self.size = size;
+            // }
             canvas.translate((self.size.width, 0.0));
-            if let Some(size) = wasm.draw_debug(canvas) {
-                self.size.width += size.width;
-                self.size.height += size.height;
-            }
+            wasm.draw_debug(canvas);
+            // if let Some(size) = wasm.draw_debug(canvas) {
+            //     self.size.width += size.width;
+            //     self.size.height += size.height;
+            // }
             canvas.restore();
         }
 
@@ -617,10 +620,20 @@ impl Widget {
         }
     }
 
-    pub fn save(&mut self) {
+    pub fn save(&mut self, wasm_messenger: &mut WasmMessenger) {
         match &mut self.data {
-            WidgetData::Wasm { wasm, .. } => {
-                wasm.save();
+            WidgetData::Wasm { wasm, wasm_id } => {
+                match wasm_messenger.save_state(*wasm_id) {
+                    wasm_messenger::SaveState::Unsaved => {
+                        panic!("Wasm instance {} is unsaved", wasm_id)
+                    }
+                    wasm_messenger::SaveState::Empty => {
+                        wasm.state = None;
+                    }
+                    wasm_messenger::SaveState::Saved(state) => {
+                        wasm.state = Some(state);
+                    }
+                }
             }
             _ => {}
         }
