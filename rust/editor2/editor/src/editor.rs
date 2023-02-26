@@ -578,7 +578,6 @@ impl Editor {
     }
 
     fn save_widgets(&mut self) {
-        let mut file = File::create(&self.widget_config_path).unwrap();
 
         for widget in self.widget_store.iter_mut() {
             widget.save(&mut self.wasm_messenger);
@@ -593,7 +592,7 @@ impl Editor {
             // println!("widget_serialized: {}", widget_serialized);
             result.push_str(&widget_serialized);
         }
-
+        let mut file = File::create(&self.widget_config_path).unwrap();
         file.write_all(result.as_bytes()).unwrap();
     }
 }

@@ -155,7 +155,6 @@ pub trait App {
         let mut buffer = String::new();
         unsafe {
             let (ptr, len) = recieve_last_message_low_level(process_id);
-            println!("{} {}", ptr, len);
             buffer = String::from_raw_parts(ptr as *mut u8, len as usize, len as usize);
         }
         buffer
