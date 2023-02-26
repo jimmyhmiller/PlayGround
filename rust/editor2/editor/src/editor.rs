@@ -49,6 +49,7 @@ pub struct Editor {
     event_loop_proxy: Option<EventLoopProxy<()>>,
     wasm_messenger: WasmMessenger,
     temp_wasm_ids: Vec<WasmId>,
+    widget_config_path: String,
     // points: Vec<[f64; 2]>,
 }
 
@@ -117,8 +118,8 @@ impl Editor {
         }
     }
 
-    fn setup_file_watcher(&mut self, widget_config_path: &str) {
-        let widget_config_path = widget_config_path.to_string();
+    fn setup_file_watcher(&mut self) {
+        let widget_config_path = self.widget_config_path.to_string();
         let (watch_raw_send, watch_raw_receive) = std::sync::mpsc::channel();
         let (sender, receiver) = std::sync::mpsc::channel::<Event>();
         let mut debouncer : Debouncer<FsEventWatcher> = new_debouncer(Duration::from_millis(250), None, watch_raw_send).unwrap();
@@ -158,8 +159,8 @@ impl Editor {
         self.debounce_watcher = Some(debouncer);
     }
 
-    fn load_widgets(&mut self, path: &str) {
-        let mut file = File::open(path).unwrap();
+    fn load_widgets(&mut self) {
+        let mut file = File::open(&self.widget_config_path).unwrap();
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
         let widgets: Vec<Widget> = contents
@@ -312,10 +313,10 @@ impl Editor {
                 }
                 Event::ReloadWidgets => {
                     self.widget_store.clear();
-                    self.load_widgets("widgets.ron");
+                    self.load_widgets();
                 }
                 Event::SaveWidgets => {
-                    self.save_widgets("widgets.ron");
+                    self.save_widgets();
                 }
                 Event::ReloadWasm(path) => {
                     for widget in self.widget_store.iter_mut() {
@@ -333,6 +334,11 @@ impl Editor {
     }
 
     pub fn new() -> Self {
+
+        let mut widget_config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        widget_config_path.push("widgets.ron");
+        let widget_config_path = widget_config_path.to_str().unwrap();
+
         Self {
             events: Events::new(),
             fps_counter: FpsCounter::new(),
@@ -351,6 +357,7 @@ impl Editor {
             active_widget: None,
             wasm_messenger: WasmMessenger::new(),
             temp_wasm_ids: vec![],
+            widget_config_path: widget_config_path.to_string(),
         }
     }
 
@@ -386,14 +393,14 @@ impl Editor {
 
         let mut to_draw = vec![];
         for widget in self.widget_store.iter_mut() {
-            to_draw.extend(widget.draw(canvas, &mut self.wasm_messenger));
+            to_draw.extend(widget.draw(canvas, &mut self.wasm_messenger, widget.size));
         }
 
         // TODO: This is bad, I need to traverse the tree. Being lazy
         // Also not even sure about compound right now
         for widget_id in to_draw {
             if let Some(widget) = self.widget_store.get_mut(widget_id) {
-                widget.draw(canvas, &mut self.wasm_messenger);
+                widget.draw(canvas, &mut self.wasm_messenger, widget.size);
             }
         }
     }
@@ -562,36 +569,29 @@ impl Editor {
 
     pub fn on_window_create(&mut self, event_loop_proxy: EventLoopProxy<()>) {
         self.event_loop_proxy = Some(event_loop_proxy);
-        let mut widget_config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        widget_config_path.push("widgets.ron");
-        let widget_config_path = widget_config_path.to_str().unwrap();
-        self.setup_file_watcher(widget_config_path);
-        self.load_widgets(widget_config_path);
+        self.setup_file_watcher();
+        self.load_widgets();
     }
 
     pub fn exit(&mut self) {
-        for widget in self.widget_store.iter_mut() {
-            widget.save();
-        }
-        self.save_widgets("widgets.ron");
+        self.save_widgets();
     }
 
-    fn save_widgets(&mut self, path: &str) {
-        let mut file = File::create(path).unwrap();
-        let widgets = self
-            .widget_store
-            .iter_mut()
-            .map(|widget| {
-                widget.save();
-                widget
-            })
-            .collect::<Vec<_>>();
+    fn save_widgets(&mut self) {
+        let mut file = File::create(&self.widget_config_path).unwrap();
+
+        for widget in self.widget_store.iter_mut() {
+            widget.save(&mut self.wasm_messenger);
+        }
         let mut result = String::new();
-        for widget in widgets.iter() {
-            result.push_str(&format!(
+        for widget in self.widget_store.iter() {
+
+            let widget_serialized = &format!(
                 "{};\n",
                 ron::ser::to_string_pretty(widget, PrettyConfig::default()).unwrap()
-            ));
+            );
+            // println!("widget_serialized: {}", widget_serialized);
+            result.push_str(&widget_serialized);
         }
 
         file.write_all(result.as_bytes()).unwrap();

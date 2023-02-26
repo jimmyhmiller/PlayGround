@@ -56,6 +56,7 @@ impl App for AsmData {
     }
 
     fn on_click(&mut self, x: f32, y: f32) {
+        println!("Clicked! {} {}", x, y);
 
         self.xml_file_text = "clicked".to_string();
         // grab the xml file
@@ -137,6 +138,7 @@ impl AsmData {
 
 
         self.xml_file_text = format!("Files: {}", name);
+        println!("State:{}", self.xml_file_text);
         Ok(())
     }
 

@@ -217,6 +217,7 @@ mod macros {
             pub extern "C" fn get_state() -> *const PointerLengthString {
                 let s = serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
                 let p : PointerLengthString = s.into();
+                println!("Length: {}", p.len);
                 &p as *const _
             }
 
