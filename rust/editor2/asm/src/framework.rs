@@ -20,6 +20,7 @@ extern "C" {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct PointerLengthString {
     pub ptr: usize,
     pub len: usize,
@@ -155,7 +156,6 @@ pub trait App {
         let mut buffer = String::new();
         unsafe {
             let (ptr, len) = recieve_last_message_low_level(process_id);
-            println!("{} {}", ptr, len);
             buffer = String::from_raw_parts(ptr as *mut u8, len as usize, len as usize);
         }
         buffer
@@ -216,8 +216,15 @@ mod macros {
             #[no_mangle]
             pub extern "C" fn get_state() -> *const PointerLengthString {
                 let s = serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
+                if s.starts_with("\"") {
+                    assert!(s.ends_with("\""));
+                }
                 let p : PointerLengthString = s.into();
-                println!("Length: {}", p.len);
+                // If I print things work properly. I assume I am doing some bad things with pointers.
+                // I know that I am making this string and then making a pointer to it
+                // But the string doesn't live anywhere.
+                // Need to have a better way to do these string cross boundaries
+                println!("get_state: {:?}", p);
                 &p as *const _
             }
 

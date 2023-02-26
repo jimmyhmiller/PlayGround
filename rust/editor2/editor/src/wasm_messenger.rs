@@ -239,6 +239,9 @@ impl WasmMessenger {
         self.sender.start_send(Message { wasm_id, payload: Payload::Reload}).unwrap();
     }
 
+
+    // Sometimes state is corrupt by going too long on the string. Not sure why.
+    // Need to track down the issue
     pub(crate) fn save_state(&mut self, wasm_id: WasmId) -> SaveState {
         self.wasm_states.insert(wasm_id, SaveState::Unsaved);
         self.sender.start_send(Message { wasm_id, payload: Payload::SaveState}).unwrap();
@@ -246,7 +249,10 @@ impl WasmMessenger {
         loop {
             self.tick();
             if let Some(state) = self.wasm_states.get(&wasm_id) {
-                if let SaveState::Saved(_) = state {
+                if let SaveState::Saved(state) = state {
+                    if state.starts_with("\"") {
+                        assert!(state.ends_with("\""), "State is corrupt: {}", state);
+                    }
                     break;
                 }
             }
@@ -374,6 +380,9 @@ impl WasmManager {
                         let state = instance.get_state().await;
                         match state {
                             Some(state) => {
+                                if state.starts_with("\"") {
+                                    assert!(state.ends_with("\""), "State is corrupt: {}", state);
+                                }
                                 self.sender.start_send(OutMessage {wasm_id: id, payload: OutPayload::Saved(SaveState::Saved(state))}).unwrap();
                             }
                             None => {
@@ -456,7 +465,6 @@ fn get_string_from_memory(
     use core::str::from_utf8;
     let ptr = ptr as u32 as usize;
     let len = len as u32 as usize;
-    println!("mem ptr: {}, len: {}", ptr, len);
     let data = memory
         .data(store)
         .get(ptr..(ptr + len));
@@ -748,6 +756,7 @@ impl WasmInstance {
         let json_string_ptr: *const PointerLengthString =
             my_buffer.as_ptr() as *const PointerLengthString;
         let json_string: &PointerLengthString = unsafe { &*json_string_ptr };
+        println!("json_string: {:?}", json_string);
 
         let json_string = get_string_from_memory(
             &memory,
