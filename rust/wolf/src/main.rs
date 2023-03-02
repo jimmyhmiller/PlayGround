@@ -60,52 +60,52 @@ fn handle_key_presses(event_pump: &EventPump, player: &mut Player, world_map: &V
     } else if keys.contains(&Keycode::Down) {
         move_position(&world_map, player, negative(delta))
     } else {
-        
+
     }
 }
 
 
 fn main() -> Result<(), String>  {
-   Ok(wolf::learning::main())
+   Ok(wolf::main_old::main())
 }
-fn new_main() -> Result<(), String> {
-    // not done
-    let world_map = get_world_map();
+// fn new_main() -> Result<(), String> {
+//     // not done
+//     let world_map = get_world_map();
 
-    let sdl_context = sdl2::init()?;
-    let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string())?;
+//     let sdl_context = sdl2::init()?;
+//     let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string())?;
 
-    let map_width: i32 = 500;
-    let map_height: i32 = 500;
+//     let map_width: i32 = 500;
+//     let map_height: i32 = 500;
 
-    let window = sdl_context.video()?
-        .window("Example", map_width as u32, map_height as u32)
-        .build()
-        .unwrap();
+//     let window = sdl_context.video()?
+//         .window("Example", map_width as u32, map_height as u32)
+//         .build()
+//         .unwrap();
 
-    // Let's create a Canvas which we will use to draw in our Window
-    let canvas: Canvas<Window> = window.into_canvas().present_vsync().build().unwrap();
-    let mut event_pump = sdl_context.event_pump()?;
+//     // Let's create a Canvas which we will use to draw in our Window
+//     let canvas: Canvas<Window> = window.into_canvas().present_vsync().build().unwrap();
+//     let mut event_pump = sdl_context.event_pump()?;
 
-    let texture_creator = canvas.texture_creator();
+//     let texture_creator = canvas.texture_creator();
 
-    let mut player = Player {
-        facing: Point { x: -1.0, y: 0.0 },
-        position: Point { x: 12.0, y: 22.0 },
-        camera: Point { x: 0.0, y: 0.66 },
-        rotation_speed: 0.0,
-        move_speed: 0.0,
-    };
+//     let mut player = Player {
+//         facing: Point { x: -1.0, y: 0.0 },
+//         position: Point { x: 12.0, y: 22.0 },
+//         camera: Point { x: 0.0, y: 0.66 },
+//         rotation_speed: 0.0,
+//         move_speed: 0.0,
+//     };
 
-    loop {
-        match event_pump.poll_event() {
-            Some(Event::Quit { .. }) => {
-                ::std::process::exit(0)
-            }
-             _ => {}
-        }
+//     loop {
+//         match event_pump.poll_event() {
+//             Some(Event::Quit { .. }) => {
+//                 ::std::process::exit(0)
+//             }
+//              _ => {}
+//         }
 
-        handle_key_presses(&event_pump, &mut player, &world_map);
+//         handle_key_presses(&event_pump, &mut player, &world_map);
 
-    }
-}
+//     }
+// }

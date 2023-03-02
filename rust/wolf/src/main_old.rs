@@ -134,7 +134,9 @@ fn handle_key_presses(
             y: -player.facing.y * player.move_speed,
         };
         (false, move_position(&world_map, &player, delta))
-    } else {
+    } else if keys.contains(&Keycode::R) {
+        (true, player.clone())
+    }else {
         (false, player.clone())
     }
 }
@@ -202,7 +204,15 @@ pub fn main() {
             players.push(new_player.clone());
         }
 
-        player = new_player;
+        if rewind {
+            if players.len() > 0 {
+                player = players.pop().unwrap();
+            }
+        } else {
+            player = new_player;
+        }
+
+
 
         clear_canvas(&mut canvas);
 
