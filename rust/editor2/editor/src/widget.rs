@@ -345,99 +345,18 @@ impl ImageData {
 #[derive(Serialize, Deserialize)]
 pub struct Wasm {
     pub path: String,
-    #[serde(skip)]
-    context: Option<WasmContext>,
+
+    // context: Option<WasmContext>,
     state: Option<String>,
 }
 
 impl Wasm {
     pub fn new(path: String) -> Self {
-        let path_clone = path.clone();
         Self {
             path,
-            context: Some(WasmContext::new(path_clone.as_str()).unwrap()),
             state: None,
         }
     }
-
-    fn draw(&mut self, canvas: &mut Canvas) -> Option<Size> {
-
-         match self.context.as_mut().unwrap().draw("draw", canvas) {
-            Ok(size) => {
-                Some(size)
-            }
-            Err(e) => {
-                println!("Error: {:?}", e);
-                None
-            }
-         }
-    }
-
-    fn draw_debug(&mut self, canvas: &mut Canvas) -> Option<Size> {
-
-        match self.context.as_mut().unwrap().draw("draw_debug", canvas) {
-           Ok(size) => {
-               Some(size)
-           }
-           Err(e) => {
-               println!("Error: {:?}", e);
-               None
-           }
-        }
-   }
-
-    fn on_click(&mut self, position: &Position) {
-        // Need to figure out a better way to provide args
-        // Or just not care about this generic case?
-        match self.context.as_mut().unwrap().on_click(position.x, position.y) {
-            Ok(_) => {}
-            Err(e) => {
-                println!("Error: {:?}", e)
-            }
-        }
-    }
-    pub fn on_key(&mut self, input: KeyboardInput) {
-        let (key_code, state, modifiers) = input.to_u32_tuple();
-        match self.context.as_mut().unwrap().on_key(key_code, state, modifiers) {
-            Ok(_) => {}
-            Err(e) => {
-                println!("Error: {:?}", e);
-            }
-        }
-    }
-
-    pub fn on_scroll(&mut self, x: f64, y: f64) {
-        // wasm_messenger.on_scroll(self., x, y);
-        // self.context.as_mut().unwrap().on_scroll(x, y).unwrap();
-    }
-
-    pub fn reload(&mut self) {
-        match self.context.as_mut().unwrap().reload() {
-            Ok(_) => {}
-            Err(e) => {
-                println!("Error: {:?}", e);
-            }
-        }
-    }
-
-    fn init(&mut self) {
-        self.context = Some(WasmContext::new(self.path.as_str()).unwrap());
-        if let Some(state) = &self.state {
-            self.context
-                .as_mut()
-                .unwrap()
-                .set_state(state.as_bytes())
-                .unwrap();
-        }
-        self.state = None;
-    }
-
-    fn save(&mut self) {
-        let state = self.context.as_mut().unwrap().get_state();
-        self.state = state;
-    }
-
-
 }
 
 impl Widget {
@@ -479,7 +398,7 @@ impl Widget {
             //     self.size = size;
             // }
             canvas.translate((self.size.width, 0.0));
-            wasm.draw_debug(canvas);
+            // wasm.draw_debug(canvas);
             // if let Some(size) = wasm.draw_debug(canvas) {
             //     self.size.width += size.width;
             //     self.size.height += size.height;
@@ -611,10 +530,10 @@ impl Widget {
             WidgetData::Wasm { wasm, wasm_id } => {
                 let new_wasm_id = wasm_messenger.new_instance(&wasm.path);
                 *wasm_id = new_wasm_id;
-                if let Some(state) = &wasm.state {
-                    wasm_messenger.send_set_state(*wasm_id, &state);
-                }
-                wasm.init();
+                // if let Some(state) = &wasm.state {
+                //     wasm_messenger.send_set_state(*wasm_id, &state);
+                // }
+                // wasm.init();
             }
             _ => {}
         }
