@@ -345,8 +345,6 @@ impl ImageData {
 #[derive(Serialize, Deserialize)]
 pub struct Wasm {
     pub path: String,
-
-    // context: Option<WasmContext>,
     state: Option<String>,
 }
 
