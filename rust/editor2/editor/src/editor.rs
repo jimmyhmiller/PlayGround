@@ -428,7 +428,6 @@ impl Editor {
                         match widget.data {
                             WidgetData::Wasm { ref mut wasm, wasm_id } => {
                                 self.wasm_messenger.send_on_key(wasm_id, input);
-                                wasm.on_key(input);
                             }
                             _ => {}
                         }

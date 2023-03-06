@@ -113,11 +113,11 @@ impl WasmMessenger {
                 // Going to do this unconditonally for now.
                 // Need to make this toggleable
                 if max_height > bounds.height + 300.0 {
-                    canvas.translate((400.0, -max_height));
+                    // canvas.translate((4000.0, -max_height));
                     // let ugly_green = Color::new(0.0, 0.5, 0.0, 1.0);
                     // paint.set_color(ugly_green.to_color4f().to_color());
-                    max_height = 0.0;
-                    max_width = 0.0;
+                    // max_height = 0.0;
+                    // max_width = 0.0;
                 }
                 match command {
                     Command::SetColor(r, g, b, a) => {
