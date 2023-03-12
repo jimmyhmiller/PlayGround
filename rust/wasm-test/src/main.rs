@@ -54,6 +54,39 @@ impl WasmInstance {
         Ok(())
     }
 
+    async fn print_stuff(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.store.epoch_deadline_async_yield_and_update(1);
+        let print_stuff = self.instance.get_typed_func::<(), ()>(&mut self.store, "print_stuff")?;
+        print_stuff.call_async(&mut self.store, ()).await?;
+        Ok(())
+    }
+
+    fn grow_memory(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("growing");
+        let memory = self
+                    .instance
+                    .get_export(&mut self.store, "memory")
+                    .unwrap()
+                    .into_memory()
+                    .unwrap();
+        memory.grow(&mut self.store, 100)?;
+        Ok(())
+    }
+
+    fn write_over_1mb(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("writing");
+        let memory = self
+                    .instance
+                    .get_export(&mut self.store, "memory")
+                    .unwrap()
+                    .into_memory()
+                    .unwrap();
+        let size = 1100000;
+        let data = vec![0; size];
+        memory.write(&mut self.store, 0, &data)?;
+        Ok(())
+    }
+
 }
 
 
@@ -80,19 +113,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         instance.init(label).await.unwrap();
         Ok(())
     }
+    async fn run2(engine: Arc<Engine>) -> Result<(), Box<dyn std::error::Error>> {
+        let mut instance = WasmInstance::new(engine).await.unwrap();
+        instance.print_stuff().await?;
+        instance.print_stuff().await?;
+        instance.print_stuff().await?;
+        instance.print_stuff().await?;
+        instance.print_stuff().await?;
+        instance.print_stuff().await?;
+        instance.grow_memory().unwrap();
+        instance.write_over_1mb()?;
+        instance.print_stuff().await.unwrap();
+        Ok(())
+    }
 
 
     let mut local_pool = futures::executor::LocalPool::new();
     let local_spawner = local_pool.spawner();
 
-    local_spawner.spawn(run(1, engine.clone()).map(|_| ())).unwrap();
-    local_spawner.spawn(run(2, engine.clone()).map(|_| ())).unwrap();
+    local_spawner.spawn(run2(engine.clone()).map(|_| ())).unwrap();
+
+    // local_spawner.spawn(run(1, engine.clone()).map(|_| ())).unwrap();
+    // local_spawner.spawn(run(2, engine.clone()).map(|_| ())).unwrap();
 
     println!("==================");
-    for _ in 0..100 {
-        local_pool.run_until(Delay::new(Duration::from_nanos(1)));
-        println!("Ran");
-    }
+    local_pool.run_until_stalled();
 
     println!("done");
 

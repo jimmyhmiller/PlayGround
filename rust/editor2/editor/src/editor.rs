@@ -111,11 +111,6 @@ impl Editor {
     }
 
     pub fn setup(&mut self) {
-
-        let counter_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/target/wasm32-wasi/debug/counter.wasm";
-        for _ in 0..4 {
-            self.temp_wasm_ids.push(self.wasm_messenger.new_instance(counter_path));
-        }
     }
 
     fn setup_file_watcher(&mut self) {

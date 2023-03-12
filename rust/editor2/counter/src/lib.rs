@@ -183,8 +183,11 @@ impl App for TextWidget {
         for line in self.text_pane.text_buffer.lines()
                 .skip(self.text_pane.lines_above_scroll())
                 .take(self.text_pane.number_of_visible_lines(self.widget_data.size.height)) {
-            canvas.draw_str(from_utf8(line).unwrap(), 0.0, 0.0);
-            canvas.translate(0.0, self.text_pane.line_height);
+            if let Ok(line) = from_utf8(line) {
+                canvas.draw_str(line, 0.0, 0.0);
+                canvas.translate(0.0, self.text_pane.line_height);
+            }
+           
         }
         canvas.restore();
 

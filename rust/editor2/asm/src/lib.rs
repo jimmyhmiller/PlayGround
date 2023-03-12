@@ -11,6 +11,14 @@ struct AsmData {
     xml_file_text: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileInfo {
+    name: String,
+    asm: Vec<String>,
+    desc: String,
+    regdiagram: Vec<String>,
+}
+
 impl App for AsmData {
     type State = String;
 
@@ -120,14 +128,6 @@ impl AsmData {
         //       end
         //     end
         //   end
-
-        #[derive(Debug, Clone, Serialize, Deserialize)]
-        struct FileInfo {
-            name: String,
-            asm: Vec<String>,
-            desc: String,
-            regdiagram: Vec<String>,
-        }
 
         let name: String = found_file_nodes
             .iter()
