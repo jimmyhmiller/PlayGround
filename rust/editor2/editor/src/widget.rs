@@ -9,7 +9,7 @@ use skia_safe::{
 
 use crate::{event::Event, wasm::{WasmContext, self}, keyboard::KeyboardInput, wasm_messenger::{self, WasmMessenger, WasmId}};
 
-#[derive(Copy, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
 pub struct Position {
     pub x: f32,
     pub y: f32,
@@ -528,10 +528,9 @@ impl Widget {
             WidgetData::Wasm { wasm, wasm_id } => {
                 let new_wasm_id = wasm_messenger.new_instance(&wasm.path);
                 *wasm_id = new_wasm_id;
-                // if let Some(state) = &wasm.state {
-                //     wasm_messenger.send_set_state(*wasm_id, &state);
-                // }
-                // wasm.init();
+                if let Some(state) = &wasm.state {
+                    wasm_messenger.send_set_state(*wasm_id, &state);
+                }
             }
             _ => {}
         }

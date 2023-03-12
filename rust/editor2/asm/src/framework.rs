@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, str::from_utf8};
 
 
 
@@ -26,8 +26,8 @@ pub struct PointerLengthString {
     pub len: usize,
 }
 
-impl From<String> for PointerLengthString {
-    fn from(s: String) -> Self {
+impl From<&String> for PointerLengthString {
+    fn from(s: &String) -> Self {
         Self {
             ptr: s.as_ptr() as usize,
             len: s.len(),
@@ -132,6 +132,7 @@ impl Canvas {
 }
 
 pub static mut DEBUG : Vec<String> = Vec::new();
+pub static mut SERIALIZED_STATE : String = String::new();
 
 pub trait App {
     type State;
@@ -165,6 +166,24 @@ pub trait App {
             DEBUG.push(format!("{}: {:?}", name, value));
         }
     }
+}
+
+
+#[no_mangle]
+pub extern "C" fn alloc_state(size: i32) -> i32 {
+    let mut buf: Vec<u8> = vec![0; size as usize];
+    buf.shrink_to_fit();
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(ptr);
+    ptr as i32
+}
+
+pub fn decode_base64(data: Vec<u8>) -> String {
+    use base64::Engine;
+    let data = data.iter().copied().skip(1).collect::<Vec<u8>>();
+    let data = base64::engine::general_purpose::STANDARD_NO_PAD.decode(data).unwrap();
+    let s = from_utf8(&data).unwrap();
+    s.to_string()
 }
 
 mod macros {
@@ -215,27 +234,31 @@ mod macros {
 
             #[no_mangle]
             pub extern "C" fn get_state() -> *const PointerLengthString {
+                use crate::framework::SERIALIZED_STATE;
+                use base64::Engine;
                 let s = serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
                 if s.starts_with("\"") {
                     assert!(s.ends_with("\""));
                 }
-                let p : PointerLengthString = s.into();
-                // If I print things work properly. I assume I am doing some bad things with pointers.
-                // I know that I am making this string and then making a pointer to it
-                // But the string doesn't live anywhere.
-                // Need to have a better way to do these string cross boundaries
-                println!("get_state: {:?}", p);
+                let s = base64::engine::general_purpose::STANDARD_NO_PAD.encode(s);
+                unsafe { SERIALIZED_STATE = s };
+                let p : PointerLengthString = unsafe { (&SERIALIZED_STATE).into() };
                 &p as *const _
             }
 
+
             #[no_mangle]
-            pub extern "C" fn set_state(ptr: i32, len: i32) {
-                let s = String::from(PointerLengthString { ptr: ptr as usize, len: len as usize });
-                if let Ok(state) = serde_json::from_str(&s) {
-                    unsafe { APP.set_state(state)}
-                } else {
-                    println!("set_state: failed to parse state");
-                }
+            pub extern "C" fn set_state(ptr: i32, size: i32) {
+                // let data = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
+                // let data = data.clone();
+                // use crate::framework::decode_base64;
+                // let s = decode_base64(data);
+                // if let Ok(state) = serde_json::from_str(&s) {
+                //     unsafe { APP.set_state(state)}
+                // } else {
+                //     println!("set_state: failed to parse state");
+                // }
+                // println!("Got State");
             }
 
             #[no_mangle]

@@ -166,6 +166,20 @@ pub trait App {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn alloc_state(size: i32) -> i32 {
+    // Still unsure about this.
+    // I've had some weird things happen if I don't clone this before
+    // use. I feel like I still don't understand
+    // what wasmtime actually wants from me.
+    let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(ptr);
+    ptr as i32
+}
+
+
+
 mod macros {
 
     #[macro_export]
@@ -219,9 +233,12 @@ mod macros {
                 &p as *const _
             }
 
+
             #[no_mangle]
-            pub extern "C" fn set_state(ptr: i32, len: i32) {
-                let s = String::from(PointerLengthString { ptr: ptr as usize, len: len as usize });
+            pub extern "C" fn set_state(ptr: i32, size: i32) {
+                let data = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
+                let data = data.clone();
+                let s = from_utf8(&data).unwrap();
                 if let Ok(state) = serde_json::from_str(&s) {
                     unsafe { APP.set_state(state)}
                 } else {

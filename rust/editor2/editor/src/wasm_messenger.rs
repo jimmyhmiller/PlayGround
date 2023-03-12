@@ -1,6 +1,7 @@
-use std::{sync::{Arc}, collections::HashMap, time::Duration, thread, error::Error, path::Path};
+use std::{sync::{Arc}, collections::HashMap, time::Duration, thread, error::Error, path::Path, cmp::min};
 
 
+use bytesize::ByteSize;
 use futures::{executor::LocalPool, task::LocalSpawnExt, channel::mpsc::{channel, Receiver, Sender}, StreamExt};
 use futures::task::SpawnExt;
 use futures_timer::Delay;
@@ -19,6 +20,7 @@ struct PointerLengthString {
 
 pub type WasmId = u64;
 
+#[derive(Debug)]
 enum Payload {
     Noop,
     NewInstance(String),
@@ -31,6 +33,8 @@ enum Payload {
     SaveState,
 }
 
+
+#[derive(Debug)]
 struct Message {
     wasm_id: WasmId,
     payload: Payload,
@@ -277,6 +281,8 @@ impl WasmManager {
 
     pub fn new(receiver: Receiver<Message>, sender: Sender<OutMessage>) -> Self {
         let mut config = Config::new();
+        config.dynamic_memory_guard_size(ByteSize::mb(500).as_u64());
+        config.static_memory_guard_size(ByteSize::mb(500).as_u64());
         config.epoch_interruption(true);
         config.async_support(true);
         let engine = Arc::new(Engine::new(&config).unwrap());
@@ -531,8 +537,8 @@ impl WasmInstance {
          {
         self.store.epoch_deadline_async_yield_and_update(deadline);
 
-        let func = self.instance.get_typed_func::<Params, Results>(&mut self.store, name)?;
-        let result = func.call_async(&mut self.store, params).await?;
+        let func = self.instance.get_typed_func::<Params, Results>(&mut self.store, name).unwrap();
+        let result = func.call_async(&mut self.store, params).await.unwrap();
         Ok(result)
     }
 
@@ -720,6 +726,8 @@ impl WasmInstance {
     }
 
     pub async fn set_state(&mut self, data: &[u8]) -> Result<(), Box<dyn Error>> {
+
+        println!("data:{:?}", data.clone().iter().take(100).copied().collect::<Vec<u8>>());
         let memory = self
             .instance
             .get_export(&mut self.store, "memory")
@@ -727,16 +735,26 @@ impl WasmInstance {
             .into_memory()
             .unwrap();
 
-        let memory_size = memory.data_size(&mut self.store);
+        let memory_size = memory.data_size(&mut self.store) / 65536;
 
-        let data_length_in_64k_multiples = (data.len() as f32 / 65536.0).ceil() as usize;
+        let data_length_in_64k_multiples = (data.len() as f32 / ByteSize::kb(64).as_u64() as f32).ceil() as usize;
         if data_length_in_64k_multiples > memory_size {
-            let delta = data_length_in_64k_multiples - memory_size;
+            let delta = data_length_in_64k_multiples;
             memory.grow(&mut self.store, delta as u64 + 10).unwrap();
         }
-        memory.write(&mut self.store, 0, &data).unwrap();
+        let memory = self
+            .instance
+            .get_export(&mut self.store, "memory")
+            .unwrap()
+            .into_memory()
+            .unwrap();
+        let memory_size = memory.data_size(&mut self.store) / 65536;
+        
+        let ptr = self.call_typed_func::<i32, i32>("alloc_state", data.len() as i32, 16).await?;
 
-        self.call_typed_func::<(i32, i32), ()>("set_state", (0, data.len() as i32), 1).await?;
+        memory.write(&mut self.store, ptr as usize, &data).unwrap();
+
+        self.call_typed_func::<(i32, i32), ()>("set_state", (ptr, data.len() as i32), 16).await.unwrap();
         Ok(())
     }
 
