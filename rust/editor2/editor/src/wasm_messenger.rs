@@ -66,6 +66,12 @@ pub struct WasmMessenger {
     wasm_states: HashMap<WasmId, SaveState>,
 }
 
+// TODO:
+// Limit inflight messages per instance
+// If I already asked for draw and it hasn't returned,
+// don't queue another draw.
+// I need to queue a click though. Need to think about the details.
+
 impl WasmMessenger {
 
     pub fn new() -> Self {
@@ -138,6 +144,9 @@ impl WasmMessenger {
                         // }
                     }
                     Command::DrawString(str, x, y) => {
+                        if max_height > bounds.height {
+                            continue;
+                        }
                         let font = Font::new(
                             Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
                             32.0,
@@ -253,16 +262,21 @@ impl WasmMessenger {
         loop {
             self.tick();
             if let Some(state) = self.wasm_states.get(&wasm_id) {
-                if let SaveState::Saved(state) = state {
-                    if state.starts_with("\"") {
-                        assert!(state.ends_with("\""), "State is corrupt: {}", state);
+                match state {
+                    SaveState::Saved(state) => {
+                        if state.starts_with("\"") {
+                            assert!(state.ends_with("\""), "State is corrupt: {}", state);
+                        }
+                        break;
                     }
-                    break;
+                    SaveState::Empty => {
+                        break;
+                    }
+                    _ => {}
                 }
             }
         }
         self.wasm_states.get(&wasm_id).unwrap_or(&SaveState::Empty).clone()
-
     }
 
 }
@@ -474,8 +488,15 @@ fn get_string_from_memory(
     let data = memory
         .data(store)
         .get(ptr..(ptr + len));
-    let string = from_utf8(data.unwrap()).ok()?;
-    Some(string.to_string())
+    let string = from_utf8(data.unwrap());
+    match string {
+        Ok(string) => Some(string.to_string()),
+        Err(err) => {
+            println!("Error getting utf8 data{:?}", err);
+            None  
+        }
+    }
+    
 }
 
 struct WasmInstance {
@@ -727,7 +748,7 @@ impl WasmInstance {
 
     pub async fn set_state(&mut self, data: &[u8]) -> Result<(), Box<dyn Error>> {
 
-        println!("data:{:?}", data.clone().iter().take(100).copied().collect::<Vec<u8>>());
+        println!("host data:{:?}", data.clone().iter().take(100).copied().collect::<Vec<u8>>());
         let memory = self
             .instance
             .get_export(&mut self.store, "memory")
@@ -735,30 +756,35 @@ impl WasmInstance {
             .into_memory()
             .unwrap();
 
-        let memory_size = memory.data_size(&mut self.store) / 65536;
+        let memory_size = (memory.data_size(&mut self.store) as f32 / ByteSize::kb(64).as_u64() as f32).ceil() as usize;
+
+        println!("data_len {}", data.len());
 
         let data_length_in_64k_multiples = (data.len() as f32 / ByteSize::kb(64).as_u64() as f32).ceil() as usize;
         if data_length_in_64k_multiples > memory_size {
             let delta = data_length_in_64k_multiples;
             memory.grow(&mut self.store, delta as u64 + 10).unwrap();
         }
+        
+        let ptr = self.call_typed_func::<u32, u32>("alloc_state", data.len() as u32,1).await?;
         let memory = self
             .instance
             .get_export(&mut self.store, "memory")
             .unwrap()
             .into_memory()
             .unwrap();
-        let memory_size = memory.data_size(&mut self.store) / 65536;
-        
-        let ptr = self.call_typed_func::<i32, i32>("alloc_state", data.len() as i32, 16).await?;
+        let memory_size = memory.data_size(&mut self.store);
+        println!("{}", memory_size);
 
         memory.write(&mut self.store, ptr as usize, &data).unwrap();
 
-        self.call_typed_func::<(i32, i32), ()>("set_state", (ptr, data.len() as i32), 16).await.unwrap();
+        self.call_typed_func::<(u32, u32), ()>("set_state", (ptr, data.len() as u32), 1).await.unwrap();
         Ok(())
     }
 
     pub async fn get_state(&mut self) -> Option<String> {
+
+
         let json_string_ptr = self.call_typed_func::<(), i32>("get_state", (), 1).await.ok()?;
         let memory = self
             .instance
