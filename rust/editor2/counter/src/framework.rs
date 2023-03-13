@@ -172,7 +172,7 @@ pub extern "C" fn alloc_state(size: i32) -> i32 {
     // I've had some weird things happen if I don't clone this before
     // use. I feel like I still don't understand
     // what wasmtime actually wants from me.
-    let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
+    let mut buf: Vec<u8> = Vec::with_capacity((size / 8) as usize);
     let ptr = buf.as_mut_ptr();
     std::mem::forget(ptr);
     ptr as i32

@@ -1,4 +1,4 @@
-use std::{fmt::Debug, str::from_utf8};
+use std::{fmt::Debug, str::from_utf8, mem::ManuallyDrop};
 
 
 
@@ -22,22 +22,22 @@ extern "C" {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct PointerLengthString {
-    pub ptr: usize,
-    pub len: usize,
+    pub ptr: u32,
+    pub len: u32,
 }
 
 impl From<&String> for PointerLengthString {
     fn from(s: &String) -> Self {
         Self {
-            ptr: s.as_ptr() as usize,
-            len: s.len(),
+            ptr: s.as_ptr() as u32,
+            len: s.len() as u32,
         }
     }
 }
 
 impl From<PointerLengthString> for String {
     fn from(s: PointerLengthString) -> Self {
-        unsafe { String::from_raw_parts(s.ptr as *mut u8, s.len, s.len) }
+        unsafe { String::from_raw_parts(s.ptr as *mut u8, s.len as usize, s.len as usize) }
     }
 }
 
@@ -132,7 +132,6 @@ impl Canvas {
 }
 
 pub static mut DEBUG : Vec<String> = Vec::new();
-pub static mut SERIALIZED_STATE : String = String::new();
 
 pub trait App {
     type State;
@@ -170,20 +169,33 @@ pub trait App {
 
 
 #[no_mangle]
-pub extern "C" fn alloc_state(size: i32) -> i32 {
-    let mut buf: Vec<u8> = vec![0; size as usize];
-    buf.shrink_to_fit();
+pub fn alloc_state(len: usize) -> *mut u8 {
+    // create a new mutable buffer with capacity `len`
+    let mut buf = Vec::with_capacity(len);
+    // take a mutable pointer to the buffer
     let ptr = buf.as_mut_ptr();
-    std::mem::forget(ptr);
-    ptr as i32
+    // take ownership of the memory block and
+    // ensure that its destructor is not
+    // called when the object goes out of scope
+    // at the end of the function
+    std::mem::forget(buf);
+    // return the pointer so the runtime
+    // can write data at this offset
+    return ptr;
 }
 
-pub fn decode_base64(data: Vec<u8>) -> String {
+
+pub fn encode_base64(data: String) -> String {
     use base64::Engine;
-    let data = data.iter().copied().skip(1).collect::<Vec<u8>>();
-    let data = base64::engine::general_purpose::STANDARD_NO_PAD.decode(data).unwrap();
-    let s = from_utf8(&data).unwrap();
-    s.to_string()
+    let data = base64::engine::general_purpose::STANDARD.encode(data);
+    data
+}
+
+pub fn decode_base64(data: Vec<u8>) -> Result<String, Box<dyn std::error::Error>> {
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.decode(data)?;
+    let s = from_utf8(&data)?;
+    Ok(s.to_string())
 }
 
 mod macros {
@@ -234,31 +246,39 @@ mod macros {
 
             #[no_mangle]
             pub extern "C" fn get_state() -> *const PointerLengthString {
-                use crate::framework::SERIALIZED_STATE;
-                use base64::Engine;
-                let s = serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
-                if s.starts_with("\"") {
-                    assert!(s.ends_with("\""));
-                }
-                let s = base64::engine::general_purpose::STANDARD_NO_PAD.encode(s);
-                unsafe { SERIALIZED_STATE = s };
-                let p : PointerLengthString = unsafe { (&SERIALIZED_STATE).into() };
-                &p as *const _
+                use crate::framework::encode_base64;
+                use std::mem::ManuallyDrop;
+                let s : String = serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
+                let s = encode_base64(s);
+                let p : ManuallyDrop<PointerLengthString> = ManuallyDrop::new((&s).into());
+                println!("action {:?}", p);
+                let p : *const PointerLengthString = &*p;
+                println!("{:?}", p);
+                std::mem::forget(p);
+                std::mem::forget(s);
+                p
             }
 
 
             #[no_mangle]
-            pub extern "C" fn set_state(ptr: i32, size: i32) {
-                // let data = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
-                // let data = data.clone();
-                // use crate::framework::decode_base64;
-                // let s = decode_base64(data);
-                // if let Ok(state) = serde_json::from_str(&s) {
-                //     unsafe { APP.set_state(state)}
-                // } else {
-                //     println!("set_state: failed to parse state");
-                // }
-                // println!("Got State");
+            pub extern "C" fn set_state(ptr: u32, size: u32) {
+                println!("Got here {}", size);
+                let data = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
+                use crate::framework::decode_base64;
+                let s = decode_base64(data);
+                match s {
+                    Ok(s) => {
+                        if let Ok(state) = serde_json::from_str(&s) {
+                            unsafe { APP.set_state(state)}
+                        } else {
+                            println!("set_state: failed to parse state");
+                        }
+                    },
+                    Err(err) => {
+                        println!("error getting state {:?}", err);
+                    }
+                }
+                println!("Got State");
             }
 
             #[no_mangle]
