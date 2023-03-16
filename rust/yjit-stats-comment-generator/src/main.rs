@@ -96,23 +96,27 @@ fn remove_indention(text: &str) -> String {
 
 fn main() {
 
-    let current_ruby = "/Users/jimmyhmiller/.rubies/ruby-yjit/bin/ruby";
-    let master_ruby_dev = "/Users/jimmyhmiller/.rubies/yjit-master-dev/bin/ruby";
+    let current_ruby_stats = "/Users/jimmyhmiller/.rubies/ruby-yjit-stats/bin/ruby";
+    let master_ruby_stats = "/Users/jimmyhmiller/.rubies/yjit-master-stats/bin/ruby";
 
     // yjit bench directory
     let yjit_bench_dir = Path::new("/Users/jimmyhmiller/Documents/Code/yjit-bench");
     // change directory
     std::env::set_current_dir(yjit_bench_dir).unwrap();
 
-    eprintln!("Switching to yjit-master-dev");
-    // TODO: Maybe auto pull?
+    eprintln!("Switching to yjit-master-stats");
 
-    let rails_bench_master = run_rails_bench(master_ruby_dev);
-    let liquid_render_master = run_liquid_render(master_ruby_dev);
+    // TODO:
+    // Auto pull on master
+    // Build current and master on stats
 
-    eprintln!("Switching to ruby-yjit");
-    let rails_bench_current = run_rails_bench(current_ruby);
-    let liquid_render_current = run_liquid_render(current_ruby);
+
+    let rails_bench_master = run_rails_bench(master_ruby_stats);
+    let liquid_render_master = run_liquid_render(master_ruby_stats);
+
+    eprintln!("Switching to ruby-yjit-stats");
+    let rails_bench_current = run_rails_bench(current_ruby_stats);
+    let liquid_render_current = run_liquid_render(current_ruby_stats);
 
     let preamble = preamble();
     let rails_before = template_single_bench("Rails Bench Before", rails_bench_master.stderr);
