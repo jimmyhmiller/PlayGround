@@ -1,10 +1,18 @@
-use std::{path::{PathBuf, Path}, env, fs};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 fn get_output_path() -> PathBuf {
     let manifest_dir_string = env::var("CARGO_MANIFEST_DIR").unwrap();
     let build_type = env::var("PROFILE").unwrap();
-    let path = Path::new(&manifest_dir_string).parent().unwrap().join("target").join("wasm32-wasi").join(build_type);
-    return PathBuf::from(path);
+    let path = Path::new(&manifest_dir_string)
+        .parent()
+        .unwrap()
+        .join("target")
+        .join("wasm32-wasi")
+        .join(build_type);
+    path
 }
 
 fn main() {

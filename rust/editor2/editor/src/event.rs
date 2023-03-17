@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use crate::{widget::{Position, WidgetId, WidgetSelector}, keyboard::{KeyboardInput, Modifiers, KeyCode, KeyState}};
+use crate::{
+    keyboard::{KeyCode, KeyState, KeyboardInput, Modifiers},
+    widget::{Position, WidgetId, WidgetSelector},
+};
 
 use serde::{Deserialize, Serialize};
 use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
@@ -12,6 +15,7 @@ pub enum Event {
         // I maybe shouldn't use this. But I'm lazy right now.
         input: KeyboardInput,
     },
+    ModifiersChanged(Modifiers),
     MouseMove {
         x: f32,
         y: f32,
@@ -96,7 +100,7 @@ impl Event {
         }
     }
 
-    pub fn from_winit_event(event: &WinitEvent<'_, ()>) -> Option<Self> {
+    pub fn from_winit_event(event: &WinitEvent<'_, ()>, modifiers: Modifiers) -> Option<Self> {
         match event {
             WinitEvent::WindowEvent { event, .. } => {
                 use WinitWindowEvent::*;
@@ -146,16 +150,23 @@ impl Event {
                     }),
                     HoveredFileCancelled => Some(Event::HoveredFileCancelled),
 
-                    KeyboardInput {  input, ..  } => {
-                        // TODO: need to keep track of modifier state instead of deprecated fields
-                        let modifiers = Modifiers {
-                            shift: input.modifiers.shift(),
-                            ctrl: input.modifiers.ctrl(),
-                            option: input.modifiers.alt(),
-                            cmd: input.modifiers.logo(),
-                        };
+                    ModifiersChanged(state) => {
+                        let ctrl = state.ctrl();
+                        let option = state.alt();
+                        let shift = state.shift();
+                        let cmd = state.logo();
+                        Some(Event::ModifiersChanged(Modifiers {
+                            shift,
+                            ctrl,
+                            cmd,
+                            option,
+                        }))
+                    }
 
-                        let key_code = input.virtual_keycode.and_then(KeyCode::map_winit_vk_to_keycode)?;
+                    KeyboardInput { input, .. } => {
+                        let key_code = input
+                            .virtual_keycode
+                            .and_then(KeyCode::map_winit_vk_to_keycode)?;
 
                         let state = match input.state {
                             winit::event::ElementState::Pressed => KeyState::Pressed,
@@ -167,9 +178,9 @@ impl Event {
                                 state,
                                 key_code,
                                 modifiers,
-                            }
+                            },
                         })
-                    },
+                    }
                     _ => None,
                 }
             }

@@ -1,19 +1,22 @@
 use std::{
     collections::HashSet,
-    fs::{File},
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::Receiver,
-    thread, time::Duration,
+    thread,
+    time::Duration,
 };
 
 use crate::{
     event::Event,
     fps_counter::FpsCounter,
-    widget::{Color, Position, Size, TextPane, Wasm, Widget, WidgetData, WidgetId, WidgetStore, self}, wasm_messenger::{WasmMessenger, WasmId},
+    keyboard::Modifiers,
+    wasm_messenger::{WasmId, WasmMessenger},
+    widget::{Color, Position, Size, TextPane, Wasm, Widget, WidgetData, WidgetId, WidgetStore},
 };
 
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher, FsEventWatcher};
+use notify::{FsEventWatcher, RecursiveMode};
 
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
@@ -34,6 +37,7 @@ struct Context {
     left_mouse_down: bool,
     right_mouse_down: bool,
     cancel_click: bool,
+    modifiers: Modifiers,
 }
 
 pub struct Editor {
@@ -48,6 +52,7 @@ pub struct Editor {
     debounce_watcher: Option<Debouncer<FsEventWatcher>>,
     event_loop_proxy: Option<EventLoopProxy<()>>,
     wasm_messenger: WasmMessenger,
+    #[allow(unused)]
     temp_wasm_ids: Vec<WasmId>,
     widget_config_path: String,
     // points: Vec<[f64; 2]>,
@@ -110,15 +115,14 @@ impl Editor {
         self.events.next_frame();
     }
 
-    pub fn setup(&mut self) {
-    }
+    pub fn setup(&mut self) {}
 
     fn setup_file_watcher(&mut self) {
         let widget_config_path = self.widget_config_path.to_string();
         let (watch_raw_send, watch_raw_receive) = std::sync::mpsc::channel();
         let (sender, receiver) = std::sync::mpsc::channel::<Event>();
-        let mut debouncer : Debouncer<FsEventWatcher> = new_debouncer(Duration::from_millis(250), None, watch_raw_send).unwrap();
-
+        let mut debouncer: Debouncer<FsEventWatcher> =
+            new_debouncer(Duration::from_millis(250), None, watch_raw_send).unwrap();
 
         let watcher = debouncer.watcher();
 
@@ -159,7 +163,7 @@ impl Editor {
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
         let widgets: Vec<Widget> = contents
-            .split(";")
+            .split(';')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .map(|s| {
@@ -190,27 +194,22 @@ impl Editor {
         // Todo: Need to test that I am not missing any
         // events with my start and end
 
-
         // TODO: Put in better place
         for widget in self.widget_store.iter_mut() {
             match &widget.data {
-                WidgetData::Wasm { wasm, wasm_id } => {
+                WidgetData::Wasm { wasm: _, wasm_id } => {
                     self.wasm_messenger.send_draw(*wasm_id, "draw");
                 }
                 _ => {}
             }
-
         }
 
         self.wasm_messenger.tick();
 
-
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
-                match event {
-                    _ => {
-                        self.events.push_current_frame(event);
-                    }
+                {
+                    self.events.push_current_frame(event);
                 }
             }
         }
@@ -273,7 +272,7 @@ impl Editor {
                                 WidgetData::TextPane { text_pane } => {
                                     text_pane.on_scroll(x, y, widget.size.height);
                                 }
-                                WidgetData::Wasm { wasm, wasm_id, } => {
+                                WidgetData::Wasm { wasm: _, wasm_id } => {
                                     self.wasm_messenger.send_on_scroll(*wasm_id, x, y);
                                 }
                                 _ => {}
@@ -329,7 +328,6 @@ impl Editor {
     }
 
     pub fn new() -> Self {
-
         let mut widget_config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         widget_config_path.push("widgets.ron");
         let widget_config_path = widget_config_path.to_str().unwrap();
@@ -342,6 +340,7 @@ impl Editor {
                 left_mouse_down: false,
                 right_mouse_down: false,
                 cancel_click: false,
+                modifiers: Modifiers::default(),
             },
             widget_store: WidgetStore::new(),
             should_redraw: true,
@@ -369,7 +368,6 @@ impl Editor {
 
         // let outline_points = get_stroke_outline_points(&stroke_points.clone(), StrokeOptions::new());
         // draw_points(&outline_points, canvas);
-
 
         let canvas_size = Size::from(canvas.base_layer_size());
 
@@ -401,7 +399,7 @@ impl Editor {
     }
 
     pub fn add_event(&mut self, event: &winit::event::Event<'_, ()>) {
-        if let Some(event) = Event::from_winit_event(event) {
+        if let Some(event) = Event::from_winit_event(event, self.context.modifiers) {
             self.respond_to_event(event);
         }
     }
@@ -421,13 +419,16 @@ impl Editor {
                 if let Some(widget_id) = self.active_widget {
                     if let Some(widget) = self.widget_store.get_mut(widget_id) {
                         match widget.data {
-                            WidgetData::Wasm { ref mut wasm, wasm_id } => {
+                            WidgetData::Wasm { wasm: _, wasm_id } => {
                                 self.wasm_messenger.send_on_key(wasm_id, input);
                             }
                             _ => {}
                         }
                     }
                 }
+            }
+            Event::ModifiersChanged(_) => {
+                self.events.push(event);
             }
             Event::MouseMove { x, y, .. } => {
                 // I want to be able to respond to mouse move events
@@ -545,7 +546,8 @@ impl Editor {
         for widget in self.widget_store.iter_mut() {
             if widget.mouse_over(&self.context.mouse_position) {
                 mouse_over.push(widget.id);
-                let events = widget.on_click(&self.context.mouse_position, &mut self.wasm_messenger);
+                let events =
+                    widget.on_click(&self.context.mouse_position, &mut self.wasm_messenger);
                 for event in events.iter() {
                     self.events.push(event.clone());
                 }
@@ -572,25 +574,22 @@ impl Editor {
     }
 
     fn save_widgets(&mut self) {
-
         for widget in self.widget_store.iter_mut() {
             widget.save(&mut self.wasm_messenger);
         }
         let mut result = String::new();
         for widget in self.widget_store.iter() {
-
             let widget_serialized = &format!(
                 "{};\n",
                 ron::ser::to_string_pretty(widget, PrettyConfig::default()).unwrap()
             );
             // println!("widget_serialized: {}", widget_serialized);
-            result.push_str(&widget_serialized);
+            result.push_str(widget_serialized);
         }
         let mut file = File::create(&self.widget_config_path).unwrap();
         file.write_all(result.as_bytes()).unwrap();
     }
 }
-
 
 // I need a way for processes to add widgets
 // I don't want them to need to remove widgets by holding onto a reference or something

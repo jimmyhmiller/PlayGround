@@ -1,21 +1,24 @@
-use std::{fmt::Debug, str::from_utf8, mem::ManuallyDrop};
-
-
+use std::{fmt::Debug, str::from_utf8};
 
 #[link(wasm_import_module = "host")]
 extern "C" {
     #[link_name = "draw_str"]
     fn draw_str_low_level(ptr: i32, len: i32, x: f32, y: f32);
+    #[allow(unused)]
     fn draw_rect(x: f32, y: f32, width: f32, height: f32);
     fn set_color(r: f32, g: f32, b: f32, a: f32);
     fn save();
+    fn set_get_state(ptr: u32, len: u32);
     fn clip_rect(x: f32, y: f32, width: f32, height: f32);
     fn draw_rrect(x: f32, y: f32, width: f32, height: f32, radius: f32);
     fn translate(x: f32, y: f32);
     fn restore();
+    #[allow(unused)]
     fn start_process_low_level(ptr: i32, len: i32) -> i32;
+    #[allow(unused)]
     fn send_message_low_level(process_id: i32, ptr: i32, len: i32);
     #[allow(improper_ctypes)]
+    #[allow(unused)]
     fn recieve_last_message_low_level(process_id: i32) -> (i32, i32);
 }
 
@@ -59,27 +62,22 @@ impl Rect {
         }
     }
 
-    pub fn with_inset(&self, (x, y): (f32, f32)) -> Self {
-       // make a rectangle with some margins
+    pub fn _with_inset(&self, (x, y): (f32, f32)) -> Self {
+        // make a rectangle with some margins
         Self {
             x: self.x + x,
             y: self.y + y,
             width: self.width - x * 2.0,
             height: self.height - y * 2.0,
         }
-
     }
 }
 
-pub struct Canvas {
-
-}
+pub struct Canvas {}
 
 impl Canvas {
     pub fn new() -> Self {
-        Self {
-
-        }
+        Self {}
     }
 
     pub fn draw_str(&self, s: &str, x: f32, y: f32) {
@@ -88,7 +86,7 @@ impl Canvas {
         }
     }
 
-    pub fn draw_rect(&self, x: f32, y: f32, width: f32, height: f32) {
+    pub fn _draw_rect(&self, x: f32, y: f32, width: f32, height: f32) {
         unsafe {
             draw_rect(x, y, width, height);
         }
@@ -131,7 +129,7 @@ impl Canvas {
     }
 }
 
-pub static mut DEBUG : Vec<String> = Vec::new();
+pub static mut DEBUG: Vec<String> = Vec::new();
 
 pub trait App {
     type State;
@@ -143,17 +141,18 @@ pub trait App {
     fn get_state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State);
     fn start_process(&mut self, process: String) -> i32 {
-        unsafe {
-            start_process_low_level(process.as_ptr() as i32, process.len() as i32)
-        }
+        unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
     }
     fn send_message(&mut self, process_id: i32, message: String) {
         unsafe {
             send_message_low_level(process_id, message.as_ptr() as i32, message.len() as i32);
         }
     }
+    fn set_get_state(&mut self, ptr: u32, len: u32) {
+        unsafe { set_get_state(ptr, len) };
+    }
     fn recieve_last_message(&mut self, process_id: i32) -> String {
-        let mut buffer = String::new();
+        let buffer;
         unsafe {
             let (ptr, len) = recieve_last_message_low_level(process_id);
             buffer = String::from_raw_parts(ptr as *mut u8, len as usize, len as usize);
@@ -166,7 +165,6 @@ pub trait App {
         }
     }
 }
-
 
 #[no_mangle]
 pub fn alloc_state(len: usize) -> *mut u8 {
@@ -181,14 +179,13 @@ pub fn alloc_state(len: usize) -> *mut u8 {
     std::mem::forget(buf);
     // return the pointer so the runtime
     // can write data at this offset
-    return ptr;
+    ptr
 }
-
 
 pub fn encode_base64(data: String) -> String {
     use base64::Engine;
-    let data = base64::engine::general_purpose::STANDARD.encode(data);
-    data
+
+    base64::engine::general_purpose::STANDARD.encode(data)
 }
 
 pub fn decode_base64(data: Vec<u8>) -> Result<String, Box<dyn std::error::Error>> {
@@ -204,9 +201,9 @@ mod macros {
     macro_rules! app {
         ($app:ident) => {
             use once_cell::sync::Lazy;
-            use $crate::framework::{PointerLengthString, KeyboardInput};
+            use $crate::framework::KeyboardInput;
             use $crate::framework::DEBUG;
-            static mut APP : Lazy<$app> = Lazy::new(|| $app::init());
+            static mut APP: Lazy<$app> = Lazy::new(|| $app::init());
 
             #[no_mangle]
             pub extern "C" fn on_click(x: f32, y: f32) {
@@ -245,40 +242,34 @@ mod macros {
             }
 
             #[no_mangle]
-            pub extern "C" fn get_state() -> *const PointerLengthString {
-                use crate::framework::encode_base64;
-                use std::mem::ManuallyDrop;
-                let s : String = serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
+            pub extern "C" fn get_state() {
+                use $crate::framework::encode_base64;
+                let s: String = serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
                 let s = encode_base64(s);
-                let p : ManuallyDrop<PointerLengthString> = ManuallyDrop::new((&s).into());
-                println!("action {:?}", p);
-                let p : *const PointerLengthString = &*p;
-                println!("{:?}", p);
-                std::mem::forget(p);
-                std::mem::forget(s);
-                p
+                let ptr = s.as_ptr() as usize;
+                let len = s.len();
+                std::mem::forget(ptr);
+                unsafe { APP.set_get_state(ptr as u32, len as u32) };
             }
-
 
             #[no_mangle]
             pub extern "C" fn set_state(ptr: u32, size: u32) {
-                println!("Got here {}", size);
-                let data = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
-                use crate::framework::decode_base64;
+                let data =
+                    unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
+                use $crate::framework::decode_base64;
                 let s = decode_base64(data);
                 match s {
                     Ok(s) => {
                         if let Ok(state) = serde_json::from_str(&s) {
-                            unsafe { APP.set_state(state)}
+                            unsafe { APP.set_state(state) }
                         } else {
                             println!("set_state: failed to parse state");
                         }
-                    },
+                    }
                     Err(err) => {
                         println!("error getting state {:?}", err);
                     }
                 }
-                println!("Got State");
             }
 
             #[no_mangle]
@@ -289,8 +280,6 @@ mod macros {
     }
 }
 
-
-
 pub struct Color {
     r: f32,
     g: f32,
@@ -299,7 +288,6 @@ pub struct Color {
 }
 
 impl Color {
-
     pub fn new(r: f32, g: f32, b: f32, a: f32) -> Color {
         Color { r, g, b, a }
     }
@@ -316,7 +304,6 @@ impl Color {
         Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
     }
 }
-
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -464,12 +451,11 @@ impl KeyCode {
         }
     }
 
+    #[allow(unused)]
     fn to_u32(&self) -> u32 {
         *self as u32
     }
-
 }
-
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -479,6 +465,7 @@ pub enum KeyState {
 }
 
 impl KeyState {
+    #[allow(unused)]
     pub fn to_u32(&self) -> u32 {
         match self {
             KeyState::Pressed => 0,
@@ -514,6 +501,7 @@ impl Modifiers {
         }
     }
 
+    #[allow(unused)]
     pub fn to_u32(&self) -> u32 {
         let mut result = 0;
         if self.shift {
@@ -538,7 +526,6 @@ pub struct KeyboardInput {
     pub modifiers: Modifiers,
 }
 
-
 impl KeyboardInput {
     pub fn from_u32(key: u32, state: u32, modifiers: u32) -> Self {
         Self {
@@ -548,6 +535,7 @@ impl KeyboardInput {
         }
     }
 
+    #[allow(unused)]
     pub fn to_u32_tuple(&self) -> (u32, u32, u32) {
         (
             self.key_code.to_u32(),
@@ -556,6 +544,7 @@ impl KeyboardInput {
         )
     }
 
+    #[allow(unused)]
     pub fn to_char(&self) -> Option<char> {
         match (self.key_code, self.modifiers.shift) {
             (KeyCode::Key0, false) => Some('0'),
