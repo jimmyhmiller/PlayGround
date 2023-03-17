@@ -7,7 +7,10 @@ use skia_safe::{
     Canvas, Color4f, Data, Font, FontStyle, Image, Paint, Point, RRect, Rect, Typeface,
 };
 
-use crate::{event::Event, wasm::{WasmContext, self}, keyboard::KeyboardInput, wasm_messenger::{self, WasmMessenger, WasmId}};
+use crate::{
+    event::Event,
+    wasm_messenger::{self, WasmId, WasmMessenger},
+};
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
 pub struct Position {
@@ -15,11 +18,11 @@ pub struct Position {
     pub y: f32,
 }
 
-impl Into<Point> for Position {
-    fn into(self) -> Point {
+impl From<Position> for Point {
+    fn from(val: Position) -> Self {
         Point {
-            x: self.x,
-            y: self.y,
+            x: val.x,
+            y: val.y,
         }
     }
 }
@@ -110,14 +113,14 @@ impl Color {
 
     pub fn parse_hex(hex: &str) -> Color {
         let mut start = 0;
-        if hex.starts_with("#") {
+        if hex.starts_with('#') {
             start = 1;
         }
 
         let r = i64::from_str_radix(&hex[start..start + 2], 16).unwrap() as f32;
         let g = i64::from_str_radix(&hex[start + 2..start + 4], 16).unwrap() as f32;
         let b = i64::from_str_radix(&hex[start + 4..start + 6], 16).unwrap() as f32;
-        return Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0);
+        Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
     }
 }
 
@@ -188,9 +191,9 @@ pub enum FontWeight {
     Bold,
 }
 
-impl Into<FontStyle> for FontWeight {
-    fn into(self) -> FontStyle {
-        match self {
+impl From<FontWeight> for FontStyle {
+    fn from(val: FontWeight) -> Self {
+        match val {
             FontWeight::Light => FontStyle::new(Weight::LIGHT, Width::NORMAL, Slant::Upright),
             FontWeight::Normal => FontStyle::normal(),
             FontWeight::Bold => FontStyle::bold(),
@@ -210,7 +213,7 @@ fn serialize_text<S>(x: &Vec<u8>, s: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    s.serialize_str(from_utf8(&x).unwrap())
+    s.serialize_str(from_utf8(x).unwrap())
 }
 
 fn deserialize_text<'de, D>(d: D) -> Result<Vec<u8>, D::Error>
@@ -256,7 +259,7 @@ impl TextPane {
     fn get_lines(&self) -> impl std::iter::Iterator<Item = &str> + '_ {
         let text = std::str::from_utf8(&self.contents).unwrap();
         let lines = text.split('\n');
-        return lines;
+        lines
     }
 
     fn number_of_lines(&self) -> usize {
@@ -350,10 +353,7 @@ pub struct Wasm {
 
 impl Wasm {
     pub fn new(path: String) -> Self {
-        Self {
-            path,
-            state: None,
-        }
+        Self { path, state: None }
     }
 }
 
@@ -367,8 +367,11 @@ impl Widget {
         )
     }
 
-    pub fn on_click(&mut self, position: &Position, wasm_messenger: &mut WasmMessenger) -> Vec<Event> {
-
+    pub fn on_click(
+        &mut self,
+        position: &Position,
+        wasm_messenger: &mut WasmMessenger,
+    ) -> Vec<Event> {
         let widget_x = position.x - self.position.x;
         let widget_y = position.y - self.position.y;
         let widget_space = Position {
@@ -376,7 +379,7 @@ impl Widget {
             y: widget_y,
         };
         match &mut self.data {
-            WidgetData::Wasm { wasm, wasm_id } => {
+            WidgetData::Wasm { wasm: _, wasm_id } => {
                 wasm_messenger.send_on_click(*wasm_id, &widget_space);
                 vec![]
             }
@@ -384,9 +387,14 @@ impl Widget {
         }
     }
 
-    pub fn draw(&mut self, canvas: &mut Canvas, wasm_messenger: &mut WasmMessenger, bounds: Size) -> Vec<WidgetId> {
+    pub fn draw(
+        &mut self,
+        canvas: &mut Canvas,
+        wasm_messenger: &mut WasmMessenger,
+        bounds: Size,
+    ) -> Vec<WidgetId> {
         // Have to do this to deal with mut stuff
-        if let WidgetData::Wasm { wasm, wasm_id } = &mut self.data {
+        if let WidgetData::Wasm { wasm: _, wasm_id } = &mut self.data {
             canvas.save();
             canvas.translate((self.position.x, self.position.y));
 
@@ -529,7 +537,7 @@ impl Widget {
                 let new_wasm_id = wasm_messenger.new_instance(&wasm.path);
                 *wasm_id = new_wasm_id;
                 if let Some(state) = &wasm.state {
-                    wasm_messenger.send_set_state(*wasm_id, &state);
+                    wasm_messenger.send_set_state(*wasm_id, state);
                 }
             }
             _ => {}
@@ -538,19 +546,17 @@ impl Widget {
 
     pub fn save(&mut self, wasm_messenger: &mut WasmMessenger) {
         match &mut self.data {
-            WidgetData::Wasm { wasm, wasm_id } => {
-                match wasm_messenger.save_state(*wasm_id) {
-                    wasm_messenger::SaveState::Unsaved => {
-                        panic!("Wasm instance {} is unsaved", wasm_id)
-                    }
-                    wasm_messenger::SaveState::Empty => {
-                        wasm.state = None;
-                    }
-                    wasm_messenger::SaveState::Saved(state) => {
-                        wasm.state = Some(state);
-                    }
+            WidgetData::Wasm { wasm, wasm_id } => match wasm_messenger.save_state(*wasm_id) {
+                wasm_messenger::SaveState::Unsaved => {
+                    panic!("Wasm instance {} is unsaved", wasm_id)
                 }
-            }
+                wasm_messenger::SaveState::Empty => {
+                    wasm.state = None;
+                }
+                wasm_messenger::SaveState::Saved(state) => {
+                    wasm.state = Some(state);
+                }
+            },
             _ => {}
         }
     }

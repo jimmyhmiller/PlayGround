@@ -1,16 +1,25 @@
-use std::{sync::{Arc}, collections::HashMap, time::Duration, thread, error::Error, path::Path, cmp::min};
-
+use std::{collections::HashMap, error::Error, path::Path, sync::Arc, thread, time::Duration};
 
 use bytesize::ByteSize;
-use futures::{executor::LocalPool, task::LocalSpawnExt, channel::mpsc::{channel, Receiver, Sender}, StreamExt};
-use futures::task::SpawnExt;
+
+use futures::{
+    channel::mpsc::{channel, Receiver, Sender},
+    executor::LocalPool,
+    task::LocalSpawnExt,
+    StreamExt,
+};
 use futures_timer::Delay;
-use skia_safe::{Canvas, Font, Typeface, FontStyle};
-use wasmtime::{Engine, Config, Instance, Store, Linker, Module, WasmParams, WasmResults, Caller, Memory, AsContextMut};
+use skia_safe::{Canvas, Font, FontStyle, Typeface};
+use wasmtime::{
+    AsContextMut, Caller, Config, Engine, Instance, Linker, Memory, Module, Store, WasmParams,
+    WasmResults,
+};
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
-use crate::{widget::{Wasm, Size, Color, Position}, keyboard::KeyboardInput};
-
+use crate::{
+    keyboard::KeyboardInput,
+    widget::{Color, Position, Size},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct PointerLengthString {
@@ -22,7 +31,6 @@ pub type WasmId = u64;
 
 #[derive(Debug)]
 enum Payload {
-    Noop,
     NewInstance(String),
     OnClick(Position),
     Draw(String),
@@ -32,7 +40,6 @@ enum Payload {
     Reload,
     SaveState,
 }
-
 
 #[derive(Debug)]
 struct Message {
@@ -73,7 +80,6 @@ pub struct WasmMessenger {
 // I need to queue a click though. Need to think about the details.
 
 impl WasmMessenger {
-
     pub fn new() -> Self {
         let (sender, receiver) = channel::<Message>(100000);
         let (out_sender, out_receiver) = channel::<OutMessage>(100000);
@@ -85,8 +91,9 @@ impl WasmMessenger {
             wasm_manager.init().await
         }
 
-
-        local_spawner.spawn_local(init_manager(receiver, out_sender)).unwrap();
+        local_spawner
+            .spawn_local(init_manager(receiver, out_sender))
+            .unwrap();
         Self {
             sender,
             out_receiver,
@@ -95,7 +102,6 @@ impl WasmMessenger {
             wasm_draw_commands: HashMap::new(),
             wasm_states: HashMap::new(),
         }
-
     }
 
     fn next_wasm_id(&mut self) -> WasmId {
@@ -105,18 +111,24 @@ impl WasmMessenger {
 
     pub fn new_instance(&mut self, wasm_path: &str) -> WasmId {
         let id = self.next_wasm_id();
-        self.sender.start_send(Message { wasm_id: id, payload: Payload::NewInstance(wasm_path.to_string()) }).unwrap();
+        self.sender
+            .start_send(Message {
+                wasm_id: id,
+                payload: Payload::NewInstance(wasm_path.to_string()),
+            })
+            .unwrap();
         id
     }
 
-    pub fn draw_widget(&mut self, wasm_id: WasmId, canvas: &mut Canvas, bounds: Size) -> Option<Size> {
-
-
+    pub fn draw_widget(
+        &mut self,
+        wasm_id: WasmId,
+        canvas: &mut Canvas,
+        bounds: Size,
+    ) -> Option<Size> {
         if let Some(commands) = self.wasm_draw_commands.get(&wasm_id) {
-
             let mut max_width = 0.0;
             let mut max_height = 0.0;
-
 
             let mut paint = skia_safe::Paint::default();
             for command in commands.iter() {
@@ -134,7 +146,8 @@ impl WasmMessenger {
                         paint.set_color(Color::new(*r, *g, *b, *a).to_color4f().to_color());
                     }
                     Command::DrawRect(x, y, width, height) => {
-                        canvas.draw_rect(skia_safe::Rect::from_xywh(*x, *y, *width, *height), &paint);
+                        canvas
+                            .draw_rect(skia_safe::Rect::from_xywh(*x, *y, *width, *height), &paint);
                         // This is not quite right because of translate and stuff.
                         // if *x + *width > max_width {
                         //     max_width = *x + *width;
@@ -174,7 +187,7 @@ impl WasmMessenger {
                             *radius,
                             *radius,
                         );
-                        canvas.draw_rrect(&rrect, &paint);
+                        canvas.draw_rrect(rrect, &paint);
                     }
                     Command::Translate(x, y) => {
                         max_height += *y;
@@ -193,23 +206,24 @@ impl WasmMessenger {
                     }
                 }
             }
-            Some(Size{ width: max_width, height: max_height})
+            Some(Size {
+                width: max_width,
+                height: max_height,
+            })
         } else {
             None
         }
     }
 
-
     pub fn tick(&mut self) {
         // Need a timeout instead
-        self.local_pool.run_until(Delay::new(Duration::from_millis(4)));
-
+        self.local_pool
+            .run_until(Delay::new(Duration::from_millis(4)));
 
         // I need to do this slightly differently because I need to draw in the context
         // of the widget.
         // But on tick I could get the pending drawings and then draw them
         // for each widget
-
 
         // TODO: need to time this out
         while let Ok(Some(message)) = self.out_receiver.try_next() {
@@ -224,48 +238,78 @@ impl WasmMessenger {
         }
     }
 
-    pub fn send_noop(&mut self, wasm_id: WasmId) {
-        self.sender.start_send(Message { wasm_id, payload: Payload::Noop}).unwrap();
-    }
-
     pub fn send_on_click(&mut self, wasm_id: WasmId, position: &Position) {
-        self.sender.start_send(Message { wasm_id, payload: Payload::OnClick(*position)}).unwrap();
+        self.sender
+            .start_send(Message {
+                wasm_id,
+                payload: Payload::OnClick(*position),
+            })
+            .unwrap();
     }
 
     pub fn send_draw(&mut self, wasm_id: WasmId, fn_name: &str) {
-        self.sender.start_send(Message { wasm_id, payload: Payload::Draw(fn_name.to_string())}).unwrap();
+        self.sender
+            .start_send(Message {
+                wasm_id,
+                payload: Payload::Draw(fn_name.to_string()),
+            })
+            .unwrap();
     }
 
     pub fn send_set_state(&mut self, wasm_id: WasmId, state: &str) {
-        self.sender.start_send(Message { wasm_id, payload: Payload::SetState(state.to_string())}).unwrap();
+        self.sender
+            .start_send(Message {
+                wasm_id,
+                payload: Payload::SetState(state.to_string()),
+            })
+            .unwrap();
     }
 
     pub fn send_on_scroll(&mut self, wasm_id: u64, x: f64, y: f64) {
-        self.sender.start_send(Message { wasm_id, payload: Payload::OnScroll(x, y)}).unwrap();
+        self.sender
+            .start_send(Message {
+                wasm_id,
+                payload: Payload::OnScroll(x, y),
+            })
+            .unwrap();
     }
 
     pub fn send_on_key(&mut self, wasm_id: u64, input: KeyboardInput) {
-        self.sender.start_send(Message { wasm_id, payload: Payload::OnKey(input)}).unwrap();
+        self.sender
+            .start_send(Message {
+                wasm_id,
+                payload: Payload::OnKey(input),
+            })
+            .unwrap();
     }
 
     pub fn send_reload(&mut self, wasm_id: u64) {
-        self.sender.start_send(Message { wasm_id, payload: Payload::Reload}).unwrap();
+        self.sender
+            .start_send(Message {
+                wasm_id,
+                payload: Payload::Reload,
+            })
+            .unwrap();
     }
-
 
     // Sometimes state is corrupt by going too long on the string. Not sure why.
     // Need to track down the issue
     pub(crate) fn save_state(&mut self, wasm_id: WasmId) -> SaveState {
         self.wasm_states.insert(wasm_id, SaveState::Unsaved);
-        self.sender.start_send(Message { wasm_id, payload: Payload::SaveState}).unwrap();
+        self.sender
+            .start_send(Message {
+                wasm_id,
+                payload: Payload::SaveState,
+            })
+            .unwrap();
         // TODO: Maybe not the best design, but I also want to ensure I save
         loop {
             self.tick();
             if let Some(state) = self.wasm_states.get(&wasm_id) {
                 match state {
                     SaveState::Saved(state) => {
-                        if state.starts_with("\"") {
-                            assert!(state.ends_with("\""), "State is corrupt: {}", state);
+                        if state.starts_with('\"') {
+                            assert!(state.ends_with('\"'), "State is corrupt: {}", state);
                         }
                         break;
                     }
@@ -276,23 +320,21 @@ impl WasmMessenger {
                 }
             }
         }
-        self.wasm_states.get(&wasm_id).unwrap_or(&SaveState::Empty).clone()
+        self.wasm_states
+            .get(&wasm_id)
+            .unwrap_or(&SaveState::Empty)
+            .clone()
     }
-
 }
-
-
 
 struct WasmManager {
     wasm_instances: HashMap<WasmId, WasmInstance>,
     receiver: Receiver<Message>,
     engine: Arc<Engine>,
-    sender: Sender<OutMessage>
+    sender: Sender<OutMessage>,
 }
 
-
 impl WasmManager {
-
     pub fn new(receiver: Receiver<Message>, sender: Sender<OutMessage>) -> Self {
         let mut config = Config::new();
         config.dynamic_memory_guard_size(ByteSize::mb(500).as_u64());
@@ -302,11 +344,9 @@ impl WasmManager {
         let engine = Arc::new(Engine::new(&config).unwrap());
 
         let engine_clone = engine.clone();
-        thread::spawn(move || {
-            loop {
-                engine_clone.increment_epoch();
-                thread::sleep(Duration::from_millis(4));
-            }
+        thread::spawn(move || loop {
+            engine_clone.increment_epoch();
+            thread::sleep(Duration::from_millis(4));
         });
 
         Self {
@@ -326,24 +366,19 @@ impl WasmManager {
     }
 
     pub async fn new_instance(&mut self, wasm_id: WasmId, wasm_path: &str) {
-        self.wasm_instances.insert(wasm_id, WasmInstance::new(self.engine.clone(), wasm_path).await.unwrap());
+        self.wasm_instances.insert(
+            wasm_id,
+            WasmInstance::new(self.engine.clone(), wasm_path)
+                .await
+                .unwrap(),
+        );
     }
 
     pub async fn process_message(&mut self) {
         if let Some(message) = self.receiver.next().await {
             let id = message.wasm_id;
             match message.payload {
-                Payload::Noop => {
-                    println!("Got noop {}", id);
-                    if let Some(instance) = self.wasm_instances.get(&id) {
-                        instance.fake_invoke().await;
-                    } else {
-                        println!("Not found nonp {}", id);
-                    }
-                }
-                Payload::NewInstance(path) => {
-                    self.new_instance(id, &path).await
-                }
+                Payload::NewInstance(path) => self.new_instance(id, &path).await,
                 Payload::OnClick(position) => {
                     if let Some(instance) = self.wasm_instances.get_mut(&id) {
                         instance.on_click(position.x, position.y).await.unwrap();
@@ -354,14 +389,19 @@ impl WasmManager {
                 Payload::Draw(fn_name) => {
                     if let Some(instance) = self.wasm_instances.get_mut(&id) {
                         let result = instance.draw(&fn_name).await.unwrap();
-                        self.sender.start_send(OutMessage {wasm_id: id, payload: OutPayload::DrawCommands(result)}).unwrap();
+                        self.sender
+                            .start_send(OutMessage {
+                                wasm_id: id,
+                                payload: OutPayload::DrawCommands(result),
+                            })
+                            .unwrap();
                     } else {
                         println!("Not found draw {}", id);
                     }
                 }
                 Payload::SetState(state) => {
                     if let Some(instance) = self.wasm_instances.get_mut(&id) {
-                        instance.set_state(&state.as_bytes()).await.unwrap();
+                        instance.set_state(state.as_bytes()).await.unwrap();
                     } else {
                         println!("Not found set state {}", id);
                     }
@@ -384,9 +424,7 @@ impl WasmManager {
                 Payload::Reload => {
                     if let Some(instance) = self.wasm_instances.get_mut(&id) {
                         match instance.reload().await {
-                            Ok(_) => {
-
-                            }
+                            Ok(_) => {}
                             Err(e) => {
                                 println!("Error reloading {}", e);
                             }
@@ -400,18 +438,32 @@ impl WasmManager {
                         let state = instance.get_state().await;
                         match state {
                             Some(state) => {
-                                if state.starts_with("\"") {
-                                    assert!(state.ends_with("\""), "State is corrupt: {}", state);
+                                if state.starts_with('\"') {
+                                    assert!(state.ends_with('\"'), "State is corrupt: {}", state);
                                 }
-                                self.sender.start_send(OutMessage {wasm_id: id, payload: OutPayload::Saved(SaveState::Saved(state))}).unwrap();
+                                self.sender
+                                    .start_send(OutMessage {
+                                        wasm_id: id,
+                                        payload: OutPayload::Saved(SaveState::Saved(state)),
+                                    })
+                                    .unwrap();
                             }
                             None => {
-                                self.sender.start_send(OutMessage {wasm_id: id, payload: OutPayload::Saved(SaveState::Empty)}).unwrap();
+                                self.sender
+                                    .start_send(OutMessage {
+                                        wasm_id: id,
+                                        payload: OutPayload::Saved(SaveState::Empty),
+                                    })
+                                    .unwrap();
                             }
                         }
-
                     } else {
-                        self.sender.start_send(OutMessage {wasm_id: id, payload: OutPayload::Saved(SaveState::Empty)}).unwrap();
+                        self.sender
+                            .start_send(OutMessage {
+                                wasm_id: id,
+                                payload: OutPayload::Saved(SaveState::Empty),
+                            })
+                            .unwrap();
                         println!("Not found save state {}", id);
                     }
                 }
@@ -420,10 +472,10 @@ impl WasmManager {
     }
 }
 
-
 struct State {
     wasi: wasmtime_wasi::WasiCtx,
     commands: Vec<Command>,
+    get_state_info: (u32, u32),
     // Probably not the best structure
     // but lets start here
     process_messages: HashMap<i32, String>,
@@ -435,10 +487,10 @@ impl State {
             wasi,
             commands: Vec::new(),
             process_messages: HashMap::new(),
+            get_state_info: (0, 0),
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 enum Command {
@@ -455,7 +507,6 @@ enum Command {
     ReceiveLastProcessMessage(i32),
 }
 
-
 fn get_string_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> String {
     use core::str::from_utf8;
     // Use our `caller` context to learn about the memory export of the
@@ -467,11 +518,7 @@ fn get_string_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> Str
     let ptr = ptr as u32 as usize;
     let len = len as u32 as usize;
     // println!("caller ptr: {}, len: {}", ptr, len);
-    let data = mem
-        .into_memory()
-        .unwrap()
-        .data(store)
-        .get(ptr..(ptr + len));
+    let data = mem.into_memory().unwrap().data(store).get(ptr..(ptr + len));
     let string = from_utf8(data.unwrap()).unwrap();
     string.to_string()
 }
@@ -485,18 +532,15 @@ fn get_string_from_memory(
     use core::str::from_utf8;
     let ptr = ptr as u32 as usize;
     let len = len as u32 as usize;
-    let data = memory
-        .data(store)
-        .get(ptr..(ptr + len));
+    let data = memory.data(store).get(ptr..(ptr + len));
     let string = from_utf8(data.unwrap());
     match string {
         Ok(string) => Some(string.to_string()),
         Err(err) => {
             println!("Error getting utf8 data{:?}", err);
-            None  
+            None
         }
     }
-    
 }
 
 struct WasmInstance {
@@ -507,11 +551,8 @@ struct WasmInstance {
     path: String,
 }
 
-
 impl WasmInstance {
-
-    async fn new(engine: Arc<Engine>, wasm_path: &str) -> Result<Self, Box<dyn std::error::Error>>{
-
+    async fn new(engine: Arc<Engine>, wasm_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = Dir::from_std_file(
             std::fs::File::open(Path::new(wasm_path).parent().unwrap()).unwrap(),
         );
@@ -522,7 +563,6 @@ impl WasmInstance {
             .preopened_dir(dir, ".")?
             .build();
 
-
         let mut linker: Linker<State> = Linker::new(&engine);
         wasmtime_wasi::add_to_linker(&mut linker, |s| &mut s.wasi)?;
         Self::setup_host_functions(&mut linker)?;
@@ -531,19 +571,13 @@ impl WasmInstance {
         let module = Module::from_file(&engine, wasm_path)?;
 
         let instance = linker.instantiate_async(&mut store, &module).await?;
-        Ok(Self { instance, store, engine, linker, path: wasm_path.to_string() })
-    }
-
-    async fn init(&mut self, label: i32) -> Result<(), Box<dyn std::error::Error>> {
-        self.store.epoch_deadline_async_yield_and_update(1);
-        let init = self.instance.get_typed_func::<i32, i32>(&mut self.store, "loop_forever")?;
-        let result = init.call_async(&mut self.store, label).await?;
-        println!("Result: {}", result);
-        Ok(())
-    }
-
-    pub async fn fake_invoke(&self) {
-        println!("Fake Invoked!");
+        Ok(Self {
+            instance,
+            store,
+            engine,
+            linker,
+            path: wasm_path.to_string(),
+        })
     }
 
     async fn call_typed_func<Params, Results>(
@@ -552,13 +586,16 @@ impl WasmInstance {
         params: Params,
         deadline: u64,
     ) -> anyhow::Result<Results>
-        where
+    where
         Params: WasmParams,
-        Results: WasmResults
-         {
+        Results: WasmResults,
+    {
         self.store.epoch_deadline_async_yield_and_update(deadline);
 
-        let func = self.instance.get_typed_func::<Params, Results>(&mut self.store, name).unwrap();
+        let func = self
+            .instance
+            .get_typed_func::<Params, Results>(&mut self.store, name)
+            .unwrap();
         let result = func.call_async(&mut self.store, params).await.unwrap();
         Ok(result)
     }
@@ -642,6 +679,15 @@ impl WasmInstance {
 
         linker.func_wrap(
             "host",
+            "set_get_state",
+            |mut caller: Caller<'_, State>, ptr: u32, len: u32| -> () {
+                let state = caller.data_mut();
+                state.get_state_info = (ptr, len);
+            },
+        )?;
+
+        linker.func_wrap(
+            "host",
             "send_message_low_level",
             |mut caller: Caller<'_, State>, process_id: i32, ptr: i32, len: i32| {
                 let message = get_string_from_caller(&mut caller, ptr, len);
@@ -675,7 +721,7 @@ impl WasmInstance {
                 memory.write(store, 0, message).unwrap();
 
                 let mut bytes = [0u8; 8];
-                bytes[0..4].copy_from_slice(&(0 as i32).to_le_bytes());
+                bytes[0..4].copy_from_slice(&0_i32.to_le_bytes());
                 bytes[4..8].copy_from_slice(&(message.len() as i32).to_le_bytes());
 
                 let store = caller.as_context_mut();
@@ -689,29 +735,28 @@ impl WasmInstance {
     }
 
     pub async fn draw(&mut self, fn_name: &str) -> Result<Vec<Command>, Box<dyn Error>> {
-
-
-        let mut max_width = 0.0;
-        let mut max_height = 0.0;
+        let _max_width = 0.0;
+        let _max_height = 0.0;
 
         self.call_typed_func(fn_name, (), 1).await?;
 
         let state = &mut self.store.data_mut();
 
-        let mut paint = skia_safe::Paint::default();
+        let _paint = skia_safe::Paint::default();
         let commands = state.commands.clone();
         state.commands.clear();
-        return Ok(commands);
-
+        Ok(commands)
     }
 
     pub async fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
-        self.call_typed_func::<(f32, f32), ()>("on_click", (x, y), 1).await?;
+        self.call_typed_func::<(f32, f32), ()>("on_click", (x, y), 1)
+            .await?;
         Ok(())
     }
 
     pub async fn on_scroll(&mut self, x: f64, y: f64) -> Result<(), Box<dyn Error>> {
-        self.call_typed_func::<(f64, f64), ()>("on_scroll", (x, y), 1).await?;
+        self.call_typed_func::<(f64, f64), ()>("on_scroll", (x, y), 1)
+            .await?;
         Ok(())
     }
 
@@ -721,34 +766,36 @@ impl WasmInstance {
         state: u32,
         modifiers: u32,
     ) -> Result<(), Box<dyn Error>> {
-
-        self.call_typed_func::<(u32, u32, u32), ()>("on_key", (key_code, state, modifiers), 1).await?;
+        self.call_typed_func::<(u32, u32, u32), ()>("on_key", (key_code, state, modifiers), 1)
+            .await?;
 
         Ok(())
     }
-
 
     pub async fn reload(&mut self) -> Result<(), Box<dyn Error>> {
         if let Ok(json_string) = self.get_state().await.ok_or("no get state function") {
             let data = json_string.as_bytes();
 
             let module = Module::from_file(&self.engine, &self.path)?;
-            let instance = self.linker.instantiate_async(&mut self.store, &module).await?;
+            let instance = self
+                .linker
+                .instantiate_async(&mut self.store, &module)
+                .await?;
             self.instance = instance;
             self.set_state(data).await?;
         } else {
             let module = Module::from_file(&self.engine, &self.path)?;
-            let instance = self.linker.instantiate_async(&mut self.store, &module).await?;
+            let instance = self
+                .linker
+                .instantiate_async(&mut self.store, &module)
+                .await?;
             self.instance = instance;
         }
-
 
         Ok(())
     }
 
     pub async fn set_state(&mut self, data: &[u8]) -> Result<(), Box<dyn Error>> {
-
-        println!("host data:{:?}", data.clone().iter().take(100).copied().collect::<Vec<u8>>());
         let memory = self
             .instance
             .get_export(&mut self.store, "memory")
@@ -756,63 +803,52 @@ impl WasmInstance {
             .into_memory()
             .unwrap();
 
-        let memory_size = (memory.data_size(&mut self.store) as f32 / ByteSize::kb(64).as_u64() as f32).ceil() as usize;
+        let memory_size = (memory.data_size(&mut self.store) as f32
+            / ByteSize::kb(64).as_u64() as f32)
+            .ceil() as usize;
 
-        println!("data_len {}", data.len());
-
-        let data_length_in_64k_multiples = (data.len() as f32 / ByteSize::kb(64).as_u64() as f32).ceil() as usize;
+        let data_length_in_64k_multiples =
+            (data.len() as f32 / ByteSize::kb(64).as_u64() as f32).ceil() as usize;
         if data_length_in_64k_multiples > memory_size {
             let delta = data_length_in_64k_multiples;
             memory.grow(&mut self.store, delta as u64 + 10).unwrap();
         }
-        
-        let ptr = self.call_typed_func::<u32, u32>("alloc_state", data.len() as u32,1).await?;
+
+        let ptr = self
+            .call_typed_func::<u32, u32>("alloc_state", data.len() as u32, 1)
+            .await?;
         let memory = self
             .instance
             .get_export(&mut self.store, "memory")
             .unwrap()
             .into_memory()
             .unwrap();
-        let memory_size = memory.data_size(&mut self.store);
-        println!("{}", memory_size);
+        // let memory_size = memory.data_size(&mut self.store);
 
-        memory.write(&mut self.store, ptr as usize, &data).unwrap();
+        memory.write(&mut self.store, ptr as usize, data).unwrap();
 
-        self.call_typed_func::<(u32, u32), ()>("set_state", (ptr, data.len() as u32), 1).await.unwrap();
+        self.call_typed_func::<(u32, u32), ()>("set_state", (ptr, data.len() as u32), 1)
+            .await
+            .unwrap();
         Ok(())
     }
 
     pub async fn get_state(&mut self) -> Option<String> {
-
-
-        let json_string_ptr = self.call_typed_func::<(), i32>("get_state", (), 1).await.ok()?;
+        self.call_typed_func::<(), ()>("get_state", (), 1)
+            .await
+            .ok()?;
+        let (ptr, len) = self.store.data().get_state_info;
         let memory = self
             .instance
             .get_export(&mut self.store, "memory")
             .unwrap()
             .into_memory()
             .unwrap();
-        let my_buffer: &mut [u8] = &mut [0; 8];
-        memory
-            .read(&mut self.store, json_string_ptr as usize, my_buffer)
-            .unwrap();
 
-        let json_string_ptr: *const PointerLengthString =
-            my_buffer.as_ptr() as *const PointerLengthString;
-        let json_string: &PointerLengthString = unsafe { &*json_string_ptr };
-        println!("json_string: {:?}", json_string);
-
-        let json_string = get_string_from_memory(
-            &memory,
-            &mut self.store,
-            json_string.ptr as i32,
-            json_string.len as i32,
-        );
+        let json_string = get_string_from_memory(&memory, &mut self.store, ptr as i32, len as i32);
         if json_string.is_none() {
             println!("No json string");
         }
         json_string
     }
-
-
 }

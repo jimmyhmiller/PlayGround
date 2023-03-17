@@ -14,8 +14,12 @@ pub fn set_smooth_scroll() {
 }
 
 pub fn open_file_dialog() -> Option<String> {
+    // This is broken on latest mac.
+    // Adding an extension filter fixes...
     let path = FileDialog::new()
-        .set_location("~/Documents")
+        .set_location("/Users/jimmyhmiller/Documents/Code")
+        // .remove_all_filters()
+        // .add_filter("ron", &["ron"])
         .show_open_single_file().ok()??;
     
     let path = &path.to_str().unwrap().replace("file://", "");

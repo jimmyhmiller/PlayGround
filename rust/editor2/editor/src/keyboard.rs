@@ -1,6 +1,5 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use winit::event::VirtualKeyCode;
-
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -28,7 +27,9 @@ impl KeyState {
 }
 
 // Not the most efficient representation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,
@@ -134,7 +135,6 @@ pub enum KeyCode {
     DownArrow,
     BackSpace,
 }
-
 
 impl KeyCode {
     pub fn map_winit_vk_to_keycode(v: VirtualKeyCode) -> Option<KeyCode> {
@@ -287,9 +287,7 @@ impl KeyCode {
     fn to_u32(&self) -> u32 {
         *self as u32
     }
-
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KeyboardInput {
@@ -297,7 +295,6 @@ pub struct KeyboardInput {
     pub key_code: KeyCode,
     pub modifiers: Modifiers,
 }
-
 
 impl KeyboardInput {
     #[allow(dead_code)]

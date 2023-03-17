@@ -1,9 +1,9 @@
-use std::{env::current_dir, error::Error, fs, io, str::from_utf8};
+use std::{error::Error, fs, str::from_utf8};
 
-use framework::{App, Canvas, Color, KeyCode, KeyState, Rect};
-use minidom::Element;
-use roxmltree::{Document, Node};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use framework::{App, Canvas, Color, Rect};
+
+use roxmltree::Node;
+use serde::{Deserialize, Serialize};
 mod framework;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,21 +56,21 @@ impl App for AsmData {
         canvas.restore();
     }
 
-    fn on_click(&mut self, x: f32, y: f32) {
+    fn on_click(&mut self, _x: f32, _y: f32) {
         self.xml_file_text = "clicked".to_string();
         // grab the xml file
         // self.xml_file_text = current_dir().unwrap().to_str().unwrap().to_string();
         match self.get_xml_stuff() {
             Ok(_) => (),
             Err(e) => {
-                self.xml_file_text = format!("Failed {}", e.to_string());
+                self.xml_file_text = format!("Failed {}", e);
             }
         }
     }
 
-    fn on_key(&mut self, input: KeyboardInput) {}
+    fn on_key(&mut self, _input: KeyboardInput) {}
 
-    fn on_scroll(&mut self, x: f64, y: f64) {}
+    fn on_scroll(&mut self, _x: f64, _y: f64) {}
 
     fn get_state(&self) -> Self::State {
         self.xml_file_text.clone()
@@ -103,8 +103,7 @@ impl AsmData {
             .unwrap()
             .descendants()
             .filter(|x| x.has_tag_name("iform"))
-            .map(|x| x.attribute("iformfile"))
-            .flatten();
+            .filter_map(|x| x.attribute("iformfile"));
 
         let mut found_file_nodes = vec![];
         for file_name in file_names {
@@ -148,14 +147,8 @@ impl AsmData {
                 let desc = x
                     .descendants()
                     .find(|x| x.has_tag_name("desc"))
-                    .and_then(|x| {
-                        x.descendants()
-                            .find(|x| x.has_tag_name("brief"))
-                    })
-                    .and_then(|x|{
-                        x.descendants()
-                            .find(|x| x.has_tag_name("para"))
-                    })
+                    .and_then(|x| x.descendants().find(|x| x.has_tag_name("brief")))
+                    .and_then(|x| x.descendants().find(|x| x.has_tag_name("para")))
                     .map(|x| x.text().unwrap_or(""))
                     .unwrap_or("")
                     .to_string();
@@ -163,7 +156,8 @@ impl AsmData {
                     .descendants()
                     .find(|x| x.has_tag_name("regdiagram"))
                     .map(|x| {
-                        let boxes : Vec<Node> = x.descendants().filter(|x| x.has_tag_name("box")).collect();
+                        let boxes: Vec<Node> =
+                            x.descendants().filter(|x| x.has_tag_name("box")).collect();
                         boxes
                     })
                     .unwrap_or_default()

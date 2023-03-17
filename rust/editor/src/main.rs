@@ -482,7 +482,7 @@ fn main() -> Result<(), String> {
     };
 
 
-    let text = fs::read_to_string("/Users/jimmyhmiller/Documents/Code/Playground/rust/editor/src/main.rs").unwrap();
+    let text = fs::read_to_string("/Users/jimmyhmiller/Documents/Code/Playground/rust/editor2/editor/widgets.ron").unwrap();
 
     let mut fps = FpsCounter::new();
 
