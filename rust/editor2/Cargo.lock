@@ -935,6 +935,7 @@ dependencies = [
  "futures",
  "futures-timer",
  "itertools",
+ "jstream-ext",
  "metal",
  "nonblock",
  "notify",
@@ -1495,6 +1496,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "445dde2150c55e483f3d8416706b97ec8e8237c307e5b7b4b8dd15e6af2a0730"
 dependencies = [
  "wasm-bindgen",
+]
+
+[[package]]
+name = "jstream-ext"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62616a1e0f9c049e4a35694eaaa3048e5ed2666ab1d5412a8b9957585fc3c3a0"
+dependencies = [
+ "futures",
+ "pin-project-lite",
 ]
 
 [[package]]
