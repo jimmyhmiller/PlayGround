@@ -384,6 +384,23 @@ impl Editor {
             white,
         );
 
+        canvas.save();
+        canvas.translate((canvas_size.width - 300.0, 60.0));
+        let counts = self.wasm_messenger.number_of_outstanding_messages();
+        for line in counts.lines() {
+            canvas.draw_str(
+                line,
+                Point::new(0.0, 0.0),
+                &font,
+                white,
+            );
+            canvas.translate((0.0, 30.0));
+        }
+        canvas.restore();
+
+       
+
+
         let mut to_draw = vec![];
         for widget in self.widget_store.iter_mut() {
             to_draw.extend(widget.draw(canvas, &mut self.wasm_messenger, widget.size));
