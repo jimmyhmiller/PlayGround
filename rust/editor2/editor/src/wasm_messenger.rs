@@ -199,6 +199,7 @@ impl WasmMessenger {
         if let Some(commands) = self.wasm_draw_commands.get(&wasm_id) {
             let mut max_width = 0.0;
             let mut max_height = 0.0;
+            let mut current_height_stack = vec![];
 
             let mut paint = skia_safe::Paint::default();
             for command in commands.iter() {
@@ -266,9 +267,12 @@ impl WasmMessenger {
                     }
                     Command::Save => {
                         canvas.save();
+                        current_height_stack.push(max_height);
+
                     }
                     Command::Restore => {
                         canvas.restore();
+                        max_height = current_height_stack.pop().unwrap();
                     }
                     c => {
                         // Need to move things out of draw
@@ -483,12 +487,21 @@ impl WasmManager {
                 default_return
             }
             Payload::Draw(fn_name) => {
-                let result = self.instance.draw(&fn_name).await.unwrap();
-                OutMessage {
-                    message_id: message.message_id,
-                    wasm_id: id,
-                    payload: OutPayload::DrawCommands(result),
+                let result = self.instance.draw(&fn_name).await;
+                match result {
+                    Ok(result) => {
+                        OutMessage {
+                            message_id: message.message_id,
+                            wasm_id: id,
+                            payload: OutPayload::DrawCommands(result),
+                        }
+                    }
+                    Err(error) => {
+                        println!("Error drawing {:?}", error);
+                        default_return
+                    }
                 }
+              
             }
             Payload::SetState(state) => {
                 self.instance.set_state(state.as_bytes()).await.unwrap();
@@ -603,7 +616,7 @@ fn get_string_from_memory(
     match string {
         Ok(string) => Some(string.to_string()),
         Err(err) => {
-            println!("Error getting utf8 data{:?}", err);
+            println!("Error getting utf8 data: {:?}", err);
             None
         }
     }
@@ -662,7 +675,7 @@ impl WasmInstance {
             .instance
             .get_typed_func::<Params, Results>(&mut self.store, name)
             .unwrap();
-        let result = func.call_async(&mut self.store, params).await.unwrap();
+        let result = func.call_async(&mut self.store, params).await?;
         Ok(result)
     }
 

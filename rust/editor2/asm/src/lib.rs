@@ -1,6 +1,6 @@
 use std::{error::Error, fs, str::from_utf8};
 
-use framework::{App, Canvas, Color, Rect};
+use framework::{App, Canvas, Color, Rect, KeyState, KeyCode};
 
 use roxmltree::Node;
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,8 @@ mod framework;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AsmData {
-    xml_file_text: String,
+    file_info: Vec<FileInfo>,
+    offset: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,15 +21,14 @@ struct FileInfo {
 }
 
 impl App for AsmData {
-    type State = String;
+    type State = AsmData;
 
     fn init() -> Self {
         // local directory from cargo
 
         // let cargo_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         // let xml_file_path = format!("{}/{}", cargo_dir, "resources/onebigfile.xml");
-        let xml_file_text = "".to_string();
-        Self { xml_file_text }
+        Self { file_info: vec![], offset: 0 }
     }
 
     fn draw(&mut self) {
@@ -44,45 +44,127 @@ impl App for AsmData {
         canvas.clip_rect(bounding_rect);
         canvas.draw_rrect(bounding_rect, 20.0);
         canvas.set_color(&foreground);
-        if self.xml_file_text.is_empty() {
-            canvas.draw_str("No XML file loaded", 40.0, 40.0);
-        } else {
-            for line in self.xml_file_text.lines() {
-                canvas.draw_str(line, 40.0, 40.0);
+
+
+
+        canvas.translate(50.0, 50.0);
+
+        if self.file_info.is_empty() {
+            canvas.draw_str("Click to load file", 0.0, 0.0);
+        }
+
+        for file_info in self.file_info.iter().skip(self.offset).take(5) {
+            canvas.draw_str(&file_info.name, 0.0, 0.0);
+            canvas.translate(0.0, 40.0);
+
+            canvas.save();
+            for regdiagram in file_info.regdiagram.iter() {
+                let document = roxmltree::Document::parse(&regdiagram).unwrap();
+                let root = document.root_element();
+                let attrs = root.attributes().map(|x| format!("{}: {}", x.name(), x.value())).collect::<Vec<String>>().join(", ");
+
+                
+                canvas.draw_str(&format!("{} {}", root.tag_name().name(), attrs), 0.0, 0.0);
                 canvas.translate(0.0, 40.0);
             }
+            canvas.restore();
+            canvas.save();
+            canvas.translate(1200.0, 0.0);
+            for regdiagram in file_info.regdiagram.iter() {
+                let document = roxmltree::Document::parse(&regdiagram).unwrap();
+                let root = document.root_element();
+                let name = root.attribute("name").unwrap_or("");
+                let use_name = root.attribute("usename");
+                let hibit = root.attribute("hibit").unwrap();
+                let width = root.attribute("width").unwrap_or("1").parse::<i32>().unwrap();
+                let children = root.descendants().filter(|x| x.has_tag_name("c")).map(|x| {
+                    x.text().map(|x| x.to_string())
+                }).flatten().collect::<Vec<String>>();
+                canvas.draw_str(hibit, 0.0, 0.0);
+                if children.is_empty() {
+                    canvas.draw_str(name, 0.0, 40.0);
+                } else {
+                    for (i, child) in children.iter().enumerate() {
+                        canvas.draw_str(child, i as f32 * 70.0, 40.0);
+                    }
+                }
+                if !children.is_empty() {
+                    canvas.draw_str(name, 0.0, 80.0);
+                }
+
+                canvas.translate(40.0 * width as f32, 0.0);
+            }
+            canvas.restore();
+
+            canvas.translate(0.0, file_info.regdiagram.len() as f32 * 40.0 + 30.0);
         }
 
         canvas.restore();
     }
 
     fn on_click(&mut self, _x: f32, _y: f32) {
-        self.xml_file_text = "clicked".to_string();
         // grab the xml file
         // self.xml_file_text = current_dir().unwrap().to_str().unwrap().to_string();
         match self.get_xml_stuff() {
             Ok(_) => (),
             Err(e) => {
-                self.xml_file_text = format!("Failed {}", e);
+                
             }
         }
     }
 
-    fn on_key(&mut self, _input: KeyboardInput) {}
+    fn on_key(&mut self, input: KeyboardInput) {
+        match input {
+            KeyboardInput { state: KeyState::Pressed, key_code, .. }=> {
+                match key_code {
+                    KeyCode::R => {
+                        self.offset = 0;
+                    }
+                    KeyCode::DownArrow => {
+                        self.offset += 1;
+                        if self.offset >= self.file_info.len() {
+                            self.offset = 0;
+                        }
+                    }
+                    KeyCode::UpArrow => {
+                        if self.offset == 0 {
+                            self.offset = self.file_info.len() - 1;
+                        } else {
+                            self.offset -= 1;
+                        }
+
+                    }
+                    _ => {}
+                }
+               
+            }
+            
+            _ => {}
+        }
+    }
 
     fn on_scroll(&mut self, _x: f64, _y: f64) {}
 
     fn get_state(&self) -> Self::State {
-        self.xml_file_text.clone()
+        self.clone()
     }
 
     fn set_state(&mut self, state: Self::State) {
-        self.xml_file_text = state;
+        *self = state;
     }
 }
 
 impl AsmData {
     fn get_xml_stuff(&mut self) -> Result<(), Box<dyn Error>> {
+
+
+        if !self.file_info.is_empty() {
+            // let name : String = self.file_info.iter().map(|x| format!("{:#?} \n", x)).collect();
+            // self.xml_file_text = name;
+            return Ok(())
+        }
+
+
         let before_read = std::time::Instant::now();
         let xml_file_bytes = fs::read("onebigfile.xml")?;
         let xml_file_text = from_utf8(&xml_file_bytes)?;
@@ -128,7 +210,7 @@ impl AsmData {
         //     end
         //   end
 
-        let name: String = found_file_nodes
+        let file_info : Vec<FileInfo> = found_file_nodes
             .iter()
             .flat_map(|x| {
                 x.descendants()
@@ -171,12 +253,14 @@ impl AsmData {
                     regdiagram,
                 }
             })
-            .map(|x| format!("{:#?} \n", x))
             .collect();
+        self.file_info = file_info.clone();
+
+        let name : String = file_info.iter().map(|x| format!("{:#?} \n", x)).collect();
 
         println!("Found file in {}ms", before_find.elapsed().as_millis());
 
-        self.xml_file_text = format!("Files: {}", name);
+        // self.xml_file_text = format!("Files: {}", name);
         Ok(())
     }
 }
