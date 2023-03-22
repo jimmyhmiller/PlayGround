@@ -246,7 +246,8 @@ mod macros {
                 use $crate::framework::encode_base64;
                 let s: String = serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
                 let s = encode_base64(s);
-                let ptr = s.as_ptr() as usize;
+                let mut s = s.into_bytes().clone();
+                let ptr = s.as_mut_ptr() as usize;
                 let len = s.len();
                 std::mem::forget(ptr);
                 unsafe { APP.set_get_state(ptr as u32, len as u32) };
