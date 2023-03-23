@@ -11,7 +11,7 @@ use futures::{
 };
 use futures_timer::Delay;
 use itertools::Itertools;
-use metal_rs::RenderPassColorAttachmentDescriptor;
+
 use skia_safe::{Canvas, Font, FontStyle, Typeface};
 use wasmtime::{
     AsContextMut, Caller, Config, Engine, Instance, Linker, Memory, Module, Store, WasmParams,
@@ -759,7 +759,7 @@ impl WasmInstance {
         linker.func_wrap(
             "host",
             "set_get_state",
-            |mut caller: Caller<'_, State>, ptr: u32, len: u32| -> () {
+            |mut caller: Caller<'_, State>, ptr: u32, len: u32| {
                 let state = caller.data_mut();
                 state.get_state_info = (ptr, len);
             },

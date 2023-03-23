@@ -2,9 +2,10 @@ use std::{error::Error, fs, str::from_utf8};
 
 use framework::{App, Canvas, Color, Rect, KeyState, KeyCode};
 
-use roxmltree::Node;
+use roxmltree::{Node, Document};
 use serde::{Deserialize, Serialize};
 mod framework;
+use indoc::indoc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AsmData {
@@ -20,6 +21,39 @@ struct FileInfo {
     regdiagram: Vec<String>,
 }
 
+use std::fmt::Write;
+
+
+fn find_indent(s: &str) -> usize {
+    let lines = s.lines();
+
+    // Find the indent of the first non-empty line
+    lines
+        .clone()
+        .filter(|line| !line.trim().is_empty())
+        .next()
+        .map(|line| line.chars().take_while(|c| c.is_whitespace()).count())
+        .unwrap_or(0)
+}
+
+fn remove_common_indent(s: &str) -> String {
+
+    // Find the indent of the first non-empty line
+    let first_non_empty_indent = find_indent(s);
+    
+    let lines = s.lines();
+    // Remove that indent from all lines
+    lines
+        .map(|line| {
+            if line.len() >= first_non_empty_indent {
+                &line[first_non_empty_indent..]
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<&str>>()
+        .join("\n")
+}
 impl App for AsmData {
     type State = AsmData;
 
@@ -54,49 +88,155 @@ impl App for AsmData {
         }
 
         for file_info in self.file_info.iter().skip(self.offset).take(5) {
-            canvas.draw_str(&file_info.name, 0.0, 0.0);
+            let name = file_info.name.to_ascii_uppercase();
+            canvas.draw_str(&format!("# {}", &name), 0.0, 0.0);
             canvas.translate(0.0, 40.0);
 
-            canvas.save();
-            for regdiagram in file_info.regdiagram.iter() {
-                let document = roxmltree::Document::parse(&regdiagram).unwrap();
-                let root = document.root_element();
-                let attrs = root.attributes().map(|x| format!("{}: {}", x.name(), x.value())).collect::<Vec<String>>().join(", ");
+            canvas.draw_str(&format!( "# {}", &file_info.desc), 0.0, 0.0);
+            canvas.translate(0.0, 40.0);
+            
 
-                
-                canvas.draw_str(&format!("{} {}", root.tag_name().name(), attrs), 0.0, 0.0);
+            for asm in file_info.asm.iter() {
+                let asm = Document::parse(asm).unwrap();
+                let texts = asm
+                    .descendants()
+                    .filter(|x| x.has_tag_name("a"))
+                    .map(|x| x.text().unwrap_or(""));
+                canvas.save();
+                canvas.draw_str("#", 0.0, 0.0);
+                canvas.translate(30.0, 0.0);
+                for text in texts {
+                    canvas.draw_str(text, 0.0, 0.0);
+                    canvas.translate(80.0, 0.0);
+                }
+                canvas.restore();
                 canvas.translate(0.0, 40.0);
             }
-            canvas.restore();
+
+            canvas.translate(0.0, 40.0);
+
+
+            struct Field {
+                name: String,
+                shift: u32,
+                bits: String,
+                width: u32,
+                required: bool,
+            }
+
+            let mut fields = vec![];
+
+
             canvas.save();
-            canvas.translate(1200.0, 0.0);
             for regdiagram in file_info.regdiagram.iter() {
                 let document = roxmltree::Document::parse(&regdiagram).unwrap();
                 let root = document.root_element();
                 let name = root.attribute("name").unwrap_or("");
                 let use_name = root.attribute("usename");
-                let hibit = root.attribute("hibit").unwrap();
-                let width = root.attribute("width").unwrap_or("1").parse::<i32>().unwrap();
-                let children = root.descendants().filter(|x| x.has_tag_name("c")).map(|x| {
-                    x.text().map(|x| x.to_string())
-                }).flatten().collect::<Vec<String>>();
-                canvas.draw_str(hibit, 0.0, 0.0);
-                if children.is_empty() {
-                    canvas.draw_str(name, 0.0, 40.0);
-                } else {
-                    for (i, child) in children.iter().enumerate() {
-                        canvas.draw_str(child, i as f32 * 70.0, 40.0);
-                    }
-                }
-                if !children.is_empty() {
-                    canvas.draw_str(name, 0.0, 80.0);
-                }
 
-                canvas.translate(40.0 * width as f32, 0.0);
+                let bits : Vec<String> = root.descendants()
+                    .filter(|child| !child.is_text())
+                    .filter_map(|child| {
+                        let text = child.text().unwrap_or_default().trim();
+                        if !text.is_empty() {
+                            Some(text.replace("(", "").replace(")", ""))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+        
+                let hibit = root.attribute("hibit").unwrap().parse::<u32>().unwrap() + 1;
+                let width = root.attribute("width").unwrap_or("1").parse::<u32>().unwrap();
+                let shift = hibit - width;
+
+
+                fields.push(Field {
+                    name: name.to_string(),
+                    shift,
+                    bits: if bits.is_empty() {
+                        "0".repeat(width as usize).to_string()
+                    } else {
+                        bits.join("")
+                    },
+                    width,
+                    required: bits.is_empty(),
+                })
             }
-            canvas.restore();
 
-            canvas.translate(0.0, file_info.regdiagram.len() as f32 * 40.0 + 30.0);
+            let params = fields.iter().filter(|x| x.required).map(|x| format!("{}: u32", x.name)).collect::<Vec<String>>().join(", ");
+
+            let indent = "                    ";
+            let mut define_params = String::new();
+            for field in fields.iter().filter(|x| x.required) {
+                let name = field.name.to_ascii_lowercase();
+                define_params.write_str(&format!("{}{}: u32,\n", indent, name)).unwrap();
+            }
+            if !define_params.is_empty() {
+                define_params.pop();
+                define_params = define_params[indent.len()..].to_string();
+            }
+                
+            let indent = "                            ";
+            // rd: check_mask(rd, 0x1f),
+            let mut init_params = String::new();
+            for field in fields.iter().filter(|x| x.required) {
+                let mask = (1 << field.width) - 1;
+                let name = field.name.to_ascii_lowercase();
+                init_params.write_str(&format!("{}{}: check_mask({}, {:#02x}),\n", indent, name, name, mask)).unwrap();
+            }
+            if !init_params.is_empty() {
+                init_params.pop();
+                init_params = init_params[indent.len()..].to_string();
+            }
+
+
+            let mut encode = String::new();
+            let all_bits = fields.iter().map(|x| x.bits.clone()).collect::<Vec<String>>().join("_");
+
+            // I am getting a SETGP instruction that the ruby library isn't
+            // Need to figure out if that is filtered out in the code or after.
+            // It has xx in th bits, which I don't understand.
+
+            if all_bits.contains(&"x".to_string()) {
+                continue;
+            }
+
+            encode.write_str(&format!("0b{}\n", all_bits)).unwrap();
+            // for lack of a better thing to do I copied from template
+            let indent = "                        ";
+            for field in fields.iter().filter(|x| x.required) {
+                let name = field.name.to_ascii_lowercase();
+                encode.write_str(&format!("{}| (self.{} << {})\n", indent, name, field.shift)).unwrap();
+            }
+            encode.pop();
+
+            let template = remove_common_indent(&format!("
+                pub struct {name} {{
+                    {define_params}
+                }}
+                
+                impl {name} {{
+                    pub fn new({params}) -> Self {{
+                        {name} {{
+                            {init_params}
+                        }}
+                    }}
+                
+                    pub fn encode(&self) -> u32 {{
+                        {encode}
+                    }}
+                }}
+            "));
+
+            for line in template.lines() {
+                canvas.draw_str(line, 0.0, 0.0);
+                canvas.translate(0.0, 40.0);
+            }
+
+
+
+            canvas.translate(0.0, file_info.regdiagram.len() as f32 * 5.0 + 30.0);
         }
 
         canvas.restore();
@@ -155,6 +295,31 @@ impl App for AsmData {
 }
 
 impl AsmData {
+
+    fn create_template() -> String {
+        indoc!{"
+            pub struct {name} {
+                {define_params}
+            }
+    
+            impl {name} {
+                pub fn new({params}) -> Self {
+                    {name} {
+                        {init_params}
+                    }
+                }
+    
+                pub fn encode(&self) -> u32 {
+                   {encode}
+                }
+            }
+        "}.to_string()
+    }
+
+
+
+
+
     fn get_xml_stuff(&mut self) -> Result<(), Box<dyn Error>> {
 
 
@@ -163,6 +328,7 @@ impl AsmData {
             // self.xml_file_text = name;
             return Ok(())
         }
+
 
 
         let before_read = std::time::Instant::now();
