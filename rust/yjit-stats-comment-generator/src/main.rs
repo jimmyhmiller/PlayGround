@@ -1,4 +1,4 @@
-use std::{path::Path, process::Command};
+use std::{path::Path, process::Command, env};
 
 fn add_indention(text: &str, indention: usize) -> String {
     let mut new_text = String::new();
@@ -31,11 +31,15 @@ fn template_single_bench(bench_name: &str, stats: Vec<u8>) -> String {
 fn base_command(ruby_path: &str) -> Command {
     let mut command = Command::new(ruby_path);
 
+    let new_path = Path::new(ruby_path).parent().unwrap().to_path_buf();
+    let current_path = env::var("PATH").unwrap_or_else(|_| String::from(""));
+    let updated_path = env::join_paths(std::iter::once(new_path).chain(env::split_paths(&current_path))).unwrap();
+
     command
         .env("WARMUP_ITRS", "0")
         .env("MIN_BENCH_ITRS", "1")
         .env("MIN_BENCH_TIME", "0")
-        .env("PATH", Path::new(ruby_path).parent().unwrap().to_str().unwrap())
+        .env("PATH", updated_path)
         .arg("-Iharness");
 
     command

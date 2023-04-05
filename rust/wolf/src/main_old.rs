@@ -233,13 +233,13 @@ pub fn main() {
                 y: (1.0 / ray_player_facing.y).abs(),
             };
 
-            let mut perp_wall_dist: f64;
+            let perp_wall_dist: f64;
 
             // what direction to step in x or y-direction (either +1 or -1)
             let mut step = Point { x: 0, y: 0 };
 
-            let mut hit = 0; // was there a wall hit?
-            let mut side: i32 = 1; // was a NS or a EW wall hit?
+            let mut hit = false; // was there a wall hit?
+            let mut side_hit = true; // was a NS or a EW wall hit?
 
             if ray_player_facing.x < 0.0 {
                 step.x = -1;
@@ -256,23 +256,23 @@ pub fn main() {
                 side_dist.y = (map.y as f64 + 1.0 - player.position.y) * delta_dist.y;
             }
 
-            while hit == 0 {
+            while !hit {
                 // jump to next map square, OR in x-direction, OR in y-direction
                 if side_dist.x < side_dist.y {
                     side_dist.x += delta_dist.x;
                     map.x += step.x as i32;
-                    side = 0;
+                    side_hit = false;
                 } else {
                     side_dist.y += delta_dist.y;
                     map.y += step.y as i32;
-                    side = 1;
+                    side_hit = true;
                 }
                 // Check if ray has hit a wall
                 if world_map[map.x as usize][map.y as usize] > 0 {
-                    hit = 1;
+                    hit = true;
                 }
             }
-            if side == 0 {
+            if !side_hit {
                 perp_wall_dist = (map.x as f64 - player.position.x + (1.0 - step.x as f64) / 2.0)
                     / ray_player_facing.x;
             } else {
@@ -300,7 +300,7 @@ pub fn main() {
                 _ => Color::RGB(255, 255, 0),
             };
 
-            if side == 1 {
+            if side_hit {
                 color = darken_color(color)
             }
 

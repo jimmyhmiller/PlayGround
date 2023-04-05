@@ -184,7 +184,7 @@ impl<'a> Tokenizer {
     fn is_comment_start(&self, input_bytes: &[u8]) -> bool {
         input_bytes[self.position] == b'/' && self.peek(input_bytes) == Some(b'/')
     }
-    
+
     fn parse_comment(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
         while !self.at_end(input_bytes) && !self.is_newline(input_bytes) {
@@ -257,7 +257,6 @@ impl<'a> Tokenizer {
             self.consume();
         }
         Token::Spaces((start, self.position))
-
     }
 
     pub fn is_valid_number_char(&mut self, input_bytes: &[u8]) -> bool {
@@ -284,7 +283,7 @@ impl<'a> Tokenizer {
     pub fn parse_identifier(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
         while !self.at_end(input_bytes)
-                && !self.is_space(input_bytes) 
+                && !self.is_space(input_bytes)
                 && !self.is_open_paren(input_bytes)
                 && !self.is_close_paren(input_bytes)
                 && !self.is_open_curly(input_bytes)
@@ -294,7 +293,7 @@ impl<'a> Tokenizer {
                 && !self.is_semi_colon(input_bytes)
                 && !self.is_colon(input_bytes)
                 && !self.is_comma(input_bytes)
-                && !self.is_newline(input_bytes) 
+                && !self.is_newline(input_bytes)
                 && !self.is_quote(input_bytes) {
             self.consume();
         }
@@ -302,7 +301,7 @@ impl<'a> Tokenizer {
     }
 
     pub fn parse_single(&mut self, input_bytes: &[u8]) -> Option<Token> {
-        
+
         if self.at_end(input_bytes) {
             return None
         }
@@ -458,8 +457,8 @@ pub fn rust_specific_pass(token: Token, input_bytes: &[u8]) -> RustSpecific {
                     "while" => RustSpecific::Keyword((s, e)),
                     _ => RustSpecific::Token(token)
                 }
-            } 
-           
+            }
+
             t => RustSpecific::Token(t)
         }
 }
