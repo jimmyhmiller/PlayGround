@@ -19,6 +19,5 @@ fn main() {
     let target_dir = get_output_path();
     let src = Path::join(&env::current_dir().unwrap(), "resources/onebigfile.xml");
     let dest = Path::join(Path::new(&target_dir), Path::new("onebigfile.xml"));
-    println!("{:?} -> {:?}", src, dest);
     fs::copy(src, dest).unwrap();
 }
