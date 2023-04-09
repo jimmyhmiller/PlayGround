@@ -6,7 +6,7 @@ What I want to do here is not question any of these studies, not even survey the
 
 ## Modern TDD Research
 
-As a starting point, we will look at [Greg Wilson’s review of “Modern Software Engineering”](https://neverworkintheory.org/2022/05/06/not-quite-modern.html). Here we find a beautiful confluence. First Wilson tells us that despite its title the book “feels a bit old-fashioned”. He specifically points to the book’s lack of inclusion of more recent research regarding TDD. The book cites studies that claim TDD helps quite a lot, but Wilson points us to a meta-analysis that found the following:
+As a starting point, we will look at {" "}[Greg Wilson’s review of “Modern Software Engineering”](https://neverworkintheory.org/2022/05/06/not-quite-modern.html). Here we find a beautiful confluence. First Wilson tells us that despite its title the book “feels a bit old-fashioned”. He specifically points to the book’s lack of inclusion of more recent research regarding TDD. The book cites studies that claim TDD helps quite a lot, but Wilson points us to a meta-analysis that found the following:
 
 > (a) the more rigorous the study, the weaker the evidence for or against TDD and (b) overall, there is no evidence that TDD makes anything better or worse
 

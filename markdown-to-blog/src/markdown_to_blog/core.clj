@@ -5,7 +5,7 @@
 
 
 (def markdown
-  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/The Space Between Programs.md"))
+  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/What follows from empirical software research.md"))
 
 
 (defmulti transform
@@ -44,13 +44,20 @@
 
 (defmethod transform :pre [[_ _ [tag attr source] :as content]]
   (if (not= tag :code)
-    (throw (ex-info "Pre without code" content))
-    [(keyword (string/capitalize (:class attr))) {} (str "\n  {`\n" (indent-lines source) "\n  `}\n")]))
+    (throw (ex-info "Pre without code" {:content  content}))
+    (do
+      (def tag tag)
+      (def attr attr)
+      (def source source)
+      (def content content)
+      (if (= (:class attr) "other")
+        [:Code (str "\n  {`\n" (indent-lines source) "\n  `}\n")]
+        [(keyword (string/capitalize (:class attr))) {} (str "\n  {`\n" (indent-lines source) "\n  `}\n")]))))
 
 (defmethod transform :code [[_ attr body :as content]]
   (if (not (contains? attr :class))
     [:Term {} body]
-    content))
+     content))
 
 (defmethod transform :div [[_ _ & content]]
   [:GlobalLayout {} content])
