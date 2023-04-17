@@ -363,19 +363,6 @@ impl AsmData {
             }
         }
 
-        //     basic_insn_files.each do |filename|
-        //     file_node = files_by_name[filename].first
-        //     file_node.css("instructionsection").each do |section|
-        //       asm = section.css("asmtemplate").map(&:text)
-        //       desc = section.at_css("desc > brief").text.strip
-        //       fname = section["id"].downcase
-        //       files_and_classes << [fname, section["id"]]
-        //       unless File.exist?  "lib/aarch64/instructions/#{fname}.rb"
-        //         File.binwrite "lib/aarch64/instructions/#{fname}.rb", make_encode(section["id"], section["title"], desc, asm, section.at_css("regdiagram"))
-        //       end
-        //     end
-        //   end
-
         let file_info : Vec<FileInfo> = found_file_nodes
             .iter()
             .flat_map(|x| {

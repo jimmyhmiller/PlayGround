@@ -46,10 +46,6 @@
   (if (not= tag :code)
     (throw (ex-info "Pre without code" {:content  content}))
     (do
-      (def tag tag)
-      (def attr attr)
-      (def source source)
-      (def content content)
       (if (= (:class attr) "other")
         [:Code (str "\n  {`\n" (indent-lines source) "\n  `}\n")]
         [(keyword (string/capitalize (:class attr))) {} (str "\n  {`\n" (indent-lines source) "\n  `}\n")]))))
