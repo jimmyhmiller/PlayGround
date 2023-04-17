@@ -1,17 +1,26 @@
-use std::{fs, error::Error, str::from_utf8};
+use std::{
+    collections::HashSet,
+    error::Error,
+    fs::{self, File},
+    io::Write,
+    str::from_utf8,
+};
 
-use roxmltree::{Node, Document};
+use roxmltree::{Document, Node};
+use serde::{Deserialize, Serialize};
 
-
-#[derive(Debug, Clone)]
-struct FileInfo {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Instruction {
+    title: String,
     name: String,
     asm: Vec<String>,
-    desc: String,
+    description: String,
     regdiagram: Vec<String>,
+    fields: Vec<Field>,
+    argument_comments: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Field {
     name: String,
     shift: u32,
@@ -20,58 +29,67 @@ struct Field {
     required: bool,
 }
 
+fn to_camel_case(name: &str) -> String {
+    let mut result = String::new();
+    let mut capitalize_next = true;
 
+    for c in name.chars() {
+        if c == '_' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.push(c.to_ascii_uppercase());
+            capitalize_next = false;
+        } else {
+            result.push(c.to_ascii_lowercase());
+        }
+    }
 
-
-
+    result
+}
 fn main() -> Result<(), Box<dyn Error>> {
+    print!("{}[2J", 27 as char);
     let xml_file_path = "resources/onebigfile.xml";
 
     let xml_file_bytes = fs::read(xml_file_path)?;
     let xml_file_text = from_utf8(&xml_file_bytes)?;
     let xml = roxmltree::Document::parse(xml_file_text.clone())?;
 
-
     let file_names = xml
         .descendants()
         .filter(|x| x.has_tag_name("iforms"))
-        .find(|x| {
-            x.attribute("title")
-                .unwrap_or("")
-                .contains("Base Instructions")
+        .filter(|x| {
+            let title = x.attribute("title").unwrap_or("");
+            title.contains("Base Instructions")
+                || title.contains("SIMD and Floating-point Instructions")
         })
-        .unwrap()
-        .descendants()
+        .flat_map(|x| x.descendants())
         .filter(|x| x.has_tag_name("iform"))
         .filter_map(|x| x.attribute("iformfile"));
 
-    let mut found_file_nodes = vec![];
-    for file_name in file_names {
-        let file_ndoe = xml
-            .descendants()
-            .find(|x| x.attribute("file") == Some(file_name));
-        if let Some(file_node) = file_ndoe {
-            found_file_nodes.push(file_node);
-        }
-    }
+    let mut file_names_hash = HashSet::new();
+    file_names_hash.extend(file_names);
 
-    let file_info : Vec<FileInfo> = found_file_nodes
-        .iter()
+    let found_file_nodes = xml
+        .descendants()
+        .filter(|x| file_names_hash.contains(x.attribute("file").unwrap_or("Not Found")));
+
+    let instructions: Vec<Instruction> = found_file_nodes
+        // .take(5)
         .flat_map(|x| {
             x.descendants()
                 .filter(|x| x.has_tag_name("instructionsection"))
         })
         .map(|x| {
-            let name = x
-                .attribute("id")
-                .unwrap_or("No file found")
-                .to_ascii_lowercase();
+            let title = x.attribute("title").unwrap_or("No file found").to_string();
+            let name =  to_camel_case(&x.attribute("id").unwrap_or("No file found").to_string());
+
             let asm = x
                 .descendants()
                 .filter(|x| x.has_tag_name("asmtemplate"))
                 .map(|x| xml_file_text[x.range()].to_string())
-                .collect();
-            let desc = x
+                .collect::<Vec<String>>();
+
+            let description = x
                 .descendants()
                 .find(|x| x.has_tag_name("desc"))
                 .and_then(|x| x.descendants().find(|x| x.has_tag_name("brief")))
@@ -79,6 +97,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map(|x| x.text().unwrap_or(""))
                 .unwrap_or("")
                 .to_string();
+
             let regdiagram = x
                 .descendants()
                 .find(|x| x.has_tag_name("regdiagram"))
@@ -90,88 +109,92 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap_or_default()
                 .iter()
                 .map(|x| xml_file_text[x.range()].to_string())
-                .collect();
-            FileInfo {
+                .collect::<Vec<String>>();
+
+            let mut fields = vec![];
+            for regdiagram in regdiagram.iter() {
+                let document = roxmltree::Document::parse(&regdiagram).unwrap();
+                let root = document.root_element();
+                let name = root.attribute("name").unwrap_or("").to_ascii_lowercase();
+                // let use_name = root.attribute("usename");
+
+                let bits: Vec<String> = root
+                    .descendants()
+                    .filter(|child| !child.is_text())
+                    .filter_map(|child| {
+                        let text = child.text().unwrap_or_default().trim();
+                        if !text.is_empty() {
+                            Some(text.replace("(", "").replace(")", ""))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                let hibit = root.attribute("hibit").unwrap().parse::<u32>().unwrap() + 1;
+                let width = root
+                    .attribute("width")
+                    .unwrap_or("1")
+                    .parse::<u32>()
+                    .unwrap();
+                let shift = hibit - width;
+
+                fields.push(Field {
+                    name: name.to_string(),
+                    shift,
+                    bits: if bits.is_empty() {
+                        "0".repeat(width as usize).to_string()
+                    } else {
+                        bits.join("")
+                    },
+                    width,
+                    required: bits.is_empty(),
+                })
+            }
+
+            let mut argument_comments = vec![];
+
+            for asm in asm.iter() {
+                let asm = Document::parse(asm).unwrap();
+
+                let texts = asm
+                    .root_element()
+                    .children()
+                    .map(|x| x.text().unwrap_or("").to_string())
+                    .collect::<Vec<String>>();
+
+                argument_comments.push(texts.join(""));
+            }
+
+            Instruction {
+                title,
                 name,
                 asm,
-                desc,
+                description,
                 regdiagram,
+                fields,
+                argument_comments,
             }
         })
         .collect();
 
+    let template = liquid::ParserBuilder::with_stdlib()
+        .build()
+        .unwrap()
+        .parse_file("./resources/asm.tpl")
+        .unwrap();
 
+    let mut globals = liquid::object!({
+        "instructions": instructions,
+    });
 
+    let output = template.render(&globals).unwrap();
+    let mut file = File::create("output.txt")?;
+    file.write_all(output.as_bytes())?;
 
-
-    for file_info in file_info.iter() {
-
-        let mut fields = vec![];
-        let name = file_info.name.to_ascii_uppercase();
-
-        let mut argument_comments = vec![];
-
-        for asm in file_info.asm.iter() {
-            let asm = Document::parse(asm).unwrap();
-            let texts = asm
-                .descendants()
-                .filter(|x| x.has_tag_name("a"))
-                .map(|x| x.text().unwrap_or("").to_string())
-                .collect::<Vec<String>>();
-            for text in texts {
-                argument_comments.push(text);
-            }
-        }
-
-
-        for regdiagram in file_info.regdiagram.iter() {
-            let document = roxmltree::Document::parse(&regdiagram).unwrap();
-            let root = document.root_element();
-            let name = root.attribute("name").unwrap_or("");
-            // let use_name = root.attribute("usename");
-
-            let bits : Vec<String> = root.descendants()
-                .filter(|child| !child.is_text())
-                .filter_map(|child| {
-                    let text = child.text().unwrap_or_default().trim();
-                    if !text.is_empty() {
-                        Some(text.replace("(", "").replace(")", ""))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            let hibit = root.attribute("hibit").unwrap().parse::<u32>().unwrap() + 1;
-            let width = root.attribute("width").unwrap_or("1").parse::<u32>().unwrap();
-            let shift = hibit - width;
-
-
-            fields.push(Field {
-                name: name.to_string(),
-                shift,
-                bits: if bits.is_empty() {
-                    "0".repeat(width as usize).to_string()
-                } else {
-                    bits.join("")
-                },
-                width,
-                required: bits.is_empty(),
-            })
-        }
-        println!("{:?}", name);
-        println!("{:?}", file_info.desc);
-        println!("{:?}", argument_comments);
-
-        for field in fields {
-            println!("{:?}", field);
-        }
-        println!("==================================================\n\n");
-    }
-
-
-    
-
+    println!("Written");
 
     Ok(())
 }
+
+
