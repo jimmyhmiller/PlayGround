@@ -305,6 +305,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// We have a nice enum format
+// but we need a none enum format
+
+// We need better documentation on which
+// instructions we actually like and care about.
+// We need to abstract over all the different "add" and "mov"
+// functions so I don't look dumb on stream
+
+// We need to not copy and paste and build a real build system
+
+// Start writing some code for the real language
+
+
+
 // #[derive(Debug)]
 // enum Size {
 //     S32,
