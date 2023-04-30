@@ -9,7 +9,7 @@ use skia_safe::{
 
 use crate::{
     event::Event,
-    wasm_messenger::{self, WasmId, WasmMessenger},
+    wasm_messenger::{self, WasmId, WasmMessenger}, editor::make_grain_gradient_shader,
 };
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
@@ -90,7 +90,7 @@ impl WidgetStore {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Copy, Clone, Serialize, Deserialize)]
 pub struct Color {
     r: f32,
     g: f32,
@@ -105,6 +105,9 @@ impl Color {
 
     pub fn to_color4f(&self) -> Color4f {
         Color4f::new(self.r, self.g, self.b, self.a)
+    }
+    pub fn to_sk_color(&self) -> skia_safe::Color {
+        self.to_color4f().to_color()
     }
 
     pub fn new(r: f32, g: f32, b: f32, a: f32) -> Color {
@@ -457,10 +460,14 @@ impl Widget {
                 let foreground = Color::parse_hex("#62b4a6");
                 let background = Color::parse_hex("#530922");
 
+                let grain_shader = make_grain_gradient_shader((self.bounding_rect().width()/2.0, self.bounding_rect().height()/2.0), 30.0, background, background, 0.3);
+
+                let mut paint = background.to_paint();
+                paint.set_shader(grain_shader);
                 canvas.save();
                 canvas.clip_rect(self.bounding_rect(), None, None);
                 let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);
-                canvas.draw_rrect(rrect, &background.to_paint());
+                canvas.draw_rrect(rrect, &paint);
                 let font = Font::new(
                     Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
                     32.0,

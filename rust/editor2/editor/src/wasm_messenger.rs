@@ -51,9 +51,11 @@ struct Message {
     payload: Payload,
 }
 
+
 enum OutPayload {
     DrawCommands(Vec<Command>),
     Saved(SaveState),
+    ErrorPayload(Box<dyn Error>),
     Complete,
 }
 
@@ -313,6 +315,9 @@ impl WasmMessenger {
                     OutPayload::Saved(saved) => {
                         self.wasm_states.insert(message.wasm_id, saved);
                     }
+                    OutPayload::ErrorPayload(err) => {
+                        println!("{:?}", err)
+                    },
                     OutPayload::Complete => {}
                 }
             }
@@ -513,8 +518,18 @@ impl WasmManager {
             }
             Payload::OnKey(input) => {
                 let (key_code, state, modifiers) = input.to_u32_tuple();
-                self.instance.on_key(key_code, state, modifiers).await.unwrap();
-                default_return
+                let result = self.instance.on_key(key_code, state, modifiers).await;
+                match result {
+                    Ok(_) => default_return,
+                    Err(err) => {
+                        OutMessage {
+                            wasm_id: message.wasm_id,
+                            message_id: message.message_id,
+                            payload: OutPayload::ErrorPayload(err)
+                        }
+                    }
+                }
+                
             }
             Payload::Reload => {
                 match self.instance.reload().await {

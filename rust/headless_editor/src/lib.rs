@@ -42,6 +42,9 @@ pub trait TextBuffer {
     fn byte_at_pos(&self, line: usize, column: usize) -> Option<&Self::Item>;
     fn delete_char(&mut self, line: usize, column: usize);
     fn lines(&self) -> LineIter<Self::Item>;
+    fn last_line(&self) -> usize {
+        self.line_count().saturating_sub(1)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -135,7 +138,7 @@ pub trait VirtualCursor: Clone + Debug {
     fn new(line: usize, column: usize) -> Self;
 
     fn move_to_bounded<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) {
-        let line = min(buffer.line_count(), line);
+        let line = min(buffer.last_line(), line);
         let column = min(buffer.line_length(line), column);
         self.move_to(line, column);
     }
@@ -149,11 +152,16 @@ pub trait VirtualCursor: Clone + Debug {
     }
 
     fn move_down<T: TextBuffer>(&mut self, buffer: &T) {
+        let next_line = self.line().saturating_add(1);
+        let last_line = buffer.last_line();
+        if next_line > last_line {
+            return
+        }
         self.move_to(
-            min(self.line().saturating_add(1), buffer.line_count()),
+            min(next_line, last_line),
             min(
                 self.column(),
-                buffer.line_length(self.line().saturating_add(1)),
+                buffer.line_length(next_line),
             ),
         );
     }

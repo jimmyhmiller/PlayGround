@@ -20,7 +20,10 @@ use notify::{FsEventWatcher, RecursiveMode};
 
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
-use skia_safe::{Font, FontStyle, Typeface};
+use skia_safe::{
+    gradient_shader::{self, Flags},
+    perlin_noise_shader, shaders, BlendMode, Font, FontStyle, PaintStyle, Rect, TileMode, Typeface, RuntimeEffect, Data, runtime_effect::ChildPtr, Shader,
+};
 
 // Need a global store of widgets
 // Then anything else refers to widgets by their id
@@ -359,17 +362,31 @@ impl Editor {
         self.fps_counter.tick();
         use skia_safe::Size;
 
-        let gray = Color::parse_hex("#333333");
-        canvas.clear(gray.to_color4f());
-
-        // let points = &self.points;
-        // let stroke_points = get_stroke_points(points.clone(), StrokeOptions::new());
-        // draw_strokes(&stroke_points, canvas);
-
-        // let outline_points = get_stroke_outline_points(&stroke_points.clone(), StrokeOptions::new());
-        // draw_points(&outline_points, canvas);
+        let darker = Color::parse_hex("#0d1d20");
+        let lighter = Color::parse_hex("#425050");
+        canvas.clear(Color::parse_hex("#ffffff").to_color4f());
 
         let canvas_size = Size::from(canvas.base_layer_size());
+
+        let mut paint = Paint::new(darker.to_color4f(), None);
+        paint.set_anti_alias(true);
+        paint.set_style(PaintStyle::Fill);
+
+
+
+        let radius = 1500.0;
+        let center = (canvas_size.width / 2.0, canvas_size.height / 2.0);
+
+        let grain_shader = make_grain_gradient_shader(center, radius, darker, lighter, 1.0);
+
+        paint.set_shader(grain_shader);
+      
+        paint.set_dither(true);
+
+        canvas.draw_rect(
+            Rect::from_xywh(0.0, 0.0, canvas_size.width, canvas_size.height),
+            &paint,
+        );
 
         let font = Font::new(
             Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(),
@@ -388,29 +405,27 @@ impl Editor {
         canvas.translate((canvas_size.width - 300.0, 60.0));
         let counts = self.wasm_messenger.number_of_outstanding_messages();
         for line in counts.lines() {
-            canvas.draw_str(
-                line,
-                Point::new(0.0, 0.0),
-                &font,
-                white,
-            );
+            canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
             canvas.translate((0.0, 30.0));
         }
         canvas.restore();
 
-       
-
-
         let mut to_draw = vec![];
         for widget in self.widget_store.iter_mut() {
+            let before_count = canvas.save();
             to_draw.extend(widget.draw(canvas, &mut self.wasm_messenger, widget.size));
+            canvas.restore_to_count(before_count);
+            canvas.restore();
         }
 
         // TODO: This is bad, I need to traverse the tree. Being lazy
         // Also not even sure about compound right now
         for widget_id in to_draw {
             if let Some(widget) = self.widget_store.get_mut(widget_id) {
+                let before_count = canvas.save();
                 widget.draw(canvas, &mut self.wasm_messenger, widget.size);
+                canvas.restore_to_count(before_count);
+                canvas.restore();
             }
         }
     }
@@ -606,6 +621,67 @@ impl Editor {
         let mut file = File::create(&self.widget_config_path).unwrap();
         file.write_all(result.as_bytes()).unwrap();
     }
+}
+
+pub fn make_grain_gradient_shader(center: (f32, f32), radius: f32, darker: Color, lighter: Color, alpha: f32) -> Shader {
+    let noise_shader = perlin_noise_shader::fractal_noise(
+        (0.25, 0.25),
+        1,
+        0.0,
+        None,
+    ).unwrap();
+
+
+    let gradient_shader = gradient_shader::radial(
+        center,
+        radius,
+        [darker.to_sk_color(), lighter.to_sk_color()].as_ref(),
+        None,
+        TileMode::Clamp,
+        None,
+        None,
+    ).unwrap();
+
+
+    let effect = RuntimeEffect::make_for_shader("
+                uniform shader noiseShader;
+                uniform shader gradientShader;
+                uniform vec4 colorLight;
+                uniform vec4 colorDark;
+                uniform float alpha;
+                
+                half4 main(vec2 fragcoord) { 
+                    vec4 noiseColor = noiseShader.eval(fragcoord);
+                    vec4 gradientColor = gradientShader.eval(fragcoord);
+                    float noiseLuma = dot(noiseColor.rgb, vec3(0.299, 0.587, 0.114));
+                    vec4 duotone = mix(gradientColor, colorDark, noiseLuma);
+                    return vec4(duotone.r * alpha, duotone.g * alpha, duotone.b * alpha, alpha);
+                }
+
+        ", None).unwrap();
+    let darker4 = darker.to_color4f();
+    let lighter4 = lighter.to_color4f();
+    let data = [
+        darker4.r,
+        darker4.g,
+        darker4.b,
+        darker4.a,
+        lighter4.r,
+        lighter4.g,
+        lighter4.b,
+        lighter4.a,
+        alpha,
+    ];
+
+    let len = data.len();
+    let ptr = data.as_ptr() as *const u8;
+    let data : &[u8] = unsafe { std::slice::from_raw_parts(ptr, len * 4)};
+
+    let uniforms = Data::new_copy(data);
+    let grain_shader = effect
+        .make_shader(uniforms, &[ChildPtr::Shader(noise_shader), ChildPtr::Shader(gradient_shader)], None, false)
+        .unwrap();
+    grain_shader
 }
 
 // I need a way for processes to add widgets
