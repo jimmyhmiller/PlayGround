@@ -194,13 +194,6 @@ impl App for AsmData {
             let mut encode = String::new();
             let all_bits = fields.iter().map(|x| x.bits.clone()).collect::<Vec<String>>().join("_");
 
-            // I am getting a SETGP instruction that the ruby library isn't
-            // Need to figure out if that is filtered out in the code or after.
-            // It has xx in th bits, which I don't understand.
-
-            if all_bits.contains(&"x".to_string()) {
-                continue;
-            }
 
             encode.write_str(&format!("0b{}\n", all_bits)).unwrap();
             // for lack of a better thing to do I copied from template
