@@ -5,7 +5,7 @@ use framework::{App, Canvas, Color, Rect, KeyState, KeyCode};
 use roxmltree::{Node, Document};
 use serde::{Deserialize, Serialize};
 mod framework;
-use indoc::indoc;
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AsmData {
@@ -132,7 +132,6 @@ impl App for AsmData {
                 let document = roxmltree::Document::parse(&regdiagram).unwrap();
                 let root = document.root_element();
                 let name = root.attribute("name").unwrap_or("");
-                let use_name = root.attribute("usename");
 
                 let bits : Vec<String> = root.descendants()
                     .filter(|child| !child.is_text())
@@ -240,7 +239,7 @@ impl App for AsmData {
         // self.xml_file_text = current_dir().unwrap().to_str().unwrap().to_string();
         match self.get_xml_stuff() {
             Ok(_) => (),
-            Err(e) => {
+            Err(_e) => {
                 
             }
         }
@@ -288,30 +287,6 @@ impl App for AsmData {
 }
 
 impl AsmData {
-
-    fn create_template() -> String {
-        indoc!{"
-            pub struct {name} {
-                {define_params}
-            }
-    
-            impl {name} {
-                pub fn new({params}) -> Self {
-                    {name} {
-                        {init_params}
-                    }
-                }
-    
-                pub fn encode(&self) -> u32 {
-                   {encode}
-                }
-            }
-        "}.to_string()
-    }
-
-
-
-
 
     fn get_xml_stuff(&mut self) -> Result<(), Box<dyn Error>> {
 
@@ -402,7 +377,7 @@ impl AsmData {
             .collect();
         self.file_info = file_info.clone();
 
-        let name : String = file_info.iter().map(|x| format!("{:#?} \n", x)).collect();
+        let _name : String = file_info.iter().map(|x| format!("{:#?} \n", x)).collect();
 
         println!("Found file in {}ms", before_find.elapsed().as_millis());
 

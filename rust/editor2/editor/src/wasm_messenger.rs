@@ -7,7 +7,7 @@ use futures::{
     channel::mpsc::{channel, Receiver, Sender},
     executor::{LocalPool, LocalSpawner},
     task::LocalSpawnExt,
-    StreamExt, FutureExt,
+    StreamExt,
 };
 use futures_timer::Delay;
 use itertools::Itertools;
@@ -21,7 +21,7 @@ use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
 use crate::{
     keyboard::KeyboardInput,
-    widget::{Color, Position, Size},
+    widget::{Color, Position, Size}, editor::make_grain_gradient_shader,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -34,6 +34,7 @@ pub type WasmId = u64;
 
 #[derive(Debug, Clone)]
 enum Payload {
+    #[allow(unused)]
     NewInstance(String),
     OnClick(Position),
     Draw(String),
@@ -204,6 +205,11 @@ impl WasmMessenger {
             let mut current_height_stack = vec![];
 
             let mut paint = skia_safe::Paint::default();
+            let center = (bounds.width/2.0, bounds.height/2.0);
+            let radius = 30.0;
+            let color = Color::from_color4f(&paint.color4f());
+            let grain_shader = make_grain_gradient_shader(center, radius, color, color, 0.3);
+            paint.set_shader(grain_shader);
             for command in commands.iter() {
                 // Going to do this unconditonally for now.
                 // Need to make this toggleable
@@ -216,7 +222,10 @@ impl WasmMessenger {
                 }
                 match command {
                     Command::SetColor(r, g, b, a) => {
-                        paint.set_color(Color::new(*r, *g, *b, *a).to_color4f().to_color());
+                        let color = Color::new(*r, *g, *b, *a);
+                        paint.set_color(color.to_color4f().to_color());
+                        let grain_shader = make_grain_gradient_shader(center, radius, color, color, 0.3);
+                        paint.set_shader(grain_shader);
                     }
                     Command::DrawRect(x, y, width, height) => {
                         canvas
@@ -230,6 +239,8 @@ impl WasmMessenger {
                         // }
                     }
                     Command::DrawString(str, x, y) => {
+                        let mut paint = paint.clone();
+                        paint.set_shader(None);
                         if max_height > bounds.height {
                             continue;
                         }
@@ -237,6 +248,7 @@ impl WasmMessenger {
                             Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
                             32.0,
                         );
+
                         // No good way right now to find bounds. Need to think about this properly
                         canvas.draw_str(str, (*x, *y), &font, &paint);
                     }
@@ -442,9 +454,11 @@ impl WasmMessenger {
 // 2. Have senders and receivers per instance
 
 struct WasmManager {
+    #[allow(unused)]
     id: WasmId,
     instance: WasmInstance,
     receiver: Receiver<Message>,
+    #[allow(unused)]
     engine: Arc<Engine>,
     sender: Sender<OutMessage>,
 }

@@ -114,6 +114,10 @@ impl Color {
         Color { r, g, b, a }
     }
 
+    pub fn from_color4f(color4f: &Color4f) -> Self {
+        Color { r: color4f.r, g: color4f.g, b: color4f.b, a: color4f.a}
+    }
+
     pub fn parse_hex(hex: &str) -> Color {
         let mut start = 0;
         if hex.starts_with('#') {
@@ -417,10 +421,16 @@ impl Widget {
 
         match &self.data {
             WidgetData::Noop => {
+
                 let rect = self.bounding_rect();
                 let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
                 let purple = Color::parse_hex("#1c041e");
-                canvas.draw_rrect(rrect, &purple.to_paint());
+                let center = (self.bounding_rect().width()/2.0, self.bounding_rect().height()/2.0);
+                let radius = 30.0;
+                let grain_shader = make_grain_gradient_shader(center, radius, purple, purple, 0.3);
+                let mut paint = purple.to_paint();
+                paint.set_shader(grain_shader);
+                canvas.draw_rrect(rrect, &paint);
 
                 let font = Font::new(
                     Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(),
@@ -433,11 +443,6 @@ impl Widget {
                     &font,
                     white,
                 );
-            }
-
-            WidgetData::Circle { radius, color } => {
-                let center = Point::new(self.position.x + radius, self.position.y + radius);
-                canvas.draw_circle(center, *radius, &color.to_paint());
             }
 
             WidgetData::Compound { children } => return children.clone(),
