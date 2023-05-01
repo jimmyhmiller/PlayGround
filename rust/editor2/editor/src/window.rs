@@ -2,6 +2,7 @@
 
 #[cfg(all(target_os = "macos"))]
 use skia_safe::{scalar, ColorType, Size, Surface};
+use winit::platform::macos::WindowBuilderExtMacOS;
 
 use crate::editor;
 
@@ -36,6 +37,9 @@ pub fn setup_window(mut editor: editor::Editor) {
     let window = WindowBuilder::new()
         .with_inner_size(size)
         .with_title("Lith2".to_string())
+        .with_titlebar_transparent(true)
+        .with_fullsize_content_view(true)
+        .with_transparent(true)
         .build(&events_loop)
         .unwrap();
 
@@ -47,6 +51,7 @@ pub fn setup_window(mut editor: editor::Editor) {
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_presents_with_transaction(false);
+        layer.set_opaque(false);
         // change some stuff to make resizing nice
         // https://thume.ca/2019/06/19/glitchless-metal-window-resizing/
 

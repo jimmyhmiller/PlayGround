@@ -21,8 +21,8 @@ use notify::{FsEventWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
 use skia_safe::{
-    gradient_shader::{self, Flags},
-    perlin_noise_shader, shaders, BlendMode, Font, FontStyle, PaintStyle, Rect, TileMode, Typeface, RuntimeEffect, Data, runtime_effect::ChildPtr, Shader,
+    gradient_shader::{self},
+    perlin_noise_shader, Font, FontStyle, PaintStyle, Rect, TileMode, Typeface, RuntimeEffect, Data, runtime_effect::ChildPtr, Shader,
 };
 
 // Need a global store of widgets
@@ -364,7 +364,9 @@ impl Editor {
 
         let darker = Color::parse_hex("#0d1d20");
         let lighter = Color::parse_hex("#425050");
-        canvas.clear(Color::parse_hex("#ffffff").to_color4f());
+        let mut color = Color::parse_hex("#ffffff").to_color4f();
+        color.a = 0.0;
+        canvas.clear(color);
 
         let canvas_size = Size::from(canvas.base_layer_size());
 
@@ -377,7 +379,7 @@ impl Editor {
         let radius = 1500.0;
         let center = (canvas_size.width / 2.0, canvas_size.height / 2.0);
 
-        let grain_shader = make_grain_gradient_shader(center, radius, darker, lighter, 1.0);
+        let grain_shader = make_grain_gradient_shader(center, radius, darker, lighter, 0.95);
 
         paint.set_shader(grain_shader);
       
