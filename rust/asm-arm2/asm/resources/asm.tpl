@@ -13,7 +13,7 @@ pub struct Register {
 }
 
 impl Register {
-    pub fn sf(&self) -> u32 {
+    pub fn sf(&self) -> i32 {
         match self.size {
             Size::S32 => 0,
             Size::S64 => 1,
@@ -49,6 +49,21 @@ impl Shl<u32> for &Register {
 }
 
 
+pub fn truncate_imm<T: Into<i32>, const WIDTH: usize>(imm: T) -> u32 {
+    let value: i32 = imm.into();
+    let masked = (value as u32) & ((1 << WIDTH) - 1);
+
+    // Assert that we didn't drop any bits by truncating.
+    if value >= 0 {
+        assert_eq!(value as u32, masked);
+    } else {
+        assert_eq!(value as u32, masked | (u32::MAX << WIDTH));
+    }
+
+    masked
+}
+
+
 #[derive(Debug)]
 pub enum Asm {
 {%- for instruction in instructions %}
@@ -60,7 +75,7 @@ pub enum Asm {
     {{instruction.name}} {
         {%- for field in instruction.fields -%}
         {%- if field.required %}
-        {{ field.name }}: {% if field.kind == "Register" %}Register{% else %}u32{%- endif -%},
+        {{ field.name }}: {% if field.kind == "Register" %}Register{% else %}i32{%- endif -%},
         {%- endif -%}
         {%- endfor %}
     },
@@ -83,7 +98,19 @@ impl Asm {
             0b{%- for field in instruction.fields -%}{{field.bits}}_{% endfor %}
             {%- for field in instruction.fields -%}
                 {%- if field.required %} 
-                | {{field.name}} << {{field.shift}}
+                |     
+                    {%- if field.name == "imm19" -%}
+                       truncate_imm::<_, 19>(*{{field.name}}) << {{field.shift}}
+                    {%- elsif field.name == "imm26" -%}
+                       truncate_imm::<_, 26>(*{{field.name}}) << {{field.shift}}
+                    {%- else %}
+                        {% if field.kind == "Register" %}
+                            {{field.name}} << {{field.shift}}
+                        {% else %}
+                            (*{{field.name}} as u32) << {{field.shift}}
+                        {% endif %}
+                    {%- endif -%}
+ 
                 {%- endif -%}
 
             {%- endfor%}
