@@ -237,5 +237,6 @@ fn generate_template() -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    generate_template()
+    // generate_template()?;
+    Ok(())
 }

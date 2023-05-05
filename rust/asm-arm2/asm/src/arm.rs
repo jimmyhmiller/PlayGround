@@ -13,7 +13,7 @@ pub struct Register {
 }
 
 impl Register {
-    pub fn sf(&self) -> u32 {
+    pub fn sf(&self) -> i32 {
         match self.size {
             Size::S32 => 0,
             Size::S64 => 1,
@@ -195,6 +195,20 @@ impl Shl<u32> for &Register {
     }
 }
 
+pub fn truncate_imm<T: Into<i32>, const WIDTH: usize>(imm: T) -> u32 {
+    let value: i32 = imm.into();
+    let masked = (value as u32) & ((1 << WIDTH) - 1);
+
+    // Assert that we didn't drop any bits by truncating.
+    if value >= 0 {
+        assert_eq!(value as u32, masked);
+    } else {
+        assert_eq!(value as u32, masked | (u32::MAX << WIDTH));
+    }
+
+    masked
+}
+
 #[derive(Debug)]
 pub enum Asm {
     // ABS -- A64
@@ -202,7 +216,7 @@ pub enum Asm {
     // ABS  <V><d>, <V><n>
     // ABS  <Vd>.<T>, <Vn>.<T>
     AbsAdvsimd {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -211,7 +225,7 @@ pub enum Asm {
     // ADC  <Wd>, <Wn>, <Wm>
     // ADC  <Xd>, <Xn>, <Xm>
     Adc {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -221,7 +235,7 @@ pub enum Asm {
     // ADCS  <Wd>, <Wn>, <Wm>
     // ADCS  <Xd>, <Xn>, <Xm>
     Adcs {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -231,10 +245,10 @@ pub enum Asm {
     // ADD  <Wd|WSP>, <Wn|WSP>, <Wm>{, <extend> {#<amount>}}
     // ADD  <Xd|SP>, <Xn|SP>, <R><m>{, <extend> {#<amount>}}
     AddAddsubExt {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        option: u32,
-        imm3: u32,
+        option: i32,
+        imm3: i32,
         rn: Register,
         rd: Register,
     },
@@ -243,9 +257,9 @@ pub enum Asm {
     // ADD  <Wd|WSP>, <Wn|WSP>, #<imm>{, <shift>}
     // ADD  <Xd|SP>, <Xn|SP>, #<imm>{, <shift>}
     AddAddsubImm {
-        sf: u32,
-        sh: u32,
-        imm12: u32,
+        sf: i32,
+        sh: i32,
+        imm12: i32,
         rn: Register,
         rd: Register,
     },
@@ -254,10 +268,10 @@ pub enum Asm {
     // ADD  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
     // ADD  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
     AddAddsubShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -266,7 +280,7 @@ pub enum Asm {
     // ADD  <V><d>, <V><n>, <V><m>
     // ADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     AddAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -275,17 +289,17 @@ pub enum Asm {
     // Add with Tag
     // ADDG  <Xd|SP>, <Xn|SP>, #<uimm6>, #<uimm4>
     Addg {
-        uimm6: u32,
-        uimm4: u32,
-        xn: u32,
-        xd: u32,
+        uimm6: i32,
+        uimm4: i32,
+        xn: i32,
+        xd: i32,
     },
     // ADDHN, ADDHN2 -- A64
     // Add returning High Narrow
     // ADDHN{2}  <Vd>.<Tb>, <Vn>.<Ta>, <Vm>.<Ta>
     AddhnAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -294,7 +308,7 @@ pub enum Asm {
     // Add Pair of elements (scalar)
     // ADDP  <V><d>, <Vn>.<T>
     AddpAdvsimdPair {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -302,8 +316,8 @@ pub enum Asm {
     // Add Pairwise (vector)
     // ADDP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     AddpAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -313,10 +327,10 @@ pub enum Asm {
     // ADDS  <Wd>, <Wn|WSP>, <Wm>{, <extend> {#<amount>}}
     // ADDS  <Xd>, <Xn|SP>, <R><m>{, <extend> {#<amount>}}
     AddsAddsubExt {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        option: u32,
-        imm3: u32,
+        option: i32,
+        imm3: i32,
         rn: Register,
         rd: Register,
     },
@@ -325,9 +339,9 @@ pub enum Asm {
     // ADDS  <Wd>, <Wn|WSP>, #<imm>{, <shift>}
     // ADDS  <Xd>, <Xn|SP>, #<imm>{, <shift>}
     AddsAddsubImm {
-        sf: u32,
-        sh: u32,
-        imm12: u32,
+        sf: i32,
+        sh: i32,
+        imm12: i32,
         rn: Register,
         rd: Register,
     },
@@ -336,10 +350,10 @@ pub enum Asm {
     // ADDS  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
     // ADDS  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
     AddsAddsubShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -347,8 +361,8 @@ pub enum Asm {
     // Add across Vector
     // ADDV  <V><d>, <Vn>.<T>
     AddvAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -356,16 +370,16 @@ pub enum Asm {
     // Form PC-relative address
     // ADR  <Xd>, <label>
     Adr {
-        immlo: u32,
-        immhi: u32,
+        immlo: i32,
+        immhi: i32,
         rd: Register,
     },
     // ADRP -- A64
     // Form PC-relative address to 4KB page
     // ADRP  <Xd>, <label>
     Adrp {
-        immlo: u32,
-        immhi: u32,
+        immlo: i32,
+        immhi: i32,
         rd: Register,
     },
     // AESD -- A64
@@ -400,7 +414,7 @@ pub enum Asm {
     // Bitwise AND (vector)
     // AND  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     AndAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -410,10 +424,10 @@ pub enum Asm {
     // AND  <Wd|WSP>, <Wn>, #<imm>
     // AND  <Xd|SP>, <Xn>, #<imm>
     AndLogImm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -422,10 +436,10 @@ pub enum Asm {
     // AND  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
     // AND  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
     AndLogShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -434,10 +448,10 @@ pub enum Asm {
     // ANDS  <Wd>, <Wn>, #<imm>
     // ANDS  <Xd>, <Xn>, #<imm>
     AndsLogImm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -446,10 +460,10 @@ pub enum Asm {
     // ANDS  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
     // ANDS  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
     AndsLogShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -460,7 +474,7 @@ pub enum Asm {
     // ASR  <Xd>, <Xn>, <Xm>
     // ASRV <Xd>, <Xn>, <Xm>
     AsrAsrv {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -472,9 +486,9 @@ pub enum Asm {
     // ASR  <Xd>, <Xn>, #<shift>
     // SBFM <Xd>, <Xn>, #<shift>, #63
     AsrSbfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
         rn: Register,
         rd: Register,
     },
@@ -483,7 +497,7 @@ pub enum Asm {
     // ASRV  <Wd>, <Wn>, <Wm>
     // ASRV  <Xd>, <Xn>, <Xm>
     Asrv {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -493,8 +507,8 @@ pub enum Asm {
     // AT  <at_op>, <Xt>
     // SYS #<op1>, C7, <Cm>, #<op2>, <Xt>
     AtSys {
-        op1: u32,
-        op2: u32,
+        op1: i32,
+        op2: i32,
         rt: Register,
     },
     // AUTDA, AUTDZA -- A64
@@ -502,7 +516,7 @@ pub enum Asm {
     // AUTDA  <Xd>, <Xn|SP>
     // AUTDZA  <Xd>
     Autda {
-        z: u32,
+        z: i32,
         rn: Register,
         rd: Register,
     },
@@ -511,7 +525,7 @@ pub enum Asm {
     // AUTDB  <Xd>, <Xn|SP>
     // AUTDZB  <Xd>
     Autdb {
-        z: u32,
+        z: i32,
         rn: Register,
         rd: Register,
     },
@@ -523,7 +537,7 @@ pub enum Asm {
     // AUTIASP
     // AUTIAZ
     Autia {
-        z: u32,
+        z: i32,
         rn: Register,
         rd: Register,
     },
@@ -535,7 +549,7 @@ pub enum Asm {
     // AUTIBSP
     // AUTIBZ
     Autib {
-        z: u32,
+        z: i32,
         rn: Register,
         rd: Register,
     },
@@ -547,21 +561,21 @@ pub enum Asm {
     // Branch conditionally
     // B.<cond>  <label>
     BCond {
-        imm19: u32,
-        cond: u32,
+        imm19: i32,
+        cond: i32,
     },
     // B -- A64
     // Branch
     // B  <label>
     BUncond {
-        imm26: u32,
+        imm26: i32,
     },
     // BC.cond -- A64
     // Branch Consistent conditionally
     // BC.<cond>  <label>
     BcCond {
-        imm19: u32,
-        cond: u32,
+        imm19: i32,
+        cond: i32,
     },
     // BCAX -- A64
     // Bit Clear and XOR
@@ -579,10 +593,10 @@ pub enum Asm {
     // BFC  <Xd>, #<lsb>, #<width>
     // BFM <Xd>, XZR, #(-<lsb> MOD 64), #(<width>-1)
     BfcBfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rd: Register,
     },
     // BFCVT -- A64
@@ -596,7 +610,7 @@ pub enum Asm {
     // Floating-point convert from single-precision to BFloat16 format (vector)
     // BFCVTN{2}  <Vd>.<Ta>, <Vn>.4S
     BfcvtnAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -604,11 +618,11 @@ pub enum Asm {
     // BFloat16 floating-point dot product (vector, by element)
     // BFDOT  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.2H[<index>]
     BfdotAdvsimdElt {
-        q: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -616,7 +630,7 @@ pub enum Asm {
     // BFloat16 floating-point dot product (vector)
     // BFDOT  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     BfdotAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -628,10 +642,10 @@ pub enum Asm {
     // BFI  <Xd>, <Xn>, #<lsb>, #<width>
     // BFM  <Xd>, <Xn>, #(-<lsb> MOD 64), #(<width>-1)
     BfiBfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rd: Register,
     },
     // BFM -- A64
@@ -639,10 +653,10 @@ pub enum Asm {
     // BFM  <Wd>, <Wn>, #<immr>, #<imms>
     // BFM  <Xd>, <Xn>, #<immr>, #<imms>
     Bfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -650,11 +664,11 @@ pub enum Asm {
     // BFloat16 floating-point widening multiply-add long (by element)
     // BFMLAL<bt>  <Vd>.4S, <Vn>.8H, <Vm>.H[<index>]
     BfmlalAdvsimdElt {
-        q: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -662,7 +676,7 @@ pub enum Asm {
     // BFloat16 floating-point widening multiply-add long (vector)
     // BFMLAL<bt>  <Vd>.4S, <Vn>.8H, <Vm>.8H
     BfmlalAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -682,10 +696,10 @@ pub enum Asm {
     // BFXIL  <Xd>, <Xn>, #<lsb>, #<width>
     // BFM  <Xd>, <Xn>, #<lsb>, #(<lsb>+<width>-1)
     BfxilBfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -694,22 +708,22 @@ pub enum Asm {
     // BIC  <Vd>.<T>, #<imm8>{, LSL #<amount>}
     // BIC  <Vd>.<T>, #<imm8>{, LSL #<amount>}
     BicAdvsimdImm {
-        q: u32,
-        a: u32,
-        b: u32,
-        c: u32,
-        d: u32,
-        e: u32,
-        f: u32,
-        g: u32,
-        h: u32,
+        q: i32,
+        a: i32,
+        b: i32,
+        c: i32,
+        d: i32,
+        e: i32,
+        f: i32,
+        g: i32,
+        h: i32,
         rd: Register,
     },
     // BIC (vector, register) -- A64
     // Bitwise bit Clear (vector, register)
     // BIC  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     BicAdvsimdReg {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -719,10 +733,10 @@ pub enum Asm {
     // BIC  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
     // BIC  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
     BicLogShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -731,10 +745,10 @@ pub enum Asm {
     // BICS  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
     // BICS  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
     Bics {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -742,7 +756,7 @@ pub enum Asm {
     // Bitwise Insert if False
     // BIF  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     BifAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -751,7 +765,7 @@ pub enum Asm {
     // Bitwise Insert if True
     // BIT  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     BitAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -760,7 +774,7 @@ pub enum Asm {
     // Branch with Link
     // BL  <label>
     Bl {
-        imm26: u32,
+        imm26: usize,
     },
     // BLR -- A64
     // Branch with Link to Register
@@ -775,8 +789,8 @@ pub enum Asm {
     // BLRABZ  <Xn>
     // BLRAB  <Xn>, <Xm|SP>
     Blra {
-        z: u32,
-        m: u32,
+        z: i32,
+        m: i32,
         rn: Register,
         rm: Register,
     },
@@ -793,8 +807,8 @@ pub enum Asm {
     // BRABZ  <Xn>
     // BRAB  <Xn>, <Xm|SP>
     Bra {
-        z: u32,
-        m: u32,
+        z: i32,
+        m: i32,
         rn: Register,
         rm: Register,
     },
@@ -802,13 +816,13 @@ pub enum Asm {
     // Breakpoint instruction
     // BRK  #<imm>
     Brk {
-        imm16: u32,
+        imm16: i32,
     },
     // BSL -- A64
     // Bitwise Select
     // BSL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     BslAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -828,9 +842,9 @@ pub enum Asm {
     // CASAL  <Xs>, <Xt>, [<Xn|SP>{,#0}]
     // CASL  <Xs>, <Xt>, [<Xn|SP>{,#0}]
     Cas {
-        l: u32,
+        l: i32,
         rs: Register,
-        o0: u32,
+        o0: i32,
         rn: Register,
         rt: Register,
     },
@@ -841,9 +855,9 @@ pub enum Asm {
     // CASB  <Ws>, <Wt>, [<Xn|SP>{,#0}]
     // CASLB  <Ws>, <Wt>, [<Xn|SP>{,#0}]
     Casb {
-        l: u32,
+        l: i32,
         rs: Register,
-        o0: u32,
+        o0: i32,
         rn: Register,
         rt: Register,
     },
@@ -854,9 +868,9 @@ pub enum Asm {
     // CASH  <Ws>, <Wt>, [<Xn|SP>{,#0}]
     // CASLH  <Ws>, <Wt>, [<Xn|SP>{,#0}]
     Cash {
-        l: u32,
+        l: i32,
         rs: Register,
-        o0: u32,
+        o0: i32,
         rn: Register,
         rt: Register,
     },
@@ -871,10 +885,10 @@ pub enum Asm {
     // CASPAL  <Xs>, <X(s+1)>, <Xt>, <X(t+1)>, [<Xn|SP>{,#0}]
     // CASPL  <Xs>, <X(s+1)>, <Xt>, <X(t+1)>, [<Xn|SP>{,#0}]
     Casp {
-        sz: u32,
-        l: u32,
+        sz: i32,
+        l: i32,
         rs: Register,
-        o0: u32,
+        o0: i32,
         rn: Register,
         rt: Register,
     },
@@ -883,8 +897,8 @@ pub enum Asm {
     // CBNZ  <Wt>, <label>
     // CBNZ  <Xt>, <label>
     Cbnz {
-        sf: u32,
-        imm19: u32,
+        sf: i32,
+        imm19: i32,
         rt: Register,
     },
     // CBZ -- A64
@@ -892,8 +906,8 @@ pub enum Asm {
     // CBZ  <Wt>, <label>
     // CBZ  <Xt>, <label>
     Cbz {
-        sf: u32,
-        imm19: u32,
+        sf: i32,
+        imm19: i32,
         rt: Register,
     },
     // CCMN (immediate) -- A64
@@ -901,44 +915,44 @@ pub enum Asm {
     // CCMN  <Wn>, #<imm>, #<nzcv>, <cond>
     // CCMN  <Xn>, #<imm>, #<nzcv>, <cond>
     CcmnImm {
-        sf: u32,
-        imm5: u32,
-        cond: u32,
+        sf: i32,
+        imm5: i32,
+        cond: i32,
         rn: Register,
-        nzcv: u32,
+        nzcv: i32,
     },
     // CCMN (register) -- A64
     // Conditional Compare Negative (register)
     // CCMN  <Wn>, <Wm>, #<nzcv>, <cond>
     // CCMN  <Xn>, <Xm>, #<nzcv>, <cond>
     CcmnReg {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        cond: u32,
+        cond: i32,
         rn: Register,
-        nzcv: u32,
+        nzcv: i32,
     },
     // CCMP (immediate) -- A64
     // Conditional Compare (immediate)
     // CCMP  <Wn>, #<imm>, #<nzcv>, <cond>
     // CCMP  <Xn>, #<imm>, #<nzcv>, <cond>
     CcmpImm {
-        sf: u32,
-        imm5: u32,
-        cond: u32,
+        sf: i32,
+        imm5: i32,
+        cond: i32,
         rn: Register,
-        nzcv: u32,
+        nzcv: i32,
     },
     // CCMP (register) -- A64
     // Conditional Compare (register)
     // CCMP  <Wn>, <Wm>, #<nzcv>, <cond>
     // CCMP  <Xn>, <Xm>, #<nzcv>, <cond>
     CcmpReg {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        cond: u32,
+        cond: i32,
         rn: Register,
-        nzcv: u32,
+        nzcv: i32,
     },
     // CFINV -- A64
     // Invert Carry Flag
@@ -958,7 +972,7 @@ pub enum Asm {
     // CINC  <Xd>, <Xn>, <cond>
     // CSINC <Xd>, <Xn>, <Xn>, invert(<cond>)
     CincCsinc {
-        sf: u32,
+        sf: i32,
         rd: Register,
     },
     // CINV -- A64
@@ -968,21 +982,21 @@ pub enum Asm {
     // CINV  <Xd>, <Xn>, <cond>
     // CSINV <Xd>, <Xn>, <Xn>, invert(<cond>)
     CinvCsinv {
-        sf: u32,
+        sf: i32,
         rd: Register,
     },
     // CLREX -- A64
     // Clear Exclusive
     // CLREX  {#<imm>}
     Clrex {
-        crm: u32,
+        crm: i32,
     },
     // CLS (vector) -- A64
     // Count Leading Sign bits (vector)
     // CLS  <Vd>.<T>, <Vn>.<T>
     ClsAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -991,7 +1005,7 @@ pub enum Asm {
     // CLS  <Wd>, <Wn>
     // CLS  <Xd>, <Xn>
     ClsInt {
-        sf: u32,
+        sf: i32,
         rn: Register,
         rd: Register,
     },
@@ -999,8 +1013,8 @@ pub enum Asm {
     // Count Leading Zero bits (vector)
     // CLZ  <Vd>.<T>, <Vn>.<T>
     ClzAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -1009,7 +1023,7 @@ pub enum Asm {
     // CLZ  <Wd>, <Wn>
     // CLZ  <Xd>, <Xn>
     ClzInt {
-        sf: u32,
+        sf: i32,
         rn: Register,
         rd: Register,
     },
@@ -1018,7 +1032,7 @@ pub enum Asm {
     // CMEQ  <V><d>, <V><n>, <V><m>
     // CMEQ  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     CmeqAdvsimdReg {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -1028,7 +1042,7 @@ pub enum Asm {
     // CMEQ  <V><d>, <V><n>, #0
     // CMEQ  <Vd>.<T>, <Vn>.<T>, #0
     CmeqAdvsimdZero {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -1037,7 +1051,7 @@ pub enum Asm {
     // CMGE  <V><d>, <V><n>, <V><m>
     // CMGE  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     CmgeAdvsimdReg {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -1047,7 +1061,7 @@ pub enum Asm {
     // CMGE  <V><d>, <V><n>, #0
     // CMGE  <Vd>.<T>, <Vn>.<T>, #0
     CmgeAdvsimdZero {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -1056,7 +1070,7 @@ pub enum Asm {
     // CMGT  <V><d>, <V><n>, <V><m>
     // CMGT  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     CmgtAdvsimdReg {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -1066,7 +1080,7 @@ pub enum Asm {
     // CMGT  <V><d>, <V><n>, #0
     // CMGT  <Vd>.<T>, <Vn>.<T>, #0
     CmgtAdvsimdZero {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -1075,7 +1089,7 @@ pub enum Asm {
     // CMHI  <V><d>, <V><n>, <V><m>
     // CMHI  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     CmhiAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -1085,7 +1099,7 @@ pub enum Asm {
     // CMHS  <V><d>, <V><n>, <V><m>
     // CMHS  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     CmhsAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -1095,7 +1109,7 @@ pub enum Asm {
     // CMLE  <V><d>, <V><n>, #0
     // CMLE  <Vd>.<T>, <Vn>.<T>, #0
     CmleAdvsimd {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -1104,7 +1118,7 @@ pub enum Asm {
     // CMLT  <V><d>, <V><n>, #0
     // CMLT  <Vd>.<T>, <Vn>.<T>, #0
     CmltAdvsimd {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -1115,10 +1129,10 @@ pub enum Asm {
     // CMN  <Xn|SP>, <R><m>{, <extend> {#<amount>}}
     // ADDS XZR, <Xn|SP>, <R><m>{, <extend> {#<amount>}}
     CmnAddsAddsubExt {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        option: u32,
-        imm3: u32,
+        option: i32,
+        imm3: i32,
         rn: Register,
     },
     // CMN (immediate) -- A64
@@ -1128,9 +1142,9 @@ pub enum Asm {
     // CMN  <Xn|SP>, #<imm>{, <shift>}
     // ADDS XZR, <Xn|SP>, #<imm> {, <shift>}
     CmnAddsAddsubImm {
-        sf: u32,
-        sh: u32,
-        imm12: u32,
+        sf: i32,
+        sh: i32,
+        imm12: i32,
         rn: Register,
     },
     // CMN (shifted register) -- A64
@@ -1140,10 +1154,10 @@ pub enum Asm {
     // CMN  <Xn>, <Xm>{, <shift> #<amount>}
     // ADDS XZR, <Xn>, <Xm> {, <shift> #<amount>}
     CmnAddsAddsubShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
     },
     // CMP (extended register) -- A64
@@ -1153,10 +1167,10 @@ pub enum Asm {
     // CMP  <Xn|SP>, <R><m>{, <extend> {#<amount>}}
     // SUBS XZR, <Xn|SP>, <R><m>{, <extend> {#<amount>}}
     CmpSubsAddsubExt {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        option: u32,
-        imm3: u32,
+        option: i32,
+        imm3: i32,
         rn: Register,
     },
     // CMP (immediate) -- A64
@@ -1166,9 +1180,9 @@ pub enum Asm {
     // CMP  <Xn|SP>, #<imm>{, <shift>}
     // SUBS XZR, <Xn|SP>, #<imm> {, <shift>}
     CmpSubsAddsubImm {
-        sf: u32,
-        sh: u32,
-        imm12: u32,
+        sf: i32,
+        sh: i32,
+        imm12: i32,
         rn: Register,
     },
     // CMP (shifted register) -- A64
@@ -1178,10 +1192,10 @@ pub enum Asm {
     // CMP  <Xn>, <Xm>{, <shift> #<amount>}
     // SUBS XZR, <Xn>, <Xm> {, <shift> #<amount>}
     CmpSubsAddsubShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
     },
     // CMPP -- A64
@@ -1189,15 +1203,15 @@ pub enum Asm {
     // CMPP  <Xn|SP>, <Xm|SP>
     // SUBPS XZR, <Xn|SP>, <Xm|SP>
     CmppSubps {
-        xm: u32,
-        xn: u32,
+        xm: i32,
+        xn: i32,
     },
     // CMTST -- A64
     // Compare bitwise Test bits nonzero (vector)
     // CMTST  <V><d>, <V><n>, <V><m>
     // CMTST  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     CmtstAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -1209,7 +1223,7 @@ pub enum Asm {
     // CNEG  <Xd>, <Xn>, <cond>
     // CSNEG <Xd>, <Xn>, <Xn>, invert(<cond>)
     CnegCsneg {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -1218,8 +1232,8 @@ pub enum Asm {
     // Population Count per byte
     // CNT  <Vd>.<T>, <Vn>.<T>
     CntAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -1236,8 +1250,8 @@ pub enum Asm {
     // CPYFM  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFP  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfp {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1248,8 +1262,8 @@ pub enum Asm {
     // CPYFMN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfpn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1260,8 +1274,8 @@ pub enum Asm {
     // CPYFMRN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPRN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfprn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1272,8 +1286,8 @@ pub enum Asm {
     // CPYFMRT  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPRT  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfprt {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1284,8 +1298,8 @@ pub enum Asm {
     // CPYFMRTN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPRTN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfprtn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1296,8 +1310,8 @@ pub enum Asm {
     // CPYFMRTRN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPRTRN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfprtrn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1308,8 +1322,8 @@ pub enum Asm {
     // CPYFMRTWN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPRTWN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfprtwn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1320,8 +1334,8 @@ pub enum Asm {
     // CPYFMT  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPT  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfpt {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1332,8 +1346,8 @@ pub enum Asm {
     // CPYFMTN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPTN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfptn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1344,8 +1358,8 @@ pub enum Asm {
     // CPYFMTRN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPTRN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfptrn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1356,8 +1370,8 @@ pub enum Asm {
     // CPYFMTWN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPTWN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfptwn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1368,8 +1382,8 @@ pub enum Asm {
     // CPYFMWN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPWN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfpwn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1380,8 +1394,8 @@ pub enum Asm {
     // CPYFMWT  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPWT  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfpwt {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1392,8 +1406,8 @@ pub enum Asm {
     // CPYFMWTN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPWTN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfpwtn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1404,8 +1418,8 @@ pub enum Asm {
     // CPYFMWTRN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPWTRN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfpwtrn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1416,8 +1430,8 @@ pub enum Asm {
     // CPYFMWTWN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYFPWTWN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyfpwtwn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1428,8 +1442,8 @@ pub enum Asm {
     // CPYM  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYP  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyp {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1440,8 +1454,8 @@ pub enum Asm {
     // CPYMN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpypn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1452,8 +1466,8 @@ pub enum Asm {
     // CPYMRN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPRN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyprn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1464,8 +1478,8 @@ pub enum Asm {
     // CPYMRT  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPRT  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyprt {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1476,8 +1490,8 @@ pub enum Asm {
     // CPYMRTN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPRTN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyprtn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1488,8 +1502,8 @@ pub enum Asm {
     // CPYMRTRN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPRTRN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyprtrn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1500,8 +1514,8 @@ pub enum Asm {
     // CPYMRTWN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPRTWN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyprtwn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1512,8 +1526,8 @@ pub enum Asm {
     // CPYMT  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPT  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpypt {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1524,8 +1538,8 @@ pub enum Asm {
     // CPYMTN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPTN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyptn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1536,8 +1550,8 @@ pub enum Asm {
     // CPYMTRN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPTRN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyptrn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1548,8 +1562,8 @@ pub enum Asm {
     // CPYMTWN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPTWN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpyptwn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1560,8 +1574,8 @@ pub enum Asm {
     // CPYMWN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPWN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpypwn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1572,8 +1586,8 @@ pub enum Asm {
     // CPYMWT  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPWT  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpypwt {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1584,8 +1598,8 @@ pub enum Asm {
     // CPYMWTN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPWTN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpypwtn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1596,8 +1610,8 @@ pub enum Asm {
     // CPYMWTRN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPWTRN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpypwtrn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1608,8 +1622,8 @@ pub enum Asm {
     // CPYMWTWN  [<Xd>]!, [<Xs>]!, <Xn>!
     // CPYPWTWN  [<Xd>]!, [<Xs>]!, <Xn>!
     Cpypwtwn {
-        sz: u32,
-        op1: u32,
+        sz: i32,
+        op1: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -1621,9 +1635,9 @@ pub enum Asm {
     // CRC32W  <Wd>, <Wn>, <Wm>
     // CRC32X  <Wd>, <Wn>, <Xm>
     Crc32 {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        sz: u32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -1634,9 +1648,9 @@ pub enum Asm {
     // CRC32CW  <Wd>, <Wn>, <Wm>
     // CRC32CX  <Wd>, <Wn>, <Xm>
     Crc32c {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        sz: u32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -1649,9 +1663,9 @@ pub enum Asm {
     // CSEL  <Wd>, <Wn>, <Wm>, <cond>
     // CSEL  <Xd>, <Xn>, <Xm>, <cond>
     Csel {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        cond: u32,
+        cond: i32,
         rn: Register,
         rd: Register,
     },
@@ -1662,7 +1676,7 @@ pub enum Asm {
     // CSET  <Xd>, <cond>
     // CSINC <Xd>, XZR, XZR, invert(<cond>)
     CsetCsinc {
-        sf: u32,
+        sf: i32,
         rd: Register,
     },
     // CSETM -- A64
@@ -1672,7 +1686,7 @@ pub enum Asm {
     // CSETM  <Xd>, <cond>
     // CSINV <Xd>, XZR, XZR, invert(<cond>)
     CsetmCsinv {
-        sf: u32,
+        sf: i32,
         rd: Register,
     },
     // CSINC -- A64
@@ -1680,9 +1694,9 @@ pub enum Asm {
     // CSINC  <Wd>, <Wn>, <Wm>, <cond>
     // CSINC  <Xd>, <Xn>, <Xm>, <cond>
     Csinc {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        cond: u32,
+        cond: i32,
         rn: Register,
         rd: Register,
     },
@@ -1691,9 +1705,9 @@ pub enum Asm {
     // CSINV  <Wd>, <Wn>, <Wm>, <cond>
     // CSINV  <Xd>, <Xn>, <Xm>, <cond>
     Csinv {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        cond: u32,
+        cond: i32,
         rn: Register,
         rd: Register,
     },
@@ -1702,9 +1716,9 @@ pub enum Asm {
     // CSNEG  <Wd>, <Wn>, <Wm>, <cond>
     // CSNEG  <Xd>, <Xn>, <Xm>, <cond>
     Csneg {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        cond: u32,
+        cond: i32,
         rn: Register,
         rd: Register,
     },
@@ -1713,28 +1727,28 @@ pub enum Asm {
     // DC  <dc_op>, <Xt>
     // SYS #<op1>, C7, <Cm>, #<op2>, <Xt>
     DcSys {
-        op1: u32,
-        crm: u32,
-        op2: u32,
+        op1: i32,
+        crm: i32,
+        op2: i32,
         rt: Register,
     },
     // DCPS1 -- A64
     // Debug Change PE State to EL1.
     // DCPS1  {#<imm>}
     Dcps1 {
-        imm16: u32,
+        imm16: i32,
     },
     // DCPS2 -- A64
     // Debug Change PE State to EL2.
     // DCPS2  {#<imm>}
     Dcps2 {
-        imm16: u32,
+        imm16: i32,
     },
     // DCPS3 -- A64
     // Debug Change PE State to EL3
     // DCPS3  {#<imm>}
     Dcps3 {
-        imm16: u32,
+        imm16: i32,
     },
     // DGH -- A64
     // Data Gathering Hint
@@ -1744,7 +1758,7 @@ pub enum Asm {
     // Data Memory Barrier
     // DMB  <option>|#<imm>
     Dmb {
-        crm: u32,
+        crm: i32,
     },
     // DRPS -- A64
     //
@@ -1755,14 +1769,14 @@ pub enum Asm {
     // DSB  <option>|#<imm>
     // DSB  <option>nXS|#<imm>
     Dsb {
-        crm: u32,
+        crm: i32,
     },
     // DUP (element) -- A64
     // Duplicate vector element to vector or scalar
     // DUP  <V><d>, <Vn>.<T>[<index>]
     // DUP  <Vd>.<T>, <Vn>.<Ts>[<index>]
     DupAdvsimdElt {
-        imm5: u32,
+        imm5: i32,
         rn: Register,
         rd: Register,
     },
@@ -1770,8 +1784,8 @@ pub enum Asm {
     // Duplicate general-purpose register to vector
     // DUP  <Vd>.<T>, <R><n>
     DupAdvsimdGen {
-        q: u32,
-        imm5: u32,
+        q: i32,
+        imm5: i32,
         rn: Register,
         rd: Register,
     },
@@ -1787,10 +1801,10 @@ pub enum Asm {
     // EON  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
     // EON  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
     Eon {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -1807,7 +1821,7 @@ pub enum Asm {
     // Bitwise Exclusive OR (vector)
     // EOR  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     EorAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -1817,10 +1831,10 @@ pub enum Asm {
     // EOR  <Wd|WSP>, <Wn>, #<imm>
     // EOR  <Xd|SP>, <Xn>, #<imm>
     EorLogImm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -1829,10 +1843,10 @@ pub enum Asm {
     // EOR  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
     // EOR  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
     EorLogShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -1845,7 +1859,7 @@ pub enum Asm {
     // ERETAA
     // ERETAB
     Ereta {
-        m: u32,
+        m: i32,
     },
     // ESB -- A64
     // Error Synchronization Barrier
@@ -1855,9 +1869,9 @@ pub enum Asm {
     // Extract vector from pair of vectors
     // EXT  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>, #<index>
     ExtAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
-        imm4: u32,
+        imm4: i32,
         rn: Register,
         rd: Register,
     },
@@ -1866,10 +1880,10 @@ pub enum Asm {
     // EXTR  <Wd>, <Wn>, <Wm>, #<lsb>
     // EXTR  <Xd>, <Xn>, <Xm>, #<lsb>
     Extr {
-        sf: u32,
-        n: u32,
+        sf: i32,
+        n: i32,
         rm: Register,
-        imms: u32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -1889,7 +1903,7 @@ pub enum Asm {
     // FABS  <Vd>.<T>, <Vn>.<T>
     // FABS  <Vd>.<T>, <Vn>.<T>
     FabsAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -1899,7 +1913,7 @@ pub enum Asm {
     // FABS  <Sd>, <Sn>
     // FABS  <Dd>, <Dn>
     FabsFloat {
-        ftype: u32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -1930,7 +1944,7 @@ pub enum Asm {
     // FADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FaddAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -1941,7 +1955,7 @@ pub enum Asm {
     // FADD  <Sd>, <Sn>, <Sm>
     // FADD  <Dd>, <Dn>, <Dm>
     FaddFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -1951,7 +1965,7 @@ pub enum Asm {
     // FADDP  <V><d>, <Vn>.<T>
     // FADDP  <V><d>, <Vn>.<T>
     FaddpAdvsimdPair {
-        sz: u32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -1960,7 +1974,7 @@ pub enum Asm {
     // FADDP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FADDP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FaddpAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -1969,8 +1983,8 @@ pub enum Asm {
     // Floating-point Complex Add
     // FCADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>, #<rotate>
     FcaddAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rot: Register,
         rn: Register,
@@ -1982,11 +1996,11 @@ pub enum Asm {
     // FCCMP  <Sn>, <Sm>, #<nzcv>, <cond>
     // FCCMP  <Dn>, <Dm>, #<nzcv>, <cond>
     FccmpFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
-        cond: u32,
+        cond: i32,
         rn: Register,
-        nzcv: u32,
+        nzcv: i32,
     },
     // FCCMPE -- A64
     // Floating-point Conditional signaling Compare (scalar)
@@ -1994,11 +2008,11 @@ pub enum Asm {
     // FCCMPE  <Sn>, <Sm>, #<nzcv>, <cond>
     // FCCMPE  <Dn>, <Dm>, #<nzcv>, <cond>
     FccmpeFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
-        cond: u32,
+        cond: i32,
         rn: Register,
-        nzcv: u32,
+        nzcv: i32,
     },
     // FCMEQ (register) -- A64
     // Floating-point Compare Equal (vector)
@@ -2068,13 +2082,13 @@ pub enum Asm {
     // FCMLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>], #<rotate>
     // FCMLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>], #<rotate>
     FcmlaAdvsimdElt {
-        q: u32,
-        size: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
         rot: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -2082,8 +2096,8 @@ pub enum Asm {
     // Floating-point Complex Multiply Accumulate
     // FCMLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>, #<rotate>
     FcmlaAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rot: Register,
         rn: Register,
@@ -2118,7 +2132,7 @@ pub enum Asm {
     // FCMP  <Dn>, <Dm>
     // FCMP  <Dn>, #0.0
     FcmpFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         rn: Register,
     },
@@ -2131,7 +2145,7 @@ pub enum Asm {
     // FCMPE  <Dn>, <Dm>
     // FCMPE  <Dn>, #0.0
     FcmpeFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         rn: Register,
     },
@@ -2141,9 +2155,9 @@ pub enum Asm {
     // FCSEL  <Sd>, <Sn>, <Sm>, <cond>
     // FCSEL  <Dd>, <Dn>, <Dm>, <cond>
     FcselFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
-        cond: u32,
+        cond: i32,
         rn: Register,
         rd: Register,
     },
@@ -2156,8 +2170,8 @@ pub enum Asm {
     // FCVT  <Hd>, <Dn>
     // FCVT  <Sd>, <Dn>
     FcvtFloat {
-        ftype: u32,
-        opc: u32,
+        ftype: i32,
+        opc: i32,
         rn: Register,
         rd: Register,
     },
@@ -2180,8 +2194,8 @@ pub enum Asm {
     // FCVTAS  <Wd>, <Dn>
     // FCVTAS  <Xd>, <Dn>
     FcvtasFloat {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2204,8 +2218,8 @@ pub enum Asm {
     // FCVTAU  <Wd>, <Dn>
     // FCVTAU  <Xd>, <Dn>
     FcvtauFloat {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2213,8 +2227,8 @@ pub enum Asm {
     // Floating-point Convert to higher precision Long (vector)
     // FCVTL{2}  <Vd>.<Ta>, <Vn>.<Tb>
     FcvtlAdvsimd {
-        q: u32,
-        sz: u32,
+        q: i32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -2237,8 +2251,8 @@ pub enum Asm {
     // FCVTMS  <Wd>, <Dn>
     // FCVTMS  <Xd>, <Dn>
     FcvtmsFloat {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2261,8 +2275,8 @@ pub enum Asm {
     // FCVTMU  <Wd>, <Dn>
     // FCVTMU  <Xd>, <Dn>
     FcvtmuFloat {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2270,8 +2284,8 @@ pub enum Asm {
     // Floating-point Convert to lower precision Narrow (vector)
     // FCVTN{2}  <Vd>.<Tb>, <Vn>.<Ta>
     FcvtnAdvsimd {
-        q: u32,
-        sz: u32,
+        q: i32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -2294,8 +2308,8 @@ pub enum Asm {
     // FCVTNS  <Wd>, <Dn>
     // FCVTNS  <Xd>, <Dn>
     FcvtnsFloat {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2318,8 +2332,8 @@ pub enum Asm {
     // FCVTNU  <Wd>, <Dn>
     // FCVTNU  <Xd>, <Dn>
     FcvtnuFloat {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2342,8 +2356,8 @@ pub enum Asm {
     // FCVTPS  <Wd>, <Dn>
     // FCVTPS  <Xd>, <Dn>
     FcvtpsFloat {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2366,8 +2380,8 @@ pub enum Asm {
     // FCVTPU  <Wd>, <Dn>
     // FCVTPU  <Xd>, <Dn>
     FcvtpuFloat {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2376,7 +2390,7 @@ pub enum Asm {
     // FCVTXN  <Vb><d>, <Va><n>
     // FCVTXN{2}  <Vd>.<Tb>, <Vn>.<Ta>
     FcvtxnAdvsimd {
-        sz: u32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -2385,7 +2399,7 @@ pub enum Asm {
     // FCVTZS  <V><d>, <V><n>, #<fbits>
     // FCVTZS  <Vd>.<T>, <Vn>.<T>, #<fbits>
     FcvtzsAdvsimdFix {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -2408,9 +2422,9 @@ pub enum Asm {
     // FCVTZS  <Wd>, <Dn>, #<fbits>
     // FCVTZS  <Xd>, <Dn>, #<fbits>
     FcvtzsFloatFix {
-        sf: u32,
-        ftype: u32,
-        scale: u32,
+        sf: i32,
+        ftype: i32,
+        scale: i32,
         rn: Register,
         rd: Register,
     },
@@ -2423,8 +2437,8 @@ pub enum Asm {
     // FCVTZS  <Wd>, <Dn>
     // FCVTZS  <Xd>, <Dn>
     FcvtzsFloatInt {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2433,7 +2447,7 @@ pub enum Asm {
     // FCVTZU  <V><d>, <V><n>, #<fbits>
     // FCVTZU  <Vd>.<T>, <Vn>.<T>, #<fbits>
     FcvtzuAdvsimdFix {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -2456,9 +2470,9 @@ pub enum Asm {
     // FCVTZU  <Wd>, <Dn>, #<fbits>
     // FCVTZU  <Xd>, <Dn>, #<fbits>
     FcvtzuFloatFix {
-        sf: u32,
-        ftype: u32,
-        scale: u32,
+        sf: i32,
+        ftype: i32,
+        scale: i32,
         rn: Register,
         rd: Register,
     },
@@ -2471,8 +2485,8 @@ pub enum Asm {
     // FCVTZU  <Wd>, <Dn>
     // FCVTZU  <Xd>, <Dn>
     FcvtzuFloatInt {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2481,7 +2495,7 @@ pub enum Asm {
     // FDIV  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FDIV  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FdivAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2492,7 +2506,7 @@ pub enum Asm {
     // FDIV  <Sd>, <Sn>, <Sm>
     // FDIV  <Dd>, <Dn>, <Dm>
     FdivFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2510,7 +2524,7 @@ pub enum Asm {
     // FMADD  <Sd>, <Sn>, <Sm>, <Sa>
     // FMADD  <Dd>, <Dn>, <Dm>, <Da>
     FmaddFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         ra: Register,
         rn: Register,
@@ -2521,7 +2535,7 @@ pub enum Asm {
     // FMAX  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FMAX  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FmaxAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2532,7 +2546,7 @@ pub enum Asm {
     // FMAX  <Sd>, <Sn>, <Sm>
     // FMAX  <Dd>, <Dn>, <Dm>
     FmaxFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2542,7 +2556,7 @@ pub enum Asm {
     // FMAXNM  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FMAXNM  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FmaxnmAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2553,7 +2567,7 @@ pub enum Asm {
     // FMAXNM  <Sd>, <Sn>, <Sm>
     // FMAXNM  <Dd>, <Dn>, <Dm>
     FmaxnmFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2563,7 +2577,7 @@ pub enum Asm {
     // FMAXNMP  <V><d>, <Vn>.<T>
     // FMAXNMP  <V><d>, <Vn>.<T>
     FmaxnmpAdvsimdPair {
-        sz: u32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -2572,7 +2586,7 @@ pub enum Asm {
     // FMAXNMP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FMAXNMP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FmaxnmpAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2582,7 +2596,7 @@ pub enum Asm {
     // FMAXNMV  <V><d>, <Vn>.<T>
     // FMAXNMV  <V><d>, <Vn>.<T>
     FmaxnmvAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -2591,7 +2605,7 @@ pub enum Asm {
     // FMAXP  <V><d>, <Vn>.<T>
     // FMAXP  <V><d>, <Vn>.<T>
     FmaxpAdvsimdPair {
-        sz: u32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -2600,7 +2614,7 @@ pub enum Asm {
     // FMAXP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FMAXP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FmaxpAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2610,7 +2624,7 @@ pub enum Asm {
     // FMAXV  <V><d>, <Vn>.<T>
     // FMAXV  <V><d>, <Vn>.<T>
     FmaxvAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -2619,7 +2633,7 @@ pub enum Asm {
     // FMIN  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FMIN  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FminAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2630,7 +2644,7 @@ pub enum Asm {
     // FMIN  <Sd>, <Sn>, <Sm>
     // FMIN  <Dd>, <Dn>, <Dm>
     FminFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2640,7 +2654,7 @@ pub enum Asm {
     // FMINNM  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FMINNM  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FminnmAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2651,7 +2665,7 @@ pub enum Asm {
     // FMINNM  <Sd>, <Sn>, <Sm>
     // FMINNM  <Dd>, <Dn>, <Dm>
     FminnmFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2661,7 +2675,7 @@ pub enum Asm {
     // FMINNMP  <V><d>, <Vn>.<T>
     // FMINNMP  <V><d>, <Vn>.<T>
     FminnmpAdvsimdPair {
-        sz: u32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -2670,7 +2684,7 @@ pub enum Asm {
     // FMINNMP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FMINNMP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FminnmpAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2680,7 +2694,7 @@ pub enum Asm {
     // FMINNMV  <V><d>, <Vn>.<T>
     // FMINNMV  <V><d>, <Vn>.<T>
     FminnmvAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -2689,7 +2703,7 @@ pub enum Asm {
     // FMINP  <V><d>, <Vn>.<T>
     // FMINP  <V><d>, <Vn>.<T>
     FminpAdvsimdPair {
-        sz: u32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -2698,7 +2712,7 @@ pub enum Asm {
     // FMINP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FMINP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FminpAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2708,7 +2722,7 @@ pub enum Asm {
     // FMINV  <V><d>, <Vn>.<T>
     // FMINV  <V><d>, <Vn>.<T>
     FminvAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -2719,10 +2733,10 @@ pub enum Asm {
     // FMLA  <Vd>.<T>, <Vn>.<T>, <Vm>.H[<index>]
     // FMLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>]
     FmlaAdvsimdElt {
-        l: u32,
-        m: u32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -2731,7 +2745,7 @@ pub enum Asm {
     // FMLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FMLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FmlaAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2741,11 +2755,11 @@ pub enum Asm {
     // FMLAL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.H[<index>]
     // FMLAL2  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.H[<index>]
     FmlalAdvsimdElt {
-        q: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -2754,7 +2768,7 @@ pub enum Asm {
     // FMLAL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     // FMLAL2  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     FmlalAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2766,10 +2780,10 @@ pub enum Asm {
     // FMLS  <Vd>.<T>, <Vn>.<T>, <Vm>.H[<index>]
     // FMLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>]
     FmlsAdvsimdElt {
-        l: u32,
-        m: u32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -2778,7 +2792,7 @@ pub enum Asm {
     // FMLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FMLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FmlsAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2788,11 +2802,11 @@ pub enum Asm {
     // FMLSL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.H[<index>]
     // FMLSL2  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.H[<index>]
     FmlslAdvsimdElt {
-        q: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -2801,7 +2815,7 @@ pub enum Asm {
     // FMLSL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     // FMLSL2  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     FmlslAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2812,15 +2826,15 @@ pub enum Asm {
     // FMOV  <Vd>.<T>, #<imm>
     // FMOV  <Vd>.2D, #<imm>
     FmovAdvsimd {
-        q: u32,
-        a: u32,
-        b: u32,
-        c: u32,
-        d: u32,
-        e: u32,
-        f: u32,
-        g: u32,
-        h: u32,
+        q: i32,
+        a: i32,
+        b: i32,
+        c: i32,
+        d: i32,
+        e: i32,
+        f: i32,
+        g: i32,
+        h: i32,
         rd: Register,
     },
     // FMOV (register) -- A64
@@ -2829,7 +2843,7 @@ pub enum Asm {
     // FMOV  <Sd>, <Sn>
     // FMOV  <Dd>, <Dn>
     FmovFloat {
-        ftype: u32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2846,8 +2860,8 @@ pub enum Asm {
     // FMOV  <Xd>, <Dn>
     // FMOV  <Xd>, <Vn>.D[1]
     FmovFloatGen {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2857,8 +2871,8 @@ pub enum Asm {
     // FMOV  <Sd>, #<imm>
     // FMOV  <Dd>, #<imm>
     FmovFloatImm {
-        ftype: u32,
-        imm8: u32,
+        ftype: i32,
+        imm8: i32,
         rd: Register,
     },
     // FMSUB -- A64
@@ -2867,7 +2881,7 @@ pub enum Asm {
     // FMSUB  <Sd>, <Sn>, <Sm>, <Sa>
     // FMSUB  <Dd>, <Dn>, <Dm>, <Da>
     FmsubFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         ra: Register,
         rn: Register,
@@ -2880,10 +2894,10 @@ pub enum Asm {
     // FMUL  <Vd>.<T>, <Vn>.<T>, <Vm>.H[<index>]
     // FMUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>]
     FmulAdvsimdElt {
-        l: u32,
-        m: u32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -2892,7 +2906,7 @@ pub enum Asm {
     // FMUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FMUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FmulAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2903,7 +2917,7 @@ pub enum Asm {
     // FMUL  <Sd>, <Sn>, <Sm>
     // FMUL  <Dd>, <Dn>, <Dm>
     FmulFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -2915,10 +2929,10 @@ pub enum Asm {
     // FMULX  <Vd>.<T>, <Vn>.<T>, <Vm>.H[<index>]
     // FMULX  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>]
     FmulxAdvsimdElt {
-        l: u32,
-        m: u32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -2938,7 +2952,7 @@ pub enum Asm {
     // FNEG  <Vd>.<T>, <Vn>.<T>
     // FNEG  <Vd>.<T>, <Vn>.<T>
     FnegAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -2948,7 +2962,7 @@ pub enum Asm {
     // FNEG  <Sd>, <Sn>
     // FNEG  <Dd>, <Dn>
     FnegFloat {
-        ftype: u32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -2958,7 +2972,7 @@ pub enum Asm {
     // FNMADD  <Sd>, <Sn>, <Sm>, <Sa>
     // FNMADD  <Dd>, <Dn>, <Dm>, <Da>
     FnmaddFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         ra: Register,
         rn: Register,
@@ -2970,7 +2984,7 @@ pub enum Asm {
     // FNMSUB  <Sd>, <Sn>, <Sm>, <Sa>
     // FNMSUB  <Dd>, <Dn>, <Dm>, <Da>
     FnmsubFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         ra: Register,
         rn: Register,
@@ -2982,7 +2996,7 @@ pub enum Asm {
     // FNMUL  <Sd>, <Sn>, <Sm>
     // FNMUL  <Dd>, <Dn>, <Dm>
     FnmulFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -3020,8 +3034,8 @@ pub enum Asm {
     // Floating-point Round to 32-bit Integer, using current rounding mode (vector)
     // FRINT32X  <Vd>.<T>, <Vn>.<T>
     Frint32xAdvsimd {
-        q: u32,
-        sz: u32,
+        q: i32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -3037,8 +3051,8 @@ pub enum Asm {
     // Floating-point Round to 32-bit Integer toward Zero (vector)
     // FRINT32Z  <Vd>.<T>, <Vn>.<T>
     Frint32zAdvsimd {
-        q: u32,
-        sz: u32,
+        q: i32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -3054,8 +3068,8 @@ pub enum Asm {
     // Floating-point Round to 64-bit Integer, using current rounding mode (vector)
     // FRINT64X  <Vd>.<T>, <Vn>.<T>
     Frint64xAdvsimd {
-        q: u32,
-        sz: u32,
+        q: i32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -3071,8 +3085,8 @@ pub enum Asm {
     // Floating-point Round to 64-bit Integer toward Zero (vector)
     // FRINT64Z  <Vd>.<T>, <Vn>.<T>
     Frint64zAdvsimd {
-        q: u32,
-        sz: u32,
+        q: i32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -3089,7 +3103,7 @@ pub enum Asm {
     // FRINTA  <Vd>.<T>, <Vn>.<T>
     // FRINTA  <Vd>.<T>, <Vn>.<T>
     FrintaAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -3099,7 +3113,7 @@ pub enum Asm {
     // FRINTA  <Sd>, <Sn>
     // FRINTA  <Dd>, <Dn>
     FrintaFloat {
-        ftype: u32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -3108,7 +3122,7 @@ pub enum Asm {
     // FRINTI  <Vd>.<T>, <Vn>.<T>
     // FRINTI  <Vd>.<T>, <Vn>.<T>
     FrintiAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -3118,7 +3132,7 @@ pub enum Asm {
     // FRINTI  <Sd>, <Sn>
     // FRINTI  <Dd>, <Dn>
     FrintiFloat {
-        ftype: u32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -3127,7 +3141,7 @@ pub enum Asm {
     // FRINTM  <Vd>.<T>, <Vn>.<T>
     // FRINTM  <Vd>.<T>, <Vn>.<T>
     FrintmAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -3137,7 +3151,7 @@ pub enum Asm {
     // FRINTM  <Sd>, <Sn>
     // FRINTM  <Dd>, <Dn>
     FrintmFloat {
-        ftype: u32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -3146,7 +3160,7 @@ pub enum Asm {
     // FRINTN  <Vd>.<T>, <Vn>.<T>
     // FRINTN  <Vd>.<T>, <Vn>.<T>
     FrintnAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -3156,7 +3170,7 @@ pub enum Asm {
     // FRINTN  <Sd>, <Sn>
     // FRINTN  <Dd>, <Dn>
     FrintnFloat {
-        ftype: u32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -3165,7 +3179,7 @@ pub enum Asm {
     // FRINTP  <Vd>.<T>, <Vn>.<T>
     // FRINTP  <Vd>.<T>, <Vn>.<T>
     FrintpAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -3175,7 +3189,7 @@ pub enum Asm {
     // FRINTP  <Sd>, <Sn>
     // FRINTP  <Dd>, <Dn>
     FrintpFloat {
-        ftype: u32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -3184,7 +3198,7 @@ pub enum Asm {
     // FRINTX  <Vd>.<T>, <Vn>.<T>
     // FRINTX  <Vd>.<T>, <Vn>.<T>
     FrintxAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -3194,7 +3208,7 @@ pub enum Asm {
     // FRINTX  <Sd>, <Sn>
     // FRINTX  <Dd>, <Dn>
     FrintxFloat {
-        ftype: u32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -3203,7 +3217,7 @@ pub enum Asm {
     // FRINTZ  <Vd>.<T>, <Vn>.<T>
     // FRINTZ  <Vd>.<T>, <Vn>.<T>
     FrintzAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -3213,7 +3227,7 @@ pub enum Asm {
     // FRINTZ  <Sd>, <Sn>
     // FRINTZ  <Dd>, <Dn>
     FrintzFloat {
-        ftype: u32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -3243,7 +3257,7 @@ pub enum Asm {
     // FSQRT  <Vd>.<T>, <Vn>.<T>
     // FSQRT  <Vd>.<T>, <Vn>.<T>
     FsqrtAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -3253,7 +3267,7 @@ pub enum Asm {
     // FSQRT  <Sd>, <Sn>
     // FSQRT  <Dd>, <Dn>
     FsqrtFloat {
-        ftype: u32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -3262,7 +3276,7 @@ pub enum Asm {
     // FSUB  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     // FSUB  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     FsubAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -3273,7 +3287,7 @@ pub enum Asm {
     // FSUB  <Sd>, <Sn>, <Sm>
     // FSUB  <Dd>, <Dn>, <Dm>
     FsubFloat {
-        ftype: u32,
+        ftype: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -3282,45 +3296,45 @@ pub enum Asm {
     // Tag Mask Insert
     // GMI  <Xd>, <Xn|SP>, <Xm>
     Gmi {
-        xm: u32,
-        xn: u32,
-        xd: u32,
+        xm: i32,
+        xn: i32,
+        xd: i32,
     },
     // HINT -- A64
     // Hint instruction
     // HINT  #<imm>
     Hint {
-        crm: u32,
-        op2: u32,
+        crm: i32,
+        op2: i32,
     },
     // HLT -- A64
     // Halt instruction
     // HLT  #<imm>
     Hlt {
-        imm16: u32,
+        imm16: i32,
     },
     // HVC -- A64
     // Hypervisor Call
     // HVC  #<imm>
     Hvc {
-        imm16: u32,
+        imm16: i32,
     },
     // IC -- A64
     // Instruction Cache operation
     // IC  <ic_op>{, <Xt>}
     // SYS #<op1>, C7, <Cm>, #<op2>{, <Xt>}
     IcSys {
-        op1: u32,
-        crm: u32,
-        op2: u32,
+        op1: i32,
+        crm: i32,
+        op2: i32,
         rt: Register,
     },
     // INS (element) -- A64
     // Insert vector element from another vector element
     // INS  <Vd>.<Ts>[<index1>], <Vn>.<Ts>[<index2>]
     InsAdvsimdElt {
-        imm5: u32,
-        imm4: u32,
+        imm5: i32,
+        imm4: i32,
         rn: Register,
         rd: Register,
     },
@@ -3328,7 +3342,7 @@ pub enum Asm {
     // Insert vector element from general-purpose register
     // INS  <Vd>.<Ts>[<index>], <R><n>
     InsAdvsimdGen {
-        imm5: u32,
+        imm5: i32,
         rn: Register,
         rd: Register,
     },
@@ -3336,15 +3350,15 @@ pub enum Asm {
     // Insert Random Tag
     // IRG  <Xd|SP>, <Xn|SP>{, <Xm>}
     Irg {
-        xm: u32,
-        xn: u32,
-        xd: u32,
+        xm: i32,
+        xn: i32,
+        xd: i32,
     },
     // ISB -- A64
     // Instruction Synchronization Barrier
     // ISB  {<option>|#<imm>}
     Isb {
-        crm: u32,
+        crm: i32,
     },
     // LD1 (multiple structures) -- A64
     // Load multiple single-element structures to one, two, three, or four registers
@@ -3361,8 +3375,8 @@ pub enum Asm {
     // LD1  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>
     // LD1  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <Xm>
     Ld1AdvsimdMult {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -3381,9 +3395,9 @@ pub enum Asm {
     // LD1  { <Vt>.D }[<index>], [<Xn|SP>], #8
     // LD1  { <Vt>.D }[<index>], [<Xn|SP>], <Xm>
     Ld1AdvsimdSngl {
-        q: u32,
-        s: u32,
-        size: u32,
+        q: i32,
+        s: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -3393,8 +3407,8 @@ pub enum Asm {
     // LD1R  { <Vt>.<T> }, [<Xn|SP>], <imm>
     // LD1R  { <Vt>.<T> }, [<Xn|SP>], <Xm>
     Ld1rAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -3404,8 +3418,8 @@ pub enum Asm {
     // LD2  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <imm>
     // LD2  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <Xm>
     Ld2AdvsimdMult {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -3424,9 +3438,9 @@ pub enum Asm {
     // LD2  { <Vt>.D, <Vt2>.D }[<index>], [<Xn|SP>], #16
     // LD2  { <Vt>.D, <Vt2>.D }[<index>], [<Xn|SP>], <Xm>
     Ld2AdvsimdSngl {
-        q: u32,
-        s: u32,
-        size: u32,
+        q: i32,
+        s: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -3436,8 +3450,8 @@ pub enum Asm {
     // LD2R  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <imm>
     // LD2R  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <Xm>
     Ld2rAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -3447,8 +3461,8 @@ pub enum Asm {
     // LD3  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>], <imm>
     // LD3  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>], <Xm>
     Ld3AdvsimdMult {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -3467,9 +3481,9 @@ pub enum Asm {
     // LD3  { <Vt>.D, <Vt2>.D, <Vt3>.D }[<index>], [<Xn|SP>], #24
     // LD3  { <Vt>.D, <Vt2>.D, <Vt3>.D }[<index>], [<Xn|SP>], <Xm>
     Ld3AdvsimdSngl {
-        q: u32,
-        s: u32,
-        size: u32,
+        q: i32,
+        s: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -3479,8 +3493,8 @@ pub enum Asm {
     // LD3R  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>], <imm>
     // LD3R  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>], <Xm>
     Ld3rAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -3490,8 +3504,8 @@ pub enum Asm {
     // LD4  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>
     // LD4  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <Xm>
     Ld4AdvsimdMult {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -3510,9 +3524,9 @@ pub enum Asm {
     // LD4  { <Vt>.D, <Vt2>.D, <Vt3>.D, <Vt4>.D }[<index>], [<Xn|SP>], #32
     // LD4  { <Vt>.D, <Vt2>.D, <Vt3>.D, <Vt4>.D }[<index>], [<Xn|SP>], <Xm>
     Ld4AdvsimdSngl {
-        q: u32,
-        s: u32,
-        size: u32,
+        q: i32,
+        s: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -3522,8 +3536,8 @@ pub enum Asm {
     // LD4R  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>
     // LD4R  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <Xm>
     Ld4rAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -3545,7 +3559,7 @@ pub enum Asm {
     // LDADDAL  <Xs>, <Xt>, [<Xn|SP>]
     // LDADDL  <Xs>, <Xt>, [<Xn|SP>]
     Ldadd {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -3558,7 +3572,7 @@ pub enum Asm {
     // LDADDB  <Ws>, <Wt>, [<Xn|SP>]
     // LDADDLB  <Ws>, <Wt>, [<Xn|SP>]
     Ldaddb {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -3571,7 +3585,7 @@ pub enum Asm {
     // LDADDH  <Ws>, <Wt>, [<Xn|SP>]
     // LDADDLH  <Ws>, <Wt>, [<Xn|SP>]
     Ldaddh {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -3604,7 +3618,7 @@ pub enum Asm {
     // LDAPUR  <Wt>, [<Xn|SP>{, #<simm>}]
     // LDAPUR  <Xt>, [<Xn|SP>{, #<simm>}]
     LdapurGen {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -3612,7 +3626,7 @@ pub enum Asm {
     // Load-Acquire RCpc Register Byte (unscaled)
     // LDAPURB  <Wt>, [<Xn|SP>{, #<simm>}]
     Ldapurb {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -3620,7 +3634,7 @@ pub enum Asm {
     // Load-Acquire RCpc Register Halfword (unscaled)
     // LDAPURH  <Wt>, [<Xn|SP>{, #<simm>}]
     Ldapurh {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -3629,7 +3643,7 @@ pub enum Asm {
     // LDAPURSB  <Wt>, [<Xn|SP>{, #<simm>}]
     // LDAPURSB  <Xt>, [<Xn|SP>{, #<simm>}]
     Ldapursb {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -3638,7 +3652,7 @@ pub enum Asm {
     // LDAPURSH  <Wt>, [<Xn|SP>{, #<simm>}]
     // LDAPURSH  <Xt>, [<Xn|SP>{, #<simm>}]
     Ldapursh {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -3646,7 +3660,7 @@ pub enum Asm {
     // Load-Acquire RCpc Register Signed Word (unscaled)
     // LDAPURSW  <Xt>, [<Xn|SP>{, #<simm>}]
     Ldapursw {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -3677,7 +3691,7 @@ pub enum Asm {
     // LDAXP  <Wt1>, <Wt2>, [<Xn|SP>{,#0}]
     // LDAXP  <Xt1>, <Xt2>, [<Xn|SP>{,#0}]
     Ldaxp {
-        sz: u32,
+        sz: i32,
         rt2: Register,
         rn: Register,
         rt: Register,
@@ -3715,7 +3729,7 @@ pub enum Asm {
     // LDCLRAL  <Xs>, <Xt>, [<Xn|SP>]
     // LDCLRL  <Xs>, <Xt>, [<Xn|SP>]
     Ldclr {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -3728,7 +3742,7 @@ pub enum Asm {
     // LDCLRB  <Ws>, <Wt>, [<Xn|SP>]
     // LDCLRLB  <Ws>, <Wt>, [<Xn|SP>]
     Ldclrb {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -3741,7 +3755,7 @@ pub enum Asm {
     // LDCLRH  <Ws>, <Wt>, [<Xn|SP>]
     // LDCLRLH  <Ws>, <Wt>, [<Xn|SP>]
     Ldclrh {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -3758,7 +3772,7 @@ pub enum Asm {
     // LDEORAL  <Xs>, <Xt>, [<Xn|SP>]
     // LDEORL  <Xs>, <Xt>, [<Xn|SP>]
     Ldeor {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -3771,7 +3785,7 @@ pub enum Asm {
     // LDEORB  <Ws>, <Wt>, [<Xn|SP>]
     // LDEORLB  <Ws>, <Wt>, [<Xn|SP>]
     Ldeorb {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -3784,7 +3798,7 @@ pub enum Asm {
     // LDEORH  <Ws>, <Wt>, [<Xn|SP>]
     // LDEORLH  <Ws>, <Wt>, [<Xn|SP>]
     Ldeorh {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -3794,16 +3808,16 @@ pub enum Asm {
     // Load Allocation Tag
     // LDG  <Xt>, [<Xn|SP>{, #<simm>}]
     Ldg {
-        imm9: u32,
-        xn: u32,
-        xt: u32,
+        imm9: i32,
+        xn: i32,
+        xt: i32,
     },
     // LDGM -- A64
     // Load Tag Multiple
     // LDGM  <Xt>, [<Xn|SP>]
     Ldgm {
-        xn: u32,
-        xt: u32,
+        xn: i32,
+        xt: i32,
     },
     // LDLAR -- A64
     // Load LOAcquire Register
@@ -3833,8 +3847,8 @@ pub enum Asm {
     // LDNP  <Dt1>, <Dt2>, [<Xn|SP>{, #<imm>}]
     // LDNP  <Qt1>, <Qt2>, [<Xn|SP>{, #<imm>}]
     LdnpFpsimd {
-        opc: u32,
-        imm7: u32,
+        opc: i32,
+        imm7: i32,
         rt2: Register,
         rn: Register,
         rt: Register,
@@ -3844,7 +3858,7 @@ pub enum Asm {
     // LDNP  <Wt1>, <Wt2>, [<Xn|SP>{, #<imm>}]
     // LDNP  <Xt1>, <Xt2>, [<Xn|SP>{, #<imm>}]
     LdnpGen {
-        imm7: u32,
+        imm7: i32,
         rt2: Register,
         rn: Register,
         rt: Register,
@@ -3861,8 +3875,8 @@ pub enum Asm {
     // LDP  <Dt1>, <Dt2>, [<Xn|SP>{, #<imm>}]
     // LDP  <Qt1>, <Qt2>, [<Xn|SP>{, #<imm>}]
     LdpFpsimd {
-        opc: u32,
-        imm7: u32,
+        opc: i32,
+        imm7: i32,
         rt2: Register,
         rn: Register,
         rt: Register,
@@ -3876,7 +3890,7 @@ pub enum Asm {
     // LDP  <Wt1>, <Wt2>, [<Xn|SP>{, #<imm>}]
     // LDP  <Xt1>, <Xt2>, [<Xn|SP>{, #<imm>}]
     LdpGen {
-        imm7: u32,
+        imm7: i32,
         rt2: Register,
         rn: Register,
         rt: Register,
@@ -3887,7 +3901,7 @@ pub enum Asm {
     // LDPSW  <Xt1>, <Xt2>, [<Xn|SP>, #<imm>]!
     // LDPSW  <Xt1>, <Xt2>, [<Xn|SP>{, #<imm>}]
     Ldpsw {
-        imm7: u32,
+        imm7: i32,
         rt2: Register,
         rn: Register,
         rt: Register,
@@ -3910,8 +3924,8 @@ pub enum Asm {
     // LDR  <Dt>, [<Xn|SP>{, #<pimm>}]
     // LDR  <Qt>, [<Xn|SP>{, #<pimm>}]
     LdrImmFpsimd {
-        size: u32,
-        imm9: u32,
+        size: i32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -3924,7 +3938,7 @@ pub enum Asm {
     // LDR  <Wt>, [<Xn|SP>{, #<pimm>}]
     // LDR  <Xt>, [<Xn|SP>{, #<pimm>}]
     LdrImmGen {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -3934,8 +3948,8 @@ pub enum Asm {
     // LDR  <Dt>, <label>
     // LDR  <Qt>, <label>
     LdrLitFpsimd {
-        opc: u32,
-        imm19: u32,
+        opc: i32,
+        imm19: i32,
         rt: Register,
     },
     // LDR (literal) -- A64
@@ -3943,7 +3957,7 @@ pub enum Asm {
     // LDR  <Wt>, <label>
     // LDR  <Xt>, <label>
     LdrLitGen {
-        imm19: u32,
+        imm19: i32,
         rt: Register,
     },
     // LDR (register, SIMD&FP) -- A64
@@ -3955,10 +3969,10 @@ pub enum Asm {
     // LDR  <Dt>, [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
     // LDR  <Qt>, [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
     LdrRegFpsimd {
-        size: u32,
+        size: i32,
         rm: Register,
-        option: u32,
-        s: u32,
+        option: i32,
+        s: i32,
         rn: Register,
         rt: Register,
     },
@@ -3968,8 +3982,8 @@ pub enum Asm {
     // LDR  <Xt>, [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
     LdrRegGen {
         rm: Register,
-        option: u32,
-        s: u32,
+        option: i32,
+        s: i32,
         rn: Register,
         rt: Register,
     },
@@ -3980,10 +3994,10 @@ pub enum Asm {
     // LDRAB  <Xt>, [<Xn|SP>{, #<simm>}]
     // LDRAB  <Xt>, [<Xn|SP>{, #<simm>}]!
     Ldra {
-        m: u32,
-        s: u32,
-        imm9: u32,
-        w: u32,
+        m: i32,
+        s: i32,
+        imm9: i32,
+        w: i32,
         rn: Register,
         rt: Register,
     },
@@ -3993,7 +4007,7 @@ pub enum Asm {
     // LDRB  <Wt>, [<Xn|SP>, #<simm>]!
     // LDRB  <Wt>, [<Xn|SP>{, #<pimm>}]
     LdrbImm {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4003,8 +4017,8 @@ pub enum Asm {
     // LDRB  <Wt>, [<Xn|SP>, <Xm>{, LSL <amount>}]
     LdrbReg {
         rm: Register,
-        option: u32,
-        s: u32,
+        option: i32,
+        s: i32,
         rn: Register,
         rt: Register,
     },
@@ -4014,7 +4028,7 @@ pub enum Asm {
     // LDRH  <Wt>, [<Xn|SP>, #<simm>]!
     // LDRH  <Wt>, [<Xn|SP>{, #<pimm>}]
     LdrhImm {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4023,8 +4037,8 @@ pub enum Asm {
     // LDRH  <Wt>, [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
     LdrhReg {
         rm: Register,
-        option: u32,
-        s: u32,
+        option: i32,
+        s: i32,
         rn: Register,
         rt: Register,
     },
@@ -4037,7 +4051,7 @@ pub enum Asm {
     // LDRSB  <Wt>, [<Xn|SP>{, #<pimm>}]
     // LDRSB  <Xt>, [<Xn|SP>{, #<pimm>}]
     LdrsbImm {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4049,8 +4063,8 @@ pub enum Asm {
     // LDRSB  <Xt>, [<Xn|SP>, <Xm>{, LSL <amount>}]
     LdrsbReg {
         rm: Register,
-        option: u32,
-        s: u32,
+        option: i32,
+        s: i32,
         rn: Register,
         rt: Register,
     },
@@ -4063,7 +4077,7 @@ pub enum Asm {
     // LDRSH  <Wt>, [<Xn|SP>{, #<pimm>}]
     // LDRSH  <Xt>, [<Xn|SP>{, #<pimm>}]
     LdrshImm {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4073,8 +4087,8 @@ pub enum Asm {
     // LDRSH  <Xt>, [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
     LdrshReg {
         rm: Register,
-        option: u32,
-        s: u32,
+        option: i32,
+        s: i32,
         rn: Register,
         rt: Register,
     },
@@ -4084,7 +4098,7 @@ pub enum Asm {
     // LDRSW  <Xt>, [<Xn|SP>, #<simm>]!
     // LDRSW  <Xt>, [<Xn|SP>{, #<pimm>}]
     LdrswImm {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4092,7 +4106,7 @@ pub enum Asm {
     // Load Register Signed Word (literal)
     // LDRSW  <Xt>, <label>
     LdrswLit {
-        imm19: u32,
+        imm19: i32,
         rt: Register,
     },
     // LDRSW (register) -- A64
@@ -4100,8 +4114,8 @@ pub enum Asm {
     // LDRSW  <Xt>, [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
     LdrswReg {
         rm: Register,
-        option: u32,
-        s: u32,
+        option: i32,
+        s: i32,
         rn: Register,
         rt: Register,
     },
@@ -4116,7 +4130,7 @@ pub enum Asm {
     // LDSETAL  <Xs>, <Xt>, [<Xn|SP>]
     // LDSETL  <Xs>, <Xt>, [<Xn|SP>]
     Ldset {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4129,7 +4143,7 @@ pub enum Asm {
     // LDSETB  <Ws>, <Wt>, [<Xn|SP>]
     // LDSETLB  <Ws>, <Wt>, [<Xn|SP>]
     Ldsetb {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4142,7 +4156,7 @@ pub enum Asm {
     // LDSETH  <Ws>, <Wt>, [<Xn|SP>]
     // LDSETLH  <Ws>, <Wt>, [<Xn|SP>]
     Ldseth {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4159,7 +4173,7 @@ pub enum Asm {
     // LDSMAXAL  <Xs>, <Xt>, [<Xn|SP>]
     // LDSMAXL  <Xs>, <Xt>, [<Xn|SP>]
     Ldsmax {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4172,7 +4186,7 @@ pub enum Asm {
     // LDSMAXB  <Ws>, <Wt>, [<Xn|SP>]
     // LDSMAXLB  <Ws>, <Wt>, [<Xn|SP>]
     Ldsmaxb {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4185,7 +4199,7 @@ pub enum Asm {
     // LDSMAXH  <Ws>, <Wt>, [<Xn|SP>]
     // LDSMAXLH  <Ws>, <Wt>, [<Xn|SP>]
     Ldsmaxh {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4202,7 +4216,7 @@ pub enum Asm {
     // LDSMINAL  <Xs>, <Xt>, [<Xn|SP>]
     // LDSMINL  <Xs>, <Xt>, [<Xn|SP>]
     Ldsmin {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4215,7 +4229,7 @@ pub enum Asm {
     // LDSMINB  <Ws>, <Wt>, [<Xn|SP>]
     // LDSMINLB  <Ws>, <Wt>, [<Xn|SP>]
     Ldsminb {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4228,7 +4242,7 @@ pub enum Asm {
     // LDSMINH  <Ws>, <Wt>, [<Xn|SP>]
     // LDSMINLH  <Ws>, <Wt>, [<Xn|SP>]
     Ldsminh {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4239,7 +4253,7 @@ pub enum Asm {
     // LDTR  <Wt>, [<Xn|SP>{, #<simm>}]
     // LDTR  <Xt>, [<Xn|SP>{, #<simm>}]
     Ldtr {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4247,7 +4261,7 @@ pub enum Asm {
     // Load Register Byte (unprivileged)
     // LDTRB  <Wt>, [<Xn|SP>{, #<simm>}]
     Ldtrb {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4255,7 +4269,7 @@ pub enum Asm {
     // Load Register Halfword (unprivileged)
     // LDTRH  <Wt>, [<Xn|SP>{, #<simm>}]
     Ldtrh {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4264,7 +4278,7 @@ pub enum Asm {
     // LDTRSB  <Wt>, [<Xn|SP>{, #<simm>}]
     // LDTRSB  <Xt>, [<Xn|SP>{, #<simm>}]
     Ldtrsb {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4273,7 +4287,7 @@ pub enum Asm {
     // LDTRSH  <Wt>, [<Xn|SP>{, #<simm>}]
     // LDTRSH  <Xt>, [<Xn|SP>{, #<simm>}]
     Ldtrsh {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4281,7 +4295,7 @@ pub enum Asm {
     // Load Register Signed Word (unprivileged)
     // LDTRSW  <Xt>, [<Xn|SP>{, #<simm>}]
     Ldtrsw {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4296,7 +4310,7 @@ pub enum Asm {
     // LDUMAXAL  <Xs>, <Xt>, [<Xn|SP>]
     // LDUMAXL  <Xs>, <Xt>, [<Xn|SP>]
     Ldumax {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4309,7 +4323,7 @@ pub enum Asm {
     // LDUMAXB  <Ws>, <Wt>, [<Xn|SP>]
     // LDUMAXLB  <Ws>, <Wt>, [<Xn|SP>]
     Ldumaxb {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4322,7 +4336,7 @@ pub enum Asm {
     // LDUMAXH  <Ws>, <Wt>, [<Xn|SP>]
     // LDUMAXLH  <Ws>, <Wt>, [<Xn|SP>]
     Ldumaxh {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4339,7 +4353,7 @@ pub enum Asm {
     // LDUMINAL  <Xs>, <Xt>, [<Xn|SP>]
     // LDUMINL  <Xs>, <Xt>, [<Xn|SP>]
     Ldumin {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4352,7 +4366,7 @@ pub enum Asm {
     // LDUMINB  <Ws>, <Wt>, [<Xn|SP>]
     // LDUMINLB  <Ws>, <Wt>, [<Xn|SP>]
     Lduminb {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4365,7 +4379,7 @@ pub enum Asm {
     // LDUMINH  <Ws>, <Wt>, [<Xn|SP>]
     // LDUMINLH  <Ws>, <Wt>, [<Xn|SP>]
     Lduminh {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -4379,8 +4393,8 @@ pub enum Asm {
     // LDUR  <Dt>, [<Xn|SP>{, #<simm>}]
     // LDUR  <Qt>, [<Xn|SP>{, #<simm>}]
     LdurFpsimd {
-        size: u32,
-        imm9: u32,
+        size: i32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4389,7 +4403,7 @@ pub enum Asm {
     // LDUR  <Wt>, [<Xn|SP>{, #<simm>}]
     // LDUR  <Xt>, [<Xn|SP>{, #<simm>}]
     LdurGen {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4397,7 +4411,7 @@ pub enum Asm {
     // Load Register Byte (unscaled)
     // LDURB  <Wt>, [<Xn|SP>{, #<simm>}]
     Ldurb {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4405,7 +4419,7 @@ pub enum Asm {
     // Load Register Halfword (unscaled)
     // LDURH  <Wt>, [<Xn|SP>{, #<simm>}]
     Ldurh {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4414,7 +4428,7 @@ pub enum Asm {
     // LDURSB  <Wt>, [<Xn|SP>{, #<simm>}]
     // LDURSB  <Xt>, [<Xn|SP>{, #<simm>}]
     Ldursb {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4423,7 +4437,7 @@ pub enum Asm {
     // LDURSH  <Wt>, [<Xn|SP>{, #<simm>}]
     // LDURSH  <Xt>, [<Xn|SP>{, #<simm>}]
     Ldursh {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4431,7 +4445,7 @@ pub enum Asm {
     // Load Register Signed Word (unscaled)
     // LDURSW  <Xt>, [<Xn|SP>{, #<simm>}]
     Ldursw {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -4440,7 +4454,7 @@ pub enum Asm {
     // LDXP  <Wt1>, <Wt2>, [<Xn|SP>{,#0}]
     // LDXP  <Xt1>, <Xt2>, [<Xn|SP>{,#0}]
     Ldxp {
-        sz: u32,
+        sz: i32,
         rt2: Register,
         rn: Register,
         rt: Register,
@@ -4474,7 +4488,7 @@ pub enum Asm {
     // LSL  <Xd>, <Xn>, <Xm>
     // LSLV <Xd>, <Xn>, <Xm>
     LslLslv {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -4486,9 +4500,9 @@ pub enum Asm {
     // LSL  <Xd>, <Xn>, #<shift>
     // UBFM <Xd>, <Xn>, #(-<shift> MOD 64), #(63-<shift>)
     LslUbfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
         rn: Register,
         rd: Register,
     },
@@ -4497,7 +4511,7 @@ pub enum Asm {
     // LSLV  <Wd>, <Wn>, <Wm>
     // LSLV  <Xd>, <Xn>, <Xm>
     Lslv {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -4509,7 +4523,7 @@ pub enum Asm {
     // LSR  <Xd>, <Xn>, <Xm>
     // LSRV <Xd>, <Xn>, <Xm>
     LsrLsrv {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -4521,9 +4535,9 @@ pub enum Asm {
     // LSR  <Xd>, <Xn>, #<shift>
     // UBFM <Xd>, <Xn>, #<shift>, #63
     LsrUbfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
         rn: Register,
         rd: Register,
     },
@@ -4532,7 +4546,7 @@ pub enum Asm {
     // LSRV  <Wd>, <Wn>, <Wm>
     // LSRV  <Xd>, <Xn>, <Xm>
     Lsrv {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -4542,7 +4556,7 @@ pub enum Asm {
     // MADD  <Wd>, <Wn>, <Wm>, <Wa>
     // MADD  <Xd>, <Xn>, <Xm>, <Xa>
     Madd {
-        sf: u32,
+        sf: i32,
         rm: Register,
         ra: Register,
         rn: Register,
@@ -4552,12 +4566,12 @@ pub enum Asm {
     // Multiply-Add to accumulator (vector, by element)
     // MLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>]
     MlaAdvsimdElt {
-        q: u32,
-        size: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -4565,8 +4579,8 @@ pub enum Asm {
     // Multiply-Add to accumulator (vector)
     // MLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     MlaAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -4575,12 +4589,12 @@ pub enum Asm {
     // Multiply-Subtract from accumulator (vector, by element)
     // MLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>]
     MlsAdvsimdElt {
-        q: u32,
-        size: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -4588,8 +4602,8 @@ pub enum Asm {
     // Multiply-Subtract from accumulator (vector)
     // MLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     MlsAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -4601,7 +4615,7 @@ pub enum Asm {
     // MNEG  <Xd>, <Xn>, <Xm>
     // MSUB <Xd>, <Xn>, <Xm>, XZR
     MnegMsub {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -4613,7 +4627,7 @@ pub enum Asm {
     // MOV  <Xd|SP>, <Xn|SP>
     // ADD <Xd|SP>, <Xn|SP>, #0
     MovAddAddsubImm {
-        sf: u32,
+        sf: i32,
         rn: Register,
         rd: Register,
     },
@@ -4622,7 +4636,7 @@ pub enum Asm {
     // MOV  <V><d>, <Vn>.<T>[<index>]
     // DUP  <V><d>, <Vn>.<T>[<index>]
     MovDupAdvsimdElt {
-        imm5: u32,
+        imm5: i32,
         rn: Register,
         rd: Register,
     },
@@ -4631,8 +4645,8 @@ pub enum Asm {
     // MOV  <Vd>.<Ts>[<index1>], <Vn>.<Ts>[<index2>]
     // INS  <Vd>.<Ts>[<index1>], <Vn>.<Ts>[<index2>]
     MovInsAdvsimdElt {
-        imm5: u32,
-        imm4: u32,
+        imm5: i32,
+        imm4: i32,
         rn: Register,
         rd: Register,
     },
@@ -4641,7 +4655,7 @@ pub enum Asm {
     // MOV  <Vd>.<Ts>[<index>], <R><n>
     // INS  <Vd>.<Ts>[<index>], <R><n>
     MovInsAdvsimdGen {
-        imm5: u32,
+        imm5: i32,
         rn: Register,
         rd: Register,
     },
@@ -4652,9 +4666,9 @@ pub enum Asm {
     // MOV  <Xd>, #<imm>
     // MOVN <Xd>, #<imm16>, LSL #<shift>
     MovMovn {
-        sf: u32,
-        hw: u32,
-        imm16: u32,
+        sf: i32,
+        hw: i32,
+        imm16: i32,
         rd: Register,
     },
     // MOV (wide immediate) -- A64
@@ -4664,9 +4678,9 @@ pub enum Asm {
     // MOV  <Xd>, #<imm>
     // MOVZ <Xd>, #<imm16>, LSL #<shift>
     MovMovz {
-        sf: u32,
-        hw: u32,
-        imm16: u32,
+        sf: i32,
+        hw: i32,
+        imm16: i32,
         rd: Register,
     },
     // MOV (vector) -- A64
@@ -4674,7 +4688,7 @@ pub enum Asm {
     // MOV  <Vd>.<T>, <Vn>.<T>
     // ORR  <Vd>.<T>, <Vn>.<T>, <Vn>.<T>
     MovOrrAdvsimdReg {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -4686,10 +4700,10 @@ pub enum Asm {
     // MOV  <Xd|SP>, #<imm>
     // ORR <Xd|SP>, XZR, #<imm>
     MovOrrLogImm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rd: Register,
     },
     // MOV (register) -- A64
@@ -4699,7 +4713,7 @@ pub enum Asm {
     // MOV  <Xd>, <Xm>
     // ORR <Xd>, XZR, <Xm>
     MovOrrLogShift {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rd: Register,
     },
@@ -4710,7 +4724,7 @@ pub enum Asm {
     // MOV  <Xd>, <Vn>.D[<index>]
     // UMOV <Xd>, <Vn>.D[<index>]
     MovUmovAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -4723,17 +4737,17 @@ pub enum Asm {
     // MOVI  <Dd>, #<imm>
     // MOVI  <Vd>.2D, #<imm>
     MoviAdvsimd {
-        q: u32,
-        op: u32,
-        a: u32,
-        b: u32,
-        c: u32,
-        cmode: u32,
-        d: u32,
-        e: u32,
-        f: u32,
-        g: u32,
-        h: u32,
+        q: i32,
+        op: i32,
+        a: i32,
+        b: i32,
+        c: i32,
+        cmode: i32,
+        d: i32,
+        e: i32,
+        f: i32,
+        g: i32,
+        h: i32,
         rd: Register,
     },
     // MOVK -- A64
@@ -4741,9 +4755,9 @@ pub enum Asm {
     // MOVK  <Wd>, #<imm>{, LSL #<shift>}
     // MOVK  <Xd>, #<imm>{, LSL #<shift>}
     Movk {
-        sf: u32,
-        hw: u32,
-        imm16: u32,
+        sf: i32,
+        hw: i32,
+        imm16: i32,
         rd: Register,
     },
     // MOVN -- A64
@@ -4751,9 +4765,9 @@ pub enum Asm {
     // MOVN  <Wd>, #<imm>{, LSL #<shift>}
     // MOVN  <Xd>, #<imm>{, LSL #<shift>}
     Movn {
-        sf: u32,
-        hw: u32,
-        imm16: u32,
+        sf: i32,
+        hw: i32,
+        imm16: i32,
         rd: Register,
     },
     // MOVZ -- A64
@@ -4761,39 +4775,39 @@ pub enum Asm {
     // MOVZ  <Wd>, #<imm>{, LSL #<shift>}
     // MOVZ  <Xd>, #<imm>{, LSL #<shift>}
     Movz {
-        sf: u32,
-        hw: u32,
-        imm16: u32,
+        sf: i32,
+        hw: i32,
+        imm16: i32,
         rd: Register,
     },
     // MRS -- A64
     // Move System Register
     // MRS  <Xt>, (<systemreg>|S<op0>_<op1>_<Cn>_<Cm>_<op2>)
     Mrs {
-        o0: u32,
-        op1: u32,
-        crn: u32,
-        crm: u32,
-        op2: u32,
+        o0: i32,
+        op1: i32,
+        crn: i32,
+        crm: i32,
+        op2: i32,
         rt: Register,
     },
     // MSR (immediate) -- A64
     // Move immediate value to Special Register
     // MSR  <pstatefield>, #<imm>
     MsrImm {
-        op1: u32,
-        crm: u32,
-        op2: u32,
+        op1: i32,
+        crm: i32,
+        op2: i32,
     },
     // MSR (register) -- A64
     // Move general-purpose register to System Register
     // MSR  (<systemreg>|S<op0>_<op1>_<Cn>_<Cm>_<op2>), <Xt>
     MsrReg {
-        o0: u32,
-        op1: u32,
-        crn: u32,
-        crm: u32,
-        op2: u32,
+        o0: i32,
+        op1: i32,
+        crn: i32,
+        crm: i32,
+        op2: i32,
         rt: Register,
     },
     // MSUB -- A64
@@ -4801,7 +4815,7 @@ pub enum Asm {
     // MSUB  <Wd>, <Wn>, <Wm>, <Wa>
     // MSUB  <Xd>, <Xn>, <Xm>, <Xa>
     Msub {
-        sf: u32,
+        sf: i32,
         rm: Register,
         ra: Register,
         rn: Register,
@@ -4811,12 +4825,12 @@ pub enum Asm {
     // Multiply (vector, by element)
     // MUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>]
     MulAdvsimdElt {
-        q: u32,
-        size: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -4824,8 +4838,8 @@ pub enum Asm {
     // Multiply (vector)
     // MUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     MulAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -4837,7 +4851,7 @@ pub enum Asm {
     // MUL  <Xd>, <Xn>, <Xm>
     // MADD <Xd>, <Xn>, <Xm>, XZR
     MulMadd {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -4847,7 +4861,7 @@ pub enum Asm {
     // MVN  <Vd>.<T>, <Vn>.<T>
     // NOT  <Vd>.<T>, <Vn>.<T>
     MvnNotAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -4858,10 +4872,10 @@ pub enum Asm {
     // MVN  <Xd>, <Xm>{, <shift> #<amount>}
     // ORN <Xd>, XZR, <Xm>{, <shift> #<amount>}
     MvnOrnLogShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rd: Register,
     },
     // MVNI -- A64
@@ -4870,16 +4884,16 @@ pub enum Asm {
     // MVNI  <Vd>.<T>, #<imm8>{, LSL #<amount>}
     // MVNI  <Vd>.<T>, #<imm8>, MSL #<amount>
     MvniAdvsimd {
-        q: u32,
-        a: u32,
-        b: u32,
-        c: u32,
-        cmode: u32,
-        d: u32,
-        e: u32,
-        f: u32,
-        g: u32,
-        h: u32,
+        q: i32,
+        a: i32,
+        b: i32,
+        c: i32,
+        cmode: i32,
+        d: i32,
+        e: i32,
+        f: i32,
+        g: i32,
+        h: i32,
         rd: Register,
     },
     // NEG (vector) -- A64
@@ -4887,7 +4901,7 @@ pub enum Asm {
     // NEG  <V><d>, <V><n>
     // NEG  <Vd>.<T>, <Vn>.<T>
     NegAdvsimd {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -4898,10 +4912,10 @@ pub enum Asm {
     // NEG  <Xd>, <Xm>{, <shift> #<amount>}
     // SUB  <Xd>, XZR, <Xm> {, <shift> #<amount>}
     NegSubAddsubShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rd: Register,
     },
     // NEGS -- A64
@@ -4911,10 +4925,10 @@ pub enum Asm {
     // NEGS  <Xd>, <Xm>{, <shift> #<amount>}
     // SUBS <Xd>, XZR, <Xm> {, <shift> #<amount>}
     NegsSubsAddsubShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
     },
     // NGC -- A64
     // Negate with Carry
@@ -4923,7 +4937,7 @@ pub enum Asm {
     // NGC  <Xd>, <Xm>
     // SBC <Xd>, XZR, <Xm>
     NgcSbc {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rd: Register,
     },
@@ -4934,7 +4948,7 @@ pub enum Asm {
     // NGCS  <Xd>, <Xm>
     // SBCS <Xd>, XZR, <Xm>
     NgcsSbcs {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rd: Register,
     },
@@ -4946,7 +4960,7 @@ pub enum Asm {
     // Bitwise NOT (vector)
     // NOT  <Vd>.<T>, <Vn>.<T>
     NotAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -4954,7 +4968,7 @@ pub enum Asm {
     // Bitwise inclusive OR NOT (vector)
     // ORN  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     OrnAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -4964,10 +4978,10 @@ pub enum Asm {
     // ORN  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
     // ORN  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
     OrnLogShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -4976,22 +4990,22 @@ pub enum Asm {
     // ORR  <Vd>.<T>, #<imm8>{, LSL #<amount>}
     // ORR  <Vd>.<T>, #<imm8>{, LSL #<amount>}
     OrrAdvsimdImm {
-        q: u32,
-        a: u32,
-        b: u32,
-        c: u32,
-        d: u32,
-        e: u32,
-        f: u32,
-        g: u32,
-        h: u32,
+        q: i32,
+        a: i32,
+        b: i32,
+        c: i32,
+        d: i32,
+        e: i32,
+        f: i32,
+        g: i32,
+        h: i32,
         rd: Register,
     },
     // ORR (vector, register) -- A64
     // Bitwise inclusive OR (vector, register)
     // ORR  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     OrrAdvsimdReg {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5001,10 +5015,10 @@ pub enum Asm {
     // ORR  <Wd|WSP>, <Wn>, #<imm>
     // ORR  <Xd|SP>, <Xn>, #<imm>
     OrrLogImm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -5013,10 +5027,10 @@ pub enum Asm {
     // ORR  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
     // ORR  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
     OrrLogShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -5025,7 +5039,7 @@ pub enum Asm {
     // PACDA  <Xd>, <Xn|SP>
     // PACDZA  <Xd>
     Pacda {
-        z: u32,
+        z: i32,
         rn: Register,
         rd: Register,
     },
@@ -5034,7 +5048,7 @@ pub enum Asm {
     // PACDB  <Xd>, <Xn|SP>
     // PACDZB  <Xd>
     Pacdb {
-        z: u32,
+        z: i32,
         rn: Register,
         rd: Register,
     },
@@ -5054,7 +5068,7 @@ pub enum Asm {
     // PACIASP
     // PACIAZ
     Pacia {
-        z: u32,
+        z: i32,
         rn: Register,
         rd: Register,
     },
@@ -5066,7 +5080,7 @@ pub enum Asm {
     // PACIBSP
     // PACIBZ
     Pacib {
-        z: u32,
+        z: i32,
         rn: Register,
         rd: Register,
     },
@@ -5074,8 +5088,8 @@ pub enum Asm {
     // Polynomial Multiply
     // PMUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     PmulAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5084,8 +5098,8 @@ pub enum Asm {
     // Polynomial Multiply Long
     // PMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     PmullAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5094,7 +5108,7 @@ pub enum Asm {
     // Prefetch Memory (immediate)
     // PRFM  (<prfop>|#<imm5>), [<Xn|SP>{, #<pimm>}]
     PrfmImm {
-        imm12: u32,
+        imm12: i32,
         rn: Register,
         rt: Register,
     },
@@ -5102,7 +5116,7 @@ pub enum Asm {
     // Prefetch Memory (literal)
     // PRFM  (<prfop>|#<imm5>), <label>
     PrfmLit {
-        imm19: u32,
+        imm19: i32,
         rt: Register,
     },
     // PRFM (register) -- A64
@@ -5110,8 +5124,8 @@ pub enum Asm {
     // PRFM  (<prfop>|#<imm5>), [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
     PrfmReg {
         rm: Register,
-        option: u32,
-        s: u32,
+        option: i32,
+        s: i32,
         rn: Register,
         rt: Register,
     },
@@ -5119,7 +5133,7 @@ pub enum Asm {
     // Prefetch Memory (unscaled offset)
     // PRFUM (<prfop>|#<imm5>), [<Xn|SP>{, #<simm>}]
     Prfum {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -5136,8 +5150,8 @@ pub enum Asm {
     // Rounding Add returning High Narrow
     // RADDHN{2}  <Vd>.<Tb>, <Vn>.<Ta>, <Vm>.<Ta>
     RaddhnAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5154,7 +5168,7 @@ pub enum Asm {
     // Reverse Bit order (vector)
     // RBIT  <Vd>.<T>, <Vn>.<T>
     RbitAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -5163,7 +5177,7 @@ pub enum Asm {
     // RBIT  <Wd>, <Wn>
     // RBIT  <Xd>, <Xn>
     RbitInt {
-        sf: u32,
+        sf: i32,
         rn: Register,
         rd: Register,
     },
@@ -5178,14 +5192,14 @@ pub enum Asm {
     // RETAA
     // RETAB
     Reta {
-        m: u32,
+        m: i32,
     },
     // REV -- A64
     // Reverse Bytes
     // REV  <Wd>, <Wn>
     // REV  <Xd>, <Xn>
     Rev {
-        sf: u32,
+        sf: i32,
         rn: Register,
         rd: Register,
     },
@@ -5193,8 +5207,8 @@ pub enum Asm {
     // Reverse elements in 16-bit halfwords (vector)
     // REV16  <Vd>.<T>, <Vn>.<T>
     Rev16Advsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -5203,7 +5217,7 @@ pub enum Asm {
     // REV16  <Wd>, <Wn>
     // REV16  <Xd>, <Xn>
     Rev16Int {
-        sf: u32,
+        sf: i32,
         rn: Register,
         rd: Register,
     },
@@ -5211,8 +5225,8 @@ pub enum Asm {
     // Reverse elements in 32-bit words (vector)
     // REV32  <Vd>.<T>, <Vn>.<T>
     Rev32Advsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -5227,8 +5241,8 @@ pub enum Asm {
     // Reverse elements in 64-bit doublewords (vector)
     // REV64  <Vd>.<T>, <Vn>.<T>
     Rev64Advsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -5244,9 +5258,9 @@ pub enum Asm {
     // Rotate, Mask Insert Flags
     // RMIF  <Xn>, #<shift>, #<mask>
     Rmif {
-        imm6: u32,
+        imm6: i32,
         rn: Register,
-        mask: u32,
+        mask: i32,
     },
     // ROR (immediate) -- A64
     // Rotate right (immediate)
@@ -5255,10 +5269,10 @@ pub enum Asm {
     // ROR  <Xd>, <Xs>, #<shift>
     // EXTR <Xd>, <Xs>, <Xs>, #<shift>
     RorExtr {
-        sf: u32,
-        n: u32,
+        sf: i32,
+        n: i32,
         rm: Register,
-        imms: u32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -5269,7 +5283,7 @@ pub enum Asm {
     // ROR  <Xd>, <Xn>, <Xm>
     // RORV <Xd>, <Xn>, <Xm>
     RorRorv {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5279,7 +5293,7 @@ pub enum Asm {
     // RORV  <Wd>, <Wn>, <Wm>
     // RORV  <Xd>, <Xn>, <Xm>
     Rorv {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5288,8 +5302,8 @@ pub enum Asm {
     // Rounding Shift Right Narrow (immediate)
     // RSHRN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     RshrnAdvsimd {
-        q: u32,
-        immb: u32,
+        q: i32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -5297,8 +5311,8 @@ pub enum Asm {
     // Rounding Subtract returning High Narrow
     // RSUBHN{2}  <Vd>.<Tb>, <Vn>.<Ta>, <Vm>.<Ta>
     RsubhnAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5307,8 +5321,8 @@ pub enum Asm {
     // Signed Absolute difference and Accumulate
     // SABA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SabaAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5317,8 +5331,8 @@ pub enum Asm {
     // Signed Absolute difference and Accumulate Long
     // SABAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     SabalAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5327,8 +5341,8 @@ pub enum Asm {
     // Signed Absolute Difference
     // SABD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SabdAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5337,8 +5351,8 @@ pub enum Asm {
     // Signed Absolute Difference Long
     // SABDL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     SabdlAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5347,8 +5361,8 @@ pub enum Asm {
     // Signed Add and Accumulate Long Pairwise
     // SADALP  <Vd>.<Ta>, <Vn>.<Tb>
     SadalpAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -5356,8 +5370,8 @@ pub enum Asm {
     // Signed Add Long (vector)
     // SADDL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     SaddlAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5366,8 +5380,8 @@ pub enum Asm {
     // Signed Add Long Pairwise
     // SADDLP  <Vd>.<Ta>, <Vn>.<Tb>
     SaddlpAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -5375,8 +5389,8 @@ pub enum Asm {
     // Signed Add Long across Vector
     // SADDLV  <V><d>, <Vn>.<T>
     SaddlvAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -5384,8 +5398,8 @@ pub enum Asm {
     // Signed Add Wide
     // SADDW{2}  <Vd>.<Ta>, <Vn>.<Ta>, <Vm>.<Tb>
     SaddwAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5399,7 +5413,7 @@ pub enum Asm {
     // SBC  <Wd>, <Wn>, <Wm>
     // SBC  <Xd>, <Xn>, <Xm>
     Sbc {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5409,7 +5423,7 @@ pub enum Asm {
     // SBCS  <Wd>, <Wn>, <Wm>
     // SBCS  <Xd>, <Xn>, <Xm>
     Sbcs {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5421,10 +5435,10 @@ pub enum Asm {
     // SBFIZ  <Xd>, <Xn>, #<lsb>, #<width>
     // SBFM <Xd>, <Xn>, #(-<lsb> MOD 64), #(<width>-1)
     SbfizSbfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -5433,10 +5447,10 @@ pub enum Asm {
     // SBFM  <Wd>, <Wn>, #<immr>, #<imms>
     // SBFM  <Xd>, <Xn>, #<immr>, #<imms>
     Sbfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -5447,10 +5461,10 @@ pub enum Asm {
     // SBFX  <Xd>, <Xn>, #<lsb>, #<width>
     // SBFM <Xd>, <Xn>, #<lsb>, #(<lsb>+<width>-1)
     SbfxSbfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -5459,7 +5473,7 @@ pub enum Asm {
     // SCVTF  <V><d>, <V><n>, #<fbits>
     // SCVTF  <Vd>.<T>, <Vn>.<T>, #<fbits>
     ScvtfAdvsimdFix {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -5482,9 +5496,9 @@ pub enum Asm {
     // SCVTF  <Sd>, <Xn>, #<fbits>
     // SCVTF  <Dd>, <Xn>, #<fbits>
     ScvtfFloatFix {
-        sf: u32,
-        ftype: u32,
-        scale: u32,
+        sf: i32,
+        ftype: i32,
+        scale: i32,
         rn: Register,
         rd: Register,
     },
@@ -5497,8 +5511,8 @@ pub enum Asm {
     // SCVTF  <Sd>, <Xn>
     // SCVTF  <Dd>, <Xn>
     ScvtfFloatInt {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -5507,7 +5521,7 @@ pub enum Asm {
     // SDIV  <Wd>, <Wn>, <Wm>
     // SDIV  <Xd>, <Xn>, <Xm>
     Sdiv {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5516,12 +5530,12 @@ pub enum Asm {
     // Dot Product signed arithmetic (vector, by element)
     // SDOT  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.4B[<index>]
     SdotAdvsimdElt {
-        q: u32,
-        size: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -5529,8 +5543,8 @@ pub enum Asm {
     // Dot Product signed arithmetic (vector)
     // SDOT  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     SdotAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5540,7 +5554,7 @@ pub enum Asm {
     // SETF8  <Wn>
     // SETF16  <Wn>
     Setf {
-        sz: u32,
+        sz: i32,
         rn: Register,
     },
     // SETGP, SETGM, SETGE -- A64
@@ -5549,7 +5563,7 @@ pub enum Asm {
     // SETGM  [<Xd>]!, <Xn>!, <Xs>
     // SETGP  [<Xd>]!, <Xn>!, <Xs>
     Setgp {
-        sz: u32,
+        sz: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -5560,7 +5574,7 @@ pub enum Asm {
     // SETGMN  [<Xd>]!, <Xn>!, <Xs>
     // SETGPN  [<Xd>]!, <Xn>!, <Xs>
     Setgpn {
-        sz: u32,
+        sz: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -5571,7 +5585,7 @@ pub enum Asm {
     // SETGMT  [<Xd>]!, <Xn>!, <Xs>
     // SETGPT  [<Xd>]!, <Xn>!, <Xs>
     Setgpt {
-        sz: u32,
+        sz: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -5582,7 +5596,7 @@ pub enum Asm {
     // SETGMTN  [<Xd>]!, <Xn>!, <Xs>
     // SETGPTN  [<Xd>]!, <Xn>!, <Xs>
     Setgptn {
-        sz: u32,
+        sz: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -5593,7 +5607,7 @@ pub enum Asm {
     // SETM  [<Xd>]!, <Xn>!, <Xs>
     // SETP  [<Xd>]!, <Xn>!, <Xs>
     Setp {
-        sz: u32,
+        sz: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -5604,7 +5618,7 @@ pub enum Asm {
     // SETMN  [<Xd>]!, <Xn>!, <Xs>
     // SETPN  [<Xd>]!, <Xn>!, <Xs>
     Setpn {
-        sz: u32,
+        sz: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -5615,7 +5629,7 @@ pub enum Asm {
     // SETMT  [<Xd>]!, <Xn>!, <Xs>
     // SETPT  [<Xd>]!, <Xn>!, <Xs>
     Setpt {
-        sz: u32,
+        sz: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -5626,7 +5640,7 @@ pub enum Asm {
     // SETMTN  [<Xd>]!, <Xn>!, <Xs>
     // SETPTN  [<Xd>]!, <Xn>!, <Xs>
     Setptn {
-        sz: u32,
+        sz: i32,
         rs: Register,
         rn: Register,
         rd: Register,
@@ -5751,8 +5765,8 @@ pub enum Asm {
     // Signed Halving Add
     // SHADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     ShaddAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5762,7 +5776,7 @@ pub enum Asm {
     // SHL  <V><d>, <V><n>, #<shift>
     // SHL  <Vd>.<T>, <Vn>.<T>, #<shift>
     ShlAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -5770,8 +5784,8 @@ pub enum Asm {
     // Shift Left Long (by element size)
     // SHLL{2}  <Vd>.<Ta>, <Vn>.<Tb>, #<shift>
     ShllAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -5779,8 +5793,8 @@ pub enum Asm {
     // Shift Right Narrow (immediate)
     // SHRN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     ShrnAdvsimd {
-        q: u32,
-        immb: u32,
+        q: i32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -5788,8 +5802,8 @@ pub enum Asm {
     // Signed Halving Subtract
     // SHSUB  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     ShsubAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5799,7 +5813,7 @@ pub enum Asm {
     // SLI  <V><d>, <V><n>, #<shift>
     // SLI  <Vd>.<T>, <Vn>.<T>, #<shift>
     SliAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -5833,7 +5847,7 @@ pub enum Asm {
     // SM3TT1A  <Vd>.4S, <Vn>.4S, <Vm>.S[<imm2>]
     Sm3tt1aAdvsimd {
         rm: Register,
-        imm2: u32,
+        imm2: i32,
         rn: Register,
         rd: Register,
     },
@@ -5842,7 +5856,7 @@ pub enum Asm {
     // SM3TT1B  <Vd>.4S, <Vn>.4S, <Vm>.S[<imm2>]
     Sm3tt1bAdvsimd {
         rm: Register,
-        imm2: u32,
+        imm2: i32,
         rn: Register,
         rd: Register,
     },
@@ -5851,7 +5865,7 @@ pub enum Asm {
     // SM3TT2A  <Vd>.4S, <Vn>.4S, <Vm>.S[<imm2>]
     Sm3tt2aAdvsimd {
         rm: Register,
-        imm2: u32,
+        imm2: i32,
         rn: Register,
         rd: Register,
     },
@@ -5860,7 +5874,7 @@ pub enum Asm {
     // SM3TT2B  <Vd>.4S, <Vn>.4S, <Vm>.S[<imm2>]
     Sm3tt2bAdvsimd {
         rm: Register,
-        imm2: u32,
+        imm2: i32,
         rn: Register,
         rd: Register,
     },
@@ -5892,8 +5906,8 @@ pub enum Asm {
     // Signed Maximum (vector)
     // SMAX  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SmaxAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5902,8 +5916,8 @@ pub enum Asm {
     // Signed Maximum Pairwise
     // SMAXP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SmaxpAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5912,8 +5926,8 @@ pub enum Asm {
     // Signed Maximum across Vector
     // SMAXV  <V><d>, <Vn>.<T>
     SmaxvAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -5921,14 +5935,14 @@ pub enum Asm {
     // Secure Monitor Call
     // SMC  #<imm>
     Smc {
-        imm16: u32,
+        imm16: i32,
     },
     // SMIN -- A64
     // Signed Minimum (vector)
     // SMIN  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SminAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5937,8 +5951,8 @@ pub enum Asm {
     // Signed Minimum Pairwise
     // SMINP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SminpAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5947,8 +5961,8 @@ pub enum Asm {
     // Signed Minimum across Vector
     // SMINV  <V><d>, <Vn>.<T>
     SminvAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -5956,12 +5970,12 @@ pub enum Asm {
     // Signed Multiply-Add Long (vector, by element)
     // SMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
     SmlalAdvsimdElt {
-        q: u32,
-        size: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -5969,8 +5983,8 @@ pub enum Asm {
     // Signed Multiply-Add Long (vector)
     // SMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     SmlalAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -5979,12 +5993,12 @@ pub enum Asm {
     // Signed Multiply-Subtract Long (vector, by element)
     // SMLSL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
     SmlslAdvsimdElt {
-        q: u32,
-        size: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -5992,8 +6006,8 @@ pub enum Asm {
     // Signed Multiply-Subtract Long (vector)
     // SMLSL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     SmlslAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6020,8 +6034,8 @@ pub enum Asm {
     // SMOV  <Wd>, <Vn>.<Ts>[<index>]
     // SMOV  <Xd>, <Vn>.<Ts>[<index>]
     SmovAdvsimd {
-        q: u32,
-        imm5: u32,
+        q: i32,
+        imm5: i32,
         rn: Register,
         rd: Register,
     },
@@ -6046,12 +6060,12 @@ pub enum Asm {
     // Signed Multiply Long (vector, by element)
     // SMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
     SmullAdvsimdElt {
-        q: u32,
-        size: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -6059,8 +6073,8 @@ pub enum Asm {
     // Signed Multiply Long (vector)
     // SMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     SmullAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6079,7 +6093,7 @@ pub enum Asm {
     // SQABS  <V><d>, <V><n>
     // SQABS  <Vd>.<T>, <Vn>.<T>
     SqabsAdvsimd {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -6088,7 +6102,7 @@ pub enum Asm {
     // SQADD  <V><d>, <V><n>, <V><m>
     // SQADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SqaddAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6098,11 +6112,11 @@ pub enum Asm {
     // SQDMLAL  <Va><d>, <Vb><n>, <Vm>.<Ts>[<index>]
     // SQDMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
     SqdmlalAdvsimdElt {
-        size: u32,
-        l: u32,
-        m: u32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -6111,7 +6125,7 @@ pub enum Asm {
     // SQDMLAL  <Va><d>, <Vb><n>, <Vb><m>
     // SQDMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     SqdmlalAdvsimdVec {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6121,11 +6135,11 @@ pub enum Asm {
     // SQDMLSL  <Va><d>, <Vb><n>, <Vm>.<Ts>[<index>]
     // SQDMLSL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
     SqdmlslAdvsimdElt {
-        size: u32,
-        l: u32,
-        m: u32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -6134,7 +6148,7 @@ pub enum Asm {
     // SQDMLSL  <Va><d>, <Vb><n>, <Vb><m>
     // SQDMLSL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     SqdmlslAdvsimdVec {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6144,11 +6158,11 @@ pub enum Asm {
     // SQDMULH  <V><d>, <V><n>, <Vm>.<Ts>[<index>]
     // SQDMULH  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>]
     SqdmulhAdvsimdElt {
-        size: u32,
-        l: u32,
-        m: u32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -6157,7 +6171,7 @@ pub enum Asm {
     // SQDMULH  <V><d>, <V><n>, <V><m>
     // SQDMULH  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SqdmulhAdvsimdVec {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6167,11 +6181,11 @@ pub enum Asm {
     // SQDMULL  <Va><d>, <Vb><n>, <Vm>.<Ts>[<index>]
     // SQDMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
     SqdmullAdvsimdElt {
-        size: u32,
-        l: u32,
-        m: u32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -6180,7 +6194,7 @@ pub enum Asm {
     // SQDMULL  <Va><d>, <Vb><n>, <Vb><m>
     // SQDMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     SqdmullAdvsimdVec {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6190,7 +6204,7 @@ pub enum Asm {
     // SQNEG  <V><d>, <V><n>
     // SQNEG  <Vd>.<T>, <Vn>.<T>
     SqnegAdvsimd {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -6199,11 +6213,11 @@ pub enum Asm {
     // SQRDMLAH  <V><d>, <V><n>, <Vm>.<Ts>[<index>]
     // SQRDMLAH  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>]
     SqrdmlahAdvsimdElt {
-        size: u32,
-        l: u32,
-        m: u32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -6212,7 +6226,7 @@ pub enum Asm {
     // SQRDMLAH  <V><d>, <V><n>, <V><m>
     // SQRDMLAH  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SqrdmlahAdvsimdVec {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6222,11 +6236,11 @@ pub enum Asm {
     // SQRDMLSH  <V><d>, <V><n>, <Vm>.<Ts>[<index>]
     // SQRDMLSH  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>]
     SqrdmlshAdvsimdElt {
-        size: u32,
-        l: u32,
-        m: u32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -6235,7 +6249,7 @@ pub enum Asm {
     // SQRDMLSH  <V><d>, <V><n>, <V><m>
     // SQRDMLSH  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SqrdmlshAdvsimdVec {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6245,11 +6259,11 @@ pub enum Asm {
     // SQRDMULH  <V><d>, <V><n>, <Vm>.<Ts>[<index>]
     // SQRDMULH  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>]
     SqrdmulhAdvsimdElt {
-        size: u32,
-        l: u32,
-        m: u32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -6258,7 +6272,7 @@ pub enum Asm {
     // SQRDMULH  <V><d>, <V><n>, <V><m>
     // SQRDMULH  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SqrdmulhAdvsimdVec {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6268,7 +6282,7 @@ pub enum Asm {
     // SQRSHL  <V><d>, <V><n>, <V><m>
     // SQRSHL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SqrshlAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6278,7 +6292,7 @@ pub enum Asm {
     // SQRSHRN  <Vb><d>, <Va><n>, #<shift>
     // SQRSHRN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     SqrshrnAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -6287,7 +6301,7 @@ pub enum Asm {
     // SQRSHRUN  <Vb><d>, <Va><n>, #<shift>
     // SQRSHRUN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     SqrshrunAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -6296,7 +6310,7 @@ pub enum Asm {
     // SQSHL  <V><d>, <V><n>, #<shift>
     // SQSHL  <Vd>.<T>, <Vn>.<T>, #<shift>
     SqshlAdvsimdImm {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -6305,7 +6319,7 @@ pub enum Asm {
     // SQSHL  <V><d>, <V><n>, <V><m>
     // SQSHL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SqshlAdvsimdReg {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6315,7 +6329,7 @@ pub enum Asm {
     // SQSHLU  <V><d>, <V><n>, #<shift>
     // SQSHLU  <Vd>.<T>, <Vn>.<T>, #<shift>
     SqshluAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -6324,7 +6338,7 @@ pub enum Asm {
     // SQSHRN  <Vb><d>, <Va><n>, #<shift>
     // SQSHRN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     SqshrnAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -6333,7 +6347,7 @@ pub enum Asm {
     // SQSHRUN  <Vb><d>, <Va><n>, #<shift>
     // SQSHRUN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     SqshrunAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -6342,7 +6356,7 @@ pub enum Asm {
     // SQSUB  <V><d>, <V><n>, <V><m>
     // SQSUB  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SqsubAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6352,7 +6366,7 @@ pub enum Asm {
     // SQXTN  <Vb><d>, <Va><n>
     // SQXTN{2}  <Vd>.<Tb>, <Vn>.<Ta>
     SqxtnAdvsimd {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -6361,7 +6375,7 @@ pub enum Asm {
     // SQXTUN  <Vb><d>, <Va><n>
     // SQXTUN{2}  <Vd>.<Tb>, <Vn>.<Ta>
     SqxtunAdvsimd {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -6369,8 +6383,8 @@ pub enum Asm {
     // Signed Rounding Halving Add
     // SRHADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SrhaddAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6380,7 +6394,7 @@ pub enum Asm {
     // SRI  <V><d>, <V><n>, #<shift>
     // SRI  <Vd>.<T>, <Vn>.<T>, #<shift>
     SriAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -6389,7 +6403,7 @@ pub enum Asm {
     // SRSHL  <V><d>, <V><n>, <V><m>
     // SRSHL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SrshlAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6399,7 +6413,7 @@ pub enum Asm {
     // SRSHR  <V><d>, <V><n>, #<shift>
     // SRSHR  <Vd>.<T>, <Vn>.<T>, #<shift>
     SrshrAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -6408,7 +6422,7 @@ pub enum Asm {
     // SRSRA  <V><d>, <V><n>, #<shift>
     // SRSRA  <Vd>.<T>, <Vn>.<T>, #<shift>
     SrsraAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -6422,7 +6436,7 @@ pub enum Asm {
     // SSHL  <V><d>, <V><n>, <V><m>
     // SSHL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SshlAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6431,8 +6445,8 @@ pub enum Asm {
     // Signed Shift Left Long (immediate)
     // SSHLL{2}  <Vd>.<Ta>, <Vn>.<Tb>, #<shift>
     SshllAdvsimd {
-        q: u32,
-        immb: u32,
+        q: i32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -6441,7 +6455,7 @@ pub enum Asm {
     // SSHR  <V><d>, <V><n>, #<shift>
     // SSHR  <Vd>.<T>, <Vn>.<T>, #<shift>
     SshrAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -6450,7 +6464,7 @@ pub enum Asm {
     // SSRA  <V><d>, <V><n>, #<shift>
     // SSRA  <Vd>.<T>, <Vn>.<T>, #<shift>
     SsraAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -6458,8 +6472,8 @@ pub enum Asm {
     // Signed Subtract Long
     // SSUBL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     SsublAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6468,8 +6482,8 @@ pub enum Asm {
     // Signed Subtract Wide
     // SSUBW{2}  <Vd>.<Ta>, <Vn>.<Ta>, <Vm>.<Tb>
     SsubwAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -6489,8 +6503,8 @@ pub enum Asm {
     // ST1  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>
     // ST1  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <Xm>
     St1AdvsimdMult {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -6509,9 +6523,9 @@ pub enum Asm {
     // ST1  { <Vt>.D }[<index>], [<Xn|SP>], #8
     // ST1  { <Vt>.D }[<index>], [<Xn|SP>], <Xm>
     St1AdvsimdSngl {
-        q: u32,
-        s: u32,
-        size: u32,
+        q: i32,
+        s: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -6521,8 +6535,8 @@ pub enum Asm {
     // ST2  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <imm>
     // ST2  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <Xm>
     St2AdvsimdMult {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -6541,9 +6555,9 @@ pub enum Asm {
     // ST2  { <Vt>.D, <Vt2>.D }[<index>], [<Xn|SP>], #16
     // ST2  { <Vt>.D, <Vt2>.D }[<index>], [<Xn|SP>], <Xm>
     St2AdvsimdSngl {
-        q: u32,
-        s: u32,
-        size: u32,
+        q: i32,
+        s: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -6553,9 +6567,9 @@ pub enum Asm {
     // ST2G  <Xt|SP>, [<Xn|SP>, #<simm>]!
     // ST2G  <Xt|SP>, [<Xn|SP>{, #<simm>}]
     St2g {
-        imm9: u32,
-        xn: u32,
-        xt: u32,
+        imm9: i32,
+        xn: i32,
+        xt: i32,
     },
     // ST3 (multiple structures) -- A64
     // Store multiple 3-element structures from three registers
@@ -6563,8 +6577,8 @@ pub enum Asm {
     // ST3  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>], <imm>
     // ST3  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>], <Xm>
     St3AdvsimdMult {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -6583,9 +6597,9 @@ pub enum Asm {
     // ST3  { <Vt>.D, <Vt2>.D, <Vt3>.D }[<index>], [<Xn|SP>], #24
     // ST3  { <Vt>.D, <Vt2>.D, <Vt3>.D }[<index>], [<Xn|SP>], <Xm>
     St3AdvsimdSngl {
-        q: u32,
-        s: u32,
-        size: u32,
+        q: i32,
+        s: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -6595,8 +6609,8 @@ pub enum Asm {
     // ST4  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>
     // ST4  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <Xm>
     St4AdvsimdMult {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -6615,9 +6629,9 @@ pub enum Asm {
     // ST4  { <Vt>.D, <Vt2>.D, <Vt3>.D, <Vt4>.D }[<index>], [<Xn|SP>], #32
     // ST4  { <Vt>.D, <Vt2>.D, <Vt3>.D, <Vt4>.D }[<index>], [<Xn|SP>], <Xm>
     St4AdvsimdSngl {
-        q: u32,
-        s: u32,
-        size: u32,
+        q: i32,
+        s: i32,
+        size: i32,
         rn: Register,
         rt: Register,
     },
@@ -6761,16 +6775,16 @@ pub enum Asm {
     // STG  <Xt|SP>, [<Xn|SP>, #<simm>]!
     // STG  <Xt|SP>, [<Xn|SP>{, #<simm>}]
     Stg {
-        imm9: u32,
-        xn: u32,
-        xt: u32,
+        imm9: i32,
+        xn: i32,
+        xt: i32,
     },
     // STGM -- A64
     // Store Tag Multiple
     // STGM  <Xt>, [<Xn|SP>]
     Stgm {
-        xn: u32,
-        xt: u32,
+        xn: i32,
+        xt: i32,
     },
     // STGP -- A64
     // Store Allocation Tag and Pair of registers
@@ -6778,10 +6792,10 @@ pub enum Asm {
     // STGP  <Xt1>, <Xt2>, [<Xn|SP>, #<imm>]!
     // STGP  <Xt1>, <Xt2>, [<Xn|SP>{, #<imm>}]
     Stgp {
-        simm7: u32,
-        xt2: u32,
-        xn: u32,
-        xt: u32,
+        simm7: i32,
+        xt2: i32,
+        xn: i32,
+        xt: i32,
     },
     // STLLR -- A64
     // Store LORelease Register
@@ -6832,7 +6846,7 @@ pub enum Asm {
     // STLUR  <Wt>, [<Xn|SP>{, #<simm>}]
     // STLUR  <Xt>, [<Xn|SP>{, #<simm>}]
     StlurGen {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -6840,7 +6854,7 @@ pub enum Asm {
     // Store-Release Register Byte (unscaled)
     // STLURB  <Wt>, [<Xn|SP>{, #<simm>}]
     Stlurb {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -6848,7 +6862,7 @@ pub enum Asm {
     // Store-Release Register Halfword (unscaled)
     // STLURH  <Wt>, [<Xn|SP>{, #<simm>}]
     Stlurh {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -6857,7 +6871,7 @@ pub enum Asm {
     // STLXP  <Ws>, <Wt1>, <Wt2>, [<Xn|SP>{,#0}]
     // STLXP  <Ws>, <Xt1>, <Xt2>, [<Xn|SP>{,#0}]
     Stlxp {
-        sz: u32,
+        sz: i32,
         rs: Register,
         rt2: Register,
         rn: Register,
@@ -6894,8 +6908,8 @@ pub enum Asm {
     // STNP  <Dt1>, <Dt2>, [<Xn|SP>{, #<imm>}]
     // STNP  <Qt1>, <Qt2>, [<Xn|SP>{, #<imm>}]
     StnpFpsimd {
-        opc: u32,
-        imm7: u32,
+        opc: i32,
+        imm7: i32,
         rt2: Register,
         rn: Register,
         rt: Register,
@@ -6905,7 +6919,7 @@ pub enum Asm {
     // STNP  <Wt1>, <Wt2>, [<Xn|SP>{, #<imm>}]
     // STNP  <Xt1>, <Xt2>, [<Xn|SP>{, #<imm>}]
     StnpGen {
-        imm7: u32,
+        imm7: i32,
         rt2: Register,
         rn: Register,
         rt: Register,
@@ -6922,8 +6936,8 @@ pub enum Asm {
     // STP  <Dt1>, <Dt2>, [<Xn|SP>{, #<imm>}]
     // STP  <Qt1>, <Qt2>, [<Xn|SP>{, #<imm>}]
     StpFpsimd {
-        opc: u32,
-        imm7: u32,
+        opc: i32,
+        imm7: i32,
         rt2: Register,
         rn: Register,
         rt: Register,
@@ -6937,7 +6951,7 @@ pub enum Asm {
     // STP  <Wt1>, <Wt2>, [<Xn|SP>{, #<imm>}]
     // STP  <Xt1>, <Xt2>, [<Xn|SP>{, #<imm>}]
     StpGen {
-        imm7: u32,
+        imm7: i32,
         rt2: Register,
         rn: Register,
         rt: Register,
@@ -6960,8 +6974,8 @@ pub enum Asm {
     // STR  <Dt>, [<Xn|SP>{, #<pimm>}]
     // STR  <Qt>, [<Xn|SP>{, #<pimm>}]
     StrImmFpsimd {
-        size: u32,
-        imm9: u32,
+        size: i32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -6974,7 +6988,7 @@ pub enum Asm {
     // STR  <Wt>, [<Xn|SP>{, #<pimm>}]
     // STR  <Xt>, [<Xn|SP>{, #<pimm>}]
     StrImmGen {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -6987,10 +7001,10 @@ pub enum Asm {
     // STR  <Dt>, [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
     // STR  <Qt>, [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
     StrRegFpsimd {
-        size: u32,
+        size: i32,
         rm: Register,
-        option: u32,
-        s: u32,
+        option: i32,
+        s: i32,
         rn: Register,
         rt: Register,
     },
@@ -7000,8 +7014,8 @@ pub enum Asm {
     // STR  <Xt>, [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
     StrRegGen {
         rm: Register,
-        option: u32,
-        s: u32,
+        option: i32,
+        s: i32,
         rn: Register,
         rt: Register,
     },
@@ -7011,7 +7025,7 @@ pub enum Asm {
     // STRB  <Wt>, [<Xn|SP>, #<simm>]!
     // STRB  <Wt>, [<Xn|SP>{, #<pimm>}]
     StrbImm {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -7021,8 +7035,8 @@ pub enum Asm {
     // STRB  <Wt>, [<Xn|SP>, <Xm>{, LSL <amount>}]
     StrbReg {
         rm: Register,
-        option: u32,
-        s: u32,
+        option: i32,
+        s: i32,
         rn: Register,
         rt: Register,
     },
@@ -7032,7 +7046,7 @@ pub enum Asm {
     // STRH  <Wt>, [<Xn|SP>, #<simm>]!
     // STRH  <Wt>, [<Xn|SP>{, #<pimm>}]
     StrhImm {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -7041,8 +7055,8 @@ pub enum Asm {
     // STRH  <Wt>, [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
     StrhReg {
         rm: Register,
-        option: u32,
-        s: u32,
+        option: i32,
+        s: i32,
         rn: Register,
         rt: Register,
     },
@@ -7162,7 +7176,7 @@ pub enum Asm {
     // STTR  <Wt>, [<Xn|SP>{, #<simm>}]
     // STTR  <Xt>, [<Xn|SP>{, #<simm>}]
     Sttr {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -7170,7 +7184,7 @@ pub enum Asm {
     // Store Register Byte (unprivileged)
     // STTRB  <Wt>, [<Xn|SP>{, #<simm>}]
     Sttrb {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -7178,7 +7192,7 @@ pub enum Asm {
     // Store Register Halfword (unprivileged)
     // STTRH  <Wt>, [<Xn|SP>{, #<simm>}]
     Sttrh {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -7264,8 +7278,8 @@ pub enum Asm {
     // STUR  <Dt>, [<Xn|SP>{, #<simm>}]
     // STUR  <Qt>, [<Xn|SP>{, #<simm>}]
     SturFpsimd {
-        size: u32,
-        imm9: u32,
+        size: i32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -7274,7 +7288,7 @@ pub enum Asm {
     // STUR  <Wt>, [<Xn|SP>{, #<simm>}]
     // STUR  <Xt>, [<Xn|SP>{, #<simm>}]
     SturGen {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -7282,7 +7296,7 @@ pub enum Asm {
     // Store Register Byte (unscaled)
     // STURB  <Wt>, [<Xn|SP>{, #<simm>}]
     Sturb {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -7290,7 +7304,7 @@ pub enum Asm {
     // Store Register Halfword (unscaled)
     // STURH  <Wt>, [<Xn|SP>{, #<simm>}]
     Sturh {
-        imm9: u32,
+        imm9: i32,
         rn: Register,
         rt: Register,
     },
@@ -7299,7 +7313,7 @@ pub enum Asm {
     // STXP  <Ws>, <Wt1>, <Wt2>, [<Xn|SP>{,#0}]
     // STXP  <Ws>, <Xt1>, <Xt2>, [<Xn|SP>{,#0}]
     Stxp {
-        sz: u32,
+        sz: i32,
         rs: Register,
         rt2: Register,
         rn: Register,
@@ -7336,9 +7350,9 @@ pub enum Asm {
     // STZ2G  <Xt|SP>, [<Xn|SP>, #<simm>]!
     // STZ2G  <Xt|SP>, [<Xn|SP>{, #<simm>}]
     Stz2g {
-        imm9: u32,
-        xn: u32,
-        xt: u32,
+        imm9: i32,
+        xn: i32,
+        xt: i32,
     },
     // STZG -- A64
     // Store Allocation Tag, Zeroing
@@ -7346,26 +7360,26 @@ pub enum Asm {
     // STZG  <Xt|SP>, [<Xn|SP>, #<simm>]!
     // STZG  <Xt|SP>, [<Xn|SP>{, #<simm>}]
     Stzg {
-        imm9: u32,
-        xn: u32,
-        xt: u32,
+        imm9: i32,
+        xn: i32,
+        xt: i32,
     },
     // STZGM -- A64
     // Store Tag and Zero Multiple
     // STZGM  <Xt>, [<Xn|SP>]
     Stzgm {
-        xn: u32,
-        xt: u32,
+        xn: i32,
+        xt: i32,
     },
     // SUB (extended register) -- A64
     // Subtract (extended register)
     // SUB  <Wd|WSP>, <Wn|WSP>, <Wm>{, <extend> {#<amount>}}
     // SUB  <Xd|SP>, <Xn|SP>, <R><m>{, <extend> {#<amount>}}
     SubAddsubExt {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        option: u32,
-        imm3: u32,
+        option: i32,
+        imm3: i32,
         rn: Register,
         rd: Register,
     },
@@ -7374,9 +7388,9 @@ pub enum Asm {
     // SUB  <Wd|WSP>, <Wn|WSP>, #<imm>{, <shift>}
     // SUB  <Xd|SP>, <Xn|SP>, #<imm>{, <shift>}
     SubAddsubImm {
-        sf: u32,
-        sh: u32,
-        imm12: u32,
+        sf: i32,
+        sh: i32,
+        imm12: i32,
         rn: Register,
         rd: Register,
     },
@@ -7385,10 +7399,10 @@ pub enum Asm {
     // SUB  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
     // SUB  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
     SubAddsubShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -7397,7 +7411,7 @@ pub enum Asm {
     // SUB  <V><d>, <V><n>, <V><m>
     // SUB  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     SubAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7406,17 +7420,17 @@ pub enum Asm {
     // Subtract with Tag
     // SUBG  <Xd|SP>, <Xn|SP>, #<uimm6>, #<uimm4>
     Subg {
-        uimm6: u32,
-        uimm4: u32,
-        xn: u32,
-        xd: u32,
+        uimm6: i32,
+        uimm4: i32,
+        xn: i32,
+        xd: i32,
     },
     // SUBHN, SUBHN2 -- A64
     // Subtract returning High Narrow
     // SUBHN{2}  <Vd>.<Tb>, <Vn>.<Ta>, <Vm>.<Ta>
     SubhnAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7425,27 +7439,27 @@ pub enum Asm {
     // Subtract Pointer
     // SUBP  <Xd>, <Xn|SP>, <Xm|SP>
     Subp {
-        xm: u32,
-        xn: u32,
-        xd: u32,
+        xm: i32,
+        xn: i32,
+        xd: i32,
     },
     // SUBPS -- A64
     // Subtract Pointer, setting Flags
     // SUBPS  <Xd>, <Xn|SP>, <Xm|SP>
     Subps {
-        xm: u32,
-        xn: u32,
-        xd: u32,
+        xm: i32,
+        xn: i32,
+        xd: i32,
     },
     // SUBS (extended register) -- A64
     // Subtract (extended register), setting flags
     // SUBS  <Wd>, <Wn|WSP>, <Wm>{, <extend> {#<amount>}}
     // SUBS  <Xd>, <Xn|SP>, <R><m>{, <extend> {#<amount>}}
     SubsAddsubExt {
-        sf: u32,
+        sf: i32,
         rm: Register,
-        option: u32,
-        imm3: u32,
+        option: i32,
+        imm3: i32,
         rn: Register,
         rd: Register,
     },
@@ -7454,9 +7468,9 @@ pub enum Asm {
     // SUBS  <Wd>, <Wn|WSP>, #<imm>{, <shift>}
     // SUBS  <Xd>, <Xn|SP>, #<imm>{, <shift>}
     SubsAddsubImm {
-        sf: u32,
-        sh: u32,
-        imm12: u32,
+        sf: i32,
+        sh: i32,
+        imm12: i32,
         rn: Register,
         rd: Register,
     },
@@ -7465,10 +7479,10 @@ pub enum Asm {
     // SUBS  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
     // SUBS  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
     SubsAddsubShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -7476,11 +7490,11 @@ pub enum Asm {
     // Dot product with signed and unsigned integers (vector, by element)
     // SUDOT  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.4B[<index>]
     SudotAdvsimdElt {
-        q: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -7489,7 +7503,7 @@ pub enum Asm {
     // SUQADD  <V><d>, <V><n>
     // SUQADD  <Vd>.<T>, <Vn>.<T>
     SuqaddAdvsimd {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -7497,7 +7511,7 @@ pub enum Asm {
     // Supervisor Call
     // SVC  #<imm>
     Svc {
-        imm16: u32,
+        imm16: i32,
     },
     // SWP, SWPA, SWPAL, SWPL -- A64
     // Swap word or doubleword in memory
@@ -7510,7 +7524,7 @@ pub enum Asm {
     // SWPAL  <Xs>, <Xt>, [<Xn|SP>]
     // SWPL  <Xs>, <Xt>, [<Xn|SP>]
     Swp {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -7523,7 +7537,7 @@ pub enum Asm {
     // SWPB  <Ws>, <Wt>, [<Xn|SP>]
     // SWPLB  <Ws>, <Wt>, [<Xn|SP>]
     Swpb {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -7536,7 +7550,7 @@ pub enum Asm {
     // SWPH  <Ws>, <Wt>, [<Xn|SP>]
     // SWPLH  <Ws>, <Wt>, [<Xn|SP>]
     Swph {
-        a: u32,
+        a: i32,
         r: Register,
         rs: Register,
         rn: Register,
@@ -7549,8 +7563,8 @@ pub enum Asm {
     // SXTB  <Xd>, <Wn>
     // SBFM <Xd>, <Xn>, #0, #7
     SxtbSbfm {
-        sf: u32,
-        n: u32,
+        sf: i32,
+        n: i32,
         rn: Register,
         rd: Register,
     },
@@ -7561,8 +7575,8 @@ pub enum Asm {
     // SXTH  <Xd>, <Wn>
     // SBFM <Xd>, <Xn>, #0, #15
     SxthSbfm {
-        sf: u32,
-        n: u32,
+        sf: i32,
+        n: i32,
         rn: Register,
         rd: Register,
     },
@@ -7571,7 +7585,7 @@ pub enum Asm {
     // SXTL{2}  <Vd>.<Ta>, <Vn>.<Tb>
     // SSHLL{2}  <Vd>.<Ta>, <Vn>.<Tb>, #0
     SxtlSshllAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -7587,20 +7601,20 @@ pub enum Asm {
     // System instruction
     // SYS  #<op1>, <Cn>, <Cm>, #<op2>{, <Xt>}
     Sys {
-        op1: u32,
-        crn: u32,
-        crm: u32,
-        op2: u32,
+        op1: i32,
+        crn: i32,
+        crm: i32,
+        op2: i32,
         rt: Register,
     },
     // SYSL -- A64
     // System instruction with result
     // SYSL  <Xt>, #<op1>, <Cn>, <Cm>, #<op2>
     Sysl {
-        op1: u32,
-        crn: u32,
-        crm: u32,
-        op2: u32,
+        op1: i32,
+        crn: i32,
+        crm: i32,
+        op2: i32,
         rt: Register,
     },
     // TBL -- A64
@@ -7610,9 +7624,9 @@ pub enum Asm {
     // TBL  <Vd>.<Ta>, { <Vn>.16B, <Vn+1>.16B, <Vn+2>.16B, <Vn+3>.16B }, <Vm>.<Ta>
     // TBL  <Vd>.<Ta>, { <Vn>.16B }, <Vm>.<Ta>
     TblAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
-        len: u32,
+        len: i32,
         rn: Register,
         rd: Register,
     },
@@ -7620,9 +7634,9 @@ pub enum Asm {
     // Test bit and Branch if Nonzero
     // TBNZ  <R><t>, #<imm>, <label>
     Tbnz {
-        b5: u32,
-        b40: u32,
-        imm14: u32,
+        b5: i32,
+        b40: i32,
+        imm14: i32,
         rt: Register,
     },
     // TBX -- A64
@@ -7632,9 +7646,9 @@ pub enum Asm {
     // TBX  <Vd>.<Ta>, { <Vn>.16B, <Vn+1>.16B, <Vn+2>.16B, <Vn+3>.16B }, <Vm>.<Ta>
     // TBX  <Vd>.<Ta>, { <Vn>.16B }, <Vm>.<Ta>
     TbxAdvsimd {
-        q: u32,
+        q: i32,
         rm: Register,
-        len: u32,
+        len: i32,
         rn: Register,
         rd: Register,
     },
@@ -7642,9 +7656,9 @@ pub enum Asm {
     // Test bit and Branch if Zero
     // TBZ  <R><t>, #<imm>, <label>
     Tbz {
-        b5: u32,
-        b40: u32,
-        imm14: u32,
+        b5: i32,
+        b40: i32,
+        imm14: i32,
         rt: Register,
     },
     // TLBI -- A64
@@ -7652,17 +7666,17 @@ pub enum Asm {
     // TLBI  <tlbi_op>{, <Xt>}
     // SYS #<op1>, C8, <Cm>, #<op2>{, <Xt>}
     TlbiSys {
-        op1: u32,
-        crm: u32,
-        op2: u32,
+        op1: i32,
+        crm: i32,
+        op2: i32,
         rt: Register,
     },
     // TRN1 -- A64
     // Transpose vectors (primary)
     // TRN1  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     Trn1Advsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7671,8 +7685,8 @@ pub enum Asm {
     // Transpose vectors (secondary)
     // TRN2  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     Trn2Advsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7688,10 +7702,10 @@ pub enum Asm {
     // TST  <Xn>, #<imm>
     // ANDS XZR, <Xn>, #<imm>
     TstAndsLogImm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
     },
     // TST (shifted register) -- A64
@@ -7701,18 +7715,18 @@ pub enum Asm {
     // TST  <Xn>, <Xm>{, <shift> #<amount>}
     // ANDS XZR, <Xn>, <Xm>{, <shift> #<amount>}
     TstAndsLogShift {
-        sf: u32,
-        shift: u32,
+        sf: i32,
+        shift: i32,
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
     },
     // UABA -- A64
     // Unsigned Absolute difference and Accumulate
     // UABA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UabaAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7721,8 +7735,8 @@ pub enum Asm {
     // Unsigned Absolute difference and Accumulate Long
     // UABAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     UabalAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7731,8 +7745,8 @@ pub enum Asm {
     // Unsigned Absolute Difference (vector)
     // UABD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UabdAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7741,8 +7755,8 @@ pub enum Asm {
     // Unsigned Absolute Difference Long
     // UABDL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     UabdlAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7751,8 +7765,8 @@ pub enum Asm {
     // Unsigned Add and Accumulate Long Pairwise
     // UADALP  <Vd>.<Ta>, <Vn>.<Tb>
     UadalpAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -7760,8 +7774,8 @@ pub enum Asm {
     // Unsigned Add Long (vector)
     // UADDL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     UaddlAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7770,8 +7784,8 @@ pub enum Asm {
     // Unsigned Add Long Pairwise
     // UADDLP  <Vd>.<Ta>, <Vn>.<Tb>
     UaddlpAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -7779,8 +7793,8 @@ pub enum Asm {
     // Unsigned sum Long across Vector
     // UADDLV  <V><d>, <Vn>.<T>
     UaddlvAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -7788,8 +7802,8 @@ pub enum Asm {
     // Unsigned Add Wide
     // UADDW{2}  <Vd>.<Ta>, <Vn>.<Ta>, <Vm>.<Tb>
     UaddwAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7801,10 +7815,10 @@ pub enum Asm {
     // UBFIZ  <Xd>, <Xn>, #<lsb>, #<width>
     // UBFM <Xd>, <Xn>, #(-<lsb> MOD 64), #(<width>-1)
     UbfizUbfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -7813,10 +7827,10 @@ pub enum Asm {
     // UBFM  <Wd>, <Wn>, #<immr>, #<imms>
     // UBFM  <Xd>, <Xn>, #<immr>, #<imms>
     Ubfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -7827,10 +7841,10 @@ pub enum Asm {
     // UBFX  <Xd>, <Xn>, #<lsb>, #<width>
     // UBFM <Xd>, <Xn>, #<lsb>, #(<lsb>+<width>-1)
     UbfxUbfm {
-        sf: u32,
-        n: u32,
-        immr: u32,
-        imms: u32,
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -7839,7 +7853,7 @@ pub enum Asm {
     // UCVTF  <V><d>, <V><n>, #<fbits>
     // UCVTF  <Vd>.<T>, <Vn>.<T>, #<fbits>
     UcvtfAdvsimdFix {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -7862,9 +7876,9 @@ pub enum Asm {
     // UCVTF  <Sd>, <Xn>, #<fbits>
     // UCVTF  <Dd>, <Xn>, #<fbits>
     UcvtfFloatFix {
-        sf: u32,
-        ftype: u32,
-        scale: u32,
+        sf: i32,
+        ftype: i32,
+        scale: i32,
         rn: Register,
         rd: Register,
     },
@@ -7877,8 +7891,8 @@ pub enum Asm {
     // UCVTF  <Sd>, <Xn>
     // UCVTF  <Dd>, <Xn>
     UcvtfFloatInt {
-        sf: u32,
-        ftype: u32,
+        sf: i32,
+        ftype: i32,
         rn: Register,
         rd: Register,
     },
@@ -7886,14 +7900,14 @@ pub enum Asm {
     // Permanently Undefined
     // UDF  #<imm>
     UdfPermUndef {
-        imm16: u32,
+        imm16: i32,
     },
     // UDIV -- A64
     // Unsigned Divide
     // UDIV  <Wd>, <Wn>, <Wm>
     // UDIV  <Xd>, <Xn>, <Xm>
     Udiv {
-        sf: u32,
+        sf: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7902,12 +7916,12 @@ pub enum Asm {
     // Dot Product unsigned arithmetic (vector, by element)
     // UDOT  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.4B[<index>]
     UdotAdvsimdElt {
-        q: u32,
-        size: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -7915,8 +7929,8 @@ pub enum Asm {
     // Dot Product unsigned arithmetic (vector)
     // UDOT  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     UdotAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7925,8 +7939,8 @@ pub enum Asm {
     // Unsigned Halving Add
     // UHADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UhaddAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7935,8 +7949,8 @@ pub enum Asm {
     // Unsigned Halving Subtract
     // UHSUB  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UhsubAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7954,8 +7968,8 @@ pub enum Asm {
     // Unsigned Maximum (vector)
     // UMAX  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UmaxAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7964,8 +7978,8 @@ pub enum Asm {
     // Unsigned Maximum Pairwise
     // UMAXP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UmaxpAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7974,8 +7988,8 @@ pub enum Asm {
     // Unsigned Maximum across Vector
     // UMAXV  <V><d>, <Vn>.<T>
     UmaxvAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -7983,8 +7997,8 @@ pub enum Asm {
     // Unsigned Minimum (vector)
     // UMIN  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UminAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -7993,8 +8007,8 @@ pub enum Asm {
     // Unsigned Minimum Pairwise
     // UMINP  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UminpAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8003,8 +8017,8 @@ pub enum Asm {
     // Unsigned Minimum across Vector
     // UMINV  <V><d>, <Vn>.<T>
     UminvAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -8012,12 +8026,12 @@ pub enum Asm {
     // Unsigned Multiply-Add Long (vector, by element)
     // UMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
     UmlalAdvsimdElt {
-        q: u32,
-        size: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -8025,8 +8039,8 @@ pub enum Asm {
     // Unsigned Multiply-Add Long (vector)
     // UMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     UmlalAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8035,12 +8049,12 @@ pub enum Asm {
     // Unsigned Multiply-Subtract Long (vector, by element)
     // UMLSL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
     UmlslAdvsimdElt {
-        q: u32,
-        size: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -8048,8 +8062,8 @@ pub enum Asm {
     // Unsigned Multiply-Subtract Long (vector)
     // UMLSL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     UmlslAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8076,8 +8090,8 @@ pub enum Asm {
     // UMOV  <Wd>, <Vn>.<Ts>[<index>]
     // UMOV  <Xd>, <Vn>.<Ts>[<index>]
     UmovAdvsimd {
-        q: u32,
-        imm5: u32,
+        q: i32,
+        imm5: i32,
         rn: Register,
         rd: Register,
     },
@@ -8102,12 +8116,12 @@ pub enum Asm {
     // Unsigned Multiply Long (vector, by element)
     // UMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
     UmullAdvsimdElt {
-        q: u32,
-        size: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        size: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -8115,8 +8129,8 @@ pub enum Asm {
     // Unsigned Multiply long (vector)
     // UMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     UmullAdvsimdVec {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8135,7 +8149,7 @@ pub enum Asm {
     // UQADD  <V><d>, <V><n>, <V><m>
     // UQADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UqaddAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8145,7 +8159,7 @@ pub enum Asm {
     // UQRSHL  <V><d>, <V><n>, <V><m>
     // UQRSHL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UqrshlAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8155,7 +8169,7 @@ pub enum Asm {
     // UQRSHRN  <Vb><d>, <Va><n>, #<shift>
     // UQRSHRN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     UqrshrnAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -8164,7 +8178,7 @@ pub enum Asm {
     // UQSHL  <V><d>, <V><n>, #<shift>
     // UQSHL  <Vd>.<T>, <Vn>.<T>, #<shift>
     UqshlAdvsimdImm {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -8173,7 +8187,7 @@ pub enum Asm {
     // UQSHL  <V><d>, <V><n>, <V><m>
     // UQSHL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UqshlAdvsimdReg {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8183,7 +8197,7 @@ pub enum Asm {
     // UQSHRN  <Vb><d>, <Va><n>, #<shift>
     // UQSHRN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     UqshrnAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -8192,7 +8206,7 @@ pub enum Asm {
     // UQSUB  <V><d>, <V><n>, <V><m>
     // UQSUB  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UqsubAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8202,7 +8216,7 @@ pub enum Asm {
     // UQXTN  <Vb><d>, <Va><n>
     // UQXTN{2}  <Vd>.<Tb>, <Vn>.<Ta>
     UqxtnAdvsimd {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -8210,8 +8224,8 @@ pub enum Asm {
     // Unsigned Reciprocal Estimate
     // URECPE  <Vd>.<T>, <Vn>.<T>
     UrecpeAdvsimd {
-        q: u32,
-        sz: u32,
+        q: i32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -8219,8 +8233,8 @@ pub enum Asm {
     // Unsigned Rounding Halving Add
     // URHADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UrhaddAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8230,7 +8244,7 @@ pub enum Asm {
     // URSHL  <V><d>, <V><n>, <V><m>
     // URSHL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UrshlAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8240,7 +8254,7 @@ pub enum Asm {
     // URSHR  <V><d>, <V><n>, #<shift>
     // URSHR  <Vd>.<T>, <Vn>.<T>, #<shift>
     UrshrAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -8248,8 +8262,8 @@ pub enum Asm {
     // Unsigned Reciprocal Square Root Estimate
     // URSQRTE  <Vd>.<T>, <Vn>.<T>
     UrsqrteAdvsimd {
-        q: u32,
-        sz: u32,
+        q: i32,
+        sz: i32,
         rn: Register,
         rd: Register,
     },
@@ -8258,7 +8272,7 @@ pub enum Asm {
     // URSRA  <V><d>, <V><n>, #<shift>
     // URSRA  <Vd>.<T>, <Vn>.<T>, #<shift>
     UrsraAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -8266,11 +8280,11 @@ pub enum Asm {
     // Dot Product with unsigned and signed integers (vector, by element)
     // USDOT  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.4B[<index>]
     UsdotAdvsimdElt {
-        q: u32,
-        l: u32,
-        m: u32,
+        q: i32,
+        l: i32,
+        m: i32,
         rm: Register,
-        h: u32,
+        h: i32,
         rn: Register,
         rd: Register,
     },
@@ -8278,7 +8292,7 @@ pub enum Asm {
     // Dot Product with unsigned and signed integers (vector)
     // USDOT  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     UsdotAdvsimdVec {
-        q: u32,
+        q: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8288,7 +8302,7 @@ pub enum Asm {
     // USHL  <V><d>, <V><n>, <V><m>
     // USHL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     UshlAdvsimd {
-        size: u32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8297,8 +8311,8 @@ pub enum Asm {
     // Unsigned Shift Left Long (immediate)
     // USHLL{2}  <Vd>.<Ta>, <Vn>.<Tb>, #<shift>
     UshllAdvsimd {
-        q: u32,
-        immb: u32,
+        q: i32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -8307,7 +8321,7 @@ pub enum Asm {
     // USHR  <V><d>, <V><n>, #<shift>
     // USHR  <Vd>.<T>, <Vn>.<T>, #<shift>
     UshrAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -8324,7 +8338,7 @@ pub enum Asm {
     // USQADD  <V><d>, <V><n>
     // USQADD  <Vd>.<T>, <Vn>.<T>
     UsqaddAdvsimd {
-        size: u32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -8333,7 +8347,7 @@ pub enum Asm {
     // USRA  <V><d>, <V><n>, #<shift>
     // USRA  <Vd>.<T>, <Vn>.<T>, #<shift>
     UsraAdvsimd {
-        immb: u32,
+        immb: i32,
         rn: Register,
         rd: Register,
     },
@@ -8341,8 +8355,8 @@ pub enum Asm {
     // Unsigned Subtract Long
     // USUBL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
     UsublAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8351,8 +8365,8 @@ pub enum Asm {
     // Unsigned Subtract Wide
     // USUBW{2}  <Vd>.<Ta>, <Vn>.<Ta>, <Vm>.<Tb>
     UsubwAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8378,7 +8392,7 @@ pub enum Asm {
     // UXTL{2}  <Vd>.<Ta>, <Vn>.<Tb>
     // USHLL{2}  <Vd>.<Ta>, <Vn>.<Tb>, #0
     UxtlUshllAdvsimd {
-        q: u32,
+        q: i32,
         rn: Register,
         rd: Register,
     },
@@ -8386,8 +8400,8 @@ pub enum Asm {
     // Unzip vectors (primary)
     // UZP1  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     Uzp1Advsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8396,8 +8410,8 @@ pub enum Asm {
     // Unzip vectors (secondary)
     // UZP2  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     Uzp2Advsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8431,7 +8445,7 @@ pub enum Asm {
     // XAR  <Vd>.2D, <Vn>.2D, <Vm>.2D, #<imm6>
     XarAdvsimd {
         rm: Register,
-        imm6: u32,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -8441,15 +8455,15 @@ pub enum Asm {
     // XPACI  <Xd>
     // XPACLRI
     Xpac {
-        d: u32,
+        d: i32,
         rd: Register,
     },
     // XTN, XTN2 -- A64
     // Extract Narrow
     // XTN{2}  <Vd>.<Tb>, <Vn>.<Ta>
     XtnAdvsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rn: Register,
         rd: Register,
     },
@@ -8461,8 +8475,8 @@ pub enum Asm {
     // Zip vectors (primary)
     // ZIP1  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     Zip1Advsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8471,8 +8485,8 @@ pub enum Asm {
     // Zip vectors (secondary)
     // ZIP2  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
     Zip2Advsimd {
-        q: u32,
-        size: u32,
+        q: i32,
+        size: i32,
         rm: Register,
         rn: Register,
         rd: Register,
@@ -8483,15 +8497,26 @@ impl Asm {
     pub fn encode(&self) -> u32 {
         match self {
             Asm::AbsAdvsimd { size, rn, rd } => {
-                0b01_0_11110_00_10000_01011_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_0_11110_00_10000_01011_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Adc { sf, rm, rn, rd } => {
-                0b0_0_0_11010000_00000_000000_00000_00000_ | sf << 31 | rm << 16 | rn << 5 | rd << 0
+                0b0_0_0_11010000_00000_000000_00000_00000_
+                    | (*sf as u32) << 31
+                    | rm << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Adcs { sf, rm, rn, rd } => {
-                0b0_0_1_11010000_00000_000000_00000_00000_ | sf << 31 | rm << 16 | rn << 5 | rd << 0
+                0b0_0_1_11010000_00000_000000_00000_00000_
+                    | (*sf as u32) << 31
+                    | rm << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::AddAddsubExt {
@@ -8503,10 +8528,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01011_00_1_00000_000_000_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | option << 13
-                    | imm3 << 10
+                    | (*option as u32) << 13
+                    | (*imm3 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -8519,9 +8544,9 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_100010_0_000000000000_00000_00000_
-                    | sf << 31
-                    | sh << 22
-                    | imm12 << 10
+                    | (*sf as u32) << 31
+                    | (*sh as u32) << 22
+                    | (*imm12 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -8535,17 +8560,17 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01011_00_0_00000_000000_00000_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::AddAdvsimd { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_10000_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -8558,10 +8583,10 @@ impl Asm {
                 xd,
             } => {
                 0b1_0_0_100011_0_000000_00_0000_00000_00000_
-                    | uimm6 << 16
-                    | uimm4 << 10
-                    | xn << 5
-                    | xd << 0
+                    | (*uimm6 as u32) << 16
+                    | (*uimm4 as u32) << 10
+                    | (*xn as u32) << 5
+                    | (*xd as u32) << 0
             }
 
             Asm::AddhnAdvsimd {
@@ -8572,15 +8597,18 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_01_0_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::AddpAdvsimdPair { size, rn, rd } => {
-                0b01_0_11110_00_11000_11011_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_0_11110_00_11000_11011_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::AddpAdvsimdVec {
@@ -8591,8 +8619,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_10111_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -8607,10 +8635,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01011_00_1_00000_000_000_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | option << 13
-                    | imm3 << 10
+                    | (*option as u32) << 13
+                    | (*imm3 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -8623,9 +8651,9 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_100010_0_000000000000_00000_00000_
-                    | sf << 31
-                    | sh << 22
-                    | imm12 << 10
+                    | (*sf as u32) << 31
+                    | (*sh as u32) << 22
+                    | (*imm12 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -8639,28 +8667,34 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01011_00_0_00000_000000_00000_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::AddvAdvsimd { q, size, rn, rd } => {
                 0b0_0_0_01110_00_11000_11011_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Adr { immlo, immhi, rd } => {
-                0b0_00_10000_0000000000000000000_00000_ | immlo << 29 | immhi << 5 | rd << 0
+                0b0_00_10000_0000000000000000000_00000_
+                    | (*immlo as u32) << 29
+                    | (*immhi as u32) << 5
+                    | rd << 0
             }
 
             Asm::Adrp { immlo, immhi, rd } => {
-                0b1_00_10000_0000000000000000000_00000_ | immlo << 29 | immhi << 5 | rd << 0
+                0b1_00_10000_0000000000000000000_00000_
+                    | (*immlo as u32) << 29
+                    | (*immhi as u32) << 5
+                    | rd << 0
             }
 
             Asm::AesdAdvsimd { rn, rd } => {
@@ -8681,7 +8715,7 @@ impl Asm {
 
             Asm::AndAdvsimd { q, rm, rn, rd } => {
                 0b0_0_0_01110_00_1_00000_00011_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -8696,10 +8730,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_00_100100_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -8713,10 +8747,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_00_01010_00_0_00000_000000_00000_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -8730,10 +8764,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_11_100100_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -8747,17 +8781,17 @@ impl Asm {
                 rd,
             } => {
                 0b0_11_01010_00_0_00000_000000_00000_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::AsrAsrv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_0010_10_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -8771,51 +8805,72 @@ impl Asm {
                 rd,
             } => {
                 0b0_00_100110_0_000000_11111_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Asrv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_0010_10_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::AtSys { op1, op2, rt } => {
-                0b1101010100_0_01_000_0111_100_000_00000_ | op1 << 16 | op2 << 5 | rt << 0
+                0b1101010100_0_01_000_0111_100_000_00000_
+                    | (*op1 as u32) << 16
+                    | (*op2 as u32) << 5
+                    | rt << 0
             }
 
             Asm::Autda { z, rn, rd } => {
-                0b1_1_0_11010110_00001_0_0_0_110_00000_00000_ | z << 13 | rn << 5 | rd << 0
+                0b1_1_0_11010110_00001_0_0_0_110_00000_00000_
+                    | (*z as u32) << 13
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Autdb { z, rn, rd } => {
-                0b1_1_0_11010110_00001_0_0_0_111_00000_00000_ | z << 13 | rn << 5 | rd << 0
+                0b1_1_0_11010110_00001_0_0_0_111_00000_00000_
+                    | (*z as u32) << 13
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Autia { z, rn, rd } => {
-                0b1_1_0_11010110_00001_0_0_0_100_00000_00000_ | z << 13 | rn << 5 | rd << 0
+                0b1_1_0_11010110_00001_0_0_0_100_00000_00000_
+                    | (*z as u32) << 13
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Autib { z, rn, rd } => {
-                0b1_1_0_11010110_00001_0_0_0_101_00000_00000_ | z << 13 | rn << 5 | rd << 0
+                0b1_1_0_11010110_00001_0_0_0_101_00000_00000_
+                    | (*z as u32) << 13
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Axflag {} => 0b1101010100_0_00_000_0100_0000_010_11111_,
 
             Asm::BCond { imm19, cond } => {
-                0b0101010_0_0000000000000000000_0_0000_ | imm19 << 5 | cond << 0
+                0b0101010_0_0000000000000000000_0_0000_
+                    | truncate_imm::<_, 19>(*imm19) << 5
+                    | (*cond as u32) << 0
             }
 
-            Asm::BUncond { imm26 } => 0b0_00101_00000000000000000000000000_ | imm26 << 0,
+            Asm::BUncond { imm26 } => {
+                0b0_00101_00000000000000000000000000_ | truncate_imm::<_, 26>(*imm26) << 0
+            }
 
             Asm::BcCond { imm19, cond } => {
-                0b0101010_0_0000000000000000000_1_0000_ | imm19 << 5 | cond << 0
+                0b0101010_0_0000000000000000000_1_0000_
+                    | truncate_imm::<_, 19>(*imm19) << 5
+                    | (*cond as u32) << 0
             }
 
             Asm::BcaxAdvsimd { rm, ra, rn, rd } => {
@@ -8830,10 +8885,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_01_100110_0_000000_000000_11111_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rd << 0
             }
 
@@ -8842,7 +8897,7 @@ impl Asm {
             }
 
             Asm::BfcvtnAdvsimd { q, rn, rd } => {
-                0b0_0_0_01110_10_10000_10110_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_0_01110_10_10000_10110_10_00000_00000_ | (*q as u32) << 30 | rn << 5 | rd << 0
             }
 
             Asm::BfdotAdvsimdElt {
@@ -8855,18 +8910,18 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01111_01_0_0_0000_1111_0_0_00000_00000_
-                    | q << 30
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::BfdotAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_1_01110_01_0_00000_1_1111_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -8880,10 +8935,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_01_100110_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rd << 0
             }
 
@@ -8896,10 +8951,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_01_100110_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -8914,18 +8969,18 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01111_11_0_0_0000_1_1_11_0_0_00000_00000_
-                    | q << 30
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::BfmlalAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_1_01110_11_0_00000_1_11_1_1_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -8944,10 +8999,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_01_100110_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -8965,21 +9020,21 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_0111100000_0_0_0_1_0_1_0_0_0_0_0_00000_
-                    | q << 30
-                    | a << 18
-                    | b << 17
-                    | c << 16
-                    | d << 9
-                    | e << 8
-                    | f << 7
-                    | g << 6
-                    | h << 5
+                    | (*q as u32) << 30
+                    | (*a as u32) << 18
+                    | (*b as u32) << 17
+                    | (*c as u32) << 16
+                    | (*d as u32) << 9
+                    | (*e as u32) << 8
+                    | (*f as u32) << 7
+                    | (*g as u32) << 6
+                    | (*h as u32) << 5
                     | rd << 0
             }
 
             Asm::BicAdvsimdReg { q, rm, rn, rd } => {
                 0b0_0_0_01110_01_1_00000_00011_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -8994,10 +9049,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_00_01010_00_1_00000_000000_00000_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -9011,17 +9066,17 @@ impl Asm {
                 rd,
             } => {
                 0b0_11_01010_00_1_00000_000000_00000_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::BifAdvsimd { q, rm, rn, rd } => {
                 0b0_0_1_01110_11_1_00000_00011_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -9029,31 +9084,41 @@ impl Asm {
 
             Asm::BitAdvsimd { q, rm, rn, rd } => {
                 0b0_0_1_01110_10_1_00000_00011_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
-            Asm::Bl { imm26 } => 0b1_00101_00000000000000000000000000_ | imm26 << 0,
+            Asm::Bl { imm26 } => {
+                0b1_00101_00000000000000000000000000_ | truncate_imm::<_, 26>(*imm26 as i32) << 0
+            }
 
             Asm::Blr { rn } => 0b1101011_0_0_01_11111_0000_0_0_00000_00000_ | rn << 5,
 
             Asm::Blra { z, m, rn, rm } => {
-                0b1101011_0_0_01_11111_0000_1_0_00000_00000_ | z << 24 | m << 10 | rn << 5 | rm << 0
+                0b1101011_0_0_01_11111_0000_1_0_00000_00000_
+                    | (*z as u32) << 24
+                    | (*m as u32) << 10
+                    | rn << 5
+                    | rm << 0
             }
 
             Asm::Br { rn } => 0b1101011_0_0_00_11111_0000_0_0_00000_00000_ | rn << 5,
 
             Asm::Bra { z, m, rn, rm } => {
-                0b1101011_0_0_00_11111_0000_1_0_00000_00000_ | z << 24 | m << 10 | rn << 5 | rm << 0
+                0b1101011_0_0_00_11111_0000_1_0_00000_00000_
+                    | (*z as u32) << 24
+                    | (*m as u32) << 10
+                    | rn << 5
+                    | rm << 0
             }
 
-            Asm::Brk { imm16 } => 0b11010100_001_0000000000000000_000_00_ | imm16 << 5,
+            Asm::Brk { imm16 } => 0b11010100_001_0000000000000000_000_00_ | (*imm16 as u32) << 5,
 
             Asm::BslAdvsimd { q, rm, rn, rd } => {
                 0b0_0_1_01110_01_1_00000_00011_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -9063,27 +9128,27 @@ impl Asm {
 
             Asm::Cas { l, rs, o0, rn, rt } => {
                 0b1_0010001_0_1_00000_0_11111_00000_00000_
-                    | l << 22
+                    | (*l as u32) << 22
                     | rs << 16
-                    | o0 << 15
+                    | (*o0 as u32) << 15
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Casb { l, rs, o0, rn, rt } => {
                 0b00_0010001_0_1_00000_0_11111_00000_00000_
-                    | l << 22
+                    | (*l as u32) << 22
                     | rs << 16
-                    | o0 << 15
+                    | (*o0 as u32) << 15
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Cash { l, rs, o0, rn, rt } => {
                 0b01_0010001_0_1_00000_0_11111_00000_00000_
-                    | l << 22
+                    | (*l as u32) << 22
                     | rs << 16
-                    | o0 << 15
+                    | (*o0 as u32) << 15
                     | rn << 5
                     | rt << 0
             }
@@ -9097,20 +9162,26 @@ impl Asm {
                 rt,
             } => {
                 0b0_0_001000_0_0_1_00000_0_11111_00000_00000_
-                    | sz << 30
-                    | l << 22
+                    | (*sz as u32) << 30
+                    | (*l as u32) << 22
                     | rs << 16
-                    | o0 << 15
+                    | (*o0 as u32) << 15
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Cbnz { sf, imm19, rt } => {
-                0b0_011010_1_0000000000000000000_00000_ | sf << 31 | imm19 << 5 | rt << 0
+                0b0_011010_1_0000000000000000000_00000_
+                    | (*sf as u32) << 31
+                    | truncate_imm::<_, 19>(*imm19) << 5
+                    | rt << 0
             }
 
             Asm::Cbz { sf, imm19, rt } => {
-                0b0_011010_0_0000000000000000000_00000_ | sf << 31 | imm19 << 5 | rt << 0
+                0b0_011010_0_0000000000000000000_00000_
+                    | (*sf as u32) << 31
+                    | truncate_imm::<_, 19>(*imm19) << 5
+                    | rt << 0
             }
 
             Asm::CcmnImm {
@@ -9121,11 +9192,11 @@ impl Asm {
                 nzcv,
             } => {
                 0b0_0_1_11010010_00000_0000_1_0_00000_0_0000_
-                    | sf << 31
-                    | imm5 << 16
-                    | cond << 12
+                    | (*sf as u32) << 31
+                    | (*imm5 as u32) << 16
+                    | (*cond as u32) << 12
                     | rn << 5
-                    | nzcv << 0
+                    | (*nzcv as u32) << 0
             }
 
             Asm::CcmnReg {
@@ -9136,11 +9207,11 @@ impl Asm {
                 nzcv,
             } => {
                 0b0_0_1_11010010_00000_0000_0_0_00000_0_0000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | cond << 12
+                    | (*cond as u32) << 12
                     | rn << 5
-                    | nzcv << 0
+                    | (*nzcv as u32) << 0
             }
 
             Asm::CcmpImm {
@@ -9151,11 +9222,11 @@ impl Asm {
                 nzcv,
             } => {
                 0b0_1_1_11010010_00000_0000_1_0_00000_0_0000_
-                    | sf << 31
-                    | imm5 << 16
-                    | cond << 12
+                    | (*sf as u32) << 31
+                    | (*imm5 as u32) << 16
+                    | (*cond as u32) << 12
                     | rn << 5
-                    | nzcv << 0
+                    | (*nzcv as u32) << 0
             }
 
             Asm::CcmpReg {
@@ -9166,11 +9237,11 @@ impl Asm {
                 nzcv,
             } => {
                 0b0_1_1_11010010_00000_0000_0_0_00000_0_0000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | cond << 12
+                    | (*cond as u32) << 12
                     | rn << 5
-                    | nzcv << 0
+                    | (*nzcv as u32) << 0
             }
 
             Asm::Cfinv {} => 0b1101010100_0_0_0_000_0100_0000_000_11111_,
@@ -9178,78 +9249,87 @@ impl Asm {
             Asm::CfpSys { rt } => 0b1101010100_0_01_011_0111_0011_100_00000_ | rt << 0,
 
             Asm::CincCsinc { sf, rd } => {
-                0b0_0_0_11010100_00000_000_0_1_00000_00000_ | sf << 31 | rd << 0
+                0b0_0_0_11010100_00000_000_0_1_00000_00000_ | (*sf as u32) << 31 | rd << 0
             }
 
             Asm::CinvCsinv { sf, rd } => {
-                0b0_1_0_11010100_00000_000_0_0_00000_00000_ | sf << 31 | rd << 0
+                0b0_1_0_11010100_00000_000_0_0_00000_00000_ | (*sf as u32) << 31 | rd << 0
             }
 
-            Asm::Clrex { crm } => 0b1101010100_0_00_011_0011_0000_010_11111_ | crm << 8,
+            Asm::Clrex { crm } => 0b1101010100_0_00_011_0011_0000_010_11111_ | (*crm as u32) << 8,
 
             Asm::ClsAdvsimd { q, size, rn, rd } => {
                 0b0_0_0_01110_00_10000_00100_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::ClsInt { sf, rn, rd } => {
-                0b0_1_0_11010110_00000_00010_1_00000_00000_ | sf << 31 | rn << 5 | rd << 0
+                0b0_1_0_11010110_00000_00010_1_00000_00000_ | (*sf as u32) << 31 | rn << 5 | rd << 0
             }
 
             Asm::ClzAdvsimd { q, size, rn, rd } => {
                 0b0_0_1_01110_00_10000_00100_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::ClzInt { sf, rn, rd } => {
-                0b0_1_0_11010110_00000_00010_0_00000_00000_ | sf << 31 | rn << 5 | rd << 0
+                0b0_1_0_11010110_00000_00010_0_00000_00000_ | (*sf as u32) << 31 | rn << 5 | rd << 0
             }
 
             Asm::CmeqAdvsimdReg { size, rm, rn, rd } => {
                 0b01_1_11110_00_1_00000_10001_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::CmeqAdvsimdZero { size, rn, rd } => {
-                0b01_0_11110_00_10000_0100_1_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_0_11110_00_10000_0100_1_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::CmgeAdvsimdReg { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_0011_1_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::CmgeAdvsimdZero { size, rn, rd } => {
-                0b01_1_11110_00_10000_0100_0_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_1_11110_00_10000_0100_0_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::CmgtAdvsimdReg { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_0011_0_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::CmgtAdvsimdZero { size, rn, rd } => {
-                0b01_0_11110_00_10000_0100_0_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_0_11110_00_10000_0100_0_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::CmhiAdvsimd { size, rm, rn, rd } => {
                 0b01_1_11110_00_1_00000_0011_0_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -9257,18 +9337,24 @@ impl Asm {
 
             Asm::CmhsAdvsimd { size, rm, rn, rd } => {
                 0b01_1_11110_00_1_00000_0011_1_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::CmleAdvsimd { size, rn, rd } => {
-                0b01_1_11110_00_10000_0100_1_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_1_11110_00_10000_0100_1_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::CmltAdvsimd { size, rn, rd } => {
-                0b01_0_11110_00_10000_01010_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_0_11110_00_10000_01010_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::CmnAddsAddsubExt {
@@ -9279,18 +9365,18 @@ impl Asm {
                 rn,
             } => {
                 0b0_0_1_01011_00_1_00000_000_000_00000_11111_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | option << 13
-                    | imm3 << 10
+                    | (*option as u32) << 13
+                    | (*imm3 as u32) << 10
                     | rn << 5
             }
 
             Asm::CmnAddsAddsubImm { sf, sh, imm12, rn } => {
                 0b0_0_1_100010_0_000000000000_00000_11111_
-                    | sf << 31
-                    | sh << 22
-                    | imm12 << 10
+                    | (*sf as u32) << 31
+                    | (*sh as u32) << 22
+                    | (*imm12 as u32) << 10
                     | rn << 5
             }
 
@@ -9302,10 +9388,10 @@ impl Asm {
                 rn,
             } => {
                 0b0_0_1_01011_00_0_00000_000000_00000_11111_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
             }
 
@@ -9317,18 +9403,18 @@ impl Asm {
                 rn,
             } => {
                 0b0_1_1_01011_00_1_00000_000_000_00000_11111_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | option << 13
-                    | imm3 << 10
+                    | (*option as u32) << 13
+                    | (*imm3 as u32) << 10
                     | rn << 5
             }
 
             Asm::CmpSubsAddsubImm { sf, sh, imm12, rn } => {
                 0b0_1_1_100010_0_000000000000_00000_11111_
-                    | sf << 31
-                    | sh << 22
-                    | imm12 << 10
+                    | (*sf as u32) << 31
+                    | (*sh as u32) << 22
+                    | (*imm12 as u32) << 10
                     | rn << 5
             }
 
@@ -9340,20 +9426,22 @@ impl Asm {
                 rn,
             } => {
                 0b0_1_1_01011_00_0_00000_000000_00000_11111_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
             }
 
             Asm::CmppSubps { xm, xn } => {
-                0b1_0_1_11010110_00000_0_0_0_0_0_0_00000_11111_ | xm << 16 | xn << 5
+                0b1_0_1_11010110_00000_0_0_0_0_0_0_00000_11111_
+                    | (*xm as u32) << 16
+                    | (*xn as u32) << 5
             }
 
             Asm::CmtstAdvsimd { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_10001_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -9361,7 +9449,7 @@ impl Asm {
 
             Asm::CnegCsneg { sf, rm, rn, rd } => {
                 0b0_1_0_11010100_00000_000_0_1_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -9369,8 +9457,8 @@ impl Asm {
 
             Asm::CntAdvsimd { q, size, rn, rd } => {
                 0b0_0_0_01110_00_10000_00101_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -9385,8 +9473,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_0000_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9400,8 +9488,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_1100_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9415,8 +9503,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_1000_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9430,8 +9518,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_0010_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9445,8 +9533,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_1110_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9460,8 +9548,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_1010_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9475,8 +9563,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_0110_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9490,8 +9578,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_0011_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9505,8 +9593,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_1111_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9520,8 +9608,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_1011_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9535,8 +9623,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_0111_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9550,8 +9638,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_0100_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9565,8 +9653,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_0001_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9580,8 +9668,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_1101_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9595,8 +9683,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_1001_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9610,8 +9698,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_0_01_00_0_00000_0101_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9625,8 +9713,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_0000_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9640,8 +9728,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_1100_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9655,8 +9743,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_1000_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9670,8 +9758,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_0010_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9685,8 +9773,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_1110_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9700,8 +9788,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_1010_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9715,8 +9803,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_0110_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9730,8 +9818,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_0011_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9745,8 +9833,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_1111_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9760,8 +9848,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_1011_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9775,8 +9863,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_0111_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9790,8 +9878,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_0100_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9805,8 +9893,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_0001_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9820,8 +9908,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_1101_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9835,8 +9923,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_1001_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9850,8 +9938,8 @@ impl Asm {
                 rd,
             } => {
                 0b00_011_1_01_00_0_00000_0101_01_00000_00000_
-                    | sz << 30
-                    | op1 << 22
+                    | (*sz as u32) << 30
+                    | (*op1 as u32) << 22
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -9859,18 +9947,18 @@ impl Asm {
 
             Asm::Crc32 { sf, rm, sz, rn, rd } => {
                 0b0_0_0_11010110_00000_010_0_00_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | sz << 10
+                    | (*sz as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Crc32c { sf, rm, sz, rn, rd } => {
                 0b0_0_0_11010110_00000_010_1_00_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | sz << 10
+                    | (*sz as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -9885,19 +9973,19 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_11010100_00000_0000_0_0_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | cond << 12
+                    | (*cond as u32) << 12
                     | rn << 5
                     | rd << 0
             }
 
             Asm::CsetCsinc { sf, rd } => {
-                0b0_0_0_11010100_11111_000_0_1_11111_00000_ | sf << 31 | rd << 0
+                0b0_0_0_11010100_11111_000_0_1_11111_00000_ | (*sf as u32) << 31 | rd << 0
             }
 
             Asm::CsetmCsinv { sf, rd } => {
-                0b0_1_0_11010100_11111_000_0_0_11111_00000_ | sf << 31 | rd << 0
+                0b0_1_0_11010100_11111_000_0_0_11111_00000_ | (*sf as u32) << 31 | rd << 0
             }
 
             Asm::Csinc {
@@ -9908,9 +9996,9 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_11010100_00000_0000_0_1_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | cond << 12
+                    | (*cond as u32) << 12
                     | rn << 5
                     | rd << 0
             }
@@ -9923,9 +10011,9 @@ impl Asm {
                 rd,
             } => {
                 0b0_1_0_11010100_00000_0000_0_0_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | cond << 12
+                    | (*cond as u32) << 12
                     | rn << 5
                     | rd << 0
             }
@@ -9938,43 +10026,46 @@ impl Asm {
                 rd,
             } => {
                 0b0_1_0_11010100_00000_0000_0_1_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | cond << 12
+                    | (*cond as u32) << 12
                     | rn << 5
                     | rd << 0
             }
 
             Asm::DcSys { op1, crm, op2, rt } => {
                 0b1101010100_0_01_000_0111_0000_000_00000_
-                    | op1 << 16
-                    | crm << 8
-                    | op2 << 5
+                    | (*op1 as u32) << 16
+                    | (*crm as u32) << 8
+                    | (*op2 as u32) << 5
                     | rt << 0
             }
 
-            Asm::Dcps1 { imm16 } => 0b11010100_101_0000000000000000_000_01_ | imm16 << 5,
+            Asm::Dcps1 { imm16 } => 0b11010100_101_0000000000000000_000_01_ | (*imm16 as u32) << 5,
 
-            Asm::Dcps2 { imm16 } => 0b11010100_101_0000000000000000_000_10_ | imm16 << 5,
+            Asm::Dcps2 { imm16 } => 0b11010100_101_0000000000000000_000_10_ | (*imm16 as u32) << 5,
 
-            Asm::Dcps3 { imm16 } => 0b11010100_101_0000000000000000_000_11_ | imm16 << 5,
+            Asm::Dcps3 { imm16 } => 0b11010100_101_0000000000000000_000_11_ | (*imm16 as u32) << 5,
 
             Asm::Dgh {} => 0b1101010100_0_00_011_0010_0000_110_11111_,
 
-            Asm::Dmb { crm } => 0b1101010100_0_00_011_0011_0000_1_01_11111_ | crm << 8,
+            Asm::Dmb { crm } => 0b1101010100_0_00_011_0011_0000_1_01_11111_ | (*crm as u32) << 8,
 
             Asm::Drps {} => 0b1101011_0101_11111_000000_11111_00000_,
 
-            Asm::Dsb { crm } => 0b1101010100_0_00_011_0011_0000_1_00_11111_ | crm << 8,
+            Asm::Dsb { crm } => 0b1101010100_0_00_011_0011_0000_1_00_11111_ | (*crm as u32) << 8,
 
             Asm::DupAdvsimdElt { imm5, rn, rd } => {
-                0b01_0_11110000_00000_0_0000_1_00000_00000_ | imm5 << 16 | rn << 5 | rd << 0
+                0b01_0_11110000_00000_0_0000_1_00000_00000_
+                    | (*imm5 as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::DupAdvsimdGen { q, imm5, rn, rd } => {
                 0b0_0_0_01110000_00000_0_0001_1_00000_00000_
-                    | q << 30
-                    | imm5 << 16
+                    | (*q as u32) << 30
+                    | (*imm5 as u32) << 16
                     | rn << 5
                     | rd << 0
             }
@@ -9990,10 +10081,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_10_01010_00_1_00000_000000_00000_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -10004,7 +10095,7 @@ impl Asm {
 
             Asm::EorAdvsimd { q, rm, rn, rd } => {
                 0b0_0_1_01110_00_1_00000_00011_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10019,10 +10110,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_10_100100_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -10036,17 +10127,17 @@ impl Asm {
                 rd,
             } => {
                 0b0_10_01010_00_0_00000_000000_00000_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Eret {} => 0b1101011_0_100_11111_0000_0_0_11111_00000_,
 
-            Asm::Ereta { m } => 0b1101011_0_100_11111_0000_1_0_11111_11111_ | m << 10,
+            Asm::Ereta { m } => 0b1101011_0_100_11111_0000_1_0_11111_11111_ | (*m as u32) << 10,
 
             Asm::Esb {} => 0b1101010100_0_00_011_0010_0010_000_11111_,
 
@@ -10058,9 +10149,9 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_101110_00_0_00000_0_0000_0_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
-                    | imm4 << 11
+                    | (*imm4 as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -10074,10 +10165,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_00_100111_0_0_00000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
                     | rm << 16
-                    | imms << 10
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -10087,11 +10178,14 @@ impl Asm {
             }
 
             Asm::FabsAdvsimd { q, rn, rd } => {
-                0b0_0_0_01110_1_111100_01111_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_0_01110_1_111100_01111_10_00000_00000_ | (*q as u32) << 30 | rn << 5 | rd << 0
             }
 
             Asm::FabsFloat { ftype, rn, rd } => {
-                0b0_0_0_11110_00_1_0000_01_10000_00000_00000_ | ftype << 22 | rn << 5 | rd << 0
+                0b0_0_0_11110_00_1_0000_01_10000_00000_00000_
+                    | (*ftype as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FacgeAdvsimd { rm, rn, rd } => {
@@ -10104,7 +10198,7 @@ impl Asm {
 
             Asm::FaddAdvsimd { q, rm, rn, rd } => {
                 0b0_0_0_01110_0_10_00000_00_010_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10112,19 +10206,22 @@ impl Asm {
 
             Asm::FaddFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_001_0_10_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FaddpAdvsimdPair { sz, rn, rd } => {
-                0b01_0_11110_0_0_11000_01101_10_00000_00000_ | sz << 22 | rn << 5 | rd << 0
+                0b01_0_11110_0_0_11000_01101_10_00000_00000_
+                    | (*sz as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FaddpAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_1_01110_0_10_00000_00_010_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10139,8 +10236,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_0_00000_1_11_0_0_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rot << 12
                     | rn << 5
@@ -10155,11 +10252,11 @@ impl Asm {
                 nzcv,
             } => {
                 0b0_0_0_11110_00_1_00000_0000_01_00000_0_0000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
-                    | cond << 12
+                    | (*cond as u32) << 12
                     | rn << 5
-                    | nzcv << 0
+                    | (*nzcv as u32) << 0
             }
 
             Asm::FccmpeFloat {
@@ -10170,11 +10267,11 @@ impl Asm {
                 nzcv,
             } => {
                 0b0_0_0_11110_00_1_00000_0000_01_00000_1_0000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
-                    | cond << 12
+                    | (*cond as u32) << 12
                     | rn << 5
-                    | nzcv << 0
+                    | (*nzcv as u32) << 0
             }
 
             Asm::FcmeqAdvsimdReg { rm, rn, rd } => {
@@ -10213,13 +10310,13 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01111_00_0_0_0000_0_00_1_0_0_00000_00000_
-                    | q << 30
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
                     | rot << 13
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -10233,8 +10330,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_0_00000_1_10_00_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rot << 11
                     | rn << 5
@@ -10250,11 +10347,17 @@ impl Asm {
             }
 
             Asm::FcmpFloat { ftype, rm, rn } => {
-                0b0_0_0_11110_00_1_00000_00_1000_00000_0_000_ | ftype << 22 | rm << 16 | rn << 5
+                0b0_0_0_11110_00_1_00000_00_1000_00000_0_000_
+                    | (*ftype as u32) << 22
+                    | rm << 16
+                    | rn << 5
             }
 
             Asm::FcmpeFloat { ftype, rm, rn } => {
-                0b0_0_0_11110_00_1_00000_00_1000_00000_1_000_ | ftype << 22 | rm << 16 | rn << 5
+                0b0_0_0_11110_00_1_00000_00_1000_00000_1_000_
+                    | (*ftype as u32) << 22
+                    | rm << 16
+                    | rn << 5
             }
 
             Asm::FcselFloat {
@@ -10265,17 +10368,17 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_11110_00_1_00000_0000_11_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
-                    | cond << 12
+                    | (*cond as u32) << 12
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FcvtFloat { ftype, opc, rn, rd } => {
                 0b0_0_0_11110_00_1_0001_00_10000_00000_00000_
-                    | ftype << 22
-                    | opc << 15
+                    | (*ftype as u32) << 22
+                    | (*opc as u32) << 15
                     | rn << 5
                     | rd << 0
             }
@@ -10286,8 +10389,8 @@ impl Asm {
 
             Asm::FcvtasFloat { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_00_100_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -10298,16 +10401,16 @@ impl Asm {
 
             Asm::FcvtauFloat { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_00_101_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FcvtlAdvsimd { q, sz, rn, rd } => {
                 0b0_0_0_01110_0_0_10000_10111_10_00000_00000_
-                    | q << 30
-                    | sz << 22
+                    | (*q as u32) << 30
+                    | (*sz as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -10318,8 +10421,8 @@ impl Asm {
 
             Asm::FcvtmsFloat { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_10_000_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -10330,16 +10433,16 @@ impl Asm {
 
             Asm::FcvtmuFloat { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_10_001_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FcvtnAdvsimd { q, sz, rn, rd } => {
                 0b0_0_0_01110_0_0_10000_10110_10_00000_00000_
-                    | q << 30
-                    | sz << 22
+                    | (*q as u32) << 30
+                    | (*sz as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -10350,8 +10453,8 @@ impl Asm {
 
             Asm::FcvtnsFloat { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_00_000_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -10362,8 +10465,8 @@ impl Asm {
 
             Asm::FcvtnuFloat { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_00_001_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -10374,8 +10477,8 @@ impl Asm {
 
             Asm::FcvtpsFloat { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_01_000_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -10386,18 +10489,24 @@ impl Asm {
 
             Asm::FcvtpuFloat { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_01_001_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FcvtxnAdvsimd { sz, rn, rd } => {
-                0b01_1_11110_0_0_10000_10110_10_00000_00000_ | sz << 22 | rn << 5 | rd << 0
+                0b01_1_11110_0_0_10000_10110_10_00000_00000_
+                    | (*sz as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FcvtzsAdvsimdFix { immb, rn, rd } => {
-                0b01_0_111110_0000_000_11111_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_0_111110_0000_000_11111_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FcvtzsAdvsimdInt { rn, rd } => {
@@ -10412,23 +10521,26 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_11110_00_0_11_000_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
-                    | scale << 10
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
+                    | (*scale as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FcvtzsFloatInt { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_11_000_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FcvtzuAdvsimdFix { immb, rn, rd } => {
-                0b01_1_111110_0000_000_11111_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_11111_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FcvtzuAdvsimdInt { rn, rd } => {
@@ -10443,24 +10555,24 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_11110_00_0_11_001_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
-                    | scale << 10
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
+                    | (*scale as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FcvtzuFloatInt { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_11_001_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FdivAdvsimd { q, rm, rn, rd } => {
                 0b0_0_1_01110_0_10_00000_00_111_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10468,7 +10580,7 @@ impl Asm {
 
             Asm::FdivFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_0001_10_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10486,7 +10598,7 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_11111_00_0_00000_0_00000_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | ra << 10
                     | rn << 5
@@ -10495,7 +10607,7 @@ impl Asm {
 
             Asm::FmaxAdvsimd { q, rm, rn, rd } => {
                 0b0_0_0_01110_0_10_00000_00_110_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10503,7 +10615,7 @@ impl Asm {
 
             Asm::FmaxFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_01_00_10_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10511,7 +10623,7 @@ impl Asm {
 
             Asm::FmaxnmAdvsimd { q, rm, rn, rd } => {
                 0b0_0_0_01110_0_10_00000_00_000_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10519,47 +10631,59 @@ impl Asm {
 
             Asm::FmaxnmFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_01_10_10_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FmaxnmpAdvsimdPair { sz, rn, rd } => {
-                0b01_0_11110_0_0_11000_01100_10_00000_00000_ | sz << 22 | rn << 5 | rd << 0
+                0b01_0_11110_0_0_11000_01100_10_00000_00000_
+                    | (*sz as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FmaxnmpAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_1_01110_0_10_00000_00_000_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FmaxnmvAdvsimd { q, rn, rd } => {
-                0b0_0_0_01110_0_0_11000_01100_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_0_01110_0_0_11000_01100_10_00000_00000_
+                    | (*q as u32) << 30
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FmaxpAdvsimdPair { sz, rn, rd } => {
-                0b01_0_11110_0_0_11000_01111_10_00000_00000_ | sz << 22 | rn << 5 | rd << 0
+                0b01_0_11110_0_0_11000_01111_10_00000_00000_
+                    | (*sz as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FmaxpAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_1_01110_0_10_00000_00_110_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FmaxvAdvsimd { q, rn, rd } => {
-                0b0_0_0_01110_0_0_11000_01111_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_0_01110_0_0_11000_01111_10_00000_00000_
+                    | (*q as u32) << 30
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FminAdvsimd { q, rm, rn, rd } => {
                 0b0_0_0_01110_1_10_00000_00_110_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10567,7 +10691,7 @@ impl Asm {
 
             Asm::FminFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_01_01_10_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10575,7 +10699,7 @@ impl Asm {
 
             Asm::FminnmAdvsimd { q, rm, rn, rd } => {
                 0b0_0_0_01110_1_10_00000_00_000_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10583,42 +10707,54 @@ impl Asm {
 
             Asm::FminnmFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_01_11_10_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FminnmpAdvsimdPair { sz, rn, rd } => {
-                0b01_0_11110_1_0_11000_01100_10_00000_00000_ | sz << 22 | rn << 5 | rd << 0
+                0b01_0_11110_1_0_11000_01100_10_00000_00000_
+                    | (*sz as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FminnmpAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_1_01110_1_10_00000_00_000_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FminnmvAdvsimd { q, rn, rd } => {
-                0b0_0_0_01110_1_0_11000_01100_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_0_01110_1_0_11000_01100_10_00000_00000_
+                    | (*q as u32) << 30
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FminpAdvsimdPair { sz, rn, rd } => {
-                0b01_0_11110_1_0_11000_01111_10_00000_00000_ | sz << 22 | rn << 5 | rd << 0
+                0b01_0_11110_1_0_11000_01111_10_00000_00000_
+                    | (*sz as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FminpAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_1_01110_1_10_00000_00_110_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FminvAdvsimd { q, rn, rd } => {
-                0b0_0_0_01110_1_0_11000_01111_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_0_01110_1_0_11000_01111_10_00000_00000_
+                    | (*q as u32) << 30
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FmlaAdvsimdElt {
@@ -10630,17 +10766,17 @@ impl Asm {
                 rd,
             } => {
                 0b01_0_11111_00_0_0_0000_0_0_01_0_0_00000_00000_
-                    | l << 21
-                    | m << 20
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FmlaAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_0_01110_0_10_00000_00_001_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10656,18 +10792,18 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01111_1_0_0_0_0000_0_0_00_0_0_00000_00000_
-                    | q << 30
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FmlalAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_0_01110_0_0_1_00000_1_1101_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10682,17 +10818,17 @@ impl Asm {
                 rd,
             } => {
                 0b01_0_11111_00_0_0_0000_0_1_01_0_0_00000_00000_
-                    | l << 21
-                    | m << 20
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FmlsAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_0_01110_1_10_00000_00_001_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10708,18 +10844,18 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01111_1_0_0_0_0000_0_1_00_0_0_00000_00000_
-                    | q << 30
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FmlslAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_0_01110_1_0_1_00000_1_1101_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10738,32 +10874,38 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_0111100000_0_0_0_1111_1_1_0_0_0_0_0_00000_
-                    | q << 30
-                    | a << 18
-                    | b << 17
-                    | c << 16
-                    | d << 9
-                    | e << 8
-                    | f << 7
-                    | g << 6
-                    | h << 5
+                    | (*q as u32) << 30
+                    | (*a as u32) << 18
+                    | (*b as u32) << 17
+                    | (*c as u32) << 16
+                    | (*d as u32) << 9
+                    | (*e as u32) << 8
+                    | (*f as u32) << 7
+                    | (*g as u32) << 6
+                    | (*h as u32) << 5
                     | rd << 0
             }
 
             Asm::FmovFloat { ftype, rn, rd } => {
-                0b0_0_0_11110_00_1_0000_00_10000_00000_00000_ | ftype << 22 | rn << 5 | rd << 0
+                0b0_0_0_11110_00_1_0000_00_10000_00000_00000_
+                    | (*ftype as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FmovFloatGen { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_0_11_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FmovFloatImm { ftype, imm8, rd } => {
-                0b0_0_0_11110_00_1_00000000_100_00000_00000_ | ftype << 22 | imm8 << 13 | rd << 0
+                0b0_0_0_11110_00_1_00000000_100_00000_00000_
+                    | (*ftype as u32) << 22
+                    | (*imm8 as u32) << 13
+                    | rd << 0
             }
 
             Asm::FmsubFloat {
@@ -10774,7 +10916,7 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_11111_00_0_00000_1_00000_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | ra << 10
                     | rn << 5
@@ -10790,17 +10932,17 @@ impl Asm {
                 rd,
             } => {
                 0b01_0_11111_00_0_0_0000_1001_0_0_00000_00000_
-                    | l << 21
-                    | m << 20
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::FmulAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_1_01110_0_10_00000_00_011_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10808,7 +10950,7 @@ impl Asm {
 
             Asm::FmulFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_0_000_10_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10823,10 +10965,10 @@ impl Asm {
                 rd,
             } => {
                 0b01_1_11111_00_0_0_0000_1001_0_0_00000_00000_
-                    | l << 21
-                    | m << 20
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -10836,11 +10978,14 @@ impl Asm {
             }
 
             Asm::FnegAdvsimd { q, rn, rd } => {
-                0b0_0_1_01110_1_111100_01111_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_1_01110_1_111100_01111_10_00000_00000_ | (*q as u32) << 30 | rn << 5 | rd << 0
             }
 
             Asm::FnegFloat { ftype, rn, rd } => {
-                0b0_0_0_11110_00_1_0000_10_10000_00000_00000_ | ftype << 22 | rn << 5 | rd << 0
+                0b0_0_0_11110_00_1_0000_10_10000_00000_00000_
+                    | (*ftype as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FnmaddFloat {
@@ -10851,7 +10996,7 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_11111_00_1_00000_0_00000_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | ra << 10
                     | rn << 5
@@ -10866,7 +11011,7 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_11111_00_1_00000_1_00000_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | ra << 10
                     | rn << 5
@@ -10875,7 +11020,7 @@ impl Asm {
 
             Asm::FnmulFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_1_000_10_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -10895,8 +11040,8 @@ impl Asm {
 
             Asm::Frint32xAdvsimd { q, sz, rn, rd } => {
                 0b0_0_1_01110_0_0_10000_1111_0_10_00000_00000_
-                    | q << 30
-                    | sz << 22
+                    | (*q as u32) << 30
+                    | (*sz as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -10907,8 +11052,8 @@ impl Asm {
 
             Asm::Frint32zAdvsimd { q, sz, rn, rd } => {
                 0b0_0_0_01110_0_0_10000_1111_0_10_00000_00000_
-                    | q << 30
-                    | sz << 22
+                    | (*q as u32) << 30
+                    | (*sz as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -10919,8 +11064,8 @@ impl Asm {
 
             Asm::Frint64xAdvsimd { q, sz, rn, rd } => {
                 0b0_0_1_01110_0_0_10000_1111_1_10_00000_00000_
-                    | q << 30
-                    | sz << 22
+                    | (*q as u32) << 30
+                    | (*sz as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -10931,8 +11076,8 @@ impl Asm {
 
             Asm::Frint64zAdvsimd { q, sz, rn, rd } => {
                 0b0_0_0_01110_0_0_10000_1111_1_10_00000_00000_
-                    | q << 30
-                    | sz << 22
+                    | (*q as u32) << 30
+                    | (*sz as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -10942,59 +11087,101 @@ impl Asm {
             }
 
             Asm::FrintaAdvsimd { q, rn, rd } => {
-                0b0_0_1_01110_0_111100_1100_0_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_1_01110_0_111100_1100_0_10_00000_00000_
+                    | (*q as u32) << 30
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintaFloat { ftype, rn, rd } => {
-                0b0_0_0_11110_00_1_001_100_10000_00000_00000_ | ftype << 22 | rn << 5 | rd << 0
+                0b0_0_0_11110_00_1_001_100_10000_00000_00000_
+                    | (*ftype as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintiAdvsimd { q, rn, rd } => {
-                0b0_0_1_01110_1_111100_1100_1_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_1_01110_1_111100_1100_1_10_00000_00000_
+                    | (*q as u32) << 30
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintiFloat { ftype, rn, rd } => {
-                0b0_0_0_11110_00_1_001_111_10000_00000_00000_ | ftype << 22 | rn << 5 | rd << 0
+                0b0_0_0_11110_00_1_001_111_10000_00000_00000_
+                    | (*ftype as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintmAdvsimd { q, rn, rd } => {
-                0b0_0_0_01110_0_111100_1100_1_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_0_01110_0_111100_1100_1_10_00000_00000_
+                    | (*q as u32) << 30
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintmFloat { ftype, rn, rd } => {
-                0b0_0_0_11110_00_1_001_010_10000_00000_00000_ | ftype << 22 | rn << 5 | rd << 0
+                0b0_0_0_11110_00_1_001_010_10000_00000_00000_
+                    | (*ftype as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintnAdvsimd { q, rn, rd } => {
-                0b0_0_0_01110_0_111100_1100_0_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_0_01110_0_111100_1100_0_10_00000_00000_
+                    | (*q as u32) << 30
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintnFloat { ftype, rn, rd } => {
-                0b0_0_0_11110_00_1_001_000_10000_00000_00000_ | ftype << 22 | rn << 5 | rd << 0
+                0b0_0_0_11110_00_1_001_000_10000_00000_00000_
+                    | (*ftype as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintpAdvsimd { q, rn, rd } => {
-                0b0_0_0_01110_1_111100_1100_0_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_0_01110_1_111100_1100_0_10_00000_00000_
+                    | (*q as u32) << 30
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintpFloat { ftype, rn, rd } => {
-                0b0_0_0_11110_00_1_001_001_10000_00000_00000_ | ftype << 22 | rn << 5 | rd << 0
+                0b0_0_0_11110_00_1_001_001_10000_00000_00000_
+                    | (*ftype as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintxAdvsimd { q, rn, rd } => {
-                0b0_0_1_01110_0_111100_1100_1_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_1_01110_0_111100_1100_1_10_00000_00000_
+                    | (*q as u32) << 30
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintxFloat { ftype, rn, rd } => {
-                0b0_0_0_11110_00_1_001_110_10000_00000_00000_ | ftype << 22 | rn << 5 | rd << 0
+                0b0_0_0_11110_00_1_001_110_10000_00000_00000_
+                    | (*ftype as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintzAdvsimd { q, rn, rd } => {
-                0b0_0_0_01110_1_111100_1100_1_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_0_01110_1_111100_1100_1_10_00000_00000_
+                    | (*q as u32) << 30
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrintzFloat { ftype, rn, rd } => {
-                0b0_0_0_11110_00_1_001_011_10000_00000_00000_ | ftype << 22 | rn << 5 | rd << 0
+                0b0_0_0_11110_00_1_001_011_10000_00000_00000_
+                    | (*ftype as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FrsqrteAdvsimd { rn, rd } => {
@@ -11006,16 +11193,19 @@ impl Asm {
             }
 
             Asm::FsqrtAdvsimd { q, rn, rd } => {
-                0b0_0_1_01110_1_111100_11111_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_1_01110_1_111100_11111_10_00000_00000_ | (*q as u32) << 30 | rn << 5 | rd << 0
             }
 
             Asm::FsqrtFloat { ftype, rn, rd } => {
-                0b0_0_0_11110_00_1_0000_11_10000_00000_00000_ | ftype << 22 | rn << 5 | rd << 0
+                0b0_0_0_11110_00_1_0000_11_10000_00000_00000_
+                    | (*ftype as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::FsubAdvsimd { q, rm, rn, rd } => {
                 0b0_0_0_01110_1_10_00000_00_010_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -11023,142 +11213,155 @@ impl Asm {
 
             Asm::FsubFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_001_1_10_00000_00000_
-                    | ftype << 22
+                    | (*ftype as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Gmi { xm, xn, xd } => {
-                0b1_0_0_11010110_00000_0_0_0_1_0_1_00000_00000_ | xm << 16 | xn << 5 | xd << 0
+                0b1_0_0_11010110_00000_0_0_0_1_0_1_00000_00000_
+                    | (*xm as u32) << 16
+                    | (*xn as u32) << 5
+                    | (*xd as u32) << 0
             }
 
             Asm::Hint { crm, op2 } => {
-                0b1101010100_0_00_011_0010_0000_000_11111_ | crm << 8 | op2 << 5
+                0b1101010100_0_00_011_0010_0000_000_11111_ | (*crm as u32) << 8 | (*op2 as u32) << 5
             }
 
-            Asm::Hlt { imm16 } => 0b11010100_010_0000000000000000_000_00_ | imm16 << 5,
+            Asm::Hlt { imm16 } => 0b11010100_010_0000000000000000_000_00_ | (*imm16 as u32) << 5,
 
-            Asm::Hvc { imm16 } => 0b11010100_000_0000000000000000_000_10_ | imm16 << 5,
+            Asm::Hvc { imm16 } => 0b11010100_000_0000000000000000_000_10_ | (*imm16 as u32) << 5,
 
             Asm::IcSys { op1, crm, op2, rt } => {
                 0b1101010100_0_01_000_0111_0000_000_00000_
-                    | op1 << 16
-                    | crm << 8
-                    | op2 << 5
+                    | (*op1 as u32) << 16
+                    | (*crm as u32) << 8
+                    | (*op2 as u32) << 5
                     | rt << 0
             }
 
             Asm::InsAdvsimdElt { imm5, imm4, rn, rd } => {
                 0b0_1_1_01110000_00000_0_0000_1_00000_00000_
-                    | imm5 << 16
-                    | imm4 << 11
+                    | (*imm5 as u32) << 16
+                    | (*imm4 as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::InsAdvsimdGen { imm5, rn, rd } => {
-                0b0_1_0_01110000_00000_0_0011_1_00000_00000_ | imm5 << 16 | rn << 5 | rd << 0
+                0b0_1_0_01110000_00000_0_0011_1_00000_00000_
+                    | (*imm5 as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Irg { xm, xn, xd } => {
-                0b1_0_0_11010110_00000_0_0_0_1_0_0_00000_00000_ | xm << 16 | xn << 5 | xd << 0
+                0b1_0_0_11010110_00000_0_0_0_1_0_0_00000_00000_
+                    | (*xm as u32) << 16
+                    | (*xn as u32) << 5
+                    | (*xd as u32) << 0
             }
 
-            Asm::Isb { crm } => 0b1101010100_0_00_011_0011_0000_1_10_11111_ | crm << 8,
+            Asm::Isb { crm } => 0b1101010100_0_00_011_0011_0000_1_10_11111_ | (*crm as u32) << 8,
 
             Asm::Ld1AdvsimdMult { q, size, rn, rt } => {
-                0b0_0_0011000_1_000000_1_00_00000_00000_ | q << 30 | size << 10 | rn << 5 | rt << 0
+                0b0_0_0011000_1_000000_1_00_00000_00000_
+                    | (*q as u32) << 30
+                    | (*size as u32) << 10
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ld1AdvsimdSngl { q, s, size, rn, rt } => {
                 0b0_0_0011010_1_0_00000_0_0_00_00000_00000_
-                    | q << 30
-                    | s << 12
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*s as u32) << 12
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Ld1rAdvsimd { q, size, rn, rt } => {
                 0b0_0_0011010_1_0_00000_110_0_00_00000_00000_
-                    | q << 30
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Ld2AdvsimdMult { q, size, rn, rt } => {
                 0b0_0_0011000_1_000000_1000_00_00000_00000_
-                    | q << 30
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Ld2AdvsimdSngl { q, s, size, rn, rt } => {
                 0b0_0_0011010_1_1_00000_0_0_00_00000_00000_
-                    | q << 30
-                    | s << 12
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*s as u32) << 12
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Ld2rAdvsimd { q, size, rn, rt } => {
                 0b0_0_0011010_1_1_00000_110_0_00_00000_00000_
-                    | q << 30
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Ld3AdvsimdMult { q, size, rn, rt } => {
                 0b0_0_0011000_1_000000_0100_00_00000_00000_
-                    | q << 30
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Ld3AdvsimdSngl { q, s, size, rn, rt } => {
                 0b0_0_0011010_1_0_00000_1_0_00_00000_00000_
-                    | q << 30
-                    | s << 12
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*s as u32) << 12
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Ld3rAdvsimd { q, size, rn, rt } => {
                 0b0_0_0011010_1_0_00000_111_0_00_00000_00000_
-                    | q << 30
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Ld4AdvsimdMult { q, size, rn, rt } => {
                 0b0_0_0011000_1_000000_0000_00_00000_00000_
-                    | q << 30
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Ld4AdvsimdSngl { q, s, size, rn, rt } => {
                 0b0_0_0011010_1_1_00000_1_0_00_00000_00000_
-                    | q << 30
-                    | s << 12
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*s as u32) << 12
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Ld4rAdvsimd { q, size, rn, rt } => {
                 0b0_0_0011010_1_1_00000_111_0_00_00000_00000_
-                    | q << 30
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
@@ -11169,7 +11372,7 @@ impl Asm {
 
             Asm::Ldadd { a, r, rs, rn, rt } => {
                 0b1_111_0_00_0_0_1_00000_0_000_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11178,7 +11381,7 @@ impl Asm {
 
             Asm::Ldaddb { a, r, rs, rn, rt } => {
                 0b00_111_0_00_0_0_1_00000_0_000_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11187,7 +11390,7 @@ impl Asm {
 
             Asm::Ldaddh { a, r, rs, rn, rt } => {
                 0b01_111_0_00_0_0_1_00000_0_000_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11207,27 +11410,36 @@ impl Asm {
             }
 
             Asm::LdapurGen { imm9, rn, rt } => {
-                0b1_011001_01_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b1_011001_01_0_000000000_00_00000_00000_ | (*imm9 as u32) << 12 | rn << 5 | rt << 0
             }
 
             Asm::Ldapurb { imm9, rn, rt } => {
-                0b00_011001_01_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b00_011001_01_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldapurh { imm9, rn, rt } => {
-                0b01_011001_01_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b01_011001_01_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldapursb { imm9, rn, rt } => {
-                0b00_011001_1_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b00_011001_1_0_000000000_00_00000_00000_ | (*imm9 as u32) << 12 | rn << 5 | rt << 0
             }
 
             Asm::Ldapursh { imm9, rn, rt } => {
-                0b01_011001_1_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b01_011001_1_0_000000000_00_00000_00000_ | (*imm9 as u32) << 12 | rn << 5 | rt << 0
             }
 
             Asm::Ldapursw { imm9, rn, rt } => {
-                0b10_011001_10_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b10_011001_10_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldar { rn, rt } => 0b1_001000_1_1_0_11111_1_11111_00000_00000_ | rn << 5 | rt << 0,
@@ -11242,7 +11454,7 @@ impl Asm {
 
             Asm::Ldaxp { sz, rt2, rn, rt } => {
                 0b1_0_001000_0_1_1_11111_1_00000_00000_00000_
-                    | sz << 30
+                    | (*sz as u32) << 30
                     | rt2 << 10
                     | rn << 5
                     | rt << 0
@@ -11262,7 +11474,7 @@ impl Asm {
 
             Asm::Ldclr { a, r, rs, rn, rt } => {
                 0b1_111_0_00_0_0_1_00000_0_001_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11271,7 +11483,7 @@ impl Asm {
 
             Asm::Ldclrb { a, r, rs, rn, rt } => {
                 0b00_111_0_00_0_0_1_00000_0_001_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11280,7 +11492,7 @@ impl Asm {
 
             Asm::Ldclrh { a, r, rs, rn, rt } => {
                 0b01_111_0_00_0_0_1_00000_0_001_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11289,7 +11501,7 @@ impl Asm {
 
             Asm::Ldeor { a, r, rs, rn, rt } => {
                 0b1_111_0_00_0_0_1_00000_0_010_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11298,7 +11510,7 @@ impl Asm {
 
             Asm::Ldeorb { a, r, rs, rn, rt } => {
                 0b00_111_0_00_0_0_1_00000_0_010_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11307,7 +11519,7 @@ impl Asm {
 
             Asm::Ldeorh { a, r, rs, rn, rt } => {
                 0b01_111_0_00_0_0_1_00000_0_010_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11315,11 +11527,16 @@ impl Asm {
             }
 
             Asm::Ldg { imm9, xn, xt } => {
-                0b11011001_0_1_1_000000000_0_0_00000_00000_ | imm9 << 12 | xn << 5 | xt << 0
+                0b11011001_0_1_1_000000000_0_0_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | (*xn as u32) << 5
+                    | (*xt as u32) << 0
             }
 
             Asm::Ldgm { xn, xt } => {
-                0b11011001_1_1_1_0_0_0_0_0_0_0_0_0_0_0_00000_00000_ | xn << 5 | xt << 0
+                0b11011001_1_1_1_0_0_0_0_0_0_0_0_0_0_0_00000_00000_
+                    | (*xn as u32) << 5
+                    | (*xt as u32) << 0
             }
 
             Asm::Ldlar { rn, rt } => {
@@ -11342,8 +11559,8 @@ impl Asm {
                 rt,
             } => {
                 0b00_101_1_000_1_0000000_00000_00000_00000_
-                    | opc << 30
-                    | imm7 << 15
+                    | (*opc as u32) << 30
+                    | (*imm7 as u32) << 15
                     | rt2 << 10
                     | rn << 5
                     | rt << 0
@@ -11351,7 +11568,7 @@ impl Asm {
 
             Asm::LdnpGen { imm7, rt2, rn, rt } => {
                 0b0_101_0_000_1_0000000_00000_00000_00000_
-                    | imm7 << 15
+                    | (*imm7 as u32) << 15
                     | rt2 << 10
                     | rn << 5
                     | rt << 0
@@ -11365,8 +11582,8 @@ impl Asm {
                 rt,
             } => {
                 0b00_101_1_001_1_0000000_00000_00000_00000_
-                    | opc << 30
-                    | imm7 << 15
+                    | (*opc as u32) << 30
+                    | (*imm7 as u32) << 15
                     | rt2 << 10
                     | rn << 5
                     | rt << 0
@@ -11374,7 +11591,7 @@ impl Asm {
 
             Asm::LdpGen { imm7, rt2, rn, rt } => {
                 0b0_101_0_001_1_0000000_00000_00000_00000_
-                    | imm7 << 15
+                    | (*imm7 as u32) << 15
                     | rt2 << 10
                     | rn << 5
                     | rt << 0
@@ -11382,7 +11599,7 @@ impl Asm {
 
             Asm::Ldpsw { imm7, rt2, rn, rt } => {
                 0b01_101_0_001_1_0000000_00000_00000_00000_
-                    | imm7 << 15
+                    | (*imm7 as u32) << 15
                     | rt2 << 10
                     | rn << 5
                     | rt << 0
@@ -11390,22 +11607,30 @@ impl Asm {
 
             Asm::LdrImmFpsimd { size, imm9, rn, rt } => {
                 0b00_111_1_00_1_0_000000000_01_00000_00000_
-                    | size << 30
-                    | imm9 << 12
+                    | (*size as u32) << 30
+                    | (*imm9 as u32) << 12
                     | rn << 5
                     | rt << 0
             }
 
             Asm::LdrImmGen { imm9, rn, rt } => {
-                0b1_111_0_00_01_0_000000000_01_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b1_111_0_00_01_0_000000000_01_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::LdrLitFpsimd { opc, imm19, rt } => {
-                0b00_011_1_00_0000000000000000000_00000_ | opc << 30 | imm19 << 5 | rt << 0
+                0b00_011_1_00_0000000000000000000_00000_
+                    | (*opc as u32) << 30
+                    | truncate_imm::<_, 19>(*imm19) << 5
+                    | rt << 0
             }
 
             Asm::LdrLitGen { imm19, rt } => {
-                0b0_011_0_00_0000000000000000000_00000_ | imm19 << 5 | rt << 0
+                0b0_011_0_00_0000000000000000000_00000_
+                    | truncate_imm::<_, 19>(*imm19) << 5
+                    | rt << 0
             }
 
             Asm::LdrRegFpsimd {
@@ -11417,10 +11642,10 @@ impl Asm {
                 rt,
             } => {
                 0b00_111_1_00_1_1_00000_000_0_10_00000_00000_
-                    | size << 30
+                    | (*size as u32) << 30
                     | rm << 16
-                    | option << 13
-                    | s << 12
+                    | (*option as u32) << 13
+                    | (*s as u32) << 12
                     | rn << 5
                     | rt << 0
             }
@@ -11434,8 +11659,8 @@ impl Asm {
             } => {
                 0b1_111_0_00_01_1_00000_000_0_10_00000_00000_
                     | rm << 16
-                    | option << 13
-                    | s << 12
+                    | (*option as u32) << 13
+                    | (*s as u32) << 12
                     | rn << 5
                     | rt << 0
             }
@@ -11449,16 +11674,19 @@ impl Asm {
                 rt,
             } => {
                 0b11_111_0_00_0_0_1_000000000_0_1_00000_00000_
-                    | m << 23
-                    | s << 22
-                    | imm9 << 12
-                    | w << 11
+                    | (*m as u32) << 23
+                    | (*s as u32) << 22
+                    | (*imm9 as u32) << 12
+                    | (*w as u32) << 11
                     | rn << 5
                     | rt << 0
             }
 
             Asm::LdrbImm { imm9, rn, rt } => {
-                0b00_111_0_00_01_0_000000000_01_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b00_111_0_00_01_0_000000000_01_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::LdrbReg {
@@ -11470,14 +11698,17 @@ impl Asm {
             } => {
                 0b00_111_0_00_01_1_00000_000_0_10_00000_00000_
                     | rm << 16
-                    | option << 13
-                    | s << 12
+                    | (*option as u32) << 13
+                    | (*s as u32) << 12
                     | rn << 5
                     | rt << 0
             }
 
             Asm::LdrhImm { imm9, rn, rt } => {
-                0b01_111_0_00_01_0_000000000_01_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b01_111_0_00_01_0_000000000_01_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::LdrhReg {
@@ -11489,14 +11720,17 @@ impl Asm {
             } => {
                 0b01_111_0_00_01_1_00000_000_0_10_00000_00000_
                     | rm << 16
-                    | option << 13
-                    | s << 12
+                    | (*option as u32) << 13
+                    | (*s as u32) << 12
                     | rn << 5
                     | rt << 0
             }
 
             Asm::LdrsbImm { imm9, rn, rt } => {
-                0b00_111_0_00_1_0_000000000_01_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b00_111_0_00_1_0_000000000_01_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::LdrsbReg {
@@ -11508,14 +11742,17 @@ impl Asm {
             } => {
                 0b00_111_0_00_1_1_00000_000_0_10_00000_00000_
                     | rm << 16
-                    | option << 13
-                    | s << 12
+                    | (*option as u32) << 13
+                    | (*s as u32) << 12
                     | rn << 5
                     | rt << 0
             }
 
             Asm::LdrshImm { imm9, rn, rt } => {
-                0b01_111_0_00_1_0_000000000_01_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b01_111_0_00_1_0_000000000_01_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::LdrshReg {
@@ -11527,18 +11764,23 @@ impl Asm {
             } => {
                 0b01_111_0_00_1_1_00000_000_0_10_00000_00000_
                     | rm << 16
-                    | option << 13
-                    | s << 12
+                    | (*option as u32) << 13
+                    | (*s as u32) << 12
                     | rn << 5
                     | rt << 0
             }
 
             Asm::LdrswImm { imm9, rn, rt } => {
-                0b10_111_0_00_10_0_000000000_01_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b10_111_0_00_10_0_000000000_01_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::LdrswLit { imm19, rt } => {
-                0b10_011_0_00_0000000000000000000_00000_ | imm19 << 5 | rt << 0
+                0b10_011_0_00_0000000000000000000_00000_
+                    | truncate_imm::<_, 19>(*imm19) << 5
+                    | rt << 0
             }
 
             Asm::LdrswReg {
@@ -11550,15 +11792,15 @@ impl Asm {
             } => {
                 0b10_111_0_00_10_1_00000_000_0_10_00000_00000_
                     | rm << 16
-                    | option << 13
-                    | s << 12
+                    | (*option as u32) << 13
+                    | (*s as u32) << 12
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Ldset { a, r, rs, rn, rt } => {
                 0b1_111_0_00_0_0_1_00000_0_011_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11567,7 +11809,7 @@ impl Asm {
 
             Asm::Ldsetb { a, r, rs, rn, rt } => {
                 0b00_111_0_00_0_0_1_00000_0_011_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11576,7 +11818,7 @@ impl Asm {
 
             Asm::Ldseth { a, r, rs, rn, rt } => {
                 0b01_111_0_00_0_0_1_00000_0_011_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11585,7 +11827,7 @@ impl Asm {
 
             Asm::Ldsmax { a, r, rs, rn, rt } => {
                 0b1_111_0_00_0_0_1_00000_0_100_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11594,7 +11836,7 @@ impl Asm {
 
             Asm::Ldsmaxb { a, r, rs, rn, rt } => {
                 0b00_111_0_00_0_0_1_00000_0_100_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11603,7 +11845,7 @@ impl Asm {
 
             Asm::Ldsmaxh { a, r, rs, rn, rt } => {
                 0b01_111_0_00_0_0_1_00000_0_100_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11612,7 +11854,7 @@ impl Asm {
 
             Asm::Ldsmin { a, r, rs, rn, rt } => {
                 0b1_111_0_00_0_0_1_00000_0_101_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11621,7 +11863,7 @@ impl Asm {
 
             Asm::Ldsminb { a, r, rs, rn, rt } => {
                 0b00_111_0_00_0_0_1_00000_0_101_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11630,7 +11872,7 @@ impl Asm {
 
             Asm::Ldsminh { a, r, rs, rn, rt } => {
                 0b01_111_0_00_0_0_1_00000_0_101_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11638,32 +11880,50 @@ impl Asm {
             }
 
             Asm::Ldtr { imm9, rn, rt } => {
-                0b1_111_0_00_01_0_000000000_10_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b1_111_0_00_01_0_000000000_10_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldtrb { imm9, rn, rt } => {
-                0b00_111_0_00_01_0_000000000_10_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b00_111_0_00_01_0_000000000_10_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldtrh { imm9, rn, rt } => {
-                0b01_111_0_00_01_0_000000000_10_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b01_111_0_00_01_0_000000000_10_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldtrsb { imm9, rn, rt } => {
-                0b00_111_0_00_1_0_000000000_10_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b00_111_0_00_1_0_000000000_10_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldtrsh { imm9, rn, rt } => {
-                0b01_111_0_00_1_0_000000000_10_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b01_111_0_00_1_0_000000000_10_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldtrsw { imm9, rn, rt } => {
-                0b10_111_0_00_10_0_000000000_10_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b10_111_0_00_10_0_000000000_10_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldumax { a, r, rs, rn, rt } => {
                 0b1_111_0_00_0_0_1_00000_0_110_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11672,7 +11932,7 @@ impl Asm {
 
             Asm::Ldumaxb { a, r, rs, rn, rt } => {
                 0b00_111_0_00_0_0_1_00000_0_110_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11681,7 +11941,7 @@ impl Asm {
 
             Asm::Ldumaxh { a, r, rs, rn, rt } => {
                 0b01_111_0_00_0_0_1_00000_0_110_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11690,7 +11950,7 @@ impl Asm {
 
             Asm::Ldumin { a, r, rs, rn, rt } => {
                 0b1_111_0_00_0_0_1_00000_0_111_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11699,7 +11959,7 @@ impl Asm {
 
             Asm::Lduminb { a, r, rs, rn, rt } => {
                 0b00_111_0_00_0_0_1_00000_0_111_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11708,7 +11968,7 @@ impl Asm {
 
             Asm::Lduminh { a, r, rs, rn, rt } => {
                 0b01_111_0_00_0_0_1_00000_0_111_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -11717,39 +11977,57 @@ impl Asm {
 
             Asm::LdurFpsimd { size, imm9, rn, rt } => {
                 0b00_111_1_00_1_0_000000000_00_00000_00000_
-                    | size << 30
-                    | imm9 << 12
+                    | (*size as u32) << 30
+                    | (*imm9 as u32) << 12
                     | rn << 5
                     | rt << 0
             }
 
             Asm::LdurGen { imm9, rn, rt } => {
-                0b1_111_0_00_01_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b1_111_0_00_01_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldurb { imm9, rn, rt } => {
-                0b00_111_0_00_01_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b00_111_0_00_01_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldurh { imm9, rn, rt } => {
-                0b01_111_0_00_01_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b01_111_0_00_01_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldursb { imm9, rn, rt } => {
-                0b00_111_0_00_1_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b00_111_0_00_1_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldursh { imm9, rn, rt } => {
-                0b01_111_0_00_1_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b01_111_0_00_1_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldursw { imm9, rn, rt } => {
-                0b10_111_0_00_10_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b10_111_0_00_10_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Ldxp { sz, rt2, rn, rt } => {
                 0b1_0_001000_0_1_1_11111_0_00000_00000_00000_
-                    | sz << 30
+                    | (*sz as u32) << 30
                     | rt2 << 10
                     | rn << 5
                     | rt << 0
@@ -11767,7 +12045,7 @@ impl Asm {
 
             Asm::LslLslv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_0010_00_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -11781,16 +12059,16 @@ impl Asm {
                 rd,
             } => {
                 0b0_10_100110_0_000000_00000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Lslv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_0010_00_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -11798,7 +12076,7 @@ impl Asm {
 
             Asm::LsrLsrv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_0010_01_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -11812,16 +12090,16 @@ impl Asm {
                 rd,
             } => {
                 0b0_10_100110_0_000000_11111_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Lsrv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_0010_01_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -11829,7 +12107,7 @@ impl Asm {
 
             Asm::Madd { sf, rm, ra, rn, rd } => {
                 0b0_00_11011_000_00000_0_00000_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | ra << 10
                     | rn << 5
@@ -11847,12 +12125,12 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01111_00_0_0_0000_0_0_00_0_0_00000_00000_
-                    | q << 30
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -11865,8 +12143,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_10010_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -11883,12 +12161,12 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01111_00_0_0_0000_0_1_00_0_0_00000_00000_
-                    | q << 30
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -11901,8 +12179,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_10010_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -11910,51 +12188,57 @@ impl Asm {
 
             Asm::MnegMsub { sf, rm, rn, rd } => {
                 0b0_00_11011_000_00000_1_11111_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::MovAddAddsubImm { sf, rn, rd } => {
-                0b0_0_0_100010_0_000000000000_00000_00000_ | sf << 31 | rn << 5 | rd << 0
+                0b0_0_0_100010_0_000000000000_00000_00000_ | (*sf as u32) << 31 | rn << 5 | rd << 0
             }
 
             Asm::MovDupAdvsimdElt { imm5, rn, rd } => {
-                0b01_0_11110000_00000_0_0000_1_00000_00000_ | imm5 << 16 | rn << 5 | rd << 0
+                0b01_0_11110000_00000_0_0000_1_00000_00000_
+                    | (*imm5 as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::MovInsAdvsimdElt { imm5, imm4, rn, rd } => {
                 0b0_1_1_01110000_00000_0_0000_1_00000_00000_
-                    | imm5 << 16
-                    | imm4 << 11
+                    | (*imm5 as u32) << 16
+                    | (*imm4 as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::MovInsAdvsimdGen { imm5, rn, rd } => {
-                0b0_1_0_01110000_00000_0_0011_1_00000_00000_ | imm5 << 16 | rn << 5 | rd << 0
+                0b0_1_0_01110000_00000_0_0011_1_00000_00000_
+                    | (*imm5 as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::MovMovn { sf, hw, imm16, rd } => {
                 0b0_00_100101_00_0000000000000000_00000_
-                    | sf << 31
-                    | hw << 21
-                    | imm16 << 5
+                    | (*sf as u32) << 31
+                    | (*hw as u32) << 21
+                    | (*imm16 as u32) << 5
                     | rd << 0
             }
 
             Asm::MovMovz { sf, hw, imm16, rd } => {
                 0b0_10_100101_00_0000000000000000_00000_
-                    | sf << 31
-                    | hw << 21
-                    | imm16 << 5
+                    | (*sf as u32) << 31
+                    | (*hw as u32) << 21
+                    | (*imm16 as u32) << 5
                     | rd << 0
             }
 
             Asm::MovOrrAdvsimdReg { q, rm, rn, rd } => {
                 0b0_0_0_01110_10_1_00000_00011_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -11968,19 +12252,22 @@ impl Asm {
                 rd,
             } => {
                 0b0_01_100100_0_000000_000000_11111_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rd << 0
             }
 
             Asm::MovOrrLogShift { sf, rm, rd } => {
-                0b0_01_01010_00_0_00000_000000_11111_00000_ | sf << 31 | rm << 16 | rd << 0
+                0b0_01_01010_00_0_00000_000000_11111_00000_
+                    | (*sf as u32) << 31
+                    | rm << 16
+                    | rd << 0
             }
 
             Asm::MovUmovAdvsimd { q, rn, rd } => {
-                0b0_0_0_01110000_00_0_01_1_1_1_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_0_01110000_00_0_01_1_1_1_00000_00000_ | (*q as u32) << 30 | rn << 5 | rd << 0
             }
 
             Asm::MoviAdvsimd {
@@ -11998,41 +12285,41 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_0111100000_0_0_0_0000_0_1_0_0_0_0_0_00000_
-                    | q << 30
-                    | op << 29
-                    | a << 18
-                    | b << 17
-                    | c << 16
-                    | cmode << 12
-                    | d << 9
-                    | e << 8
-                    | f << 7
-                    | g << 6
-                    | h << 5
+                    | (*q as u32) << 30
+                    | (*op as u32) << 29
+                    | (*a as u32) << 18
+                    | (*b as u32) << 17
+                    | (*c as u32) << 16
+                    | (*cmode as u32) << 12
+                    | (*d as u32) << 9
+                    | (*e as u32) << 8
+                    | (*f as u32) << 7
+                    | (*g as u32) << 6
+                    | (*h as u32) << 5
                     | rd << 0
             }
 
             Asm::Movk { sf, hw, imm16, rd } => {
                 0b0_11_100101_00_0000000000000000_00000_
-                    | sf << 31
-                    | hw << 21
-                    | imm16 << 5
+                    | (*sf as u32) << 31
+                    | (*hw as u32) << 21
+                    | (*imm16 as u32) << 5
                     | rd << 0
             }
 
             Asm::Movn { sf, hw, imm16, rd } => {
                 0b0_00_100101_00_0000000000000000_00000_
-                    | sf << 31
-                    | hw << 21
-                    | imm16 << 5
+                    | (*sf as u32) << 31
+                    | (*hw as u32) << 21
+                    | (*imm16 as u32) << 5
                     | rd << 0
             }
 
             Asm::Movz { sf, hw, imm16, rd } => {
                 0b0_10_100101_00_0000000000000000_00000_
-                    | sf << 31
-                    | hw << 21
-                    | imm16 << 5
+                    | (*sf as u32) << 31
+                    | (*hw as u32) << 21
+                    | (*imm16 as u32) << 5
                     | rd << 0
             }
 
@@ -12045,16 +12332,19 @@ impl Asm {
                 rt,
             } => {
                 0b1101010100_1_1_0_000_0000_0000_000_00000_
-                    | o0 << 19
-                    | op1 << 16
-                    | crn << 12
-                    | crm << 8
-                    | op2 << 5
+                    | (*o0 as u32) << 19
+                    | (*op1 as u32) << 16
+                    | (*crn as u32) << 12
+                    | (*crm as u32) << 8
+                    | (*op2 as u32) << 5
                     | rt << 0
             }
 
             Asm::MsrImm { op1, crm, op2 } => {
-                0b1101010100_0_00_000_0100_0000_000_11111_ | op1 << 16 | crm << 8 | op2 << 5
+                0b1101010100_0_00_000_0100_0000_000_11111_
+                    | (*op1 as u32) << 16
+                    | (*crm as u32) << 8
+                    | (*op2 as u32) << 5
             }
 
             Asm::MsrReg {
@@ -12066,17 +12356,17 @@ impl Asm {
                 rt,
             } => {
                 0b1101010100_0_1_0_000_0000_0000_000_00000_
-                    | o0 << 19
-                    | op1 << 16
-                    | crn << 12
-                    | crm << 8
-                    | op2 << 5
+                    | (*o0 as u32) << 19
+                    | (*op1 as u32) << 16
+                    | (*crn as u32) << 12
+                    | (*crm as u32) << 8
+                    | (*op2 as u32) << 5
                     | rt << 0
             }
 
             Asm::Msub { sf, rm, ra, rn, rd } => {
                 0b0_00_11011_000_00000_1_00000_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | ra << 10
                     | rn << 5
@@ -12094,12 +12384,12 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01111_00_0_0_0000_1000_0_0_00000_00000_
-                    | q << 30
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -12112,8 +12402,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_10011_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12121,14 +12411,14 @@ impl Asm {
 
             Asm::MulMadd { sf, rm, rn, rd } => {
                 0b0_00_11011_000_00000_0_11111_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::MvnNotAdvsimd { q, rn, rd } => {
-                0b0_0_1_01110_00_10000_00101_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_1_01110_00_10000_00101_10_00000_00000_ | (*q as u32) << 30 | rn << 5 | rd << 0
             }
 
             Asm::MvnOrnLogShift {
@@ -12139,10 +12429,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_01_01010_00_1_00000_000000_11111_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rd << 0
             }
 
@@ -12160,21 +12450,24 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_0111100000_0_0_0_0000_0_1_0_0_0_0_0_00000_
-                    | q << 30
-                    | a << 18
-                    | b << 17
-                    | c << 16
-                    | cmode << 12
-                    | d << 9
-                    | e << 8
-                    | f << 7
-                    | g << 6
-                    | h << 5
+                    | (*q as u32) << 30
+                    | (*a as u32) << 18
+                    | (*b as u32) << 17
+                    | (*c as u32) << 16
+                    | (*cmode as u32) << 12
+                    | (*d as u32) << 9
+                    | (*e as u32) << 8
+                    | (*f as u32) << 7
+                    | (*g as u32) << 6
+                    | (*h as u32) << 5
                     | rd << 0
             }
 
             Asm::NegAdvsimd { size, rn, rd } => {
-                0b01_1_11110_00_10000_01011_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_1_11110_00_10000_01011_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::NegSubAddsubShift {
@@ -12185,10 +12478,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_1_0_01011_00_0_00000_000000_11111_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rd << 0
             }
 
@@ -12199,29 +12492,29 @@ impl Asm {
                 imm6,
             } => {
                 0b0_1_1_01011_00_0_00000_000000_11111_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
             }
 
             Asm::NgcSbc { sf, rm, rd } => {
-                0b0_1_0_11010000_00000_000000_11111_00000_ | sf << 31 | rm << 16 | rd << 0
+                0b0_1_0_11010000_00000_000000_11111_00000_ | (*sf as u32) << 31 | rm << 16 | rd << 0
             }
 
             Asm::NgcsSbcs { sf, rm, rd } => {
-                0b0_1_1_11010000_00000_000000_11111_00000_ | sf << 31 | rm << 16 | rd << 0
+                0b0_1_1_11010000_00000_000000_11111_00000_ | (*sf as u32) << 31 | rm << 16 | rd << 0
             }
 
             Asm::Nop {} => 0b1101010100_0_00_011_0010_0000_000_11111_,
 
             Asm::NotAdvsimd { q, rn, rd } => {
-                0b0_0_1_01110_00_10000_00101_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_1_01110_00_10000_00101_10_00000_00000_ | (*q as u32) << 30 | rn << 5 | rd << 0
             }
 
             Asm::OrnAdvsimd { q, rm, rn, rd } => {
                 0b0_0_0_01110_11_1_00000_00011_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12236,10 +12529,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_01_01010_00_1_00000_000000_00000_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -12257,21 +12550,21 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_0111100000_0_0_0_1_0_1_0_0_0_0_0_00000_
-                    | q << 30
-                    | a << 18
-                    | b << 17
-                    | c << 16
-                    | d << 9
-                    | e << 8
-                    | f << 7
-                    | g << 6
-                    | h << 5
+                    | (*q as u32) << 30
+                    | (*a as u32) << 18
+                    | (*b as u32) << 17
+                    | (*c as u32) << 16
+                    | (*d as u32) << 9
+                    | (*e as u32) << 8
+                    | (*f as u32) << 7
+                    | (*g as u32) << 6
+                    | (*h as u32) << 5
                     | rd << 0
             }
 
             Asm::OrrAdvsimdReg { q, rm, rn, rd } => {
                 0b0_0_0_01110_10_1_00000_00011_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12286,10 +12579,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_01_100100_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -12303,20 +12596,26 @@ impl Asm {
                 rd,
             } => {
                 0b0_01_01010_00_0_00000_000000_00000_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Pacda { z, rn, rd } => {
-                0b1_1_0_11010110_00001_0_0_0_010_00000_00000_ | z << 13 | rn << 5 | rd << 0
+                0b1_1_0_11010110_00001_0_0_0_010_00000_00000_
+                    | (*z as u32) << 13
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Pacdb { z, rn, rd } => {
-                0b1_1_0_11010110_00001_0_0_0_011_00000_00000_ | z << 13 | rn << 5 | rd << 0
+                0b1_1_0_11010110_00001_0_0_0_011_00000_00000_
+                    | (*z as u32) << 13
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Pacga { rm, rn, rd } => {
@@ -12324,11 +12623,17 @@ impl Asm {
             }
 
             Asm::Pacia { z, rn, rd } => {
-                0b1_1_0_11010110_00001_0_0_0_000_00000_00000_ | z << 13 | rn << 5 | rd << 0
+                0b1_1_0_11010110_00001_0_0_0_000_00000_00000_
+                    | (*z as u32) << 13
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Pacib { z, rn, rd } => {
-                0b1_1_0_11010110_00001_0_0_0_001_00000_00000_ | z << 13 | rn << 5 | rd << 0
+                0b1_1_0_11010110_00001_0_0_0_001_00000_00000_
+                    | (*z as u32) << 13
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::PmulAdvsimd {
@@ -12339,8 +12644,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_10011_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12354,19 +12659,24 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_1110_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::PrfmImm { imm12, rn, rt } => {
-                0b11_111_0_01_10_000000000000_00000_00000_ | imm12 << 10 | rn << 5 | rt << 0
+                0b11_111_0_01_10_000000000000_00000_00000_
+                    | (*imm12 as u32) << 10
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::PrfmLit { imm19, rt } => {
-                0b11_011_0_00_0000000000000000000_00000_ | imm19 << 5 | rt << 0
+                0b11_011_0_00_0000000000000000000_00000_
+                    | truncate_imm::<_, 19>(*imm19) << 5
+                    | rt << 0
             }
 
             Asm::PrfmReg {
@@ -12378,14 +12688,17 @@ impl Asm {
             } => {
                 0b11_111_0_00_10_1_00000_000_0_10_00000_00000_
                     | rm << 16
-                    | option << 13
-                    | s << 12
+                    | (*option as u32) << 13
+                    | (*s as u32) << 12
                     | rn << 5
                     | rt << 0
             }
 
             Asm::Prfum { imm9, rn, rt } => {
-                0b11_111_0_00_10_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b11_111_0_00_10_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Psb {} => 0b1101010100_0_00_011_0010_0010_001_11111_,
@@ -12400,8 +12713,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_01_0_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12412,37 +12725,37 @@ impl Asm {
             }
 
             Asm::RbitAdvsimd { q, rn, rd } => {
-                0b0_0_1_01110_01_10000_00101_10_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_1_01110_01_10000_00101_10_00000_00000_ | (*q as u32) << 30 | rn << 5 | rd << 0
             }
 
             Asm::RbitInt { sf, rn, rd } => {
-                0b0_1_0_11010110_00000_0000_00_00000_00000_ | sf << 31 | rn << 5 | rd << 0
+                0b0_1_0_11010110_00000_0000_00_00000_00000_ | (*sf as u32) << 31 | rn << 5 | rd << 0
             }
 
             Asm::Ret { rn } => 0b1101011_0_0_10_11111_0000_0_0_00000_00000_ | rn << 5,
 
-            Asm::Reta { m } => 0b1101011_0_0_10_11111_0000_1_0_11111_11111_ | m << 10,
+            Asm::Reta { m } => 0b1101011_0_0_10_11111_0000_1_0_11111_11111_ | (*m as u32) << 10,
 
             Asm::Rev { sf, rn, rd } => {
-                0b0_1_0_11010110_00000_0000_1_00000_00000_ | sf << 31 | rn << 5 | rd << 0
+                0b0_1_0_11010110_00000_0000_1_00000_00000_ | (*sf as u32) << 31 | rn << 5 | rd << 0
             }
 
             Asm::Rev16Advsimd { q, size, rn, rd } => {
                 0b0_0_0_01110_00_10000_0000_1_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Rev16Int { sf, rn, rd } => {
-                0b0_1_0_11010110_00000_0000_01_00000_00000_ | sf << 31 | rn << 5 | rd << 0
+                0b0_1_0_11010110_00000_0000_01_00000_00000_ | (*sf as u32) << 31 | rn << 5 | rd << 0
             }
 
             Asm::Rev32Advsimd { q, size, rn, rd } => {
                 0b0_0_1_01110_00_10000_0000_0_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -12453,8 +12766,8 @@ impl Asm {
 
             Asm::Rev64Advsimd { q, size, rn, rd } => {
                 0b0_0_0_01110_00_10000_0000_0_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -12464,7 +12777,10 @@ impl Asm {
             }
 
             Asm::Rmif { imm6, rn, mask } => {
-                0b1_0_1_11010000_000000_00001_00000_0_0000_ | imm6 << 15 | rn << 5 | mask << 0
+                0b1_0_1_11010000_000000_00001_00000_0_0000_
+                    | (*imm6 as u32) << 15
+                    | rn << 5
+                    | (*mask as u32) << 0
             }
 
             Asm::RorExtr {
@@ -12476,17 +12792,17 @@ impl Asm {
                 rd,
             } => {
                 0b0_00_100111_0_0_00000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
                     | rm << 16
-                    | imms << 10
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::RorRorv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_0010_11_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12494,7 +12810,7 @@ impl Asm {
 
             Asm::Rorv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_0010_11_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12502,8 +12818,8 @@ impl Asm {
 
             Asm::RshrnAdvsimd { q, immb, rn, rd } => {
                 0b0_0_0_011110_0000_000_1000_1_1_00000_00000_
-                    | q << 30
-                    | immb << 16
+                    | (*q as u32) << 30
+                    | (*immb as u32) << 16
                     | rn << 5
                     | rd << 0
             }
@@ -12516,8 +12832,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_01_1_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12531,8 +12847,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_0111_1_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12546,8 +12862,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_01_0_1_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12561,8 +12877,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_0111_0_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12576,8 +12892,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_01_1_1_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12585,8 +12901,8 @@ impl Asm {
 
             Asm::SadalpAdvsimd { q, size, rn, rd } => {
                 0b0_0_0_01110_00_10000_00_1_10_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -12599,8 +12915,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_00_0_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12608,16 +12924,16 @@ impl Asm {
 
             Asm::SaddlpAdvsimd { q, size, rn, rd } => {
                 0b0_0_0_01110_00_10000_00_0_10_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SaddlvAdvsimd { q, size, rn, rd } => {
                 0b0_0_0_01110_00_11000_00011_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -12630,8 +12946,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_00_0_1_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12640,11 +12956,19 @@ impl Asm {
             Asm::Sb {} => 0b1101010100_0_00_011_0011_0000_1_11_11111_,
 
             Asm::Sbc { sf, rm, rn, rd } => {
-                0b0_1_0_11010000_00000_000000_00000_00000_ | sf << 31 | rm << 16 | rn << 5 | rd << 0
+                0b0_1_0_11010000_00000_000000_00000_00000_
+                    | (*sf as u32) << 31
+                    | rm << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Sbcs { sf, rm, rn, rd } => {
-                0b0_1_1_11010000_00000_000000_00000_00000_ | sf << 31 | rm << 16 | rn << 5 | rd << 0
+                0b0_1_1_11010000_00000_000000_00000_00000_
+                    | (*sf as u32) << 31
+                    | rm << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SbfizSbfm {
@@ -12656,10 +12980,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_00_100110_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -12673,10 +12997,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_00_100110_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -12690,16 +13014,19 @@ impl Asm {
                 rd,
             } => {
                 0b0_00_100110_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::ScvtfAdvsimdFix { immb, rn, rd } => {
-                0b01_0_111110_0000_000_11100_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_0_111110_0000_000_11100_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::ScvtfAdvsimdInt { rn, rd } => {
@@ -12714,24 +13041,24 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_11110_00_0_00_010_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
-                    | scale << 10
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
+                    | (*scale as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::ScvtfFloatInt { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_00_010_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Sdiv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_00001_1_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -12748,12 +13075,12 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01111_00_0_0_0000_1110_0_0_00000_00000_
-                    | q << 30
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -12766,20 +13093,20 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_0_00000_1_0010_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Setf { sz, rn } => {
-                0b0_0_1_11010000_000000_0_0010_00000_0_1101_ | sz << 14 | rn << 5
+                0b0_0_1_11010000_000000_0_0010_00000_0_1101_ | (*sz as u32) << 14 | rn << 5
             }
 
             Asm::Setgp { sz, rs, rn, rd } => {
                 0b00_011_1_01_11_0_00000_00_01_00000_00000_
-                    | sz << 30
+                    | (*sz as u32) << 30
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -12787,7 +13114,7 @@ impl Asm {
 
             Asm::Setgpn { sz, rs, rn, rd } => {
                 0b00_011_1_01_11_0_00000_10_01_00000_00000_
-                    | sz << 30
+                    | (*sz as u32) << 30
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -12795,7 +13122,7 @@ impl Asm {
 
             Asm::Setgpt { sz, rs, rn, rd } => {
                 0b00_011_1_01_11_0_00000_01_01_00000_00000_
-                    | sz << 30
+                    | (*sz as u32) << 30
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -12803,7 +13130,7 @@ impl Asm {
 
             Asm::Setgptn { sz, rs, rn, rd } => {
                 0b00_011_1_01_11_0_00000_11_01_00000_00000_
-                    | sz << 30
+                    | (*sz as u32) << 30
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -12811,7 +13138,7 @@ impl Asm {
 
             Asm::Setp { sz, rs, rn, rd } => {
                 0b00_011_0_01_11_0_00000_00_01_00000_00000_
-                    | sz << 30
+                    | (*sz as u32) << 30
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -12819,7 +13146,7 @@ impl Asm {
 
             Asm::Setpn { sz, rs, rn, rd } => {
                 0b00_011_0_01_11_0_00000_10_01_00000_00000_
-                    | sz << 30
+                    | (*sz as u32) << 30
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -12827,7 +13154,7 @@ impl Asm {
 
             Asm::Setpt { sz, rs, rn, rd } => {
                 0b00_011_0_01_11_0_00000_01_01_00000_00000_
-                    | sz << 30
+                    | (*sz as u32) << 30
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -12835,7 +13162,7 @@ impl Asm {
 
             Asm::Setptn { sz, rs, rn, rd } => {
                 0b00_011_0_01_11_0_00000_11_01_00000_00000_
-                    | sz << 30
+                    | (*sz as u32) << 30
                     | rs << 16
                     | rn << 5
                     | rd << 0
@@ -12909,29 +13236,32 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_00000_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::ShlAdvsimd { immb, rn, rd } => {
-                0b01_0_111110_0000_000_01010_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_0_111110_0000_000_01010_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::ShllAdvsimd { q, size, rn, rd } => {
                 0b0_0_1_01110_00_10000_10011_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::ShrnAdvsimd { q, immb, rn, rd } => {
                 0b0_0_0_011110_0000_000_1000_0_1_00000_00000_
-                    | q << 30
-                    | immb << 16
+                    | (*q as u32) << 30
+                    | (*immb as u32) << 16
                     | rn << 5
                     | rd << 0
             }
@@ -12944,15 +13274,18 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_00100_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SliAdvsimd { immb, rn, rd } => {
-                0b01_1_111110_0000_000_01010_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_01010_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Sm3partw1Advsimd { rm, rn, rd } => {
@@ -12970,7 +13303,7 @@ impl Asm {
             Asm::Sm3tt1aAdvsimd { rm, imm2, rn, rd } => {
                 0b11001110010_00000_10_00_00_00000_00000_
                     | rm << 16
-                    | imm2 << 12
+                    | (*imm2 as u32) << 12
                     | rn << 5
                     | rd << 0
             }
@@ -12978,7 +13311,7 @@ impl Asm {
             Asm::Sm3tt1bAdvsimd { rm, imm2, rn, rd } => {
                 0b11001110010_00000_10_00_01_00000_00000_
                     | rm << 16
-                    | imm2 << 12
+                    | (*imm2 as u32) << 12
                     | rn << 5
                     | rd << 0
             }
@@ -12986,7 +13319,7 @@ impl Asm {
             Asm::Sm3tt2aAdvsimd { rm, imm2, rn, rd } => {
                 0b11001110010_00000_10_00_10_00000_00000_
                     | rm << 16
-                    | imm2 << 12
+                    | (*imm2 as u32) << 12
                     | rn << 5
                     | rd << 0
             }
@@ -12994,7 +13327,7 @@ impl Asm {
             Asm::Sm3tt2bAdvsimd { rm, imm2, rn, rd } => {
                 0b11001110010_00000_10_00_11_00000_00000_
                     | rm << 16
-                    | imm2 << 12
+                    | (*imm2 as u32) << 12
                     | rn << 5
                     | rd << 0
             }
@@ -13023,8 +13356,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_0110_0_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13038,8 +13371,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_1010_0_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13047,13 +13380,13 @@ impl Asm {
 
             Asm::SmaxvAdvsimd { q, size, rn, rd } => {
                 0b0_0_0_01110_00_11000_0_1010_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
-            Asm::Smc { imm16 } => 0b11010100_000_0000000000000000_000_11_ | imm16 << 5,
+            Asm::Smc { imm16 } => 0b11010100_000_0000000000000000_000_11_ | (*imm16 as u32) << 5,
 
             Asm::SminAdvsimd {
                 q,
@@ -13063,8 +13396,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_0110_1_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13078,8 +13411,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_1010_1_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13087,8 +13420,8 @@ impl Asm {
 
             Asm::SminvAdvsimd { q, size, rn, rd } => {
                 0b0_0_0_01110_00_11000_1_1010_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -13104,12 +13437,12 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01111_00_0_0_0000_0_0_10_0_0_00000_00000_
-                    | q << 30
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -13122,8 +13455,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_10_0_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13140,12 +13473,12 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01111_00_0_0_0000_0_1_10_0_0_00000_00000_
-                    | q << 30
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -13158,8 +13491,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_10_1_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13175,8 +13508,8 @@ impl Asm {
 
             Asm::SmovAdvsimd { q, imm5, rn, rd } => {
                 0b0_0_0_01110000_00000_0_01_0_1_1_00000_00000_
-                    | q << 30
-                    | imm5 << 16
+                    | (*q as u32) << 30
+                    | (*imm5 as u32) << 16
                     | rn << 5
                     | rd << 0
             }
@@ -13204,12 +13537,12 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01111_00_0_0_0000_1010_0_0_00000_00000_
-                    | q << 30
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -13222,8 +13555,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_1_1_0_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13234,12 +13567,15 @@ impl Asm {
             }
 
             Asm::SqabsAdvsimd { size, rn, rd } => {
-                0b01_0_11110_00_10000_00111_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_0_11110_00_10000_00111_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SqaddAdvsimd { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_00001_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13255,18 +13591,18 @@ impl Asm {
                 rd,
             } => {
                 0b01_0_11111_00_0_0_0000_0_0_11_0_0_00000_00000_
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SqdmlalAdvsimdVec { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_10_0_1_00_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13282,18 +13618,18 @@ impl Asm {
                 rd,
             } => {
                 0b01_0_11111_00_0_0_0000_0_1_11_0_0_00000_00000_
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SqdmlslAdvsimdVec { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_10_1_1_00_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13309,18 +13645,18 @@ impl Asm {
                 rd,
             } => {
                 0b01_0_11111_00_0_0_0000_110_0_0_0_00000_00000_
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SqdmulhAdvsimdVec { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_10110_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13336,25 +13672,28 @@ impl Asm {
                 rd,
             } => {
                 0b01_0_11111_00_0_0_0000_1011_0_0_00000_00000_
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SqdmullAdvsimdVec { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_1101_00_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SqnegAdvsimd { size, rn, rd } => {
-                0b01_1_11110_00_10000_00111_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_1_11110_00_10000_00111_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SqrdmlahAdvsimdElt {
@@ -13367,18 +13706,18 @@ impl Asm {
                 rd,
             } => {
                 0b01_1_11111_00_0_0_0000_11_0_1_0_0_00000_00000_
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SqrdmlahAdvsimdVec { size, rm, rn, rd } => {
                 0b01_1_11110_00_0_00000_1_000_0_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13394,18 +13733,18 @@ impl Asm {
                 rd,
             } => {
                 0b01_1_11111_00_0_0_0000_11_1_1_0_0_00000_00000_
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SqrdmlshAdvsimdVec { size, rm, rn, rd } => {
                 0b01_1_11110_00_0_00000_1_000_1_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13421,18 +13760,18 @@ impl Asm {
                 rd,
             } => {
                 0b01_0_11111_00_0_0_0000_110_1_0_0_00000_00000_
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SqrdmulhAdvsimdVec { size, rm, rn, rd } => {
                 0b01_1_11110_00_1_00000_10110_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13440,58 +13779,82 @@ impl Asm {
 
             Asm::SqrshlAdvsimd { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_010_1_1_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SqrshrnAdvsimd { immb, rn, rd } => {
-                0b01_0_111110_0000_000_1001_1_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_0_111110_0000_000_1001_1_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SqrshrunAdvsimd { immb, rn, rd } => {
-                0b01_1_111110_0000_000_1000_1_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_1000_1_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SqshlAdvsimdImm { immb, rn, rd } => {
-                0b01_0_111110_0000_000_011_1_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_0_111110_0000_000_011_1_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SqshlAdvsimdReg { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_010_0_1_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SqshluAdvsimd { immb, rn, rd } => {
-                0b01_1_111110_0000_000_011_0_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_011_0_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SqshrnAdvsimd { immb, rn, rd } => {
-                0b01_0_111110_0000_000_1001_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_0_111110_0000_000_1001_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SqshrunAdvsimd { immb, rn, rd } => {
-                0b01_1_111110_0000_000_1000_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_1000_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SqsubAdvsimd { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_00101_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SqxtnAdvsimd { size, rn, rd } => {
-                0b01_0_11110_00_10000_10100_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_0_11110_00_10000_10100_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SqxtunAdvsimd { size, rn, rd } => {
-                0b01_1_11110_00_10000_10010_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_1_11110_00_10000_10010_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SrhaddAdvsimd {
@@ -13502,38 +13865,47 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_00010_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SriAdvsimd { immb, rn, rd } => {
-                0b01_1_111110_0000_000_01000_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_01000_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SrshlAdvsimd { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_010_1_0_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SrshrAdvsimd { immb, rn, rd } => {
-                0b01_0_111110_0000_000_00_1_0_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_0_111110_0000_000_00_1_0_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SrsraAdvsimd { immb, rn, rd } => {
-                0b01_0_111110_0000_000_00_1_1_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_0_111110_0000_000_00_1_1_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SsbbDsb {} => 0b1101010100_0_00_011_0011_0000_1_00_11111_,
 
             Asm::SshlAdvsimd { size, rm, rn, rd } => {
                 0b01_0_11110_00_1_00000_010_0_0_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13541,18 +13913,24 @@ impl Asm {
 
             Asm::SshllAdvsimd { q, immb, rn, rd } => {
                 0b0_0_0_011110_0000_000_10100_1_00000_00000_
-                    | q << 30
-                    | immb << 16
+                    | (*q as u32) << 30
+                    | (*immb as u32) << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SshrAdvsimd { immb, rn, rd } => {
-                0b01_0_111110_0000_000_00_0_0_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_0_111110_0000_000_00_0_0_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SsraAdvsimd { immb, rn, rd } => {
-                0b01_0_111110_0000_000_00_0_1_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_0_111110_0000_000_00_0_1_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SsublAdvsimd {
@@ -13563,8 +13941,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_00_1_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -13578,77 +13956,84 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_00_1_1_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::St1AdvsimdMult { q, size, rn, rt } => {
-                0b0_0_0011000_0_000000_1_00_00000_00000_ | q << 30 | size << 10 | rn << 5 | rt << 0
+                0b0_0_0011000_0_000000_1_00_00000_00000_
+                    | (*q as u32) << 30
+                    | (*size as u32) << 10
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::St1AdvsimdSngl { q, s, size, rn, rt } => {
                 0b0_0_0011010_0_0_00000_0_0_00_00000_00000_
-                    | q << 30
-                    | s << 12
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*s as u32) << 12
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::St2AdvsimdMult { q, size, rn, rt } => {
                 0b0_0_0011000_0_000000_1000_00_00000_00000_
-                    | q << 30
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::St2AdvsimdSngl { q, s, size, rn, rt } => {
                 0b0_0_0011010_0_1_00000_0_0_00_00000_00000_
-                    | q << 30
-                    | s << 12
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*s as u32) << 12
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::St2g { imm9, xn, xt } => {
-                0b11011001_1_0_1_000000000_0_1_00000_00000_ | imm9 << 12 | xn << 5 | xt << 0
+                0b11011001_1_0_1_000000000_0_1_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | (*xn as u32) << 5
+                    | (*xt as u32) << 0
             }
 
             Asm::St3AdvsimdMult { q, size, rn, rt } => {
                 0b0_0_0011000_0_000000_0100_00_00000_00000_
-                    | q << 30
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::St3AdvsimdSngl { q, s, size, rn, rt } => {
                 0b0_0_0011010_0_0_00000_1_0_00_00000_00000_
-                    | q << 30
-                    | s << 12
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*s as u32) << 12
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::St4AdvsimdMult { q, size, rn, rt } => {
                 0b0_0_0011000_0_000000_0000_00_00000_00000_
-                    | q << 30
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
 
             Asm::St4AdvsimdSngl { q, s, size, rn, rt } => {
                 0b0_0_0011010_0_1_00000_1_0_00_00000_00000_
-                    | q << 30
-                    | s << 12
-                    | size << 10
+                    | (*q as u32) << 30
+                    | (*s as u32) << 12
+                    | (*size as u32) << 10
                     | rn << 5
                     | rt << 0
             }
@@ -13702,19 +14087,24 @@ impl Asm {
             }
 
             Asm::Stg { imm9, xn, xt } => {
-                0b11011001_0_0_1_000000000_0_1_00000_00000_ | imm9 << 12 | xn << 5 | xt << 0
+                0b11011001_0_0_1_000000000_0_1_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | (*xn as u32) << 5
+                    | (*xt as u32) << 0
             }
 
             Asm::Stgm { xn, xt } => {
-                0b11011001_1_0_1_0_0_0_0_0_0_0_0_0_0_0_00000_00000_ | xn << 5 | xt << 0
+                0b11011001_1_0_1_0_0_0_0_0_0_0_0_0_0_0_00000_00000_
+                    | (*xn as u32) << 5
+                    | (*xt as u32) << 0
             }
 
             Asm::Stgp { simm7, xt2, xn, xt } => {
                 0b0_1_101_0_001_0_0000000_00000_00000_00000_
-                    | simm7 << 15
-                    | xt2 << 10
-                    | xn << 5
-                    | xt << 0
+                    | (*simm7 as u32) << 15
+                    | (*xt2 as u32) << 10
+                    | (*xn as u32) << 5
+                    | (*xt as u32) << 0
             }
 
             Asm::Stllr { rn, rt } => {
@@ -13740,15 +14130,21 @@ impl Asm {
             }
 
             Asm::StlurGen { imm9, rn, rt } => {
-                0b1_011001_00_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b1_011001_00_0_000000000_00_00000_00000_ | (*imm9 as u32) << 12 | rn << 5 | rt << 0
             }
 
             Asm::Stlurb { imm9, rn, rt } => {
-                0b00_011001_00_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b00_011001_00_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Stlurh { imm9, rn, rt } => {
-                0b01_011001_00_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b01_011001_00_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Stlxp {
@@ -13759,7 +14155,7 @@ impl Asm {
                 rt,
             } => {
                 0b1_0_001000_0_0_1_00000_1_00000_00000_00000_
-                    | sz << 30
+                    | (*sz as u32) << 30
                     | rs << 16
                     | rt2 << 10
                     | rn << 5
@@ -13786,8 +14182,8 @@ impl Asm {
                 rt,
             } => {
                 0b00_101_1_000_0_0000000_00000_00000_00000_
-                    | opc << 30
-                    | imm7 << 15
+                    | (*opc as u32) << 30
+                    | (*imm7 as u32) << 15
                     | rt2 << 10
                     | rn << 5
                     | rt << 0
@@ -13795,7 +14191,7 @@ impl Asm {
 
             Asm::StnpGen { imm7, rt2, rn, rt } => {
                 0b0_101_0_000_0_0000000_00000_00000_00000_
-                    | imm7 << 15
+                    | (*imm7 as u32) << 15
                     | rt2 << 10
                     | rn << 5
                     | rt << 0
@@ -13809,8 +14205,8 @@ impl Asm {
                 rt,
             } => {
                 0b00_101_1_001_0_0000000_00000_00000_00000_
-                    | opc << 30
-                    | imm7 << 15
+                    | (*opc as u32) << 30
+                    | (*imm7 as u32) << 15
                     | rt2 << 10
                     | rn << 5
                     | rt << 0
@@ -13818,7 +14214,7 @@ impl Asm {
 
             Asm::StpGen { imm7, rt2, rn, rt } => {
                 0b0_101_0_001_0_0000000_00000_00000_00000_
-                    | imm7 << 15
+                    | (*imm7 as u32) << 15
                     | rt2 << 10
                     | rn << 5
                     | rt << 0
@@ -13826,14 +14222,17 @@ impl Asm {
 
             Asm::StrImmFpsimd { size, imm9, rn, rt } => {
                 0b00_111_1_00_0_0_000000000_01_00000_00000_
-                    | size << 30
-                    | imm9 << 12
+                    | (*size as u32) << 30
+                    | (*imm9 as u32) << 12
                     | rn << 5
                     | rt << 0
             }
 
             Asm::StrImmGen { imm9, rn, rt } => {
-                0b1_111_0_00_00_0_000000000_01_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b1_111_0_00_00_0_000000000_01_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::StrRegFpsimd {
@@ -13845,10 +14244,10 @@ impl Asm {
                 rt,
             } => {
                 0b00_111_1_00_0_1_00000_000_0_10_00000_00000_
-                    | size << 30
+                    | (*size as u32) << 30
                     | rm << 16
-                    | option << 13
-                    | s << 12
+                    | (*option as u32) << 13
+                    | (*s as u32) << 12
                     | rn << 5
                     | rt << 0
             }
@@ -13862,14 +14261,17 @@ impl Asm {
             } => {
                 0b1_111_0_00_00_1_00000_000_0_10_00000_00000_
                     | rm << 16
-                    | option << 13
-                    | s << 12
+                    | (*option as u32) << 13
+                    | (*s as u32) << 12
                     | rn << 5
                     | rt << 0
             }
 
             Asm::StrbImm { imm9, rn, rt } => {
-                0b00_111_0_00_00_0_000000000_01_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b00_111_0_00_00_0_000000000_01_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::StrbReg {
@@ -13881,14 +14283,17 @@ impl Asm {
             } => {
                 0b00_111_0_00_00_1_00000_000_0_10_00000_00000_
                     | rm << 16
-                    | option << 13
-                    | s << 12
+                    | (*option as u32) << 13
+                    | (*s as u32) << 12
                     | rn << 5
                     | rt << 0
             }
 
             Asm::StrhImm { imm9, rn, rt } => {
-                0b01_111_0_00_00_0_000000000_01_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b01_111_0_00_00_0_000000000_01_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::StrhReg {
@@ -13900,8 +14305,8 @@ impl Asm {
             } => {
                 0b01_111_0_00_00_1_00000_000_0_10_00000_00000_
                     | rm << 16
-                    | option << 13
-                    | s << 12
+                    | (*option as u32) << 13
+                    | (*s as u32) << 12
                     | rn << 5
                     | rt << 0
             }
@@ -13943,15 +14348,24 @@ impl Asm {
             }
 
             Asm::Sttr { imm9, rn, rt } => {
-                0b1_111_0_00_00_0_000000000_10_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b1_111_0_00_00_0_000000000_10_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Sttrb { imm9, rn, rt } => {
-                0b00_111_0_00_00_0_000000000_10_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b00_111_0_00_00_0_000000000_10_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Sttrh { imm9, rn, rt } => {
-                0b01_111_0_00_00_0_000000000_10_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b01_111_0_00_00_0_000000000_10_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::StumaxLdumax { r, rs, rn } => {
@@ -13980,22 +14394,31 @@ impl Asm {
 
             Asm::SturFpsimd { size, imm9, rn, rt } => {
                 0b00_111_1_00_0_0_000000000_00_00000_00000_
-                    | size << 30
-                    | imm9 << 12
+                    | (*size as u32) << 30
+                    | (*imm9 as u32) << 12
                     | rn << 5
                     | rt << 0
             }
 
             Asm::SturGen { imm9, rn, rt } => {
-                0b1_111_0_00_00_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b1_111_0_00_00_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Sturb { imm9, rn, rt } => {
-                0b00_111_0_00_00_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b00_111_0_00_00_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Sturh { imm9, rn, rt } => {
-                0b01_111_0_00_00_0_000000000_00_00000_00000_ | imm9 << 12 | rn << 5 | rt << 0
+                0b01_111_0_00_00_0_000000000_00_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | rn << 5
+                    | rt << 0
             }
 
             Asm::Stxp {
@@ -14006,7 +14429,7 @@ impl Asm {
                 rt,
             } => {
                 0b1_0_001000_0_0_1_00000_0_00000_00000_00000_
-                    | sz << 30
+                    | (*sz as u32) << 30
                     | rs << 16
                     | rt2 << 10
                     | rn << 5
@@ -14026,15 +14449,23 @@ impl Asm {
             }
 
             Asm::Stz2g { imm9, xn, xt } => {
-                0b11011001_1_1_1_000000000_0_1_00000_00000_ | imm9 << 12 | xn << 5 | xt << 0
+                0b11011001_1_1_1_000000000_0_1_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | (*xn as u32) << 5
+                    | (*xt as u32) << 0
             }
 
             Asm::Stzg { imm9, xn, xt } => {
-                0b11011001_0_1_1_000000000_0_1_00000_00000_ | imm9 << 12 | xn << 5 | xt << 0
+                0b11011001_0_1_1_000000000_0_1_00000_00000_
+                    | (*imm9 as u32) << 12
+                    | (*xn as u32) << 5
+                    | (*xt as u32) << 0
             }
 
             Asm::Stzgm { xn, xt } => {
-                0b11011001_0_0_1_0_0_0_0_0_0_0_0_0_0_0_00000_00000_ | xn << 5 | xt << 0
+                0b11011001_0_0_1_0_0_0_0_0_0_0_0_0_0_0_00000_00000_
+                    | (*xn as u32) << 5
+                    | (*xt as u32) << 0
             }
 
             Asm::SubAddsubExt {
@@ -14046,10 +14477,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_1_0_01011_00_1_00000_000_000_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | option << 13
-                    | imm3 << 10
+                    | (*option as u32) << 13
+                    | (*imm3 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -14062,9 +14493,9 @@ impl Asm {
                 rd,
             } => {
                 0b0_1_0_100010_0_000000000000_00000_00000_
-                    | sf << 31
-                    | sh << 22
-                    | imm12 << 10
+                    | (*sf as u32) << 31
+                    | (*sh as u32) << 22
+                    | (*imm12 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -14078,17 +14509,17 @@ impl Asm {
                 rd,
             } => {
                 0b0_1_0_01011_00_0_00000_000000_00000_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SubAdvsimd { size, rm, rn, rd } => {
                 0b01_1_11110_00_1_00000_10000_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14101,10 +14532,10 @@ impl Asm {
                 xd,
             } => {
                 0b1_1_0_100011_0_000000_00_0000_00000_00000_
-                    | uimm6 << 16
-                    | uimm4 << 10
-                    | xn << 5
-                    | xd << 0
+                    | (*uimm6 as u32) << 16
+                    | (*uimm4 as u32) << 10
+                    | (*xn as u32) << 5
+                    | (*xd as u32) << 0
             }
 
             Asm::SubhnAdvsimd {
@@ -14115,19 +14546,25 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01110_00_1_00000_01_1_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Subp { xm, xn, xd } => {
-                0b1_0_0_11010110_00000_0_0_0_0_0_0_00000_00000_ | xm << 16 | xn << 5 | xd << 0
+                0b1_0_0_11010110_00000_0_0_0_0_0_0_00000_00000_
+                    | (*xm as u32) << 16
+                    | (*xn as u32) << 5
+                    | (*xd as u32) << 0
             }
 
             Asm::Subps { xm, xn, xd } => {
-                0b1_0_1_11010110_00000_0_0_0_0_0_0_00000_00000_ | xm << 16 | xn << 5 | xd << 0
+                0b1_0_1_11010110_00000_0_0_0_0_0_0_00000_00000_
+                    | (*xm as u32) << 16
+                    | (*xn as u32) << 5
+                    | (*xd as u32) << 0
             }
 
             Asm::SubsAddsubExt {
@@ -14139,10 +14576,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_1_1_01011_00_1_00000_000_000_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
-                    | option << 13
-                    | imm3 << 10
+                    | (*option as u32) << 13
+                    | (*imm3 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -14155,9 +14592,9 @@ impl Asm {
                 rd,
             } => {
                 0b0_1_1_100010_0_000000000000_00000_00000_
-                    | sf << 31
-                    | sh << 22
-                    | imm12 << 10
+                    | (*sf as u32) << 31
+                    | (*sh as u32) << 22
+                    | (*imm12 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -14171,10 +14608,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_1_1_01011_00_0_00000_000000_00000_00000_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -14189,24 +14626,27 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01111_0_0_0_0_0000_1111_0_0_00000_00000_
-                    | q << 30
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::SuqaddAdvsimd { size, rn, rd } => {
-                0b01_0_11110_00_10000_00011_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_0_11110_00_10000_00011_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
-            Asm::Svc { imm16 } => 0b11010100_000_0000000000000000_000_01_ | imm16 << 5,
+            Asm::Svc { imm16 } => 0b11010100_000_0000000000000000_000_01_ | (*imm16 as u32) << 5,
 
             Asm::Swp { a, r, rs, rn, rt } => {
                 0b1_111_0_00_0_0_1_00000_1_000_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -14215,7 +14655,7 @@ impl Asm {
 
             Asm::Swpb { a, r, rs, rn, rt } => {
                 0b00_111_0_00_0_0_1_00000_1_000_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -14224,7 +14664,7 @@ impl Asm {
 
             Asm::Swph { a, r, rs, rn, rt } => {
                 0b01_111_0_00_0_0_1_00000_1_000_00_00000_00000_
-                    | a << 23
+                    | (*a as u32) << 23
                     | r << 22
                     | rs << 16
                     | rn << 5
@@ -14232,15 +14672,23 @@ impl Asm {
             }
 
             Asm::SxtbSbfm { sf, n, rn, rd } => {
-                0b0_00_100110_0_000000_000111_00000_00000_ | sf << 31 | n << 22 | rn << 5 | rd << 0
+                0b0_00_100110_0_000000_000111_00000_00000_
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SxthSbfm { sf, n, rn, rd } => {
-                0b0_00_100110_0_000000_001111_00000_00000_ | sf << 31 | n << 22 | rn << 5 | rd << 0
+                0b0_00_100110_0_000000_001111_00000_00000_
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::SxtlSshllAdvsimd { q, rn, rd } => {
-                0b0_0_0_011110_0000_000_10100_1_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_0_011110_0000_000_10100_1_00000_00000_ | (*q as u32) << 30 | rn << 5 | rd << 0
             }
 
             Asm::SxtwSbfm { rn, rd } => {
@@ -14255,10 +14703,10 @@ impl Asm {
                 rt,
             } => {
                 0b1101010100_0_01_000_0000_0000_000_00000_
-                    | op1 << 16
-                    | crn << 12
-                    | crm << 8
-                    | op2 << 5
+                    | (*op1 as u32) << 16
+                    | (*crn as u32) << 12
+                    | (*crm as u32) << 8
+                    | (*op2 as u32) << 5
                     | rt << 0
             }
 
@@ -14270,52 +14718,52 @@ impl Asm {
                 rt,
             } => {
                 0b1101010100_1_01_000_0000_0000_000_00000_
-                    | op1 << 16
-                    | crn << 12
-                    | crm << 8
-                    | op2 << 5
+                    | (*op1 as u32) << 16
+                    | (*crn as u32) << 12
+                    | (*crm as u32) << 8
+                    | (*op2 as u32) << 5
                     | rt << 0
             }
 
             Asm::TblAdvsimd { q, rm, len, rn, rd } => {
                 0b0_0_001110_00_0_00000_0_00_0_00_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
-                    | len << 13
+                    | (*len as u32) << 13
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Tbnz { b5, b40, imm14, rt } => {
                 0b0_011011_1_00000_00000000000000_00000_
-                    | b5 << 31
-                    | b40 << 19
-                    | imm14 << 5
+                    | (*b5 as u32) << 31
+                    | (*b40 as u32) << 19
+                    | (*imm14 as u32) << 5
                     | rt << 0
             }
 
             Asm::TbxAdvsimd { q, rm, len, rn, rd } => {
                 0b0_0_001110_00_0_00000_0_00_1_00_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
-                    | len << 13
+                    | (*len as u32) << 13
                     | rn << 5
                     | rd << 0
             }
 
             Asm::Tbz { b5, b40, imm14, rt } => {
                 0b0_011011_0_00000_00000000000000_00000_
-                    | b5 << 31
-                    | b40 << 19
-                    | imm14 << 5
+                    | (*b5 as u32) << 31
+                    | (*b40 as u32) << 19
+                    | (*imm14 as u32) << 5
                     | rt << 0
             }
 
             Asm::TlbiSys { op1, crm, op2, rt } => {
                 0b1101010100_0_01_000_1000_0000_000_00000_
-                    | op1 << 16
-                    | crm << 8
-                    | op2 << 5
+                    | (*op1 as u32) << 16
+                    | (*crm as u32) << 8
+                    | (*op2 as u32) << 5
                     | rt << 0
             }
 
@@ -14327,8 +14775,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_001110_00_0_00000_0_0_10_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14342,8 +14790,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_001110_00_0_00000_0_1_10_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14359,10 +14807,10 @@ impl Asm {
                 rn,
             } => {
                 0b0_11_100100_0_000000_000000_00000_11111_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
             }
 
@@ -14374,10 +14822,10 @@ impl Asm {
                 rn,
             } => {
                 0b0_11_01010_00_0_00000_000000_00000_11111_
-                    | sf << 31
-                    | shift << 22
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
                     | rm << 16
-                    | imm6 << 10
+                    | (*imm6 as u32) << 10
                     | rn << 5
             }
 
@@ -14389,8 +14837,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_0111_1_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14404,8 +14852,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_01_0_1_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14419,8 +14867,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_0111_0_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14434,8 +14882,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_01_1_1_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14443,8 +14891,8 @@ impl Asm {
 
             Asm::UadalpAdvsimd { q, size, rn, rd } => {
                 0b0_0_1_01110_00_10000_00_1_10_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -14457,8 +14905,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_00_0_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14466,16 +14914,16 @@ impl Asm {
 
             Asm::UaddlpAdvsimd { q, size, rn, rd } => {
                 0b0_0_1_01110_00_10000_00_0_10_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::UaddlvAdvsimd { q, size, rn, rd } => {
                 0b0_0_1_01110_00_11000_00011_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -14488,8 +14936,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_00_0_1_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14504,10 +14952,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_10_100110_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -14521,10 +14969,10 @@ impl Asm {
                 rd,
             } => {
                 0b0_10_100110_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -14538,16 +14986,19 @@ impl Asm {
                 rd,
             } => {
                 0b0_10_100110_0_000000_000000_00000_00000_
-                    | sf << 31
-                    | n << 22
-                    | immr << 16
-                    | imms << 10
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::UcvtfAdvsimdFix { immb, rn, rd } => {
-                0b01_1_111110_0000_000_11100_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_11100_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::UcvtfAdvsimdInt { rn, rd } => {
@@ -14562,26 +15013,28 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_11110_00_0_00_011_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
-                    | scale << 10
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
+                    | (*scale as u32) << 10
                     | rn << 5
                     | rd << 0
             }
 
             Asm::UcvtfFloatInt { sf, ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_00_011_000000_00000_00000_
-                    | sf << 31
-                    | ftype << 22
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
-            Asm::UdfPermUndef { imm16 } => 0b0000000000000000_0000000000000000_ | imm16 << 0,
+            Asm::UdfPermUndef { imm16 } => {
+                0b0000000000000000_0000000000000000_ | (*imm16 as u32) << 0
+            }
 
             Asm::Udiv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_00001_0_00000_00000_
-                    | sf << 31
+                    | (*sf as u32) << 31
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14598,12 +15051,12 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01111_00_0_0_0000_1110_0_0_00000_00000_
-                    | q << 30
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -14616,8 +15069,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_0_00000_1_0010_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14631,8 +15084,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_00000_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14646,8 +15099,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_00100_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14669,8 +15122,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_0110_0_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14684,8 +15137,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_1010_0_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14693,8 +15146,8 @@ impl Asm {
 
             Asm::UmaxvAdvsimd { q, size, rn, rd } => {
                 0b0_0_1_01110_00_11000_0_1010_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -14707,8 +15160,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_0110_1_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14722,8 +15175,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_1010_1_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14731,8 +15184,8 @@ impl Asm {
 
             Asm::UminvAdvsimd { q, size, rn, rd } => {
                 0b0_0_1_01110_00_11000_1_1010_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -14748,12 +15201,12 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01111_00_0_0_0000_0_0_10_0_0_00000_00000_
-                    | q << 30
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -14766,8 +15219,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_10_0_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14784,12 +15237,12 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01111_00_0_0_0000_0_1_10_0_0_00000_00000_
-                    | q << 30
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -14802,8 +15255,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_10_1_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14819,8 +15272,8 @@ impl Asm {
 
             Asm::UmovAdvsimd { q, imm5, rn, rd } => {
                 0b0_0_0_01110000_00000_0_01_1_1_1_00000_00000_
-                    | q << 30
-                    | imm5 << 16
+                    | (*q as u32) << 30
+                    | (*imm5 as u32) << 16
                     | rn << 5
                     | rd << 0
             }
@@ -14848,12 +15301,12 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01111_00_0_0_0000_1010_0_0_00000_00000_
-                    | q << 30
-                    | size << 22
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
@@ -14866,8 +15319,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_1_1_0_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14879,7 +15332,7 @@ impl Asm {
 
             Asm::UqaddAdvsimd { size, rm, rn, rd } => {
                 0b01_1_11110_00_1_00000_00001_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14887,48 +15340,60 @@ impl Asm {
 
             Asm::UqrshlAdvsimd { size, rm, rn, rd } => {
                 0b01_1_11110_00_1_00000_010_1_1_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::UqrshrnAdvsimd { immb, rn, rd } => {
-                0b01_1_111110_0000_000_1001_1_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_1001_1_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::UqshlAdvsimdImm { immb, rn, rd } => {
-                0b01_1_111110_0000_000_011_1_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_011_1_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::UqshlAdvsimdReg { size, rm, rn, rd } => {
                 0b01_1_11110_00_1_00000_010_0_1_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::UqshrnAdvsimd { immb, rn, rd } => {
-                0b01_1_111110_0000_000_1001_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_1001_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::UqsubAdvsimd { size, rm, rn, rd } => {
                 0b01_1_11110_00_1_00000_00101_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::UqxtnAdvsimd { size, rn, rd } => {
-                0b01_1_11110_00_10000_10100_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_1_11110_00_10000_10100_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::UrecpeAdvsimd { q, sz, rn, rd } => {
                 0b0_0_0_01110_1_0_10000_11100_10_00000_00000_
-                    | q << 30
-                    | sz << 22
+                    | (*q as u32) << 30
+                    | (*sz as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -14941,8 +15406,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_00010_1_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -14950,26 +15415,32 @@ impl Asm {
 
             Asm::UrshlAdvsimd { size, rm, rn, rd } => {
                 0b01_1_11110_00_1_00000_010_1_0_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::UrshrAdvsimd { immb, rn, rd } => {
-                0b01_1_111110_0000_000_00_1_0_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_00_1_0_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::UrsqrteAdvsimd { q, sz, rn, rd } => {
                 0b0_0_1_01110_1_0_10000_11100_10_00000_00000_
-                    | q << 30
-                    | sz << 22
+                    | (*q as u32) << 30
+                    | (*sz as u32) << 22
                     | rn << 5
                     | rd << 0
             }
 
             Asm::UrsraAdvsimd { immb, rn, rd } => {
-                0b01_1_111110_0000_000_00_1_1_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_00_1_1_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::UsdotAdvsimdElt {
@@ -14982,18 +15453,18 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_0_01111_1_0_0_0_0000_1111_0_0_00000_00000_
-                    | q << 30
-                    | l << 21
-                    | m << 20
+                    | (*q as u32) << 30
+                    | (*l as u32) << 21
+                    | (*m as u32) << 20
                     | rm << 16
-                    | h << 11
+                    | (*h as u32) << 11
                     | rn << 5
                     | rd << 0
             }
 
             Asm::UsdotAdvsimdVec { q, rm, rn, rd } => {
                 0b0_0_0_01110_10_0_00000_1_0011_1_00000_00000_
-                    | q << 30
+                    | (*q as u32) << 30
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -15001,7 +15472,7 @@ impl Asm {
 
             Asm::UshlAdvsimd { size, rm, rn, rd } => {
                 0b01_1_11110_00_1_00000_010_0_0_1_00000_00000_
-                    | size << 22
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -15009,14 +15480,17 @@ impl Asm {
 
             Asm::UshllAdvsimd { q, immb, rn, rd } => {
                 0b0_0_1_011110_0000_000_10100_1_00000_00000_
-                    | q << 30
-                    | immb << 16
+                    | (*q as u32) << 30
+                    | (*immb as u32) << 16
                     | rn << 5
                     | rd << 0
             }
 
             Asm::UshrAdvsimd { immb, rn, rd } => {
-                0b01_1_111110_0000_000_00_0_0_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_00_0_0_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::UsmmlaAdvsimdVec { rm, rn, rd } => {
@@ -15024,11 +15498,17 @@ impl Asm {
             }
 
             Asm::UsqaddAdvsimd { size, rn, rd } => {
-                0b01_1_11110_00_10000_00011_10_00000_00000_ | size << 22 | rn << 5 | rd << 0
+                0b01_1_11110_00_10000_00011_10_00000_00000_
+                    | (*size as u32) << 22
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::UsraAdvsimd { immb, rn, rd } => {
-                0b01_1_111110_0000_000_00_0_1_0_1_00000_00000_ | immb << 16 | rn << 5 | rd << 0
+                0b01_1_111110_0000_000_00_0_1_0_1_00000_00000_
+                    | (*immb as u32) << 16
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::UsublAdvsimd {
@@ -15039,8 +15519,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_00_1_0_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -15054,8 +15534,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_1_01110_00_1_00000_00_1_1_00_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -15070,7 +15550,7 @@ impl Asm {
             }
 
             Asm::UxtlUshllAdvsimd { q, rn, rd } => {
-                0b0_0_1_011110_0000_000_10100_1_00000_00000_ | q << 30 | rn << 5 | rd << 0
+                0b0_0_1_011110_0000_000_10100_1_00000_00000_ | (*q as u32) << 30 | rn << 5 | rd << 0
             }
 
             Asm::Uzp1Advsimd {
@@ -15081,8 +15561,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_001110_00_0_00000_0_0_01_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -15096,8 +15576,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_001110_00_0_00000_0_1_01_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -15114,17 +15594,21 @@ impl Asm {
             Asm::Xaflag {} => 0b1101010100_0_00_000_0100_0000_001_11111_,
 
             Asm::XarAdvsimd { rm, imm6, rn, rd } => {
-                0b11001110100_00000_000000_00000_00000_ | rm << 16 | imm6 << 10 | rn << 5 | rd << 0
+                0b11001110100_00000_000000_00000_00000_
+                    | rm << 16
+                    | (*imm6 as u32) << 10
+                    | rn << 5
+                    | rd << 0
             }
 
             Asm::Xpac { d, rd } => {
-                0b1_1_0_11010110_00001_0_1_000_0_11111_00000_ | d << 10 | rd << 0
+                0b1_1_0_11010110_00001_0_1_000_0_11111_00000_ | (*d as u32) << 10 | rd << 0
             }
 
             Asm::XtnAdvsimd { q, size, rn, rd } => {
                 0b0_0_0_01110_00_10000_10010_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rn << 5
                     | rd << 0
             }
@@ -15139,8 +15623,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_001110_00_0_00000_0_0_11_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
@@ -15154,8 +15638,8 @@ impl Asm {
                 rd,
             } => {
                 0b0_0_001110_00_0_00000_0_1_11_10_00000_00000_
-                    | q << 30
-                    | size << 22
+                    | (*q as u32) << 30
+                    | (*size as u32) << 22
                     | rm << 16
                     | rn << 5
                     | rd << 0
