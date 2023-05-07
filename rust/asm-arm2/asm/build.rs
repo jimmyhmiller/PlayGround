@@ -55,8 +55,14 @@ fn to_camel_case(name: &str) -> String {
     result
 }
 
-fn generate_template() -> Result<(), Box<dyn Error>> {
-    let xml_file_path = "resources/onebigfile.xml";
+// We learned from stp_gen that some instructions have multiple classes
+// These need to be accounted for and are not.
+// Problem: Our code is a mess and it is hard to refactor to deal with that
+
+
+pub fn generate_template() -> Result<(), Box<dyn Error>> {
+    let xml_file_path =
+        "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/asm/resources/onebigfile.xml";
 
     let xml_file_bytes = fs::read(xml_file_path)?;
     let xml_file_text = from_utf8(&xml_file_bytes)?;
@@ -81,6 +87,8 @@ fn generate_template() -> Result<(), Box<dyn Error>> {
         .descendants()
         .filter(|x| file_names_hash.contains(x.attribute("file").unwrap_or("Not Found")));
 
+
+
     let instructions: Vec<Instruction> = found_file_nodes
         // .take(5)
         .flat_map(|x| {
@@ -90,6 +98,10 @@ fn generate_template() -> Result<(), Box<dyn Error>> {
         .map(|x| {
             let title = x.attribute("title").unwrap_or("No file found").to_string();
             let name = to_camel_case(&x.attribute("id").unwrap_or("No file found").to_string());
+
+            if name == "StpGen" {
+                println!("HERE");
+            }
 
             let asm = x
                 .descendants()
@@ -147,11 +159,11 @@ fn generate_template() -> Result<(), Box<dyn Error>> {
                     .unwrap();
                 let shift = hibit - width;
 
-                let mut constraints = vec![];
-                let mut new_bits = vec![];
+                let mut constraints: Vec<String> = vec![];
+                let mut new_bits: Vec<String> = vec![];
 
                 for bit in bits {
-                    let all_numbers = bit.chars().all(|x| x.is_numeric());
+                    let all_numbers = bit.chars().all(|x| x.is_numeric() || x == 'x');
                     if all_numbers {
                         new_bits.push(bit);
                     } else {
@@ -165,18 +177,19 @@ fn generate_template() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                // != 1111
+                let joined_bits = new_bits.join("");
+                let field_template_bits = if new_bits.is_empty() {
+                    "0".repeat(width as usize).to_string()
+                } else {
+                    joined_bits.replace("x", "0")
+                };
 
                 fields.push(Field {
                     name: name.to_string(),
                     shift,
-                    bits: if new_bits.is_empty() {
-                        "0".repeat(width as usize).to_string()
-                    } else {
-                        new_bits.join("")
-                    },
+                    bits: field_template_bits,
                     width,
-                    required: new_bits.is_empty(),
+                    required: joined_bits.is_empty() || joined_bits.contains("x"),
                     kind: if name.starts_with("r") {
                         Kind::Register
                     } else {
