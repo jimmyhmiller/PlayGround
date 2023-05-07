@@ -1,6 +1,6 @@
 use std::{error::Error, collections::HashMap, mem};
 
-use asm::arm::{Register, Asm, Size, X0, X1, X2, truncate_imm};
+use asm::{arm::{Register, Asm, Size, X0, X1, X2, truncate_imm, X3, X19, X20, X21, SP, X29, X30}};
 use mmap_rs::MmapOptions;
 
 
@@ -26,7 +26,7 @@ fn print_i32_hex_le(value: i32) {
     println!();
 }
 
-fn mov(destination: Register, input: u16) -> Asm {
+fn mov_imm(destination: Register, input: u16) -> Asm {
     Asm::Movz {
         sf: destination.sf(),
         hw: 0,
@@ -35,6 +35,24 @@ fn mov(destination: Register, input: u16) -> Asm {
         rd: destination,
     }
 }
+
+fn mov_reg(destination: Register, source: Register) -> Asm {
+    Asm::MovOrrLogShift {
+        sf: destination.sf(),
+        rm: source,
+        rd: destination,
+    }
+}
+
+
+fn mov_sp(destination: Register, source: Register) -> Asm {
+    Asm::MovAddAddsubImm {
+        sf: destination.sf(),
+        rn: source,
+        rd: destination,
+    }
+}
+
 
 fn add(destination: Register, a: Register, b: Register) -> Asm {
     Asm::AddAddsubShift {
@@ -125,13 +143,18 @@ fn jump(destination: u32) -> Asm {
 fn branch_with_link(destination: *const u8) -> Asm {
 
     Asm::Bl {
-        imm26: destination as usize
+        imm26: destination as i32
     }
+}
+
+fn branch_with_link_register(register: Register) -> Asm {
+    Asm::Blr { rn: register }
 }
 
 fn breakpoint() -> Asm {
     Asm::Brk { imm16: 30 }
 }
+
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Label {
@@ -166,7 +189,7 @@ impl Lang {
     }
 
     fn mov(&mut self, destination: Register, input: u16) {
-        self.instructions.push(mov(destination, input));
+        self.instructions.push(mov_imm(destination, input));
     }
     fn add(&mut self, destination: Register, a: Register, b: Register) {
         self.instructions.push(add(destination, a, b));
@@ -222,11 +245,37 @@ impl Lang {
         &self.instructions
     }
 
-    fn call(&mut self, func: *const u8){
-        println!("MY FUNC {:?}", func);
-        self.instructions.push(
-            branch_with_link(func)
+    fn call(&mut self, register: Register, func: *const u8) {
+        self.instructions.push({
+            Asm::StpGen {
+                opc: 0b00,
+                // TODO: Truncate
+                imm7: -4,
+                rt2: X30,
+                rt: X29,
+                rn: SP,
+            }
+        });
+        self.mov_reg(X29, SP);
+
+        self.instructions.extend(
+            load_64_bit_num(register, func as usize)
         );
+
+        self.instructions.push(
+            branch_with_link_register(register)
+        );
+
+        self.instructions.push({
+            Asm::LdpGen {
+                opc: 0b10,
+                // TODO: Truncate
+                imm7: 4,
+                rt2: X30,
+                rt: X29,
+                rn: SP,
+            }
+        });
     }
 
     fn patch_labels(&mut self) {
@@ -250,9 +299,51 @@ impl Lang {
             }
         }
     }
+
+    fn mov_reg(&mut self, destination: Register, source: Register) {
+        self.instructions.push(
+            match (destination, source) {
+                (SP, _) => {
+                    mov_sp(destination, source)
+                }
+                (_, SP) => {
+                    mov_sp(destination, source)
+                }
+                _ => {
+                    mov_reg(destination, source)
+                }
+            }
+        );
+
+    }
+}
+
+fn load_64_bit_num(register: Register, num: usize) -> Vec<Asm> {
+    let mut num = num;
+    let mut result = vec![];
+
+    // movz(cb, rd, A64Opnd::new_uimm(current & 0xffff), 0);
+    // movk(cb, rd, A64Opnd::new_uimm(current & 0xffff), 16);
+    // movk(cb, rd, A64Opnd::new_uimm(current & 0xffff), 32);
+    // movk(cb, rd, A64Opnd::new_uimm(current & 0xffff), 48);
+    
+    result.push(Asm::Movz { sf: register.sf(), hw: 0, imm16: num as i32 & 0xffff, rd: register });
+    num >>= 16;
+    result.push(Asm::Movk { sf: register.sf(), hw: 0b01, imm16: num as i32 & 0xffff, rd: register });
+    num >>= 16;
+    result.push(Asm::Movk { sf: register.sf(), hw: 0b10, imm16: num as i32 & 0xffff, rd: register });
+    num >>= 16;
+    result.push(Asm::Movk { sf: register.sf(), hw: 0b11, imm16: num as i32 & 0xffff, rd: register });
+    
+    result
 }
 
 
+
+// LSL0 = 0b00,
+// LSL16 = 0b01,
+// LSL32 = 0b10,
+// LSL48 = 0b11
 
 fn use_the_assembler() -> Result<(), Box<dyn Error>> {
     let mut lang = Lang::new();
@@ -261,20 +352,24 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
     let loop_exit = lang.new_label("loop_exit");
 
     lang.breakpoint();
-    lang.mov(X1, 10);
-    lang.mov(X0, 0);
-    lang.mov(X2, 1);
+    lang.mov(X19, 10);
+    lang.mov(X20, 0);
+    lang.mov(X21, 1);
 
     lang.write_label(loop_start);
 
-    lang.compare(X0, X1);
+    lang.compare(X20, X19);
     lang.jump_equal(loop_exit);
-    lang.sub(X1, X1, X2);
+    lang.sub(X19, X19, X21);
+    lang.mov_reg(X0, X19);
+    lang.call(X3, print_it as *const u8);
 
     lang.jump(loop_start);
     lang.write_label(loop_exit);
 
     lang.ret();
+
+    
 
     // This doesn't work because it doesn't fit
     // we need to put it in a register and branch from that
@@ -284,7 +379,7 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
     // movk(cb, rd, A64Opnd::new_uimm(current & 0xffff), 48);
     // Then we need a blr instruction.
 
-    lang.call(print_it as *const u8);
+
 
     let instructions = lang.compile();
 

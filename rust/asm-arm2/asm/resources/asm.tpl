@@ -1,12 +1,12 @@
 use std::ops::Shl;
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Size {
     S32,
     S64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Register {
     pub size: Size,
     pub index: u8,
@@ -35,7 +35,7 @@ pub const X{{i}}: Register = Register {
 };
 {% endfor %}
 
-pub const XZR: Register = Register {
+pub const SP: Register = Register {
     index: 31,
     size: Size::S64,
 };
@@ -67,10 +67,10 @@ pub fn truncate_imm<T: Into<i32>, const WIDTH: usize>(imm: T) -> u32 {
 #[derive(Debug)]
 pub enum Asm {
 {%- for instruction in instructions %}
-    // {{ instruction.title }}
-    // {{ instruction.description }}
+    /// {{ instruction.title }}
+    /// {{ instruction.description }}
     {%- for arg_comment in instruction.argument_comments %}
-    // {{arg_comment}}
+    /// {{arg_comment}}
     {%- endfor %}
     {{instruction.name}} {
         {%- for field in instruction.fields -%}
@@ -101,6 +101,8 @@ impl Asm {
                 |     
                     {%- if field.name == "imm19" -%}
                        truncate_imm::<_, 19>(*{{field.name}}) << {{field.shift}}
+                    {%- elsif field.name == "imm7" -%}
+                        truncate_imm::<_, 7>(*{{field.name}}) << {{field.shift}}
                     {%- elsif field.name == "imm26" -%}
                        truncate_imm::<_, 26>(*{{field.name}}) << {{field.shift}}
                     {%- else %}
