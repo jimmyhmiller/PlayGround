@@ -1,6 +1,6 @@
 use std::{error::Error, collections::HashMap, mem};
 
-use asm::{arm::{Register, Asm, Size, X0, X1, X2, truncate_imm, X3, X19, X20, X21, SP, X29, X30}};
+use asm::{arm2::{Register, Asm, Size, X0, X1, X2, truncate_imm, X3, X19, X20, X21, SP, X29, X30, X22}, generate_template};
 use mmap_rs::MmapOptions;
 
 
@@ -199,6 +199,7 @@ impl Lang {
     }
     fn ret(&mut self) {
         self.instructions.push(ret());
+
     }
     fn compare(&mut self, a: Register, b: Register) {
         self.instructions.push(compare(a, b));
@@ -249,7 +250,7 @@ impl Lang {
         self.instructions.push({
             Asm::StpGen {
                 opc: 0b00,
-                // TODO: Truncate
+                class_selector: asm::arm2::StpGenSelector::PreIndex,
                 imm7: -4,
                 rt2: X30,
                 rt: X29,
@@ -269,8 +270,9 @@ impl Lang {
         self.instructions.push({
             Asm::LdpGen {
                 opc: 0b10,
+                class_selector: asm::arm2::LdpGenSelector::PostIndex,
                 // TODO: Truncate
-                imm7: 4,
+                imm7: 2,
                 rt2: X30,
                 rt: X29,
                 rn: SP,
@@ -346,22 +348,23 @@ fn load_64_bit_num(register: Register, num: usize) -> Vec<Asm> {
 // LSL48 = 0b11
 
 fn use_the_assembler() -> Result<(), Box<dyn Error>> {
+    // generate_template()?;
     let mut lang = Lang::new();
 
     let loop_start = lang.new_label("loop_start");
     let loop_exit = lang.new_label("loop_exit");
 
     lang.breakpoint();
-    lang.mov(X19, 10);
+    lang.mov(X22, 10);
     lang.mov(X20, 0);
     lang.mov(X21, 1);
 
     lang.write_label(loop_start);
 
-    lang.compare(X20, X19);
+    lang.compare(X20, X22);
     lang.jump_equal(loop_exit);
-    lang.sub(X19, X19, X21);
-    lang.mov_reg(X0, X19);
+    lang.sub(X22, X22, X21);
+    lang.mov_reg(X0, X22);
     lang.call(X3, print_it as *const u8);
 
     lang.jump(loop_start);
