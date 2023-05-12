@@ -247,16 +247,7 @@ impl Lang {
     }
 
     fn call(&mut self, register: Register, func: *const u8) {
-        self.instructions.push({
-            Asm::StpGen {
-                opc: 0b00,
-                class_selector: asm::arm2::StpGenSelector::PreIndex,
-                imm7: -4,
-                rt2: X30,
-                rt: X29,
-                rn: SP,
-            }
-        });
+
         self.mov_reg(X29, SP);
 
         self.instructions.extend(
@@ -266,18 +257,6 @@ impl Lang {
         self.instructions.push(
             branch_with_link_register(register)
         );
-
-        self.instructions.push({
-            Asm::LdpGen {
-                opc: 0b10,
-                class_selector: asm::arm2::LdpGenSelector::PostIndex,
-                // TODO: Truncate
-                imm7: 2,
-                rt2: X30,
-                rt: X29,
-                rn: SP,
-            }
-        });
     }
 
     fn patch_labels(&mut self) {
@@ -355,6 +334,16 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
     let loop_exit = lang.new_label("loop_exit");
 
     lang.breakpoint();
+    lang.instructions.push({
+        Asm::StpGen {
+            opc: 0b10,
+            class_selector: asm::arm2::StpGenSelector::PreIndex,
+            imm7: -4,
+            rt2: X30,
+            rt: X29,
+            rn: SP,
+        }
+    });
     lang.mov(X22, 10);
     lang.mov(X20, 0);
     lang.mov(X21, 1);
@@ -369,6 +358,17 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
 
     lang.jump(loop_start);
     lang.write_label(loop_exit);
+    lang.instructions.push({
+        Asm::LdpGen {
+            opc: 0b10,
+            class_selector: asm::arm2::LdpGenSelector::PostIndex,
+            // TODO: Truncate
+            imm7: 2,
+            rt2: X30,
+            rt: X29,
+            rn: SP,
+        }
+    });
 
     lang.ret();
 
