@@ -59,7 +59,6 @@ fn to_camel_case(name: &str) -> String {
 // These need to be accounted for and are not.
 // Problem: Our code is a mess and it is hard to refactor to deal with that
 
-
 pub fn generate_template() -> Result<(), Box<dyn Error>> {
     let xml_file_path =
         "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/asm/resources/onebigfile.xml";
@@ -86,8 +85,6 @@ pub fn generate_template() -> Result<(), Box<dyn Error>> {
     let found_file_nodes = xml
         .descendants()
         .filter(|x| file_names_hash.contains(x.attribute("file").unwrap_or("Not Found")));
-
-
 
     let instructions: Vec<Instruction> = found_file_nodes
         // .take(5)
