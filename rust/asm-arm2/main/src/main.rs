@@ -1,6 +1,6 @@
 use std::{error::Error, collections::HashMap, mem};
 
-use asm::{arm2::{Register, Asm, Size, X0, X1, X2, truncate_imm, X3, X19, X20, X21, SP, X29, X30, X22}, generate_template};
+use asm::{arm::{Register, Asm, Size, X0, X3, X20, X21, SP, X29, X30, X22, StpGenSelector, LdpGenSelector}};
 use mmap_rs::MmapOptions;
 
 
@@ -18,7 +18,7 @@ fn print_u32_hex_le(value: u32) {
 }
 
 
-fn print_i32_hex_le(value: i32) {
+fn _print_i32_hex_le(value: i32) {
     let bytes = value.to_le_bytes();
     for byte in &bytes {
         print!("{:02x}", byte);
@@ -53,7 +53,7 @@ fn mov_sp(destination: Register, source: Register) -> Asm {
     }
 }
 
-
+#[allow(unused)]
 fn add(destination: Register, a: Register, b: Register) -> Asm {
     Asm::AddAddsubShift {
         sf: destination.sf(),
@@ -102,30 +102,35 @@ fn jump_equal(destination: u32) -> Asm {
         cond: 0,
     }
 }
+#[allow(unused)]
 fn jump_not_equal(destination: u32) -> Asm {
     Asm::BCond {
         imm19: destination as i32,
         cond: 1,
     }
 }
+#[allow(unused)]
 fn jump_greater_or_equal(destination: u32) -> Asm {
     Asm::BCond {
         imm19: destination as i32,
         cond: 10,
     }
 }
+#[allow(unused)]
 fn jump_less_than(destination: u32) -> Asm {
     Asm::BCond {
         imm19: destination as i32,
         cond: 11,
     }
 }
+#[allow(unused)]
 fn jump_greater(destination: u32) -> Asm {
     Asm::BCond {
         imm19: destination as i32,
         cond: 12,
     }
 }
+#[allow(unused)]
 fn jump_less_or_equal(destination: u32) -> Asm {
     Asm::BCond {
         imm19: destination as i32,
@@ -139,7 +144,7 @@ fn jump(destination: u32) -> Asm {
     }
 }
 
-
+#[allow(unused)]
 fn branch_with_link(destination: *const u8) -> Asm {
 
     Asm::Bl {
@@ -168,6 +173,7 @@ struct Lang {
     labels: Vec<String>,
 }
 
+#[allow(unused)]
 impl Lang {
     fn new() -> Self {
         Lang {
@@ -204,6 +210,7 @@ impl Lang {
     fn compare(&mut self, a: Register, b: Register) {
         self.instructions.push(compare(a, b));
     }
+    
     fn jump_equal(&mut self, destination: Label) {
         self.instructions.push(jump_equal(destination.index as u32));
     }
@@ -302,11 +309,6 @@ impl Lang {
 fn load_64_bit_num(register: Register, num: usize) -> Vec<Asm> {
     let mut num = num;
     let mut result = vec![];
-
-    // movz(cb, rd, A64Opnd::new_uimm(current & 0xffff), 0);
-    // movk(cb, rd, A64Opnd::new_uimm(current & 0xffff), 16);
-    // movk(cb, rd, A64Opnd::new_uimm(current & 0xffff), 32);
-    // movk(cb, rd, A64Opnd::new_uimm(current & 0xffff), 48);
     
     result.push(Asm::Movz { sf: register.sf(), hw: 0, imm16: num as i32 & 0xffff, rd: register });
     num >>= 16;
@@ -320,12 +322,6 @@ fn load_64_bit_num(register: Register, num: usize) -> Vec<Asm> {
 }
 
 
-
-// LSL0 = 0b00,
-// LSL16 = 0b01,
-// LSL32 = 0b10,
-// LSL48 = 0b11
-
 fn use_the_assembler() -> Result<(), Box<dyn Error>> {
     // generate_template()?;
     let mut lang = Lang::new();
@@ -337,7 +333,7 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
     lang.instructions.push({
         Asm::StpGen {
             opc: 0b10,
-            class_selector: asm::arm2::StpGenSelector::PreIndex,
+            class_selector: StpGenSelector::PreIndex,
             imm7: -4,
             rt2: X30,
             rt: X29,
@@ -361,7 +357,7 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
     lang.instructions.push({
         Asm::LdpGen {
             opc: 0b10,
-            class_selector: asm::arm2::LdpGenSelector::PostIndex,
+            class_selector: LdpGenSelector::PostIndex,
             // TODO: Truncate
             imm7: 2,
             rt2: X30,
@@ -371,18 +367,6 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
     });
 
     lang.ret();
-
-    
-
-    // This doesn't work because it doesn't fit
-    // we need to put it in a register and branch from that
-    // movz(cb, rd, A64Opnd::new_uimm(current & 0xffff), 0);
-    // movk(cb, rd, A64Opnd::new_uimm(current & 0xffff), 16);
-    // movk(cb, rd, A64Opnd::new_uimm(current & 0xffff), 32);
-    // movk(cb, rd, A64Opnd::new_uimm(current & 0xffff), 48);
-    // Then we need a blr instruction.
-
-
 
     let instructions = lang.compile();
 
@@ -422,15 +406,6 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
 extern "C" fn print_it(num: u32) {
     println!("{}", num);
 }
-
-fn count_down() {
-    let mut i = 10;
-    while i > 0 {
-        println!("{}", i);
-        i -= 1;
-    }
-}
-
 
 // TODO:
 // Register allocator
