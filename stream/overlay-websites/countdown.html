@@ -1,0 +1,79 @@
+<!-- Take from w3 schools. Display the countdown timer in an element -->
+
+
+<p onclick="start()" id="demo"></p>
+
+<audio id="audio" src="file:///Users/jimmyhmiller/Downloads/wii.mp3"></audio>
+<script>
+
+
+function addMinutesToDate(date, minutes) {
+  return new Date(date.getTime() + minutes * 60000);
+}
+
+
+const displayTime = (minutes, seconds) => {
+   document.getElementById("demo").innerHTML = "Compiler Hacking <br />"
+    + minutes + "m " + seconds + "s ";
+}
+
+const calcAndDisplayTime = (countDownDate) => {
+  // Get today's date and time
+  document.getElementById("audio").play()
+
+  const now = new Date().getTime();
+
+  // Find the distance between now and the count down date
+  const distance = countDownDate - now;
+
+  // Time calculations for days, hours, minutes and seconds
+  const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+  const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+  displayTime(minutes, seconds)
+
+  // If the count down is finished, write some text
+  if (distance < 0) {
+    document.getElementById("demo").innerHTML = "Starting!";
+    return true
+  }
+  return false
+}
+
+function start() {
+
+  displayTime(5, 0)
+
+    // Set the date we're counting down to
+  const countDownDate = addMinutesToDate(new Date(), 5);
+  // Update the count down every 1 second
+  const x = setInterval(function() {
+    let stop = calcAndDisplayTime(countDownDate)
+    if (stop) {
+      clearInterval(x)
+    }
+    
+  }, 500);
+
+}
+displayTime(5, 0);
+</script>
+
+<style type="text/css">
+  body {
+    font-family: "Ubuntu Mono";
+    font-size: 120;
+    display: grid;
+    font-weight: bold;
+    color: #ffffff;
+    text-align: center;
+    place-items: center;
+    height: 100vh;
+    margin: 0;
+    background: #FEAC5E;  /* fallback for old browsers */
+background: -webkit-linear-gradient(to right, #4BC0C8, #C779D0, #FEAC5E);  /* Chrome 10-25, Safari 5.1-6 */
+background: linear-gradient(to right, #4BC0C8, #C779D0, #FEAC5E); /* W3C, IE 10+/ Edge, Firefox 16+, Chrome 26+, Opera 12+, Safari 7+ */
+
+  }
+
+</style>
