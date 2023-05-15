@@ -1,6 +1,6 @@
-use std::{error::Error, collections::HashMap, mem};
+use std::{error::Error, collections::HashMap, mem, time::Instant};
 
-use asm::{arm::{Register, Asm, Size, X0, X3, X20, X21, SP, X29, X30, X22, StpGenSelector, LdpGenSelector}};
+use asm::{arm::{Register, Asm, Size, X0, X3, X20, X21, SP, X29, X30, X22, StpGenSelector, LdpGenSelector, X19, X1, StrImmGenSelector, LdrImmGenSelector}};
 use mmap_rs::MmapOptions;
 
 
@@ -90,9 +90,9 @@ fn compare(a: Register, b: Register) -> Asm {
     Asm::CmpSubsAddsubShift {
         sf: a.sf(),
         shift: 0,
-        rm: a,
+        rm: b,
         imm6: 0,
-        rn: b,
+        rn: a,
     }
 }
 
@@ -143,10 +143,32 @@ fn jump(destination: u32) -> Asm {
         cond: 14,
     }
 }
+fn store_pair(reg1: Register, reg2: Register, destination: Register, offset: i32) -> Asm {
+    Asm::StpGen {
+        // TODO: Make this better/document this is about 64 bit or not
+        opc: 0b10,
+        class_selector: StpGenSelector::PreIndex,
+        imm7: offset,
+        rt2: reg2,
+        rt: reg1,
+        rn: destination,
+    }
+}
+
+fn load_pair(reg1: Register, reg2: Register, destination: Register, offset: i32) -> Asm {
+    Asm::LdpGen {
+        opc: 0b10,
+        class_selector: LdpGenSelector::PostIndex,
+        // TODO: Truncate
+        imm7: offset,
+        rt2: reg2,
+        rt: reg1,
+        rn: destination,
+    }
+}
 
 #[allow(unused)]
 fn branch_with_link(destination: *const u8) -> Asm {
-
     Asm::Bl {
         imm26: destination as i32
     }
@@ -197,6 +219,12 @@ impl Lang {
     fn mov(&mut self, destination: Register, input: u16) {
         self.instructions.push(mov_imm(destination, input));
     }
+    fn store_pair(&mut self, reg1: Register, reg2: Register, destination: Register, offset: i32) {
+        self.instructions.push(store_pair(reg1, reg2, destination, offset));
+    }
+    fn load_pair(&mut self, reg1: Register, reg2: Register, destination: Register, offset: i32) {
+        self.instructions.push(load_pair(reg1, reg2, destination, offset));
+    }
     fn add(&mut self, destination: Register, a: Register, b: Register) {
         self.instructions.push(add(destination, a, b));
     }
@@ -205,12 +233,10 @@ impl Lang {
     }
     fn ret(&mut self) {
         self.instructions.push(ret());
-
     }
     fn compare(&mut self, a: Register, b: Register) {
         self.instructions.push(compare(a, b));
     }
-    
     fn jump_equal(&mut self, destination: Label) {
         self.instructions.push(jump_equal(destination.index as u32));
     }
@@ -252,15 +278,16 @@ impl Lang {
         self.patch_labels();
         &self.instructions
     }
-
-    fn call(&mut self, register: Register, func: *const u8) {
-
-        self.mov_reg(X29, SP);
+    fn call_rust_function(&mut self, register: Register, func: *const u8) {
 
         self.instructions.extend(
             load_64_bit_num(register, func as usize)
         );
 
+        self.call(register)
+    }
+
+    fn call(&mut self, register: Register) {
         self.instructions.push(
             branch_with_link_register(register)
         );
@@ -323,50 +350,7 @@ fn load_64_bit_num(register: Register, num: usize) -> Vec<Asm> {
 
 
 fn use_the_assembler() -> Result<(), Box<dyn Error>> {
-    // generate_template()?;
-    let mut lang = Lang::new();
-
-    let loop_start = lang.new_label("loop_start");
-    let loop_exit = lang.new_label("loop_exit");
-
-    lang.breakpoint();
-    lang.instructions.push({
-        Asm::StpGen {
-            opc: 0b10,
-            class_selector: StpGenSelector::PreIndex,
-            imm7: -4,
-            rt2: X30,
-            rt: X29,
-            rn: SP,
-        }
-    });
-    lang.mov(X22, 10);
-    lang.mov(X20, 0);
-    lang.mov(X21, 1);
-
-    lang.write_label(loop_start);
-
-    lang.compare(X20, X22);
-    lang.jump_equal(loop_exit);
-    lang.sub(X22, X22, X21);
-    lang.mov_reg(X0, X22);
-    lang.call(X3, print_it as *const u8);
-
-    lang.jump(loop_start);
-    lang.write_label(loop_exit);
-    lang.instructions.push({
-        Asm::LdpGen {
-            opc: 0b10,
-            class_selector: LdpGenSelector::PostIndex,
-            // TODO: Truncate
-            imm7: 2,
-            rt2: X30,
-            rt: X29,
-            rn: SP,
-        }
-    });
-
-    lang.ret();
+    let mut lang = fib();
 
     let instructions = lang.compile();
 
@@ -392,19 +376,175 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
         panic!("Failed to make mmap executable: {}", e);
     });
 
-    let f: fn() -> u64 = unsafe { mem::transmute(exec.as_ref().as_ptr()) };
+    let f: fn(i64, u64) -> u64 = unsafe { mem::transmute(exec.as_ref().as_ptr()) };
 
-    println!("{:?}", print_it as *const u8);
-    println!("Result {}", f());
 
-    print_it(42);
+    let n = 30;
+    let time = Instant::now();
+
+    let result1 = f(n, f as *const u8 as u64);
+    println!("time {:?}", time.elapsed());
+    let time = Instant::now();
+    let result2 = fib_rust(n as usize);
+    println!("time {:?}", time.elapsed());
+    println!("{} {}", result1, result2);
 
     Ok(())
 }
 
+
+fn fib_rust(n: usize) -> usize {
+    if n <= 1 {
+        return n
+    }
+    return fib_rust(n - 1) + fib_rust(n - 2)
+}
+
+
+
+fn fib() -> Lang {
+    let mut lang = Lang::new();
+
+    // lang.breakpoint();
+    lang.store_pair(X29, X30, SP, -4);
+    lang.mov_reg(X29, SP);
+
+    // lang.instructions.push(
+    //     Asm::StrImmGen {
+    //         size: 0b11,
+    //         imm9: 0, // not used
+    //         rn: SP,
+    //         rt: X1,
+    //         imm12: 2,
+    //         class_selector: StrImmGenSelector::UnsignedOffset,
+    //     }
+    // );
+
+    // lang.call_rust_function(X22, print_it as *const u8);
+
+    // lang.instructions.push(
+    //     Asm::LdrImmGen {
+    //         size: 0b11,
+    //         imm9: 0, // not used
+    //         rn: SP,
+    //         rt: X1,
+    //         imm12: 2,
+    //         class_selector: LdrImmGenSelector::UnsignedOffset,
+    //     }
+    // );
+
+    let base_case = lang.new_label("base_case");
+    let recursive_case = lang.new_label("recursive_case");
+    let return_label = lang.new_label("return");
+    lang.mov(X21, 1);
+
+    lang.compare(X0, X21);
+    lang.jump_less_or_equal(base_case);
+    lang.jump(recursive_case);
+
+    lang.write_label(base_case);
+
+    lang.jump(return_label);
+
+    lang.write_label(recursive_case);
+    
+    lang.sub(X19, X0, X21);
+
+    lang.instructions.push(
+        Asm::StrImmGen {
+            size: 0b11,
+            imm9: 0, // not used
+            rn: SP,
+            rt: X0,
+            imm12: 2,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        }
+    );
+    lang.mov_reg(X0, X19);
+    
+    lang.call(X1);
+    lang.mov_reg(X22, X0);
+
+    lang.instructions.push(
+        Asm::LdrImmGen {
+            size: 0b11,
+            imm9: 0, // not used
+            rn: SP,
+            rt: X0,
+            imm12: 2,
+            class_selector: LdrImmGenSelector::UnsignedOffset,
+        }
+    );
+
+    lang.sub(X19, X0, X21);
+    lang.sub(X19, X19, X21);
+    lang.mov_reg(X0, X19);
+
+    lang.instructions.push(
+        Asm::StrImmGen {
+            size: 0b11,
+            imm9: 0, // not used
+            rn: SP,
+            rt: X22,
+            imm12: 2,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        }
+    );
+    
+    lang.call(X1);
+
+    lang.instructions.push(
+        Asm::LdrImmGen {
+            size: 0b11,
+            imm9: 0, // not used
+            rn: SP,
+            rt: X22,
+            imm12: 2,
+            class_selector: LdrImmGenSelector::UnsignedOffset,
+        }
+    );
+    lang.add(X0, X0, X22);
+
+
+    lang.write_label(return_label);
+    lang.load_pair(X29, X30, SP, 4);
+
+    lang.ret();
+    lang
+}
+
+fn countdown_codegen() -> Lang {
+    let mut lang = Lang::new();
+
+    let loop_start = lang.new_label("loop_start");
+    let loop_exit = lang.new_label("loop_exit");
+
+    lang.breakpoint();
+    lang.store_pair(X29, X30, SP, -2);
+    lang.mov_reg(X29, SP);
+    lang.mov(X22, 10);
+    lang.mov(X20, 0);
+    lang.mov(X21, 1);
+
+    lang.write_label(loop_start);
+
+    lang.compare(X20, X22);
+    lang.jump_equal(loop_exit);
+    lang.sub(X22, X22, X21);
+    lang.mov_reg(X0, X22);
+    lang.call_rust_function(X3, print_it as *const u8);
+
+    lang.jump(loop_start);
+    lang.write_label(loop_exit);
+    lang.load_pair(X29, X30, SP, 2);
+    lang.ret();
+    lang
+}
+
 #[no_mangle]
-extern "C" fn print_it(num: u32) {
+extern "C" fn print_it(num: u64) -> u64 {
     println!("{}", num);
+    return num;
 }
 
 // TODO:
@@ -417,3 +557,4 @@ extern "C" fn print_it(num: u32) {
 // Parser
 // Debugging
 // 
+// PS bits the ones with X need to be dealt with
