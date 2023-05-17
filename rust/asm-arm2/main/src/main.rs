@@ -404,34 +404,9 @@ fn fib_rust(n: usize) -> usize {
 
 fn fib() -> Lang {
     let mut lang = Lang::new();
-
-    // lang.breakpoint();
+    
     lang.store_pair(X29, X30, SP, -4);
     lang.mov_reg(X29, SP);
-
-    // lang.instructions.push(
-    //     Asm::StrImmGen {
-    //         size: 0b11,
-    //         imm9: 0, // not used
-    //         rn: SP,
-    //         rt: X1,
-    //         imm12: 2,
-    //         class_selector: StrImmGenSelector::UnsignedOffset,
-    //     }
-    // );
-
-    // lang.call_rust_function(X22, print_it as *const u8);
-
-    // lang.instructions.push(
-    //     Asm::LdrImmGen {
-    //         size: 0b11,
-    //         imm9: 0, // not used
-    //         rn: SP,
-    //         rt: X1,
-    //         imm12: 2,
-    //         class_selector: LdrImmGenSelector::UnsignedOffset,
-    //     }
-    // );
 
     let base_case = lang.new_label("base_case");
     let recursive_case = lang.new_label("recursive_case");
