@@ -1,5 +1,4 @@
-use std::{collections::{HashMap}, error::Error, path::Path, sync::Arc, time::Duration, thread};
-
+use std::{collections::HashMap, error::Error, path::Path, sync::Arc, thread, time::Duration};
 
 use bytesize::ByteSize;
 
@@ -20,8 +19,9 @@ use wasmtime::{
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
 use crate::{
+    editor::make_grain_gradient_shader,
     keyboard::KeyboardInput,
-    widget::{Color, Position, Size}, editor::make_grain_gradient_shader,
+    widget::{Color, Position, Size},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -51,7 +51,6 @@ struct Message {
     wasm_id: WasmId,
     payload: Payload,
 }
-
 
 enum OutPayload {
     DrawCommands(Vec<Command>),
@@ -92,7 +91,6 @@ pub struct WasmMessenger {
 
 impl WasmMessenger {
     pub fn new() -> Self {
-
         let local_pool = LocalPool::new();
         let local_spawner = local_pool.spawner();
 
@@ -102,8 +100,6 @@ impl WasmMessenger {
         config.epoch_interruption(true);
         config.async_support(true);
 
-        
-
         let engine = Arc::new(Engine::new(&config).unwrap());
 
         let engine_clone = engine.clone();
@@ -111,7 +107,6 @@ impl WasmMessenger {
             thread::sleep(Duration::from_millis(4));
             engine_clone.increment_epoch();
         });
-        
 
         Self {
             local_pool,
@@ -165,8 +160,6 @@ impl WasmMessenger {
     }
 
     pub fn new_instance(&mut self, wasm_path: &str) -> WasmId {
-
-        
         let id = self.next_wasm_id();
 
         let (sender, receiver) = channel::<Message>(100000);
@@ -175,15 +168,34 @@ impl WasmMessenger {
         self.receivers.insert(id, out_receiver);
         self.senders.insert(id, sender);
 
-        async fn spawn_instance(engine: Arc<Engine>, wasm_id: WasmId, wasm_path: String, receiver: Receiver<Message>, sender: Sender<OutMessage>) {
-            let mut instance = WasmManager::new(engine.clone(), wasm_id, wasm_path.to_string(), receiver, sender).await;
+        async fn spawn_instance(
+            engine: Arc<Engine>,
+            wasm_id: WasmId,
+            wasm_path: String,
+            receiver: Receiver<Message>,
+            sender: Sender<OutMessage>,
+        ) {
+            let mut instance = WasmManager::new(
+                engine.clone(),
+                wasm_id,
+                wasm_path.to_string(),
+                receiver,
+                sender,
+            )
+            .await;
             instance.init().await;
         }
 
         self.local_spawner
-            .spawn_local(spawn_instance(self.engine.clone(), id, wasm_path.to_string(), receiver, out_sender))
+            .spawn_local(spawn_instance(
+                self.engine.clone(),
+                id,
+                wasm_path.to_string(),
+                receiver,
+                out_sender,
+            ))
             .unwrap();
-       
+
         id
     }
 
@@ -199,7 +211,7 @@ impl WasmMessenger {
             let mut current_height_stack = vec![];
 
             let mut paint = skia_safe::Paint::default();
-            let center = (bounds.width/2.0, bounds.height/2.0);
+            let center = (bounds.width / 2.0, bounds.height / 2.0);
             let radius = 30.0;
             let color = Color::from_color4f(&paint.color4f());
             // let grain_shader = make_grain_gradient_shader(center, radius, color, color, 0.3);
@@ -276,7 +288,6 @@ impl WasmMessenger {
                     Command::Save => {
                         canvas.save();
                         current_height_stack.push(max_height);
-
                     }
                     Command::Restore => {
                         canvas.restore();
@@ -323,7 +334,7 @@ impl WasmMessenger {
                     }
                     OutPayload::ErrorPayload(err) => {
                         println!("{:?}", err)
-                    },
+                    }
                     OutPayload::Complete => {}
                 }
             }
@@ -331,12 +342,15 @@ impl WasmMessenger {
     }
 
     fn send_message(&mut self, message: Message) {
-        let records = self.outstanding_messages.entry(message.wasm_id).or_insert(HashMap::new());
+        let records = self
+            .outstanding_messages
+            .entry(message.wasm_id)
+            .or_insert(HashMap::new());
 
         let mut already_drawing = false;
         if matches!(message.payload, Payload::Draw(_)) {
             for record in records.values() {
-                if  matches!(record.payload, Payload::Draw(_)) {
+                if matches!(record.payload, Payload::Draw(_)) {
                     already_drawing = true;
                     break;
                 }
@@ -356,55 +370,55 @@ impl WasmMessenger {
     pub fn send_on_click(&mut self, wasm_id: WasmId, position: &Position) {
         let message_id = self.next_message_id();
         self.send_message(Message {
-                message_id,
-                wasm_id,
-                payload: Payload::OnClick(*position),
-            });
+            message_id,
+            wasm_id,
+            payload: Payload::OnClick(*position),
+        });
     }
 
     pub fn send_draw(&mut self, wasm_id: WasmId, fn_name: &str) {
         let message_id = self.next_message_id();
         self.send_message(Message {
-                message_id,
-                wasm_id,
-                payload: Payload::Draw(fn_name.to_string()),
-            });
+            message_id,
+            wasm_id,
+            payload: Payload::Draw(fn_name.to_string()),
+        });
     }
 
     pub fn send_set_state(&mut self, wasm_id: WasmId, state: &str) {
         let message_id = self.next_message_id();
         self.send_message(Message {
-                message_id,
-                wasm_id,
-                payload: Payload::SetState(state.to_string()),
-            });
+            message_id,
+            wasm_id,
+            payload: Payload::SetState(state.to_string()),
+        });
     }
 
     pub fn send_on_scroll(&mut self, wasm_id: u64, x: f64, y: f64) {
         let message_id = self.next_message_id();
         self.send_message(Message {
-                message_id,
-                wasm_id,
-                payload: Payload::OnScroll(x, y),
-            });
+            message_id,
+            wasm_id,
+            payload: Payload::OnScroll(x, y),
+        });
     }
 
     pub fn send_on_key(&mut self, wasm_id: u64, input: KeyboardInput) {
         let message_id = self.next_message_id();
         self.send_message(Message {
-                message_id,
-                wasm_id,
-                payload: Payload::OnKey(input),
-            });
+            message_id,
+            wasm_id,
+            payload: Payload::OnKey(input),
+        });
     }
 
     pub fn send_reload(&mut self, wasm_id: u64) {
         let message_id = self.next_message_id();
         self.send_message(Message {
-                message_id,
-                wasm_id,
-                payload: Payload::Reload,
-            });
+            message_id,
+            wasm_id,
+            payload: Payload::Reload,
+        });
     }
 
     // Sometimes state is corrupt by going too long on the string. Not sure why.
@@ -413,10 +427,10 @@ impl WasmMessenger {
         self.wasm_states.insert(wasm_id, SaveState::Unsaved);
         let message_id = self.next_message_id();
         self.send_message(Message {
-                message_id,
-                wasm_id,
-                payload: Payload::SaveState,
-            });
+            message_id,
+            wasm_id,
+            payload: Payload::SaveState,
+        });
         // TODO: Maybe not the best design, but I also want to ensure I save
         loop {
             self.tick();
@@ -442,7 +456,6 @@ impl WasmMessenger {
     }
 }
 
-
 // I think I need to:
 // 1. Spawn a task per wasm instance
 // 2. Have senders and receivers per instance
@@ -458,11 +471,14 @@ struct WasmManager {
 }
 
 impl WasmManager {
-    pub async fn new(engine: Arc<Engine>, wasm_id: WasmId, wasm_path: String, receiver: Receiver<Message>, sender: Sender<OutMessage>) -> Self {
-
-        let instance = WasmInstance::new(engine.clone(), &wasm_path)
-                .await
-                .unwrap();
+    pub async fn new(
+        engine: Arc<Engine>,
+        wasm_id: WasmId,
+        wasm_path: String,
+        receiver: Receiver<Message>,
+        sender: Sender<OutMessage>,
+    ) -> Self {
+        let instance = WasmInstance::new(engine.clone(), &wasm_path).await.unwrap();
 
         Self {
             id: wasm_id,
@@ -487,34 +503,33 @@ impl WasmManager {
         let default_return = OutMessage {
             wasm_id: message.wasm_id,
             message_id: message.message_id,
-            payload: OutPayload::Complete
+            payload: OutPayload::Complete,
         };
-    
+
         match message.payload {
             Payload::NewInstance(_) => {
                 panic!("Shouldn't get here")
             }
             Payload::OnClick(position) => {
-
-                self.instance.on_click(position.x, position.y).await.unwrap();
+                self.instance
+                    .on_click(position.x, position.y)
+                    .await
+                    .unwrap();
                 default_return
             }
             Payload::Draw(fn_name) => {
                 let result = self.instance.draw(&fn_name).await;
                 match result {
-                    Ok(result) => {
-                        OutMessage {
-                            message_id: message.message_id,
-                            wasm_id: id,
-                            payload: OutPayload::DrawCommands(result),
-                        }
-                    }
+                    Ok(result) => OutMessage {
+                        message_id: message.message_id,
+                        wasm_id: id,
+                        payload: OutPayload::DrawCommands(result),
+                    },
                     Err(error) => {
                         println!("Error drawing {:?}", error);
                         default_return
                     }
                 }
-              
             }
             Payload::SetState(state) => {
                 self.instance.set_state(state.as_bytes()).await.unwrap();
@@ -529,15 +544,12 @@ impl WasmManager {
                 let result = self.instance.on_key(key_code, state, modifiers).await;
                 match result {
                     Ok(_) => default_return,
-                    Err(err) => {
-                        OutMessage {
-                            wasm_id: message.wasm_id,
-                            message_id: message.message_id,
-                            payload: OutPayload::ErrorPayload(err)
-                        }
-                    }
+                    Err(err) => OutMessage {
+                        wasm_id: message.wasm_id,
+                        message_id: message.message_id,
+                        payload: OutPayload::ErrorPayload(err),
+                    },
                 }
-                
             }
             Payload::Reload => {
                 match self.instance.reload().await {
@@ -561,13 +573,11 @@ impl WasmManager {
                             payload: OutPayload::Saved(SaveState::Saved(state)),
                         }
                     }
-                    None => {
-                        OutMessage {
-                            message_id: message.message_id,
-                            wasm_id: id,
-                            payload: OutPayload::Saved(SaveState::Empty),
-                        }
-                    }
+                    None => OutMessage {
+                        message_id: message.message_id,
+                        wasm_id: id,
+                        payload: OutPayload::Saved(SaveState::Empty),
+                    },
                 }
             }
         }

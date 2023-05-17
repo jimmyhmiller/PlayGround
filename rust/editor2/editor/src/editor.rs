@@ -12,7 +12,7 @@ use crate::{
     event::Event,
     fps_counter::FpsCounter,
     keyboard::Modifiers,
-    wasm_messenger::{WasmMessenger},
+    wasm_messenger::WasmMessenger,
     widget::{Color, Position, Size, TextPane, Wasm, Widget, WidgetData, WidgetId, WidgetStore},
 };
 
@@ -22,7 +22,9 @@ use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
 use skia_safe::{
     gradient_shader::{self},
-    perlin_noise_shader, Font, FontStyle, PaintStyle, Rect, TileMode, Typeface, RuntimeEffect, Data, runtime_effect::ChildPtr, Shader,
+    perlin_noise_shader,
+    runtime_effect::ChildPtr,
+    Data, Font, FontStyle, PaintStyle, Rect, RuntimeEffect, Shader, TileMode, Typeface,
 };
 
 struct Context {
@@ -366,7 +368,7 @@ impl Editor {
         let grain_shader = make_grain_gradient_shader(center, radius, darker, lighter, 0.95);
 
         paint.set_shader(grain_shader);
-      
+
         paint.set_dither(true);
 
         canvas.draw_rect(
@@ -609,14 +611,14 @@ impl Editor {
     }
 }
 
-pub fn make_grain_gradient_shader(center: (f32, f32), radius: f32, darker: Color, lighter: Color, alpha: f32) -> Shader {
-    let noise_shader = perlin_noise_shader::fractal_noise(
-        (0.25, 0.25),
-        1,
-        0.0,
-        None,
-    ).unwrap();
-
+pub fn make_grain_gradient_shader(
+    center: (f32, f32),
+    radius: f32,
+    darker: Color,
+    lighter: Color,
+    alpha: f32,
+) -> Shader {
+    let noise_shader = perlin_noise_shader::fractal_noise((0.25, 0.25), 1, 0.0, None).unwrap();
 
     let gradient_shader = gradient_shader::radial(
         center,
@@ -626,10 +628,11 @@ pub fn make_grain_gradient_shader(center: (f32, f32), radius: f32, darker: Color
         TileMode::Clamp,
         None,
         None,
-    ).unwrap();
+    )
+    .unwrap();
 
-
-    let effect = RuntimeEffect::make_for_shader("
+    let effect = RuntimeEffect::make_for_shader(
+        "
                 uniform shader noiseShader;
                 uniform shader gradientShader;
                 uniform vec4 colorLight;
@@ -644,28 +647,32 @@ pub fn make_grain_gradient_shader(center: (f32, f32), radius: f32, darker: Color
                     return vec4(duotone.r * alpha, duotone.g * alpha, duotone.b * alpha, alpha);
                 }
 
-        ", None).unwrap();
+        ",
+        None,
+    )
+    .unwrap();
     let darker4 = darker.to_color4f();
     let lighter4 = lighter.to_color4f();
     let data = [
-        darker4.r,
-        darker4.g,
-        darker4.b,
-        darker4.a,
-        lighter4.r,
-        lighter4.g,
-        lighter4.b,
-        lighter4.a,
+        darker4.r, darker4.g, darker4.b, darker4.a, lighter4.r, lighter4.g, lighter4.b, lighter4.a,
         alpha,
     ];
 
     let len = data.len();
     let ptr = data.as_ptr() as *const u8;
-    let data : &[u8] = unsafe { std::slice::from_raw_parts(ptr, len * 4)};
+    let data: &[u8] = unsafe { std::slice::from_raw_parts(ptr, len * 4) };
 
     let uniforms = Data::new_copy(data);
     let grain_shader = effect
-        .make_shader(uniforms, &[ChildPtr::Shader(noise_shader), ChildPtr::Shader(gradient_shader)], None, false)
+        .make_shader(
+            uniforms,
+            &[
+                ChildPtr::Shader(noise_shader),
+                ChildPtr::Shader(gradient_shader),
+            ],
+            None,
+            false,
+        )
         .unwrap();
     grain_shader
 }
