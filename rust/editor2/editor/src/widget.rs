@@ -8,8 +8,9 @@ use skia_safe::{
 };
 
 use crate::{
+    editor::make_grain_gradient_shader,
     event::Event,
-    wasm_messenger::{self, WasmId, WasmMessenger}, editor::make_grain_gradient_shader,
+    wasm_messenger::{self, WasmId, WasmMessenger},
 };
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
@@ -20,10 +21,7 @@ pub struct Position {
 
 impl From<Position> for Point {
     fn from(val: Position) -> Self {
-        Point {
-            x: val.x,
-            y: val.y,
-        }
+        Point { x: val.x, y: val.y }
     }
 }
 
@@ -115,7 +113,12 @@ impl Color {
     }
 
     pub fn from_color4f(color4f: &Color4f) -> Self {
-        Color { r: color4f.r, g: color4f.g, b: color4f.b, a: color4f.a}
+        Color {
+            r: color4f.r,
+            g: color4f.g,
+            b: color4f.b,
+            a: color4f.a,
+        }
     }
 
     pub fn parse_hex(hex: &str) -> Color {

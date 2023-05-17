@@ -1,11 +1,10 @@
 use std::{error::Error, fs, str::from_utf8};
 
-use framework::{App, Canvas, Color, Rect, KeyState, KeyCode};
+use framework::{App, Canvas, Color, KeyCode, KeyState, Rect};
 
-use roxmltree::{Node, Document};
+use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 mod framework;
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AsmData {
@@ -23,7 +22,6 @@ struct FileInfo {
 
 use std::fmt::Write;
 
-
 fn find_indent(s: &str) -> usize {
     let lines = s.lines();
 
@@ -37,10 +35,9 @@ fn find_indent(s: &str) -> usize {
 }
 
 fn remove_common_indent(s: &str) -> String {
-
     // Find the indent of the first non-empty line
     let first_non_empty_indent = find_indent(s);
-    
+
     let lines = s.lines();
     // Remove that indent from all lines
     lines
@@ -62,7 +59,10 @@ impl App for AsmData {
 
         // let cargo_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         // let xml_file_path = format!("{}/{}", cargo_dir, "resources/onebigfile.xml");
-        Self { file_info: vec![], offset: 0 }
+        Self {
+            file_info: vec![],
+            offset: 0,
+        }
     }
 
     fn draw(&mut self) {
@@ -79,8 +79,6 @@ impl App for AsmData {
         canvas.draw_rrect(bounding_rect, 20.0);
         canvas.set_color(&foreground);
 
-
-
         canvas.translate(50.0, 50.0);
 
         if self.file_info.is_empty() {
@@ -92,9 +90,8 @@ impl App for AsmData {
             canvas.draw_str(&format!("# {}", &name), 0.0, 0.0);
             canvas.translate(0.0, 40.0);
 
-            canvas.draw_str(&format!( "# {}", &file_info.desc), 0.0, 0.0);
+            canvas.draw_str(&format!("# {}", &file_info.desc), 0.0, 0.0);
             canvas.translate(0.0, 40.0);
-            
 
             for asm in file_info.asm.iter() {
                 let asm = Document::parse(asm).unwrap();
@@ -115,7 +112,6 @@ impl App for AsmData {
 
             canvas.translate(0.0, 40.0);
 
-
             struct Field {
                 name: String,
                 shift: u32,
@@ -126,14 +122,14 @@ impl App for AsmData {
 
             let mut fields = vec![];
 
-
             canvas.save();
             for regdiagram in file_info.regdiagram.iter() {
                 let document = roxmltree::Document::parse(&regdiagram).unwrap();
                 let root = document.root_element();
                 let name = root.attribute("name").unwrap_or("");
 
-                let bits : Vec<String> = root.descendants()
+                let bits: Vec<String> = root
+                    .descendants()
                     .filter(|child| !child.is_text())
                     .filter_map(|child| {
                         let text = child.text().unwrap_or_default().trim();
@@ -144,11 +140,14 @@ impl App for AsmData {
                         }
                     })
                     .collect();
-        
-                let hibit = root.attribute("hibit").unwrap().parse::<u32>().unwrap() + 1;
-                let width = root.attribute("width").unwrap_or("1").parse::<u32>().unwrap();
-                let shift = hibit - width;
 
+                let hibit = root.attribute("hibit").unwrap().parse::<u32>().unwrap() + 1;
+                let width = root
+                    .attribute("width")
+                    .unwrap_or("1")
+                    .parse::<u32>()
+                    .unwrap();
+                let shift = hibit - width;
 
                 fields.push(Field {
                     name: name.to_string(),
@@ -163,47 +162,64 @@ impl App for AsmData {
                 })
             }
 
-            let params = fields.iter().filter(|x| x.required).map(|x| format!("{}: u32", x.name)).collect::<Vec<String>>().join(", ");
+            let params = fields
+                .iter()
+                .filter(|x| x.required)
+                .map(|x| format!("{}: u32", x.name))
+                .collect::<Vec<String>>()
+                .join(", ");
 
             let indent = "                    ";
             let mut define_params = String::new();
             for field in fields.iter().filter(|x| x.required) {
                 let name = field.name.to_ascii_lowercase();
-                define_params.write_str(&format!("{}{}: u32,\n", indent, name)).unwrap();
+                define_params
+                    .write_str(&format!("{}{}: u32,\n", indent, name))
+                    .unwrap();
             }
             if !define_params.is_empty() {
                 define_params.pop();
                 define_params = define_params[indent.len()..].to_string();
             }
-                
+
             let indent = "                            ";
             // rd: check_mask(rd, 0x1f),
             let mut init_params = String::new();
             for field in fields.iter().filter(|x| x.required) {
                 let mask = (1 << field.width) - 1;
                 let name = field.name.to_ascii_lowercase();
-                init_params.write_str(&format!("{}{}: check_mask({}, {:#02x}),\n", indent, name, name, mask)).unwrap();
+                init_params
+                    .write_str(&format!(
+                        "{}{}: check_mask({}, {:#02x}),\n",
+                        indent, name, name, mask
+                    ))
+                    .unwrap();
             }
             if !init_params.is_empty() {
                 init_params.pop();
                 init_params = init_params[indent.len()..].to_string();
             }
 
-
             let mut encode = String::new();
-            let all_bits = fields.iter().map(|x| x.bits.clone()).collect::<Vec<String>>().join("_");
-
+            let all_bits = fields
+                .iter()
+                .map(|x| x.bits.clone())
+                .collect::<Vec<String>>()
+                .join("_");
 
             encode.write_str(&format!("0b{}\n", all_bits)).unwrap();
             // for lack of a better thing to do I copied from template
             let indent = "                        ";
             for field in fields.iter().filter(|x| x.required) {
                 let name = field.name.to_ascii_lowercase();
-                encode.write_str(&format!("{}| (self.{} << {})\n", indent, name, field.shift)).unwrap();
+                encode
+                    .write_str(&format!("{}| (self.{} << {})\n", indent, name, field.shift))
+                    .unwrap();
             }
             encode.pop();
 
-            let template = remove_common_indent(&format!("
+            let template = remove_common_indent(&format!(
+                "
                 pub struct {name} {{
                     {define_params}
                 }}
@@ -219,14 +235,13 @@ impl App for AsmData {
                         {encode}
                     }}
                 }}
-            "));
+            "
+            ));
 
             for line in template.lines() {
                 canvas.draw_str(line, 0.0, 0.0);
                 canvas.translate(0.0, 40.0);
             }
-
-
 
             canvas.translate(0.0, file_info.regdiagram.len() as f32 * 5.0 + 30.0);
         }
@@ -239,38 +254,36 @@ impl App for AsmData {
         // self.xml_file_text = current_dir().unwrap().to_str().unwrap().to_string();
         match self.get_xml_stuff() {
             Ok(_) => (),
-            Err(_e) => {
-                
-            }
+            Err(_e) => {}
         }
     }
 
     fn on_key(&mut self, input: KeyboardInput) {
         match input {
-            KeyboardInput { state: KeyState::Pressed, key_code, .. }=> {
-                match key_code {
-                    KeyCode::R => {
+            KeyboardInput {
+                state: KeyState::Pressed,
+                key_code,
+                ..
+            } => match key_code {
+                KeyCode::R => {
+                    self.offset = 0;
+                }
+                KeyCode::DownArrow => {
+                    self.offset += 1;
+                    if self.offset >= self.file_info.len() {
                         self.offset = 0;
                     }
-                    KeyCode::DownArrow => {
-                        self.offset += 1;
-                        if self.offset >= self.file_info.len() {
-                            self.offset = 0;
-                        }
-                    }
-                    KeyCode::UpArrow => {
-                        if self.offset == 0 {
-                            self.offset = self.file_info.len() - 1;
-                        } else {
-                            self.offset -= 1;
-                        }
-
-                    }
-                    _ => {}
                 }
-               
-            }
-            
+                KeyCode::UpArrow => {
+                    if self.offset == 0 {
+                        self.offset = self.file_info.len() - 1;
+                    } else {
+                        self.offset -= 1;
+                    }
+                }
+                _ => {}
+            },
+
             _ => {}
         }
     }
@@ -287,17 +300,12 @@ impl App for AsmData {
 }
 
 impl AsmData {
-
     fn get_xml_stuff(&mut self) -> Result<(), Box<dyn Error>> {
-
-
         if !self.file_info.is_empty() {
             // let name : String = self.file_info.iter().map(|x| format!("{:#?} \n", x)).collect();
             // self.xml_file_text = name;
-            return Ok(())
+            return Ok(());
         }
-
-
 
         let before_read = std::time::Instant::now();
         let xml_file_bytes = fs::read("onebigfile.xml")?;
@@ -331,7 +339,7 @@ impl AsmData {
             }
         }
 
-        let file_info : Vec<FileInfo> = found_file_nodes
+        let file_info: Vec<FileInfo> = found_file_nodes
             .iter()
             .flat_map(|x| {
                 x.descendants()
@@ -377,7 +385,7 @@ impl AsmData {
             .collect();
         self.file_info = file_info.clone();
 
-        let _name : String = file_info.iter().map(|x| format!("{:#?} \n", x)).collect();
+        let _name: String = file_info.iter().map(|x| format!("{:#?} \n", x)).collect();
 
         println!("Found file in {}ms", before_find.elapsed().as_millis());
 

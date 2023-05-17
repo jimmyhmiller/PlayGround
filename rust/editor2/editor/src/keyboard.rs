@@ -297,7 +297,6 @@ impl KeyCode {
     }
 }
 
-
 impl KeyboardInput {
     #[allow(dead_code)]
     pub fn from_u32(key: u32, state: u32, modifiers: u32) -> Self {
