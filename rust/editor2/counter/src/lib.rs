@@ -237,24 +237,19 @@ impl App for TextWidget {
     }
 
     fn on_click(&mut self, x: f32, y: f32) {
-        // TODO: Remove
-        if x == 0.0 && y == 0.0 {
-            println!("Click");
-        } else {
-            // TODO: Need to handle margin here.
-            let margin = 20;
-            let lines_above = self.text_pane.lines_above_scroll();
-            let line = (((y - margin as f32) / self.text_pane.line_height).ceil() as usize
-                + lines_above)
-                - 1;
-            let char_width = 16.0;
-            let column = (((x - margin as f32) / char_width).ceil() as usize)
-                .saturating_sub((self.text_pane.offset.x / char_width) as usize)
-                - 1;
-            self.text_pane
-                .cursor
-                .move_to_bounded(line, column, &self.text_pane.text_buffer);
-        }
+        // TODO: Need to handle margin here.
+        let margin = 20;
+        let lines_above = self.text_pane.lines_above_scroll();
+        let line = (((y - margin as f32) / self.text_pane.line_height).ceil() as usize
+            + lines_above)
+            - 1;
+        let char_width = 16.0;
+        let column = (((x - margin as f32) / char_width).ceil() as usize)
+            .saturating_sub((self.text_pane.offset.x / char_width) as usize)
+            - 1;
+        self.text_pane
+            .cursor
+            .move_to_bounded(line, column, &self.text_pane.text_buffer);
     }
 
     fn on_key(&mut self, input: KeyboardInput) {

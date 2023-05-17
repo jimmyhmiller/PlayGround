@@ -12,7 +12,7 @@ use crate::{
     event::Event,
     fps_counter::FpsCounter,
     keyboard::Modifiers,
-    wasm_messenger::{WasmId, WasmMessenger},
+    wasm_messenger::{WasmMessenger},
     widget::{Color, Position, Size, TextPane, Wasm, Widget, WidgetData, WidgetId, WidgetStore},
 };
 
@@ -24,16 +24,6 @@ use skia_safe::{
     gradient_shader::{self},
     perlin_noise_shader, Font, FontStyle, PaintStyle, Rect, TileMode, Typeface, RuntimeEffect, Data, runtime_effect::ChildPtr, Shader,
 };
-
-// Need a global store of widgets
-// Then anything else refers to widgets by their id
-// The nice part about that is that widgets can appear in multiple places
-// It might make some other parts more awkward.
-// I can also then deal with events to a widget as data with the id
-// So things can listen for different interactions.
-// If there are a large number of widgets, this could be a bottle neck
-// So I could keep the hierachy. Like I know if the widget is not
-// on the current scene then I am not going to click on it.
 
 struct Context {
     mouse_position: Position,
@@ -55,10 +45,7 @@ pub struct Editor {
     debounce_watcher: Option<Debouncer<FsEventWatcher>>,
     event_loop_proxy: Option<EventLoopProxy<()>>,
     wasm_messenger: WasmMessenger,
-    #[allow(unused)]
-    temp_wasm_ids: Vec<WasmId>,
     widget_config_path: String,
-    // points: Vec<[f64; 2]>,
 }
 
 struct Events {
@@ -353,7 +340,6 @@ impl Editor {
             event_loop_proxy: None,
             active_widget: None,
             wasm_messenger: WasmMessenger::new(),
-            temp_wasm_ids: vec![],
             widget_config_path: widget_config_path.to_string(),
         }
     }
@@ -373,8 +359,6 @@ impl Editor {
         let mut paint = Paint::new(darker.to_color4f(), None);
         paint.set_anti_alias(true);
         paint.set_style(PaintStyle::Fill);
-
-
 
         let radius = 1500.0;
         let center = (canvas_size.width / 2.0, canvas_size.height / 2.0);
