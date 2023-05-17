@@ -136,8 +136,16 @@ pub enum KeyCode {
     BackSpace,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyboardInput {
+    pub state: KeyState,
+    pub key_code: KeyCode,
+    pub modifiers: Modifiers,
+}
+
 impl KeyCode {
     pub fn map_winit_vk_to_keycode(v: VirtualKeyCode) -> Option<KeyCode> {
+        // TODO: VirtualKeyCode is serializable. Should I just use that?
         use VirtualKeyCode::*;
         match v {
             Key0 => Some(KeyCode::Key0),
@@ -289,12 +297,6 @@ impl KeyCode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct KeyboardInput {
-    pub state: KeyState,
-    pub key_code: KeyCode,
-    pub modifiers: Modifiers,
-}
 
 impl KeyboardInput {
     #[allow(dead_code)]

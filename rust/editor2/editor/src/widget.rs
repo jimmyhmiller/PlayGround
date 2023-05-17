@@ -135,7 +135,6 @@ impl Color {
 // I like enums. Will consider it later.
 #[derive(Serialize, Deserialize)]
 pub enum WidgetData {
-    Noop,
     Circle {
         radius: f32,
         color: Color,
@@ -420,31 +419,6 @@ impl Widget {
         }
 
         match &self.data {
-            WidgetData::Noop => {
-
-                let rect = self.bounding_rect();
-                let rrect = RRect::new_rect_xy(rect, 20.0, 20.0);
-                let purple = Color::parse_hex("#1c041e");
-                let center = (self.bounding_rect().width()/2.0, self.bounding_rect().height()/2.0);
-                let radius = 30.0;
-                let grain_shader = make_grain_gradient_shader(center, radius, purple, purple, 0.3);
-                let mut paint = purple.to_paint();
-                paint.set_shader(grain_shader);
-                canvas.draw_rrect(rrect, &paint);
-
-                let font = Font::new(
-                    Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(),
-                    32.0,
-                );
-                let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-                canvas.draw_str(
-                    "noop",
-                    Point::new(self.position.x + 30.0, self.position.y + 40.0),
-                    &font,
-                    white,
-                );
-            }
-
             WidgetData::Compound { children } => return children.clone(),
             WidgetData::Image { data } => {
                 // I tried to abstract this out and ran into the issue of returning a ref.
@@ -465,10 +439,10 @@ impl Widget {
                 let foreground = Color::parse_hex("#62b4a6");
                 let background = Color::parse_hex("#530922");
 
-                let grain_shader = make_grain_gradient_shader((self.bounding_rect().width()/2.0, self.bounding_rect().height()/2.0), 30.0, background, background, 0.3);
+                // let grain_shader = make_grain_gradient_shader((self.bounding_rect().width()/2.0, self.bounding_rect().height()/2.0), 30.0, background, background, 0.3);
 
                 let mut paint = background.to_paint();
-                paint.set_shader(grain_shader);
+                // paint.set_shader(grain_shader);
                 canvas.save();
                 canvas.clip_rect(self.bounding_rect(), None, None);
                 let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);

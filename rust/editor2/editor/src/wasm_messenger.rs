@@ -90,12 +90,6 @@ pub struct WasmMessenger {
     senders: HashMap<WasmId, Sender<Message>>,
 }
 
-// TODO:
-// Limit inflight messages per instance
-// If I already asked for draw and it hasn't returned,
-// don't queue another draw.
-// I need to queue a click though. Need to think about the details.
-
 impl WasmMessenger {
     pub fn new() -> Self {
 
@@ -208,8 +202,8 @@ impl WasmMessenger {
             let center = (bounds.width/2.0, bounds.height/2.0);
             let radius = 30.0;
             let color = Color::from_color4f(&paint.color4f());
-            let grain_shader = make_grain_gradient_shader(center, radius, color, color, 0.3);
-            paint.set_shader(grain_shader);
+            // let grain_shader = make_grain_gradient_shader(center, radius, color, color, 0.3);
+            // paint.set_shader(grain_shader);
             for command in commands.iter() {
                 // Going to do this unconditonally for now.
                 // Need to make this toggleable
@@ -224,8 +218,8 @@ impl WasmMessenger {
                     Command::SetColor(r, g, b, a) => {
                         let color = Color::new(*r, *g, *b, *a);
                         paint.set_color(color.to_color4f().to_color());
-                        let grain_shader = make_grain_gradient_shader(center, radius, color, color, 0.3);
-                        paint.set_shader(grain_shader);
+                        // let grain_shader = make_grain_gradient_shader(center, radius, color, color, 0.3);
+                        // paint.set_shader(grain_shader);
                     }
                     Command::DrawRect(x, y, width, height) => {
                         canvas
