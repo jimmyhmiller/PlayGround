@@ -8,7 +8,6 @@ use skia_safe::{
 };
 
 use crate::{
-    editor::make_grain_gradient_shader,
     event::Event,
     wasm_messenger::{self, WasmId, WasmMessenger},
 };
@@ -104,6 +103,8 @@ impl Color {
     pub fn to_color4f(&self) -> Color4f {
         Color4f::new(self.r, self.g, self.b, self.a)
     }
+    
+    #[allow(unused)]
     pub fn to_sk_color(&self) -> skia_safe::Color {
         self.to_color4f().to_color()
     }
@@ -112,6 +113,7 @@ impl Color {
         Color { r, g, b, a }
     }
 
+    #[allow(unused)]
     pub fn from_color4f(color4f: &Color4f) -> Self {
         Color {
             r: color4f.r,
@@ -440,12 +442,10 @@ impl Widget {
             WidgetData::TextPane { text_pane } => {
                 let text_pane = &text_pane;
                 let foreground = Color::parse_hex("#62b4a6");
-                let background = Color::parse_hex("#530922");
-
-                // let grain_shader = make_grain_gradient_shader((self.bounding_rect().width()/2.0, self.bounding_rect().height()/2.0), 30.0, background, background, 0.3);
-
-                let mut paint = background.to_paint();
-                // paint.set_shader(grain_shader);
+                let mut background = Color::parse_hex("#ffffff");
+                background.a = 0.3;
+                
+                let paint = background.to_paint();
                 canvas.save();
                 canvas.clip_rect(self.bounding_rect(), None, None);
                 let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);

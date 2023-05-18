@@ -13,7 +13,7 @@ use crate::{
     fps_counter::FpsCounter,
     keyboard::Modifiers,
     wasm_messenger::WasmMessenger,
-    widget::{Color, Position, Size, TextPane, Wasm, Widget, WidgetData, WidgetId, WidgetStore},
+    widget::{Color, Position, Size, Widget, WidgetData, WidgetId, WidgetStore},
 };
 
 use notify::{FsEventWatcher, RecursiveMode};
@@ -21,36 +21,35 @@ use notify::{FsEventWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
 use skia_safe::{
-    gradient_shader::{self},
     perlin_noise_shader,
     runtime_effect::ChildPtr,
-    Data, Font, FontStyle, PaintStyle, Rect, RuntimeEffect, Shader, TileMode, Typeface,
+    Data, Font, FontStyle, ISize, PaintStyle, Rect, RuntimeEffect, Shader, Typeface,
 };
 
-struct Context {
-    mouse_position: Position,
-    left_mouse_down: bool,
-    right_mouse_down: bool,
-    cancel_click: bool,
-    modifiers: Modifiers,
+pub struct Context {
+    pub mouse_position: Position,
+    pub left_mouse_down: bool,
+    pub right_mouse_down: bool,
+    pub cancel_click: bool,
+    pub modifiers: Modifiers,
 }
 
 pub struct Editor {
-    events: Events,
+    pub events: Events,
     pub fps_counter: FpsCounter,
-    context: Context,
-    widget_store: WidgetStore,
-    should_redraw: bool,
-    selected_widgets: HashSet<WidgetId>,
-    active_widget: Option<WidgetId>,
-    external_receiver: Option<Receiver<Event>>,
-    debounce_watcher: Option<Debouncer<FsEventWatcher>>,
-    event_loop_proxy: Option<EventLoopProxy<()>>,
-    wasm_messenger: WasmMessenger,
-    widget_config_path: String,
+    pub context: Context,
+    pub widget_store: WidgetStore,
+    pub should_redraw: bool,
+    pub selected_widgets: HashSet<WidgetId>,
+    pub active_widget: Option<WidgetId>,
+    pub external_receiver: Option<Receiver<Event>>,
+    pub debounce_watcher: Option<Debouncer<FsEventWatcher>>,
+    pub event_loop_proxy: Option<EventLoopProxy<()>>,
+    pub wasm_messenger: WasmMessenger,
+    pub widget_config_path: String,
 }
 
-struct Events {
+pub struct Events {
     events: Vec<Event>,
     frame_start_index: usize,
     frame_end_index: usize, // exclusive
@@ -150,7 +149,7 @@ impl Editor {
         self.debounce_watcher = Some(debouncer);
     }
 
-    fn load_widgets(&mut self) {
+    pub fn load_widgets(&mut self) {
         let mut file = File::open(&self.widget_config_path).unwrap();
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
@@ -212,111 +211,7 @@ impl Editor {
             self.should_redraw = true;
         }
 
-        for event in events {
-            match event {
-                Event::DroppedFile { path, x, y } => {
-                    if path.extension().unwrap() == "wasm" {
-                        let wasm_id = self.wasm_messenger.new_instance(path.to_str().unwrap());
-                        self.widget_store.add_widget(Widget {
-                            id: 0,
-                            on_click: vec![],
-                            position: Position { x, y },
-                            size: Size {
-                                width: 800.0,
-                                height: 800.0,
-                            },
-                            data: WidgetData::Wasm {
-                                wasm: Wasm::new(path.to_str().unwrap().to_string()),
-                                wasm_id,
-                            },
-                        });
-                    } else {
-                        self.widget_store.add_widget(Widget {
-                            id: 0,
-                            // TODO: Temp for testing
-                            on_click: vec![],
-                            position: Position { x, y },
-                            size: Size {
-                                width: 800.0,
-                                height: 800.0,
-                            },
-                            data: WidgetData::TextPane {
-                                text_pane: TextPane::new(
-                                    std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
-                                    40.0,
-                                ),
-                            },
-                        });
-                    }
-                    if let Some(watcher) = &mut self.debounce_watcher {
-                        let watcher = watcher.watcher();
-                        watcher
-                            .watch(path.as_path(), RecursiveMode::NonRecursive)
-                            .unwrap();
-                    }
-                }
-
-                Event::Scroll { x, y } => {
-                    let mouse = self.context.mouse_position;
-                    for widget in self.widget_store.iter_mut() {
-                        if widget.mouse_over(&mouse) {
-                            match &mut widget.data {
-                                WidgetData::TextPane { text_pane } => {
-                                    text_pane.on_scroll(x, y, widget.size.height);
-                                }
-                                WidgetData::Wasm { wasm: _, wasm_id } => {
-                                    self.wasm_messenger.send_on_scroll(*wasm_id, x, y);
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                Event::MoveWidgetRelative { selector, x, y } => {
-                    let widget_ids = selector.select(&self.widget_store);
-                    for widget_id in widget_ids {
-                        if let Some(widget) = self.widget_store.get_mut(widget_id) {
-                            widget.position.x += x;
-                            widget.position.y += y;
-                        }
-                    }
-                }
-                Event::MouseMove {
-                    x_diff: x,
-                    y_diff: y,
-                    ..
-                } => {
-                    // We are dragging, so don't click
-                    if !self.selected_widgets.is_empty() && x != 0.0 && y != 0.0 {
-                        self.context.cancel_click = true;
-                    }
-                    for widget_id in self.selected_widgets.iter() {
-                        if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                            widget.position.x += x;
-                            widget.position.y += y;
-                        }
-                    }
-                }
-                Event::ReloadWidgets => {
-                    self.widget_store.clear();
-                    self.load_widgets();
-                }
-                Event::SaveWidgets => {
-                    self.save_widgets();
-                }
-                Event::ReloadWasm(path) => {
-                    for widget in self.widget_store.iter_mut() {
-                        if let WidgetData::Wasm { wasm, wasm_id } = &mut widget.data {
-                            if path == wasm.path {
-                                self.wasm_messenger.send_reload(*wasm_id);
-                                // wasm.reload();
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        self.handle_events(events);
     }
 
     pub fn new() -> Self {
@@ -362,10 +257,15 @@ impl Editor {
         paint.set_anti_alias(true);
         paint.set_style(PaintStyle::Fill);
 
-        let radius = 1500.0;
-        let center = (canvas_size.width / 2.0, canvas_size.height / 2.0);
-
-        let grain_shader = make_grain_gradient_shader(center, radius, darker, lighter, 0.95);
+        let grain_shader = make_grain_gradient_shader(
+            darker,
+            lighter,
+            0.95,
+            crate::widget::Size {
+                width: canvas_size.width,
+                height: canvas_size.height,
+            },
+        );
 
         paint.set_shader(grain_shader);
 
@@ -463,7 +363,6 @@ impl Editor {
                     y,
                 });
                 self.context.mouse_position = Position { x, y };
-                // self.points.push([x as f64, y as f64])
             }
             Event::LeftMouseDown { .. } => {
                 self.events.push(event);
@@ -593,7 +492,7 @@ impl Editor {
         self.save_widgets();
     }
 
-    fn save_widgets(&mut self) {
+    pub fn save_widgets(&mut self) {
         for widget in self.widget_store.iter_mut() {
             widget.save(&mut self.wasm_messenger);
         }
@@ -612,21 +511,43 @@ impl Editor {
 }
 
 pub fn make_grain_gradient_shader(
-    center: (f32, f32),
-    radius: f32,
     darker: Color,
     lighter: Color,
     alpha: f32,
+    size: Size,
 ) -> Shader {
-    let noise_shader = perlin_noise_shader::fractal_noise((0.25, 0.25), 1, 0.0, None).unwrap();
+    let noise_shader = perlin_noise_shader::turbulence(
+        (0.25, 0.25),
+        1,
+        0.0,
+        ISize {
+            width: size.width as i32 * 2,
+            height: size.height as i32 * 2,
+        },
+    )
+    .unwrap();
 
-    let gradient_shader = gradient_shader::radial(
-        center,
-        radius,
-        [darker.to_sk_color(), lighter.to_sk_color()].as_ref(),
-        None,
-        TileMode::Clamp,
-        None,
+    let new_gradient_shader = RuntimeEffect::make_for_shader(
+        "
+        uniform vec2 iResolution;
+        vec3 colorA = vec3(0.149,0.141,0.912);
+        vec3 colorB = vec3(1.000,0.833,0.224);
+        float alpha = 1.0;
+        
+        half4 main(vec2 fragCoord) {
+          vec2 st = fragCoord / iResolution.xy;
+          vec3 color = vec3(0.0);
+        
+          vec3 pct = vec3(st.x);
+        
+          // pct.r = smoothstep(0.0,1.0, st.x);
+          pct.g = sin(st.x*3.14 + st.y*2.616) * -0.488;
+          // pct.b = pow(st.x,0.5);
+        
+          color = mix(colorA, colorB, pct);
+          return vec4(color.r * alpha, color.g * alpha, color.b * alpha, alpha);
+        }
+    ",
         None,
     )
     .unwrap();
@@ -642,8 +563,17 @@ pub fn make_grain_gradient_shader(
                 half4 main(vec2 fragcoord) { 
                     vec4 noiseColor = noiseShader.eval(fragcoord);
                     vec4 gradientColor = gradientShader.eval(fragcoord);
-                    float noiseLuma = dot(noiseColor.rgb, vec3(0.299, 0.587, 0.114));
-                    vec4 duotone = mix(gradientColor, colorDark, noiseLuma);
+                    // float noiseLuma = dot(noiseColor.rgb, vec3(0.299, 0.587, 0.114));
+                    gradientColor.r += noiseColor.r * 0.4;
+                    gradientColor.g += noiseColor.g * 0.4;
+                    gradientColor.b += noiseColor.b * 0.4;
+                    // vec4 white = vec4(1.0,1.0,1.0,1.0);
+                    // vec4 lighter = mix(gradientColor, white, 0.3);
+                    // vec4 black = vec4(0.0, 0.0, 0.0, 1);
+                    // vec4 darker = mix(gradientColor, black, 0.7);
+                    // float noiseLuma = dot(noiseColor.rgb, vec3(0.299, 0.587, 0.114));
+                    // vec4 duotone = mix(gradientColor, darker, noiseLuma);
+                    vec4 duotone = gradientColor;
                     return vec4(duotone.r * alpha, duotone.g * alpha, duotone.b * alpha, alpha);
                 }
 
@@ -651,6 +581,14 @@ pub fn make_grain_gradient_shader(
         None,
     )
     .unwrap();
+    let data = [size.width, size.height];
+
+    let len = data.len();
+    let ptr = data.as_ptr() as *const u8;
+    let data: &[u8] = unsafe { std::slice::from_raw_parts(ptr, len * 4) };
+    let new_gradient_shader = new_gradient_shader
+        .make_shader(Data::new_copy(data), &[], None, false)
+        .unwrap();
     let darker4 = darker.to_color4f();
     let lighter4 = lighter.to_color4f();
     let data = [
@@ -668,7 +606,7 @@ pub fn make_grain_gradient_shader(
             uniforms,
             &[
                 ChildPtr::Shader(noise_shader),
-                ChildPtr::Shader(gradient_shader),
+                ChildPtr::Shader(new_gradient_shader),
             ],
             None,
             false,
