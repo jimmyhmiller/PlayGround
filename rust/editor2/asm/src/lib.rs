@@ -69,7 +69,9 @@ impl App for AsmData {
         let canvas = Canvas::new();
 
         let foreground = Color::parse_hex("#62b4a6");
-        let background = Color::parse_hex("#530922");
+        let mut background = Color::parse_hex("#ffffff");
+        background.a = 0.3;
+        
 
         let bounding_rect = Rect::new(0.0, 0.0, 2500.0, 1500.0);
 

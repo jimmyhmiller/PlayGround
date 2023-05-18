@@ -19,7 +19,6 @@ use wasmtime::{
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
 use crate::{
-    editor::make_grain_gradient_shader,
     keyboard::KeyboardInput,
     widget::{Color, Position, Size},
 };
@@ -211,11 +210,6 @@ impl WasmMessenger {
             let mut current_height_stack = vec![];
 
             let mut paint = skia_safe::Paint::default();
-            let center = (bounds.width / 2.0, bounds.height / 2.0);
-            let radius = 30.0;
-            let color = Color::from_color4f(&paint.color4f());
-            // let grain_shader = make_grain_gradient_shader(center, radius, color, color, 0.3);
-            // paint.set_shader(grain_shader);
             for command in commands.iter() {
                 // Going to do this unconditonally for now.
                 // Need to make this toggleable
