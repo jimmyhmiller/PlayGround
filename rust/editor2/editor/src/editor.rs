@@ -271,6 +271,7 @@ impl Editor {
 
         paint.set_dither(true);
 
+
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, canvas_size.width, canvas_size.height),
             &paint,
