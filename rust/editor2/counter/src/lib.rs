@@ -1,9 +1,8 @@
 use std::str::from_utf8;
 
-use framework::{App, Canvas, Color, KeyCode, KeyState, Rect};
+use framework::{App, Canvas, Color, KeyCode, KeyState, Rect, KeyboardInput, app};
 use headless_editor::{Cursor, SimpleTextBuffer, TextBuffer, VirtualCursor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-mod framework;
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
 pub struct Position {

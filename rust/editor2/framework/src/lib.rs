@@ -1,5 +1,7 @@
 use std::{fmt::Debug, str::from_utf8};
 
+use serde::{Serialize, Deserialize};
+
 #[link(wasm_import_module = "host")]
 extern "C" {
     #[link_name = "draw_str"]
@@ -62,7 +64,7 @@ impl Rect {
         }
     }
 
-    pub fn _with_inset(&self, (x, y): (f32, f32)) -> Self {
+    pub fn with_inset(&self, (x, y): (f32, f32)) -> Self {
         // make a rectangle with some margins
         Self {
             x: self.x + x,
@@ -86,7 +88,7 @@ impl Canvas {
         }
     }
 
-    pub fn _draw_rect(&self, x: f32, y: f32, width: f32, height: f32) {
+    pub fn draw_rect(&self, x: f32, y: f32, width: f32, height: f32) {
         unsafe {
             draw_rect(x, y, width, height);
         }
@@ -201,8 +203,7 @@ mod macros {
     macro_rules! app {
         ($app:ident) => {
             use once_cell::sync::Lazy;
-            use $crate::framework::KeyboardInput;
-            use $crate::framework::DEBUG;
+            use framework::DEBUG;
             static mut APP: Lazy<$app> = Lazy::new(|| $app::init());
 
             #[no_mangle]
@@ -243,7 +244,7 @@ mod macros {
 
             #[no_mangle]
             pub extern "C" fn get_state() {
-                use $crate::framework::encode_base64;
+                use framework::encode_base64;
                 let s: String = serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
                 let s = encode_base64(s);
                 let mut s = s.into_bytes().clone();
@@ -257,7 +258,7 @@ mod macros {
             pub extern "C" fn set_state(ptr: u32, size: u32) {
                 let data =
                     unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
-                use $crate::framework::decode_base64;
+                use framework::decode_base64;
                 let s = decode_base64(data);
                 match s {
                     Ok(s) => {
@@ -307,7 +308,7 @@ impl Color {
 }
 
 #[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeyCode {
     Key0,
     Key1,

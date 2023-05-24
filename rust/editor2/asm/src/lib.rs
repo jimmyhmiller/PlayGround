@@ -1,10 +1,9 @@
 use std::{error::Error, fs, str::from_utf8};
 
-use framework::{App, Canvas, Color, KeyCode, KeyState, Rect};
+use framework::{App, Canvas, Color, KeyCode, KeyState, Rect, KeyboardInput, app};
 
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
-mod framework;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AsmData {

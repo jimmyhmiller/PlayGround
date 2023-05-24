@@ -392,15 +392,12 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-
 fn fib_rust(n: usize) -> usize {
     if n <= 1 {
         return n
     }
     return fib_rust(n - 1) + fib_rust(n - 2)
 }
-
-
 
 fn fib() -> Lang {
     let mut lang = Lang::new();

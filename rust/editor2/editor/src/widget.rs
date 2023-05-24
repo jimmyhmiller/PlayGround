@@ -443,7 +443,7 @@ impl Widget {
                 let text_pane = &text_pane;
                 let foreground = Color::parse_hex("#62b4a6");
                 let mut background = Color::parse_hex("#ffffff");
-                background.a = 0.8;
+                background.a = 0.3;
                 
                 let paint = background.to_paint();
                 canvas.save();
