@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashSet, HashMap},
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -20,6 +20,7 @@ use notify::{FsEventWatcher, RecursiveMode};
 
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
+use serde::{Serialize, Deserialize};
 use skia_safe::{
     perlin_noise_shader,
     runtime_effect::ChildPtr,
@@ -32,6 +33,21 @@ pub struct Context {
     pub right_mouse_down: bool,
     pub cancel_click: bool,
     pub modifiers: Modifiers,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub enum Value {
+    USize(usize),
+    F32(f32),
+}
+
+impl Value {
+    pub fn as_f32(&self) -> f32 {
+        match self {
+            Value::USize(v) => *v as f32,
+            Value::F32(v) => *v,
+        }
+    }
 }
 
 pub struct Editor {
@@ -47,6 +63,7 @@ pub struct Editor {
     pub event_loop_proxy: Option<EventLoopProxy<()>>,
     pub wasm_messenger: WasmMessenger,
     pub widget_config_path: String,
+    pub values: HashMap<String, Value>,
 }
 
 pub struct Events {
@@ -182,6 +199,15 @@ impl Editor {
     }
 
     pub fn update(&mut self) {
+
+        for widget in self.widget_store.iter_mut() {
+            match &widget.data {
+                WidgetData::Wasm { wasm: _, wasm_id } => {
+                    self.wasm_messenger.send_update_position(*wasm_id, &widget.position);
+                }
+                _ => {}
+            }
+        }
         // Todo: Need to test that I am not missing any
         // events with my start and end
 
@@ -194,8 +220,9 @@ impl Editor {
                 _ => {}
             }
         }
+        
 
-        self.wasm_messenger.tick();
+        self.wasm_messenger.tick(&mut self.values);
 
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
@@ -238,6 +265,7 @@ impl Editor {
             active_widget: None,
             wasm_messenger: WasmMessenger::new(),
             widget_config_path: widget_config_path.to_string(),
+            values: HashMap::new(),
         }
     }
 
@@ -245,37 +273,38 @@ impl Editor {
         self.fps_counter.tick();
         use skia_safe::Size;
 
+        let background = Color::parse_hex("#39463e");
         let darker = Color::parse_hex("#0d1d20");
         let lighter = Color::parse_hex("#425050");
         let mut color = Color::parse_hex("#ffffff").to_color4f();
         color.a = 0.0;
-        canvas.clear(color);
+        canvas.clear(background.to_color4f());
 
         let canvas_size = Size::from(canvas.base_layer_size());
 
-        let mut paint = Paint::new(darker.to_color4f(), None);
-        paint.set_anti_alias(true);
-        paint.set_style(PaintStyle::Fill);
+        // let mut paint = Paint::new(darker.to_color4f(), None);
+        // paint.set_anti_alias(true);
+        // paint.set_style(PaintStyle::Fill);
 
-        let grain_shader = make_grain_gradient_shader(
-            darker,
-            lighter,
-            0.95,
-            crate::widget::Size {
-                width: canvas_size.width,
-                height: canvas_size.height,
-            },
-        );
+        // let grain_shader = make_grain_gradient_shader(
+        //     darker,
+        //     lighter,
+        //     0.95,
+        //     crate::widget::Size {
+        //         width: canvas_size.width,
+        //         height: canvas_size.height,
+        //     },
+        // );
 
-        paint.set_shader(grain_shader);
+        // paint.set_shader(grain_shader);
 
-        paint.set_dither(true);
+        // paint.set_dither(true);
 
 
-        canvas.draw_rect(
-            Rect::from_xywh(0.0, 0.0, canvas_size.width, canvas_size.height),
-            &paint,
-        );
+        // canvas.draw_rect(
+        //     Rect::from_xywh(0.0, 0.0, canvas_size.width, canvas_size.height),
+        //     &paint,
+        // );
 
         let font = Font::new(
             Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(),
@@ -302,7 +331,7 @@ impl Editor {
         let mut to_draw = vec![];
         for widget in self.widget_store.iter_mut() {
             let before_count = canvas.save();
-            to_draw.extend(widget.draw(canvas, &mut self.wasm_messenger, widget.size));
+            to_draw.extend(widget.draw(canvas, &mut self.wasm_messenger, widget.size, &self.values));
             canvas.restore_to_count(before_count);
             canvas.restore();
         }
@@ -312,7 +341,7 @@ impl Editor {
         for widget_id in to_draw {
             if let Some(widget) = self.widget_store.get_mut(widget_id) {
                 let before_count = canvas.save();
-                widget.draw(canvas, &mut self.wasm_messenger, widget.size);
+                widget.draw(canvas, &mut self.wasm_messenger, widget.size, &self.values);
                 canvas.restore_to_count(before_count);
                 canvas.restore();
             }

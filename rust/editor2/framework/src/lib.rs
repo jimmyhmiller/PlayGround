@@ -22,6 +22,10 @@ extern "C" {
     #[allow(improper_ctypes)]
     #[allow(unused)]
     fn recieve_last_message_low_level(process_id: i32) -> (i32, i32);
+    #[link_name = "provide_f32"]
+    fn provide_f32_low_level(ptr: i32, len: i32, val: f32);
+    fn get_x() -> f32;
+    fn get_y() -> f32;
 }
 
 #[repr(C)]
@@ -153,6 +157,11 @@ pub trait App {
     fn set_get_state(&mut self, ptr: u32, len: u32) {
         unsafe { set_get_state(ptr, len) };
     }
+    fn provide_f32(&self, s: &str, val: f32) {
+        unsafe {
+            provide_f32_low_level(s.as_ptr() as i32, s.len() as i32, val);
+        }
+    }
     fn recieve_last_message(&mut self, process_id: i32) -> String {
         let buffer;
         unsafe {
@@ -165,6 +174,9 @@ pub trait App {
         unsafe {
             DEBUG.push(format!("{}: {:?}", name, value));
         }
+    }
+    fn get_position(&self) -> (f32, f32) {
+        unsafe { (get_x(), get_y()) }
     }
 }
 
@@ -197,14 +209,21 @@ pub fn decode_base64(data: Vec<u8>) -> Result<String, Box<dyn std::error::Error>
     Ok(s.to_string())
 }
 
-mod macros {
+
+
+pub mod macros {
+    pub use once_cell::sync::Lazy;
+    pub use serde_json;
+
+    pub fn init_lazy<T>(f: fn() -> T) -> Lazy<T> {
+        Lazy::new(f)
+    }
 
     #[macro_export]
     macro_rules! app {
         ($app:ident) => {
-            use once_cell::sync::Lazy;
             use framework::DEBUG;
-            static mut APP: Lazy<$app> = Lazy::new(|| $app::init());
+            static mut APP: $crate::macros::Lazy<$app> = $crate::macros::Lazy::new(|| $app::init());
 
             #[no_mangle]
             pub extern "C" fn on_click(x: f32, y: f32) {
@@ -213,6 +232,9 @@ mod macros {
 
             #[no_mangle]
             pub extern "C" fn draw_debug() {
+                use framework::Color;
+                use framework::Canvas;
+                use framework::Rect;
                 let debug = unsafe { &DEBUG };
                 if debug.len() == 0 {
                     return;
@@ -234,6 +256,7 @@ mod macros {
 
             #[no_mangle]
             pub extern "C" fn on_key(key: u32, state: u32, modifiers: u32) {
+                use framework::KeyboardInput;
                 unsafe { APP.on_key(KeyboardInput::from_u32(key, state, modifiers)) }
             }
 
@@ -245,7 +268,7 @@ mod macros {
             #[no_mangle]
             pub extern "C" fn get_state() {
                 use framework::encode_base64;
-                let s: String = serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
+                let s: String = $crate::macros::serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
                 let s = encode_base64(s);
                 let mut s = s.into_bytes().clone();
                 let ptr = s.as_mut_ptr() as usize;
@@ -262,7 +285,7 @@ mod macros {
                 let s = decode_base64(data);
                 match s {
                     Ok(s) => {
-                        if let Ok(state) = serde_json::from_str(&s) {
+                        if let Ok(state) = $crate::macros::serde_json::from_str(&s) {
                             unsafe { APP.set_state(state) }
                         } else {
                             println!("set_state: failed to parse state");
@@ -460,7 +483,7 @@ impl KeyCode {
 }
 
 #[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeyState {
     Pressed,
     Released,
@@ -485,7 +508,7 @@ impl KeyState {
 }
 
 // Not the most efficient representation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,

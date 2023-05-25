@@ -313,44 +313,34 @@ impl<'a> Tokenizer {
         } else if self.is_comment_start(input_bytes) {
             self.parse_comment(input_bytes)
         } else if self.is_open_paren(input_bytes) {
-            // println!("open paren");
             self.consume();
             Token::OpenParen
         } else if self.is_close_paren(input_bytes) {
-            // println!("close paren");
             self.consume();
             Token::CloseParen
         } else if self.is_valid_number_char(input_bytes) {
-            // println!("number");
             self.parse_number(input_bytes)
         } else if self.is_quote(input_bytes) {
-            // println!("string");
             self.parse_string(input_bytes)
         } else if self.is_semi_colon(input_bytes) {
-            // println!("semicolon");
             self.consume();
             Token::SemiColon
         } else if self.is_comma(input_bytes) {
             self.consume();
             Token::Comma
         } else if self.is_colon(input_bytes) {
-            // println!("colon");
             self.consume();
             Token::Colon
         } else if self.is_open_curly(input_bytes) {
-            // println!("open curly");
             self.consume();
             Token::OpenCurly
         } else if self.is_close_curly(input_bytes) {
-            // println!("close curly");
             self.consume();
             Token::CloseCurly
         } else if self.is_open_bracket(input_bytes) {
-            // println!("open bracket");
             self.consume();
             Token::OpenBracket
         } else if self.is_close_bracket(input_bytes) {
-            // println!("close bracket");
             self.consume();
             Token::CloseBracket
         } else {
