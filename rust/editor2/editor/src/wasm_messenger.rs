@@ -20,7 +20,7 @@ use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
 use crate::{
     keyboard::KeyboardInput,
-    widget::{Color, Position, Size},
+    widget::{Color, Position, Size}, editor::Value,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -42,6 +42,7 @@ enum Payload {
     OnKey(KeyboardInput),
     Reload,
     SaveState,
+    UpdatePosition(Position),
 }
 
 #[derive(Clone, Debug)]
@@ -76,6 +77,7 @@ pub struct WasmMessenger {
     local_spawner: LocalSpawner,
     last_wasm_id: u64,
     wasm_draw_commands: HashMap<WasmId, Vec<Command>>,
+    wasm_non_draw_commands: HashMap<WasmId, Vec<Command>>,
     wasm_states: HashMap<WasmId, SaveState>,
     last_message_id: usize,
     // Not a huge fan of this solution,
@@ -112,6 +114,7 @@ impl WasmMessenger {
             local_spawner,
             last_wasm_id: 0,
             wasm_draw_commands: HashMap::new(),
+            wasm_non_draw_commands: HashMap::new(),
             wasm_states: HashMap::new(),
             last_message_id: 0,
             outstanding_messages: HashMap::new(),
@@ -134,6 +137,7 @@ impl WasmMessenger {
                     Payload::OnKey(_) => "OnKey",
                     Payload::Reload => "Reload",
                     Payload::SaveState => "SaveState",
+                    Payload::UpdatePosition(_) => "UpdatePosition",
                 });
             }
         }
@@ -210,22 +214,12 @@ impl WasmMessenger {
             let mut current_height_stack = vec![];
 
             let mut paint = skia_safe::Paint::default();
+            let mut non_draw_commands = vec![];
             for command in commands.iter() {
-                // Going to do this unconditonally for now.
-                // Need to make this toggleable
-                if max_height > bounds.height + 300.0 {
-                    // canvas.translate((4000.0, -max_height));
-                    // let ugly_green = Color::new(0.0, 0.5, 0.0, 1.0);
-                    // paint.set_color(ugly_green.to_color4f().to_color());
-                    // max_height = 0.0;
-                    // max_width = 0.0;
-                }
                 match command {
                     Command::SetColor(r, g, b, a) => {
                         let color = Color::new(*r, *g, *b, *a);
                         paint.set_color(color.to_color4f().to_color());
-                        // let grain_shader = make_grain_gradient_shader(center, radius, color, color, 0.3);
-                        // paint.set_shader(grain_shader);
                     }
                     Command::DrawRect(x, y, width, height) => {
                         canvas
@@ -288,11 +282,11 @@ impl WasmMessenger {
                         max_height = current_height_stack.pop().unwrap();
                     }
                     c => {
-                        // Need to move things out of draw
-                        println!("Unknown command {:?}", c);
+                        non_draw_commands.push(c.clone());
                     }
                 }
             }
+            self.wasm_non_draw_commands.insert(wasm_id, non_draw_commands);
             Some(Size {
                 width: max_width,
                 height: max_height,
@@ -302,8 +296,27 @@ impl WasmMessenger {
         }
     }
 
-    pub fn tick(&mut self) {
-        // Need a timeout instead
+    pub fn process_non_draw_commands(&mut self, values: &mut HashMap<String, Value>) {
+        for (_wasm_id, commands) in self.wasm_non_draw_commands.iter() {
+            for command in commands.iter() {
+                match command {
+                    Command::Restore => println!("UnHandled"),
+                    Command::Save => println!("UnHandled"),
+                    Command::StartProcess(_) => println!("UnHandled"),
+                    Command::SendProcessMessage(_, _) => println!("UnHandled"),
+                    Command::ReceiveLastProcessMessage(_) => println!("UnHandled"),
+                    Command::ProvideF32(name, val) => {
+                        values.insert(name.to_string(), Value::F32(*val));
+                    }
+                    _ => println!("Draw command ended up here")
+                }
+            }
+        }
+        self.wasm_non_draw_commands.clear();
+    }
+
+    pub fn tick(&mut self, values: &mut HashMap<String, Value>) {
+        self.process_non_draw_commands(values);
         self.local_pool
             .run_until(Delay::new(Duration::from_millis(4)));
 
@@ -370,6 +383,15 @@ impl WasmMessenger {
         });
     }
 
+    pub fn send_update_position(&mut self, wasm_id: WasmId, position: &Position) {
+        let message_id = self.next_message_id();
+        self.send_message(Message {
+            message_id,
+            wasm_id,
+            payload: Payload::UpdatePosition(*position),
+        });
+    }
+
     pub fn send_draw(&mut self, wasm_id: WasmId, fn_name: &str) {
         let message_id = self.next_message_id();
         self.send_message(Message {
@@ -427,7 +449,8 @@ impl WasmMessenger {
         });
         // TODO: Maybe not the best design, but I also want to ensure I save
         loop {
-            self.tick();
+            // TODO: Fix this
+            self.tick(&mut HashMap::new());
             if let Some(state) = self.wasm_states.get(&wasm_id) {
                 match state {
                     SaveState::Saved(state) => {
@@ -574,6 +597,10 @@ impl WasmManager {
                     },
                 }
             }
+            Payload::UpdatePosition(position) => {
+                self.instance.store.data_mut().position = position;
+                default_return
+            }
         }
     }
 }
@@ -585,6 +612,7 @@ struct State {
     // Probably not the best structure
     // but lets start here
     process_messages: HashMap<i32, String>,
+    position: Position,
 }
 
 impl State {
@@ -594,6 +622,7 @@ impl State {
             commands: Vec::new(),
             process_messages: HashMap::new(),
             get_state_info: (0, 0),
+            position: Position { x: 0.0, y: 0.0}
         }
     }
 }
@@ -611,6 +640,7 @@ enum Command {
     StartProcess(String),
     SendProcessMessage(i32, String),
     ReceiveLastProcessMessage(i32),
+    ProvideF32(String, f32),
 }
 
 fn get_string_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> String {
@@ -722,6 +752,31 @@ impl WasmInstance {
                 let string = get_string_from_caller(&mut caller, ptr, len);
                 let state = caller.data_mut();
                 state.commands.push(Command::DrawString(string, x, y));
+            },
+        )?;
+        linker.func_wrap(
+            "host",
+            "provide_f32",
+            |mut caller: Caller<'_, State>, ptr: i32, len: i32, val: f32| {
+                let string = get_string_from_caller(&mut caller, ptr, len);
+                let state = caller.data_mut();
+                state.commands.push(Command::ProvideF32(string, val));
+            },
+        )?;
+        linker.func_wrap(
+            "host",
+            "get_x",
+            |mut caller: Caller<'_, State>| {
+                let state = caller.data_mut();
+                state.position.x
+            },
+        )?;
+        linker.func_wrap(
+            "host",
+            "get_y",
+            |mut caller: Caller<'_, State>| {
+                let state = caller.data_mut();
+                state.position.y
             },
         )?;
         linker.func_wrap(

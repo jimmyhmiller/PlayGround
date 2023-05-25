@@ -139,9 +139,8 @@ impl App for TextWidget {
 
         let canvas = Canvas::new();
 
-        let foreground = Color::parse_hex("#62b4a6");
-        let mut background = Color::parse_hex("#ffffff");
-        background.a = 0.3;
+        let foreground = Color::parse_hex("#dc9941");
+        let background = Color::parse_hex("#353f38");
         
 
         let bounding_rect = Rect::new(

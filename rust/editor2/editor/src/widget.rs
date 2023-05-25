@@ -1,15 +1,16 @@
-use std::{cell::RefCell, fs::File, io::Read, path::PathBuf, process::ChildStdout, str::from_utf8};
+use std::{cell::RefCell, fs::File, io::Read, path::PathBuf, process::ChildStdout, str::from_utf8, collections::HashMap};
 
 use nonblock::NonBlockingReader;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use skia_safe::{
     font_style::{Slant, Weight, Width},
-    Canvas, Color4f, Data, Font, FontStyle, Image, Paint, Point, RRect, Rect, Typeface,
+    utils::shadow_utils::draw_shadow,
+    Canvas, Color4f, Data, Font, FontStyle, Image, Paint, Path, Point, RRect, Rect, Typeface,
 };
 
 use crate::{
     event::Event,
-    wasm_messenger::{self, WasmId, WasmMessenger},
+    wasm_messenger::{self, WasmId, WasmMessenger}, editor::Value,
 };
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
@@ -103,7 +104,7 @@ impl Color {
     pub fn to_color4f(&self) -> Color4f {
         Color4f::new(self.r, self.g, self.b, self.a)
     }
-    
+
     #[allow(unused)]
     pub fn to_sk_color(&self) -> skia_safe::Color {
         self.to_color4f().to_color()
@@ -403,6 +404,7 @@ impl Widget {
         canvas: &mut Canvas,
         wasm_messenger: &mut WasmMessenger,
         bounds: Size,
+        values: &HashMap<String, Value>,
     ) -> Vec<WidgetId> {
         // Have to do this to deal with mut stuff
         if let WidgetData::Wasm { wasm: _, wasm_id } = &mut self.data {
@@ -441,21 +443,35 @@ impl Widget {
             }
             WidgetData::TextPane { text_pane } => {
                 let text_pane = &text_pane;
-                let foreground = Color::parse_hex("#62b4a6");
-                let mut background = Color::parse_hex("#ffffff");
-                background.a = 0.3;
-                
+                let foreground = Color::parse_hex("#dc9941");
+                let background = Color::parse_hex("#353f38");
+                // background.a = 0.3;
+
                 let paint = background.to_paint();
                 canvas.save();
-                canvas.clip_rect(self.bounding_rect(), None, None);
-                let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);
-                canvas.draw_rrect(rrect, &paint);
+                // canvas.clip_rect(self.bounding_rect().with_outset((30.0,30.0)), None, None);
+
                 let font = Font::new(
                     Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
                     32.0,
                 );
+                let mut path = Path::new();
+                path.add_rect(self.bounding_rect().with_outset((30.0, 30.0)), None);
 
-                canvas.clip_rect(self.bounding_rect().with_inset((20, 20)), None, None);
+                draw_shadow(
+                    canvas,
+                    &path,
+                    (1.0, 2.0, 1.0),
+                    (1.0, 20.0, 1.0),
+                    values.get("radius").map(|x| x.as_f32()).unwrap_or(10.0),
+                    Color::parse_hex("#000000").to_sk_color(),
+                    background.to_sk_color(),
+                    None,
+                );
+                let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);
+                canvas.draw_rrect(rrect, &paint);
+
+                // canvas.clip_rect(self.bounding_rect().with_inset((20, 20)), None, None);
                 let fractional_offset = text_pane.fractional_line_offset();
                 canvas.translate((
                     self.position.x + 30.0 - text_pane.offset.x,
