@@ -458,12 +458,17 @@ impl Widget {
                 let mut path = Path::new();
                 path.add_rect(self.bounding_rect().with_outset((30.0, 30.0)), None);
 
+                let x = values.get("x").map(|x| x.as_f32()).unwrap_or(10.0);
+                let y = values.get("y").map(|x| x.as_f32()).unwrap_or(10.0);
+                let z = values.get("z").map(|x| x.as_f32()).unwrap_or(10.0);
+
+
                 draw_shadow(
                     canvas,
                     &path,
-                    (1.0, 2.0, 1.0),
-                    (1.0, 20.0, 1.0),
-                    values.get("radius").map(|x| x.as_f32()).unwrap_or(10.0),
+                    (x, y, z),
+                    (x, y, z),
+                    10.0,
                     Color::parse_hex("#000000").to_sk_color(),
                     background.to_sk_color(),
                     None,

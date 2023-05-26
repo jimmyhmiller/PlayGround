@@ -3,19 +3,23 @@ use framework::{app, App, Canvas};
 
 
 struct ProcessSpawner {
-
+    state: f32,
 }
 
 impl App for ProcessSpawner {
     type State = u32;
 
     fn init() -> Self {
-        ProcessSpawner {  }
+        ProcessSpawner { 
+            state: 0.0,
+         }
     }
 
     fn draw(&mut self) {
         // needs to be not on draw
-        self.provide_f32("radius", (self.get_position().1 / 1000.0) -1.0 );
+        self.provide_f32("x", self.get_position().0);
+        self.provide_f32("y", self.get_position().1);
+        self.provide_f32("z", self.state);
 
         let canvas = Canvas::new();
         canvas.draw_rect(0.0, 0.0, 100.0, 100.0);
@@ -30,7 +34,7 @@ impl App for ProcessSpawner {
     }
 
     fn on_scroll(&mut self, x: f64, y: f64) {
-        
+        self.state += y as f32;
     }
 
     fn get_state(&self) -> Self::State {
