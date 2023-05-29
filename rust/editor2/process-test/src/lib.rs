@@ -25,15 +25,15 @@ impl App for ProcessSpawner {
         canvas.draw_rect(0.0, 0.0, 100.0, 100.0);
     }
 
-    fn on_click(&mut self, x: f32, y: f32) {
-        self.start_process("my_process".to_string());
+    fn on_click(&mut self, _x: f32, _y: f32) {
+        self.start_process("/Users/jimmyhmiller/Documents/Code/PlayGround/rust/echo-test/target/debug/echo-test".to_string());
     }
 
-    fn on_key(&mut self, input: framework::KeyboardInput) {
+    fn on_key(&mut self, _input: framework::KeyboardInput) {
         
     }
 
-    fn on_scroll(&mut self, x: f64, y: f64) {
+    fn on_scroll(&mut self, _x: f64, y: f64) {
         self.state += y as f32;
     }
 
@@ -41,7 +41,7 @@ impl App for ProcessSpawner {
         0
     }
 
-    fn set_state(&mut self, state: Self::State) {
+    fn set_state(&mut self, _state: Self::State) {
         
     }
     
