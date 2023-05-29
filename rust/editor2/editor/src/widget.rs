@@ -4,7 +4,6 @@ use nonblock::NonBlockingReader;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use skia_safe::{
     font_style::{Slant, Weight, Width},
-    utils::shadow_utils::draw_shadow,
     Canvas, Color4f, Data, Font, FontStyle, Image, Paint, Path, Point, RRect, Rect, Typeface,
 };
 
@@ -404,6 +403,7 @@ impl Widget {
         canvas: &mut Canvas,
         wasm_messenger: &mut WasmMessenger,
         bounds: Size,
+        #[allow(unused)]
         values: &HashMap<String, Value>,
     ) -> Vec<WidgetId> {
         // Have to do this to deal with mut stuff
@@ -458,21 +458,21 @@ impl Widget {
                 let mut path = Path::new();
                 path.add_rect(self.bounding_rect().with_outset((30.0, 30.0)), None);
 
-                let x = values.get("x").map(|x| x.as_f32()).unwrap_or(10.0);
-                let y = values.get("y").map(|x| x.as_f32()).unwrap_or(10.0);
-                let z = values.get("z").map(|x| x.as_f32()).unwrap_or(10.0);
+                // let x = values.get("x").map(|x| x.as_f32()).unwrap_or(10.0);
+                // let y = values.get("y").map(|x| x.as_f32()).unwrap_or(10.0);
+                // let z = values.get("z").map(|x| x.as_f32()).unwrap_or(10.0);
 
 
-                draw_shadow(
-                    canvas,
-                    &path,
-                    (x, y, z),
-                    (x, y, z),
-                    10.0,
-                    Color::parse_hex("#000000").to_sk_color(),
-                    background.to_sk_color(),
-                    None,
-                );
+                // draw_shadow(
+                //     canvas,
+                //     &path,
+                //     (x, y, z),
+                //     (x, y, z),
+                //     10.0,
+                //     Color::parse_hex("#000000").to_sk_color(),
+                //     background.to_sk_color(),
+                //     None,
+                // );
                 let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);
                 canvas.draw_rrect(rrect, &paint);
 

@@ -67,6 +67,7 @@ pub enum Event {
     ReloadWidgets,
     ReloadWasm(String),
     SaveWidgets,
+    StartProcess(usize, String),
 }
 
 impl Event {

@@ -1,6 +1,7 @@
+use nonblock::NonBlockingReader;
 use notify::RecursiveMode;
 
-use crate::{event::Event, editor::Editor, widget::{Widget, Position, Size, WidgetData, Wasm, TextPane}};
+use crate::{event::Event, editor::{Editor, PerFrame}, widget::{Widget, Position, Size, WidgetData, Wasm, TextPane}};
 
 
 
@@ -108,7 +109,27 @@ impl Editor {
                         }
                     }
                 }
-                _ => {}
+                Event::StartProcess(process_id, process_command) => {
+                    let mut process = std::process::Command::new(process_command)
+                        .stdout(std::process::Stdio::piped())
+                        .stdin(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                        .expect("failed to execute process");
+
+                    // grab stdout
+                    let stdout = process.stdout.take().unwrap();
+                    let mut non_blocking = NonBlockingReader::from_fd(stdout).unwrap();
+                    self.per_frame_actions.push(PerFrame::ProcessOutput {
+                        process_id,
+                        stdout: non_blocking,
+                        stdin: process.stdin.take().unwrap(),
+                        stderr: process.stderr.take().unwrap(),
+                    });
+                }
+                e => {
+                    println!("Unhandled event {:?}", e)
+                }
             }
         }
     }

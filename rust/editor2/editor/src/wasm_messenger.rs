@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error, path::Path, sync::Arc, thread, time::Duration};
+use std::{collections::HashMap, error::Error, path::Path, sync::{Arc, mpsc}, thread, time::Duration};
 
 use bytesize::ByteSize;
 
@@ -20,7 +20,7 @@ use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
 use crate::{
     keyboard::KeyboardInput,
-    widget::{Color, Position, Size}, editor::Value,
+    widget::{Color, Position, Size}, editor::Value, event::Event,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -88,10 +88,11 @@ pub struct WasmMessenger {
     engine: Arc<Engine>,
     receivers: HashMap<WasmId, Receiver<OutMessage>>,
     senders: HashMap<WasmId, Sender<Message>>,
+    external_sender: Option<mpsc::Sender<Event>>,
 }
 
 impl WasmMessenger {
-    pub fn new() -> Self {
+    pub fn new(external_sender: Option<mpsc::Sender<Event>>) -> Self {
         let local_pool = LocalPool::new();
         let local_spawner = local_pool.spawner();
 
@@ -121,7 +122,12 @@ impl WasmMessenger {
             engine,
             receivers: HashMap::new(),
             senders: HashMap::new(),
+            external_sender,
         }
+    }
+
+    pub fn set_external_sender(&mut self, external_sender: mpsc::Sender<Event>) {
+        self.external_sender = Some(external_sender);
     }
 
     pub fn number_of_outstanding_messages(&self) -> String {
@@ -300,11 +306,13 @@ impl WasmMessenger {
         for (_wasm_id, commands) in self.wasm_non_draw_commands.iter() {
             for command in commands.iter() {
                 match command {
-                    Command::Restore => println!("UnHandled"),
-                    Command::Save => println!("UnHandled"),
-                    Command::StartProcess(_) => println!("UnHandled"),
-                    Command::SendProcessMessage(_, _) => println!("UnHandled"),
-                    Command::ReceiveLastProcessMessage(_) => println!("UnHandled"),
+                    Command::Restore => println!("Unhandled"),
+                    Command::Save => println!("Unhandled"),
+                    Command::StartProcess(process_id, process_command) => {
+                        self.external_sender.as_mut().unwrap().send(Event::StartProcess(*process_id as usize, process_command.clone())).unwrap();
+                    }
+                    Command::SendProcessMessage(_, _) => {}
+                    Command::ReceiveLastProcessMessage(_) => println!("Unhandled"),
                     Command::ProvideF32(name, val) => {
                         values.insert(name.to_string(), Value::F32(*val));
                     }
@@ -637,7 +645,7 @@ enum Command {
     SetColor(f32, f32, f32, f32),
     Restore,
     Save,
-    StartProcess(String),
+    StartProcess(u32, String),
     SendProcessMessage(i32, String),
     ReceiveLastProcessMessage(i32),
     ProvideF32(String, f32),
@@ -830,11 +838,13 @@ impl WasmInstance {
         linker.func_wrap(
             "host",
             "start_process_low_level",
-            |mut caller: Caller<'_, State>, ptr: i32, len: i32| -> i32 {
+            |mut caller: Caller<'_, State>, ptr: i32, len: i32| -> u32 {
                 let process = get_string_from_caller(&mut caller, ptr, len);
                 let state = caller.data_mut();
-                state.commands.push(Command::StartProcess(process));
-                0
+                // TODO: Real process id
+                let process_id = 0;
+                state.commands.push(Command::StartProcess(process_id, process));
+                process_id
             },
         )?;
 

@@ -3,9 +3,9 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::mpsc::Receiver,
+    sync::mpsc::{Receiver, Sender},
     thread,
-    time::Duration,
+    time::Duration, process::ChildStdout,
 };
 
 use crate::{
@@ -16,6 +16,7 @@ use crate::{
     widget::{Color, Position, Size, Widget, WidgetData, WidgetId, WidgetStore},
 };
 
+use nonblock::NonBlockingReader;
 use notify::{FsEventWatcher, RecursiveMode};
 
 use notify_debouncer_mini::{new_debouncer, Debouncer};
@@ -24,7 +25,7 @@ use serde::{Serialize, Deserialize};
 use skia_safe::{
     perlin_noise_shader,
     runtime_effect::ChildPtr,
-    Data, Font, FontStyle, ISize, PaintStyle, Rect, RuntimeEffect, Shader, Typeface,
+    Data, Font, FontStyle, ISize, RuntimeEffect, Shader, Typeface,
 };
 
 pub struct Context {
@@ -42,11 +43,21 @@ pub enum Value {
 }
 
 impl Value {
+    #[allow(unused)]
     pub fn as_f32(&self) -> f32 {
         match self {
             Value::USize(v) => *v as f32,
             Value::F32(v) => *v,
         }
+    }
+}
+
+pub enum PerFrame {
+    ProcessOutput {
+        process_id: usize,
+        stdout: NonBlockingReader<ChildStdout>,
+        stdin: std::process::ChildStdin,
+        stderr: std::process::ChildStderr,
     }
 }
 
@@ -59,11 +70,13 @@ pub struct Editor {
     pub selected_widgets: HashSet<WidgetId>,
     pub active_widget: Option<WidgetId>,
     pub external_receiver: Option<Receiver<Event>>,
+    pub external_sender: Option<Sender<Event>>,
     pub debounce_watcher: Option<Debouncer<FsEventWatcher>>,
     pub event_loop_proxy: Option<EventLoopProxy<()>>,
     pub wasm_messenger: WasmMessenger,
     pub widget_config_path: String,
     pub values: HashMap<String, Value>,
+    pub per_frame_actions: Vec<PerFrame>,
 }
 
 pub struct Events {
@@ -139,8 +152,11 @@ impl Editor {
             .watch(Path::new(&widget_config_path), RecursiveMode::NonRecursive)
             .unwrap();
 
+        let sender_clone = sender.clone();
+
         let event_loop_proxy = self.event_loop_proxy.as_ref().unwrap().clone();
         thread::spawn(move || {
+
             for res in watch_raw_receive {
                 match res {
                     Ok(event) => {
@@ -163,6 +179,8 @@ impl Editor {
             }
         });
         self.external_receiver = Some(receiver);
+        self.external_sender = Some(sender_clone.clone());
+        self.wasm_messenger.set_external_sender(sender_clone);
         self.debounce_watcher = Some(debouncer);
     }
 
@@ -220,6 +238,29 @@ impl Editor {
                 _ => {}
             }
         }
+
+        for action in self.per_frame_actions.iter_mut() {
+            match action {
+                PerFrame::ProcessOutput { process_id, stdout, stdin, stderr } => {
+                    let max_attempts = 100;
+                    let mut i = 0;
+                    let mut buf = String::new();
+                    while !stdout.is_eof() {
+                        if i > max_attempts {
+                            break;
+                        }
+                        let length = stdout.read_available_to_string(&mut buf).unwrap();
+                        if length == 0 {
+                            break;
+                        }
+                        i += 1;
+                    }
+                    if !buf.is_empty() {
+                        println!("{}: {}", process_id, buf);
+                    }
+                }
+            }
+        }
         
 
         self.wasm_messenger.tick(&mut self.values);
@@ -260,12 +301,14 @@ impl Editor {
             should_redraw: true,
             selected_widgets: HashSet::new(),
             external_receiver: None,
+            external_sender: None,
             debounce_watcher: None,
             event_loop_proxy: None,
             active_widget: None,
-            wasm_messenger: WasmMessenger::new(),
+            wasm_messenger: WasmMessenger::new(None),
             widget_config_path: widget_config_path.to_string(),
             values: HashMap::new(),
+            per_frame_actions: Vec::new(),
         }
     }
 
@@ -274,8 +317,8 @@ impl Editor {
         use skia_safe::Size;
 
         let background = Color::parse_hex("#39463e");
-        let darker = Color::parse_hex("#0d1d20");
-        let lighter = Color::parse_hex("#425050");
+        // let darker = Color::parse_hex("#0d1d20");
+        // let lighter = Color::parse_hex("#425050");
         let mut color = Color::parse_hex("#ffffff").to_color4f();
         color.a = 0.0;
         canvas.clear(background.to_color4f());
@@ -446,6 +489,9 @@ impl Editor {
             Event::ReloadWasm(_) => {
                 self.events.push(event);
             }
+            Event::StartProcess(_, _) => {
+                self.events.push(event);
+            }
         }
     }
 
@@ -540,6 +586,7 @@ impl Editor {
     }
 }
 
+#[allow(unused)]
 pub fn make_grain_gradient_shader(
     darker: Color,
     lighter: Color,
