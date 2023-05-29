@@ -55,11 +55,18 @@ impl Value {
 pub enum PerFrame {
     ProcessOutput {
         process_id: usize,
-        stdout: NonBlockingReader<ChildStdout>,
-        stdin: std::process::ChildStdin,
-        stderr: std::process::ChildStderr,
     }
 }
+
+pub struct Process {
+    pub process_id: usize,
+    pub stdout: NonBlockingReader<ChildStdout>,
+    pub stdin: std::process::ChildStdin,
+    pub stderr: std::process::ChildStderr,
+    pub output: String,
+    pub widget_id: usize,
+}
+
 
 pub struct Editor {
     pub events: Events,
@@ -76,6 +83,7 @@ pub struct Editor {
     pub wasm_messenger: WasmMessenger,
     pub widget_config_path: String,
     pub values: HashMap<String, Value>,
+    pub processes: HashMap<usize, Process>,
     pub per_frame_actions: Vec<PerFrame>,
 }
 
@@ -239,27 +247,64 @@ impl Editor {
             }
         }
 
-        for action in self.per_frame_actions.iter_mut() {
+        let mut to_delete = HashSet::new();
+
+        for action in self.per_frame_actions.iter() {
             match action {
-                PerFrame::ProcessOutput { process_id, stdout, stdin, stderr } => {
-                    let max_attempts = 100;
-                    let mut i = 0;
-                    let mut buf = String::new();
-                    while !stdout.is_eof() {
-                        if i > max_attempts {
-                            break;
+                PerFrame::ProcessOutput { process_id } => {
+                    if let Some(process) = self.processes.get_mut(process_id) {
+                        let stdout = &mut process.stdout;
+                        let max_attempts = 100;
+                        let mut i = 0;
+                        let mut buf = String::new();
+                        while !stdout.is_eof() {
+                            if i > max_attempts {
+                                break;
+                            }
+                            let length = stdout.read_available_to_string(&mut buf).unwrap();
+                            if length == 0 {
+                                break;
+                            }
+                            i += 1;
                         }
-                        let length = stdout.read_available_to_string(&mut buf).unwrap();
-                        if length == 0 {
-                            break;
+                        if !buf.is_empty() {
+                            process.output.push_str(&buf);
                         }
-                        i += 1;
-                    }
-                    if !buf.is_empty() {
-                        println!("{}: {}", process_id, buf);
+                    } else {
+                        to_delete.insert(*process_id);
                     }
                 }
             }
+        }
+
+        self.per_frame_actions
+            .retain(|action| match action {
+                PerFrame::ProcessOutput { process_id: id } => {
+                    !to_delete.contains(id)
+                },
+            });
+
+        let mut to_delete = vec![];
+
+        for process in self.processes.values() {
+            let widget_id = process.widget_id;
+            let widget = self.widget_store.get_mut(widget_id).unwrap();
+            let output = &process.output;
+            match &mut widget.data {
+                WidgetData::TextPane { text_pane } => {
+                    text_pane.set_text(output);
+                }
+                // Shouldn't this be a process?
+                WidgetData::Process { process: _ } => todo!(),
+                WidgetData::Deleted => {
+                    to_delete.push(process.process_id);
+                }
+                _ => unreachable!("Shouldn't be here")
+            }
+        }
+
+        for process_id in to_delete {
+            self.processes.remove(&process_id);
         }
         
 
@@ -309,6 +354,7 @@ impl Editor {
             widget_config_path: widget_config_path.to_string(),
             values: HashMap::new(),
             per_frame_actions: Vec::new(),
+            processes: HashMap::new(),
         }
     }
 
@@ -536,11 +582,20 @@ impl Editor {
             return;
         }
 
+        let mut to_delete = vec![];
+
         let mut mouse_over = vec![];
         // I would need some sort of hierarchy here
         for widget in self.widget_store.iter_mut() {
             if widget.mouse_over(&self.context.mouse_position) {
                 mouse_over.push(widget.id);
+
+                let modifiers = self.context.modifiers;
+                if modifiers.cmd && modifiers.ctrl && modifiers.option {
+                    to_delete.push(widget.id);
+                    continue;
+                }
+
                 let events =
                     widget.on_click(&self.context.mouse_position, &mut self.wasm_messenger);
                 for event in events.iter() {
@@ -551,6 +606,10 @@ impl Editor {
         for id in mouse_over {
             self.respond_to_event(Event::WidgetMouseUp { widget_id: id });
         }
+        for widget_id in to_delete {
+            self.widget_store.delete_widget(widget_id);
+        }
+
     }
 
     pub fn should_redraw(&self) -> bool {
