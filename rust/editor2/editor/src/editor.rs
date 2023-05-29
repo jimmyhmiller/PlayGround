@@ -65,6 +65,13 @@ pub struct Process {
     pub stderr: std::process::ChildStderr,
     pub output: String,
     pub widget_id: usize,
+    pub process: std::process::Child,
+}
+
+impl Process {
+    pub fn kill(&mut self) {
+        self.process.kill().unwrap();
+    }
 }
 
 
@@ -623,8 +630,16 @@ impl Editor {
         self.load_widgets();
     }
 
+    pub fn kill_processes(&mut self) {
+        for (_, process) in self.processes.iter_mut() {
+            process.kill();
+        }
+        self.processes.clear();
+    }
+
     pub fn exit(&mut self) {
         self.save_widgets();
+        self.kill_processes();
     }
 
     pub fn save_widgets(&mut self) {
