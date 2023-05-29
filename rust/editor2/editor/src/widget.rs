@@ -24,7 +24,7 @@ impl From<Position> for Point {
     }
 }
 
-#[derive(Copy, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
 pub struct Size {
     pub width: f32,
     pub height: f32,
@@ -74,16 +74,21 @@ impl WidgetStore {
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Widget> {
-        self.widgets.iter_mut()
+        self.widgets.iter_mut().filter(|x| !x.data.is_deleted())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Widget> {
-        self.widgets.iter()
+        self.widgets.iter().filter(|x| !x.data.is_deleted())
     }
 
     pub fn clear(&mut self) {
         self.next_id = 0;
         self.widgets.clear();
+    }
+
+    pub fn delete_widget(&mut self, widget_id: usize) {
+        // TODO: Need a better way rather than tombstones
+        self.widgets[widget_id].data = WidgetData::Deleted;
     }
 }
 
@@ -171,6 +176,16 @@ pub enum WidgetData {
     HoverFile {
         path: String,
     },
+    Deleted,
+}
+
+impl WidgetData {
+    pub fn is_deleted(&self) -> bool {
+        match self {
+            WidgetData::Deleted => true,
+            _ => false,
+        }
+    }
 }
 
 // TODO: watch for file changes
@@ -253,10 +268,6 @@ impl TextPane {
         }
     }
 
-    pub fn _set_contents(&mut self, contents: Vec<u8>) {
-        self.contents = contents;
-    }
-
     fn lines_above_scroll(&self) -> usize {
         (self.offset.y / self.line_height).floor() as usize
     }
@@ -312,6 +323,10 @@ impl TextPane {
 
     fn fractional_line_offset(&self) -> f32 {
         self.offset.y % self.line_height
+    }
+
+    pub fn set_text(&mut self, output: &str) {
+        self.contents = output.into();
     }
 }
 
@@ -412,6 +427,9 @@ impl Widget {
             canvas.translate((self.position.x, self.position.y));
 
             wasm_messenger.draw_widget(*wasm_id, canvas, bounds);
+            // if let Some(widget_size) = widget_size {
+            //     println!("widget size: {:?}", widget_size);
+            // };
 
             // if let Some(size) = wasm_messenger.draw_widget(*wasm_id, canvas, bounds) {
             //     self.size = size;

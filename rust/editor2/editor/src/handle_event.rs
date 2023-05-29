@@ -1,7 +1,7 @@
 use nonblock::NonBlockingReader;
 use notify::RecursiveMode;
 
-use crate::{event::Event, editor::{Editor, PerFrame}, widget::{Widget, Position, Size, WidgetData, Wasm, TextPane}};
+use crate::{event::Event, editor::{Editor, PerFrame, self}, widget::{Widget, Position, Size, WidgetData, Wasm, TextPane}};
 
 
 
@@ -116,16 +116,43 @@ impl Editor {
                         .stderr(std::process::Stdio::piped())
                         .spawn()
                         .expect("failed to execute process");
+                    
 
                     // grab stdout
                     let stdout = process.stdout.take().unwrap();
-                    let mut non_blocking = NonBlockingReader::from_fd(stdout).unwrap();
+                    let non_blocking = NonBlockingReader::from_fd(stdout).unwrap();
                     self.per_frame_actions.push(PerFrame::ProcessOutput {
+                        process_id,
+                    });
+
+                    let widget_id = self.widget_store.add_widget(Widget {
+                        id: 0,
+                        position: Position { x: 0.0, y: 0.0 },
+                        size: Size {
+                            width: 800.0,
+                            height: 800.0,
+                        },
+                        on_click: vec![],
+                        data: WidgetData::TextPane {
+                            text_pane: TextPane::new(
+                                vec![],
+                                40.0,
+                            ),
+                        },
+                    });
+
+                    self.processes.insert(process_id, editor::Process {
                         process_id,
                         stdout: non_blocking,
                         stdin: process.stdin.take().unwrap(),
                         stderr: process.stderr.take().unwrap(),
+                        output: String::new(),
+                        widget_id,
                     });
+
+                }
+                Event::ModifiersChanged(modifiers) => {
+                    self.context.modifiers = modifiers;
                 }
                 e => {
                     println!("Unhandled event {:?}", e)
