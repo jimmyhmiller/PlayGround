@@ -147,6 +147,7 @@ impl Editor {
                         stdin: process.stdin.take().unwrap(),
                         stderr: process.stderr.take().unwrap(),
                         output: String::new(),
+                        process,
                         widget_id,
                     });
 
