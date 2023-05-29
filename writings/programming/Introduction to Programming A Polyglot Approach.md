@@ -86,7 +86,7 @@ But I know some of you think that I'm cheating, that this is not a language at a
 
 # Chapter 2
 
-Despite the place that computers hold in society, programming is barely understood outside of those who practice it. Telling someone you program for a living will almost immediately cut off all possible conversation. The average person does not even know how to ask questions about what programmers do. (Sofware Devloper/Engineer is the more common term for "programmers", but we will just continue to use programmers.) As far as anyone from the outside is concerned, we are "computer people". We must know a lot about computers or something. 
+Despite the place that computers hold in society, programming is barely understood outside of those who practice it. Telling someone you program for a living will almost immediately cut off all possible conversation. The average person does not even know how to ask questions about what programmers do. (Software Devloper/Engineer is the more common term for "programmers", but we will just continue to use programmers.) As far as anyone from the outside is concerned, we are "computer people". We must know a lot about computers or something. 
 
 What is known about programming as a profession is generally inaccurate. Often people believe that programming "languages" are just like natural languages. In fact, some schools have even considered allow programming as a substitute for taking a foreign language. It is our view that this cannot be further from the truth.
 
