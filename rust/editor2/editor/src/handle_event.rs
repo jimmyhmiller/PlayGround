@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use nonblock::NonBlockingReader;
 use notify::RecursiveMode;
 
@@ -151,6 +153,11 @@ impl Editor {
                         widget_id,
                     });
 
+                }
+                Event::SendProcessMessage(process_id, message) => {
+                    if let Some(process) = self.processes.get_mut(&process_id) {
+                        process.stdin.write_all(message.as_bytes()).unwrap();
+                    }
                 }
                 Event::ModifiersChanged(modifiers) => {
                     self.context.modifiers = modifiers;

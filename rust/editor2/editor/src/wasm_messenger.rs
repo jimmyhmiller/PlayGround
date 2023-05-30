@@ -311,7 +311,9 @@ impl WasmMessenger {
                     Command::StartProcess(process_id, process_command) => {
                         self.external_sender.as_mut().unwrap().send(Event::StartProcess(*process_id as usize, process_command.clone())).unwrap();
                     }
-                    Command::SendProcessMessage(_, _) => {}
+                    Command::SendProcessMessage(process_id, message) => {
+                        self.external_sender.as_mut().unwrap().send(Event::SendProcessMessage(*process_id as usize, message.clone())).unwrap();
+                    }
                     Command::ReceiveLastProcessMessage(_) => println!("Unhandled"),
                     Command::ProvideF32(name, val) => {
                         values.insert(name.to_string(), Value::F32(*val));
