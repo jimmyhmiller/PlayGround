@@ -10,3 +10,5 @@ crate-type = ['cdylib']
 
 [dependencies]
 framework = { path = "../framework" }
+lsp-types = "0.94.0"
+serde = {version = "1.0.163", features=["derive"] }

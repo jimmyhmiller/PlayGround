@@ -545,6 +545,9 @@ impl Editor {
             Event::StartProcess(_, _) => {
                 self.events.push(event);
             }
+            Event::SendProcessMessage(_, _) => {
+                self.events.push(event);
+            }
         }
     }
 
