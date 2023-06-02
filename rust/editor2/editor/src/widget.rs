@@ -39,6 +39,7 @@ pub struct Widget {
     pub position: Position,
     pub size: Size,
     pub on_click: Vec<Event>,
+    pub scale: f32,
     // Children might make sense
     // pub children: Vec<Widget>,
     pub data: WidgetData,
@@ -421,6 +422,8 @@ impl Widget {
         #[allow(unused)]
         values: &HashMap<String, Value>,
     ) -> Vec<WidgetId> {
+        canvas.save();
+        canvas.scale((self.scale, self.scale));
         // Have to do this to deal with mut stuff
         if let WidgetData::Wasm { wasm: _, wasm_id } = &mut self.data {
             canvas.save();
@@ -444,7 +447,10 @@ impl Widget {
         }
 
         match &self.data {
-            WidgetData::Compound { children } => return children.clone(),
+            WidgetData::Compound { children } => {
+                canvas.restore();
+                return children.clone();
+            }
             WidgetData::Image { data } => {
                 // I tried to abstract this out and ran into the issue of returning a ref.
                 // Can't use a closure, could box, but seems unnecessary. Maybe this data belongs elsewhere?
@@ -531,6 +537,7 @@ impl Widget {
 
             _ => {}
         }
+        canvas.restore();
         vec![]
     }
 
