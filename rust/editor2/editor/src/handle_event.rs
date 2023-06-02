@@ -22,6 +22,7 @@ impl Editor {
                                 width: 800.0,
                                 height: 800.0,
                             },
+                            scale: 1.0,
                             data: WidgetData::Wasm {
                                 wasm: Wasm::new(path.to_str().unwrap().to_string()),
                                 wasm_id,
@@ -33,6 +34,7 @@ impl Editor {
                             // TODO: Temp for testing
                             on_click: vec![],
                             position: Position { x, y },
+                            scale: 1.0,
                             size: Size {
                                 width: 800.0,
                                 height: 800.0,
@@ -134,6 +136,7 @@ impl Editor {
                             width: 800.0,
                             height: 800.0,
                         },
+                        scale: 1.0,
                         on_click: vec![],
                         data: WidgetData::TextPane {
                             text_pane: TextPane::new(
