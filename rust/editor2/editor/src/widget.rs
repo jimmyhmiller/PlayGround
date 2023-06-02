@@ -463,11 +463,11 @@ impl Widget {
                 let text_pane = &text_pane;
                 let foreground = Color::parse_hex("#dc9941");
                 let background = Color::parse_hex("#353f38");
-                // background.a = 0.3;
+
 
                 let paint = background.to_paint();
                 canvas.save();
-                // canvas.clip_rect(self.bounding_rect().with_outset((30.0,30.0)), None, None);
+                canvas.clip_rect(self.bounding_rect().with_outset((30.0,30.0)), None, None);
 
                 let font = Font::new(
                     Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
@@ -476,25 +476,10 @@ impl Widget {
                 let mut path = Path::new();
                 path.add_rect(self.bounding_rect().with_outset((30.0, 30.0)), None);
 
-                // let x = values.get("x").map(|x| x.as_f32()).unwrap_or(10.0);
-                // let y = values.get("y").map(|x| x.as_f32()).unwrap_or(10.0);
-                // let z = values.get("z").map(|x| x.as_f32()).unwrap_or(10.0);
-
-
-                // draw_shadow(
-                //     canvas,
-                //     &path,
-                //     (x, y, z),
-                //     (x, y, z),
-                //     10.0,
-                //     Color::parse_hex("#000000").to_sk_color(),
-                //     background.to_sk_color(),
-                //     None,
-                // );
                 let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);
                 canvas.draw_rrect(rrect, &paint);
 
-                // canvas.clip_rect(self.bounding_rect().with_inset((20, 20)), None, None);
+                canvas.clip_rect(self.bounding_rect().with_inset((20, 20)), None, None);
                 let fractional_offset = text_pane.fractional_line_offset();
                 canvas.translate((
                     self.position.x + 30.0 - text_pane.offset.x,
