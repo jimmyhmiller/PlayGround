@@ -1,12 +1,12 @@
-use std::{collections::HashMap, error::Error, path::Path, sync::{Arc, mpsc}, thread, time::Duration};
+use std::{collections::HashMap, error::Error, path::Path, sync::{Arc, mpsc}, thread, time::Duration, mem};
 
 use bytesize::ByteSize;
 
 use futures::{
-    channel::mpsc::{channel, Receiver, Sender},
+    channel::{mpsc::{channel, Receiver, Sender}, oneshot},
     executor::{LocalPool, LocalSpawner},
     task::LocalSpawnExt,
-    StreamExt,
+    StreamExt
 };
 use futures_timer::Delay;
 use itertools::Itertools;
@@ -14,7 +14,7 @@ use itertools::Itertools;
 use skia_safe::{Canvas, Font, FontStyle, Typeface};
 use wasmtime::{
     AsContextMut, Caller, Config, Engine, Instance, Linker, Memory, Module, Store, WasmParams,
-    WasmResults,
+    WasmResults, FuncType, ValType,
 };
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
@@ -55,8 +55,9 @@ struct Message {
 enum OutPayload {
     DrawCommands(Vec<Command>),
     Saved(SaveState),
-    ErrorPayload(Box<dyn Error>),
+    ErrorPayload,
     Complete,
+    NeededValue(oneshot::Sender<u32>),
 }
 
 struct OutMessage {
@@ -349,8 +350,12 @@ impl WasmMessenger {
                     OutPayload::Saved(saved) => {
                         self.wasm_states.insert(message.wasm_id, saved);
                     }
-                    OutPayload::ErrorPayload(err) => {
-                        println!("{:?}", err)
+                    // TODO: Fix this
+                    OutPayload::ErrorPayload => {
+                        println!("Some error happened")
+                    }
+                    OutPayload::NeededValue(sender) => {
+                        sender.send(0).unwrap();
                     }
                     OutPayload::Complete => {}
                 }
@@ -505,7 +510,7 @@ impl WasmManager {
         receiver: Receiver<Message>,
         sender: Sender<OutMessage>,
     ) -> Self {
-        let instance = WasmInstance::new(engine.clone(), &wasm_path).await.unwrap();
+        let instance = WasmInstance::new(engine.clone(), &wasm_path, sender.clone()).await.unwrap();
 
         Self {
             id: wasm_id,
@@ -517,10 +522,13 @@ impl WasmManager {
     }
 
     pub async fn init(&mut self) {
-        // This is a problem because we are only taking from one instance
         loop {
             let message = self.receiver.select_next_some().await;
             let out_message = self.process_message(message).await;
+            let values_needed = self.instance.get_values_needed();
+            for values_needed in values_needed {
+                values_needed.send(0).unwrap();
+            }
             self.sender.start_send(out_message).unwrap();
         }
     }
@@ -574,7 +582,8 @@ impl WasmManager {
                     Err(err) => OutMessage {
                         wasm_id: message.wasm_id,
                         message_id: message.message_id,
-                        payload: OutPayload::ErrorPayload(err),
+                        // TODO: Fix
+                        payload: OutPayload::ErrorPayload,
                     },
                 }
             }
@@ -623,16 +632,20 @@ struct State {
     // but lets start here
     process_messages: HashMap<i32, String>,
     position: Position,
+    values_needed: Vec<oneshot::Sender<u32>>,
+    sender: Sender<OutMessage>
 }
 
 impl State {
-    fn new(wasi: wasmtime_wasi::WasiCtx) -> Self {
+    fn new(wasi: wasmtime_wasi::WasiCtx, sender: Sender<OutMessage>) -> Self {
         Self {
             wasi,
             commands: Vec::new(),
             process_messages: HashMap::new(),
             get_state_info: (0, 0),
-            position: Position { x: 0.0, y: 0.0}
+            position: Position { x: 0.0, y: 0.0 },
+            values_needed: Vec::new(),
+            sender,
         }
     }
 }
@@ -698,7 +711,7 @@ struct WasmInstance {
 }
 
 impl WasmInstance {
-    async fn new(engine: Arc<Engine>, wasm_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn new(engine: Arc<Engine>, wasm_path: &str, sender: Sender<OutMessage>) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = Dir::from_std_file(
             std::fs::File::open(Path::new(wasm_path).parent().unwrap()).unwrap(),
         );
@@ -713,7 +726,7 @@ impl WasmInstance {
         wasmtime_wasi::add_to_linker(&mut linker, |s| &mut s.wasi)?;
         Self::setup_host_functions(&mut linker)?;
 
-        let mut store = Store::new(&engine, State::new(wasi));
+        let mut store = Store::new(&engine, State::new(wasi, sender));
         let module = Module::from_file(&engine, wasm_path)?;
 
         let instance = linker.instantiate_async(&mut store, &module).await?;
@@ -755,6 +768,28 @@ impl WasmInstance {
                 state.commands.push(Command::DrawRect(x, y, width, height));
             },
         )?;
+        linker.func_wrap0_async("host", "get_async_thing", |mut caller: Caller<'_, State>| {
+            Box::new(async move {
+                let state = caller.data_mut();
+                let (sender, receiver) = oneshot::channel();
+                state.sender.start_send(OutMessage {
+                     message_id: 0, 
+                     wasm_id: 0, 
+                     payload: OutPayload::NeededValue(sender)
+                    })?;
+                let result = receiver.await;
+                match result {
+                    Ok(result) => { 
+                        println!("got result: {}", result);
+                    }
+                    Err(_) => {
+                        println!("Cancelled")
+                    },
+                }
+
+                Ok(result.unwrap_or(0))
+            })
+        })?;
         linker.func_wrap(
             "host",
             "draw_str",
@@ -919,6 +954,13 @@ impl WasmInstance {
         let commands = state.commands.clone();
         state.commands.clear();
         Ok(commands)
+    }
+
+    pub fn get_values_needed(&mut self) -> Vec<oneshot::Sender<u32>> {
+        let state = &mut self.store.data_mut();
+        let values_needed = mem::take(&mut state.values_needed);
+        state.values_needed = vec![];
+        values_needed
     }
 
     pub async fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {

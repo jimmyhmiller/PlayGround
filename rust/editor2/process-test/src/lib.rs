@@ -51,6 +51,10 @@ impl App for ProcessSpawner {
 
     fn on_click(&mut self, _x: f32, _y: f32) {
 
+        println!("About to get value");
+        let x = self.get_async_thing();
+        println!("{:?}", x);
+
         #[allow(deprecated)]
         // Root path is deprecated, but I also need to specify it
         let initialize_params = InitializeParams {
