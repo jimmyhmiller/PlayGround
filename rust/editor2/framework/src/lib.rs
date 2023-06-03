@@ -26,6 +26,7 @@ extern "C" {
     fn provide_f32_low_level(ptr: i32, len: i32, val: f32);
     fn get_x() -> f32;
     fn get_y() -> f32;
+    fn get_async_thing() -> u32;
 }
 
 #[repr(C)]
@@ -177,6 +178,10 @@ pub trait App {
     }
     fn get_position(&self) -> (f32, f32) {
         unsafe { (get_x(), get_y()) }
+    }
+
+    fn get_async_thing(&self) -> u32 {
+        unsafe { get_async_thing() }
     }
 }
 

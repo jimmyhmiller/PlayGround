@@ -241,6 +241,7 @@ impl Editor {
                 _ => {}
             }
         }
+        
         // Todo: Need to test that I am not missing any
         // events with my start and end
 
