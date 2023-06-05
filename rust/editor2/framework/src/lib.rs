@@ -1,5 +1,6 @@
-use std::{fmt::Debug, str::from_utf8};
+use std::{fmt::Debug, str::from_utf8, collections::HashMap};
 
+use once_cell::sync::Lazy;
 use serde::{Serialize, Deserialize};
 
 #[link(wasm_import_module = "host")]
@@ -137,6 +138,7 @@ impl Canvas {
 }
 
 pub static mut DEBUG: Vec<String> = Vec::new();
+pub static mut STRING_PTR_TO_LEN: Lazy<HashMap<u32, u32>> = Lazy::new(|| HashMap::new());
 
 pub trait App {
     type State;
@@ -180,9 +182,37 @@ pub trait App {
         unsafe { (get_x(), get_y()) }
     }
 
-    fn get_async_thing(&self) -> u32 {
-        unsafe { get_async_thing() }
+    fn get_async_thing(&self) -> String {
+        let ptr = unsafe { get_async_thing() };
+        let result = fetch_string(ptr);
+        result
     }
+}
+
+#[no_mangle]
+pub fn alloc_string(len: usize) -> *mut u8 {
+    // create a new mutable buffer with capacity `len`
+    let mut buf = Vec::with_capacity(len);
+    // take a mutable pointer to the buffer
+    let ptr = buf.as_mut_ptr();
+    // take ownership of the memory block and
+    // ensure that its destructor is not
+    // called when the object goes out of scope
+    // at the end of the function
+    std::mem::forget(buf);
+    // return the pointer so the runtime
+    // can write data at this offset
+    unsafe { STRING_PTR_TO_LEN.insert(ptr as u32, len as u32) };
+    ptr
+}
+
+pub fn fetch_string(str_ptr: u32) -> String {
+    let buffer;
+    unsafe {
+        let len = STRING_PTR_TO_LEN.get(&(str_ptr as u32)).unwrap();
+        buffer = String::from_raw_parts(str_ptr as *mut u8, *len as usize, *len as usize);
+    }
+    buffer
 }
 
 #[no_mangle]

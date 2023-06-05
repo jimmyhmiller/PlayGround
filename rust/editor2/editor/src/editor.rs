@@ -36,21 +36,13 @@ pub struct Context {
     pub modifiers: Modifiers,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Value {
     USize(usize),
     F32(f32),
+    String(String),
 }
 
-impl Value {
-    #[allow(unused)]
-    pub fn as_f32(&self) -> f32 {
-        match self {
-            Value::USize(v) => *v as f32,
-            Value::F32(v) => *v,
-        }
-    }
-}
 
 pub enum PerFrame {
     ProcessOutput {

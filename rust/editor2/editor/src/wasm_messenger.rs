@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error, path::Path, sync::{Arc, mpsc}, thread, time::Duration, mem};
+use std::{collections::HashMap, error::Error, path::Path, sync::{Arc, mpsc}, thread, time::Duration};
 
 use bytesize::ByteSize;
 
@@ -14,7 +14,7 @@ use itertools::Itertools;
 use skia_safe::{Canvas, Font, FontStyle, Typeface};
 use wasmtime::{
     AsContextMut, Caller, Config, Engine, Instance, Linker, Memory, Module, Store, WasmParams,
-    WasmResults, FuncType, ValType,
+    WasmResults, Val,
 };
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
@@ -55,9 +55,9 @@ struct Message {
 enum OutPayload {
     DrawCommands(Vec<Command>),
     Saved(SaveState),
-    ErrorPayload,
+    ErrorPayload(String),
     Complete,
-    NeededValue(oneshot::Sender<u32>),
+    NeededValue(String, oneshot::Sender<String>),
 }
 
 struct OutMessage {
@@ -350,12 +350,18 @@ impl WasmMessenger {
                     OutPayload::Saved(saved) => {
                         self.wasm_states.insert(message.wasm_id, saved);
                     }
-                    // TODO: Fix this
-                    OutPayload::ErrorPayload => {
-                        println!("Some error happened")
+                    OutPayload::ErrorPayload(error_message) => {
+                        println!("Error: {}", error_message);
                     }
-                    OutPayload::NeededValue(sender) => {
-                        sender.send(0).unwrap();
+                    OutPayload::NeededValue(name, sender) => {
+                        // If I don't have the value, what should I do?
+                        // Should I save this message and re-enqueue or signal failure?
+                        if let Some(value) = values.get(&name) {
+                            let serialized = serde_json::to_string(value).unwrap();
+                            sender.send(serialized).unwrap();
+                        } else {
+                            println!("Can't find value {}", name);
+                        }
                     }
                     OutPayload::Complete => {}
                 }
@@ -525,10 +531,6 @@ impl WasmManager {
         loop {
             let message = self.receiver.select_next_some().await;
             let out_message = self.process_message(message).await;
-            let values_needed = self.instance.get_values_needed();
-            for values_needed in values_needed {
-                values_needed.send(0).unwrap();
-            }
             self.sender.start_send(out_message).unwrap();
         }
     }
@@ -582,8 +584,7 @@ impl WasmManager {
                     Err(err) => OutMessage {
                         wasm_id: message.wasm_id,
                         message_id: message.message_id,
-                        // TODO: Fix
-                        payload: OutPayload::ErrorPayload,
+                        payload: OutPayload::ErrorPayload(err.to_string()),
                     },
                 }
             }
@@ -632,7 +633,6 @@ struct State {
     // but lets start here
     process_messages: HashMap<i32, String>,
     position: Position,
-    values_needed: Vec<oneshot::Sender<u32>>,
     sender: Sender<OutMessage>
 }
 
@@ -644,7 +644,6 @@ impl State {
             process_messages: HashMap::new(),
             get_state_info: (0, 0),
             position: Position { x: 0.0, y: 0.0 },
-            values_needed: Vec::new(),
             sender,
         }
     }
@@ -775,7 +774,7 @@ impl WasmInstance {
                 state.sender.start_send(OutMessage {
                      message_id: 0, 
                      wasm_id: 0, 
-                     payload: OutPayload::NeededValue(sender)
+                     payload: OutPayload::NeededValue("hardcoded".to_string(), sender)
                     })?;
                 let result = receiver.await;
                 match result {
@@ -786,8 +785,9 @@ impl WasmInstance {
                         println!("Cancelled")
                     },
                 }
+                let (ptr, _len) = WasmInstance::transfer_string_to_wasm(&mut caller, "hardcoded".to_string()).await.unwrap();
 
-                Ok(result.unwrap_or(0))
+                Ok(ptr)
             })
         })?;
         linker.func_wrap(
@@ -956,13 +956,6 @@ impl WasmInstance {
         Ok(commands)
     }
 
-    pub fn get_values_needed(&mut self) -> Vec<oneshot::Sender<u32>> {
-        let state = &mut self.store.data_mut();
-        let values_needed = mem::take(&mut state.values_needed);
-        state.values_needed = vec![];
-        values_needed
-    }
-
     pub async fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.call_typed_func::<(f32, f32), ()>("on_click", (x, y), 1)
             .await?;
@@ -1008,6 +1001,41 @@ impl WasmInstance {
         }
 
         Ok(())
+    }
+
+    pub async fn transfer_string_to_wasm(caller: &mut Caller<'_, State>, data: String) -> Result<(u32, u32), Box<dyn Error>> {
+        let memory = caller
+            .get_export("memory")
+            .unwrap()
+            .into_memory()
+            .unwrap();
+
+        let memory_size = (memory.data_size(caller.as_context_mut()) as f32
+            / ByteSize::kb(64).as_u64() as f32)
+            .ceil() as usize;
+
+        let data_length_in_64k_multiples =
+            (data.len() as f32 / ByteSize::kb(64).as_u64() as f32).ceil() as usize;
+        if data_length_in_64k_multiples > memory_size {
+            let delta = data_length_in_64k_multiples;
+            memory.grow(caller.as_context_mut(), delta as u64 + 10).unwrap();
+        }
+
+        let func =  caller.get_export("alloc_string").unwrap();
+        let func = func.into_func().unwrap();
+        let results = &mut [Val::I32(0)];
+        func.call_async(caller.as_context_mut(), &[Val::I32(data.len() as i32)], results ).await.unwrap();
+        let ptr = results[0].clone().i32().unwrap() as u32;
+
+        let memory = caller
+            .get_export("memory")
+            .unwrap()
+            .into_memory()
+            .unwrap();
+
+        memory.write(caller.as_context_mut(), ptr as usize, data.as_bytes()).unwrap();
+        
+        Ok((ptr, data.len() as u32))
     }
 
     pub async fn set_state(&mut self, data: &[u8]) -> Result<(), Box<dyn Error>> {
