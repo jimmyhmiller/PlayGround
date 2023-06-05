@@ -1,5 +1,5 @@
 use framework::{app, App, Canvas, macros::serde_json};
-use lsp_types::{InitializeParams, ClientCapabilities, lsp_request, request::{Initialize, Request}};
+use lsp_types::{InitializeParams, ClientCapabilities, request::{Initialize, Request}};
 use serde::{Deserialize, Serialize};
 
 
