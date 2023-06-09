@@ -1,4 +1,7 @@
-use std::{cell::RefCell, fs::File, io::Read, path::PathBuf, process::ChildStdout, str::from_utf8, collections::HashMap};
+use std::{
+    cell::RefCell, collections::HashMap, fs::File, io::Read, path::PathBuf, process::ChildStdout,
+    str::from_utf8,
+};
 
 use nonblock::NonBlockingReader;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -8,8 +11,9 @@ use skia_safe::{
 };
 
 use crate::{
+    editor::Value,
     event::Event,
-    wasm_messenger::{self, WasmId, WasmMessenger}, editor::Value,
+    wasm_messenger::{self, WasmId, WasmMessenger},
 };
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
@@ -419,8 +423,7 @@ impl Widget {
         canvas: &mut Canvas,
         wasm_messenger: &mut WasmMessenger,
         bounds: Size,
-        #[allow(unused)]
-        values: &HashMap<String, Value>,
+        #[allow(unused)] values: &HashMap<String, Value>,
     ) -> Vec<WidgetId> {
         canvas.save();
         canvas.scale((self.scale, self.scale));
@@ -470,10 +473,9 @@ impl Widget {
                 let foreground = Color::parse_hex("#dc9941");
                 let background = Color::parse_hex("#353f38");
 
-
                 let paint = background.to_paint();
                 canvas.save();
-                canvas.clip_rect(self.bounding_rect().with_outset((30.0,30.0)), None, None);
+                canvas.clip_rect(self.bounding_rect().with_outset((30.0, 30.0)), None, None);
 
                 let font = Font::new(
                     Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),

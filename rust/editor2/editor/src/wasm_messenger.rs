@@ -1,26 +1,38 @@
-use std::{collections::HashMap, error::Error, path::Path, sync::{Arc, mpsc}, thread, time::Duration};
+use std::{
+    collections::HashMap,
+    error::Error,
+    path::Path,
+    sync::{mpsc, Arc},
+    thread,
+    time::Duration,
+};
 
 use bytesize::ByteSize;
 
 use futures::{
-    channel::{mpsc::{channel, Receiver, Sender}, oneshot},
+    channel::{
+        mpsc::{channel, Receiver, Sender},
+        oneshot,
+    },
     executor::{LocalPool, LocalSpawner},
     task::LocalSpawnExt,
-    StreamExt
+    StreamExt,
 };
 use futures_timer::Delay;
 use itertools::Itertools;
 
 use skia_safe::{Canvas, Font, FontStyle, Typeface};
 use wasmtime::{
-    AsContextMut, Caller, Config, Engine, Instance, Linker, Memory, Module, Store, WasmParams,
-    WasmResults, Val,
+    AsContextMut, Caller, Config, Engine, Instance, Linker, Memory, Module, Store, Val, WasmParams,
+    WasmResults,
 };
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
 use crate::{
+    editor::Value,
+    event::Event,
     keyboard::KeyboardInput,
-    widget::{Color, Position, Size}, editor::Value, event::Event,
+    widget::{Color, Position, Size},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -293,7 +305,8 @@ impl WasmMessenger {
                     }
                 }
             }
-            self.wasm_non_draw_commands.insert(wasm_id, non_draw_commands);
+            self.wasm_non_draw_commands
+                .insert(wasm_id, non_draw_commands);
             Some(Size {
                 width: max_width,
                 height: max_height,
@@ -310,16 +323,30 @@ impl WasmMessenger {
                     Command::Restore => println!("Unhandled"),
                     Command::Save => println!("Unhandled"),
                     Command::StartProcess(process_id, process_command) => {
-                        self.external_sender.as_mut().unwrap().send(Event::StartProcess(*process_id as usize, process_command.clone())).unwrap();
+                        self.external_sender
+                            .as_mut()
+                            .unwrap()
+                            .send(Event::StartProcess(
+                                *process_id as usize,
+                                process_command.clone(),
+                            ))
+                            .unwrap();
                     }
                     Command::SendProcessMessage(process_id, message) => {
-                        self.external_sender.as_mut().unwrap().send(Event::SendProcessMessage(*process_id as usize, message.clone())).unwrap();
+                        self.external_sender
+                            .as_mut()
+                            .unwrap()
+                            .send(Event::SendProcessMessage(
+                                *process_id as usize,
+                                message.clone(),
+                            ))
+                            .unwrap();
                     }
                     Command::ReceiveLastProcessMessage(_) => println!("Unhandled"),
                     Command::ProvideF32(name, val) => {
                         values.insert(name.to_string(), Value::F32(*val));
                     }
-                    _ => println!("Draw command ended up here")
+                    _ => println!("Draw command ended up here"),
                 }
             }
         }
@@ -516,7 +543,9 @@ impl WasmManager {
         receiver: Receiver<Message>,
         sender: Sender<OutMessage>,
     ) -> Self {
-        let instance = WasmInstance::new(engine.clone(), &wasm_path, sender.clone()).await.unwrap();
+        let instance = WasmInstance::new(engine.clone(), &wasm_path, sender.clone())
+            .await
+            .unwrap();
 
         Self {
             id: wasm_id,
@@ -633,7 +662,7 @@ struct State {
     // but lets start here
     process_messages: HashMap<i32, String>,
     position: Position,
-    sender: Sender<OutMessage>
+    sender: Sender<OutMessage>,
 }
 
 impl State {
@@ -710,7 +739,11 @@ struct WasmInstance {
 }
 
 impl WasmInstance {
-    async fn new(engine: Arc<Engine>, wasm_path: &str, sender: Sender<OutMessage>) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn new(
+        engine: Arc<Engine>,
+        wasm_path: &str,
+        sender: Sender<OutMessage>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = Dir::from_std_file(
             std::fs::File::open(Path::new(wasm_path).parent().unwrap()).unwrap(),
         );
@@ -767,29 +800,36 @@ impl WasmInstance {
                 state.commands.push(Command::DrawRect(x, y, width, height));
             },
         )?;
-        linker.func_wrap0_async("host", "get_async_thing", |mut caller: Caller<'_, State>| {
-            Box::new(async move {
-                let state = caller.data_mut();
-                let (sender, receiver) = oneshot::channel();
-                state.sender.start_send(OutMessage {
-                     message_id: 0, 
-                     wasm_id: 0, 
-                     payload: OutPayload::NeededValue("hardcoded".to_string(), sender)
+        linker.func_wrap0_async(
+            "host",
+            "get_async_thing",
+            |mut caller: Caller<'_, State>| {
+                Box::new(async move {
+                    let state = caller.data_mut();
+                    let (sender, receiver) = oneshot::channel();
+                    state.sender.start_send(OutMessage {
+                        message_id: 0,
+                        wasm_id: 0,
+                        payload: OutPayload::NeededValue("hardcoded".to_string(), sender),
                     })?;
-                let result = receiver.await;
-                match result {
-                    Ok(result) => { 
-                        println!("got result: {}", result);
+                    let result = receiver.await;
+                    match result {
+                        Ok(result) => {
+                            println!("got result: {}", result);
+                        }
+                        Err(_) => {
+                            println!("Cancelled")
+                        }
                     }
-                    Err(_) => {
-                        println!("Cancelled")
-                    },
-                }
-                let (ptr, _len) = WasmInstance::transfer_string_to_wasm(&mut caller, "hardcoded".to_string()).await.unwrap();
+                    let (ptr, _len) =
+                        WasmInstance::transfer_string_to_wasm(&mut caller, "hardcoded".to_string())
+                            .await
+                            .unwrap();
 
-                Ok(ptr)
-            })
-        })?;
+                    Ok(ptr)
+                })
+            },
+        )?;
         linker.func_wrap(
             "host",
             "draw_str",
@@ -808,22 +848,14 @@ impl WasmInstance {
                 state.commands.push(Command::ProvideF32(string, val));
             },
         )?;
-        linker.func_wrap(
-            "host",
-            "get_x",
-            |mut caller: Caller<'_, State>| {
-                let state = caller.data_mut();
-                state.position.x
-            },
-        )?;
-        linker.func_wrap(
-            "host",
-            "get_y",
-            |mut caller: Caller<'_, State>| {
-                let state = caller.data_mut();
-                state.position.y
-            },
-        )?;
+        linker.func_wrap("host", "get_x", |mut caller: Caller<'_, State>| {
+            let state = caller.data_mut();
+            state.position.x
+        })?;
+        linker.func_wrap("host", "get_y", |mut caller: Caller<'_, State>| {
+            let state = caller.data_mut();
+            state.position.y
+        })?;
         linker.func_wrap(
             "host",
             "clip_rect",
@@ -880,7 +912,9 @@ impl WasmInstance {
                 let state = caller.data_mut();
                 // TODO: Real process id
                 let process_id = 0;
-                state.commands.push(Command::StartProcess(process_id, process));
+                state
+                    .commands
+                    .push(Command::StartProcess(process_id, process));
                 process_id
             },
         )?;
@@ -1003,12 +1037,11 @@ impl WasmInstance {
         Ok(())
     }
 
-    pub async fn transfer_string_to_wasm(caller: &mut Caller<'_, State>, data: String) -> Result<(u32, u32), Box<dyn Error>> {
-        let memory = caller
-            .get_export("memory")
-            .unwrap()
-            .into_memory()
-            .unwrap();
+    pub async fn transfer_string_to_wasm(
+        caller: &mut Caller<'_, State>,
+        data: String,
+    ) -> Result<(u32, u32), Box<dyn Error>> {
+        let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
 
         let memory_size = (memory.data_size(caller.as_context_mut()) as f32
             / ByteSize::kb(64).as_u64() as f32)
@@ -1018,23 +1051,29 @@ impl WasmInstance {
             (data.len() as f32 / ByteSize::kb(64).as_u64() as f32).ceil() as usize;
         if data_length_in_64k_multiples > memory_size {
             let delta = data_length_in_64k_multiples;
-            memory.grow(caller.as_context_mut(), delta as u64 + 10).unwrap();
+            memory
+                .grow(caller.as_context_mut(), delta as u64 + 10)
+                .unwrap();
         }
 
-        let func =  caller.get_export("alloc_string").unwrap();
+        let func = caller.get_export("alloc_string").unwrap();
         let func = func.into_func().unwrap();
         let results = &mut [Val::I32(0)];
-        func.call_async(caller.as_context_mut(), &[Val::I32(data.len() as i32)], results ).await.unwrap();
+        func.call_async(
+            caller.as_context_mut(),
+            &[Val::I32(data.len() as i32)],
+            results,
+        )
+        .await
+        .unwrap();
         let ptr = results[0].clone().i32().unwrap() as u32;
 
-        let memory = caller
-            .get_export("memory")
-            .unwrap()
-            .into_memory()
+        let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+
+        memory
+            .write(caller.as_context_mut(), ptr as usize, data.as_bytes())
             .unwrap();
 
-        memory.write(caller.as_context_mut(), ptr as usize, data.as_bytes()).unwrap();
-        
         Ok((ptr, data.len() as u32))
     }
 

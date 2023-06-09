@@ -1,6 +1,6 @@
 use std::{error::Error, fs, str::from_utf8};
 
-use framework::{App, Canvas, Color, KeyCode, KeyState, Rect, KeyboardInput, app};
+use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect};
 
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
@@ -69,7 +69,6 @@ impl App for AsmData {
 
         let foreground = Color::parse_hex("#dc9941");
         let background = Color::parse_hex("#353f38");
-        
 
         let bounding_rect = Rect::new(0.0, 0.0, 2500.0, 1500.0);
 

@@ -3,9 +3,11 @@ use std::io::Write;
 use nonblock::NonBlockingReader;
 use notify::RecursiveMode;
 
-use crate::{event::Event, editor::{Editor, PerFrame, self}, widget::{Widget, Position, Size, WidgetData, Wasm, TextPane}};
-
-
+use crate::{
+    editor::{self, Editor, PerFrame},
+    event::Event,
+    widget::{Position, Size, TextPane, Wasm, Widget, WidgetData},
+};
 
 impl Editor {
     pub fn handle_events(&mut self, events: Vec<Event>) {
@@ -120,14 +122,12 @@ impl Editor {
                         .stderr(std::process::Stdio::piped())
                         .spawn()
                         .expect("failed to execute process");
-                    
 
                     // grab stdout
                     let stdout = process.stdout.take().unwrap();
                     let non_blocking = NonBlockingReader::from_fd(stdout).unwrap();
-                    self.per_frame_actions.push(PerFrame::ProcessOutput {
-                        process_id,
-                    });
+                    self.per_frame_actions
+                        .push(PerFrame::ProcessOutput { process_id });
 
                     let widget_id = self.widget_store.add_widget(Widget {
                         id: 0,
@@ -139,23 +139,22 @@ impl Editor {
                         scale: 1.0,
                         on_click: vec![],
                         data: WidgetData::TextPane {
-                            text_pane: TextPane::new(
-                                vec![],
-                                40.0,
-                            ),
+                            text_pane: TextPane::new(vec![], 40.0),
                         },
                     });
 
-                    self.processes.insert(process_id, editor::Process {
+                    self.processes.insert(
                         process_id,
-                        stdout: non_blocking,
-                        stdin: process.stdin.take().unwrap(),
-                        stderr: process.stderr.take().unwrap(),
-                        output: String::new(),
-                        process,
-                        widget_id,
-                    });
-
+                        editor::Process {
+                            process_id,
+                            stdout: non_blocking,
+                            stdin: process.stdin.take().unwrap(),
+                            stderr: process.stderr.take().unwrap(),
+                            output: String::new(),
+                            process,
+                            widget_id,
+                        },
+                    );
                 }
                 Event::SendProcessMessage(process_id, message) => {
                     if let Some(process) = self.processes.get_mut(&process_id) {

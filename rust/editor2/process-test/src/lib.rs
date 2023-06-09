@@ -1,7 +1,9 @@
-use framework::{app, App, Canvas, macros::serde_json};
-use lsp_types::{InitializeParams, ClientCapabilities, request::{Initialize, Request}};
+use framework::{app, macros::serde_json, App, Canvas};
+use lsp_types::{
+    request::{Initialize, Request},
+    ClientCapabilities, InitializeParams,
+};
 use serde::{Deserialize, Serialize};
-
 
 #[derive(Copy, Clone, Deserialize, Serialize)]
 enum State {
@@ -16,11 +18,13 @@ struct JsonRpcRequest {
     params: String,
 }
 
-
 impl JsonRpcRequest {
     fn request(&self) -> String {
         // construct the request and add the headers including content-length
-        let body = format!("{{\"jsonrpc\":\"{}\",\"id\":{},\"method\":\"{}\",\"params\":{}}}", self.jsonrpc, self.id, self.method, self.params);
+        let body = format!(
+            "{{\"jsonrpc\":\"{}\",\"id\":{},\"method\":\"{}\",\"params\":{}}}",
+            self.jsonrpc, self.id, self.method, self.params
+        );
         let content_length = body.len();
         let headers = format!("Content-Length: {}\r\n\r\n", content_length);
         format!("{}{}", headers, body)
@@ -36,10 +40,10 @@ impl App for ProcessSpawner {
     type State = State;
 
     fn init() -> Self {
-        ProcessSpawner { 
+        ProcessSpawner {
             state: State::Init,
-            process_id: 0
-         }
+            process_id: 0,
+        }
     }
 
     fn draw(&mut self) {
@@ -47,10 +51,7 @@ impl App for ProcessSpawner {
         canvas.draw_rect(0.0, 0.0, 100.0, 100.0);
     }
 
-    
-
     fn on_click(&mut self, _x: f32, _y: f32) {
-
         println!("About to get value");
         let x = self.get_async_thing();
         println!("{:?}", x);
@@ -70,7 +71,7 @@ impl App for ProcessSpawner {
         };
         let request = Initialize::METHOD;
         let id = 1;
-        
+
         let json_rpc_request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id,
@@ -80,36 +81,25 @@ impl App for ProcessSpawner {
 
         let request = json_rpc_request.request();
 
-
         match self.state {
             State::Init => {
                 let process_id = self.start_process("/Users/jimmyhmiller/.vscode/extensions/rust-lang.rust-analyzer-0.3.1533-darwin-arm64/server/rust-analyzer".to_string());
                 self.process_id = process_id;
                 self.state = State::Message;
-            },
-            State::Message => {
-                self.send_message(self.process_id, request)
-            },
+            }
+            State::Message => self.send_message(self.process_id, request),
         }
-        
-        
     }
 
-    fn on_key(&mut self, _input: framework::KeyboardInput) {
-        
-    }
+    fn on_key(&mut self, _input: framework::KeyboardInput) {}
 
-    fn on_scroll(&mut self, _x: f64, _y: f64) {
-    }
+    fn on_scroll(&mut self, _x: f64, _y: f64) {}
 
     fn get_state(&self) -> Self::State {
         self.state
     }
 
-    fn set_state(&mut self, _state: Self::State) {
-        
-    }
-    
+    fn set_state(&mut self, _state: Self::State) {}
 }
 
 app!(ProcessSpawner);
