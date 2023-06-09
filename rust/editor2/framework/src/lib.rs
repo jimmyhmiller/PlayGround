@@ -1,7 +1,7 @@
-use std::{fmt::Debug, str::from_utf8, collections::HashMap};
+use std::{collections::HashMap, fmt::Debug, str::from_utf8};
 
 use once_cell::sync::Lazy;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[link(wasm_import_module = "host")]
 extern "C" {
@@ -244,8 +244,6 @@ pub fn decode_base64(data: Vec<u8>) -> Result<String, Box<dyn std::error::Error>
     Ok(s.to_string())
 }
 
-
-
 pub mod macros {
     pub use once_cell::sync::Lazy;
     pub use serde_json;
@@ -267,8 +265,8 @@ pub mod macros {
 
             #[no_mangle]
             pub extern "C" fn draw_debug() {
-                use framework::Color;
                 use framework::Canvas;
+                use framework::Color;
                 use framework::Rect;
                 let debug = unsafe { &DEBUG };
                 if debug.len() == 0 {
@@ -303,7 +301,8 @@ pub mod macros {
             #[no_mangle]
             pub extern "C" fn get_state() {
                 use framework::encode_base64;
-                let s: String = $crate::macros::serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
+                let s: String =
+                    $crate::macros::serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
                 let s = encode_base64(s);
                 let mut s = s.into_bytes().clone();
                 let ptr = s.as_mut_ptr() as usize;

@@ -2,11 +2,11 @@ mod editor;
 mod event;
 mod fps_counter;
 // mod strokes;
+mod handle_event;
 mod keyboard;
 mod wasm_messenger;
 mod widget;
 mod window;
-mod handle_event;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {

@@ -1,11 +1,12 @@
 use std::{
-    collections::{HashSet, HashMap},
+    collections::{HashMap, HashSet},
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::ChildStdout,
     sync::mpsc::{Receiver, Sender},
     thread,
-    time::Duration, process::ChildStdout,
+    time::Duration,
 };
 
 use crate::{
@@ -21,11 +22,10 @@ use notify::{FsEventWatcher, RecursiveMode};
 
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use skia_safe::{
-    perlin_noise_shader,
-    runtime_effect::ChildPtr,
-    Data, Font, FontStyle, ISize, RuntimeEffect, Shader, Typeface,
+    perlin_noise_shader, runtime_effect::ChildPtr, Data, Font, FontStyle, ISize, RuntimeEffect,
+    Shader, Typeface,
 };
 
 pub struct Context {
@@ -43,11 +43,8 @@ pub enum Value {
     String(String),
 }
 
-
 pub enum PerFrame {
-    ProcessOutput {
-        process_id: usize,
-    }
+    ProcessOutput { process_id: usize },
 }
 
 pub struct Process {
@@ -65,7 +62,6 @@ impl Process {
         self.process.kill().unwrap();
     }
 }
-
 
 pub struct Editor {
     pub events: Events,
@@ -163,7 +159,6 @@ impl Editor {
 
         let event_loop_proxy = self.event_loop_proxy.as_ref().unwrap().clone();
         thread::spawn(move || {
-
             for res in watch_raw_receive {
                 match res {
                     Ok(event) => {
@@ -224,16 +219,16 @@ impl Editor {
     }
 
     pub fn update(&mut self) {
-
         for widget in self.widget_store.iter_mut() {
             match &widget.data {
                 WidgetData::Wasm { wasm: _, wasm_id } => {
-                    self.wasm_messenger.send_update_position(*wasm_id, &widget.position);
+                    self.wasm_messenger
+                        .send_update_position(*wasm_id, &widget.position);
                 }
                 _ => {}
             }
         }
-        
+
         // Todo: Need to test that I am not missing any
         // events with my start and end
 
@@ -277,12 +272,9 @@ impl Editor {
             }
         }
 
-        self.per_frame_actions
-            .retain(|action| match action {
-                PerFrame::ProcessOutput { process_id: id } => {
-                    !to_delete.contains(id)
-                },
-            });
+        self.per_frame_actions.retain(|action| match action {
+            PerFrame::ProcessOutput { process_id: id } => !to_delete.contains(id),
+        });
 
         let mut to_delete = vec![];
 
@@ -299,14 +291,13 @@ impl Editor {
                 WidgetData::Deleted => {
                     to_delete.push(process.process_id);
                 }
-                _ => unreachable!("Shouldn't be here")
+                _ => unreachable!("Shouldn't be here"),
             }
         }
 
         for process_id in to_delete {
             self.processes.remove(&process_id);
         }
-        
 
         self.wasm_messenger.tick(&mut self.values);
 
@@ -389,7 +380,6 @@ impl Editor {
 
         // paint.set_dither(true);
 
-
         // canvas.draw_rect(
         //     Rect::from_xywh(0.0, 0.0, canvas_size.width, canvas_size.height),
         //     &paint,
@@ -420,7 +410,12 @@ impl Editor {
         let mut to_draw = vec![];
         for widget in self.widget_store.iter_mut() {
             let before_count = canvas.save();
-            to_draw.extend(widget.draw(canvas, &mut self.wasm_messenger, widget.size, &self.values));
+            to_draw.extend(widget.draw(
+                canvas,
+                &mut self.wasm_messenger,
+                widget.size,
+                &self.values,
+            ));
             canvas.restore_to_count(before_count);
             canvas.restore();
         }
@@ -612,7 +607,6 @@ impl Editor {
         for widget_id in to_delete {
             self.widget_store.delete_widget(widget_id);
         }
-
     }
 
     pub fn should_redraw(&self) -> bool {
@@ -657,12 +651,7 @@ impl Editor {
 }
 
 #[allow(unused)]
-pub fn make_grain_gradient_shader(
-    darker: Color,
-    lighter: Color,
-    alpha: f32,
-    size: Size,
-) -> Shader {
+pub fn make_grain_gradient_shader(darker: Color, lighter: Color, alpha: f32, size: Size) -> Shader {
     let noise_shader = perlin_noise_shader::turbulence(
         (0.25, 0.25),
         1,

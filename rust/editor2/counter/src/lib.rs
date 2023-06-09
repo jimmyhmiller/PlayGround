@@ -1,6 +1,6 @@
 use std::str::from_utf8;
 
-use framework::{App, Canvas, Color, KeyCode, KeyState, Rect, KeyboardInput, app};
+use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect};
 use headless_editor::{Cursor, SimpleTextBuffer, TextBuffer, VirtualCursor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -141,7 +141,6 @@ impl App for TextWidget {
 
         let foreground = Color::parse_hex("#dc9941");
         let background = Color::parse_hex("#353f38");
-        
 
         let bounding_rect = Rect::new(
             0.0,
