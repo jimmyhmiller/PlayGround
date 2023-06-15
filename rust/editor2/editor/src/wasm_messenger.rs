@@ -4,7 +4,7 @@ use std::{
     path::Path,
     sync::{mpsc, Arc},
     thread,
-    time::Duration,
+    time::Duration, os::unix::process,
 };
 
 use bytesize::ByteSize;
@@ -55,6 +55,7 @@ enum Payload {
     Reload,
     SaveState,
     UpdatePosition(Position),
+    ProcessMessage(usize, String),
 }
 
 #[derive(Clone, Debug)]
@@ -157,6 +158,7 @@ impl WasmMessenger {
                     Payload::Reload => "Reload",
                     Payload::SaveState => "SaveState",
                     Payload::UpdatePosition(_) => "UpdatePosition",
+                    Payload::ProcessMessage(_, _) => "ProcessMessage",
                 });
             }
         }
@@ -485,6 +487,15 @@ impl WasmMessenger {
         });
     }
 
+    pub fn send_process_message(&mut self, wasm_id: u64, process_id: usize, buf: &str) {
+        let message_id = self.next_message_id();
+        self.send_message(Message {
+            message_id,
+            wasm_id,
+            payload: Payload::ProcessMessage(process_id, buf.to_string()),
+        });
+    }
+
     // Sometimes state is corrupt by going too long on the string. Not sure why.
     // Need to track down the issue
     pub fn save_state(&mut self, wasm_id: WasmId) -> SaveState {
@@ -519,6 +530,8 @@ impl WasmMessenger {
             .unwrap_or(&SaveState::Empty)
             .clone()
     }
+
+
 }
 
 // I think I need to:
@@ -603,6 +616,10 @@ impl WasmManager {
             }
             Payload::OnScroll(x, y) => {
                 self.instance.on_scroll(x, y).await.unwrap();
+                default_return
+            }
+            Payload::ProcessMessage(process_id, message) => {
+                self.instance.on_process_message(process_id as i32, message);
                 default_return
             }
             Payload::OnKey(input) => {
@@ -1014,6 +1031,14 @@ impl WasmInstance {
         Ok(())
     }
 
+    pub async fn on_process_message(&mut self, process_id: i32, message: String) -> Result<(), Box<dyn Error>> {
+        let (ptr, _len) = self.transfer_string_to_wasm2(message).await?;
+
+        self.call_typed_func::<(i32, u32), ()>("on_process_message", (process_id, ptr), 1)
+            .await?;
+        Ok(())
+    }
+
     pub async fn reload(&mut self) -> Result<(), Box<dyn Error>> {
         if let Ok(json_string) = self.get_state().await.ok_or("no get state function") {
             let data = json_string.as_bytes();
@@ -1073,6 +1098,46 @@ impl WasmInstance {
         memory
             .write(caller.as_context_mut(), ptr as usize, data.as_bytes())
             .unwrap();
+
+        Ok((ptr, data.len() as u32))
+    }
+
+
+    // Instance vs caller. Can I collapse these?
+    // super ugly that I right now have 3
+    pub async fn transfer_string_to_wasm2(
+        &mut self,
+        data: String,
+    ) -> Result<(u32, u32), Box<dyn Error>> {
+        let memory = self
+            .instance
+            .get_export(&mut self.store, "memory")
+            .unwrap()
+            .into_memory()
+            .unwrap();
+
+        let memory_size = (memory.data_size(&mut self.store) as f32
+        / ByteSize::kb(64).as_u64() as f32)
+        .ceil() as usize;
+
+        let data_length_in_64k_multiples =
+            (data.len() as f32 / ByteSize::kb(64).as_u64() as f32).ceil() as usize;
+        if data_length_in_64k_multiples > memory_size {
+            let delta = data_length_in_64k_multiples;
+            memory.grow(&mut self.store, delta as u64 + 10).unwrap();
+        }
+
+        let ptr = self
+            .call_typed_func::<u32, u32>("alloc_state", data.len() as u32, 1)
+            .await?;
+        let memory = self
+            .instance
+            .get_export(&mut self.store, "memory")
+            .unwrap()
+            .into_memory()
+            .unwrap();
+
+        memory.write(&mut self.store, ptr as usize, data.as_bytes()).unwrap();
 
         Ok((ptr, data.len() as u32))
     }

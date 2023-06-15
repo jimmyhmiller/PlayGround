@@ -264,6 +264,9 @@ impl Editor {
                         }
                         if !buf.is_empty() {
                             process.output.push_str(&buf);
+                            if let Some(widget) = self.widget_store.get_mut(process.widget_id) {
+                                widget.send_process_message(*process_id, &buf, &mut self.wasm_messenger);
+                            }
                         }
                     } else {
                         to_delete.insert(*process_id);
