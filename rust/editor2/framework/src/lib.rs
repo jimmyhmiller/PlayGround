@@ -157,6 +157,9 @@ pub trait App {
             send_message_low_level(process_id, message.as_ptr() as i32, message.len() as i32);
         }
     }
+    fn on_process_message(&mut self, process_id: i32, message: String) {
+        
+    }
     fn set_get_state(&mut self, ptr: u32, len: u32) {
         unsafe { set_get_state(ptr, len) };
     }
@@ -165,6 +168,7 @@ pub trait App {
             provide_f32_low_level(s.as_ptr() as i32, s.len() as i32, val);
         }
     }
+
     fn recieve_last_message(&mut self, process_id: i32) -> String {
         let buffer;
         unsafe {
@@ -261,6 +265,11 @@ pub mod macros {
             #[no_mangle]
             pub extern "C" fn on_click(x: f32, y: f32) {
                 unsafe { APP.on_click(x, y) }
+            }
+
+            pub extern "C" fn on_process_message(process_id: i32, str_ptr: u32) {
+                let message = framework::fetch_string(str_ptr);
+                unsafe { APP.on_process_message(process_id, message) }
             }
 
             #[no_mangle]

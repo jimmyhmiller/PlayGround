@@ -596,6 +596,17 @@ impl Widget {
             }
         }
     }
+
+    pub fn send_process_message(&self, process_id: usize, buf: &str, wasm_messenger: &mut WasmMessenger) {
+        match &self.data {
+            WidgetData::Wasm { wasm, wasm_id } => {
+                wasm_messenger.send_process_message(*wasm_id, process_id, buf);
+            }
+            _ => {
+                panic!("Can't send process message to non-wasm widget");
+            }
+        }
+    }
 }
 
 // TODO: I might need tags or things like that

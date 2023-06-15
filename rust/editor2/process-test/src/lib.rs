@@ -83,7 +83,7 @@ impl App for ProcessSpawner {
 
         match self.state {
             State::Init => {
-                let process_id = self.start_process("/Users/jimmyhmiller/.vscode/extensions/rust-lang.rust-analyzer-0.3.1533-darwin-arm64/server/rust-analyzer".to_string());
+                let process_id = self.start_process("/Users/jimmyhmiller/.vscode/extensions/rust-lang.rust-analyzer-0.3.1541-darwin-arm64/server/rust-analyzer".to_string());
                 self.process_id = process_id;
                 self.state = State::Message;
             }
@@ -97,6 +97,10 @@ impl App for ProcessSpawner {
 
     fn get_state(&self) -> Self::State {
         self.state
+    }
+
+    fn on_process_message(&mut self, process_id: i32, message: String) {
+        println!("Process {} sent message {}", process_id, message);
     }
 
     fn set_state(&mut self, _state: Self::State) {}
