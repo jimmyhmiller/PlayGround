@@ -213,7 +213,7 @@ pub fn alloc_string(len: usize) -> *mut u8 {
 pub fn fetch_string(str_ptr: u32) -> String {
     let buffer;
     unsafe {
-        let len = STRING_PTR_TO_LEN.get(&(str_ptr as u32)).unwrap();
+        let len = STRING_PTR_TO_LEN.get(&str_ptr).unwrap();
         buffer = String::from_raw_parts(str_ptr as *mut u8, *len as usize, *len as usize);
     }
     buffer
@@ -267,6 +267,7 @@ pub mod macros {
                 unsafe { APP.on_click(x, y) }
             }
 
+            #[no_mangle]
             pub extern "C" fn on_process_message(process_id: i32, str_ptr: u32) {
                 let message = framework::fetch_string(str_ptr);
                 unsafe { APP.on_process_message(process_id, message) }

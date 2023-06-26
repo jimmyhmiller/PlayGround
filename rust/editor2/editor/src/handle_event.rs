@@ -115,7 +115,7 @@ impl Editor {
                         }
                     }
                 }
-                Event::StartProcess(process_id, process_command) => {
+                Event::StartProcess(process_id, wasmi_id, process_command) => {
                     let mut process = std::process::Command::new(process_command)
                         .stdout(std::process::Stdio::piped())
                         .stdin(std::process::Stdio::piped())
@@ -129,7 +129,9 @@ impl Editor {
                     self.per_frame_actions
                         .push(PerFrame::ProcessOutput { process_id });
 
-                    let widget_id = self.widget_store.add_widget(Widget {
+                    let parent_widget_id = self.widget_store.get_widget_by_wasm_id(wasmi_id).unwrap();
+
+                    let output_widget_id = self.widget_store.add_widget(Widget {
                         id: 0,
                         position: Position { x: 0.0, y: 0.0 },
                         size: Size {
@@ -152,7 +154,8 @@ impl Editor {
                             stderr: process.stderr.take().unwrap(),
                             output: String::new(),
                             process,
-                            widget_id,
+                            output_widget_id,
+                            parent_widget_id,
                         },
                     );
                 }

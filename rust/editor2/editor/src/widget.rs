@@ -95,6 +95,22 @@ impl WidgetStore {
         // TODO: Need a better way rather than tombstones
         self.widgets[widget_id].data = WidgetData::Deleted;
     }
+
+    pub fn get_widget_by_wasm_id(&self, expected_wasm_id: usize) -> Option<usize> {
+        self.widgets
+            .iter()
+            .find(|x| match &x.data {
+                WidgetData::Wasm { wasm: _, wasm_id } => {
+                    if *wasm_id as usize == expected_wasm_id {
+                        true
+                    } else {
+                        false
+                    }
+                },
+                _ => false,
+            })
+            .map(|x| x.id)
+    }
 }
 
 #[derive(Copy, Clone, Serialize, Deserialize)]

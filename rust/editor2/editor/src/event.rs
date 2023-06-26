@@ -67,7 +67,7 @@ pub enum Event {
     ReloadWidgets,
     ReloadWasm(String),
     SaveWidgets,
-    StartProcess(usize, String),
+    StartProcess(usize, usize, String),
     SendProcessMessage(usize, String),
 }
 

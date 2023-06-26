@@ -319,7 +319,7 @@ impl WasmMessenger {
     }
 
     pub fn process_non_draw_commands(&mut self, values: &mut HashMap<String, Value>) {
-        for (_wasm_id, commands) in self.wasm_non_draw_commands.iter() {
+        for (wasm_id, commands) in self.wasm_non_draw_commands.iter() {
             for command in commands.iter() {
                 match command {
                     Command::Restore => println!("Unhandled"),
@@ -330,6 +330,8 @@ impl WasmMessenger {
                             .unwrap()
                             .send(Event::StartProcess(
                                 *process_id as usize,
+                                // TODO: I probably actually want widget id?
+                                *wasm_id as usize,
                                 process_command.clone(),
                             ))
                             .unwrap();
@@ -619,7 +621,7 @@ impl WasmManager {
                 default_return
             }
             Payload::ProcessMessage(process_id, message) => {
-                self.instance.on_process_message(process_id as i32, message);
+                self.instance.on_process_message(process_id as i32, message).await.unwrap();
                 default_return
             }
             Payload::OnKey(input) => {
@@ -1128,7 +1130,7 @@ impl WasmInstance {
         }
 
         let ptr = self
-            .call_typed_func::<u32, u32>("alloc_state", data.len() as u32, 1)
+            .call_typed_func::<u32, u32>("alloc_string", data.len() as u32, 1)
             .await?;
         let memory = self
             .instance
