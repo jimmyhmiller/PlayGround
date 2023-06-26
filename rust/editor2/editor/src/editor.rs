@@ -53,7 +53,10 @@ pub struct Process {
     pub stdin: std::process::ChildStdin,
     pub stderr: std::process::ChildStderr,
     pub output: String,
-    pub widget_id: usize,
+    // TODO: I could remove this and just allow
+    // multiple widgets to be attached to a process.
+    pub parent_widget_id: usize,
+    pub output_widget_id: usize,
     pub process: std::process::Child,
 }
 
@@ -264,7 +267,7 @@ impl Editor {
                         }
                         if !buf.is_empty() {
                             process.output.push_str(&buf);
-                            if let Some(widget) = self.widget_store.get_mut(process.widget_id) {
+                            if let Some(widget) = self.widget_store.get_mut(process.parent_widget_id) {
                                 widget.send_process_message(*process_id, &buf, &mut self.wasm_messenger);
                             }
                         }
@@ -282,7 +285,7 @@ impl Editor {
         let mut to_delete = vec![];
 
         for process in self.processes.values() {
-            let widget_id = process.widget_id;
+            let widget_id = process.output_widget_id;
             let widget = self.widget_store.get_mut(widget_id).unwrap();
             let output = &process.output;
             match &mut widget.data {
@@ -533,7 +536,7 @@ impl Editor {
             Event::ReloadWasm(_) => {
                 self.events.push(event);
             }
-            Event::StartProcess(_, _) => {
+            Event::StartProcess(_, _, _) => {
                 self.events.push(event);
             }
             Event::SendProcessMessage(_, _) => {

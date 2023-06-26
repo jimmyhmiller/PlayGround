@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 enum State {
     Init,
     Message,
+    Recieve,
 }
 
 struct JsonRpcRequest {
@@ -87,7 +88,13 @@ impl App for ProcessSpawner {
                 self.process_id = process_id;
                 self.state = State::Message;
             }
-            State::Message => self.send_message(self.process_id, request),
+            State::Message => {
+                self.state = State::Recieve;
+                self.send_message(self.process_id, request)
+            }
+            State::Recieve => {
+                println!("Noop")
+            }
         }
     }
 
