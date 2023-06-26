@@ -1,7 +1,9 @@
+use std::str::FromStr;
+
 use framework::{app, macros::serde_json, App, Canvas};
 use lsp_types::{
     request::{Initialize, Request},
-    ClientCapabilities, InitializeParams,
+    ClientCapabilities, InitializeParams, Url, notification::{Initialized, Notification}, InitializedParams,
 };
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +12,7 @@ enum State {
     Init,
     Message,
     Recieve,
+    Initialized,
 }
 
 struct JsonRpcRequest {
@@ -57,12 +60,14 @@ impl App for ProcessSpawner {
         let x = self.get_async_thing();
         println!("{:?}", x);
 
+        let root_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2";
+
         #[allow(deprecated)]
         // Root path is deprecated, but I also need to specify it
         let initialize_params = InitializeParams {
             process_id: Some(self.process_id as u32),
-            root_path: None,
-            root_uri: None,
+            root_path: Some(root_path.to_string()),
+            root_uri: Some(Url::from_str(&format!("file://{}", root_path)).unwrap()),
             initialization_options: None,
             capabilities: ClientCapabilities::default(),
             trace: None,
@@ -91,6 +96,20 @@ impl App for ProcessSpawner {
             State::Message => {
                 self.state = State::Recieve;
                 self.send_message(self.process_id, request)
+            }
+            State::Initialized => {
+                
+                let params : <Initialized as Notification>::Params = InitializedParams {};
+                let json_rpc_request = JsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id,
+                    method: Initialized::METHOD.to_string(),
+                    params: serde_json::to_string(&params).unwrap(),
+                };
+                let request = json_rpc_request.request();
+                self.send_message(self.process_id, request);
+
+                println!("Noop")
             }
             State::Recieve => {
                 println!("Noop")
