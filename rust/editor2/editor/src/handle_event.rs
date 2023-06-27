@@ -125,9 +125,11 @@ impl Editor {
 
                     // grab stdout
                     let stdout = process.stdout.take().unwrap();
-                    let non_blocking = NonBlockingReader::from_fd(stdout).unwrap();
+                    let stdout = NonBlockingReader::from_fd(stdout).unwrap();
+                    let stderr: NonBlockingReader<std::process::ChildStderr> = NonBlockingReader::from_fd(process.stderr.take().unwrap()).unwrap();
                     self.per_frame_actions
                         .push(PerFrame::ProcessOutput { process_id });
+
 
                     let parent_widget_id = self.widget_store.get_widget_by_wasm_id(wasmi_id).unwrap();
 
@@ -149,9 +151,9 @@ impl Editor {
                         process_id,
                         editor::Process {
                             process_id,
-                            stdout: non_blocking,
+                            stdout,
                             stdin: process.stdin.take().unwrap(),
-                            stderr: process.stderr.take().unwrap(),
+                            stderr,
                             output: String::new(),
                             process,
                             output_widget_id,

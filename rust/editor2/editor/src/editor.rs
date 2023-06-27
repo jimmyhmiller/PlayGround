@@ -51,7 +51,7 @@ pub struct Process {
     pub process_id: usize,
     pub stdout: NonBlockingReader<ChildStdout>,
     pub stdin: std::process::ChildStdin,
-    pub stderr: std::process::ChildStderr,
+    pub stderr: NonBlockingReader<std::process::ChildStderr>,
     pub output: String,
     // TODO: I could remove this and just allow
     // multiple widgets to be attached to a process.
@@ -260,6 +260,19 @@ impl Editor {
                                 break;
                             }
                             let length = stdout.read_available_to_string(&mut buf).unwrap();
+                            if length == 0 {
+                                break;
+                            }
+                            i += 1;
+                        }
+                        let stderr = &mut process.stderr;
+                        let max_attempts = 100;
+                        let mut i = 0;
+                        while !stderr.is_eof() {
+                            if i > max_attempts {
+                                break;
+                            }
+                            let length = stderr.read_available_to_string(&mut buf).unwrap();
                             if length == 0 {
                                 break;
                             }
