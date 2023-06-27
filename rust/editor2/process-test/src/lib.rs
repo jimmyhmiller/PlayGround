@@ -2,8 +2,8 @@ use std::str::FromStr;
 
 use framework::{app, macros::serde_json, App, Canvas};
 use lsp_types::{
-    request::{Initialize, Request},
-    ClientCapabilities, InitializeParams, Url, notification::{Initialized, Notification}, InitializedParams,
+    request::{Initialize, Request, WorkDoneProgressCreate, ShowMessageRequest},
+    ClientCapabilities, InitializeParams, Url, notification::{Initialized, Notification, ShowMessage}, InitializedParams, WorkDoneProgressCreateParams, WorkspaceFolder, WindowClientCapabilities, ShowMessageRequestClientCapabilities, MessageActionItemCapabilities, ShowDocumentClientCapabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +13,7 @@ enum State {
     Message,
     Recieve,
     Initialized,
+    Progress,
 }
 
 struct JsonRpcRequest {
@@ -33,11 +34,40 @@ impl JsonRpcRequest {
         let headers = format!("Content-Length: {}\r\n\r\n", content_length);
         format!("{}{}", headers, body)
     }
+    fn notification(&self) -> String {
+        let body = format!(
+            "{{\"jsonrpc\":\"{}\",\"method\":\"{}\",\"params\":{}}}",
+            self.jsonrpc, self.method, self.params
+        );
+        let content_length = body.len();
+        let headers = format!("Content-Length: {}\r\n\r\n", content_length);
+        format!("{}{}", headers, body)
+    }
 }
 
 struct ProcessSpawner {
     state: State,
     process_id: i32,
+}
+
+struct ParsedMessage {
+    method: String,
+    params: String,
+}
+
+impl ProcessSpawner {
+    fn parse_message(&self, message: &str) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+        // skip the content length and two newlines
+        let message = &message[message.find('{').unwrap()..];
+        let deserializer = serde_json::Deserializer::from_str(message);
+        let iterator: serde_json::StreamDeserializer<'_, serde_json::de::StrRead<'_>, serde_json::Value> = deserializer.into_iter::<serde_json::Value>();
+        let mut results = vec![];
+        for item in iterator {
+            results.push(item?);
+        }
+
+        Ok(results)
+    }
 }
 
 impl App for ProcessSpawner {
@@ -64,23 +94,38 @@ impl App for ProcessSpawner {
 
         #[allow(deprecated)]
         // Root path is deprecated, but I also need to specify it
-        let initialize_params = InitializeParams {
+        let mut initialize_params = InitializeParams {
             process_id: Some(self.process_id as u32),
             root_path: Some(root_path.to_string()),
             root_uri: Some(Url::from_str(&format!("file://{}", root_path)).unwrap()),
             initialization_options: None,
             capabilities: ClientCapabilities::default(),
             trace: None,
-            workspace_folders: None,
+            workspace_folders: Some(vec![
+                WorkspaceFolder {
+                    uri: Url::from_str(&format!("file://{}", root_path)).unwrap(),
+                    name: "editor2".to_string(),
+                },
+            ]),
             client_info: None,
             locale: None,
         };
+        // initialize_params.capabilities.window = Some(WindowClientCapabilities {
+        //     work_done_progress: Some(true),
+        //     show_message: Some(ShowMessageRequestClientCapabilities {
+        //         message_action_item: Some(MessageActionItemCapabilities {
+        //             additional_properties_support: Some(true),
+        //         }),
+        //     }),
+        //     show_document: Some(ShowDocumentClientCapabilities {
+        //         support: true,
+        //     })
+        // });
         let request = Initialize::METHOD;
-        let id = 1;
 
         let json_rpc_request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
-            id,
+            id: 1,
             method: request.to_string(),
             params: serde_json::to_string(&initialize_params).unwrap(),
         };
@@ -94,7 +139,7 @@ impl App for ProcessSpawner {
                 self.state = State::Message;
             }
             State::Message => {
-                self.state = State::Recieve;
+                self.state = State::Initialized;
                 self.send_message(self.process_id, request)
             }
             State::Initialized => {
@@ -102,14 +147,16 @@ impl App for ProcessSpawner {
                 let params : <Initialized as Notification>::Params = InitializedParams {};
                 let json_rpc_request = JsonRpcRequest {
                     jsonrpc: "2.0".to_string(),
-                    id,
+                    id: 1,
                     method: Initialized::METHOD.to_string(),
                     params: serde_json::to_string(&params).unwrap(),
                 };
-                let request = json_rpc_request.request();
+                let request = json_rpc_request.notification();
                 self.send_message(self.process_id, request);
-
-                println!("Noop")
+                self.state = State::Progress;
+            }
+            State::Progress => {
+                self.state = State::Recieve;
             }
             State::Recieve => {
                 println!("Noop")
@@ -124,9 +171,12 @@ impl App for ProcessSpawner {
     fn get_state(&self) -> Self::State {
         self.state
     }
-
+    
     fn on_process_message(&mut self, process_id: i32, message: String) {
-        println!("Process {} sent message {}", process_id, message);
+        for message in self.parse_message(&message).unwrap_or_default() {
+            println!("{:?}", message.as_object().unwrap().get("method"));
+        }
+        // println!("Process {} sent message {}", process_id, message);
     }
 
     fn set_state(&mut self, _state: Self::State) {}
