@@ -12,9 +12,9 @@ Taxonomies aren’t wholly bad. They can help separate distinct concepts allowin
 
 ## The Redefinition
 
-Redefinitions come in two varieties. Those embracing and extending the debt metaphor, and those completely rejecting it. But what they share in common is they want to claim a "folk" understanding of technical debt is incorrect. These articles typically do very little in helping us understand the things we are calling technical debt. Whether the metaphor holds or not is beside the point. Nor do we need some crystal clear definition of technical debt to recognize it or do something about it. Instead, these articles simply increase the amount of bikeshedding over what is and isn’t technical debt.
+Redefinitions come in two varieties. Those embracing and extending the debt metaphor, and those that completely rejecting it. But what they share in common is they want to claim a "folk" understanding of technical debt is incorrect. These articles typically do very little in helping us understand the things we are calling technical debt. Whether the metaphor holds or not is beside the point. Nor do we need some crystal clear definition of technical debt to recognize it or do something about it. Instead, these articles simply increase the amount of bikeshedding over what is and isn’t technical debt.
 
-## Declaring Normative status
+## Declaring Normative Status
 
 Articles that focus on the goodness or badness of technical debt do nothing to move the dialogue forward and nothing to solve the problem we are hoping to solve. Of course, no article actually states in absolute terms that all technical debt is bad or all is good. Instead, they combine elements of the last two types to give you a taxonomy and claim that those elements fall into two categories, good and bad. Or they redefine technical debt to be only the good/bad parts of the concept. In this way, these articles reduce to the former categories.
 
@@ -38,7 +38,8 @@ Most technical debt action plans have one failure mode, bikeshedding that leads 
 
 In these cases, you must proceed slowly. Show the problem, show the solution. Try and convince those around you to see things your way. Don’t foist your solutions on others. Further, be willing to admit when you are wrong. Your solution might not be the right one, the "problem" you identified might not be a problem. Don’t mistake change for progress.
 
-## Fixing Things as a way Helping Others
+## Fixing Things as a Way Helping Others
+
 Time and time again people don’t fix problems they recognize out of fear. What if someone questions why I’m working on this rather than the card I was assigned? What if other engineers think I’m wasting time? What if I can’t fix this problem and end up spending so much time and accomplishing nothing? All these fears are completely understandable. 
 
 Yet in my experience putting those fears aside leads to a reward that is greater than the risk. These fears hold us back, but just like the fear of raising your hand in class to ask a "stupid" question, once you finally do it you see the fear was unfounded. Minimally, you get a better understanding. But more often than not you find that others had the same issue. This is what fixing technical debt does, it brings us closer as a team. It helps others see that you too struggled to understand a piece of code. You too had problems making that build process run. Fixing things helps bond us together. It is an act that helps unite and ultimately helps others succeed.
