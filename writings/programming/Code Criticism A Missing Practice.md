@@ -1,4 +1,4 @@
-# Code Criticsm: A Missing Practice
+# Code Criticism: A Missing Practice
 
 Code is a remarkably aesthetic activity. When you first learn to program this fact might not be obvious. Most of your time will be spent figuring out how to tell the computer what you want it to do. But as you program more, this takes up less and less of your time. Instead you start asking yourself meta questions. Questions about code organization, code simplicity, potential future changes, understandability, flexibility, etc. When contemplating all these questions, you are not merely thinking about algorithms. You aren’t thinking performance. Instead you are going beyond the needs of the computer into the realm of taste, of judgement, of opinion. These topics are constantly on our minds, and yet where in the programming community are these topics fully discussed?
 
