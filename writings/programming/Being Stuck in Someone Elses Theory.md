@@ -4,7 +4,7 @@ Software development can be an incredibly frustrating venture. Not primarily bec
 
 As programmers our primary activity is that of theory building. As we craft software we are relating parts of our programs to other parts of the system, to third party software, and ultimately to the world. But this activity is not passive. We are not merely discovering and reporting the facts, instead this is a creative activity where at once we are discovering the world as it is, but also changing that world. Through the act of writing software, we are making the world a different place.
 
-But still here, we are more than just disinterested creators. We are not assembly workers putting together predefined parts in predefined configurations. Instead we have creative control over what we produce. Our primary activity is not the making of thing, but of thinking about how the thing ought to be made. We are building up this theory as an interested party, we are crafting the world into the way we want it to be. Or at least that’s what we want to do.’’
+But still here, we are more than just disinterested creators. We are not assembly workers putting together predefined parts in predefined configurations. Instead we have creative control over what we produce. Our primary activity is not the making of thing, but of thinking about how the thing ought to be made. We are building up this theory as an interested party, we are crafting the world into the way we want it to be. Or at least that’s what we want to do.
 
 ## Living in an Unwelcoming World
 
@@ -20,7 +20,7 @@ This is the key connection that is missed. Theory creation, world building, and 
 
 ## Reactions to this Unhappy World
 
-As we face the unhappy prospect of living in a world we view not only less than desirable, but ultimately unjust, we must make a decision, should we give up or strive to make the world better? We know those who have taken both paths. We all know the old, zen like engineer who gave up the fight a long time ago. Perhaps we too should take that path. Perhaps this fight isn’t worth it. Perhaps we are merely being melodramatic. How can code being wrong, or a system being bug-ridden truly be unjust? Are there not greater injustices in the world to focus on?
+As we face the unhappy prospect of living in a world we view not only less than desirable, but ultimately unjust, we must make a decision, should we give up or strive to make the world better? We know those who have taken both paths. We all know the old, zen-like engineer who gave up the fight a long time ago. Perhaps we too should take that path. Perhaps this fight isn’t worth it. Perhaps we are merely being melodramatic. How can code being wrong, or a system being bug-ridden truly be unjust? Are there not greater injustices in the world to focus on?
 
 And yet to give up seems wrong. We are the ones who have to live in this world. We are the ones that have to fill our minds with its esoteria. We are the ones who have to spend day in and day out concerned with minutia we are powerless to change. Does ceasing our striving actually solve our problem, or is doing so merely a means of embracing [bad faith](https://en.wikipedia.org/wiki/Bad_faith_(existentialism))?
 
