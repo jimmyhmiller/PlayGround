@@ -41,6 +41,7 @@ pub enum Value {
     USize(usize),
     F32(f32),
     String(String),
+    Bytes(Vec<u8>),
 }
 
 pub enum PerFrame {

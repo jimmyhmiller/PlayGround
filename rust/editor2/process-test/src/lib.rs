@@ -2,11 +2,11 @@ use std::str::FromStr;
 
 use framework::{app, macros::serde_json, App, Canvas};
 use lsp_types::{
-    notification::{Initialized, Notification, ShowMessage},
-    request::{Initialize, Request, ShowMessageRequest, WorkDoneProgressCreate},
+    notification::{Initialized, Notification},
+    request::{Initialize, Request},
     ClientCapabilities, InitializeParams, InitializedParams, MessageActionItemCapabilities,
     ShowDocumentClientCapabilities, ShowMessageRequestClientCapabilities, Url,
-    WindowClientCapabilities, WorkDoneProgressCreateParams, WorkspaceFolder,
+    WindowClientCapabilities, WorkspaceFolder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -174,7 +174,7 @@ impl App for ProcessSpawner {
         self.state
     }
 
-    fn on_process_message(&mut self, process_id: i32, message: String) {
+    fn on_process_message(&mut self, _process_id: i32, message: String) {
         let messages = message.split("Content-Length");
         for message in messages {
             match self.parse_message(&message) {
