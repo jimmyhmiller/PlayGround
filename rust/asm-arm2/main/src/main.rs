@@ -1,8 +1,10 @@
-use std::{error::Error, collections::HashMap, mem, time::Instant};
+use std::{collections::HashMap, error::Error, mem, time::Instant};
 
-use asm::{arm::{Register, Asm, Size, X0, X3, X20, X21, SP, X29, X30, X22, StpGenSelector, LdpGenSelector, X19, X1, StrImmGenSelector, LdrImmGenSelector}};
+use asm::arm::{
+    Asm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector, SP,
+    X0, X1, X19, X20, X21, X22, X29, X3, X30,
+};
 use mmap_rs::MmapOptions;
-
 
 fn main() -> Result<(), Box<dyn Error>> {
     use_the_assembler()?;
@@ -16,7 +18,6 @@ fn print_u32_hex_le(value: u32) {
     }
     println!();
 }
-
 
 fn _print_i32_hex_le(value: i32) {
     let bytes = value.to_le_bytes();
@@ -43,7 +44,6 @@ fn mov_reg(destination: Register, source: Register) -> Asm {
         rd: destination,
     }
 }
-
 
 fn mov_sp(destination: Register, source: Register) -> Asm {
     Asm::MovAddAddsubImm {
@@ -75,7 +75,6 @@ fn sub(destination: Register, a: Register, b: Register) -> Asm {
         rd: destination,
     }
 }
-
 
 fn ret() -> Asm {
     Asm::Ret {
@@ -170,7 +169,7 @@ fn load_pair(reg1: Register, reg2: Register, destination: Register, offset: i32)
 #[allow(unused)]
 fn branch_with_link(destination: *const u8) -> Asm {
     Asm::Bl {
-        imm26: destination as i32
+        imm26: destination as i32,
     }
 }
 
@@ -182,7 +181,6 @@ fn breakpoint() -> Asm {
     Asm::Brk { imm16: 30 }
 }
 
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Label {
     index: usize,
@@ -193,6 +191,7 @@ struct Lang {
     label_index: usize,
     label_locations: HashMap<usize, usize>,
     labels: Vec<String>,
+    volatile_registers: Vec<Register>,
 }
 
 #[allow(unused)]
@@ -203,7 +202,17 @@ impl Lang {
             label_locations: HashMap::new(),
             label_index: 0,
             labels: vec![],
+            volatile_registers: vec![X22, X21, X20, X19]
         }
+    }
+
+    fn prelude(&mut self, offset: i32) {
+        self.store_pair(X29, X30, SP, offset);
+        self.mov_reg(X29, SP);
+    }
+
+    fn epilogue(&mut self, offset: i32) {
+        self.load_pair(X29, X30, SP, offset);
     }
 
     fn get_label_index(&mut self) -> usize {
@@ -220,10 +229,12 @@ impl Lang {
         self.instructions.push(mov_imm(destination, input));
     }
     fn store_pair(&mut self, reg1: Register, reg2: Register, destination: Register, offset: i32) {
-        self.instructions.push(store_pair(reg1, reg2, destination, offset));
+        self.instructions
+            .push(store_pair(reg1, reg2, destination, offset));
     }
     fn load_pair(&mut self, reg1: Register, reg2: Register, destination: Register, offset: i32) {
-        self.instructions.push(load_pair(reg1, reg2, destination, offset));
+        self.instructions
+            .push(load_pair(reg1, reg2, destination, offset));
     }
     fn add(&mut self, destination: Register, a: Register, b: Register) {
         self.instructions.push(add(destination, a, b));
@@ -263,6 +274,29 @@ impl Lang {
     fn jump(&mut self, destination: Label) {
         self.instructions.push(jump(destination.index as u32));
     }
+
+    fn store_on_stack(&mut self, reg: Register, offset: i32) {
+        self.instructions.push(Asm::StrImmGen {
+            size: 0b11,
+            imm9: 0, // not used
+            rn: SP,
+            rt: reg,
+            imm12: offset,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        });
+    }
+
+    fn load_from_stack(&mut self, destination: Register, offset: i32) {
+        self.instructions.push(Asm::LdrImmGen {
+            size: 0b11,
+            imm9: 0, // not used
+            rn: SP,
+            rt: destination,
+            imm12: offset,
+            class_selector: LdrImmGenSelector::UnsignedOffset,
+        });
+    }
+
     fn new_label(&mut self, name: &str) -> Label {
         self.labels.push(name.to_string());
         Label {
@@ -279,18 +313,14 @@ impl Lang {
         &self.instructions
     }
     fn call_rust_function(&mut self, register: Register, func: *const u8) {
-
-        self.instructions.extend(
-            load_64_bit_num(register, func as usize)
-        );
+        self.instructions
+            .extend(load_64_bit_num(register, func as usize));
 
         self.call(register)
     }
 
     fn call(&mut self, register: Register) {
-        self.instructions.push(
-            branch_with_link_register(register)
-        );
+        self.instructions.push(branch_with_link_register(register));
     }
 
     fn patch_labels(&mut self) {
@@ -301,14 +331,14 @@ impl Lang {
                     let label_location = self.label_locations.get(&label_index);
                     match label_location {
                         Some(label_location) => {
-                            let relative_position = *label_location as isize - instruction_index as isize;
+                            let relative_position =
+                                *label_location as isize - instruction_index as isize;
                             *imm19 = relative_position as i32;
                         }
                         None => {
                             println!("Couldn't find label {:?}", self.labels.get(label_index));
                         }
                     }
-                   
                 }
                 _ => {}
             }
@@ -316,38 +346,64 @@ impl Lang {
     }
 
     fn mov_reg(&mut self, destination: Register, source: Register) {
-        self.instructions.push(
-            match (destination, source) {
-                (SP, _) => {
-                    mov_sp(destination, source)
-                }
-                (_, SP) => {
-                    mov_sp(destination, source)
-                }
-                _ => {
-                    mov_reg(destination, source)
-                }
-            }
-        );
+        self.instructions.push(match (destination, source) {
+            (SP, _) => mov_sp(destination, source),
+            (_, SP) => mov_sp(destination, source),
+            _ => mov_reg(destination, source),
+        });
+    }
 
+    fn volatile_register(&mut self) -> Register {
+        self.volatile_registers.pop().unwrap()
+    }
+
+    fn arg(&self, arg: u8) -> Register {
+        assert!(
+            arg < 8,
+            "Only 8 arguments are supported on aarch64, but {} was requested",
+            arg);
+        Register { size: Size::S64, index: arg }
+    }
+
+    fn ret_reg(&self) -> Register {
+        X0
     }
 }
 
 fn load_64_bit_num(register: Register, num: usize) -> Vec<Asm> {
     let mut num = num;
     let mut result = vec![];
-    
-    result.push(Asm::Movz { sf: register.sf(), hw: 0, imm16: num as i32 & 0xffff, rd: register });
+
+    result.push(Asm::Movz {
+        sf: register.sf(),
+        hw: 0,
+        imm16: num as i32 & 0xffff,
+        rd: register,
+    });
     num >>= 16;
-    result.push(Asm::Movk { sf: register.sf(), hw: 0b01, imm16: num as i32 & 0xffff, rd: register });
+    result.push(Asm::Movk {
+        sf: register.sf(),
+        hw: 0b01,
+        imm16: num as i32 & 0xffff,
+        rd: register,
+    });
     num >>= 16;
-    result.push(Asm::Movk { sf: register.sf(), hw: 0b10, imm16: num as i32 & 0xffff, rd: register });
+    result.push(Asm::Movk {
+        sf: register.sf(),
+        hw: 0b10,
+        imm16: num as i32 & 0xffff,
+        rd: register,
+    });
     num >>= 16;
-    result.push(Asm::Movk { sf: register.sf(), hw: 0b11, imm16: num as i32 & 0xffff, rd: register });
-    
+    result.push(Asm::Movk {
+        sf: register.sf(),
+        hw: 0b11,
+        imm16: num as i32 & 0xffff,
+        rd: register,
+    });
+
     result
 }
-
 
 fn use_the_assembler() -> Result<(), Box<dyn Error>> {
     let mut lang = fib();
@@ -378,15 +434,14 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
 
     let f: fn(i64, u64) -> u64 = unsafe { mem::transmute(exec.as_ref().as_ptr()) };
 
-
     let n = 30;
     let time = Instant::now();
 
     let result1 = f(n, f as *const u8 as u64);
-    println!("time {:?}", time.elapsed());
+    println!("Our time {:?}", time.elapsed());
     let time = Instant::now();
     let result2 = fib_rust(n as usize);
-    println!("time {:?}", time.elapsed());
+    println!("Rust time {:?}", time.elapsed());
     println!("{} {}", result1, result2);
 
     Ok(())
@@ -394,96 +449,64 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
 
 fn fib_rust(n: usize) -> usize {
     if n <= 1 {
-        return n
+        return n;
     }
-    return fib_rust(n - 1) + fib_rust(n - 2)
+    return fib_rust(n - 1) + fib_rust(n - 2);
 }
 
 fn fib() -> Lang {
-    let mut lang = Lang::new();
-    
-    lang.store_pair(X29, X30, SP, -4);
-    lang.mov_reg(X29, SP);
 
-    let base_case = lang.new_label("base_case");
+    let mut lang = Lang::new();
+    // lang.breakpoint();
+    lang.prelude(-4);
+
+    let const_1 = lang.volatile_register();
+    lang.mov(const_1, 1);
+
+
     let recursive_case = lang.new_label("recursive_case");
     let return_label = lang.new_label("return");
-    lang.mov(X21, 1);
 
-    lang.compare(X0, X21);
-    lang.jump_less_or_equal(base_case);
-    lang.jump(recursive_case);
-
-    lang.write_label(base_case);
-
+    lang.compare(lang.arg(0), const_1);
+    lang.jump_greater(recursive_case);
     lang.jump(return_label);
 
     lang.write_label(recursive_case);
+
+    let arg_0_minus_1 = lang.volatile_register();
+    lang.sub(arg_0_minus_1, lang.arg(0), const_1);
+
+    lang.store_on_stack(lang.arg(0), 2);
+    lang.mov_reg(lang.arg(0), arg_0_minus_1);
+
+    let first_recursive_result = lang.volatile_register();
+
+    lang.call(lang.arg(1));
+    lang.mov_reg(first_recursive_result, lang.ret_reg());
     
-    lang.sub(X19, X0, X21);
+    lang.load_from_stack(lang.arg(0), 2);
 
-    lang.instructions.push(
-        Asm::StrImmGen {
-            size: 0b11,
-            imm9: 0, // not used
-            rn: SP,
-            rt: X0,
-            imm12: 2,
-            class_selector: StrImmGenSelector::UnsignedOffset,
-        }
-    );
-    lang.mov_reg(X0, X19);
-    
-    lang.call(X1);
-    lang.mov_reg(X22, X0);
+    lang.sub(arg_0_minus_1, lang.arg(0), const_1);
+    lang.sub(arg_0_minus_1, arg_0_minus_1, const_1);
+    lang.mov_reg(lang.arg(0), arg_0_minus_1);
 
-    lang.instructions.push(
-        Asm::LdrImmGen {
-            size: 0b11,
-            imm9: 0, // not used
-            rn: SP,
-            rt: X0,
-            imm12: 2,
-            class_selector: LdrImmGenSelector::UnsignedOffset,
-        }
-    );
+    lang.store_on_stack(first_recursive_result, 2);
 
-    lang.sub(X19, X0, X21);
-    lang.sub(X19, X19, X21);
-    lang.mov_reg(X0, X19);
+    lang.call(lang.arg(1));
 
-    lang.instructions.push(
-        Asm::StrImmGen {
-            size: 0b11,
-            imm9: 0, // not used
-            rn: SP,
-            rt: X22,
-            imm12: 2,
-            class_selector: StrImmGenSelector::UnsignedOffset,
-        }
-    );
-    
-    lang.call(X1);
+    lang.load_from_stack(first_recursive_result, 2);
 
-    lang.instructions.push(
-        Asm::LdrImmGen {
-            size: 0b11,
-            imm9: 0, // not used
-            rn: SP,
-            rt: X22,
-            imm12: 2,
-            class_selector: LdrImmGenSelector::UnsignedOffset,
-        }
-    );
-    lang.add(X0, X0, X22);
-
+    lang.add(lang.ret_reg(), lang.ret_reg(), first_recursive_result);
 
     lang.write_label(return_label);
-    lang.load_pair(X29, X30, SP, 4);
+    
+    lang.epilogue(4);
 
     lang.ret();
     lang
 }
+
+
 
 fn countdown_codegen() -> Lang {
     let mut lang = Lang::new();
@@ -491,7 +514,7 @@ fn countdown_codegen() -> Lang {
     let loop_start = lang.new_label("loop_start");
     let loop_exit = lang.new_label("loop_exit");
 
-    lang.breakpoint();
+    // lang.breakpoint();
     lang.store_pair(X29, X30, SP, -2);
     lang.mov_reg(X29, SP);
     lang.mov(X22, 10);
@@ -521,12 +544,12 @@ extern "C" fn print_it(num: u64) -> u64 {
 
 // TODO:
 // Register allocator
-// Runtime? 
+// Runtime?
 //     Function in our language names and calling them.
 //     Built-in functions
 //     Stack
 //     Heap
 // Parser
 // Debugging
-// 
+//
 // PS bits the ones with X need to be dealt with
