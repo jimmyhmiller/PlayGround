@@ -615,7 +615,7 @@ impl Widget {
 
     pub fn send_process_message(&self, process_id: usize, buf: &str, wasm_messenger: &mut WasmMessenger) {
         match &self.data {
-            WidgetData::Wasm { wasm, wasm_id } => {
+            WidgetData::Wasm { wasm: _, wasm_id } => {
                 wasm_messenger.send_process_message(*wasm_id, process_id, buf);
             }
             _ => {

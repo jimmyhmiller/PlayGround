@@ -4,7 +4,7 @@ use std::{
     path::Path,
     sync::{mpsc, Arc},
     thread,
-    time::Duration, os::unix::process,
+    time::Duration,
 };
 
 use bytesize::ByteSize;
@@ -349,6 +349,10 @@ impl WasmMessenger {
                     Command::ReceiveLastProcessMessage(_) => println!("Unhandled"),
                     Command::ProvideF32(name, val) => {
                         values.insert(name.to_string(), Value::F32(*val));
+                    }
+                    Command::ProvideBytes(name, data) => {
+                        // TODO: Get rid of clone here
+                        values.insert(name.to_string(), Value::Bytes(data.clone()));
                     }
                     _ => println!("Draw command ended up here"),
                 }
@@ -711,10 +715,10 @@ enum Command {
     SendProcessMessage(i32, String),
     ReceiveLastProcessMessage(i32),
     ProvideF32(String, f32),
+    ProvideBytes(String, Vec<u8>),
 }
 
-fn get_string_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> String {
-    use core::str::from_utf8;
+fn get_bytes_from_caller<'a>(caller: &mut Caller<State>, ptr: i32, len: i32) -> Vec<u8> {
     // Use our `caller` context to learn about the memory export of the
     // module which called this host function.
     let mem = caller.get_export("memory").unwrap();
@@ -725,7 +729,15 @@ fn get_string_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> Str
     let len = len as u32 as usize;
     // println!("caller ptr: {}, len: {}", ptr, len);
     let data = mem.into_memory().unwrap().data(store).get(ptr..(ptr + len));
-    let string = from_utf8(data.unwrap()).unwrap();
+    data.unwrap().to_vec()
+}
+
+fn get_string_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> String {
+    use core::str::from_utf8;
+    // I allocate a vector here I didn't need to for code reuse sake.
+    // There is probably a better way to do this.
+    let data = get_bytes_from_caller(caller, ptr, len);
+    let string = from_utf8(&data).unwrap();
     string.to_string()
 }
 
@@ -826,6 +838,9 @@ impl WasmInstance {
                 Box::new(async move {
                     let state = caller.data_mut();
                     let (sender, receiver) = oneshot::channel();
+                    // TODO: Make this code legit
+                    // Handle when it blocks and when it doesn't.
+                    // Probably want a try_ version
                     state.sender.start_send(OutMessage {
                         message_id: 0,
                         wasm_id: 0,
@@ -865,6 +880,16 @@ impl WasmInstance {
                 let string = get_string_from_caller(&mut caller, ptr, len);
                 let state = caller.data_mut();
                 state.commands.push(Command::ProvideF32(string, val));
+            },
+        )?;
+        linker.func_wrap(
+            "host",
+            "provide_bytes",
+            |mut caller: Caller<'_, State>, name_ptr: i32, name_len: i32, ptr: i32, len: i32| {
+                let string = get_string_from_caller(&mut caller, name_ptr, name_len);
+                let data = get_bytes_from_caller(&mut caller, ptr, len).to_vec();
+                let state = caller.data_mut();
+                state.commands.push(Command::ProvideBytes(string, data));
             },
         )?;
         linker.func_wrap("host", "get_x", |mut caller: Caller<'_, State>| {

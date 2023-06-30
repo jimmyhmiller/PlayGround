@@ -25,6 +25,8 @@ extern "C" {
     fn recieve_last_message_low_level(process_id: i32) -> (i32, i32);
     #[link_name = "provide_f32"]
     fn provide_f32_low_level(ptr: i32, len: i32, val: f32);
+    #[link_name = "provide_bytes"]
+    fn provide_bytes_low_level(name_ptr: i32, name_len: i32, ptr: i32, len: i32);
     fn get_x() -> f32;
     fn get_y() -> f32;
     fn get_async_thing() -> u32;
@@ -157,7 +159,7 @@ pub trait App {
             send_message_low_level(process_id, message.as_ptr() as i32, message.len() as i32);
         }
     }
-    fn on_process_message(&mut self, process_id: i32, message: String) {
+    fn on_process_message(&mut self, _process_id: i32, _message: String) {
         
     }
     fn set_get_state(&mut self, ptr: u32, len: u32) {
@@ -166,6 +168,12 @@ pub trait App {
     fn provide_f32(&self, s: &str, val: f32) {
         unsafe {
             provide_f32_low_level(s.as_ptr() as i32, s.len() as i32, val);
+        }
+    }
+    
+    fn provide_bytes(&self, s:&str, val: &[u8]) {
+        unsafe {
+            provide_bytes_low_level(s.as_ptr() as i32, s.len() as i32, val.as_ptr() as i32, val.len() as i32);
         }
     }
 
