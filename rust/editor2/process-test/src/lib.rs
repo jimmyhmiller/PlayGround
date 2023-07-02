@@ -3,10 +3,10 @@ use std::str::FromStr;
 use framework::{app, macros::serde_json, App, Canvas};
 use lsp_types::{
     notification::{Initialized, Notification},
-    request::{Initialize, Request},
+    request::{Initialize, Request, SemanticTokensFullDeltaRequest, SemanticTokensFullRequest},
     ClientCapabilities, InitializeParams, InitializedParams, MessageActionItemCapabilities,
     ShowDocumentClientCapabilities, ShowMessageRequestClientCapabilities, Url,
-    WindowClientCapabilities, WorkspaceFolder,
+    WindowClientCapabilities, WorkspaceFolder, SemanticTokensDeltaParams, TextDocumentIdentifier, PartialResultParams, WorkDoneProgressParams, SemanticTokensParams,
 };
 use serde::{Deserialize, Serialize};
 
@@ -93,9 +93,9 @@ impl App for ProcessSpawner {
     }
 
     fn on_click(&mut self, _x: f32, _y: f32) {
-        println!("About to get value");
-        let x = self.get_async_thing();
-        println!("{:?}", x);
+        // println!("About to get value");
+        // let x = self.get_value("tokens");
+        // println!("{:?}", x);
 
         let root_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2";
 
@@ -137,7 +137,7 @@ impl App for ProcessSpawner {
 
         match self.state {
             State::Init => {
-                let process_id = self.start_process("/Users/jimmyhmiller/.vscode/extensions/rust-lang.rust-analyzer-0.3.1541-darwin-arm64/server/rust-analyzer".to_string());
+                let process_id = self.start_process("/Users/jimmyhmiller/.vscode/extensions/rust-lang.rust-analyzer-0.3.1566-darwin-arm64/server/rust-analyzer".to_string());
                 self.process_id = process_id;
                 self.state = State::Message;
             }
@@ -158,6 +158,26 @@ impl App for ProcessSpawner {
                 self.state = State::Progress;
             }
             State::Progress => {
+                let params: <SemanticTokensFullRequest as Request>::Params = SemanticTokensParams {
+                    text_document: TextDocumentIdentifier {
+                        uri: Url::from_str(&format!(
+                            "file://{}/process-test/src/lib.rs",
+                            root_path
+                        ))
+                        .unwrap(),
+                    },
+                    partial_result_params: PartialResultParams::default(),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                };
+                let json_rpc_request = JsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: 1,
+                    method: SemanticTokensFullRequest::METHOD.to_string(),
+                    params: serde_json::to_string(&params).unwrap(),
+                };
+                
+                let request = json_rpc_request.request();
+                self.send_message(self.process_id, request);
                 self.state = State::Recieve;
             }
             State::Recieve => {

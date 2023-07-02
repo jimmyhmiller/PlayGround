@@ -29,7 +29,7 @@ extern "C" {
     fn provide_bytes_low_level(name_ptr: i32, name_len: i32, ptr: i32, len: i32);
     fn get_x() -> f32;
     fn get_y() -> f32;
-    fn get_async_thing() -> u32;
+    fn get_value(ptr: i32, len: i32) -> u32;
 }
 
 #[repr(C)]
@@ -37,6 +37,15 @@ extern "C" {
 pub struct PointerLengthString {
     pub ptr: u32,
     pub len: u32,
+}
+
+// Copied from editor
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Value {
+    USize(usize),
+    F32(f32),
+    String(String),
+    Bytes(Vec<u8>),
 }
 
 impl From<&String> for PointerLengthString {
@@ -194,8 +203,8 @@ pub trait App {
         unsafe { (get_x(), get_y()) }
     }
 
-    fn get_async_thing(&self) -> String {
-        let ptr = unsafe { get_async_thing() };
+    fn get_value(&self, name: &str) -> String {
+        let ptr = unsafe { get_value(name.as_ptr() as i32, name.len() as i32) };
         let result = fetch_string(ptr);
         result
     }
