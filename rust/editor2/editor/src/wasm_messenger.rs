@@ -131,7 +131,7 @@ impl WasmMessenger {
             wasm_draw_commands: HashMap::new(),
             wasm_non_draw_commands: HashMap::new(),
             wasm_states: HashMap::new(),
-            last_message_id: 0,
+            last_message_id: 1,
             outstanding_messages: HashMap::new(),
             engine,
             receivers: HashMap::new(),
@@ -374,6 +374,8 @@ impl WasmMessenger {
         // TODO: need to time this out
         for out_receiver in self.receivers.values_mut() {
             while let Ok(Some(message)) = out_receiver.try_next() {
+                // Note: Right now if a message doesn't have a corresponding in-message
+                // I am just setting the out message to id: 0.
                 if let Some(record) = self.outstanding_messages.get_mut(&message.wasm_id) {
                     record.remove(&message.message_id);
                 }
@@ -562,7 +564,7 @@ impl WasmManager {
         receiver: Receiver<Message>,
         sender: Sender<OutMessage>,
     ) -> Self {
-        let instance = WasmInstance::new(engine.clone(), &wasm_path, sender.clone())
+        let instance = WasmInstance::new(engine.clone(), &wasm_path, sender.clone(), wasm_id)
             .await
             .unwrap();
 
@@ -686,10 +688,11 @@ struct State {
     process_messages: HashMap<i32, String>,
     position: Position,
     sender: Sender<OutMessage>,
+    wasm_id: u64,
 }
 
 impl State {
-    fn new(wasi: wasmtime_wasi::WasiCtx, sender: Sender<OutMessage>) -> Self {
+    fn new(wasi: wasmtime_wasi::WasiCtx, sender: Sender<OutMessage>, wasm_id: u64) -> Self {
         Self {
             wasi,
             commands: Vec::new(),
@@ -697,6 +700,7 @@ impl State {
             get_state_info: (0, 0),
             position: Position { x: 0.0, y: 0.0 },
             sender,
+            wasm_id,
         }
     }
 }
@@ -774,6 +778,7 @@ impl WasmInstance {
         engine: Arc<Engine>,
         wasm_path: &str,
         sender: Sender<OutMessage>,
+        wasm_id: u64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = Dir::from_std_file(
             std::fs::File::open(Path::new(wasm_path).parent().unwrap()).unwrap(),
@@ -789,7 +794,7 @@ impl WasmInstance {
         wasmtime_wasi::add_to_linker(&mut linker, |s| &mut s.wasi)?;
         Self::setup_host_functions(&mut linker)?;
 
-        let mut store = Store::new(&engine, State::new(wasi, sender));
+        let mut store = Store::new(&engine, State::new(wasi, sender, wasm_id));
         let module = Module::from_file(&engine, wasm_path)?;
 
         let instance = linker.instantiate_async(&mut store, &module).await?;
@@ -831,36 +836,39 @@ impl WasmInstance {
                 state.commands.push(Command::DrawRect(x, y, width, height));
             },
         )?;
-        linker.func_wrap0_async(
+        linker.func_wrap2_async(
             "host",
-            "get_async_thing",
-            |mut caller: Caller<'_, State>| {
+            "get_value",
+            |mut caller: Caller<'_, State>, ptr: i32, len: i32| {
+                let name = get_string_from_caller(&mut caller, ptr, len);
                 Box::new(async move {
                     let state = caller.data_mut();
                     let (sender, receiver) = oneshot::channel();
-                    // TODO: Make this code legit
                     // Handle when it blocks and when it doesn't.
                     // Probably want a try_ version
                     state.sender.start_send(OutMessage {
                         message_id: 0,
-                        wasm_id: 0,
-                        payload: OutPayload::NeededValue("hardcoded".to_string(), sender),
+                        wasm_id: state.wasm_id,
+                        payload: OutPayload::NeededValue(name, sender),
                     })?;
+                    // The value is serialized and will need to be deserialized
                     let result = receiver.await;
                     match result {
                         Ok(result) => {
-                            println!("got result: {}", result);
+                            let (ptr, _len) =
+                                WasmInstance::transfer_string_to_wasm(&mut caller, result)
+                                    .await
+                                    .unwrap();
+                            Ok(ptr)
+
                         }
-                        Err(_) => {
-                            println!("Cancelled")
+                        Err(_e) => {
+                            // TODO: Actually handle
+                            println!("Cancelled");
+                            Ok(0)
                         }
                     }
-                    let (ptr, _len) =
-                        WasmInstance::transfer_string_to_wasm(&mut caller, "hardcoded".to_string())
-                            .await
-                            .unwrap();
-
-                    Ok(ptr)
+                    
                 })
             },
         )?;

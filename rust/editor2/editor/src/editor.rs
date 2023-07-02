@@ -36,7 +36,7 @@ pub struct Context {
     pub modifiers: Modifiers,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
     USize(usize),
     F32(f32),
