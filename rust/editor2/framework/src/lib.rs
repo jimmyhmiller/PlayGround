@@ -30,6 +30,7 @@ extern "C" {
     fn get_x() -> f32;
     fn get_y() -> f32;
     fn get_value(ptr: i32, len: i32) -> u32;
+    fn try_get_value(ptr: i32, len: i32) -> u32;
 }
 
 #[repr(C)]
@@ -207,6 +208,16 @@ pub trait App {
         let ptr = unsafe { get_value(name.as_ptr() as i32, name.len() as i32) };
         let result = fetch_string(ptr);
         result
+    }
+
+
+    fn try_get_value(&self, name: &str) -> Option<String> {
+        let ptr = unsafe { get_value(name.as_ptr() as i32, name.len() as i32) };
+        if ptr == 0 {
+            return None;
+        }
+        let result = fetch_string(ptr);
+        Some(result)
     }
 }
 

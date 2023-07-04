@@ -784,10 +784,21 @@ impl WasmInstance {
             std::fs::File::open(Path::new(wasm_path).parent().unwrap()).unwrap(),
         );
 
+        let code_dir = Dir::from_std_file(
+            std::fs::File::open("/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2").unwrap(),
+        );
+
+        let vs_code_extension_dir = Dir::from_std_file(
+            std::fs::File::open("/Users/jimmyhmiller/.vscode/extensions/").unwrap(),
+        );
+
         let wasi = WasiCtxBuilder::new()
             .inherit_stdio()
             .inherit_args()?
             .preopened_dir(dir, ".")?
+            .preopened_dir(code_dir, "/code")?
+            // TODO: How do we handle this in the general case?
+            .preopened_dir(vs_code_extension_dir, "/Users/jimmyhmiller/.vscode/extensions/")?
             .build();
 
         let mut linker: Linker<State> = Linker::new(&engine);
@@ -863,6 +874,48 @@ impl WasmInstance {
 
                         }
                         Err(_e) => {
+                            // TODO: Actually handle
+                            println!("Cancelled");
+                            Ok(0)
+                        }
+                    }
+                    
+                })
+            },
+        )?;
+        linker.func_wrap2_async(
+            "host",
+            "try_get_value",
+            |mut caller: Caller<'_, State>, ptr: i32, len: i32| {
+                let name = get_string_from_caller(&mut caller, ptr, len);
+                Box::new(async move {
+                    let state = caller.data_mut();
+                    let (sender, mut receiver) = oneshot::channel();
+                    // Handle when it blocks and when it doesn't.
+                    // Probably want a try_ version
+                    state.sender.start_send(OutMessage {
+                        message_id: 0,
+                        wasm_id: state.wasm_id,
+                        payload: OutPayload::NeededValue(name, sender),
+                    })?;
+
+                    
+                    // TODO: This will probably cause problems for the sender
+                    let result = receiver.try_recv();
+                    if result.is_err() {
+                        return Ok(0);
+                    }
+                    let result = result.unwrap();
+                    match result {
+                        Some(result) => {
+                            let (ptr, _len) =
+                                WasmInstance::transfer_string_to_wasm(&mut caller, result)
+                                    .await
+                                    .unwrap();
+                            Ok(ptr)
+
+                        }
+                        None => {
                             // TODO: Actually handle
                             println!("Cancelled");
                             Ok(0)

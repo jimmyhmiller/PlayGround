@@ -1,6 +1,6 @@
 use std::str::from_utf8;
 
-use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect};
+use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, Value};
 use headless_editor::{Cursor, SimpleTextBuffer, TextBuffer, VirtualCursor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -115,12 +115,96 @@ struct TextWidget {
     edit_position: usize,
 }
 
+pub struct Token {
+    pub delta_line: usize,
+    pub delta_start: usize,
+    pub length: usize,
+    pub kind: usize,
+    pub modifiers: usize,
+}
+
+
+pub struct TokenLineIter<'a> {
+    current_position: usize,
+    tokens: &'a [Token],
+    empty_lines: usize,
+}
+
+impl<'a> Iterator for TokenLineIter<'a> 
+{
+    type Item = &'a [Token];
+    fn next(&mut self) -> Option<Self::Item> {
+        let original_position = self.current_position;
+
+        if self.empty_lines > 0 {
+            self.empty_lines -= 1;
+            return Some(&[]);
+        }
+        while self.current_position < self.tokens.len() {
+            let token = &self.tokens[self.current_position];
+            if self.current_position != original_position && token.delta_line == 1 {
+                self.empty_lines = 0;
+                return Some(&self.tokens[original_position..self.current_position]);
+
+            } else if self.current_position != original_position && token.delta_line > 1 {
+                self.empty_lines = token.delta_line - 1;
+                return Some(&self.tokens[original_position..self.current_position]);
+            }
+            self.current_position += 1;
+        }
+        if self.current_position != original_position {
+            let line = &self.tokens[original_position..self.current_position];
+            return Some(line);
+        }
+        None
+    }
+}
+
+trait TokenLinerIterExt<'a> {
+    fn token_lines(self) -> TokenLineIter<'a>;
+}
+
+
+impl <'a> TokenLinerIterExt<'a> for &'a [Token] {
+    fn token_lines(self) -> TokenLineIter<'a> {
+        TokenLineIter {
+            current_position: 0,
+            tokens: self,
+            empty_lines: 0,
+        }
+    }
+}
+
+fn make_decorted_line<'a>(line: &'a[u8], tokens: &'a[Token]) -> Vec<(&'a[u8], Option<&'a Token>)> {
+    let mut result = vec![];
+    let mut current_position = 0;
+    let mut last_end = 0;
+    for (i, token) in tokens.iter().enumerate() {
+        current_position += token.delta_start;
+        if current_position > last_end {
+            let non_token_range = last_end..current_position;
+            result.push((&line[non_token_range], None));
+        }
+        let end = current_position + token.length;
+        let token_range = current_position..end;
+        result.push((&line[token_range], Some(token)));
+        last_end = end;
+    }
+    if last_end < line.len() {
+        let non_token_range = last_end..line.len();
+        result.push((&line[non_token_range], None));
+    }
+    result
+}
+
 impl App for TextWidget {
     type State = TextPane;
 
     fn init() -> Self {
+        let file = "/code/process-test/src/lib.rs";
+        let contents = std::fs::read(file).unwrap();
         Self {
-            text_pane: TextPane::new(vec![], 30.0),
+            text_pane: TextPane::new(contents, 30.0),
             widget_data: WidgetData {
                 position: Position { x: 0.0, y: 0.0 },
                 size: Size {
@@ -133,9 +217,22 @@ impl App for TextWidget {
     }
 
     fn draw(&mut self) {
-        // let process_id = self.start_process("test-process".to_string());
-        // self.send_message(process_id, "SENDING!".to_string());
-        // println!("Got Message {}", self.recieve_last_message(process_id));
+
+
+        // TODO: Clean up
+        // Only do this when I need to
+        let tokens = if let Some(tokens) = self.try_get_value("tokens") {
+            if let Value::Bytes(bytes) = serde_json::from_str::<Value>(&tokens).unwrap() {
+                let tokens: Vec<u64> = serde_json::from_slice(&bytes).unwrap();
+                let tokens = parse_tokens(&tokens);
+                Some(tokens)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
 
         let canvas = Canvas::new();
 
@@ -153,11 +250,6 @@ impl App for TextWidget {
         canvas.set_color(&background);
         canvas.clip_rect(bounding_rect);
         canvas.draw_rrect(bounding_rect, 20.0);
-        // TODO: deal with fonts
-        // let font = Font::new(
-        //     Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
-        //     32.0,
-        // );
 
         canvas.clip_rect(bounding_rect.with_inset((20.0, 20.0)));
 
@@ -186,19 +278,85 @@ impl App for TextWidget {
 
         canvas.save();
 
-        for line in self
-            .text_pane
-            .text_buffer
-            .lines()
-            .skip(self.text_pane.lines_above_scroll())
-            .take(
-                self.text_pane
-                    .number_of_visible_lines(self.widget_data.size.height),
-            )
-        {
-            if let Ok(line) = from_utf8(line) {
-                canvas.draw_str(line, 0.0, 0.0);
+        if let Some(tokens) = tokens {
+            let token_iter = tokens.token_lines();
+            let line_iter = self.text_pane.text_buffer.lines();
+            let zipped = line_iter.zip(token_iter);
+            for (line, tokens) in zipped
+                .skip(self.text_pane.lines_above_scroll())
+                .take(
+                    self.text_pane
+                        .number_of_visible_lines(self.widget_data.size.height),
+                )
+            {
+                
+
+                let mut x = 0.0;
+                for (text, token) in make_decorted_line(line, tokens) {
+                    let foreground = if let Some(token) = token {
+                        Color::new( 1.0 / token.kind as f32, 1.0 / token.modifiers as f32, 0.0, 1.0)
+                    } else {
+                        Color::parse_hex("#aa9941")
+                    };
+                    canvas.set_color(&foreground);
+                    let text = from_utf8(text).unwrap().to_string();
+                    // let text = if let Some(token) = token {
+                    //     format!("length: {}, start: {}, text: {}", text.len(), token.delta_start, text)
+                    // } else {
+                    //     format!("empty: {}, text: {}", text.len(), text)
+                    // };
+                    canvas.draw_str(&text, x, 0.0);
+                    x += text.len() as f32 * 16.0;
+                }
                 canvas.translate(0.0, self.text_pane.line_height);
+                // if let Ok(line) = from_utf8(line) {
+                //     canvas.draw_str(line, 0.0, 0.0);
+                //     canvas.translate(0.0, self.text_pane.line_height);
+                // }
+                // canvas.translate(0.0, self.text_pane.line_height);
+
+                // let mut position = 0;
+                // let mut x = 0.0;
+                // for (i, token) in tokens.iter().enumerate() {
+                //     let length = token.length;
+                //     let start = if i == 0 {
+                //         0
+                //     } else {
+                //         position + token.delta_start
+                //     };
+                //     let end = start + length;
+                //     let token_text = &line[start..end];
+                //     canvas.draw_str(from_utf8(token_text).unwrap(), x, 0.0);
+                //     x += length as f32 * 18.0;
+                //     if i != 0 {
+                //         position += token.delta_start;
+                //     }
+                //     canvas.draw_rect(x, -50.0, 3.0, 50.0);
+                // }
+                // canvas.translate(0.0, self.text_pane.line_height);
+                // if let Ok(line) = from_utf8(line) {
+                //     canvas.draw_str(line, 0.0, 0.0);
+                //     canvas.translate(0.0, self.text_pane.line_height);
+                // }
+                // canvas.translate(0.0, self.text_pane.line_height);
+
+            }
+        } else {
+            for line in self
+                .text_pane
+                .text_buffer
+                .lines()
+                .skip(self.text_pane.lines_above_scroll())
+                .take(
+                    self.text_pane
+                        .number_of_visible_lines(self.widget_data.size.height),
+                )
+            {
+                canvas.set_color(&foreground);
+                if let Ok(line) = from_utf8(line) {
+                    canvas.draw_str(line, 0.0, 0.0);
+                    canvas.translate(0.0, self.text_pane.line_height);
+                }
             }
         }
         canvas.restore();
@@ -223,16 +381,7 @@ impl App for TextWidget {
             );
         }
 
-        // let line_height = 30.0;
-        // canvas.set_color(foreground);
-        // for line in text.split("\\n") {
-        //     canvas.draw_str(line, 0.0, 0.0);
-        //     canvas.translate(0.0, line_height);
-        // }
-
         canvas.restore();
-        // canvas.draw_rect(0.0, 0.0, 240 as f32, 100 as f32);
-        // canvas.draw_str(&format!("Count: {}", self.count), 40.0, 50.0);
     }
 
     fn on_click(&mut self, x: f32, y: f32) {
@@ -316,8 +465,33 @@ impl App for TextWidget {
     }
 
     fn set_state(&mut self, state: Self::State) {
-        self.text_pane = state;
+        // TODO: hacky
+        // let old_contents = self.text_pane.contents.clone();
+        // self.text_pane = state;
+        // self.text_pane.contents = old_contents;
     }
+}
+
+impl From<&[u64]> for Token {
+    fn from(chunk: &[u64]) -> Self {
+        assert!(
+            chunk.len() == 5,
+            "Expected chunk to be of length 5, but was {}",
+            chunk.len(),
+        );
+        Token {
+            delta_line: chunk[0] as usize,
+            delta_start: chunk[1] as usize,
+            length: chunk[2] as usize,
+            kind: chunk[3] as usize,
+            modifiers: chunk[4] as usize,
+            
+        }
+    }
+}
+
+fn parse_tokens(tokens: &[u64]) -> Vec<Token> {
+    tokens.chunks(5).map(|chunk| Token::from(chunk)).collect()
 }
 
 app!(TextWidget);
