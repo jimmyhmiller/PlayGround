@@ -1,14 +1,22 @@
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr, fs};
 
-use framework::{app, macros::serde_json, App, Canvas};
+use framework::{app, macros::serde_json, App, Canvas, Value};
 use lsp_types::{
     notification::{Initialized, Notification},
-    request::{Initialize, Request, SemanticTokensFullDeltaRequest, SemanticTokensFullRequest},
+    request::{Initialize, Request, SemanticTokensFullRequest},
     ClientCapabilities, InitializeParams, InitializedParams, MessageActionItemCapabilities,
-    ShowDocumentClientCapabilities, ShowMessageRequestClientCapabilities, Url,
-    WindowClientCapabilities, WorkspaceFolder, SemanticTokensDeltaParams, TextDocumentIdentifier, PartialResultParams, WorkDoneProgressParams, SemanticTokensParams,
+    PartialResultParams, SemanticTokensParams, ShowDocumentClientCapabilities,
+    ShowMessageRequestClientCapabilities, TextDocumentIdentifier, Url, WindowClientCapabilities,
+    WorkDoneProgressParams, WorkspaceFolder,
 };
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Deserialize, Serialize)]
+struct Data {
+    state: State,
+    message_type: HashMap<usize, String>,
+    last_request_id: usize,
+}
 
 #[derive(Copy, Clone, Deserialize, Serialize)]
 enum State {
@@ -19,40 +27,10 @@ enum State {
     Progress,
 }
 
-struct JsonRpcRequest {
-    jsonrpc: String,
-    id: i32,
-    method: String,
-    params: String,
-}
-
-impl JsonRpcRequest {
-    fn request(&self) -> String {
-        // construct the request and add the headers including content-length
-        let body = format!(
-            "{{\"jsonrpc\":\"{}\",\"id\":{},\"method\":\"{}\",\"params\":{}}}",
-            self.jsonrpc, self.id, self.method, self.params
-        );
-        let content_length = body.len();
-        let headers = format!("Content-Length: {}\r\n\r\n", content_length);
-        format!("{}{}", headers, body)
-    }
-    fn notification(&self) -> String {
-        let body = format!(
-            "{{\"jsonrpc\":\"{}\",\"method\":\"{}\",\"params\":{}}}",
-            self.jsonrpc, self.method, self.params
-        );
-        let content_length = body.len();
-        let headers = format!("Content-Length: {}\r\n\r\n", content_length);
-        format!("{}{}", headers, body)
-    }
-}
-
 struct ProcessSpawner {
-    state: State,
+    state: Data,
     process_id: i32,
 }
-
 
 impl ProcessSpawner {
     fn parse_message(
@@ -75,14 +53,55 @@ impl ProcessSpawner {
 
         Ok(results)
     }
+
+    fn update_state(&mut self, state: State) {
+        self.state.state = state;
+    }
+
+    fn next_request_id(&mut self) -> usize {
+        self.state.last_request_id += 1;
+        self.state.last_request_id
+    }
+
+    fn request(&mut self, id: usize, method: &str, params: &str) -> String {
+        // construct the request and add the headers including content-length
+        let body = format!(
+            "{{\"jsonrpc\":\"{}\",\"id\":{},\"method\":\"{}\",\"params\":{}}}",
+            "2.0", id, method, params
+        );
+        let content_length = body.len();
+        let headers = format!("Content-Length: {}\r\n\r\n", content_length);
+        format!("{}{}", headers, body)
+    }
+
+    fn send_request(&mut self, method: &str, params: &str) {
+        let id = self.next_request_id();
+        let request = self.request(id, method, params);
+        self.state.message_type.insert(id, method.to_string());
+        self.send_message(self.process_id, request);
+    }
+
+    fn notification(&self, method: &str, params: &str) -> String {
+        let body = format!(
+            "{{\"jsonrpc\":\"{}\",\"method\":\"{}\",\"params\":{}}}",
+            "2.0", method, params
+        );
+        let content_length = body.len();
+        let headers = format!("Content-Length: {}\r\n\r\n", content_length);
+        format!("{}{}", headers, body)
+    }
 }
 
 impl App for ProcessSpawner {
-    type State = State;
+    type State = Data;
 
     fn init() -> Self {
         ProcessSpawner {
-            state: State::Init,
+            state: Data {
+                state: State::Init,
+                message_type: HashMap::new(),
+                last_request_id: 0,
+            },
             process_id: 0,
         }
     }
@@ -124,38 +143,29 @@ impl App for ProcessSpawner {
             }),
             show_document: Some(ShowDocumentClientCapabilities { support: true }),
         });
-        let request = Initialize::METHOD;
 
-        let json_rpc_request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: 1,
-            method: request.to_string(),
-            params: serde_json::to_string(&initialize_params).unwrap(),
-        };
-
-        let request = json_rpc_request.request();
-
-        match self.state {
+        match self.state.state {
             State::Init => {
-                let process_id = self.start_process("/Users/jimmyhmiller/.vscode/extensions/rust-lang.rust-analyzer-0.3.1566-darwin-arm64/server/rust-analyzer".to_string());
+                let process_id = self.start_process(find_rust_analyzer());
                 self.process_id = process_id;
-                self.state = State::Message;
+                self.update_state(State::Message);
             }
             State::Message => {
-                self.state = State::Initialized;
-                self.send_message(self.process_id, request)
+                self.update_state(State::Initialized);
+
+                self.send_request(
+                    Initialize::METHOD,
+                    &serde_json::to_string(&initialize_params).unwrap(),
+                );
             }
             State::Initialized => {
                 let params: <Initialized as Notification>::Params = InitializedParams {};
-                let json_rpc_request = JsonRpcRequest {
-                    jsonrpc: "2.0".to_string(),
-                    id: 1,
-                    method: Initialized::METHOD.to_string(),
-                    params: serde_json::to_string(&params).unwrap(),
-                };
-                let request = json_rpc_request.notification();
+                let request = self.notification(
+                    Initialized::METHOD,
+                    &serde_json::to_string(&params).unwrap(),
+                );
                 self.send_message(self.process_id, request);
-                self.state = State::Progress;
+                self.update_state(State::Progress);
             }
             State::Progress => {
                 let params: <SemanticTokensFullRequest as Request>::Params = SemanticTokensParams {
@@ -169,19 +179,22 @@ impl App for ProcessSpawner {
                     partial_result_params: PartialResultParams::default(),
                     work_done_progress_params: WorkDoneProgressParams::default(),
                 };
-                let json_rpc_request = JsonRpcRequest {
-                    jsonrpc: "2.0".to_string(),
-                    id: 1,
-                    method: SemanticTokensFullRequest::METHOD.to_string(),
-                    params: serde_json::to_string(&params).unwrap(),
-                };
-                
-                let request = json_rpc_request.request();
-                self.send_message(self.process_id, request);
-                self.state = State::Recieve;
+
+                self.send_request(
+                    SemanticTokensFullRequest::METHOD,
+                    &serde_json::to_string(&params).unwrap(),
+                );
+                self.update_state(State::Recieve);
             }
             State::Recieve => {
-                println!("Noop")
+                if let Some(tokens) = self.try_get_value("tokens") {
+                    if let Value::Bytes(bytes) = serde_json::from_str::<Value>(&tokens).unwrap() {
+                        let other_json: Vec<u64> = serde_json::from_slice(&bytes).unwrap();
+                        println!("{:?}", other_json);
+                    }
+
+                }
+
             }
         }
     }
@@ -191,7 +204,7 @@ impl App for ProcessSpawner {
     fn on_scroll(&mut self, _x: f64, _y: f64) {}
 
     fn get_state(&self) -> Self::State {
-        self.state
+        self.state.clone()
     }
 
     fn on_process_message(&mut self, _process_id: i32, message: String) {
@@ -200,9 +213,15 @@ impl App for ProcessSpawner {
             match self.parse_message(&message) {
                 Ok(messages) => {
                     for message in messages {
-                        let method = message["method"].as_str();
-                        // let params = &message["params"];
-                        println!("Method: {:?}", method);
+                        // let method = message["method"].as_str();
+                        if let Some(id) = message["id"].as_u64() {
+                            if let Some(method) = self.state.message_type.get(&(id as usize)) {
+                                if method == "textDocument/semanticTokens/full" {
+                                    self.provide_bytes("tokens", &extract_tokens(&message));
+                                }
+                                println!("Method: {:?}", method);
+                            }
+                        }
                     }
                 }
                 Err(err) => {
@@ -215,6 +234,30 @@ impl App for ProcessSpawner {
     }
 
     fn set_state(&mut self, _state: Self::State) {}
+}
+
+fn extract_tokens(message: &serde_json::Value) -> Vec<u8> {
+    let result = &message["result"];
+    let data = &result["data"];
+    serde_json::to_string(&data).unwrap().into_bytes()
+}
+
+fn find_rust_analyzer() -> String {
+    let root = "/Users/jimmyhmiller/.vscode/extensions/";
+    let folder = fs::read_dir(root)
+        .unwrap()
+        .map(|res| res.map(|e| e.path()))
+        .find(|path| {
+            path.as_ref()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("rust-lang.rust-analyzer")
+        }).unwrap().unwrap();
+
+    format!("{}/server/rust-analyzer", folder.to_str().unwrap())
 }
 
 app!(ProcessSpawner);
