@@ -309,37 +309,6 @@ impl App for TextWidget {
                     x += text.len() as f32 * 16.0;
                 }
                 canvas.translate(0.0, self.text_pane.line_height);
-                // if let Ok(line) = from_utf8(line) {
-                //     canvas.draw_str(line, 0.0, 0.0);
-                //     canvas.translate(0.0, self.text_pane.line_height);
-                // }
-                // canvas.translate(0.0, self.text_pane.line_height);
-
-                // let mut position = 0;
-                // let mut x = 0.0;
-                // for (i, token) in tokens.iter().enumerate() {
-                //     let length = token.length;
-                //     let start = if i == 0 {
-                //         0
-                //     } else {
-                //         position + token.delta_start
-                //     };
-                //     let end = start + length;
-                //     let token_text = &line[start..end];
-                //     canvas.draw_str(from_utf8(token_text).unwrap(), x, 0.0);
-                //     x += length as f32 * 18.0;
-                //     if i != 0 {
-                //         position += token.delta_start;
-                //     }
-                //     canvas.draw_rect(x, -50.0, 3.0, 50.0);
-                // }
-                // canvas.translate(0.0, self.text_pane.line_height);
-                // if let Ok(line) = from_utf8(line) {
-                //     canvas.draw_str(line, 0.0, 0.0);
-                //     canvas.translate(0.0, self.text_pane.line_height);
-                // }
-                // canvas.translate(0.0, self.text_pane.line_height);
-
             }
         } else {
             for line in self
