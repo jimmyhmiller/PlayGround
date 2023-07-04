@@ -1,7 +1,9 @@
 use std::str::from_utf8;
 
 use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, Value};
-use headless_editor::{Cursor, SimpleTextBuffer, TextBuffer, VirtualCursor};
+use headless_editor::{
+    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
@@ -33,7 +35,7 @@ pub struct TextPane {
     line_height: f32,
     offset: Position,
     cursor: Cursor,
-    text_buffer: SimpleTextBuffer,
+    text_buffer: TokenTextBuffer<SimpleTextBuffer>,
 }
 
 impl TextPane {
@@ -43,7 +45,7 @@ impl TextPane {
             line_height,
             offset: Position { x: 0.0, y: 0.0 },
             cursor: Cursor::new(0, 0),
-            text_buffer: SimpleTextBuffer::new_with_contents(&contents),
+            text_buffer: TokenTextBuffer::new_with_contents(&contents),
         }
     }
 
@@ -115,88 +117,6 @@ struct TextWidget {
     edit_position: usize,
 }
 
-pub struct Token {
-    pub delta_line: usize,
-    pub delta_start: usize,
-    pub length: usize,
-    pub kind: usize,
-    pub modifiers: usize,
-}
-
-
-pub struct TokenLineIter<'a> {
-    current_position: usize,
-    tokens: &'a [Token],
-    empty_lines: usize,
-}
-
-impl<'a> Iterator for TokenLineIter<'a> 
-{
-    type Item = &'a [Token];
-    fn next(&mut self) -> Option<Self::Item> {
-        let original_position = self.current_position;
-
-        if self.empty_lines > 0 {
-            self.empty_lines -= 1;
-            return Some(&[]);
-        }
-        while self.current_position < self.tokens.len() {
-            let token = &self.tokens[self.current_position];
-            if self.current_position != original_position && token.delta_line == 1 {
-                self.empty_lines = 0;
-                return Some(&self.tokens[original_position..self.current_position]);
-
-            } else if self.current_position != original_position && token.delta_line > 1 {
-                self.empty_lines = token.delta_line - 1;
-                return Some(&self.tokens[original_position..self.current_position]);
-            }
-            self.current_position += 1;
-        }
-        if self.current_position != original_position {
-            let line = &self.tokens[original_position..self.current_position];
-            return Some(line);
-        }
-        None
-    }
-}
-
-trait TokenLinerIterExt<'a> {
-    fn token_lines(self) -> TokenLineIter<'a>;
-}
-
-
-impl <'a> TokenLinerIterExt<'a> for &'a [Token] {
-    fn token_lines(self) -> TokenLineIter<'a> {
-        TokenLineIter {
-            current_position: 0,
-            tokens: self,
-            empty_lines: 0,
-        }
-    }
-}
-
-fn make_decorted_line<'a>(line: &'a[u8], tokens: &'a[Token]) -> Vec<(&'a[u8], Option<&'a Token>)> {
-    let mut result = vec![];
-    let mut current_position = 0;
-    let mut last_end = 0;
-    for (i, token) in tokens.iter().enumerate() {
-        current_position += token.delta_start;
-        if current_position > last_end {
-            let non_token_range = last_end..current_position;
-            result.push((&line[non_token_range], None));
-        }
-        let end = current_position + token.length;
-        let token_range = current_position..end;
-        result.push((&line[token_range], Some(token)));
-        last_end = end;
-    }
-    if last_end < line.len() {
-        let non_token_range = last_end..line.len();
-        result.push((&line[non_token_range], None));
-    }
-    result
-}
-
 impl App for TextWidget {
     type State = TextPane;
 
@@ -217,8 +137,6 @@ impl App for TextWidget {
     }
 
     fn draw(&mut self) {
-
-
         // TODO: Clean up
         // Only do this when I need to
         let tokens = if let Some(tokens) = self.try_get_value("tokens") {
@@ -232,7 +150,6 @@ impl App for TextWidget {
         } else {
             None
         };
-
 
         let canvas = Canvas::new();
 
@@ -279,27 +196,32 @@ impl App for TextWidget {
         canvas.save();
 
         if let Some(tokens) = tokens {
-            let token_iter = tokens.token_lines();
-            let line_iter = self.text_pane.text_buffer.lines();
-            let zipped = line_iter.zip(token_iter);
-            for (line, tokens) in zipped
-                .skip(self.text_pane.lines_above_scroll())
-                .take(
-                    self.text_pane
-                        .number_of_visible_lines(self.widget_data.size.height),
-                )
-            {
-                
+            self.text_pane.text_buffer.set_tokens(tokens);
 
+            for line in self.text_pane.text_buffer.decorated_lines(
+                self.text_pane.lines_above_scroll(),
+                self.text_pane
+                    .number_of_visible_lines(self.widget_data.size.height),
+            ) {
                 let mut x = 0.0;
-                for (text, token) in make_decorted_line(line, tokens) {
+                for (text, token) in line {
                     let foreground = if let Some(token) = token {
-                        Color::new( 1.0 / token.kind as f32, 1.0 / token.modifiers as f32, 0.0, 1.0)
+                        Color::new(
+                            1.0 / token.kind as f32,
+                            1.0 / token.modifiers as f32,
+                            0.0,
+                            1.0,
+                        )
                     } else {
                         Color::parse_hex("#aa9941")
                     };
                     canvas.set_color(&foreground);
                     let text = from_utf8(text).unwrap().to_string();
+                    // let text = if let Some(token) = token {
+                    //     format!("length: {}, start: {}, text: {}", text.len(), token.delta_start, text)
+                    // } else {
+                    //     format!("empty: {}, text: {}", text.len(), text)
+                    // };
                     canvas.draw_str(&text, x, 0.0);
                     x += text.len() as f32 * 16.0;
                 }
@@ -434,28 +356,6 @@ impl App for TextWidget {
         // self.text_pane = state;
         // self.text_pane.contents = old_contents;
     }
-}
-
-impl From<&[u64]> for Token {
-    fn from(chunk: &[u64]) -> Self {
-        assert!(
-            chunk.len() == 5,
-            "Expected chunk to be of length 5, but was {}",
-            chunk.len(),
-        );
-        Token {
-            delta_line: chunk[0] as usize,
-            delta_start: chunk[1] as usize,
-            length: chunk[2] as usize,
-            kind: chunk[3] as usize,
-            modifiers: chunk[4] as usize,
-            
-        }
-    }
-}
-
-fn parse_tokens(tokens: &[u64]) -> Vec<Token> {
-    tokens.chunks(5).map(|chunk| Token::from(chunk)).collect()
 }
 
 app!(TextWidget);

@@ -1,6 +1,7 @@
 use core::cmp::min;
 use core::fmt::Debug;
 use std::collections::HashMap;
+use std::ops::Range;
 // TODO: I probably do need to return actions here
 // for every time the cursor moves.
 
@@ -44,6 +45,211 @@ pub trait TextBuffer {
     fn lines(&self) -> LineIter<Self::Item>;
     fn last_line(&self) -> usize {
         self.line_count().saturating_sub(1)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Token {
+    pub delta_line: usize,
+    pub delta_start: usize,
+    pub length: usize,
+    pub kind: usize,
+    pub modifiers: usize,
+}
+
+impl From<&[u64]> for Token {
+    fn from(chunk: &[u64]) -> Self {
+        assert!(
+            chunk.len() == 5,
+            "Expected chunk to be of length 5, but was {}",
+            chunk.len(),
+        );
+        Token {
+            delta_line: chunk[0] as usize,
+            delta_start: chunk[1] as usize,
+            length: chunk[2] as usize,
+            kind: chunk[3] as usize,
+            modifiers: chunk[4] as usize,
+            
+        }
+    }
+}
+
+pub fn parse_tokens(tokens: &[u64]) -> Vec<Token> {
+    tokens.chunks(5).map(|chunk| Token::from(chunk)).collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Edit {
+    Insert(usize, usize, Vec<u8>),
+    Delete(usize, usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct TokenTextBuffer<T: TextBuffer> {
+    pub tokens: Vec<Token>,
+    pub underlying_text_buffer: T,
+    pub edits: Vec<Edit>,
+}
+
+impl<T> TokenTextBuffer<T>
+where
+    T: TextBuffer<Item = u8>,
+{
+    // TODO: Make this an iterator instead
+    pub fn decorated_lines(&self, skip: usize, take: usize) -> Vec<Vec<(&[u8], Option<&Token>)>> {
+        let mut result = vec![];
+        for (relative_line_number, (line, tokens)) in self
+            .lines()
+            .skip(skip)
+            .take(take)
+            .zip(self.tokens.token_lines().skip(skip).take(take))
+            .enumerate()
+        {
+            let line_number = relative_line_number + skip;
+            result.push(self.decorated_line(line_number, line, tokens));
+        }
+        result
+    }
+
+    fn decorated_line<'a>(
+        &self,
+        line_number: usize,
+        line: &'a [u8],
+        tokens: &'a [Token],
+    ) -> Vec<(&'a [u8], Option<&'a Token>)> {
+        // TODO: Need to account for edits
+
+        let mut result = vec![];
+        let mut current_position = 0;
+        let mut last_end = 0;
+        for token in tokens.iter() {
+            current_position += token.delta_start;
+            if current_position > last_end {
+                let non_token_range = last_end..current_position;
+                result.push((&line[non_token_range], None));
+            }
+            let end = current_position + token.length;
+            let token_range = current_position..end;
+            result.push((&line[token_range], Some(token)));
+            last_end = end;
+        }
+        if last_end < line.len() {
+            let non_token_range = last_end..line.len();
+            result.push((&line[non_token_range], None));
+        }
+
+        result
+    }
+
+    fn apply_edits(&mut self) {
+        for edit in self.edits.iter() {
+            match edit {
+                Edit::Insert(line, column, text) => {
+                    self.underlying_text_buffer
+                        .insert_bytes(*line, *column, text.as_slice())
+                }
+                Edit::Delete(line, column) => {
+                    self.underlying_text_buffer.delete_char(*line, *column)
+                }
+            }
+        }
+    }
+
+    pub fn set_tokens(&mut self, tokens: Vec<Token>) {
+        self.tokens = tokens;
+    }
+}
+
+impl<T> TextBuffer for TokenTextBuffer<T>
+where
+    T: TextBuffer<Item = u8>,
+{
+    type Item = u8;
+
+    fn line_length(&self, line: usize) -> usize {
+        self.underlying_text_buffer.line_length(line)
+    }
+
+    fn line_count(&self) -> usize {
+        self.underlying_text_buffer.line_count()
+    }
+
+    fn insert_bytes(&mut self, line: usize, column: usize, text: &[Self::Item]) {
+        // self.underlying_text_buffer.insert_bytes(line, column, text);
+        self.edits.push(Edit::Insert(line, column, text.to_vec()));
+    }
+
+    fn byte_at_pos(&self, line: usize, column: usize) -> Option<&Self::Item> {
+        self.underlying_text_buffer.byte_at_pos(line, column)
+    }
+
+    fn delete_char(&mut self, line: usize, column: usize) {
+        // self.underlying_text_buffer.delete_char(line, column);
+        self.edits.push(Edit::Delete(line, column));
+    }
+
+    fn lines(&self) -> LineIter<Self::Item> {
+        self.underlying_text_buffer.lines()
+    }
+}
+
+impl TokenTextBuffer<SimpleTextBuffer> {
+    pub fn new_with_contents(contents: &[u8]) -> Self {
+        let underlying_text_buffer = SimpleTextBuffer::new_with_contents(contents);
+        Self {
+            tokens: vec![],
+            underlying_text_buffer,
+            edits: vec![],
+        }
+    }
+}
+
+pub struct TokenLineIter<'a> {
+    current_position: usize,
+    tokens: &'a [Token],
+    empty_lines: usize,
+}
+
+impl<'a> Iterator for TokenLineIter<'a> {
+    type Item = &'a [Token];
+    fn next(&mut self) -> Option<Self::Item> {
+        let original_position = self.current_position;
+
+        if self.empty_lines > 0 {
+            self.empty_lines -= 1;
+            return Some(&[]);
+        }
+        while self.current_position < self.tokens.len() {
+            let token = &self.tokens[self.current_position];
+            if self.current_position != original_position && token.delta_line == 1 {
+                self.empty_lines = 0;
+                return Some(&self.tokens[original_position..self.current_position]);
+            } else if self.current_position != original_position && token.delta_line > 1 {
+                self.empty_lines = token.delta_line - 1;
+                return Some(&self.tokens[original_position..self.current_position]);
+            }
+            self.current_position += 1;
+        }
+        if self.current_position != original_position {
+            let line = &self.tokens[original_position..self.current_position];
+            return Some(line);
+        }
+        None
+    }
+}
+
+trait TokenLinerIterExt<'a> {
+    fn token_lines(self) -> TokenLineIter<'a>;
+}
+
+impl<'a> TokenLinerIterExt<'a> for &'a [Token] {
+    fn token_lines(self) -> TokenLineIter<'a> {
+        TokenLineIter {
+            current_position: 0,
+            tokens: self,
+            empty_lines: 0,
+        }
     }
 }
 
@@ -155,14 +361,11 @@ pub trait VirtualCursor: Clone + Debug {
         let next_line = self.line().saturating_add(1);
         let last_line = buffer.last_line();
         if next_line > last_line {
-            return
+            return;
         }
         self.move_to(
             min(next_line, last_line),
-            min(
-                self.column(),
-                buffer.line_length(next_line),
-            ),
+            min(self.column(), buffer.line_length(next_line)),
         );
     }
 
