@@ -309,6 +309,10 @@ impl App for TextWidget {
                 .handle_insert(&[char as u8], &mut self.text_pane.text_buffer);
         }
 
+        // TODO: Send message about what changed
+        // Listen to that message and send to lsp
+        // Update tokens
+
         match input.key_code {
             KeyCode::UpArrow => {
                 if self.text_pane.cursor.line() == self.text_pane.lines_above_scroll() {
