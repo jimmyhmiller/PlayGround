@@ -1,8 +1,8 @@
 use std::str::from_utf8;
 
-use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, Value};
+use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, Value, EventWrapper};
 use headless_editor::{
-    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
+    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -307,6 +307,14 @@ impl App for TextWidget {
             self.text_pane
                 .cursor
                 .handle_insert(&[char as u8], &mut self.text_pane.text_buffer);
+        }
+
+        // TODO: I actually want the new edits, not all of them.
+        for edit in self.text_pane.text_buffer.edits.iter() {
+            self.send_event(serde_json::ser::to_string(&EventWrapper {
+                kind: "text_change".to_string(),
+                data: serde_json::ser::to_string(edit).unwrap(),
+            }).unwrap());
         }
 
         // TODO: Send message about what changed
