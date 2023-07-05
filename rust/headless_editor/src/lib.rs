@@ -154,6 +154,7 @@ where
                 }
             }
         }
+        self.edits.clear();
     }
 
     pub fn set_tokens(&mut self, tokens: Vec<Token>) {

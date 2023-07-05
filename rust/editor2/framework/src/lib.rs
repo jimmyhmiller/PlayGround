@@ -31,6 +31,18 @@ extern "C" {
     fn get_y() -> f32;
     fn get_value(ptr: i32, len: i32) -> u32;
     fn try_get_value(ptr: i32, len: i32) -> u32;
+    #[link_name = "send_event"]
+    fn send_event_low_level(ptr: i32, len: i32);
+    #[link_name = "subscribe"]
+    fn subscribe_low_level(ptr: i32, len: i32);
+    #[link_name = "unsubscribe"]
+    fn unsubscribe_low_level(ptr: i32, len: i32);
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct EventWrapper {
+    pub kind: String,
+    pub data: String,
 }
 
 #[repr(C)]
@@ -159,6 +171,7 @@ pub trait App {
     fn on_click(&mut self, x: f32, y: f32);
     fn on_key(&mut self, input: KeyboardInput);
     fn on_scroll(&mut self, x: f64, y: f64);
+    fn on_event(&mut self, event: String) {}
     fn get_state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State);
     fn start_process(&mut self, process: String) -> i32 {
@@ -187,6 +200,12 @@ pub trait App {
         }
     }
 
+    fn send_event(&self, event: String) {
+        unsafe {
+            send_event_low_level(event.as_ptr() as i32, event.len() as i32);
+        }
+    }
+
     fn recieve_last_message(&mut self, process_id: i32) -> String {
         let buffer;
         unsafe {
@@ -209,7 +228,6 @@ pub trait App {
         let result = fetch_string(ptr);
         result
     }
-
 
     fn try_get_value(&self, name: &str) -> Option<String> {
         let ptr = unsafe { get_value(name.as_ptr() as i32, name.len() as i32) };
@@ -329,6 +347,12 @@ pub mod macros {
             pub extern "C" fn on_key(key: u32, state: u32, modifiers: u32) {
                 use framework::KeyboardInput;
                 unsafe { APP.on_key(KeyboardInput::from_u32(key, state, modifiers)) }
+            }
+
+            #[no_mangle]
+            pub extern "C" fn on_event(str_ptr: u32) {
+                let message = framework::fetch_string(str_ptr);
+                unsafe { APP.on_event(message) }
             }
 
             #[no_mangle]
