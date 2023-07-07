@@ -110,6 +110,10 @@ enum TokenAction {
     CreateToken,
     OffsetToken {
         index: usize,
+        length: isize,
+    },
+    ReduceTokenLength {
+        index: usize,
         length: usize,
     },
 }
@@ -158,11 +162,15 @@ where
         for token in tokens.iter() {
             current_position += token.delta_start;
             if current_position > last_end {
-                let non_token_range = last_end..current_position;
+                let non_token_end = current_position;
+                let non_token_end = std::cmp::min(non_token_end, line.len());
+                let non_token_range = last_end..non_token_end;
                 result.push((&line[non_token_range], None));
             }
             let end = current_position + token.length;
-            let token_range = current_position..end;
+            let end = std::cmp::min(end, line.len());
+            let start = std::cmp::min(current_position, end);
+            let token_range = start..end;
             result.push((&line[token_range], Some(token)));
             last_end = end;
         }
@@ -183,12 +191,20 @@ where
 
     fn update_tokens_insert(&mut self, line: usize, column: usize, text: &[u8]) {
         let window: TokenWindow = self.find_token(line, column);
-        let actions = self.resolve_token_action(window, line, column, text);
+        let actions = self.resolve_token_action_insert(window, line, column, text);
         for action in actions.iter() {
             self.apply_token_action(action);
         }
-
     }
+
+    fn update_tokens_delete(&mut self, line: usize, column: usize) {
+        let window: TokenWindow = self.find_token(line, column);
+        let actions = self.result_token_action_delete(window, line, column);
+        for action in actions.iter() {
+            self.apply_token_action(action);
+        }
+    }
+    
 
     fn find_token(&self, line: usize, column: usize) -> TokenWindow {
         let mut index = 0;
@@ -204,10 +220,10 @@ where
                 current_column = 0;
             }
             current_column += token.delta_start;
-            println!("current_line: {}, current_columns: {}, token: {:?}", current_line, current_column, token);
+            
             if current_line == line {
                 if current_column >= column && column < current_column + token.length {
-                    println!("found token {:?}", token);
+                   
                     center = Some(token.clone());
                     break;
                 }
@@ -231,21 +247,19 @@ where
         }
     }
 
-    fn resolve_token_action<>(&self, window: TokenWindow, line: usize, column: usize, text: &[u8]) -> Vec<TokenAction> {
+    fn resolve_token_action_insert(&self, window: TokenWindow, line: usize, column: usize, text: &[u8]) -> Vec<TokenAction> {
         if text.iter().all(|x| x.is_ascii_whitespace()) {
             if window.column <= column {
-                println!("offset center token");
-                vec![TokenAction::OffsetToken { index: window.index, length: text.len() }]
+                vec![TokenAction::OffsetToken { index: window.index, length: text.len() as isize }]
             } else {
                 if let Some(token) = window.center {
                     if column < token.length + window.column {
                         vec![TokenAction::SplitToken { index: window.index, length: text.len(), offset: token.length + window.column - column }]
                     } else {
-                        println!("offset right token");
-                        vec![TokenAction::OffsetToken { index: window.index + 1, length: text.len() }]
+                        vec![TokenAction::OffsetToken { index: window.index + 1, length: text.len() as isize }]
                     }
                 } else {
-                    vec![TokenAction::OffsetToken { index: window.index + 1, length: text.len() }]
+                    vec![TokenAction::OffsetToken { index: window.index + 1, length: text.len() as isize }]
                 }
             }
         } else {
@@ -253,9 +267,24 @@ where
             vec![]
         }
     }
+    
+    fn result_token_action_delete(&self, window: TokenWindow, line: usize, column: usize) -> Vec<TokenAction> {
+        if let Some(token) = window.center {
+            if column <= window.column {
+                
+                vec![TokenAction::OffsetToken { index: window.index, length: -1 }]
+            } else if column < token.length + window.column {
+                vec![TokenAction::ReduceTokenLength { index: window.index, length: 1 }]
+            } else {
+                vec![TokenAction::OffsetToken { index: window.index + 1, length: -1 }]
+            }
+        } else {
+            vec![TokenAction::OffsetToken { index: window.index + 1, length: -1 }]
+        }
+    }
 
     fn apply_token_action(&mut self, action: &TokenAction) {
-        println!("applying token action {:?}", action);
+       
         match action {
             TokenAction::SplitToken { index, length, offset} => {
                 if let Some(token) = self.tokens.get_mut(*index) {
@@ -274,8 +303,16 @@ where
             TokenAction::CreateToken => todo!(),
             TokenAction::OffsetToken { index, length } => {
                 if let Some(token) = self.tokens.get_mut(*index) {
-                    println!("offsetting token {:?} by {}", token, length);
-                    token.delta_start += length;
+                    if length.is_negative() {
+                        token.delta_start -= length.abs() as usize;
+                    } else {
+                        token.delta_start += *length as usize;
+                    }
+                }
+            }
+            TokenAction::ReduceTokenLength { index, length } => {
+                if let Some(token) = self.tokens.get_mut(*index) {
+                    token.length -= length;
                 }
             }
         }
@@ -309,6 +346,7 @@ where
     fn delete_char(&mut self, line: usize, column: usize) {
         self.underlying_text_buffer.delete_char(line, column);
         self.edits.push(EditEvent { edit: Edit::Delete(line, column) });
+        self.update_tokens_delete(line, column);
     }
 
     fn lines(&self) -> LineIter<Self::Item> {
