@@ -320,8 +320,55 @@ impl App for ProcessSpawner {
                             &serde_json::to_string(&params).unwrap(),
                         );
                     }
-                    Edit::Delete(_, _) => {
-                        println!("Delete");
+                    Edit::Delete(line, column) => {
+                        let params: <DidChangeTextDocument as Notification>::Params =
+                            DidChangeTextDocumentParams {
+                                text_document: VersionedTextDocumentIdentifier {
+                                    uri: Url::from_str(&format!(
+                                        "file://{}/process-test/src/lib.rs",
+                                        root_path
+                                    ))
+                                    .unwrap(),
+                                    version: 0,
+                                },
+                                content_changes: vec![TextDocumentContentChangeEvent {
+                                    range: Some(Range {
+                                        start: Position {
+                                            line: line as u32,
+                                            character: column as u32,
+                                        },
+                                        end: Position {
+                                            line: line as u32,
+                                            character: column as u32 + 1,
+                                        },
+                                    }),
+                                    range_length: None,
+                                    text: "".to_string(),
+                                }],
+                            };
+                        let request = self.notification(
+                            DidChangeTextDocument::METHOD,
+                            &serde_json::to_string(&params).unwrap(),
+                        );
+                        self.send_message(self.process_id, request);
+
+                        
+                        let params: <SemanticTokensFullRequest as Request>::Params = SemanticTokensParams {
+                            text_document: TextDocumentIdentifier {
+                                uri: Url::from_str(&format!(
+                                    "file://{}/process-test/src/lib.rs",
+                                    root_path
+                                ))
+                                .unwrap(),
+                            },
+                            partial_result_params: PartialResultParams::default(),
+                            work_done_progress_params: WorkDoneProgressParams::default(),
+                        };
+
+                        self.send_request(
+                            SemanticTokensFullRequest::METHOD,
+                            &serde_json::to_string(&params).unwrap(),
+                        );
                     }
                 }
             }
