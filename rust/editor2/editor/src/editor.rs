@@ -247,8 +247,32 @@ impl Editor {
             }
         }
 
-        let mut to_delete = HashSet::new();
+        self.process_per_frame_actions();
 
+        self.wasm_messenger.tick(&mut self.values);
+
+        if let Some(receiver) = &self.external_receiver {
+            for event in receiver.try_iter() {
+                {
+                    self.events.push_current_frame(event);
+                }
+            }
+        }
+
+        let events = self.events.events_for_frame().to_vec();
+        self.next_frame();
+
+        if !events.is_empty() {
+            self.should_redraw = true;
+        }
+
+        self.handle_events(events);
+
+    }
+
+    fn process_per_frame_actions(&mut self) {
+
+        let mut to_delete = HashSet::new();
         for action in self.per_frame_actions.iter() {
             match action {
                 PerFrame::ProcessOutput { process_id } => {
@@ -291,53 +315,32 @@ impl Editor {
                     }
                 }
             }
+
+            for process in self.processes.values() {
+                let widget_id = process.output_widget_id;
+                let widget = self.widget_store.get_mut(widget_id).unwrap();
+                let output = &process.output;
+                match &mut widget.data {
+                    WidgetData::TextPane { text_pane } => {
+                        text_pane.set_text(output);
+                    }
+                    // Shouldn't this be a process?
+                    WidgetData::Process { process: _ } => todo!(),
+                    WidgetData::Deleted => {
+                        to_delete.insert(process.process_id);
+                    }
+                    _ => unreachable!("Shouldn't be here"),
+                }
+            }
+    
+            for process_id in to_delete.iter() {
+                self.processes.remove(&process_id);
+            }
         }
 
         self.per_frame_actions.retain(|action| match action {
             PerFrame::ProcessOutput { process_id: id } => !to_delete.contains(id),
         });
-
-        let mut to_delete = vec![];
-
-        for process in self.processes.values() {
-            let widget_id = process.output_widget_id;
-            let widget = self.widget_store.get_mut(widget_id).unwrap();
-            let output = &process.output;
-            match &mut widget.data {
-                WidgetData::TextPane { text_pane } => {
-                    text_pane.set_text(output);
-                }
-                // Shouldn't this be a process?
-                WidgetData::Process { process: _ } => todo!(),
-                WidgetData::Deleted => {
-                    to_delete.push(process.process_id);
-                }
-                _ => unreachable!("Shouldn't be here"),
-            }
-        }
-
-        for process_id in to_delete {
-            self.processes.remove(&process_id);
-        }
-
-        self.wasm_messenger.tick(&mut self.values);
-
-        if let Some(receiver) = &self.external_receiver {
-            for event in receiver.try_iter() {
-                {
-                    self.events.push_current_frame(event);
-                }
-            }
-        }
-
-        let events = self.events.events_for_frame().to_vec();
-        self.next_frame();
-
-        if !events.is_empty() {
-            self.should_redraw = true;
-        }
-
-        self.handle_events(events);
     }
 
     pub fn new() -> Self {

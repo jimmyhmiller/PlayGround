@@ -43,6 +43,11 @@ pub enum Edit {
     Delete(usize, usize),
 }
 
+// TODO:
+// I need to properly handle versions of tokens and make sure I always use the latest.
+// I need to actually update my tokens myself and then get the refresh.
+
+
 impl ProcessSpawner {
     fn parse_message(
         &self,
@@ -297,12 +302,29 @@ impl App for ProcessSpawner {
                                     text: from_utf8(&bytes).unwrap().to_string(),
                                 }],
                             };
-                        println!("Insert {:?}", params);
                         let request = self.notification(
                             DidChangeTextDocument::METHOD,
                             &serde_json::to_string(&params).unwrap(),
                         );
                         self.send_message(self.process_id, request);
+
+                        
+                        let params: <SemanticTokensFullRequest as Request>::Params = SemanticTokensParams {
+                            text_document: TextDocumentIdentifier {
+                                uri: Url::from_str(&format!(
+                                    "file://{}/process-test/src/lib.rs",
+                                    root_path
+                                ))
+                                .unwrap(),
+                            },
+                            partial_result_params: PartialResultParams::default(),
+                            work_done_progress_params: WorkDoneProgressParams::default(),
+                        };
+
+                        self.send_request(
+                            SemanticTokensFullRequest::METHOD,
+                            &serde_json::to_string(&params).unwrap(),
+                        );
                     }
                     Edit::Delete(_, _) => {
                         println!("Delete");
