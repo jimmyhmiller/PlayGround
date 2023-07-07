@@ -84,6 +84,7 @@ pub struct Editor {
     pub values: HashMap<String, Value>,
     pub processes: HashMap<usize, Process>,
     pub per_frame_actions: Vec<PerFrame>,
+    pub event_listeners: HashMap<String, HashSet<WidgetId>>,
 }
 
 pub struct Events {
@@ -330,6 +331,7 @@ impl Editor {
         }
 
         let events = self.events.events_for_frame().to_vec();
+        self.next_frame();
 
         if !events.is_empty() {
             self.should_redraw = true;
@@ -366,6 +368,7 @@ impl Editor {
             values: HashMap::new(),
             per_frame_actions: Vec::new(),
             processes: HashMap::new(),
+            event_listeners: HashMap::new(),
         }
     }
 
@@ -458,6 +461,7 @@ impl Editor {
         }
     }
 
+    // TODO: Do I need this indirection?
     fn respond_to_event(&mut self, mut event: Event) {
         event.patch_mouse_event(&self.context.mouse_position);
         match event {
@@ -554,6 +558,15 @@ impl Editor {
                 self.events.push(event);
             }
             Event::SendProcessMessage(_, _) => {
+                self.events.push(event);
+            }
+            Event::Event(_, _) => {
+                self.events.push(event);
+            }
+            Event::Subscribe(_, _) => {
+                self.events.push(event);
+            }
+            Event::Unsubscribe(_, _) => {
                 self.events.push(event);
             }
         }

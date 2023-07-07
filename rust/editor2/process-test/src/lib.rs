@@ -1,13 +1,18 @@
-use std::{collections::HashMap, str::FromStr, fs};
+use std::{
+    collections::HashMap,
+    fs::{self, File},
+    str::{from_utf8, FromStr}, io::Read,
+};
 
 use framework::{app, macros::serde_json, App, Canvas, Value};
 use lsp_types::{
-    notification::{Initialized, Notification},
+    notification::{DidChangeTextDocument, Initialized, Notification, DidOpenTextDocument},
     request::{Initialize, Request, SemanticTokensFullRequest},
-    ClientCapabilities, InitializeParams, InitializedParams, MessageActionItemCapabilities,
-    PartialResultParams, SemanticTokensParams, ShowDocumentClientCapabilities,
-    ShowMessageRequestClientCapabilities, TextDocumentIdentifier, Url, WindowClientCapabilities,
-    WorkDoneProgressParams, WorkspaceFolder,
+    ClientCapabilities, DidChangeTextDocumentParams, InitializeParams, InitializedParams,
+    MessageActionItemCapabilities, PartialResultParams, Position, Range, SemanticTokensParams,
+    ShowDocumentClientCapabilities, ShowMessageRequestClientCapabilities,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, Url, VersionedTextDocumentIdentifier,
+    WindowClientCapabilities, WorkDoneProgressParams, WorkspaceFolder, TextDocumentClientCapabilities, TextDocumentSyncCapability, TextDocumentSyncClientCapabilities, TextDocumentItem, DidOpenTextDocumentParams,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +35,12 @@ enum State {
 struct ProcessSpawner {
     state: Data,
     process_id: i32,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub enum Edit {
+    Insert(usize, usize, Vec<u8>),
+    Delete(usize, usize),
 }
 
 impl ProcessSpawner {
@@ -96,14 +107,16 @@ impl App for ProcessSpawner {
     type State = Data;
 
     fn init() -> Self {
-        ProcessSpawner {
+        let me = ProcessSpawner {
             state: Data {
                 state: State::Init,
                 message_type: HashMap::new(),
                 last_request_id: 0,
             },
             process_id: 0,
-        }
+        };
+        me.subscribe("text_change".to_string());
+        me
     }
 
     fn draw(&mut self) {
@@ -168,6 +181,59 @@ impl App for ProcessSpawner {
                 self.update_state(State::Progress);
             }
             State::Progress => {
+
+
+
+                // let params: <SemanticTokensFullRequest as Request>::Params = SemanticTokensParams {
+                //     text_document: TextDocumentIdentifier {
+                //         uri: Url::from_str(&format!(
+                //             "file://{}/process-test/src/lib.rs",
+                //             root_path
+                //         ))
+                //         .unwrap(),
+                //     },
+                //     partial_result_params: PartialResultParams::default(),
+                //     work_done_progress_params: WorkDoneProgressParams::default(),
+                // };
+
+                // self.send_request(
+                //     SemanticTokensFullRequest::METHOD,
+                //     &serde_json::to_string(&params).unwrap(),
+                // );
+
+                let file = "/code/process-test/src/lib.rs";
+
+                // read entire contents
+                let mut file = File::open(file).unwrap();
+                let mut contents = String::new();
+                file.read_to_string(&mut contents).unwrap();
+
+
+                let params: <DidOpenTextDocument as Notification>::Params = DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem {
+                        uri: Url::from_str(&format!(
+                            "file://{}/process-test/src/lib.rs",
+                            root_path
+                        ))
+                        .unwrap(),
+                        language_id: "rust".to_string(),
+                        version: 1,
+                        text: contents,
+                    },
+                };
+
+                let notify = self.notification(
+                    DidOpenTextDocument::METHOD,
+                    &serde_json::to_string(&params).unwrap(),
+                );
+                self.send_message(self.process_id, notify);
+                
+                self.update_state(State::Recieve);
+                
+            }
+            State::Recieve => {
+                
+
                 let params: <SemanticTokensFullRequest as Request>::Params = SemanticTokensParams {
                     text_document: TextDocumentIdentifier {
                         uri: Url::from_str(&format!(
@@ -184,17 +250,13 @@ impl App for ProcessSpawner {
                     SemanticTokensFullRequest::METHOD,
                     &serde_json::to_string(&params).unwrap(),
                 );
-                self.update_state(State::Recieve);
-            }
-            State::Recieve => {
+
                 if let Some(tokens) = self.try_get_value("tokens") {
                     if let Value::Bytes(bytes) = serde_json::from_str::<Value>(&tokens).unwrap() {
                         let other_json: Vec<u64> = serde_json::from_slice(&bytes).unwrap();
                         println!("{:?}", other_json);
                     }
-
                 }
-
             }
         }
     }
@@ -202,6 +264,56 @@ impl App for ProcessSpawner {
     fn on_key(&mut self, _input: framework::KeyboardInput) {}
 
     fn on_scroll(&mut self, _x: f64, _y: f64) {}
+
+    fn on_event(&mut self, kind: String, event: String) {
+        let root_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2";
+        match kind.as_str() {
+            "text_change" => {
+                let edit: Edit = serde_json::from_str(&event).unwrap();
+                match edit {
+                    Edit::Insert(line, column, bytes) => {
+                        let params: <DidChangeTextDocument as Notification>::Params =
+                            DidChangeTextDocumentParams {
+                                text_document: VersionedTextDocumentIdentifier {
+                                    uri: Url::from_str(&format!(
+                                        "file://{}/process-test/src/lib.rs",
+                                        root_path
+                                    ))
+                                    .unwrap(),
+                                    version: 0,
+                                },
+                                content_changes: vec![TextDocumentContentChangeEvent {
+                                    range: Some(Range {
+                                        start: Position {
+                                            line: line as u32,
+                                            character: column as u32,
+                                        },
+                                        end: Position {
+                                            line: line as u32,
+                                            character: column as u32,
+                                        },
+                                    }),
+                                    range_length: None,
+                                    text: from_utf8(&bytes).unwrap().to_string(),
+                                }],
+                            };
+                        println!("Insert {:?}", params);
+                        let request = self.notification(
+                            DidChangeTextDocument::METHOD,
+                            &serde_json::to_string(&params).unwrap(),
+                        );
+                        self.send_message(self.process_id, request);
+                    }
+                    Edit::Delete(_, _) => {
+                        println!("Delete");
+                    }
+                }
+            }
+            _ => {
+                println!("Unknown event: {}", kind);
+            }
+        }
+    }
 
     fn get_state(&self) -> Self::State {
         self.state.clone()
@@ -255,7 +367,9 @@ fn find_rust_analyzer() -> String {
                 .to_str()
                 .unwrap()
                 .starts_with("rust-lang.rust-analyzer")
-        }).unwrap().unwrap();
+        })
+        .unwrap()
+        .unwrap();
 
     format!("{}/server/rust-analyzer", folder.to_str().unwrap())
 }

@@ -69,6 +69,9 @@ pub enum Event {
     SaveWidgets,
     StartProcess(usize, usize, String),
     SendProcessMessage(usize, String),
+    Event(String, String),
+    Subscribe(usize, String),
+    Unsubscribe(usize, String),
 }
 
 impl Event {

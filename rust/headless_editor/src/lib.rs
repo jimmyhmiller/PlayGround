@@ -142,7 +142,7 @@ where
         result
     }
 
-    fn apply_edits(&mut self) {
+    pub fn apply_edits(&mut self) {
         for edit in self.edits.iter() {
             match edit {
                 Edit::Insert(line, column, text) => {

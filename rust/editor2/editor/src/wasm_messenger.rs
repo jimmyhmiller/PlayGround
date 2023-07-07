@@ -56,6 +56,7 @@ enum Payload {
     SaveState,
     UpdatePosition(Position),
     ProcessMessage(usize, String),
+    Event(String, String),
 }
 
 #[derive(Clone, Debug)]
@@ -159,6 +160,7 @@ impl WasmMessenger {
                     Payload::SaveState => "SaveState",
                     Payload::UpdatePosition(_) => "UpdatePosition",
                     Payload::ProcessMessage(_, _) => "ProcessMessage",
+                    Payload::Event(_, _) => "Event",
                 });
             }
         }
@@ -229,7 +231,7 @@ impl WasmMessenger {
         canvas: &mut Canvas,
         bounds: Size,
     ) -> Option<Size> {
-        if let Some(commands) = self.wasm_draw_commands.get(&wasm_id) {
+        if let Some(mut commands) = self.wasm_draw_commands.get_mut(&wasm_id) {
             let mut max_width = 0.0;
             let mut max_height = 0.0;
             let mut current_height_stack = vec![];
@@ -307,6 +309,7 @@ impl WasmMessenger {
                     }
                 }
             }
+            commands.retain(|x| x.is_draw());
             self.wasm_non_draw_commands
                 .insert(wasm_id, non_draw_commands);
             Some(Size {
@@ -354,6 +357,35 @@ impl WasmMessenger {
                         // TODO: Get rid of clone here
                         values.insert(name.to_string(), Value::Bytes(data.clone()));
                     }
+                    Command::Event(kind, event) => {
+                        self.external_sender
+                            .as_mut()
+                            .unwrap()
+                            .send(Event::Event(kind.clone(), event.clone()))
+                            .unwrap();
+                    }
+                    Command::Subscribe(kind) => {
+                        self.external_sender
+                            .as_mut()
+                            .unwrap()
+                            .send(Event::Subscribe(
+                                // TODO: I probably actually want widget id?
+                                *wasm_id as usize,
+                                kind.clone(),
+                            ))
+                            .unwrap();
+                    }
+                    Command::Unsubscribe(kind) => {
+                        self.external_sender
+                            .as_mut()
+                            .unwrap()
+                            .send(Event::Unsubscribe(
+                                // TODO: I probably actually want widget id?
+                                *wasm_id as usize,
+                                kind.clone(),
+                            ))
+                            .unwrap();
+                    }
                     _ => println!("Draw command ended up here"),
                 }
             }
@@ -397,7 +429,7 @@ impl WasmMessenger {
                             let serialized = serde_json::to_string(value).unwrap();
                             sender.send(serialized).unwrap();
                         } else {
-                            println!("Can't find value {}", name);
+                            // println!("Can't find value {}", name);
                         }
                     }
                     OutPayload::Complete => {}
@@ -539,7 +571,14 @@ impl WasmMessenger {
             .clone()
     }
 
-
+    pub fn send_event(&mut self, wasm_id: u64, kind: String, event: String) {
+        let message_id = self.next_message_id();
+        self.send_message(Message {
+            message_id,
+            wasm_id,
+            payload: Payload::Event(kind, event),
+        });
+    }
 }
 
 // I think I need to:
@@ -627,7 +666,10 @@ impl WasmManager {
                 default_return
             }
             Payload::ProcessMessage(process_id, message) => {
-                self.instance.on_process_message(process_id as i32, message).await.unwrap();
+                self.instance
+                    .on_process_message(process_id as i32, message)
+                    .await
+                    .unwrap();
                 default_return
             }
             Payload::OnKey(input) => {
@@ -675,6 +717,10 @@ impl WasmManager {
                 self.instance.store.data_mut().position = position;
                 default_return
             }
+            Payload::Event(kind, event) => {
+                self.instance.on_event(kind, event).await.unwrap();
+                default_return
+            }
         }
     }
 }
@@ -720,6 +766,25 @@ enum Command {
     ReceiveLastProcessMessage(i32),
     ProvideF32(String, f32),
     ProvideBytes(String, Vec<u8>),
+    Event(String, String),
+    Subscribe(String),
+    Unsubscribe(String),
+}
+
+impl Command {
+    fn is_draw(&self) -> bool {
+        match &self {
+            Command::DrawRect(_, _, _, _) => true,
+            Command::DrawString(_, _, _) => true,
+            Command::ClipRect(_, _, _, _) => true,
+            Command::DrawRRect(_, _, _, _, _) => true,
+            Command::Translate(_, _) => true,
+            Command::SetColor(_, _, _, _) => true,
+            Command::Restore => true,
+            Command::Save => true,
+            _ => false,
+        }
+    }
 }
 
 fn get_bytes_from_caller<'a>(caller: &mut Caller<State>, ptr: i32, len: i32) -> Vec<u8> {
@@ -785,7 +850,8 @@ impl WasmInstance {
         );
 
         let code_dir = Dir::from_std_file(
-            std::fs::File::open("/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2").unwrap(),
+            std::fs::File::open("/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2")
+                .unwrap(),
         );
 
         let vs_code_extension_dir = Dir::from_std_file(
@@ -798,7 +864,10 @@ impl WasmInstance {
             .preopened_dir(dir, ".")?
             .preopened_dir(code_dir, "/code")?
             // TODO: How do we handle this in the general case?
-            .preopened_dir(vs_code_extension_dir, "/Users/jimmyhmiller/.vscode/extensions/")?
+            .preopened_dir(
+                vs_code_extension_dir,
+                "/Users/jimmyhmiller/.vscode/extensions/",
+            )?
             .build();
 
         let mut linker: Linker<State> = Linker::new(&engine);
@@ -871,15 +940,13 @@ impl WasmInstance {
                                     .await
                                     .unwrap();
                             Ok(ptr)
-
                         }
                         Err(_e) => {
                             // TODO: Actually handle
-                            println!("Cancelled");
+                            // println!("Cancelled");
                             Ok(0)
                         }
                     }
-                    
                 })
             },
         )?;
@@ -899,7 +966,6 @@ impl WasmInstance {
                         payload: OutPayload::NeededValue(name, sender),
                     })?;
 
-                    
                     // TODO: This will probably cause problems for the sender
                     let result = receiver.try_recv();
                     if result.is_err() {
@@ -913,7 +979,6 @@ impl WasmInstance {
                                     .await
                                     .unwrap();
                             Ok(ptr)
-
                         }
                         None => {
                             // TODO: Actually handle
@@ -921,7 +986,6 @@ impl WasmInstance {
                             Ok(0)
                         }
                     }
-                    
                 })
             },
         )?;
@@ -943,6 +1007,41 @@ impl WasmInstance {
                 state.commands.push(Command::ProvideF32(string, val));
             },
         )?;
+        linker.func_wrap(
+            "host",
+            "send_event",
+            |mut caller: Caller<'_, State>,
+             kind_ptr: i32,
+             kind_len: i32,
+             event_ptr: i32,
+             event_len: i32| {
+                let kind = get_string_from_caller(&mut caller, kind_ptr, kind_len);
+                let event = get_string_from_caller(&mut caller, event_ptr, event_len);
+                let state = caller.data_mut();
+                state.commands.push(Command::Event(kind, event));
+            },
+        )?;
+
+        linker.func_wrap(
+            "host",
+            "subscribe",
+            |mut caller: Caller<'_, State>, kind_ptr: i32, kind_len: i32| {
+                let kind = get_string_from_caller(&mut caller, kind_ptr, kind_len);
+                let state = caller.data_mut();
+                state.commands.push(Command::Subscribe(kind));
+            },
+        )?;
+
+        linker.func_wrap(
+            "host",
+            "unsubscribe",
+            |mut caller: Caller<'_, State>, kind_ptr: i32, kind_len: i32| {
+                let kind = get_string_from_caller(&mut caller, kind_ptr, kind_len);
+                let state = caller.data_mut();
+                state.commands.push(Command::Unsubscribe(kind));
+            },
+        )?;
+
         linker.func_wrap(
             "host",
             "provide_bytes",
@@ -1119,7 +1218,11 @@ impl WasmInstance {
         Ok(())
     }
 
-    pub async fn on_process_message(&mut self, process_id: i32, message: String) -> Result<(), Box<dyn Error>> {
+    pub async fn on_process_message(
+        &mut self,
+        process_id: i32,
+        message: String,
+    ) -> Result<(), Box<dyn Error>> {
         let (ptr, _len) = self.transfer_string_to_wasm2(message).await?;
 
         self.call_typed_func::<(i32, u32), ()>("on_process_message", (process_id, ptr), 1)
@@ -1190,7 +1293,6 @@ impl WasmInstance {
         Ok((ptr, data.len() as u32))
     }
 
-
     // Instance vs caller. Can I collapse these?
     // super ugly that I right now have 3
     pub async fn transfer_string_to_wasm2(
@@ -1205,8 +1307,8 @@ impl WasmInstance {
             .unwrap();
 
         let memory_size = (memory.data_size(&mut self.store) as f32
-        / ByteSize::kb(64).as_u64() as f32)
-        .ceil() as usize;
+            / ByteSize::kb(64).as_u64() as f32)
+            .ceil() as usize;
 
         let data_length_in_64k_multiples =
             (data.len() as f32 / ByteSize::kb(64).as_u64() as f32).ceil() as usize;
@@ -1225,7 +1327,9 @@ impl WasmInstance {
             .into_memory()
             .unwrap();
 
-        memory.write(&mut self.store, ptr as usize, data.as_bytes()).unwrap();
+        memory
+            .write(&mut self.store, ptr as usize, data.as_bytes())
+            .unwrap();
 
         Ok((ptr, data.len() as u32))
     }
@@ -1285,5 +1389,13 @@ impl WasmInstance {
             println!("No json string");
         }
         json_string
+    }
+
+    pub async fn on_event(&mut self, kind: String, event: String) -> Result<(), Box<dyn Error>> {
+        let (kind_ptr, _len) = self.transfer_string_to_wasm2(kind).await?;
+        let (event_ptr, _len) = self.transfer_string_to_wasm2(event).await?;
+        self.call_typed_func::<(u32, u32), ()>("on_event", (kind_ptr, event_ptr), 1)
+            .await?;
+        Ok(())
     }
 }

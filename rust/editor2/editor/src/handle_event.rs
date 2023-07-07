@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{io::Write, collections::HashSet};
 
 use nonblock::NonBlockingReader;
 use notify::RecursiveMode;
@@ -115,7 +115,7 @@ impl Editor {
                         }
                     }
                 }
-                Event::StartProcess(process_id, wasmi_id, process_command) => {
+                Event::StartProcess(process_id, wasm_id, process_command) => {
                     let mut process = std::process::Command::new(process_command)
                         .stdout(std::process::Stdio::piped())
                         .stdin(std::process::Stdio::piped())
@@ -131,7 +131,7 @@ impl Editor {
                         .push(PerFrame::ProcessOutput { process_id });
 
 
-                    let parent_widget_id = self.widget_store.get_widget_by_wasm_id(wasmi_id).unwrap();
+                    let parent_widget_id = self.widget_store.get_widget_by_wasm_id(wasm_id).unwrap();
 
                     let output_widget_id = self.widget_store.add_widget(Widget {
                         id: 0,
@@ -169,6 +169,35 @@ impl Editor {
                 }
                 Event::ModifiersChanged(modifiers) => {
                     self.context.modifiers = modifiers;
+                }
+                Event::Event(kind, event) => {
+                    // lookup what widgets are listening, call their on_event handler
+                    if let Some(listening_widgets) = self.event_listeners.get(&kind) {
+                        for widget_id in listening_widgets {
+                            if let Some(widget) = self.widget_store.get_mut(*widget_id) {
+                                match &mut widget.data {
+                                    WidgetData::Wasm { wasm: _, wasm_id } => {
+                                        self.wasm_messenger.send_event(*wasm_id, kind.clone(), event.clone());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                Event::Subscribe(wasm_id, kind) => {
+                    let widget_id = self.widget_store.get_widget_by_wasm_id(wasm_id).unwrap();
+                    if let Some(listening_widgets) = self.event_listeners.get_mut(&kind) {
+                        listening_widgets.insert(widget_id);
+                    } else {
+                        self.event_listeners.insert(kind, HashSet::from_iter(vec![widget_id]));
+                    }
+                }
+                Event::Unsubscribe(wasm_id, kind) => {
+                    let widget_id = self.widget_store.get_widget_by_wasm_id(wasm_id).unwrap();
+                    if let Some(listening_widgets) = self.event_listeners.get_mut(&kind) {
+                        listening_widgets.retain(|x| *x != widget_id);
+                    }
                 }
                 e => {
                     println!("Unhandled event {:?}", e)
