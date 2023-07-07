@@ -237,15 +237,6 @@ impl Editor {
         // Todo: Need to test that I am not missing any
         // events with my start and end
 
-        // TODO: Put in better place
-        for widget in self.widget_store.iter_mut() {
-            match &widget.data {
-                WidgetData::Wasm { wasm: _, wasm_id } => {
-                    self.wasm_messenger.send_draw(*wasm_id, "draw");
-                }
-                _ => {}
-            }
-        }
 
         self.process_per_frame_actions();
 
@@ -267,6 +258,16 @@ impl Editor {
         }
 
         self.handle_events(events);
+
+        // TODO: Put in better place
+        for widget in self.widget_store.iter_mut() {
+            match &widget.data {
+                WidgetData::Wasm { wasm: _, wasm_id } => {
+                    self.wasm_messenger.send_draw(*wasm_id, "draw");
+                }
+                _ => {}
+            }
+        }
 
     }
 

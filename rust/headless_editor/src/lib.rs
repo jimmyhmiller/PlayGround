@@ -86,11 +86,43 @@ pub enum Edit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct EditEvent {
+    pub edit: Edit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TokenTextBuffer<T: TextBuffer> {
     pub tokens: Vec<Token>,
     pub underlying_text_buffer: T,
-    pub edits: Vec<Edit>,
+    pub edits: Vec<EditEvent>,
 }
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+enum TokenAction {
+    SplitToken {
+        index: usize,
+        length: usize,
+        offset: usize,
+    },
+    MergeToken,
+    DeleteToken,
+    CreateToken,
+    OffsetToken {
+        index: usize,
+        length: usize,
+    },
+}
+
+struct TokenWindow {
+    index: usize,
+    line: usize,
+    column: usize,
+    left: Option<Token>,
+    center: Option<Token>,
+    right: Option<Token>,
+}
+
 
 impl<T> TokenTextBuffer<T>
 where
@@ -141,24 +173,112 @@ where
 
         result
     }
-
-    pub fn apply_edits(&mut self) {
-        for edit in self.edits.iter() {
-            match edit {
-                Edit::Insert(line, column, text) => {
-                    self.underlying_text_buffer
-                        .insert_bytes(*line, *column, text.as_slice())
-                }
-                Edit::Delete(line, column) => {
-                    self.underlying_text_buffer.delete_char(*line, *column)
-                }
-            }
-        }
-        self.edits.clear();
+    pub fn drain_edits(&mut self) -> Vec<EditEvent> {
+        std::mem::take(&mut self.edits)
     }
 
     pub fn set_tokens(&mut self, tokens: Vec<Token>) {
         self.tokens = tokens;
+    }
+
+    fn update_tokens_insert(&mut self, line: usize, column: usize, text: &[u8]) {
+        let window: TokenWindow = self.find_token(line, column);
+        let actions = self.resolve_token_action(window, line, column, text);
+        for action in actions.iter() {
+            self.apply_token_action(action);
+        }
+
+    }
+
+    fn find_token(&self, line: usize, column: usize) -> TokenWindow {
+        let mut index = 0;
+        let mut current_line = 0;
+        let mut current_column = 0;
+        let mut left = None;
+        let mut center = None;
+        let mut right = None;
+        // remember, column resets if we change lines
+        for token in self.tokens.iter() {
+            if token.delta_line > 0 {
+                current_line += token.delta_line;
+                current_column = 0;
+            }
+            current_column += token.delta_start;
+            println!("current_line: {}, current_columns: {}, token: {:?}", current_line, current_column, token);
+            if current_line == line {
+                if current_column >= column && column < current_column + token.length {
+                    println!("found token {:?}", token);
+                    center = Some(token.clone());
+                    break;
+                }
+            }
+            index += 1;
+        }
+        if let Some(token) = self.tokens.get(index - 1) {
+            left = Some(token.clone());
+        }
+        if let Some(token) = self.tokens.get(index + 1) {
+            right = Some(token.clone());
+        }
+        
+        TokenWindow {
+            index,
+            line,
+            column,
+            left,
+            center,
+            right,
+        }
+    }
+
+    fn resolve_token_action<>(&self, window: TokenWindow, line: usize, column: usize, text: &[u8]) -> Vec<TokenAction> {
+        if text.iter().all(|x| x.is_ascii_whitespace()) {
+            if window.column <= column {
+                println!("offset center token");
+                vec![TokenAction::OffsetToken { index: window.index, length: text.len() }]
+            } else {
+                if let Some(token) = window.center {
+                    if column < token.length + window.column {
+                        vec![TokenAction::SplitToken { index: window.index, length: text.len(), offset: token.length + window.column - column }]
+                    } else {
+                        println!("offset right token");
+                        vec![TokenAction::OffsetToken { index: window.index + 1, length: text.len() }]
+                    }
+                } else {
+                    vec![TokenAction::OffsetToken { index: window.index + 1, length: text.len() }]
+                }
+            }
+        } else {
+            // TODO: have some default I can always do
+            vec![]
+        }
+    }
+
+    fn apply_token_action(&mut self, action: &TokenAction) {
+        println!("applying token action {:?}", action);
+        match action {
+            TokenAction::SplitToken { index, length, offset} => {
+                if let Some(token) = self.tokens.get_mut(*index) {
+                    token.length = *offset;
+                    let remaining_length = token.length - offset;
+                    let new_token = Token {
+                        delta_start: token.delta_start + length,
+                        length: remaining_length,
+                        ..*token
+                    };
+                    self.tokens.insert(*index + 1, new_token);
+                }
+            }
+            TokenAction::MergeToken => todo!(),
+            TokenAction::DeleteToken => todo!(),
+            TokenAction::CreateToken => todo!(),
+            TokenAction::OffsetToken { index, length } => {
+                if let Some(token) = self.tokens.get_mut(*index) {
+                    println!("offsetting token {:?} by {}", token, length);
+                    token.delta_start += length;
+                }
+            }
+        }
     }
 }
 
@@ -177,8 +297,9 @@ where
     }
 
     fn insert_bytes(&mut self, line: usize, column: usize, text: &[Self::Item]) {
-        // self.underlying_text_buffer.insert_bytes(line, column, text);
-        self.edits.push(Edit::Insert(line, column, text.to_vec()));
+        self.underlying_text_buffer.insert_bytes(line, column, text);
+        self.edits.push(EditEvent { edit: Edit::Insert(line, column, text.to_vec())});
+        self.update_tokens_insert(line, column, text);
     }
 
     fn byte_at_pos(&self, line: usize, column: usize) -> Option<&Self::Item> {
@@ -186,8 +307,8 @@ where
     }
 
     fn delete_char(&mut self, line: usize, column: usize) {
-        // self.underlying_text_buffer.delete_char(line, column);
-        self.edits.push(Edit::Delete(line, column));
+        self.underlying_text_buffer.delete_char(line, column);
+        self.edits.push(EditEvent { edit: Edit::Delete(line, column) });
     }
 
     fn lines(&self) -> LineIter<Self::Item> {
