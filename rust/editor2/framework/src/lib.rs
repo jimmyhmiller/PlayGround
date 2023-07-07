@@ -32,7 +32,7 @@ extern "C" {
     fn get_value(ptr: i32, len: i32) -> u32;
     fn try_get_value(ptr: i32, len: i32) -> u32;
     #[link_name = "send_event"]
-    fn send_event_low_level(ptr: i32, len: i32);
+    fn send_event_low_level(kind_ptr: i32, kind_len: i32, ptr: i32, len: i32);
     #[link_name = "subscribe"]
     fn subscribe_low_level(ptr: i32, len: i32);
     #[link_name = "unsubscribe"]
@@ -171,7 +171,7 @@ pub trait App {
     fn on_click(&mut self, x: f32, y: f32);
     fn on_key(&mut self, input: KeyboardInput);
     fn on_scroll(&mut self, x: f64, y: f64);
-    fn on_event(&mut self, event: String) {}
+    fn on_event(&mut self, kind: String, event: String) {}
     fn get_state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State);
     fn start_process(&mut self, process: String) -> i32 {
@@ -200,11 +200,23 @@ pub trait App {
         }
     }
 
-    fn send_event(&self, event: String) {
+    fn send_event(&self, kind: String, event: String) {
         unsafe {
-            send_event_low_level(event.as_ptr() as i32, event.len() as i32);
+            send_event_low_level(kind.as_ptr() as i32, kind.len() as i32, event.as_ptr() as i32, event.len() as i32);
         }
     }
+    fn subscribe(&self, kind: String) {
+        unsafe {
+            subscribe_low_level(kind.as_ptr() as i32, kind.len() as i32);
+        }
+    }
+
+    fn unsubscribe(&self, kind: String) {
+        unsafe {
+            unsubscribe_low_level(kind.as_ptr() as i32, kind.len() as i32);
+        }
+    }
+
 
     fn recieve_last_message(&mut self, process_id: i32) -> String {
         let buffer;
@@ -350,9 +362,10 @@ pub mod macros {
             }
 
             #[no_mangle]
-            pub extern "C" fn on_event(str_ptr: u32) {
-                let message = framework::fetch_string(str_ptr);
-                unsafe { APP.on_event(message) }
+            pub extern "C" fn on_event(kind_ptr: u32, event_ptr: u32) {
+                let kind = framework::fetch_string(kind_ptr);
+                let event = framework::fetch_string(event_ptr);
+                unsafe { APP.on_event(kind, event) }
             }
 
             #[no_mangle]

@@ -1,8 +1,8 @@
 use std::str::from_utf8;
 
-use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, Value, EventWrapper};
+use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, Value};
 use headless_editor::{
-    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor,
+    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor, Token,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -36,6 +36,7 @@ pub struct TextPane {
     offset: Position,
     cursor: Cursor,
     text_buffer: TokenTextBuffer<SimpleTextBuffer>,
+    tokens: Vec<Token>,
 }
 
 impl TextPane {
@@ -46,6 +47,7 @@ impl TextPane {
             offset: Position { x: 0.0, y: 0.0 },
             cursor: Cursor::new(0, 0),
             text_buffer: TokenTextBuffer::new_with_contents(&contents),
+            tokens: vec![],
         }
     }
 
@@ -143,6 +145,12 @@ impl App for TextWidget {
             if let Value::Bytes(bytes) = serde_json::from_str::<Value>(&tokens).unwrap() {
                 let tokens: Vec<u64> = serde_json::from_slice(&bytes).unwrap();
                 let tokens = parse_tokens(&tokens);
+                if self.text_pane.tokens != tokens {
+                    println!("tokens changed!");
+                    self.text_pane.tokens = tokens.clone();
+                    self.text_pane.text_buffer.apply_edits();
+                }
+
                 Some(tokens)
             } else {
                 None
@@ -196,7 +204,7 @@ impl App for TextWidget {
         canvas.save();
 
         if let Some(tokens) = tokens {
-            self.text_pane.text_buffer.set_tokens(tokens);
+            self.text_pane.text_buffer.set_tokens(self.text_pane.tokens.clone());
 
             for line in self.text_pane.text_buffer.decorated_lines(
                 self.text_pane.lines_above_scroll(),
@@ -311,10 +319,11 @@ impl App for TextWidget {
 
         // TODO: I actually want the new edits, not all of them.
         for edit in self.text_pane.text_buffer.edits.iter() {
-            self.send_event(serde_json::ser::to_string(&EventWrapper {
-                kind: "text_change".to_string(),
-                data: serde_json::ser::to_string(edit).unwrap(),
-            }).unwrap());
+            self.send_event(
+                "text_change".to_string(), 
+                serde_json::ser::to_string(edit).unwrap()
+            );
+            println!("EDIT: {:?}", edit);
         }
 
         // TODO: Send message about what changed
