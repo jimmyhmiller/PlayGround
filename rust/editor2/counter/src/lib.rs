@@ -141,23 +141,16 @@ impl App for TextWidget {
     fn draw(&mut self) {
         // TODO: Clean up
         // Only do this when I need to
-        let tokens = if let Some(tokens) = self.try_get_value("tokens") {
+        if let Some(tokens) = self.try_get_value("tokens") {
             if let Value::Bytes(bytes) = serde_json::from_str::<Value>(&tokens).unwrap() {
                 let tokens: Vec<u64> = serde_json::from_slice(&bytes).unwrap();
                 let tokens = parse_tokens(&tokens);
                 if self.text_pane.tokens != tokens {
-                    println!("tokens changed!");
-                    self.text_pane.tokens = tokens.clone();
-                    self.text_pane.text_buffer.apply_edits();
+                    self.text_pane.tokens = tokens;
+                    self.text_pane.text_buffer.set_tokens(self.text_pane.tokens.clone());
                 }
-
-                Some(tokens)
-            } else {
-                None
             }
-        } else {
-            None
-        };
+        }
 
         let canvas = Canvas::new();
 
@@ -203,8 +196,7 @@ impl App for TextWidget {
 
         canvas.save();
 
-        if let Some(tokens) = tokens {
-            self.text_pane.text_buffer.set_tokens(self.text_pane.tokens.clone());
+        if !self.text_pane.tokens.is_empty() {
 
             for line in self.text_pane.text_buffer.decorated_lines(
                 self.text_pane.lines_above_scroll(),
@@ -318,12 +310,11 @@ impl App for TextWidget {
         }
 
         // TODO: I actually want the new edits, not all of them.
-        for edit in self.text_pane.text_buffer.edits.iter() {
+        for edit in self.text_pane.text_buffer.drain_edits() {
             self.send_event(
                 "text_change".to_string(), 
-                serde_json::ser::to_string(edit).unwrap()
+                serde_json::ser::to_string(&edit.edit).unwrap()
             );
-            println!("EDIT: {:?}", edit);
         }
 
         // TODO: Send message about what changed

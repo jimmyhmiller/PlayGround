@@ -256,12 +256,6 @@ impl App for ProcessSpawner {
                     &serde_json::to_string(&params).unwrap(),
                 );
 
-                if let Some(tokens) = self.try_get_value("tokens") {
-                    if let Value::Bytes(bytes) = serde_json::from_str::<Value>(&tokens).unwrap() {
-                        let other_json: Vec<u64> = serde_json::from_slice(&bytes).unwrap();
-                        println!("{:?}", other_json);
-                    }
-                }
             }
         }
     }
