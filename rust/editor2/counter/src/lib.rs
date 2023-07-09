@@ -1,6 +1,6 @@
 use std::str::from_utf8;
 
-use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, Value};
+use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, Value, decode_base64};
 use headless_editor::{
     parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
 };
@@ -125,7 +125,7 @@ impl App for TextWidget {
     fn init() -> Self {
         let file = "/code/process-test/src/lib.rs";
         let contents = std::fs::read(file).unwrap();
-        Self {
+        let me = Self {
             text_pane: TextPane::new(contents, 30.0),
             widget_data: WidgetData {
                 position: Position { x: 0.0, y: 0.0 },
@@ -135,26 +135,12 @@ impl App for TextWidget {
                 },
             },
             edit_position: 0,
-        }
+        };
+        me.subscribe("tokens".to_string());
+        me
     }
 
     fn draw(&mut self) {
-        // TODO: Clean up
-        // Only do this when I need to
-        if let Some(tokens) = self.try_get_value("tokens") {
-            if let Value::Bytes(bytes) = serde_json::from_str::<Value>(&tokens).unwrap() {
-                if let Ok(tokens) = serde_json::from_slice::<Vec<u64>>(&bytes) {
-                    let tokens = parse_tokens(&tokens);
-                    if self.text_pane.tokens != tokens {
-                        self.text_pane.tokens = tokens;
-                        self.text_pane
-                            .text_buffer
-                            .set_tokens(self.text_pane.tokens.clone());
-                    }
-                }
-            }
-        }
-
         let canvas = Canvas::new();
 
         let foreground = Color::parse_hex("#dc9941");
@@ -371,6 +357,18 @@ impl App for TextWidget {
         let file = "/code/process-test/src/lib.rs";
         let contents = std::fs::read(file).unwrap();
         self.text_pane.contents = contents;
+    }
+
+    fn on_event(&mut self, kind: String, event: String) {
+        println!("event: {}", kind);
+        if kind == "tokens" {
+            if let Ok(data) = decode_base64(event.into_bytes()) {
+                if let Ok(tokens) = serde_json::from_str::<Vec<u64>>(from_utf8(&data).unwrap()) {
+                    let tokens = parse_tokens(&tokens);
+                    self.text_pane.text_buffer.set_tokens(tokens);
+                }
+            }
+        }
     }
 
     fn on_size_change(&mut self, width: f32, height: f32) {

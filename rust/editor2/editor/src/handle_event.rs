@@ -150,7 +150,21 @@ impl Editor {
                         self.widget_store.get_widget_by_wasm_id(wasm_id).unwrap();
 
                     let parent = self.widget_store.get(parent_widget_id).unwrap();
-                    let position = parent.position.offset(parent.size.width + 50.0, 0.0);
+                    let mut position = parent.position.offset(parent.size.width + 50.0, 0.0);
+
+                    loop {
+                        let mut should_move = false;
+                        for widget in self.widget_store.iter() {
+                            if widget.position == position {
+                                should_move = true;
+                            }
+                        }
+                        if should_move {
+                            position.x += 50.0;
+                        } else {
+                            break;
+                        }
+                    }
 
                     let output_widget_id = self.widget_store.add_widget(Widget {
                         id: 0,

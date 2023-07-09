@@ -257,6 +257,7 @@ pub trait App {
         let result = fetch_string(ptr);
         Some(result)
     }
+    
 }
 
 #[no_mangle]
@@ -301,17 +302,16 @@ pub fn alloc_state(len: usize) -> *mut u8 {
     ptr
 }
 
-pub fn encode_base64(data: String) -> String {
+pub fn encode_base64(data: &[u8]) -> String {
     use base64::Engine;
 
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-pub fn decode_base64(data: Vec<u8>) -> Result<String, Box<dyn std::error::Error>> {
+pub fn decode_base64(data: Vec<u8>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     use base64::Engine;
     let data = base64::engine::general_purpose::STANDARD.decode(data)?;
-    let s = from_utf8(&data)?;
-    Ok(s.to_string())
+    Ok(data)
 }
 
 pub mod macros {
@@ -391,8 +391,8 @@ pub mod macros {
                 use framework::encode_base64;
                 let s: String =
                     $crate::macros::serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
-                let s = encode_base64(s);
-                let mut s = s.into_bytes().clone();
+                let s = encode_base64(&s.into_bytes());
+                let mut s = s.into_bytes();
                 let ptr = s.as_mut_ptr() as usize;
                 let len = s.len();
                 std::mem::forget(ptr);
@@ -404,7 +404,8 @@ pub mod macros {
                 let data =
                     unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
                 use framework::decode_base64;
-                let s = decode_base64(data);
+                let s = decode_base64(data)
+                    .map(|v| String::from_utf8(v).unwrap());
                 match s {
                     Ok(s) => {
                         if let Ok(state) = $crate::macros::serde_json::from_str(&s) {

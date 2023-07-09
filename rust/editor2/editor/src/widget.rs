@@ -16,7 +16,7 @@ use crate::{
     wasm_messenger::{self, WasmId, WasmMessenger},
 };
 
-#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
+#[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct Position {
     pub x: f32,
     pub y: f32,
