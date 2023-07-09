@@ -296,6 +296,10 @@ impl App for AsmData {
     fn set_state(&mut self, state: Self::State) {
         *self = state;
     }
+
+    fn on_size_change(&mut self, width: f32, height: f32) {
+        
+    }
 }
 
 impl AsmData {

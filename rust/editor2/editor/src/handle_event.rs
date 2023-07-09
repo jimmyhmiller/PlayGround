@@ -91,12 +91,24 @@ impl Editor {
                     if !self.selected_widgets.is_empty() && x != 0.0 && y != 0.0 {
                         self.context.cancel_click = true;
                     }
-                    for widget_id in self.selected_widgets.iter() {
-                        if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                            widget.position.x += x;
-                            widget.position.y += y;
+
+                    if self.context.modifiers.ctrl && self.context.modifiers.option {
+                        for widget_id in self.selected_widgets.iter() {
+                            if let Some(widget) = self.widget_store.get_mut(*widget_id) {
+                                widget.size.width += x;
+                                widget.size.height += y;
+                                widget.on_size_change(widget.size.width, widget.size.height, &mut self.wasm_messenger);
+                            }
+                        }
+                    } else if self.context.modifiers.ctrl {
+                        for widget_id in self.selected_widgets.iter() {
+                            if let Some(widget) = self.widget_store.get_mut(*widget_id) {
+                                widget.position.x += x;
+                                widget.position.y += y;
+                            }
                         }
                     }
+                   
                 }
                 Event::ReloadWidgets => {
                     self.widget_store.clear();
@@ -133,9 +145,12 @@ impl Editor {
 
                     let parent_widget_id = self.widget_store.get_widget_by_wasm_id(wasm_id).unwrap();
 
+                    let parent = self.widget_store.get(parent_widget_id).unwrap();
+                    let position = parent.position.offset(parent.size.width + 50.0, 0.0);
+
                     let output_widget_id = self.widget_store.add_widget(Widget {
                         id: 0,
-                        position: Position { x: 0.0, y: 0.0 },
+                        position,
                         size: Size {
                             width: 800.0,
                             height: 800.0,

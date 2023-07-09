@@ -172,6 +172,7 @@ pub trait App {
     fn on_key(&mut self, input: KeyboardInput);
     fn on_scroll(&mut self, x: f64, y: f64);
     fn on_event(&mut self, kind: String, event: String) {}
+    fn on_size_change(&mut self, width: f32, height: f32);
     fn get_state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State);
     fn start_process(&mut self, process: String) -> i32 {
@@ -366,6 +367,11 @@ pub mod macros {
                 let kind = framework::fetch_string(kind_ptr);
                 let event = framework::fetch_string(event_ptr);
                 unsafe { APP.on_event(kind, event) }
+            }
+
+            #[no_mangle]
+            pub extern "C" fn on_size_change(width: f32, height: f32) {
+                unsafe { APP.on_size_change(width, height) }
             }
 
             #[no_mangle]

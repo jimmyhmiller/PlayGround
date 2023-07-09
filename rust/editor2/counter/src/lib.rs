@@ -2,7 +2,7 @@ use std::str::from_utf8;
 
 use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, Value};
 use headless_editor::{
-    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor, Token,
+    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -120,7 +120,7 @@ struct TextWidget {
 }
 
 impl App for TextWidget {
-    type State = TextPane;
+    type State = TextWidget;
 
     fn init() -> Self {
         let file = "/code/process-test/src/lib.rs";
@@ -143,11 +143,14 @@ impl App for TextWidget {
         // Only do this when I need to
         if let Some(tokens) = self.try_get_value("tokens") {
             if let Value::Bytes(bytes) = serde_json::from_str::<Value>(&tokens).unwrap() {
-                let tokens: Vec<u64> = serde_json::from_slice(&bytes).unwrap();
-                let tokens = parse_tokens(&tokens);
-                if self.text_pane.tokens != tokens {
-                    self.text_pane.tokens = tokens;
-                    self.text_pane.text_buffer.set_tokens(self.text_pane.tokens.clone());
+                if let Ok(tokens) = serde_json::from_slice::<Vec<u64>>(&bytes) {
+                    let tokens = parse_tokens(&tokens);
+                    if self.text_pane.tokens != tokens {
+                        self.text_pane.tokens = tokens;
+                        self.text_pane
+                            .text_buffer
+                            .set_tokens(self.text_pane.tokens.clone());
+                    }
                 }
             }
         }
@@ -177,15 +180,16 @@ impl App for TextWidget {
         let text_buffer = &self.text_pane.text_buffer;
 
         canvas.set_color(&foreground);
+        let length_output = &format!(
+            "({}, {}) length: {}",
+            cursor.line(),
+            cursor.column(),
+            text_buffer.line_length(cursor.line())
+        );
         canvas.draw_str(
-            &format!(
-                "({}, {}) length: {}",
-                cursor.line(),
-                cursor.column(),
-                text_buffer.line_length(cursor.line())
-            ),
-            300.0,
-            500.0,
+            length_output,
+            self.widget_data.size.width - length_output.len() as f32 * 18.0,
+            self.widget_data.size.height - 40.0,
         );
 
         let fractional_offset = self.text_pane.fractional_line_offset();
@@ -197,7 +201,6 @@ impl App for TextWidget {
         canvas.save();
 
         if !self.text_pane.tokens.is_empty() {
-
             for line in self.text_pane.text_buffer.decorated_lines(
                 self.text_pane.lines_above_scroll(),
                 self.text_pane
@@ -312,8 +315,8 @@ impl App for TextWidget {
         // TODO: I actually want the new edits, not all of them.
         for edit in self.text_pane.text_buffer.drain_edits() {
             self.send_event(
-                "text_change".to_string(), 
-                serde_json::ser::to_string(&edit.edit).unwrap()
+                "text_change".to_string(),
+                serde_json::ser::to_string(&edit.edit).unwrap(),
             );
         }
 
@@ -359,14 +362,18 @@ impl App for TextWidget {
     }
 
     fn get_state(&self) -> Self::State {
-        self.text_pane.clone()
+        self.clone()
     }
 
     fn set_state(&mut self, state: Self::State) {
         // TODO: hacky
-        // let old_contents = self.text_pane.contents.clone();
-        // self.text_pane = state;
-        // self.text_pane.contents = old_contents;
+        let old_contents = self.text_pane.contents.clone();
+        *self = state;
+        self.text_pane.contents = old_contents;
+    }
+
+    fn on_size_change(&mut self, width: f32, height: f32) {
+        self.widget_data.size = Size { width, height };
     }
 }
 
