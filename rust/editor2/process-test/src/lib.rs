@@ -5,7 +5,7 @@ use std::{
     str::{from_utf8, FromStr},
 };
 
-use framework::{app, macros::serde_json, App, Canvas};
+use framework::{app, macros::serde_json, App, Canvas, encode_base64};
 use lsp_types::{
     notification::{DidChangeTextDocument, DidOpenTextDocument, Initialized, Notification},
     request::{Initialize, Request, SemanticTokensFullRequest},
@@ -332,7 +332,7 @@ impl App for ProcessSpawner {
                         if let Some(id) = message["id"].as_u64() {
                             if let Some(method) = self.state.message_type.get(&(id as usize)) {
                                 if method == "textDocument/semanticTokens/full" {
-                                    self.provide_bytes("tokens", &extract_tokens(&message));
+                                    self.send_event("tokens".to_string(), encode_base64(&extract_tokens(&message)));
                                 }
                                 println!("Method: {:?}", method);
                             }
