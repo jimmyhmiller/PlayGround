@@ -108,13 +108,7 @@ impl WidgetStore {
         self.widgets
             .iter()
             .find(|x| match &x.data {
-                WidgetData::Wasm { wasm: _, wasm_id } => {
-                    if *wasm_id as usize == expected_wasm_id {
-                        true
-                    } else {
-                        false
-                    }
-                },
+                WidgetData::Wasm { wasm: _, wasm_id } => *wasm_id as usize == expected_wasm_id,
                 _ => false,
             })
             .map(|x| x.id)
@@ -290,10 +284,10 @@ where
     let s = String::deserialize(d)?;
     let bytes = s.into_bytes();
     if let Ok(s) = decode_base64(&bytes) {
-        return Ok(s);
+        Ok(s)
     } else {
         // TODO: Fail?
-        return Ok(bytes);
+        Ok(bytes)
     }
 }
 
@@ -639,7 +633,12 @@ impl Widget {
         }
     }
 
-    pub fn send_process_message(&self, process_id: usize, buf: &str, wasm_messenger: &mut WasmMessenger) {
+    pub fn send_process_message(
+        &self,
+        process_id: usize,
+        buf: &str,
+        wasm_messenger: &mut WasmMessenger,
+    ) {
         match &self.data {
             WidgetData::Wasm { wasm: _, wasm_id } => {
                 wasm_messenger.send_process_message(*wasm_id, process_id, buf);

@@ -1,4 +1,4 @@
-use std::{io::Write, collections::HashSet};
+use std::{collections::HashSet, io::Write};
 
 use nonblock::NonBlockingReader;
 use notify::RecursiveMode;
@@ -97,7 +97,11 @@ impl Editor {
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
                                 widget.size.width += x;
                                 widget.size.height += y;
-                                widget.on_size_change(widget.size.width, widget.size.height, &mut self.wasm_messenger);
+                                widget.on_size_change(
+                                    widget.size.width,
+                                    widget.size.height,
+                                    &mut self.wasm_messenger,
+                                );
                             }
                         }
                     } else if self.context.modifiers.ctrl {
@@ -108,7 +112,6 @@ impl Editor {
                             }
                         }
                     }
-                   
                 }
                 Event::ReloadWidgets => {
                     self.widget_store.clear();
@@ -138,12 +141,13 @@ impl Editor {
                     // grab stdout
                     let stdout = process.stdout.take().unwrap();
                     let stdout = NonBlockingReader::from_fd(stdout).unwrap();
-                    let stderr: NonBlockingReader<std::process::ChildStderr> = NonBlockingReader::from_fd(process.stderr.take().unwrap()).unwrap();
+                    let stderr: NonBlockingReader<std::process::ChildStderr> =
+                        NonBlockingReader::from_fd(process.stderr.take().unwrap()).unwrap();
                     self.per_frame_actions
                         .push(PerFrame::ProcessOutput { process_id });
 
-
-                    let parent_widget_id = self.widget_store.get_widget_by_wasm_id(wasm_id).unwrap();
+                    let parent_widget_id =
+                        self.widget_store.get_widget_by_wasm_id(wasm_id).unwrap();
 
                     let parent = self.widget_store.get(parent_widget_id).unwrap();
                     let position = parent.position.offset(parent.size.width + 50.0, 0.0);
@@ -192,7 +196,11 @@ impl Editor {
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
                                 match &mut widget.data {
                                     WidgetData::Wasm { wasm: _, wasm_id } => {
-                                        self.wasm_messenger.send_event(*wasm_id, kind.clone(), event.clone());
+                                        self.wasm_messenger.send_event(
+                                            *wasm_id,
+                                            kind.clone(),
+                                            event.clone(),
+                                        );
                                     }
                                     _ => {}
                                 }
@@ -205,7 +213,8 @@ impl Editor {
                     if let Some(listening_widgets) = self.event_listeners.get_mut(&kind) {
                         listening_widgets.insert(widget_id);
                     } else {
-                        self.event_listeners.insert(kind, HashSet::from_iter(vec![widget_id]));
+                        self.event_listeners
+                            .insert(kind, HashSet::from_iter(vec![widget_id]));
                     }
                 }
                 Event::Unsubscribe(wasm_id, kind) => {

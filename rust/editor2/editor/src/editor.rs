@@ -247,7 +247,6 @@ impl Editor {
         // Todo: Need to test that I am not missing any
         // events with my start and end
 
-
         self.process_per_frame_actions();
 
         self.wasm_messenger.tick(&mut self.values);
@@ -268,11 +267,9 @@ impl Editor {
         }
 
         self.handle_events(events);
-
     }
 
     fn process_per_frame_actions(&mut self) {
-
         let mut to_delete = HashSet::new();
         for action in self.per_frame_actions.iter() {
             match action {
@@ -307,8 +304,14 @@ impl Editor {
                         }
                         if !buf.is_empty() {
                             process.output.push_str(&buf);
-                            if let Some(widget) = self.widget_store.get_mut(process.parent_widget_id) {
-                                widget.send_process_message(*process_id, &buf, &mut self.wasm_messenger);
+                            if let Some(widget) =
+                                self.widget_store.get_mut(process.parent_widget_id)
+                            {
+                                widget.send_process_message(
+                                    *process_id,
+                                    &buf,
+                                    &mut self.wasm_messenger,
+                                );
                             }
                         }
                     } else {
@@ -333,9 +336,9 @@ impl Editor {
                     _ => unreachable!("Shouldn't be here"),
                 }
             }
-    
+
             for process_id in to_delete.iter() {
-                self.processes.remove(&process_id);
+                self.processes.remove(process_id);
             }
         }
 
@@ -774,7 +777,8 @@ pub fn make_grain_gradient_shader(darker: Color, lighter: Color, alpha: f32, siz
     let data: &[u8] = unsafe { std::slice::from_raw_parts(ptr, len * 4) };
 
     let uniforms = Data::new_copy(data);
-    let grain_shader = effect
+
+    effect
         .make_shader(
             uniforms,
             &[
@@ -784,8 +788,7 @@ pub fn make_grain_gradient_shader(darker: Color, lighter: Color, alpha: f32, siz
             None,
             false,
         )
-        .unwrap();
-    grain_shader
+        .unwrap()
 }
 
 // I need a way for processes to add widgets
