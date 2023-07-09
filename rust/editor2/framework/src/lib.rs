@@ -162,7 +162,7 @@ impl Canvas {
 }
 
 pub static mut DEBUG: Vec<String> = Vec::new();
-pub static mut STRING_PTR_TO_LEN: Lazy<HashMap<u32, u32>> = Lazy::new(|| HashMap::new());
+pub static mut STRING_PTR_TO_LEN: Lazy<HashMap<u32, u32>> = Lazy::new(HashMap::new);
 
 pub trait App {
     type State;
@@ -171,7 +171,7 @@ pub trait App {
     fn on_click(&mut self, x: f32, y: f32);
     fn on_key(&mut self, input: KeyboardInput);
     fn on_scroll(&mut self, x: f64, y: f64);
-    fn on_event(&mut self, kind: String, event: String) {}
+    fn on_event(&mut self, _kind: String, _event: String) {}
     fn on_size_change(&mut self, width: f32, height: f32);
     fn get_state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State);
@@ -183,9 +183,7 @@ pub trait App {
             send_message_low_level(process_id, message.as_ptr() as i32, message.len() as i32);
         }
     }
-    fn on_process_message(&mut self, _process_id: i32, _message: String) {
-        
-    }
+    fn on_process_message(&mut self, _process_id: i32, _message: String) {}
     fn set_get_state(&mut self, ptr: u32, len: u32) {
         unsafe { set_get_state(ptr, len) };
     }
@@ -194,16 +192,26 @@ pub trait App {
             provide_f32_low_level(s.as_ptr() as i32, s.len() as i32, val);
         }
     }
-    
-    fn provide_bytes(&self, s:&str, val: &[u8]) {
+
+    fn provide_bytes(&self, s: &str, val: &[u8]) {
         unsafe {
-            provide_bytes_low_level(s.as_ptr() as i32, s.len() as i32, val.as_ptr() as i32, val.len() as i32);
+            provide_bytes_low_level(
+                s.as_ptr() as i32,
+                s.len() as i32,
+                val.as_ptr() as i32,
+                val.len() as i32,
+            );
         }
     }
 
     fn send_event(&self, kind: String, event: String) {
         unsafe {
-            send_event_low_level(kind.as_ptr() as i32, kind.len() as i32, event.as_ptr() as i32, event.len() as i32);
+            send_event_low_level(
+                kind.as_ptr() as i32,
+                kind.len() as i32,
+                event.as_ptr() as i32,
+                event.len() as i32,
+            );
         }
     }
     fn subscribe(&self, kind: String) {
@@ -217,7 +225,6 @@ pub trait App {
             unsubscribe_low_level(kind.as_ptr() as i32, kind.len() as i32);
         }
     }
-
 
     fn recieve_last_message(&mut self, process_id: i32) -> String {
         let buffer;
@@ -238,8 +245,8 @@ pub trait App {
 
     fn get_value(&self, name: &str) -> String {
         let ptr = unsafe { get_value(name.as_ptr() as i32, name.len() as i32) };
-        let result = fetch_string(ptr);
-        result
+
+        fetch_string(ptr)
     }
 
     fn try_get_value(&self, name: &str) -> Option<String> {

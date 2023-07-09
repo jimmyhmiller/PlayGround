@@ -183,7 +183,6 @@ pub fn setup_window(mut editor: editor::Editor) {
                         command_buffer.commit();
                     }
                     editor.next_frame();
-
                 }
                 _ => {}
             }

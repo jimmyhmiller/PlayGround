@@ -27,8 +27,7 @@ fn find_indent(s: &str) -> usize {
     // Find the indent of the first non-empty line
     lines
         .clone()
-        .filter(|line| !line.trim().is_empty())
-        .next()
+        .find(|line| !line.trim().is_empty())
         .map(|line| line.chars().take_while(|c| c.is_whitespace()).count())
         .unwrap_or(0)
 }
@@ -123,7 +122,7 @@ impl App for AsmData {
 
             canvas.save();
             for regdiagram in file_info.regdiagram.iter() {
-                let document = roxmltree::Document::parse(&regdiagram).unwrap();
+                let document = roxmltree::Document::parse(regdiagram).unwrap();
                 let root = document.root_element();
                 let name = root.attribute("name").unwrap_or("");
 
@@ -133,7 +132,7 @@ impl App for AsmData {
                     .filter_map(|child| {
                         let text = child.text().unwrap_or_default().trim();
                         if !text.is_empty() {
-                            Some(text.replace("(", "").replace(")", ""))
+                            Some(text.replace(['(', ')'], ""))
                         } else {
                             None
                         }
@@ -297,9 +296,7 @@ impl App for AsmData {
         *self = state;
     }
 
-    fn on_size_change(&mut self, width: f32, height: f32) {
-        
-    }
+    fn on_size_change(&mut self, _width: f32, _height: f32) {}
 }
 
 impl AsmData {

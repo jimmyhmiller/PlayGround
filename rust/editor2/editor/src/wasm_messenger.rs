@@ -233,7 +233,7 @@ impl WasmMessenger {
         canvas: &mut Canvas,
         bounds: Size,
     ) -> Option<Size> {
-        if let Some(mut commands) = self.wasm_draw_commands.get_mut(&wasm_id) {
+        if let Some(commands) = self.wasm_draw_commands.get_mut(&wasm_id) {
             let mut max_width = 0.0;
             let mut max_height = 0.0;
             let mut current_height_stack = vec![];
@@ -733,10 +733,7 @@ impl WasmManager {
                 default_return
             }
             Payload::OnSizeChange(width, height) => {
-                self.instance
-                    .on_size_change(width, height)
-                    .await
-                    .unwrap();
+                self.instance.on_size_change(width, height).await.unwrap();
                 default_return
             }
         }

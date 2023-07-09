@@ -110,8 +110,6 @@ impl ProcessSpawner {
     }
 
     fn initialize_rust_analyzer(&mut self) {
-
-
         let process_id = self.start_process(find_rust_analyzer());
         self.process_id = process_id;
 
@@ -146,7 +144,6 @@ impl ProcessSpawner {
             &serde_json::to_string(&initialize_params).unwrap(),
         );
 
-
         let params: <Initialized as Notification>::Params = InitializedParams {};
         let request = self.notification(
             Initialized::METHOD,
@@ -163,19 +160,18 @@ impl ProcessSpawner {
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
 
-        let params: <DidOpenTextDocument as Notification>::Params =
-            DidOpenTextDocumentParams {
-                text_document: TextDocumentItem {
-                    uri: Url::from_str(&format!(
-                        "file://{}/process-test/src/lib.rs",
-                        self.root_path
-                    ))
-                    .unwrap(),
-                    language_id: "rust".to_string(),
-                    version: 1,
-                    text: contents,
-                },
-            };
+        let params: <DidOpenTextDocument as Notification>::Params = DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: Url::from_str(&format!(
+                    "file://{}/process-test/src/lib.rs",
+                    self.root_path
+                ))
+                .unwrap(),
+                language_id: "rust".to_string(),
+                version: 1,
+                text: contents,
+            },
+        };
 
         let notify = self.notification(
             DidOpenTextDocument::METHOD,
@@ -203,32 +199,34 @@ impl ProcessSpawner {
         );
     }
 
-    fn update_document_insert(&mut self, root_path: &str, line: usize, column: usize, bytes: Vec<u8>) {
-        let params: <DidChangeTextDocument as Notification>::Params =
-            DidChangeTextDocumentParams {
-                text_document: VersionedTextDocumentIdentifier {
-                    uri: Url::from_str(&format!(
-                        "file://{}/process-test/src/lib.rs",
-                        root_path
-                    ))
+    fn update_document_insert(
+        &mut self,
+        root_path: &str,
+        line: usize,
+        column: usize,
+        bytes: Vec<u8>,
+    ) {
+        let params: <DidChangeTextDocument as Notification>::Params = DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: Url::from_str(&format!("file://{}/process-test/src/lib.rs", root_path))
                     .unwrap(),
-                    version: 0,
-                },
-                content_changes: vec![TextDocumentContentChangeEvent {
-                    range: Some(Range {
-                        start: Position {
-                            line: line as u32,
-                            character: column as u32,
-                        },
-                        end: Position {
-                            line: line as u32,
-                            character: column as u32,
-                        },
-                    }),
-                    range_length: None,
-                    text: from_utf8(&bytes).unwrap().to_string(),
-                }],
-            };
+                version: 0,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position {
+                        line: line as u32,
+                        character: column as u32,
+                    },
+                    end: Position {
+                        line: line as u32,
+                        character: column as u32,
+                    },
+                }),
+                range_length: None,
+                text: from_utf8(&bytes).unwrap().to_string(),
+            }],
+        };
         let request = self.notification(
             DidChangeTextDocument::METHOD,
             &serde_json::to_string(&params).unwrap(),
@@ -237,31 +235,27 @@ impl ProcessSpawner {
     }
 
     fn update_document_delete(&mut self, root_path: &str, line: usize, column: usize) {
-        let params: <DidChangeTextDocument as Notification>::Params =
-            DidChangeTextDocumentParams {
-                text_document: VersionedTextDocumentIdentifier {
-                    uri: Url::from_str(&format!(
-                        "file://{}/process-test/src/lib.rs",
-                        root_path
-                    ))
+        let params: <DidChangeTextDocument as Notification>::Params = DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: Url::from_str(&format!("file://{}/process-test/src/lib.rs", root_path))
                     .unwrap(),
-                    version: 0,
-                },
-                content_changes: vec![TextDocumentContentChangeEvent {
-                    range: Some(Range {
-                        start: Position {
-                            line: line as u32,
-                            character: column as u32,
-                        },
-                        end: Position {
-                            line: line as u32,
-                            character: column as u32 + 1,
-                        },
-                    }),
-                    range_length: None,
-                    text: "".to_string(),
-                }],
-            };
+                version: 0,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position {
+                        line: line as u32,
+                        character: column as u32,
+                    },
+                    end: Position {
+                        line: line as u32,
+                        character: column as u32 + 1,
+                    },
+                }),
+                range_length: None,
+                text: "".to_string(),
+            }],
+        };
         let request = self.notification(
             DidChangeTextDocument::METHOD,
             &serde_json::to_string(&params).unwrap(),
@@ -279,7 +273,6 @@ impl App for ProcessSpawner {
                 state: State::Init,
                 message_type: HashMap::new(),
                 last_request_id: 0,
-
             },
             process_id: 0,
             root_path: "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2".to_string(),
@@ -332,7 +325,7 @@ impl App for ProcessSpawner {
     fn on_process_message(&mut self, _process_id: i32, message: String) {
         let messages = message.split("Content-Length");
         for message in messages {
-            match self.parse_message(&message) {
+            match self.parse_message(message) {
                 Ok(messages) => {
                     for message in messages {
                         // let method = message["method"].as_str();
@@ -357,7 +350,7 @@ impl App for ProcessSpawner {
 
     fn set_state(&mut self, _state: Self::State) {}
 
-    fn on_size_change(&mut self, width: f32, height: f32) {}
+    fn on_size_change(&mut self, _width: f32, _height: f32) {}
 }
 
 fn extract_tokens(message: &serde_json::Value) -> Vec<u8> {
