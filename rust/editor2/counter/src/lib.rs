@@ -367,9 +367,10 @@ impl App for TextWidget {
 
     fn set_state(&mut self, state: Self::State) {
         // TODO: hacky
-        let old_contents = self.text_pane.contents.clone();
         *self = state;
-        self.text_pane.contents = old_contents;
+        let file = "/code/process-test/src/lib.rs";
+        let contents = std::fs::read(file).unwrap();
+        self.text_pane.contents = contents;
     }
 
     fn on_size_change(&mut self, width: f32, height: f32) {
