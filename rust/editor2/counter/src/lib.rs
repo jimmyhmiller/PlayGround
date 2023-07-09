@@ -1,6 +1,6 @@
 use std::str::from_utf8;
 
-use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, Value, decode_base64};
+use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, decode_base64};
 use headless_editor::{
     parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
 };
