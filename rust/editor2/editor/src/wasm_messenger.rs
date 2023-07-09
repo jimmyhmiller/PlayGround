@@ -57,6 +57,7 @@ enum Payload {
     UpdatePosition(Position),
     ProcessMessage(usize, String),
     Event(String, String),
+    OnSizeChange(f32, f32),
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +162,7 @@ impl WasmMessenger {
                     Payload::UpdatePosition(_) => "UpdatePosition",
                     Payload::ProcessMessage(_, _) => "ProcessMessage",
                     Payload::Event(_, _) => "Event",
+                    Payload::OnSizeChange(_, _) => "OnSizeChange",
                 });
             }
         }
@@ -579,6 +581,15 @@ impl WasmMessenger {
             payload: Payload::Event(kind, event),
         });
     }
+
+    pub fn send_on_size_change(&mut self, wasm_id: u64, width: f32, height: f32) {
+        let message_id = self.next_message_id();
+        self.send_message(Message {
+            message_id,
+            wasm_id,
+            payload: Payload::OnSizeChange(width, height),
+        });
+    }
 }
 
 // I think I need to:
@@ -719,6 +730,13 @@ impl WasmManager {
             }
             Payload::Event(kind, event) => {
                 self.instance.on_event(kind, event).await.unwrap();
+                default_return
+            }
+            Payload::OnSizeChange(width, height) => {
+                self.instance
+                    .on_size_change(width, height)
+                    .await
+                    .unwrap();
                 default_return
             }
         }
@@ -1395,6 +1413,12 @@ impl WasmInstance {
         let (kind_ptr, _len) = self.transfer_string_to_wasm2(kind).await?;
         let (event_ptr, _len) = self.transfer_string_to_wasm2(event).await?;
         self.call_typed_func::<(u32, u32), ()>("on_event", (kind_ptr, event_ptr), 1)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn on_size_change(&mut self, width: f32, height: f32) -> Result<(), Box<dyn Error>> {
+        self.call_typed_func::<(f32, f32), ()>("on_size_change", (width, height), 1)
             .await?;
         Ok(())
     }

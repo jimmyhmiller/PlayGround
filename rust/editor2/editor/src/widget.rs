@@ -21,6 +21,14 @@ pub struct Position {
     pub x: f32,
     pub y: f32,
 }
+impl Position {
+    pub fn offset(&self, x: f32, y: f32) -> Position {
+        Position {
+            x: self.x + x,
+            y: self.y + y,
+        }
+    }
+}
 
 impl From<Position> for Point {
     fn from(val: Position) -> Self {
@@ -63,7 +71,7 @@ impl WidgetStore {
         id
     }
 
-    pub fn _get(&self, id: usize) -> Option<&Widget> {
+    pub fn get(&self, id: usize) -> Option<&Widget> {
         self.widgets.get(id)
     }
 
@@ -256,11 +264,23 @@ pub struct TextOptions {
     pub color: Color,
 }
 
+pub fn encode_base64(data: &str) -> String {
+    use base64::Engine;
+
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+pub fn decode_base64(data: &Vec<u8>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.decode(data)?;
+    Ok(data)
+}
+
 fn serialize_text<S>(x: &Vec<u8>, s: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    s.serialize_str(from_utf8(x).unwrap())
+    s.serialize_str(&encode_base64(from_utf8(x).unwrap()))
 }
 
 fn deserialize_text<'de, D>(d: D) -> Result<Vec<u8>, D::Error>
@@ -268,7 +288,13 @@ where
     D: Deserializer<'de>,
 {
     let s = String::deserialize(d)?;
-    Ok(s.into_bytes())
+    let bytes = s.into_bytes();
+    if let Ok(s) = decode_base64(&bytes) {
+        return Ok(s);
+    } else {
+        // TODO: Fail?
+        return Ok(bytes);
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -621,6 +647,15 @@ impl Widget {
             _ => {
                 panic!("Can't send process message to non-wasm widget");
             }
+        }
+    }
+
+    pub fn on_size_change(&mut self, width: f32, height: f32, wasm_messenger: &mut WasmMessenger) {
+        match &mut self.data {
+            WidgetData::Wasm { wasm: _, wasm_id } => {
+                wasm_messenger.send_on_size_change(*wasm_id, width, height);
+            }
+            _ => {}
         }
     }
 }
