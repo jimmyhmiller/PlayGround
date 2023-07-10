@@ -39,6 +39,9 @@ pub struct TextPane {
     tokens: Vec<Token>,
 }
 
+// TODO: Got some weird token missing that refreshing state fixes
+
+
 impl TextPane {
     pub fn new(contents: Vec<u8>, line_height: f32) -> Self {
         Self {
