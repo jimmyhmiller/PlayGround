@@ -179,6 +179,7 @@ pub fn truncate_imm<T: Into<i32>, const WIDTH: usize>(imm: T) -> u32 {
     masked
 }
 
+#[derive(Debug)]
 pub enum Asm {
     /// ABS -- A64
     /// Absolute value (vector)
@@ -8648,91 +8649,109 @@ pub enum Asm {
         rd: Register,
     },
 }
+#[derive(Debug)]
 pub enum AbsAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum AddAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum AutiaSelector {
     Integer,
     System,
 }
 
+#[derive(Debug)]
 pub enum AutibSelector {
     Integer,
     System,
 }
 
+#[derive(Debug)]
 pub enum CmeqAdvsimdRegSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum CmeqAdvsimdZeroSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum CmgeAdvsimdRegSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum CmgeAdvsimdZeroSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum CmgtAdvsimdRegSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum CmgtAdvsimdZeroSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum CmhiAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum CmhsAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum CmleAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum CmltAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum CmtstAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum DsbSelector {
     MemoryBarrier,
     MemoryNxsBarrier,
 }
 
+#[derive(Debug)]
 pub enum DupAdvsimdEltSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum FabdAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8740,11 +8759,13 @@ pub enum FabdAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FabsAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FacgeAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8752,6 +8773,7 @@ pub enum FacgeAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FacgtAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8759,21 +8781,25 @@ pub enum FacgtAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FaddAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FaddpAdvsimdPairSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FaddpAdvsimdVecSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcmeqAdvsimdRegSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8781,6 +8807,7 @@ pub enum FcmeqAdvsimdRegSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcmeqAdvsimdZeroSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8788,6 +8815,7 @@ pub enum FcmeqAdvsimdZeroSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcmgeAdvsimdRegSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8795,6 +8823,7 @@ pub enum FcmgeAdvsimdRegSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcmgeAdvsimdZeroSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8802,6 +8831,7 @@ pub enum FcmgeAdvsimdZeroSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcmgtAdvsimdRegSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8809,6 +8839,7 @@ pub enum FcmgtAdvsimdRegSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcmgtAdvsimdZeroSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8816,6 +8847,7 @@ pub enum FcmgtAdvsimdZeroSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcmleAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8823,6 +8855,7 @@ pub enum FcmleAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcmltAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8830,6 +8863,7 @@ pub enum FcmltAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcvtasAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8837,6 +8871,7 @@ pub enum FcvtasAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcvtauAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8844,6 +8879,7 @@ pub enum FcvtauAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcvtmsAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8851,6 +8887,7 @@ pub enum FcvtmsAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcvtmuAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8858,6 +8895,7 @@ pub enum FcvtmuAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcvtnsAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8865,6 +8903,7 @@ pub enum FcvtnsAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcvtnuAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8872,6 +8911,7 @@ pub enum FcvtnuAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcvtpsAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8879,6 +8919,7 @@ pub enum FcvtpsAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcvtpuAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8886,16 +8927,19 @@ pub enum FcvtpuAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcvtxnAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum FcvtzsAdvsimdFixSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum FcvtzsAdvsimdIntSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8903,11 +8947,13 @@ pub enum FcvtzsAdvsimdIntSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FcvtzuAdvsimdFixSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum FcvtzuAdvsimdIntSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -8915,91 +8961,109 @@ pub enum FcvtzuAdvsimdIntSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FdivAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmaxAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmaxnmAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmaxnmpAdvsimdPairSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmaxnmpAdvsimdVecSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmaxnmvAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmaxpAdvsimdPairSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmaxpAdvsimdVecSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmaxvAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FminAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FminnmAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FminnmpAdvsimdPairSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FminnmpAdvsimdVecSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FminnmvAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FminpAdvsimdPairSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FminpAdvsimdVecSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FminvAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmlaAdvsimdEltSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -9007,21 +9071,25 @@ pub enum FmlaAdvsimdEltSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmlaAdvsimdVecSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmlalAdvsimdEltSelector {
     Fmlal,
     Fmlal2,
 }
 
+#[derive(Debug)]
 pub enum FmlalAdvsimdVecSelector {
     Fmlal,
     Fmlal2,
 }
 
+#[derive(Debug)]
 pub enum FmlsAdvsimdEltSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -9029,26 +9097,31 @@ pub enum FmlsAdvsimdEltSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmlsAdvsimdVecSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmlslAdvsimdEltSelector {
     Fmlsl,
     Fmlsl2,
 }
 
+#[derive(Debug)]
 pub enum FmlslAdvsimdVecSelector {
     Fmlsl,
     Fmlsl2,
 }
 
+#[derive(Debug)]
 pub enum FmovAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmulAdvsimdEltSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -9056,11 +9129,13 @@ pub enum FmulAdvsimdEltSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmulAdvsimdVecSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmulxAdvsimdEltSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -9068,6 +9143,7 @@ pub enum FmulxAdvsimdEltSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FmulxAdvsimdVecSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -9075,11 +9151,13 @@ pub enum FmulxAdvsimdVecSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FnegAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FrecpeAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -9087,6 +9165,7 @@ pub enum FrecpeAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FrecpsAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -9094,46 +9173,55 @@ pub enum FrecpsAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FrecpxAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FrintaAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FrintiAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FrintmAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FrintnAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FrintpAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FrintxAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FrintzAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FrsqrteAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -9141,6 +9229,7 @@ pub enum FrsqrteAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FrsqrtsAdvsimdSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -9148,156 +9237,185 @@ pub enum FrsqrtsAdvsimdSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FsqrtAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum FsubAdvsimdSelector {
     HalfPrecision,
     SinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum Ld1AdvsimdMultSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum Ld1AdvsimdSnglSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum Ld1rAdvsimdSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum Ld2AdvsimdMultSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum Ld2AdvsimdSnglSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum Ld2rAdvsimdSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum Ld3AdvsimdMultSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum Ld3AdvsimdSnglSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum Ld3rAdvsimdSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum Ld4AdvsimdMultSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum Ld4AdvsimdSnglSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum Ld4rAdvsimdSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum LdpFpsimdSelector {
     PostIndex,
     PreIndex,
     SignedOffset,
 }
 
+#[derive(Debug)]
 pub enum LdpGenSelector {
     PostIndex,
     PreIndex,
     SignedOffset,
 }
 
+#[derive(Debug)]
 pub enum LdpswSelector {
     PostIndex,
     PreIndex,
     SignedOffset,
 }
 
+#[derive(Debug)]
 pub enum LdrImmFpsimdSelector {
     PostIndex,
     PreIndex,
     UnsignedOffset,
 }
 
+#[derive(Debug)]
 pub enum LdrImmGenSelector {
     PostIndex,
     PreIndex,
     UnsignedOffset,
 }
 
+#[derive(Debug)]
 pub enum LdrbImmSelector {
     PostIndex,
     PreIndex,
     UnsignedOffset,
 }
 
+#[derive(Debug)]
 pub enum LdrhImmSelector {
     PostIndex,
     PreIndex,
     UnsignedOffset,
 }
 
+#[derive(Debug)]
 pub enum LdrsbImmSelector {
     PostIndex,
     PreIndex,
     UnsignedOffset,
 }
 
+#[derive(Debug)]
 pub enum LdrshImmSelector {
     PostIndex,
     PreIndex,
     UnsignedOffset,
 }
 
+#[derive(Debug)]
 pub enum LdrswImmSelector {
     PostIndex,
     PreIndex,
     UnsignedOffset,
 }
 
+#[derive(Debug)]
 pub enum NegAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum PaciaSelector {
     Integer,
     System,
 }
 
+#[derive(Debug)]
 pub enum PacibSelector {
     Integer,
     System,
 }
 
+#[derive(Debug)]
 pub enum ScvtfAdvsimdFixSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum ScvtfAdvsimdIntSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -9305,312 +9423,372 @@ pub enum ScvtfAdvsimdIntSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum ShlAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SliAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqabsAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqaddAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqdmlalAdvsimdEltSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqdmlalAdvsimdVecSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqdmlslAdvsimdEltSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqdmlslAdvsimdVecSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqdmulhAdvsimdEltSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqdmulhAdvsimdVecSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqdmullAdvsimdEltSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqdmullAdvsimdVecSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqnegAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqrdmlahAdvsimdEltSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqrdmlahAdvsimdVecSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqrdmlshAdvsimdEltSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqrdmlshAdvsimdVecSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqrdmulhAdvsimdEltSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqrdmulhAdvsimdVecSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqrshlAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqrshrnAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqrshrunAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqshlAdvsimdImmSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqshlAdvsimdRegSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqshluAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqshrnAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqshrunAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqsubAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqxtnAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SqxtunAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SriAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SrshlAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SrshrAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SrsraAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SshlAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SshrAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SsraAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum St1AdvsimdMultSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum St1AdvsimdSnglSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum St2AdvsimdMultSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum St2AdvsimdSnglSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum St2gSelector {
     PostIndex,
     PreIndex,
     SignedOffset,
 }
 
+#[derive(Debug)]
 pub enum St3AdvsimdMultSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum St3AdvsimdSnglSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum St4AdvsimdMultSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum St4AdvsimdSnglSelector {
     NoOffset,
     PostIndex,
 }
 
+#[derive(Debug)]
 pub enum StgSelector {
     PostIndex,
     PreIndex,
     SignedOffset,
 }
 
+#[derive(Debug)]
 pub enum StgpSelector {
     PostIndex,
     PreIndex,
     SignedOffset,
 }
 
+#[derive(Debug)]
 pub enum StpFpsimdSelector {
     PostIndex,
     PreIndex,
     SignedOffset,
 }
 
+#[derive(Debug)]
 pub enum StpGenSelector {
     PostIndex,
     PreIndex,
     SignedOffset,
 }
 
+#[derive(Debug)]
 pub enum StrImmFpsimdSelector {
     PostIndex,
     PreIndex,
     UnsignedOffset,
 }
 
+#[derive(Debug)]
 pub enum StrImmGenSelector {
     PostIndex,
     PreIndex,
     UnsignedOffset,
 }
 
+#[derive(Debug)]
 pub enum StrbImmSelector {
     PostIndex,
     PreIndex,
     UnsignedOffset,
 }
 
+#[derive(Debug)]
 pub enum StrhImmSelector {
     PostIndex,
     PreIndex,
     UnsignedOffset,
 }
 
+#[derive(Debug)]
 pub enum Stz2gSelector {
     PostIndex,
     PreIndex,
     SignedOffset,
 }
 
+#[derive(Debug)]
 pub enum StzgSelector {
     PostIndex,
     PreIndex,
     SignedOffset,
 }
 
+#[derive(Debug)]
 pub enum SubAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum SuqaddAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UcvtfAdvsimdFixSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UcvtfAdvsimdIntSelector {
     ScalarHalfPrecision,
     ScalarSinglePrecisionAndDoublePrecision,
@@ -9618,81 +9796,97 @@ pub enum UcvtfAdvsimdIntSelector {
     VectorSinglePrecisionAndDoublePrecision,
 }
 
+#[derive(Debug)]
 pub enum UqaddAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UqrshlAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UqrshrnAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UqshlAdvsimdImmSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UqshlAdvsimdRegSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UqshrnAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UqsubAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UqxtnAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UrshlAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UrshrAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UrsraAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UshlAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UshrAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UsqaddAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum UsraAdvsimdSelector {
     Scalar,
     Vector,
 }
 
+#[derive(Debug)]
 pub enum XpacSelector {
     Integer,
     System,

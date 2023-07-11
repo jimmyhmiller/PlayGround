@@ -6,10 +6,6 @@ use asm::arm::{
 };
 use mmap_rs::MmapOptions;
 
-fn main() -> Result<(), Box<dyn Error>> {
-    use_the_assembler()?;
-    Ok(())
-}
 
 fn print_u32_hex_le(value: u32) {
     let bytes = value.to_le_bytes();
@@ -181,7 +177,7 @@ fn breakpoint() -> Asm {
     Asm::Brk { imm16: 30 }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Label {
     index: usize,
 }
@@ -191,7 +187,8 @@ struct Lang {
     label_index: usize,
     label_locations: HashMap<usize, usize>,
     labels: Vec<String>,
-    volatile_registers: Vec<Register>,
+    free_volatile_registers: Vec<Register>,
+    allocated_volatile_registers: Vec<Register>,
 }
 
 #[allow(unused)]
@@ -202,7 +199,8 @@ impl Lang {
             label_locations: HashMap::new(),
             label_index: 0,
             labels: vec![],
-            volatile_registers: vec![X22, X21, X20, X19]
+            free_volatile_registers: vec![X22, X21, X20, X19],
+            allocated_volatile_registers: vec![]
         }
     }
 
@@ -354,7 +352,20 @@ impl Lang {
     }
 
     fn volatile_register(&mut self) -> Register {
-        self.volatile_registers.pop().unwrap()
+        let next_register = self.free_volatile_registers.pop().unwrap();
+        self.allocated_volatile_registers.push(next_register);
+        next_register
+    }
+    fn free_register(&mut self, reg: Register) {
+        self.free_volatile_registers.push(reg);
+        self.allocated_volatile_registers
+            .retain(|&allocated| allocated != reg);
+    }
+
+    fn reserve_register(&mut self, reg: Register) {
+        self.free_volatile_registers
+            .retain(|&free| free != reg);
+        self.allocated_volatile_registers.push(reg);
     }
 
     fn arg(&self, arg: u8) -> Register {
@@ -368,6 +379,8 @@ impl Lang {
     fn ret_reg(&self) -> Register {
         X0
     }
+
+
 }
 
 fn load_64_bit_num(register: Register, num: usize) -> Vec<Asm> {
@@ -453,6 +466,452 @@ fn fib_rust(n: usize) -> usize {
     }
     return fib_rust(n - 1) + fib_rust(n - 2);
 }
+
+
+
+#[derive(Debug, Copy, Clone)]
+enum Condition {
+    LessThanOrEqual,
+}
+
+type InstructionId = usize;
+
+#[derive(Debug, Copy, Clone)]
+enum Value {
+    Register(VirtualRegister),
+    UnSignedConstant(usize),
+    SignedConstant(isize),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+struct VirtualRegister {
+    argument: Option<usize>,
+    index: usize,
+    volatile: bool,
+}
+
+impl Into<Value> for VirtualRegister {
+    fn into(self) -> Value {
+        Value::Register(self)
+    }
+}
+
+impl Into<Value> for usize {
+    fn into(self) -> Value {
+        Value::UnSignedConstant(self)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Instruction {
+    Sub(Value, Value, Value),
+    Add(Value, Value, Value),
+    Mul(Value, Value, Value),
+    Div(Value, Value, Value),
+    Assign(VirtualRegister, Value),
+    Recurse(Value, Vec<Value>),
+    JumpIf(Label, Condition, Value, Value),
+    Ret(Value),
+}
+
+impl TryInto<VirtualRegister> for &Value {
+    type Error = ();
+
+    fn try_into(self) -> Result<VirtualRegister, Self::Error> {
+        match self {
+            Value::Register(register) => Ok(*register),
+            _ => Err(()),
+        }
+    }
+}
+impl TryInto<VirtualRegister> for &VirtualRegister {
+    type Error = ();
+
+    fn try_into(self) -> Result<VirtualRegister, Self::Error> {
+        Ok(*self)
+    }
+}
+
+macro_rules! get_registers {
+    ($x:expr) => {
+        if let Ok(register) = $x.try_into() {
+            Some(register)
+        } else {
+            None
+        }
+    };
+    ($x:expr, $($xs:expr),+)  => {
+        vec![get_registers!($x), $(get_registers!($xs)),+].into_iter().flatten().collect()
+    };
+}
+
+
+
+impl Instruction {
+    fn get_registers(&self) -> Vec<VirtualRegister> {
+        match self {
+            Instruction::Sub(a, b, c) => {
+                get_registers!(a, b, c)
+            }
+            Instruction::Add(a, b, c) => {
+                get_registers!(a, b, c)
+            }
+            Instruction::Mul(a, b, c) => {
+                get_registers!(a, b, c)
+            }
+            Instruction::Div(a, b, c) => {
+                get_registers!(a, b, c)
+            }
+            Instruction::Assign(a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::Recurse(a, args) => {
+                let mut result : Vec<VirtualRegister> = args.iter().map(|arg| get_registers!(arg)).flatten().collect();
+                if let Ok(register) = a.try_into() {
+                    result.push(register);
+                }
+                result
+
+            }
+            Instruction::JumpIf(_, _, a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::Ret(a) => {
+                if let Ok(register) = a.try_into() {
+                    vec![register]
+                } else {
+                    vec![]
+                }
+            }
+        }
+    }
+}
+
+
+struct RegisterAllocator {
+    lifetimes: HashMap<VirtualRegister, (usize, usize)>,
+    allocated_register: HashMap<VirtualRegister, Register>,
+}
+
+#[derive(Debug, Clone)]
+struct Ir {
+    register_index: usize,
+    instructions: Vec<Instruction>,
+    labels: Vec<Label>,
+    label_names: Vec<String>,
+    label_locations: HashMap<usize, usize>,
+}
+
+impl Ir {
+    fn new() -> Self {
+        Self {
+            register_index: 0,
+            instructions: vec![],
+            labels: vec![],
+            label_names: vec![],
+            label_locations: HashMap::new(),
+        }
+    }
+
+    fn next_register(&mut self, argument: Option<usize>, volatile: bool) -> VirtualRegister {
+        let register = VirtualRegister {
+            argument,
+            index: self.register_index,
+            volatile,
+        };
+        self.register_index += 1;
+        register
+    }
+
+    fn arg(&mut self, n: usize) -> VirtualRegister {
+        self.next_register(Some(n), true)
+    }
+
+    fn volatile_register(&mut self) -> VirtualRegister {
+        self.next_register(None, true)
+    }
+
+    fn recurse<A>(&mut self, args: Vec<A>) -> Value where A: Into<Value> {
+        let register = self.volatile_register();
+        let mut new_args: Vec<Value> = vec![];
+        for (index, arg) in args.into_iter().enumerate() {
+            let value: Value = arg.into();
+            let reg = self.arg(index);
+            self.assign(reg, value);
+            new_args.push(reg.into());
+        }
+        self.instructions.push(Instruction::Recurse(register.into(), new_args));
+        Value::Register(register)
+    }
+
+    fn sub<A, B>(&mut self, a: A, b: B) -> Value where A : Into<Value>, B : Into<Value> {
+        let result = self.volatile_register();
+        let a = self.assign_new(a.into());
+        let b = self.assign_new(b.into());
+        self.instructions.push(Instruction::Sub(result.into(), a.into(), b.into()));
+        Value::Register(result)
+    }
+
+    fn add<A, B>(&mut self, a: A, b: B) -> Value where A : Into<Value>, B : Into<Value> {
+        let register = self.volatile_register();
+        let a = self.assign_new(a.into());
+        let b = self.assign_new(b.into());
+        self.instructions.push(Instruction::Add(register.into(), a.into(), b.into()));
+        Value::Register(register)
+    }
+
+    fn jump_if<A, B>(&mut self, block: Label, condition: Condition, a: A, b: B) where A : Into<Value>, B : Into<Value> {
+        let a = self.assign_new(a.into());
+        let b = self.assign_new(b.into());
+        self.instructions.push(Instruction::JumpIf(block, condition, a.into(), b.into()));
+    }
+
+    fn assign(&mut self, dest: VirtualRegister, val: Value) {
+        self.instructions.push(Instruction::Assign(dest, val));
+    }
+
+    fn assign_new(&mut self, val: Value) -> VirtualRegister {
+        if let Value::Register(register) = val {
+            return register;
+        }
+        let register = self.next_register(None, false);
+        self.instructions.push(Instruction::Assign(register, val));
+        register
+    }
+
+    fn ret<A>(&mut self, n: A) where A: Into<Value> {
+        self.instructions.push(Instruction::Ret(n.into()));
+    }
+
+    fn label(&mut self, arg: &str) -> Label {
+        let label_index = self.labels.len();
+        self.label_names.push(arg.to_string());
+        let label = Label { index: label_index };
+        self.labels.push(label);
+        label
+    }
+
+    fn write_label(&mut self, early_exit: Label) {
+        self.label_locations.insert(self.instructions.len(), early_exit.index);
+    }
+
+    fn get_register_lifetime(&mut self) -> HashMap<VirtualRegister, (usize, usize)> {
+        let mut result: HashMap<VirtualRegister, (usize, usize)> = HashMap::new();
+        for (index, instruction) in self.instructions.iter().enumerate().rev() {
+            for register in instruction.get_registers() {
+                if let Some((_start, end)) = result.get(&register) {
+                    result.insert(register, (index, *end));
+                } else {
+                    result.insert(register, (index, index));
+                }
+            }
+        }
+
+        result
+    }
+
+    fn allocate_register(&mut self, index: usize, register: VirtualRegister, lifetimes: &HashMap<VirtualRegister, (usize, usize)>, allocated_registers: HashMap<VirtualRegister, Register>, lang: &mut Lang) -> Register {
+        if let Some(arg) = register.argument {
+            let reg = lang.arg(arg as u8);
+            reg
+        }
+        else {
+            let (start, end) = lifetimes.get(&register).unwrap();
+            if index == *start {
+                let reg = lang.volatile_register();
+                reg
+            } else if index == *end {
+                let reg = allocated_registers.get(&register).unwrap();
+                lang.free_register(*reg);
+                *reg
+            } else {
+                assert!(allocated_registers.contains_key(&register));
+                *allocated_registers.get(&register).unwrap()
+            }
+        }
+    }
+
+    fn allocate_registers(&self, lang: &mut Lang, lifetimes: &HashMap<VirtualRegister, (usize, usize)>) -> HashMap<VirtualRegister, Register> {
+        let mut result = HashMap::new();
+        for (index, instruction) in self.instructions.iter().enumerate() {
+            let registers = instruction.get_registers();
+            for register in registers.iter() {
+                if let Some(arg) = register.argument {
+                    result.insert(*register, lang.arg(arg as u8));
+                }
+                else {
+                    let (start, end) = lifetimes.get(register).unwrap();
+                    if index == *start {
+                        let reg = lang.volatile_register();
+                        result.insert(*register, reg);
+                    } else if index == *end {
+                        let reg = result.get(register).unwrap();
+                        lang.free_register(*reg);
+                    } else {
+                        assert!(result.contains_key(register))
+                    }
+                }
+            }
+        }
+        result
+    }
+
+
+    pub fn draw_lifetimes(lifetimes: &HashMap<VirtualRegister, (usize, usize)>) {
+        // Find the maximum lifetime to set the width of the diagram
+        let max_lifetime = lifetimes.values().map(|(_, end)| end).max().unwrap_or(&0);
+        // sort lifetime by start
+        let mut lifetimes: Vec<(VirtualRegister, (usize, usize))> = lifetimes.clone().into_iter().collect();
+        lifetimes.sort_by_key(|(_, (start, _))| *start);
+
+        for (register, (start, end)) in &lifetimes {
+            // Print the register name
+            print!("{:10} |", register.index);
+    
+            // Print the start of the lifetime
+            for _ in 0..*start {
+                print!(" ");
+            }
+    
+            // Print the lifetime
+            for _ in *start..*end {
+                print!("-");
+            }
+    
+            // Print the rest of the line
+            for _ in *end..*max_lifetime {
+                print!(" ");
+            }
+    
+            println!("|");
+        }
+    }
+
+    fn compile(&mut self) -> Lang {
+        let mut lang = Lang::new();
+
+        let mut ir_label_to_lang_label: HashMap<Label, Label> = HashMap::new();
+
+        for label in self.labels.iter() {
+            let new_label = lang.new_label(&self.label_names[label.index]);
+            ir_label_to_lang_label.insert(*label, new_label);
+        }
+        let lifetimes = self.get_register_lifetime();
+        let register_assignment: HashMap<VirtualRegister, Register> = self.allocate_registers(&mut lang, &lifetimes);
+        for (index, instruction) in self.instructions.iter().enumerate() {
+            let label = self.label_locations.get(&index);
+            if let Some(label) = label {
+                lang.write_label(ir_label_to_lang_label[&self.labels[*label]]);
+            }
+            match instruction {
+                Instruction::Sub(dest, a, b) => {
+                    let a = register_assignment.get(&a.try_into().unwrap()).unwrap();
+                    let b = register_assignment.get(&b.try_into().unwrap()).unwrap();
+                    let dest = register_assignment.get(&dest.try_into().unwrap()).unwrap();
+                    lang.sub(*dest, *a, *b)
+                }
+                Instruction::Add(dest, a, b) => {
+                    let a = register_assignment.get(&a.try_into().unwrap()).unwrap();
+                    let b = register_assignment.get(&b.try_into().unwrap()).unwrap();
+                    let dest = register_assignment.get(&dest.try_into().unwrap()).unwrap();
+                    lang.add(*dest, *a, *b)
+                }
+                Instruction::Mul(dest, a, b) => todo!(),
+                Instruction::Div(dest, a, b) => todo!(),
+                Instruction::Assign(dest, val) => {
+                    match val {
+                        Value::Register(virt_reg) => {
+                            let register = register_assignment.get(virt_reg).unwrap();
+                            lang.mov_reg(*register, *register);
+                        }
+                        Value::UnSignedConstant(i) => {
+                            assert!(*i <= u16::MAX as usize);
+                            let register = register_assignment.get(dest).unwrap();
+                            lang.mov(*register, *i as u16);
+                        }
+                        Value::SignedConstant(_) => {
+                            todo!()
+                        }
+                    }
+                }
+                Instruction::Recurse(dest, args) => {
+                    
+                }
+                Instruction::JumpIf(label, condition, a, b) => {
+                    let a = register_assignment.get(&a.try_into().unwrap()).unwrap();
+                    let b = register_assignment.get(&b.try_into().unwrap()).unwrap();
+                    let label = ir_label_to_lang_label.get(label).unwrap();
+                    lang.compare(*a, *b);
+                    match condition {
+                        Condition::LessThanOrEqual => lang.jump_less_or_equal(*label),
+                    }
+                }
+                Instruction::Ret(value) => {
+                    match value {
+                        Value::Register(virt_reg) => {
+                            let register = register_assignment.get(virt_reg).unwrap();
+                            if *register == lang.ret_reg() {
+                                lang.ret();
+                            } else {
+                                lang.mov_reg(lang.ret_reg(), *register);
+                            }
+                        }
+                        Value::UnSignedConstant(i) => {
+                            // TODO: Fix this
+                            assert!(*i <= u16::MAX as usize);
+                            lang.mov(lang.ret_reg(), *i as u16);
+                        }
+                        Value::SignedConstant(_) => todo!(),
+                    }
+                }
+            }
+        }
+
+        lang
+    }
+}
+
+
+fn fib2_prime() -> Ir {
+    let mut ir = Ir::new();
+    let n = ir.arg(0);
+
+    let early_exit = ir.label("early_exit");
+
+    ir.jump_if(early_exit, Condition::LessThanOrEqual, n, 1);
+
+    let reg_0 = ir.sub(n, 1);
+    let reg_1 = ir.recurse(vec![reg_0]);
+
+    let reg_2 = ir.sub(n, 2);
+    let reg_3 = ir.recurse(vec![reg_2]);
+
+    let reg_4 = ir.add(reg_1, reg_3);
+    ir.ret(reg_4);
+
+    ir.write_label(early_exit);
+    ir.ret(n);
+
+    ir
+}
+
+
+
+// fn fib2() -> Ir {
+//     let mut ir = Ir::new();
+//     let n = ir.arg(0);
+//     let early_exit_block = ir.block();
+//     early_exit_block.ret(n);
+//     ir.jump_if(early_exit_block, Condition::LessThanOrEqual, n, 1);
+//     ir.ret(
+//         ir.add(
+//             ir.recurse(ir.sub(n, 1)),
+//             ir.recurse(ir.sub(n, 2))
+//         )
+//     );
+//     ir
+// }
+
 
 fn fib() -> Lang {
 
@@ -540,6 +999,23 @@ fn countdown_codegen() -> Lang {
 extern "C" fn print_it(num: u64) -> u64 {
     println!("{}", num);
     return num;
+}
+
+
+
+
+fn main() -> Result<(), Box<dyn Error>> {
+
+    let mut ir = fib2_prime();
+    // let lifetimes = ir.get_register_lifetime();
+    // let mut lang = Lang::new();
+    // let register_assignment: HashMap<VirtualRegister, Register> = ir.allocate_registers(&mut lang, &lifetimes);
+    // Ir::draw_lifetimes(&lifetimes);
+    // println!("{:#?}", register_assignment);
+    let mut lang = ir.compile();
+    println!("{:#?}", lang.compile());
+    // use_the_assembler()?;
+    Ok(())
 }
 
 // TODO:
