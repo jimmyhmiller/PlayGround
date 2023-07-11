@@ -672,8 +672,7 @@ impl Ir {
         let mut new_args: Vec<Value> = vec![];
         for (index, arg) in args.into_iter().enumerate() {
             let value: Value = arg.into();
-            let reg = self.arg(index);
-            self.assign(reg, value);
+            let reg = self.assign_new(value);
             new_args.push(reg.into());
         }
         self.instructions.push(Instruction::Recurse(register.into(), new_args));
@@ -827,7 +826,7 @@ impl Ir {
         let mut lang = Lang::new();
         // TODO: Calculate stack_size
         let stack_size = 4;
-        lang.breakpoint();
+        // lang.breakpoint();
         lang.prelude(stack_size * -1);
 
         let exit = lang.new_label("exit");
@@ -1098,8 +1097,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Ir::draw_lifetimes(&lifetimes);
     // println!("{:#?}", register_assignment);
     let mut lang = ir.compile();
-    // println!("{:#?}", lang.compile());
-    use_the_assembler(2, &mut lang)?;
+    // println!("{:#?}", ir);
+    use_the_assembler(5, &mut lang)?;
     Ok(())
 }
 
