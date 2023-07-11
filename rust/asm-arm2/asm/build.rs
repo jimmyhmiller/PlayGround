@@ -415,6 +415,7 @@ fn generate_instruction_enum(instructions: &Vec<Instruction>) -> String {
 
     let enum_gen = scope.new_enum("Asm");
     enum_gen.vis("pub");
+    enum_gen.derive("Debug");
 
     for instruction in instructions.iter() {
         let variant = enum_gen.new_variant(instruction.name.clone());
@@ -547,6 +548,7 @@ fn generate_class_selector_enums(instructions: &[Instruction]) -> String {
 
         let selector_enum = scope.new_enum(format!("{}Selector", instruction.name));
         selector_enum.vis("pub");
+        selector_enum.derive("Debug");
         for diagram in instruction.diagrams.iter() {
             selector_enum.new_variant(to_camel_case(&diagram.name));
         }
