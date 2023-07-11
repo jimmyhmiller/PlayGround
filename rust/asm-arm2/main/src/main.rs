@@ -365,7 +365,9 @@ impl Lang {
     fn reserve_register(&mut self, reg: Register) {
         self.free_volatile_registers
             .retain(|&free| free != reg);
-        self.allocated_volatile_registers.push(reg);
+        if !self.allocated_volatile_registers.contains(&reg) {
+            self.allocated_volatile_registers.push(reg);
+        }
     }
 
     fn arg(&self, arg: u8) -> Register {
@@ -418,8 +420,7 @@ fn load_64_bit_num(register: Register, num: usize) -> Vec<Asm> {
     result
 }
 
-fn use_the_assembler() -> Result<(), Box<dyn Error>> {
-    let mut lang = fib();
+fn use_the_assembler(n: i64, lang: &mut Lang) -> Result<(), Box<dyn Error>> {
 
     let instructions = lang.compile();
 
@@ -447,7 +448,6 @@ fn use_the_assembler() -> Result<(), Box<dyn Error>> {
 
     let f: fn(i64, u64) -> u64 = unsafe { mem::transmute(exec.as_ref().as_ptr()) };
 
-    let n = 30;
     let time = Instant::now();
 
     let result1 = f(n, f as *const u8 as u64);
@@ -512,6 +512,7 @@ enum Instruction {
     Recurse(Value, Vec<Value>),
     JumpIf(Label, Condition, Value, Value),
     Ret(Value),
+    Breakpoint,
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -583,6 +584,9 @@ impl Instruction {
                     vec![]
                 }
             }
+            Instruction::Breakpoint => {
+                vec![]
+            }
         }
     }
 }
@@ -590,7 +594,39 @@ impl Instruction {
 
 struct RegisterAllocator {
     lifetimes: HashMap<VirtualRegister, (usize, usize)>,
-    allocated_register: HashMap<VirtualRegister, Register>,
+    allocated_registers: HashMap<VirtualRegister, Register>,
+}
+
+impl RegisterAllocator {
+    fn new(lifetimes:  HashMap<VirtualRegister, (usize, usize)>,) -> Self {
+        Self {
+            lifetimes,
+            allocated_registers: HashMap::new(),
+        }
+    }
+
+    fn allocate_register(&mut self, index: usize, register: VirtualRegister, lang: &mut Lang) -> Register {
+        let (start, end) = self.lifetimes.get(&register).unwrap();
+        if index == *start {
+            if let Some(arg) = register.argument {
+                let reg = lang.arg(arg as u8);
+                self.allocated_registers.insert(register, reg);
+                lang.reserve_register(reg);
+                reg
+            } else {
+                let reg = lang.volatile_register();
+                self.allocated_registers.insert(register, reg);
+                reg
+            }
+        } else if index == *end {
+            let reg = self.allocated_registers.get(&register).unwrap();
+            lang.free_register(*reg);
+            *reg
+        } else {
+            assert!(self.allocated_registers.contains_key(&register));
+            *self.allocated_registers.get(&register).unwrap()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -789,6 +825,12 @@ impl Ir {
 
     fn compile(&mut self) -> Lang {
         let mut lang = Lang::new();
+        // TODO: Calculate stack_size
+        let stack_size = 4;
+        lang.breakpoint();
+        lang.prelude(stack_size * -1);
+
+        let exit = lang.new_label("exit");
 
         let mut ir_label_to_lang_label: HashMap<Label, Label> = HashMap::new();
 
@@ -797,37 +839,47 @@ impl Ir {
             ir_label_to_lang_label.insert(*label, new_label);
         }
         let lifetimes = self.get_register_lifetime();
-        let register_assignment: HashMap<VirtualRegister, Register> = self.allocate_registers(&mut lang, &lifetimes);
+        let mut alloc = RegisterAllocator::new(lifetimes);
         for (index, instruction) in self.instructions.iter().enumerate() {
             let label = self.label_locations.get(&index);
             if let Some(label) = label {
                 lang.write_label(ir_label_to_lang_label[&self.labels[*label]]);
             }
             match instruction {
+                Instruction::Breakpoint => {
+                    lang.breakpoint();
+                }
                 Instruction::Sub(dest, a, b) => {
-                    let a = register_assignment.get(&a.try_into().unwrap()).unwrap();
-                    let b = register_assignment.get(&b.try_into().unwrap()).unwrap();
-                    let dest = register_assignment.get(&dest.try_into().unwrap()).unwrap();
-                    lang.sub(*dest, *a, *b)
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, &mut lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, &mut lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.sub(dest, a, b)
                 }
                 Instruction::Add(dest, a, b) => {
-                    let a = register_assignment.get(&a.try_into().unwrap()).unwrap();
-                    let b = register_assignment.get(&b.try_into().unwrap()).unwrap();
-                    let dest = register_assignment.get(&dest.try_into().unwrap()).unwrap();
-                    lang.add(*dest, *a, *b)
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, &mut lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, &mut lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.add(dest, a, b)
                 }
                 Instruction::Mul(dest, a, b) => todo!(),
                 Instruction::Div(dest, a, b) => todo!(),
                 Instruction::Assign(dest, val) => {
                     match val {
                         Value::Register(virt_reg) => {
-                            let register = register_assignment.get(virt_reg).unwrap();
-                            lang.mov_reg(*register, *register);
+                            let register = alloc.allocate_register(index, *virt_reg, &mut lang);
+                            let dest = alloc.allocate_register(index, *dest, &mut lang);
+                            lang.mov_reg(dest, register);
                         }
                         Value::UnSignedConstant(i) => {
                             assert!(*i <= u16::MAX as usize);
-                            let register = register_assignment.get(dest).unwrap();
-                            lang.mov(*register, *i as u16);
+                            let register = alloc.allocate_register(index, *dest, &mut lang);
+                            lang.mov(register, *i as u16);
                         }
                         Value::SignedConstant(_) => {
                             todo!()
@@ -835,13 +887,33 @@ impl Ir {
                     }
                 }
                 Instruction::Recurse(dest, args) => {
-                    
+                    let allocated_registers = lang.allocated_volatile_registers.clone();
+                    // TODO: I've got issues with arguments
+                    for (index, register) in allocated_registers.iter().enumerate() {
+                        // TODO: Make better
+                        lang.store_on_stack(*register, index as i32 + 2)
+                    }
+                    for (index, arg) in args.iter().enumerate() {
+                        let arg = arg.try_into().unwrap();
+                        let arg = alloc.allocate_register(index, arg, &mut lang);
+                        lang.mov_reg(lang.arg(index as u8), arg);
+                    }
+                    // TODO: Make the recursion actually work instead of assuming second argument
+                    lang.call(lang.arg(1));
+                    let dest = dest.try_into().unwrap();
+                    let register = alloc.allocate_register(index, dest, &mut lang);
+                    lang.mov_reg(register, lang.ret_reg());
+                    for (index, register) in allocated_registers.iter().enumerate() {
+                        lang.load_from_stack(*register, index as i32 + 2)
+                    }
                 }
                 Instruction::JumpIf(label, condition, a, b) => {
-                    let a = register_assignment.get(&a.try_into().unwrap()).unwrap();
-                    let b = register_assignment.get(&b.try_into().unwrap()).unwrap();
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, &mut lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, &mut lang);
                     let label = ir_label_to_lang_label.get(label).unwrap();
-                    lang.compare(*a, *b);
+                    lang.compare(a, b);
                     match condition {
                         Condition::LessThanOrEqual => lang.jump_less_or_equal(*label),
                     }
@@ -849,17 +921,19 @@ impl Ir {
                 Instruction::Ret(value) => {
                     match value {
                         Value::Register(virt_reg) => {
-                            let register = register_assignment.get(virt_reg).unwrap();
-                            if *register == lang.ret_reg() {
-                                lang.ret();
+                            let register = alloc.allocate_register(index, *virt_reg, &mut lang);
+                            if register == lang.ret_reg() {
+                                lang.jump(exit);
                             } else {
-                                lang.mov_reg(lang.ret_reg(), *register);
+                                lang.mov_reg(lang.ret_reg(), register);
+                                lang.jump(exit);
                             }
                         }
                         Value::UnSignedConstant(i) => {
                             // TODO: Fix this
                             assert!(*i <= u16::MAX as usize);
                             lang.mov(lang.ret_reg(), *i as u16);
+                            lang.jump(exit);
                         }
                         Value::SignedConstant(_) => todo!(),
                     }
@@ -867,13 +941,24 @@ impl Ir {
             }
         }
 
+
+        lang.write_label(exit);
+        lang.epilogue(stack_size);
+        lang.ret();
+        
+
         lang
+    }
+
+    fn breakpoint(&mut self) {
+        self.instructions.push(Instruction::Breakpoint);
     }
 }
 
 
 fn fib2_prime() -> Ir {
     let mut ir = Ir::new();
+    // ir.breakpoint();
     let n = ir.arg(0);
 
     let early_exit = ir.label("early_exit");
@@ -1013,8 +1098,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Ir::draw_lifetimes(&lifetimes);
     // println!("{:#?}", register_assignment);
     let mut lang = ir.compile();
-    println!("{:#?}", lang.compile());
-    // use_the_assembler()?;
+    // println!("{:#?}", lang.compile());
+    use_the_assembler(2, &mut lang)?;
     Ok(())
 }
 
