@@ -8,7 +8,6 @@
             [goog.object]))
 
 
-;; Ported from https://github.com/egierach/2048
 
 (def event-listeners (atom {}))
 
