@@ -4,7 +4,7 @@ use std::{cmp::{max, min}, fs, str::from_utf8};
 use std::fmt::Debug;
 // use foreign_types::ForeignType;
 
-// use metal::{Device, MetalLayer, CAMetalLayer};
+use metal::{Device, MetalLayer, CAMetalLayer};
 use pane::{TextPane, Pane};
 use pane_manager::{PaneManager, PaneSelector};
 use sdl2::{pixels::{Color}, rect::Rect};
@@ -508,7 +508,7 @@ fn main() -> Result<(), String> {
     let mut per_frame_actions: Vec<PerFrameAction> = vec![];
 
     // TODO: HTTP Server Struct?
-    let server = Server::http("0.0.0.0:8000").unwrap();
+    let server = Server::http("0.0.0.0:8001").unwrap();
     let mut matcher = Node::new();
     matcher.insert("/panes/:pane_name", HttpRoutes::GetPane).ok();
 
