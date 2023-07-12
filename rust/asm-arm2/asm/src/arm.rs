@@ -1,3 +1,62 @@
+#![allow(clippy::identity_op)]
+#![allow(clippy::unusual_byte_groupings)]
+
+use std::ops::Shl;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Size {
+    S32,
+    S64,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct Register {
+    pub size: Size,
+    pub index: u8,
+}
+
+impl Register {
+    pub fn sf(&self) -> i32 {
+        match self.size {
+            Size::S32 => 0,
+            Size::S64 => 1,
+        }
+    }
+}
+
+impl Register {
+    pub fn encode(&self) -> u8 {
+        self.index
+    }
+}
+
+impl Shl<u32> for &Register {
+    type Output = u32;
+
+    fn shl(self, rhs: u32) -> Self::Output {
+        (self.encode() as u32) << rhs
+    }
+}
+
+pub const SP: Register = Register {
+    index: 31,
+    size: Size::S64,
+};
+
+pub fn truncate_imm<T: Into<i32>, const WIDTH: usize>(imm: T) -> u32 {
+    let value: i32 = imm.into();
+    let masked = (value as u32) & ((1 << WIDTH) - 1);
+
+    // Assert that we didn't drop any bits by truncating.
+    if value >= 0 {
+        assert_eq!(value as u32, masked);
+    } else {
+        assert_eq!(value as u32, masked | (u32::MAX << WIDTH));
+    }
+
+    masked
+}
+
 pub const X0: Register = Register {
     index: 0,
     size: Size::S64,
@@ -122,63 +181,6 @@ pub const X30: Register = Register {
     index: 30,
     size: Size::S64,
 };
-
-use std::ops::Shl;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Size {
-    S32,
-    S64,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct Register {
-    pub size: Size,
-    pub index: u8,
-}
-
-impl Register {
-    pub fn sf(&self) -> i32 {
-        match self.size {
-            Size::S32 => 0,
-            Size::S64 => 1,
-        }
-    }
-}
-
-impl Register {
-    pub fn encode(&self) -> u8 {
-        self.index
-    }
-}
-
-impl Shl<u32> for &Register {
-    type Output = u32;
-
-    fn shl(self, rhs: u32) -> Self::Output {
-        (self.encode() as u32) << rhs
-    }
-}
-
-pub const SP: Register = Register {
-    index: 31,
-    size: Size::S64,
-};
-
-pub fn truncate_imm<T: Into<i32>, const WIDTH: usize>(imm: T) -> u32 {
-    let value: i32 = imm.into();
-    let masked = (value as u32) & ((1 << WIDTH) - 1);
-
-    // Assert that we didn't drop any bits by truncating.
-    if value >= 0 {
-        assert_eq!(value as u32, masked);
-    } else {
-        assert_eq!(value as u32, masked | (u32::MAX << WIDTH));
-    }
-
-    masked
-}
-
 #[derive(Debug)]
 pub enum Asm {
     /// ABS -- A64

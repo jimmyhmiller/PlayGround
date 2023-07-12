@@ -338,22 +338,19 @@ impl Lang {
 
     fn patch_labels(&mut self) {
         for (instruction_index, instruction) in self.instructions.iter_mut().enumerate() {
-            match instruction {
-                Asm::BCond { imm19, cond: _ } => {
-                    let label_index = *imm19 as usize;
-                    let label_location = self.label_locations.get(&label_index);
-                    match label_location {
-                        Some(label_location) => {
-                            let relative_position =
-                                *label_location as isize - instruction_index as isize;
-                            *imm19 = relative_position as i32;
-                        }
-                        None => {
-                            println!("Couldn't find label {:?}", self.labels.get(label_index));
-                        }
+            if let Asm::BCond { imm19, cond: _ } = instruction {
+                let label_index = *imm19 as usize;
+                let label_location = self.label_locations.get(&label_index);
+                match label_location {
+                    Some(label_location) => {
+                        let relative_position =
+                            *label_location as isize - instruction_index as isize;
+                        *imm19 = relative_position as i32;
+                    }
+                    None => {
+                        println!("Couldn't find label {:?}", self.labels.get(label_index));
                     }
                 }
-                _ => {}
             }
         }
     }
@@ -401,7 +398,6 @@ impl Lang {
     }
 
     fn patch_prelude_and_epilogue(&mut self) {
-
         let max = self.max_stack_size as u64;
         let max = max.next_power_of_two();
         let max = max as i32;
@@ -413,7 +409,7 @@ impl Lang {
             .position(|instruction| matches!(instruction, Asm::StpGen { .. }))
             .map(|i| &mut self.instructions[i])
         {
-            *imm7 = max * -1;
+            *imm7 = -max;
         } else {
             unreachable!();
         }
@@ -511,14 +507,13 @@ fn fib_rust(n: usize) -> usize {
     if n <= 1 {
         return n;
     }
-    return fib_rust(n - 1) + fib_rust(n - 2);
+    fib_rust(n - 1) + fib_rust(n - 2)
 }
 
 #[derive(Debug, Copy, Clone)]
 enum Condition {
     LessThanOrEqual,
 }
-
 
 #[derive(Debug, Copy, Clone)]
 #[allow(dead_code)]
@@ -535,15 +530,15 @@ struct VirtualRegister {
     volatile: bool,
 }
 
-impl Into<Value> for VirtualRegister {
-    fn into(self) -> Value {
-        Value::Register(self)
+impl From<VirtualRegister> for Value {
+    fn from(val: VirtualRegister) -> Self {
+        Value::Register(val)
     }
 }
 
-impl Into<Value> for usize {
-    fn into(self) -> Value {
-        Value::UnSignedConstant(self)
+impl From<usize> for Value {
+    fn from(val: usize) -> Self {
+        Value::UnSignedConstant(val)
     }
 }
 
@@ -611,11 +606,8 @@ impl Instruction {
                 get_registers!(a, b)
             }
             Instruction::Recurse(a, args) => {
-                let mut result: Vec<VirtualRegister> = args
-                    .iter()
-                    .map(|arg| get_registers!(arg))
-                    .flatten()
-                    .collect();
+                let mut result: Vec<VirtualRegister> =
+                    args.iter().filter_map(|arg| get_registers!(arg)).collect();
                 if let Ok(register) = a.try_into() {
                     result.push(register);
                 }
@@ -1090,7 +1082,7 @@ fn countdown_codegen() -> Lang {
 #[no_mangle]
 extern "C" fn print_it(num: u64) -> u64 {
     println!("{}", num);
-    return num;
+    num
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

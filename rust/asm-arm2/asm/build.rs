@@ -17,8 +17,13 @@ fn is_power_of_two(x: u8) -> bool {
     (x & (x - 1)) == 0
 }
 
-const TEMPLATE_PREFIX: &'static str = "
+const TEMPLATE_PREFIX: &str = "
+
+#![allow(clippy::identity_op)]
+#![allow(clippy::unusual_byte_groupings)]
+
 use std::ops::Shl;
+
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Size {
@@ -83,9 +88,9 @@ enum Kind {
     NonPowerOfTwoImm(u8),
 }
 
-impl Into<String> for Kind {
-    fn into(self) -> String {
-        match self {
+impl From<Kind> for String {
+    fn from(val: Kind) -> Self {
+        match val {
             Kind::Register => "Register".to_string(),
             Kind::Immediate => "i32".to_string(),
             Kind::ClassSelector(name) => name,
@@ -155,10 +160,9 @@ fn get_instruction_name_and_title(instruction_section: Node) -> (String, String)
         .unwrap_or("No file found")
         .to_string();
     let name = to_camel_case(
-        &instruction_section
+        instruction_section
             .attribute("id")
-            .unwrap_or("No file found")
-            .to_string(),
+            .unwrap_or("No file found"),
     );
     (name, title)
 }
@@ -209,7 +213,7 @@ fn get_register_diagrams(instruction_section: Node) -> Vec<RegisterDiagram> {
         let boxes = diagram
             .descendants()
             .filter(|x| x.has_tag_name("box"))
-            .map(|x| ArmBox::parse(x))
+            .map(ArmBox::parse)
             .collect::<Vec<ArmBox>>();
 
         result.push(RegisterDiagram { name, boxes })
@@ -239,17 +243,11 @@ impl Bits {
     }
 
     fn is_empty(&self) -> bool {
-        match self {
-            Bits::Empty(_) => true,
-            _ => false,
-        }
+        matches!(self, Bits::Empty(_))
     }
 
     fn is_variable(&self) -> bool {
-        match self {
-            Bits::HasVariable(_) => true,
-            _ => false,
-        }
+        matches!(self, Bits::HasVariable(_))
     }
 }
 
@@ -328,7 +326,7 @@ impl ArmBox {
     }
 
     fn kind(&self) -> Kind {
-        if self.name.starts_with("r") {
+        if self.name.starts_with('r') {
             Kind::Register
         } else if self.name.starts_with("imm") {
             let num = &self.name[3..];
@@ -387,7 +385,7 @@ impl Instruction {
     fn get_comments(&self) -> String {
         let mut result = String::new();
         result.push_str(&format!("/// {}", self.title));
-        result.push_str("\n");
+        result.push('\n');
         result.push_str(
             &self
                 .description
@@ -396,7 +394,7 @@ impl Instruction {
                 .collect::<Vec<String>>()
                 .join("\n"),
         );
-        result.push_str("\n");
+        result.push('\n');
         result.push_str(
             &self
                 .comments
@@ -410,7 +408,7 @@ impl Instruction {
     }
 }
 
-fn generate_instruction_enum(instructions: &Vec<Instruction>) -> String {
+fn generate_instruction_enum(instructions: &[Instruction]) -> String {
     let mut scope = Scope::new();
 
     let enum_gen = scope.new_enum("Asm");
@@ -456,8 +454,7 @@ fn generate_encoding_instructions(instructions: &[Instruction]) -> String {
             let bits = diagram
                 .boxes
                 .iter()
-                .map(|x| x.bits.render())
-                .flatten()
+                .filter_map(|x| x.bits.render())
                 .collect::<Vec<String>>()
                 .join("_");
             function.line(format!("0b{}", bits));
@@ -484,7 +481,7 @@ fn generate_encoding_instructions(instructions: &[Instruction]) -> String {
                 }
             }
         } else {
-            function.line(format!("match class_selector {{"));
+            function.line("match class_selector {".to_string());
             for diagram in instruction.diagrams.iter() {
                 function.line(format!(
                     "{}Selector::{} => {{",
@@ -494,8 +491,7 @@ fn generate_encoding_instructions(instructions: &[Instruction]) -> String {
                 let bits = diagram
                     .boxes
                     .iter()
-                    .map(|x| x.bits.render())
-                    .flatten()
+                    .filter_map(|x| x.bits.render())
                     .collect::<Vec<String>>()
                     .join("_");
                 function.line(format!("0b{}", bits));
@@ -577,7 +573,7 @@ pub fn generate_template() -> Result<(), Box<dyn Error>> {
 
     let xml_file_bytes = fs::read(xml_file_path)?;
     let xml_file_text = from_utf8(&xml_file_bytes)?;
-    let xml = roxmltree::Document::parse(xml_file_text.clone())?;
+    let xml = roxmltree::Document::parse(xml_file_text)?;
 
     let found_file_nodes = get_files(&xml);
 
@@ -608,7 +604,7 @@ pub fn generate_template() -> Result<(), Box<dyn Error>> {
 
     let code = format!(
         "{}\n{}\n{}\n{}\n{}",
-        registers, TEMPLATE_PREFIX, instruction_enum, class_selector_enums, encoding_instructions
+        TEMPLATE_PREFIX, registers, instruction_enum, class_selector_enums, encoding_instructions
     );
     let mut file = File::create("src/arm.rs")?;
     file.write_all(code.as_bytes())?;
