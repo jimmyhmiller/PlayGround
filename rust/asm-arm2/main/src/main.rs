@@ -977,7 +977,7 @@ impl Ir {
 
 fn fib2_prime() -> Ir {
     let mut ir = Ir::new();
-    // ir.breakpoint();
+    ir.breakpoint();
     let n = ir.arg(0);
 
     let early_exit = ir.label("early_exit");
