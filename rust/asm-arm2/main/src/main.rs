@@ -1414,6 +1414,8 @@ macro_rules! ast {
     }
 }
 
+// TODO: I don't like that if is a statement not an expression.
+// I think I need to change things at the IR level to make this work properly
 fn test_fib() -> Ast {
     ast! {
         (fn fib [n]
