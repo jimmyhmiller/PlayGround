@@ -984,7 +984,6 @@ impl Ir {
                         let arg = alloc.allocate_register(index, arg, &mut lang);
                         lang.mov_reg(lang.arg(index as u8), arg);
                     }
-                    // TODO: Make the recursion actually work instead of assuming second argument
                     lang.call(RECURSE_PLACEHOLDER_REGISTER);
                     let dest = dest.try_into().unwrap();
                     let register = alloc.allocate_register(index, dest, &mut lang);
