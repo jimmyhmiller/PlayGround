@@ -564,6 +564,14 @@ fn generate_registers() -> String {
         ));
     }
 
+    result.push_str(
+        "
+        pub const ZERO_REGISTER: Register = Register {
+            index: 31,
+            size: Size::S64,
+        };",
+    );
+
     result
 }
 
