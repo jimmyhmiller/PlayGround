@@ -6,7 +6,6 @@ use asm::arm::{
 };
 use mmap_rs::MmapOptions;
 
-
 fn _print_u32_hex_le(value: u32) {
     let bytes = value.to_le_bytes();
     for byte in &bytes {
@@ -61,8 +60,6 @@ fn add(destination: Register, a: Register, b: Register) -> Asm {
     }
 }
 
-
-
 fn sub(destination: Register, a: Register, b: Register) -> Asm {
     Asm::SubAddsubShift {
         sf: destination.sf(),
@@ -75,7 +72,7 @@ fn sub(destination: Register, a: Register, b: Register) -> Asm {
 }
 
 fn mul(destination: Register, a: Register, b: Register) -> Asm {
-    Asm::Madd  {
+    Asm::Madd {
         sf: destination.sf(),
         rm: b,
         ra: ZERO_REGISTER,
@@ -266,6 +263,10 @@ impl Lang {
     fn mov(&mut self, destination: Register, input: u16) {
         self.instructions.push(mov_imm(destination, input));
     }
+    fn mov_64(&mut self, destination: Register, input: isize) {
+        self.instructions.extend(mov_64_bit_num(destination, input));
+    }
+
     fn store_pair(&mut self, reg1: Register, reg2: Register, destination: Register, offset: i32) {
         self.increment_stack_size(2);
         self.instructions
@@ -364,9 +365,7 @@ impl Lang {
     }
 
     fn call_rust_function(&mut self, register: Register, func: *const u8) {
-        self.instructions
-            .extend(load_64_bit_num(register, func as usize));
-
+        self.mov_64(register, func as isize);
         self.call(register)
     }
 
@@ -472,18 +471,16 @@ impl Lang {
 
     fn patch_recurse(&mut self) {
         for (index, instruction) in self.instructions.iter_mut().enumerate() {
-            if let Asm::Blr { rn} = instruction {
+            if let Asm::Blr { rn } = instruction {
                 if rn == &RECURSE_PLACEHOLDER_REGISTER {
-                    *instruction = branch_with_link(- (index as i32));
+                    *instruction = branch_with_link(-(index as i32));
                 }
             }
         }
     }
 }
 
-
-
-fn load_64_bit_num(register: Register, num: usize) -> Vec<Asm> {
+fn mov_64_bit_num(register: Register, num: isize) -> Vec<Asm> {
     let mut num = num;
     let mut result = vec![];
 
@@ -519,7 +516,6 @@ fn load_64_bit_num(register: Register, num: usize) -> Vec<Asm> {
 }
 
 fn use_the_assembler(n: i64, lang: &mut Lang) -> Result<(), Box<dyn Error>> {
-
     let mut buffer = MmapOptions::new(MmapOptions::page_size())?.map_mut()?;
     let memory = &mut buffer[..];
 
@@ -941,8 +937,24 @@ impl Ir {
                     let dest = alloc.allocate_register(index, dest, &mut lang);
                     lang.add(dest, a, b)
                 }
-                Instruction::Mul(_dest, _a, _b) => todo!(),
-                Instruction::Div(_dest, _a, _b) => todo!(),
+                Instruction::Mul(dest, a, b) => {
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, &mut lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, &mut lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.mul(dest, a, b)
+                }
+                Instruction::Div(dest, a, b) => {
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, &mut lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, &mut lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.div(dest, a, b)
+                }
                 Instruction::Assign(dest, val) => match val {
                     Value::Register(virt_reg) => {
                         let register = alloc.allocate_register(index, *virt_reg, &mut lang);
@@ -950,12 +962,12 @@ impl Ir {
                         lang.mov_reg(dest, register);
                     }
                     Value::UnSignedConstant(i) => {
-                        assert!(*i <= u16::MAX as usize);
                         let register = alloc.allocate_register(index, *dest, &mut lang);
-                        lang.mov(register, *i as u16);
+                        lang.mov_64(register, *i as isize);
                     }
-                    Value::SignedConstant(_) => {
-                        todo!()
+                    Value::SignedConstant(i) => {
+                        let register = alloc.allocate_register(index, *dest, &mut lang);
+                        lang.mov_64(register, *i);
                     }
                 },
                 Instruction::Recurse(dest, args) => {
@@ -992,26 +1004,25 @@ impl Ir {
                         Condition::LessThanOrEqual => lang.jump_less_or_equal(*label),
                     }
                 }
-                Instruction::Ret(value) => {
-                    match value {
-                        Value::Register(virt_reg) => {
-                            let register = alloc.allocate_register(index, *virt_reg, &mut lang);
-                            if register == lang.ret_reg() {
-                                lang.jump(exit);
-                            } else {
-                                lang.mov_reg(lang.ret_reg(), register);
-                                lang.jump(exit);
-                            }
-                        }
-                        Value::UnSignedConstant(i) => {
-                            // TODO: Fix this
-                            assert!(*i <= u16::MAX as usize);
-                            lang.mov(lang.ret_reg(), *i as u16);
+                Instruction::Ret(value) => match value {
+                    Value::Register(virt_reg) => {
+                        let register = alloc.allocate_register(index, *virt_reg, &mut lang);
+                        if register == lang.ret_reg() {
+                            lang.jump(exit);
+                        } else {
+                            lang.mov_reg(lang.ret_reg(), register);
                             lang.jump(exit);
                         }
-                        Value::SignedConstant(_) => todo!(),
                     }
-                }
+                    Value::UnSignedConstant(i) => {
+                        lang.mov_64(lang.ret_reg(), *i as isize);
+                        lang.jump(exit);
+                    }
+                    Value::SignedConstant(i) => {
+                        lang.mov_64(lang.ret_reg(), *i);
+                        lang.jump(exit);
+                    }
+                },
             }
         }
 
@@ -1161,5 +1172,3 @@ fn main() -> Result<(), Box<dyn Error>> {
 //     Heap
 // Parser
 // Debugging
-//
-// PS bits the ones with X need to be dealt with
