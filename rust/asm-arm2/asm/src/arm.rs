@@ -181,6 +181,10 @@ pub const X30: Register = Register {
     index: 30,
     size: Size::S64,
 };
+pub const ZERO_REGISTER: Register = Register {
+    index: 31,
+    size: Size::S64,
+};
 #[derive(Debug)]
 pub enum Asm {
     /// ABS -- A64

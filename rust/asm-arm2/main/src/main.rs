@@ -2,11 +2,12 @@ use std::{collections::HashMap, error::Error, mem, time::Instant};
 
 use asm::arm::{
     Asm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector, SP,
-    X0, X19, X20, X21, X22, X29, X3, X30,
+    X0, X19, X20, X21, X22, X29, X3, X30, ZERO_REGISTER,
 };
 use mmap_rs::MmapOptions;
 
-fn print_u32_hex_le(value: u32) {
+
+fn _print_u32_hex_le(value: u32) {
     let bytes = value.to_le_bytes();
     for byte in &bytes {
         print!("{:02x}", byte);
@@ -60,6 +61,8 @@ fn add(destination: Register, a: Register, b: Register) -> Asm {
     }
 }
 
+
+
 fn sub(destination: Register, a: Register, b: Register) -> Asm {
     Asm::SubAddsubShift {
         sf: destination.sf(),
@@ -67,6 +70,24 @@ fn sub(destination: Register, a: Register, b: Register) -> Asm {
         imm6: 0,
         rn: a,
         rm: b,
+        rd: destination,
+    }
+}
+
+fn mul(destination: Register, a: Register, b: Register) -> Asm {
+    Asm::Madd  {
+        sf: destination.sf(),
+        rm: b,
+        ra: ZERO_REGISTER,
+        rn: a,
+        rd: destination,
+    }
+}
+fn div(destination: Register, a: Register, b: Register) -> Asm {
+    Asm::Sdiv {
+        sf: destination.sf(),
+        rm: b,
+        rn: a,
         rd: destination,
     }
 }
@@ -162,7 +183,7 @@ fn load_pair(reg1: Register, reg2: Register, destination: Register, offset: i32)
 }
 
 #[allow(unused)]
-fn branch_with_link(destination: *const u8) -> Asm {
+fn branch_with_link(destination: i32) -> Asm {
     Asm::Bl {
         imm26: destination as i32,
     }
@@ -191,6 +212,15 @@ struct Lang {
     stack_size: i32,
     max_stack_size: i32,
 }
+
+// We don't know the address of the recursive call
+// so we are using a placeholder
+// This is probably not the best approach, but will
+// work for now.
+const RECURSE_PLACEHOLDER_REGISTER: Register = Register {
+    size: Size::S64,
+    index: 255,
+};
 
 #[allow(unused)]
 impl Lang {
@@ -251,6 +281,12 @@ impl Lang {
     }
     fn sub(&mut self, destination: Register, a: Register, b: Register) {
         self.instructions.push(sub(destination, a, b));
+    }
+    fn mul(&mut self, destination: Register, a: Register, b: Register) {
+        self.instructions.push(mul(destination, a, b));
+    }
+    fn div(&mut self, destination: Register, a: Register, b: Register) {
+        self.instructions.push(div(destination, a, b));
     }
     fn ret(&mut self) {
         self.instructions.push(ret());
@@ -320,11 +356,13 @@ impl Lang {
             .insert(label.index, self.instructions.len());
     }
 
-    fn compile(&mut self) -> &Vec<Asm> {
+    fn compile(&mut self, ptr: *const u8) -> &Vec<Asm> {
         self.patch_labels();
         self.patch_prelude_and_epilogue();
+        self.patch_recurse();
         &self.instructions
     }
+
     fn call_rust_function(&mut self, register: Register, func: *const u8) {
         self.instructions
             .extend(load_64_bit_num(register, func as usize));
@@ -393,6 +431,10 @@ impl Lang {
         }
     }
 
+    fn recurse(&self) -> Register {
+        RECURSE_PLACEHOLDER_REGISTER
+    }
+
     fn ret_reg(&self) -> Register {
         X0
     }
@@ -427,7 +469,19 @@ impl Lang {
             unreachable!();
         }
     }
+
+    fn patch_recurse(&mut self) {
+        for (index, instruction) in self.instructions.iter_mut().enumerate() {
+            if let Asm::Blr { rn} = instruction {
+                if rn == &RECURSE_PLACEHOLDER_REGISTER {
+                    *instruction = branch_with_link(- (index as i32));
+                }
+            }
+        }
+    }
 }
+
+
 
 fn load_64_bit_num(register: Register, num: usize) -> Vec<Asm> {
     let mut num = num;
@@ -465,14 +519,14 @@ fn load_64_bit_num(register: Register, num: usize) -> Vec<Asm> {
 }
 
 fn use_the_assembler(n: i64, lang: &mut Lang) -> Result<(), Box<dyn Error>> {
-    let instructions = lang.compile();
-
-    for instruction in instructions.iter() {
-        print_u32_hex_le(instruction.encode());
-    }
 
     let mut buffer = MmapOptions::new(MmapOptions::page_size())?.map_mut()?;
     let memory = &mut buffer[..];
+
+    let ptr = memory.as_ptr();
+
+    let instructions = lang.compile(ptr);
+
     let mut bytes = vec![];
     for instruction in instructions.iter() {
         for byte in instruction.encode().to_le_bytes() {
@@ -489,11 +543,11 @@ fn use_the_assembler(n: i64, lang: &mut Lang) -> Result<(), Box<dyn Error>> {
         panic!("Failed to make mmap executable: {}", e);
     });
 
-    let f: fn(i64, u64) -> u64 = unsafe { mem::transmute(exec.as_ref().as_ptr()) };
+    let f: fn(i64) -> u64 = unsafe { mem::transmute(exec.as_ref().as_ptr()) };
 
     let time = Instant::now();
 
-    let result1 = f(n, f as *const u8 as u64);
+    let result1 = f(n);
     println!("Our time {:?}", time.elapsed());
     let time = Instant::now();
     let result2 = fib_rust(n as usize);
@@ -919,7 +973,7 @@ impl Ir {
                         lang.mov_reg(lang.arg(index as u8), arg);
                     }
                     // TODO: Make the recursion actually work instead of assuming second argument
-                    lang.call(lang.arg(1));
+                    lang.call(RECURSE_PLACEHOLDER_REGISTER);
                     let dest = dest.try_into().unwrap();
                     let register = alloc.allocate_register(index, dest, &mut lang);
                     lang.mov_reg(register, lang.ret_reg());
@@ -977,7 +1031,7 @@ impl Ir {
 
 fn fib2_prime() -> Ir {
     let mut ir = Ir::new();
-    ir.breakpoint();
+    // ir.breakpoint();
     let n = ir.arg(0);
 
     let early_exit = ir.label("early_exit");
