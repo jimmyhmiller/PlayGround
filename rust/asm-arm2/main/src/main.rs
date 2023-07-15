@@ -214,6 +214,8 @@ struct Lang {
 // so we are using a placeholder
 // This is probably not the best approach, but will
 // work for now.
+// I realized after implementing this, I could just probably
+// have used a label and always had a self/start label.
 const RECURSE_PLACEHOLDER_REGISTER: Register = Register {
     size: Size::S64,
     index: 255,
@@ -560,7 +562,7 @@ fn fib_rust(n: usize) -> usize {
     fib_rust(n - 1) + fib_rust(n - 2)
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 enum Condition {
     LessThanOrEqual,
 }
@@ -798,7 +800,7 @@ impl Ir {
         Value::Register(register)
     }
 
-    fn jump_if<A, B>(&mut self, block: Label, condition: Condition, a: A, b: B)
+    fn jump_if<A, B>(&mut self, label: Label, condition: Condition, a: A, b: B)
     where
         A: Into<Value>,
         B: Into<Value>,
@@ -806,7 +808,7 @@ impl Ir {
         let a = self.assign_new(a.into());
         let b = self.assign_new(b.into());
         self.instructions
-            .push(Instruction::JumpIf(block, condition, a.into(), b.into()));
+            .push(Instruction::JumpIf(label, condition, a.into(), b.into()));
     }
 
     fn _assign(&mut self, dest: VirtualRegister, val: Value) {
@@ -890,6 +892,7 @@ impl Ir {
 
     fn compile(&mut self) -> Lang {
         let mut lang = Lang::new();
+        // lang.breakpoint();
         // zero is a placeholder because this will be patched
         lang.prelude(0);
 
@@ -1158,9 +1161,269 @@ fn main() -> Result<(), Box<dyn Error>> {
     // println!("{:#?}", register_assignment);
     let mut lang = ir.compile();
     // println!("{:#?}", ir);
+    // use_the_assembler(30, &mut lang)?;
+
+    let new_fib = test_fib();
+    println!("{:#?}", new_fib);
+    let mut new_ir = new_fib.compile();
+    println!("{:#?}", new_ir);
+    
+    let mut lang = new_ir.compile();
     use_the_assembler(30, &mut lang)?;
     Ok(())
 }
+
+
+
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Ast {
+    Function {
+        name: String,
+        args: Vec<String>,
+        body: Vec<Ast>,
+    },
+    If {
+        condition: Box<Ast>,
+        then: Box<Ast>,
+        else_: Box<Ast>,
+    },
+    Condition {
+        operator: Condition,
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
+    Add {
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
+    Sub {
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
+    Recurse {
+        args: Vec<Ast>,
+    },
+    Return(Box<Ast>),
+    Constant(i64),
+    Variable(String),
+}
+
+impl Ast {
+    fn compile(&self) -> Ir {
+        let mut compiler = AstCompiler {
+            ast: self.clone(),
+            variables: HashMap::new(),
+        };
+        compiler.compile()
+    }
+}
+
+struct AstCompiler {
+    ast: Ast,
+    variables: HashMap<String, VirtualRegister>,
+}
+
+// I'm using this because there are some places I'm not
+// currently sure the right thing to return and I want
+// signal exactly where that is.
+const TEMP_PLACEHOLDER : Value = Value::UnSignedConstant(42);
+
+impl AstCompiler {
+    fn compile(&mut self) -> Ir {
+        let mut ir = Ir::new();
+        self.compile_to_ir(&Box::new(self.ast.clone()), &mut ir);
+        ir
+    }
+
+    fn compile_to_ir(&mut self, ast: &Box<Ast>, ir: &mut Ir) -> Value {
+        match ast.as_ref().clone() {
+            Ast::Function { name, args, body } => {
+                for (index, arg) in args.iter().enumerate() {
+                    let reg = ir.arg(index);
+                    self.variables.insert(arg.clone(), reg);
+                }
+
+
+                for ast in body {
+                    self.compile_to_ir(&Box::new(ast), ir);
+                }
+                // Should actually return the last value?
+                // Or what is explicitly returned?
+                // I might need to just deal with all of this a bit differently
+                // Or I need to return the return_reg?
+                // need to think about this.
+                TEMP_PLACEHOLDER
+            }
+            Ast::If { condition, then, else_ } => {
+                // TODO: My condition system is a bit ugly
+                // Mostly because I don't have booleans
+                if let Ast::Condition { operator, left, right } = condition.as_ref() {
+                    let a = self.compile_to_ir(left, ir);
+                    let b = self.compile_to_ir(right, ir);
+
+                    let then_label = ir.label("then");
+                    ir.jump_if(then_label, *operator, a, b);
+
+                    self.compile_to_ir(&else_, ir);
+                    ir.write_label(then_label);
+                    self.compile_to_ir(&then, ir);
+
+                    // TODO: I need ifs to be expressions.
+                    // Right now they are acting as statements.
+                    TEMP_PLACEHOLDER
+
+                } else {
+                    panic!("Expected condition")
+                }
+            }
+            Ast::Return(ast) => {
+                let value = self.compile_to_ir(&ast, ir);
+                ir.ret(value);
+                // Do I need a concept of the return register in the IR?
+                TEMP_PLACEHOLDER
+            }
+            Ast::Add { left, right } => {
+                let left = self.compile_to_ir(&left, ir);
+                let right = self.compile_to_ir(&right, ir);
+                ir.add(left, right)
+            }
+            Ast::Sub { left, right } => {
+                let left = self.compile_to_ir(&left, ir);
+                let right = self.compile_to_ir(&right, ir);
+                ir.sub(left, right)
+            }
+            Ast::Recurse { args } => {
+                let mut args = args.iter().map(|arg| self.compile_to_ir(&Box::new(arg.clone()), ir)).collect();
+                ir.recurse(args)
+            }
+            Ast::Constant(n) => {
+                Value::SignedConstant(n as isize)
+            },
+            Ast::Variable(name) => {
+                let reg = self.variables.get(&name).unwrap();
+                Value::Register(*reg)
+            }
+            Ast::Condition { .. } => {
+                panic!("Condition should be handled by if")
+            }
+        }
+    }
+}
+
+
+
+macro_rules! ast {
+    ((fn $name:ident[] 
+        $body:tt
+     )) => {
+        Ast::Func{ 
+            name: stringify!($name).to_string(), 
+            args: vec![],
+            body: vec![Ast::Return(Box::new(ast!($body)))]
+        }
+    };
+    ((fn $name:ident[$arg:ident] 
+        $body:tt
+     )) => {
+        Ast::Function { 
+            name: stringify!($name).to_string(), 
+            args: vec![stringify!($arg).to_string()],
+            body: vec![ast!($body)]
+        }
+    };
+    ((fn $name:ident[$arg1:ident $arg2:ident] 
+        $body:tt
+     )) => {
+        Ast::Func{ 
+            name: stringify!($name).to_string(), 
+            args: vec![stringify!($arg1).to_string(), stringify!($arg2).to_string()],
+            body: vec![ast!($body)]
+        }
+    };
+    ((fn $name:ident[$arg1:ident $arg2:ident $arg3:ident] 
+        $body:tt
+     )) => {
+        Ast::Func{ 
+            name: stringify!($name).to_string(), 
+            args: vec![stringify!($arg1).to_string(), stringify!($arg2).to_string(), stringify!($arg3).to_string()],
+            body: vec![Ast::Return(Box::new(ast!($body)))]
+        }
+    };
+    ((let [$name:tt $val:tt]
+        $body:tt
+    )) => {
+        Ast::Do(vec![
+            Ast::Let(stringify!($name).to_string(), Box::new(ast!($val))),
+            ast!($body)]);
+    };
+    ((if (<= $arg:tt $val:tt)
+        $result1:tt
+        $result2:tt
+    )) => {
+        Ast::If{
+            condition: Box::new(Ast::Condition {
+                operator: Condition::LessThanOrEqual,
+                left: Box::new(ast!($arg)),
+                right: Box::new(ast!($val))
+            }),
+            then: Box::new(ast!($result1)),
+            else_: Box::new(ast!($result2))
+        }
+    };
+    ((+ $arg1:tt $arg2:tt)) => {
+        Ast::Add {
+            left: Box::new(ast!($arg1)),
+            right: Box::new(ast!($arg2))
+        }
+    };
+    ((+ $arg1:tt $arg2:tt $($args:tt)+)) => {
+            Ast::Add(Box::new(ast!($arg1)),
+                     Box::new(ast!((+ $arg2 $($args)+))))
+    };
+    ((- $arg1:tt $arg2:tt)) => {
+        Ast::Sub {
+            left: Box::new(ast!($arg1)),
+            right: Box::new(ast!($arg2))
+        }
+    };
+
+    ((do $($arg1:tt)+)) => {
+        Ast::Do(vec![$(ast!($arg1)),+])
+    };
+    ((return $arg:tt)) => {
+        Ast::Return(Box::new(ast!($arg)))
+    };
+    (($f:ident $arg:tt)) => {
+        Ast::Recurse {
+            args: vec![ast!($arg)]
+        }
+    };
+    // (($f:ident $arg1:tt $arg2:tt)) => {
+    //     Ast::Call2(stringify!($f).to_string(), Box::new(ast!($arg1)), Box::new(ast!($arg2)))
+    // };
+    // (($f:ident $arg1:tt $arg2:tt $arg3:tt)) => {
+    //     Ast::Call3(stringify!($f).to_string(), Box::new(ast!($arg1)), Box::new(ast!($arg2)), Box::new(ast!($arg3)))
+    // };
+    ($int:literal) => {
+        Ast::Constant($int)
+    };
+    ($var:ident) => {
+        Ast::Variable(stringify!($var).to_string())
+    }
+}
+
+fn test_fib() -> Ast {
+    ast! {
+        (fn fib [n]
+            (if (<= n 1)
+                (return n)
+                (return (+ (fib (- n 1)) (fib (- n 2))))))
+    }
+}
+
+
 
 // TODO:
 // Register allocator
