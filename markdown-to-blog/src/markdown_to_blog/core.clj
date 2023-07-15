@@ -5,7 +5,7 @@
 
 
 (def markdown
-  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/What follows from empirical software research.md"))
+  (slurp "/Users/jimmyhmiller/Documents/Code/PlayGround/writings/programming/ChatGPT is not a mind.md"))
 
 
 (defmulti transform
