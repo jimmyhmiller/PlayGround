@@ -604,6 +604,7 @@ enum Instruction {
     Assign(VirtualRegister, Value),
     Recurse(Value, Vec<Value>),
     JumpIf(Label, Condition, Value, Value),
+    Jump(Label),
     Ret(Value),
     Breakpoint,
 }
@@ -676,6 +677,9 @@ impl Instruction {
                 }
             }
             Instruction::Breakpoint => {
+                vec![]
+            }
+            Instruction::Jump(_) => {
                 vec![]
             }
         }
@@ -811,8 +815,8 @@ impl Ir {
             .push(Instruction::JumpIf(label, condition, a.into(), b.into()));
     }
 
-    fn _assign(&mut self, dest: VirtualRegister, val: Value) {
-        self.instructions.push(Instruction::Assign(dest, val));
+    fn assign<A>(&mut self, dest: VirtualRegister, val: A) where A: Into<Value> {
+        self.instructions.push(Instruction::Assign(dest, val.into()));
     }
 
     fn assign_new(&mut self, val: Value) -> VirtualRegister {
@@ -1006,6 +1010,10 @@ impl Ir {
                         Condition::LessThanOrEqual => lang.jump_less_or_equal(*label),
                     }
                 }
+                Instruction::Jump(label) => {
+                    let label = ir_label_to_lang_label.get(label).unwrap();
+                    lang.jump(*label); 
+                }
                 Instruction::Ret(value) => match value {
                     Value::Register(virt_reg) => {
                         let register = alloc.allocate_register(index, *virt_reg, &mut lang);
@@ -1040,6 +1048,11 @@ impl Ir {
     fn breakpoint(&mut self) {
         self.instructions.push(Instruction::Breakpoint);
     }
+
+    fn jump(&mut self, label: Label) {
+        self.instructions
+            .push(Instruction::Jump(label));
+    }
 }
 
 fn fib2_prime() -> Ir {
@@ -1049,6 +1062,7 @@ fn fib2_prime() -> Ir {
 
     let early_exit = ir.label("early_exit");
 
+    let result_reg = ir.volatile_register();
     ir.jump_if(early_exit, Condition::LessThanOrEqual, n, 1);
 
     let reg_0 = ir.sub(n, 1);
@@ -1058,10 +1072,15 @@ fn fib2_prime() -> Ir {
     let reg_3 = ir.recurse(vec![reg_2]);
 
     let reg_4 = ir.add(reg_1, reg_3);
-    ir.ret(reg_4);
+    ir.assign(result_reg, reg_4);
+    let end_else = ir.label("end_else");
+    ir.jump(end_else);
 
     ir.write_label(early_exit);
-    ir.ret(n);
+    ir.assign(result_reg, n);
+    ir.write_label(end_else);
+
+    ir.ret(result_reg);
 
     ir
 }
