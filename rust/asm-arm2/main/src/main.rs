@@ -1178,7 +1178,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // let register_assignment: HashMap<VirtualRegister, Register> = ir.allocate_registers(&mut lang, &lifetimes);
     Ir::draw_lifetimes(&lifetimes);
     // println!("{:#?}", register_assignment);
-    let mut lang = ir.compile();
+    // let mut lang = ir.compile();
     // println!("{:#?}", ir);
     // use_the_assembler(30, &mut lang)?;
 
@@ -1258,7 +1258,7 @@ impl AstCompiler {
 
     fn compile_to_ir(&mut self, ast: &Box<Ast>, ir: &mut Ir) -> Value {
         match ast.as_ref().clone() {
-            Ast::Function { name, args, body } => {
+            Ast::Function { name: _, args, body } => {
                 for (index, arg) in args.iter().enumerate() {
                     let reg = ir.arg(index);
                     self.variables.insert(arg.clone(), reg);
@@ -1314,7 +1314,7 @@ impl AstCompiler {
                 ir.sub(left, right)
             }
             Ast::Recurse { args } => {
-                let mut args = args.iter().map(|arg| self.compile_to_ir(&Box::new(arg.clone()), ir)).collect();
+                let args = args.iter().map(|arg| self.compile_to_ir(&Box::new(arg.clone()), ir)).collect();
                 ir.recurse(args)
             }
             Ast::Constant(n) => {
