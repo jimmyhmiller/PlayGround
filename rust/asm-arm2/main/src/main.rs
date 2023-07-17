@@ -527,15 +527,13 @@ fn use_the_assembler(n: i64, lang: &mut Lang) -> Result<(), Box<dyn Error>> {
 
     let instructions = lang.compile(ptr);
 
-    let mut bytes = vec![];
-    for instruction in instructions.iter() {
-        for byte in instruction.encode().to_le_bytes() {
-            bytes.push(byte);
-        }
+    let bytes = instructions.iter()
+        .flat_map(|x| x.encode().to_le_bytes());
+
+    for (index, byte) in bytes.enumerate() {
+        memory[index] = byte;
     }
-    for (i, byte) in bytes.iter().enumerate() {
-        memory[i] = *byte;
-    }
+    
     let size = buffer.size();
     buffer.flush(0..size)?;
 
@@ -868,6 +866,7 @@ impl Ir {
         result
     }
 
+    #[allow(unused)]
     pub fn draw_lifetimes(lifetimes: &HashMap<VirtualRegister, (usize, usize)>) {
         // Find the maximum lifetime to set the width of the diagram
         let max_lifetime = lifetimes.values().map(|(_, end)| end).max().unwrap_or(&0);
@@ -1060,6 +1059,7 @@ impl Ir {
     }
 }
 
+#[allow(unused)]
 fn fib2_prime() -> Ir {
     let mut ir = Ir::new();
     // ir.breakpoint();
@@ -1179,8 +1179,8 @@ extern "C" fn print_it(num: u64) -> u64 {
 fn main() -> Result<(), Box<dyn Error>> {
 
     // compile_simple_stuff()?;
-    let mut ir = fib2_prime();
-    let lifetimes = ir.get_register_lifetime();
+    // let mut ir = fib2_prime();
+    // let lifetimes = ir.get_register_lifetime();
     // let mut lang = Lang::new();
     // let register_assignment: HashMap<VirtualRegister, Register> = ir.allocate_registers(&mut lang, &lifetimes);
     // Ir::draw_lifetimes(&lifetimes);
@@ -1233,7 +1233,6 @@ enum Ast {
     Recurse {
         args: Vec<Ast>,
     },
-    Return(Box<Ast>),
     Constant(i64),
     Variable(String),
 }
@@ -1303,10 +1302,6 @@ impl AstCompiler {
                 } else {
                     panic!("Expected condition")
                 }
-            }
-            Ast::Return(ast) => {
-                let value = self.compile_to_ir(&ast, ir);
-                ir.ret(value)
             }
             Ast::Add { left, right } => {
                 let left = self.compile_to_ir(&left, ir);
