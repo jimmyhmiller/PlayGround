@@ -517,6 +517,8 @@ fn mov_64_bit_num(register: Register, num: isize) -> Vec<Asm> {
     result
 }
 
+
+
 fn use_the_assembler(n: i64, lang: &mut Lang) -> Result<(), Box<dyn Error>> {
     let mut buffer = MmapOptions::new(MmapOptions::page_size())?.map_mut()?;
     let memory = &mut buffer[..];
@@ -828,11 +830,14 @@ impl Ir {
         register
     }
 
-    fn ret<A>(&mut self, n: A)
+    fn ret<A>(&mut self, n: A) -> Value
     where
         A: Into<Value>,
     {
-        self.instructions.push(Instruction::Ret(n.into()));
+        let val = n.into();
+        self.instructions.push(Instruction::Ret(val));
+        val
+
     }
 
     fn label(&mut self, arg: &str) -> Label {
@@ -1065,7 +1070,7 @@ fn fib2_prime() -> Ir {
     let result_reg = ir.volatile_register();
     ir.jump_if(early_exit, Condition::LessThanOrEqual, n, 1);
 
-    let reg_0 = ir.sub(n, 1);
+    let reg_0: Value = ir.sub(n, 1);
     let reg_1 = ir.recurse(vec![reg_0]);
 
     let reg_2 = ir.sub(n, 2);
@@ -1172,19 +1177,23 @@ extern "C" fn print_it(num: u64) -> u64 {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+
+    // compile_simple_stuff()?;
     let mut ir = fib2_prime();
     let lifetimes = ir.get_register_lifetime();
     // let mut lang = Lang::new();
     // let register_assignment: HashMap<VirtualRegister, Register> = ir.allocate_registers(&mut lang, &lifetimes);
-    Ir::draw_lifetimes(&lifetimes);
+    // Ir::draw_lifetimes(&lifetimes);
     // println!("{:#?}", register_assignment);
     // let mut lang = ir.compile();
     // println!("{:#?}", ir);
     // use_the_assembler(30, &mut lang)?;
 
+    // let mut lang = fib();
+
     let new_fib = test_fib();
-    println!("{:#?}", new_fib);
-    let mut new_ir = new_fib.compile();
+    // println!("{:#?}", new_fib);
+    let mut new_ir: Ir = new_fib.compile();
     println!("{:#?}", new_ir);
     
     let mut lang = new_ir.compile();
@@ -1244,11 +1253,6 @@ struct AstCompiler {
     variables: HashMap<String, VirtualRegister>,
 }
 
-// I'm using this because there are some places I'm not
-// currently sure the right thing to return and I want
-// signal exactly where that is.
-const TEMP_PLACEHOLDER : Value = Value::UnSignedConstant(42);
-
 impl AstCompiler {
     fn compile(&mut self) -> Ir {
         let mut ir = Ir::new();
@@ -1264,16 +1268,12 @@ impl AstCompiler {
                     self.variables.insert(arg.clone(), reg);
                 }
 
-
-                for ast in body {
+                for ast in body[..body.len()-1].iter() {
                     self.compile_to_ir(&Box::new(ast), ir);
                 }
-                // Should actually return the last value?
-                // Or what is explicitly returned?
-                // I might need to just deal with all of this a bit differently
-                // Or I need to return the return_reg?
-                // need to think about this.
-                TEMP_PLACEHOLDER
+                let last = body.last().unwrap();
+                let return_value = self.compile_to_ir(&Box::new(last), ir);
+                ir.ret(return_value)
             }
             Ast::If { condition, then, else_ } => {
                 // TODO: My condition system is a bit ugly
@@ -1281,17 +1281,24 @@ impl AstCompiler {
                 if let Ast::Condition { operator, left, right } = condition.as_ref() {
                     let a = self.compile_to_ir(left, ir);
                     let b = self.compile_to_ir(right, ir);
+                    let end_if_label = ir.label("end_if");
+
+                    let result_reg = ir.volatile_register();
 
                     let then_label = ir.label("then");
                     ir.jump_if(then_label, *operator, a, b);
 
-                    self.compile_to_ir(&else_, ir);
-                    ir.write_label(then_label);
-                    self.compile_to_ir(&then, ir);
+                    let else_result = self.compile_to_ir(&else_, ir);
+                    ir.assign(result_reg, else_result);
+                    ir.jump(end_if_label);
 
-                    // TODO: I need ifs to be expressions.
-                    // Right now they are acting as statements.
-                    TEMP_PLACEHOLDER
+                    ir.write_label(then_label);
+                    let then_result = self.compile_to_ir(&then, ir);
+                    ir.assign(result_reg, then_result);
+
+                    ir.write_label(end_if_label);
+
+                    result_reg.into()
 
                 } else {
                     panic!("Expected condition")
@@ -1299,9 +1306,7 @@ impl AstCompiler {
             }
             Ast::Return(ast) => {
                 let value = self.compile_to_ir(&ast, ir);
-                ir.ret(value);
-                // Do I need a concept of the return register in the IR?
-                TEMP_PLACEHOLDER
+                ir.ret(value)
             }
             Ast::Add { left, right } => {
                 let left = self.compile_to_ir(&left, ir);
@@ -1439,8 +1444,8 @@ fn test_fib() -> Ast {
     ast! {
         (fn fib [n]
             (if (<= n 1)
-                (return n)
-                (return (+ (fib (- n 1)) (fib (- n 2))))))
+                n
+                (+ (fib (- n 1)) (fib (- n 2)))))
     }
 }
 
