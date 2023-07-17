@@ -182,7 +182,7 @@ fn load_pair(reg1: Register, reg2: Register, destination: Register, offset: i32)
 #[allow(unused)]
 fn branch_with_link(destination: i32) -> Asm {
     Asm::Bl {
-        imm26: destination as i32,
+        imm26: destination,
     }
 }
 
@@ -1256,8 +1256,8 @@ impl AstCompiler {
         ir
     }
 
-    fn compile_to_ir(&mut self, ast: &Box<Ast>, ir: &mut Ir) -> Value {
-        match ast.as_ref().clone() {
+    fn compile_to_ir(&mut self, ast: &Ast, ir: &mut Ir) -> Value {
+        match ast.clone() {
             Ast::Function { name: _, args, body } => {
                 for (index, arg) in args.iter().enumerate() {
                     let reg = ir.arg(index);
