@@ -1,6 +1,9 @@
-use std::str::from_utf8;
+use std::{
+    collections::{HashMap, HashSet},
+    str::from_utf8,
+};
 
-use framework::{app, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, decode_base64};
+use framework::{app, decode_base64, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect};
 use headless_editor::{
     parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
 };
@@ -36,11 +39,9 @@ pub struct TextPane {
     offset: Position,
     cursor: Cursor,
     text_buffer: TokenTextBuffer<SimpleTextBuffer>,
-    tokens: Vec<Token>,
 }
 
 // TODO: Got some weird token missing that refreshing state fixes
-
 
 impl TextPane {
     pub fn new(contents: Vec<u8>, line_height: f32) -> Self {
@@ -50,7 +51,6 @@ impl TextPane {
             offset: Position { x: 0.0, y: 0.0 },
             cursor: Cursor::new(0, 0),
             text_buffer: TokenTextBuffer::new_with_contents(&contents),
-            tokens: vec![],
         }
     }
 
@@ -144,6 +144,22 @@ impl App for TextWidget {
     }
 
     fn draw(&mut self) {
+        let unique: HashSet<usize> = HashSet::from_iter(
+            self.text_pane
+                .text_buffer
+                .tokens
+                .iter()
+                .cloned()
+                .map(|token| token.kind),
+        );
+
+        let colors = vec![
+            "#D36247", "#FFB5A3", "#F58C73", "#B54226", "#D39147", "#FFD4A3", "#F5B873", "#7CAABD",
+            "#4C839A", "#33985C", "#83CDA1", "#53B079", "#1C8245",
+        ];
+        let mut color_index = 0;
+        let mut token_to_color: HashMap<usize, String> = HashMap::new();
+
         let canvas = Canvas::new();
 
         let foreground = Color::parse_hex("#dc9941");
@@ -189,7 +205,7 @@ impl App for TextWidget {
 
         canvas.save();
 
-        if !self.text_pane.tokens.is_empty() {
+        if !self.text_pane.text_buffer.tokens.is_empty() {
             for line in self.text_pane.text_buffer.decorated_lines(
                 self.text_pane.lines_above_scroll(),
                 self.text_pane
@@ -198,12 +214,15 @@ impl App for TextWidget {
                 let mut x = 0.0;
                 for (text, token) in line {
                     let foreground = if let Some(token) = token {
-                        Color::new(
-                            1.0 / token.kind as f32,
-                            1.0 / token.modifiers as f32,
-                            0.0,
-                            1.0,
-                        )
+                        let key = ((token.kind as f32 + token.modifiers as f32) as usize);
+                        if let Some(color) = token_to_color.get(&key) {
+                            Color::parse_hex(color)
+                        } else {
+                            let color = colors[color_index % colors.len()];
+                            color_index += 1;
+                            token_to_color.insert(key, color.to_string());
+                            Color::parse_hex(color)
+                        }
                     } else {
                         Color::parse_hex("#aa9941")
                     };
@@ -367,6 +386,7 @@ impl App for TextWidget {
         if kind == "tokens" {
             if let Ok(data) = decode_base64(event.into_bytes()) {
                 if let Ok(tokens) = serde_json::from_str::<Vec<u64>>(from_utf8(&data).unwrap()) {
+                    println!("First okay!!");
                     let tokens = parse_tokens(&tokens);
                     self.text_pane.text_buffer.set_tokens(tokens);
                 }

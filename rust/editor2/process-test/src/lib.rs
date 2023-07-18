@@ -334,6 +334,9 @@ impl App for ProcessSpawner {
                                 if method == "textDocument/semanticTokens/full" {
                                     self.send_event("tokens".to_string(), encode_base64(&extract_tokens(&message)));
                                 }
+                                if method == "initialize" {
+                                    println!("{}", message);
+                                }
                                 println!("Method: {:?}", method);
                             }
                         }
