@@ -6,6 +6,7 @@
 
 
 
+k
 (->> (slurp "/Users/jimmyhmiller/Documents/Code/yjit-bench/connections.json")
      (string/split-lines)
      (map #(json/decode % true))

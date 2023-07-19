@@ -1,7 +1,6 @@
 use core::cmp::min;
 use core::fmt::Debug;
 use std::collections::HashMap;
-use std::ops::Range;
 // TODO: I probably do need to return actions here
 // for every time the cursor moves.
 
@@ -118,6 +117,7 @@ enum TokenAction {
     },
 }
 
+#[allow(unused)]
 struct TokenWindow {
     index: usize,
     line: usize,
@@ -150,7 +150,7 @@ where
 
     fn decorated_line<'a>(
         &self,
-        line_number: usize,
+        _line_number: usize,
         line: &'a [u8],
         tokens: &'a [Token],
     ) -> Vec<(&'a [u8], Option<&'a Token>)> {
@@ -247,7 +247,7 @@ where
         }
     }
 
-    fn resolve_token_action_insert(&self, window: TokenWindow, line: usize, column: usize, text: &[u8]) -> Vec<TokenAction> {
+    fn resolve_token_action_insert(&self, window: TokenWindow, _line: usize, column: usize, text: &[u8]) -> Vec<TokenAction> {
         if text.iter().all(|x| x.is_ascii_whitespace()) {
             if window.column <= column {
                 vec![TokenAction::OffsetToken { index: window.index, length: text.len() as isize }]
@@ -268,7 +268,7 @@ where
         }
     }
     
-    fn result_token_action_delete(&self, window: TokenWindow, line: usize, column: usize) -> Vec<TokenAction> {
+    fn result_token_action_delete(&self, window: TokenWindow, _line: usize, column: usize) -> Vec<TokenAction> {
         if let Some(token) = window.center {
             if column <= window.column {
                 
