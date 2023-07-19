@@ -14,7 +14,7 @@ use lsp_types::{
     SemanticTokensParams, ShowDocumentClientCapabilities, ShowMessageRequestClientCapabilities,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem, Url,
     VersionedTextDocumentIdentifier, WindowClientCapabilities, WorkDoneProgressParams,
-    WorkspaceFolder,
+    WorkspaceFolder, InitializeResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -70,10 +70,6 @@ impl ProcessSpawner {
         }
 
         Ok(results)
-    }
-
-    fn update_state(&mut self, state: State) {
-        self.state.state = state;
     }
 
     fn next_request_id(&mut self) -> usize {
@@ -332,10 +328,20 @@ impl App for ProcessSpawner {
                         if let Some(id) = message["id"].as_u64() {
                             if let Some(method) = self.state.message_type.get(&(id as usize)) {
                                 if method == "textDocument/semanticTokens/full" {
-                                    self.send_event("tokens".to_string(), encode_base64(&extract_tokens(&message)));
+                                    self.send_event("tokens", encode_base64(&extract_tokens(&message)));
                                 }
                                 if method == "initialize" {
-                                    println!("{}", message);
+                                    let parsed_message = serde_json::from_str::<InitializeResult>(&message.to_string()).unwrap();
+                                    if let Some(token_provider) = parsed_message.capabilities.semantic_tokens_provider {
+                                        match token_provider {
+                                            lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(_options) => {
+                                                
+                                            }
+                                            lsp_types::SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(options) => {
+                                                self.send_event("token_options", serde_json::to_string(&options.semantic_tokens_options.legend).unwrap());
+                                            },
+                                        }
+                                    }
                                 }
                                 println!("Method: {:?}", method);
                             }

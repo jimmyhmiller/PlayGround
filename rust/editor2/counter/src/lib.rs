@@ -1,11 +1,11 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     str::from_utf8,
 };
 
 use framework::{app, decode_base64, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect};
 use headless_editor::{
-    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
+    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -144,14 +144,6 @@ impl App for TextWidget {
     }
 
     fn draw(&mut self) {
-        let unique: HashSet<usize> = HashSet::from_iter(
-            self.text_pane
-                .text_buffer
-                .tokens
-                .iter()
-                .cloned()
-                .map(|token| token.kind),
-        );
 
         let colors = vec![
             "#D36247", "#FFB5A3", "#F58C73", "#B54226", "#D39147", "#FFD4A3", "#F5B873", "#7CAABD",
@@ -214,7 +206,7 @@ impl App for TextWidget {
                 let mut x = 0.0;
                 for (text, token) in line {
                     let foreground = if let Some(token) = token {
-                        let key = ((token.kind as f32 + token.modifiers as f32) as usize);
+                        let key = token.kind + token.modifiers;
                         if let Some(color) = token_to_color.get(&key) {
                             Color::parse_hex(color)
                         } else {
@@ -323,7 +315,7 @@ impl App for TextWidget {
         // TODO: I actually want the new edits, not all of them.
         for edit in self.text_pane.text_buffer.drain_edits() {
             self.send_event(
-                "text_change".to_string(),
+                "text_change",
                 serde_json::ser::to_string(&edit.edit).unwrap(),
             );
         }

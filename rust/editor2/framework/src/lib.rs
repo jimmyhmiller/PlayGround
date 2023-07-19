@@ -30,6 +30,7 @@ extern "C" {
     fn get_x() -> f32;
     fn get_y() -> f32;
     fn get_value(ptr: i32, len: i32) -> u32;
+    #[allow(unused)]
     fn try_get_value(ptr: i32, len: i32) -> u32;
     #[link_name = "send_event"]
     fn send_event_low_level(kind_ptr: i32, kind_len: i32, ptr: i32, len: i32);
@@ -164,6 +165,12 @@ impl Canvas {
 pub static mut DEBUG: Vec<String> = Vec::new();
 pub static mut STRING_PTR_TO_LEN: Lazy<HashMap<u32, u32>> = Lazy::new(HashMap::new);
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Size {
+    pub width: f32,
+    pub height: f32,
+}
+
 pub trait App {
     type State;
     fn init() -> Self;
@@ -204,7 +211,7 @@ pub trait App {
         }
     }
 
-    fn send_event(&self, kind: String, event: String) {
+    fn send_event(&self, kind: &str, event: String) {
         unsafe {
             send_event_low_level(
                 kind.as_ptr() as i32,
