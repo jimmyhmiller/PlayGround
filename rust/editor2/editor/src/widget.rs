@@ -123,6 +123,8 @@ pub struct Color {
     a: f32,
 }
 
+
+
 impl Color {
     pub fn to_paint(&self) -> Paint {
         Paint::new(Color4f::new(self.r, self.g, self.b, self.a), None)
@@ -467,6 +469,7 @@ impl Widget {
         if let WidgetData::Wasm { wasm: _, wasm_id } = &mut self.data {
             canvas.save();
             canvas.translate((self.position.x, self.position.y));
+            canvas.clip_rect(Rect::from_wh(bounds.width, bounds.height), None, false);
 
             wasm_messenger.draw_widget(*wasm_id, canvas, bounds);
             // if let Some(widget_size) = widget_size {

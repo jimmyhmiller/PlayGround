@@ -374,11 +374,9 @@ impl App for TextWidget {
     }
 
     fn on_event(&mut self, kind: String, event: String) {
-        println!("event: {}", kind);
         if kind == "tokens" {
             if let Ok(data) = decode_base64(event.into_bytes()) {
                 if let Ok(tokens) = serde_json::from_str::<Vec<u64>>(from_utf8(&data).unwrap()) {
-                    println!("First okay!!");
                     let tokens = parse_tokens(&tokens);
                     self.text_pane.text_buffer.set_tokens(tokens);
                 }
