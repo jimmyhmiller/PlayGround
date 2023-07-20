@@ -171,6 +171,16 @@ pub struct Size {
     pub height: f32,
 }
 
+impl Size {
+    pub fn default() -> Self {
+        // We don't want things to be sized to zero by default
+        Self {
+            width: 100.0,
+            height: 100.0,
+        }
+    }
+}
+
 pub trait App {
     type State;
     fn init() -> Self;
@@ -178,7 +188,8 @@ pub trait App {
     fn on_click(&mut self, x: f32, y: f32);
     fn on_key(&mut self, input: KeyboardInput);
     fn on_scroll(&mut self, x: f64, y: f64);
-    fn on_event(&mut self, _kind: String, _event: String) {}
+    #[allow(unused)]
+    fn on_event(&mut self, kind: String, event: String) {}
     fn on_size_change(&mut self, width: f32, height: f32);
     fn get_state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State);
@@ -418,7 +429,8 @@ pub mod macros {
                         if let Ok(state) = $crate::macros::serde_json::from_str(&s) {
                             unsafe { APP.set_state(state) }
                         } else {
-                            println!("set_state: failed to parse state");
+                            // TODO: We should allow partial parsing of state
+                            println!("set_state: failed to parse state!");
                         }
                     }
                     Err(err) => {

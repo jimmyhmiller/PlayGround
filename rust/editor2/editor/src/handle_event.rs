@@ -205,19 +205,23 @@ impl Editor {
                 }
                 Event::Event(kind, event) => {
                     // lookup what widgets are listening, call their on_event handler
-                    if let Some(listening_widgets) = self.event_listeners.get(&kind) {
-                        for widget_id in listening_widgets {
-                            if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                                match &mut widget.data {
-                                    WidgetData::Wasm { wasm: _, wasm_id } => {
-                                        self.wasm_messenger.send_event(
-                                            *wasm_id,
-                                            kind.clone(),
-                                            event.clone(),
-                                        );
-                                    }
-                                    _ => {}
+                    let empty = &HashSet::new();
+                    let specific = self.event_listeners.get(&kind).unwrap_or(empty);
+                    let all = self.event_listeners.get("*").unwrap_or(empty);
+                    
+                    let both = specific.union(all);
+
+                    for widget_id in both {
+                        if let Some(widget) = self.widget_store.get_mut(*widget_id) {
+                            match &mut widget.data {
+                                WidgetData::Wasm { wasm: _, wasm_id } => {
+                                    self.wasm_messenger.send_event(
+                                        *wasm_id,
+                                        kind.clone(),
+                                        event.clone(),
+                                    );
                                 }
+                                _ => {}
                             }
                         }
                     }

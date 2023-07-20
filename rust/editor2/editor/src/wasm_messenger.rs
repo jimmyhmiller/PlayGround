@@ -234,8 +234,9 @@ impl WasmMessenger {
         bounds: Size,
     ) -> Option<Size> {
         if let Some(commands) = self.wasm_draw_commands.get_mut(&wasm_id) {
-            let mut max_width = 0.0;
-            let mut max_height = 0.0;
+            
+            let mut current_width = 0.0;
+            let mut current_height = 0.0;
             let mut current_height_stack = vec![];
 
             let mut paint = skia_safe::Paint::default();
@@ -249,18 +250,14 @@ impl WasmMessenger {
                     Command::DrawRect(x, y, width, height) => {
                         canvas
                             .draw_rect(skia_safe::Rect::from_xywh(*x, *y, *width, *height), &paint);
-                        // This is not quite right because of translate and stuff.
-                        // if *x + *width > max_width {
-                        //     max_width = *x + *width;
-                        // }
-                        // if *y + *height > max_height {
-                        //     max_height = *y + *height;
-                        // }
                     }
                     Command::DrawString(str, x, y) => {
                         let mut paint = paint.clone();
                         paint.set_shader(None);
-                        if max_height > bounds.height {
+                        if current_height > bounds.height {
+                            continue;
+                        }
+                        if current_height < 0.0 {
                             continue;
                         }
                         let font = Font::new(
@@ -278,12 +275,6 @@ impl WasmMessenger {
                             None,
                             None,
                         );
-                        // if *width > max_width {
-                        //     max_width = *width;
-                        // }
-                        // if *height > max_height {
-                        //     max_height = *height;
-                        // }
                     }
                     Command::DrawRRect(x, y, width, height, radius) => {
                         let rrect = skia_safe::RRect::new_rect_xy(
@@ -294,17 +285,17 @@ impl WasmMessenger {
                         canvas.draw_rrect(rrect, &paint);
                     }
                     Command::Translate(x, y) => {
-                        max_height += *y;
-                        max_width += *x;
+                        current_height += *y;
+                        current_width += *x;
                         canvas.translate((*x, *y));
                     }
                     Command::Save => {
                         canvas.save();
-                        current_height_stack.push(max_height);
+                        current_height_stack.push(current_height);
                     }
                     Command::Restore => {
                         canvas.restore();
-                        max_height = current_height_stack.pop().unwrap();
+                        current_height = current_height_stack.pop().unwrap();
                     }
                     c => {
                         non_draw_commands.push(c.clone());
@@ -315,8 +306,8 @@ impl WasmMessenger {
             self.wasm_non_draw_commands
                 .insert(wasm_id, non_draw_commands);
             Some(Size {
-                width: max_width,
-                height: max_height,
+                width: current_width,
+                height: current_height,
             })
         } else {
             None

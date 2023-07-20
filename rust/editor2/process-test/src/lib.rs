@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Deserialize, Serialize)]
 struct Data {
     state: State,
-    message_type: HashMap<usize, String>,
+    message_type: HashMap<String, String>,
     last_request_id: usize,
 }
 
@@ -72,15 +72,15 @@ impl ProcessSpawner {
         Ok(results)
     }
 
-    fn next_request_id(&mut self) -> usize {
+    fn next_request_id(&mut self) -> String {
         self.state.last_request_id += 1;
-        self.state.last_request_id
+        format!("client/{}", self.state.last_request_id)
     }
 
-    fn request(&mut self, id: usize, method: &str, params: &str) -> String {
+    fn request(&mut self, id: String, method: &str, params: &str) -> String {
         // construct the request and add the headers including content-length
         let body = format!(
-            "{{\"jsonrpc\":\"{}\",\"id\":{},\"method\":\"{}\",\"params\":{}}}",
+            "{{\"jsonrpc\":\"{}\",\"id\":\"{}\",\"method\":\"{}\",\"params\":{}}}",
             "2.0", id, method, params
         );
         let content_length = body.len();
@@ -90,7 +90,7 @@ impl ProcessSpawner {
 
     fn send_request(&mut self, method: &str, params: &str) {
         let id = self.next_request_id();
-        let request = self.request(id, method, params);
+        let request = self.request(id.clone(), method, params);
         self.state.message_type.insert(id, method.to_string());
         self.send_message(self.process_id, request);
     }
@@ -325,19 +325,23 @@ impl App for ProcessSpawner {
                 Ok(messages) => {
                     for message in messages {
                         // let method = message["method"].as_str();
-                        if let Some(id) = message["id"].as_u64() {
-                            if let Some(method) = self.state.message_type.get(&(id as usize)) {
+                        if let Some(id) = message["id"].as_str() {
+                            println!("Id: {}", id);
+                            if let Some(method) = self.state.message_type.get(id) {
                                 if method == "textDocument/semanticTokens/full" {
                                     self.send_event("tokens", encode_base64(&extract_tokens(&message)));
                                 }
                                 if method == "initialize" {
-                                    let parsed_message = serde_json::from_str::<InitializeResult>(&message.to_string()).unwrap();
+                                    let result = message.get("result").unwrap();
+                                    let parsed_message = serde_json::from_value::<InitializeResult>(result.clone()).unwrap();
                                     if let Some(token_provider) = parsed_message.capabilities.semantic_tokens_provider {
+                                        println!("Token provider: {:?}", token_provider);
                                         match token_provider {
-                                            lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(_options) => {
-                                                
+                                            lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(options) => {
+                                                self.send_event("token_options", serde_json::to_string(&options.legend).unwrap());
                                             }
                                             lsp_types::SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(options) => {
+                                                println!("Did token options");
                                                 self.send_event("token_options", serde_json::to_string(&options.semantic_tokens_options.legend).unwrap());
                                             },
                                         }
