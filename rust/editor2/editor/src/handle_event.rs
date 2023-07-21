@@ -83,20 +83,21 @@ impl Editor {
                     }
                 }
                 Event::MouseMove {
-                    x_diff: x,
-                    y_diff: y,
-                    ..
+                    x_diff,
+                    y_diff,
+                    x,
+                    y,
                 } => {
                     // We are dragging, so don't click
-                    if !self.selected_widgets.is_empty() && x != 0.0 && y != 0.0 {
+                    if !self.selected_widgets.is_empty() && x_diff != 0.0 && y_diff != 0.0 {
                         self.context.cancel_click = true;
                     }
 
                     if self.context.modifiers.ctrl && self.context.modifiers.option {
                         for widget_id in self.selected_widgets.iter() {
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                                widget.size.width += x;
-                                widget.size.height += y;
+                                widget.size.width += x_diff;
+                                widget.size.height += y_diff;
                                 widget.on_size_change(
                                     widget.size.width,
                                     widget.size.height,
@@ -107,8 +108,27 @@ impl Editor {
                     } else if self.context.modifiers.ctrl {
                         for widget_id in self.selected_widgets.iter() {
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                                widget.position.x += x;
-                                widget.position.y += y;
+                                widget.position.x += x_diff;
+                                widget.position.y += y_diff;
+                            }
+                        }
+                    }
+                    else {
+                        for widget in self.widget_store.iter() {
+                            let position = Position { x, y };
+                            let widget_x = position.x - widget.position.x;
+                            let widget_y = position.y - widget.position.y;
+                            let widget_space = Position {
+                                x: widget_x,
+                                y: widget_y,
+                            };
+                            if widget.mouse_over(&position) {
+                                match &widget.data {
+                                    WidgetData::Wasm { wasm: _, wasm_id } => {
+                                        self.wasm_messenger.send_on_mouse_move(*wasm_id, &widget_space)
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                     }
