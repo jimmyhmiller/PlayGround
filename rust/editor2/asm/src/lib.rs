@@ -64,7 +64,7 @@ impl App for AsmData {
     }
 
     fn draw(&mut self) {
-        let canvas = Canvas::new();
+        let mut canvas = Canvas::new();
 
         let foreground = Color::parse_hex("#dc9941");
         let background = Color::parse_hex("#353f38");

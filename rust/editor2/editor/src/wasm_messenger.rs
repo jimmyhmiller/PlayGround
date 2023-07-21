@@ -58,6 +58,7 @@ enum Payload {
     ProcessMessage(usize, String),
     Event(String, String),
     OnSizeChange(f32, f32),
+    OnMouseMove(Position),
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +164,7 @@ impl WasmMessenger {
                     Payload::ProcessMessage(_, _) => "ProcessMessage",
                     Payload::Event(_, _) => "Event",
                     Payload::OnSizeChange(_, _) => "OnSizeChange",
+                    Payload::OnMouseMove(_) => "OnMouseMove",
                 });
             }
         }
@@ -466,6 +468,15 @@ impl WasmMessenger {
         });
     }
 
+    pub fn send_on_mouse_move(&mut self, wasm_id: WasmId, position: &Position) {
+        let message_id = self.next_message_id();
+        self.send_message(Message {
+            message_id,
+            wasm_id,
+            payload: Payload::OnMouseMove(*position),
+        });
+    }
+
     pub fn send_update_position(&mut self, wasm_id: WasmId, position: &Position) {
         let message_id = self.next_message_id();
         self.send_message(Message {
@@ -622,17 +633,24 @@ impl WasmManager {
         loop {
             let message = self.receiver.select_next_some().await;
             let out_message = self.process_message(message).await;
-            self.sender.start_send(out_message).unwrap();
+            match out_message {
+                Ok(out_message) => {
+                    self.sender.start_send(out_message).unwrap();
+                }
+                Err(err) => {
+                    println!("Error processing message: {}", err);
+                }
+            }
         }
     }
 
-    pub async fn process_message(&mut self, message: Message) -> OutMessage {
+    pub async fn process_message(&mut self, message: Message) -> Result<OutMessage, Box<dyn Error>> {
         let id = message.wasm_id;
-        let default_return = OutMessage {
+        let default_return = Ok(OutMessage {
             wasm_id: message.wasm_id,
             message_id: message.message_id,
             payload: OutPayload::Complete,
-        };
+        });
 
         match message.payload {
             Payload::NewInstance(_) => {
@@ -641,18 +659,23 @@ impl WasmManager {
             Payload::OnClick(position) => {
                 self.instance
                     .on_click(position.x, position.y)
-                    .await
-                    .unwrap();
+                    .await?;
+                default_return
+            }
+            Payload::OnMouseMove(position) => {
+                self.instance
+                    .on_mouse_move(position.x, position.y)
+                    .await?;
                 default_return
             }
             Payload::Draw(fn_name) => {
                 let result = self.instance.draw(&fn_name).await;
                 match result {
-                    Ok(result) => OutMessage {
+                    Ok(result) => Ok(OutMessage {
                         message_id: message.message_id,
                         wasm_id: id,
                         payload: OutPayload::DrawCommands(result),
-                    },
+                    }),
                     Err(error) => {
                         println!("Error drawing {:?}", error);
                         default_return
@@ -660,18 +683,17 @@ impl WasmManager {
                 }
             }
             Payload::SetState(state) => {
-                self.instance.set_state(state.as_bytes()).await.unwrap();
+                self.instance.set_state(state.as_bytes()).await?;
                 default_return
             }
             Payload::OnScroll(x, y) => {
-                self.instance.on_scroll(x, y).await.unwrap();
+                self.instance.on_scroll(x, y).await?;
                 default_return
             }
             Payload::ProcessMessage(process_id, message) => {
                 self.instance
                     .on_process_message(process_id as i32, message)
-                    .await
-                    .unwrap();
+                    .await?;
                 default_return
             }
             Payload::OnKey(input) => {
@@ -679,11 +701,11 @@ impl WasmManager {
                 let result = self.instance.on_key(key_code, state, modifiers).await;
                 match result {
                     Ok(_) => default_return,
-                    Err(err) => OutMessage {
+                    Err(err) => Ok(OutMessage {
                         wasm_id: message.wasm_id,
                         message_id: message.message_id,
                         payload: OutPayload::ErrorPayload(err.to_string()),
-                    },
+                    }),
                 }
             }
             Payload::Reload => {
@@ -702,17 +724,17 @@ impl WasmManager {
                         if state.starts_with('\"') {
                             assert!(state.ends_with('\"'), "State is corrupt: {}", state);
                         }
-                        OutMessage {
+                        Ok(OutMessage {
                             message_id: message.message_id,
                             wasm_id: id,
                             payload: OutPayload::Saved(SaveState::Saved(state)),
-                        }
+                        })
                     }
-                    None => OutMessage {
+                    None => Ok(OutMessage {
                         message_id: message.message_id,
                         wasm_id: id,
                         payload: OutPayload::Saved(SaveState::Empty),
-                    },
+                    }),
                 }
             }
             Payload::UpdatePosition(position) => {
@@ -720,11 +742,11 @@ impl WasmManager {
                 default_return
             }
             Payload::Event(kind, event) => {
-                self.instance.on_event(kind, event).await.unwrap();
+                self.instance.on_event(kind, event).await?;
                 default_return
             }
             Payload::OnSizeChange(width, height) => {
-                self.instance.on_size_change(width, height).await.unwrap();
+                self.instance.on_size_change(width, height).await?;
                 default_return
             }
         }
@@ -907,8 +929,7 @@ impl WasmInstance {
 
         let func = self
             .instance
-            .get_typed_func::<Params, Results>(&mut self.store, name)
-            .unwrap();
+            .get_typed_func::<Params, Results>(&mut self.store, name)?;
         let result = func.call_async(&mut self.store, params).await?;
         Ok(result)
     }
@@ -1202,6 +1223,12 @@ impl WasmInstance {
 
     pub async fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.call_typed_func::<(f32, f32), ()>("on_click", (x, y), 1)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn on_mouse_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.call_typed_func::<(f32, f32), ()>("on_mouse_move", (x, y), 1)
             .await?;
         Ok(())
     }

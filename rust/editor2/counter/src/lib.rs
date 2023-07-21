@@ -32,13 +32,11 @@ where
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TextPane {
-    #[serde(serialize_with = "serialize_text")]
-    #[serde(deserialize_with = "deserialize_text")]
-    contents: Vec<u8>,
     line_height: f32,
     offset: Position,
     cursor: Cursor,
     text_buffer: TokenTextBuffer<SimpleTextBuffer>,
+    color_mapping: HashMap<usize, String>,
 }
 
 // TODO: Got some weird token missing that refreshing state fixes
@@ -46,16 +44,12 @@ pub struct TextPane {
 impl TextPane {
     pub fn new(contents: Vec<u8>, line_height: f32) -> Self {
         Self {
-            contents: vec![],
             line_height,
             offset: Position { x: 0.0, y: 0.0 },
             cursor: Cursor::new(0, 0),
             text_buffer: TokenTextBuffer::new_with_contents(&contents),
+            color_mapping: HashMap::new(),
         }
-    }
-
-    pub fn _set_contents(&mut self, contents: Vec<u8>) {
-        self.contents = contents;
     }
 
     fn lines_above_scroll(&self) -> usize {
@@ -101,6 +95,10 @@ impl TextPane {
     fn fractional_line_offset(&self) -> f32 {
         self.offset.y % self.line_height
     }
+
+    fn set_color_mapping(&mut self, mapping: HashMap<usize, String>) {
+        self.color_mapping = mapping;
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -140,19 +138,13 @@ impl App for TextWidget {
             edit_position: 0,
         };
         me.subscribe("tokens".to_string());
+        me.subscribe("color_mapping_changed".to_string());
         me
     }
 
     fn draw(&mut self) {
 
-        let colors = vec![
-            "#D36247", "#FFB5A3", "#F58C73", "#B54226", "#D39147", "#FFD4A3", "#F5B873", "#7CAABD",
-            "#4C839A", "#33985C", "#83CDA1", "#53B079", "#1C8245",
-        ];
-        let mut color_index = 0;
-        let mut token_to_color: HashMap<usize, String> = HashMap::new();
-
-        let canvas = Canvas::new();
+        let mut canvas = Canvas::new();
 
         let foreground = Color::parse_hex("#dc9941");
         let background = Color::parse_hex("#353f38");
@@ -206,14 +198,13 @@ impl App for TextWidget {
                 let mut x = 0.0;
                 for (text, token) in line {
                     let foreground = if let Some(token) = token {
-                        let key = token.kind + token.modifiers;
-                        if let Some(color) = token_to_color.get(&key) {
+                        let key = token.kind;
+                        // println!("key: {}", key);
+                        // println!("{}", self.text_pane.color_mapping.len());
+                        if let Some(color) = self.text_pane.color_mapping.get(&key) {
                             Color::parse_hex(color)
                         } else {
-                            let color = colors[color_index % colors.len()];
-                            color_index += 1;
-                            token_to_color.insert(key, color.to_string());
-                            Color::parse_hex(color)
+                            Color::parse_hex("#aa9941")
                         }
                     } else {
                         Color::parse_hex("#aa9941")
@@ -370,7 +361,7 @@ impl App for TextWidget {
         *self = state;
         let file = "/code/process-test/src/lib.rs";
         let contents = std::fs::read(file).unwrap();
-        self.text_pane.contents = contents;
+        self.text_pane.text_buffer.set_contents(&contents);
     }
 
     fn on_event(&mut self, kind: String, event: String) {
@@ -381,6 +372,12 @@ impl App for TextWidget {
                     self.text_pane.text_buffer.set_tokens(tokens);
                 }
             }
+        } else if kind == "color_mapping_changed" {
+                if let Ok(mapping) = serde_json::from_str::<HashMap<usize, String>>(
+                    from_utf8(event.as_bytes()).unwrap(),
+                ) {
+                    self.text_pane.set_color_mapping(mapping);
+                }
         }
     }
 

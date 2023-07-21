@@ -106,11 +106,17 @@ impl Rect {
     }
 }
 
-pub struct Canvas {}
+pub struct Canvas {
+    tranlation: (f32, f32),
+    translation_stack: Vec<(f32, f32)>,
+}
 
 impl Canvas {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            tranlation: (0.0, 0.0),
+            translation_stack: Vec::new(),
+        }
     }
 
     pub fn draw_str(&self, s: &str, x: f32, y: f32) {
@@ -125,7 +131,8 @@ impl Canvas {
         }
     }
 
-    pub fn save(&self) {
+    pub fn save(&mut self) {
+        self.translation_stack.push(self.tranlation);
         unsafe {
             save();
         }
@@ -143,13 +150,23 @@ impl Canvas {
         }
     }
 
-    pub fn translate(&self, x: f32, y: f32) {
+    pub fn get_current_position(&self) -> (f32, f32) {
+        self.tranlation
+    }
+
+    pub fn translate(&mut self, x: f32, y: f32) {
+        self.tranlation.0 += x;
+        self.tranlation.1 += y;
         unsafe {
             translate(x, y);
         }
     }
 
-    pub fn restore(&self) {
+    pub fn restore(&mut self) {
+        if let Some(popped) = self.translation_stack.pop() {
+            self.tranlation = popped;
+        }
+
         unsafe {
             restore();
         }
@@ -186,6 +203,8 @@ pub trait App {
     fn init() -> Self;
     fn draw(&mut self);
     fn on_click(&mut self, x: f32, y: f32);
+    #[allow(unused)]
+    fn on_mouse_move(&mut self, x: f32, y: f32) {}
     fn on_key(&mut self, input: KeyboardInput);
     fn on_scroll(&mut self, x: f64, y: f64);
     #[allow(unused)]
@@ -368,7 +387,7 @@ pub mod macros {
                 }
                 let foreground = Color::parse_hex("#62b4a6");
                 let background = Color::parse_hex("#1c041e");
-                let canvas = Canvas::new();
+                let mut canvas = Canvas::new();
                 canvas.set_color(&background);
                 canvas.draw_rrect(Rect::new(0.0, 0.0, 300.0, 300.0), 20.0);
                 canvas.set_color(&foreground);
@@ -385,6 +404,11 @@ pub mod macros {
             pub extern "C" fn on_key(key: u32, state: u32, modifiers: u32) {
                 use framework::KeyboardInput;
                 unsafe { APP.on_key(KeyboardInput::from_u32(key, state, modifiers)) }
+            }
+
+            #[no_mangle]
+            pub extern "C" fn on_mouse_move(x: f32, y: f32) {
+                unsafe { APP.on_mouse_move(x, y) }
             }
 
             #[no_mangle]

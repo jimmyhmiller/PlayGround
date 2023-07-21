@@ -45,6 +45,7 @@ pub trait TextBuffer {
     fn last_line(&self) -> usize {
         self.line_count().saturating_sub(1)
     }
+    fn set_contents(&mut self, contents: &[Self::Item]);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -207,7 +208,7 @@ where
     
 
     fn find_token(&self, line: usize, column: usize) -> TokenWindow {
-        let mut index = 0;
+        let mut index: usize = 0;
         let mut current_line = 0;
         let mut current_column = 0;
         let mut left = None;
@@ -230,7 +231,7 @@ where
             }
             index += 1;
         }
-        if let Some(token) = self.tokens.get(index - 1) {
+        if let Some(token) = self.tokens.get(index.saturating_sub(1)) {
             left = Some(token.clone());
         }
         if let Some(token) = self.tokens.get(index + 1) {
@@ -351,6 +352,10 @@ where
 
     fn lines(&self) -> LineIter<Self::Item> {
         self.underlying_text_buffer.lines()
+    }
+
+    fn set_contents(&mut self, contents: &[Self::Item]) {
+        self.underlying_text_buffer.set_contents(contents);
     }
 }
 
@@ -494,6 +499,10 @@ impl TextBuffer for SimpleTextBuffer {
             items: &self.bytes,
             newline: &b'\n',
         }
+    }
+
+    fn set_contents(&mut self, contents: &[Self::Item]) {
+        self.bytes = contents.to_vec();
     }
 }
 
@@ -897,6 +906,9 @@ impl TextBuffer for EventTextBuffer {
             items: &self.bytes,
             newline: &b'\n',
         }
+    }
+    fn set_contents(&mut self, contents: &[Self::Item]) {
+        self.bytes = contents.to_vec();
     }
 }
 
