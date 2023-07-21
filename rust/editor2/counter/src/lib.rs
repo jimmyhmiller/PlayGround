@@ -7,7 +7,7 @@ use framework::{app, decode_base64, App, Canvas, Color, KeyCode, KeyState, Keybo
 use headless_editor::{
     parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor,
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
 pub struct Position {
@@ -15,20 +15,6 @@ pub struct Position {
     pub y: f32,
 }
 
-fn serialize_text<S>(x: &Vec<u8>, s: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    s.serialize_str(from_utf8(x).unwrap())
-}
-
-fn deserialize_text<'de, D>(d: D) -> Result<Vec<u8>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s = String::deserialize(d)?;
-    Ok(s.into_bytes())
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TextPane {

@@ -98,18 +98,18 @@ impl App for ColorScheme {
     // Right now I have to do things to figure out what was clicked
     // on for each UI. I need to do this generically like
     // set on_click handlers, or give UI parts an id or something.
-    fn on_click(&mut self, x: f32, y: f32) {
+    fn on_click(&mut self, _x: f32, _y: f32) {
         self.clicked = true;
     }
     fn on_mouse_move(&mut self, x: f32, y: f32) {
         self.mouse_location = Some((x, y));
     }
     
-    fn on_key(&mut self, input: framework::KeyboardInput) {
+    fn on_key(&mut self, _input: framework::KeyboardInput) {
         // Need to be able to access clipboard
     }
 
-    fn on_scroll(&mut self, x: f64, y: f64) {
+    fn on_scroll(&mut self, _x: f64, y: f64) {
         self.y_scroll_offset += y as f32;
         if self.y_scroll_offset > 0.0 {
             self.y_scroll_offset = 0.0;
