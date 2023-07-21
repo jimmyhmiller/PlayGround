@@ -250,7 +250,7 @@ impl App for TextWidget {
         if shown_lines.contains(&cursor.line()) {
             let nth_line = cursor.line() - lines_above;
             let cursor_position_pane_x = cursor.column() as f32 * 16.0;
-            let cursor_position_pane_y = (nth_line as f32 - 1.0) * self.text_pane.line_height;
+            let cursor_position_pane_y = (nth_line as f32 - 1.0) * self.text_pane.line_height + 6.0;
 
             canvas.set_color(&foreground);
             canvas.draw_rect(
