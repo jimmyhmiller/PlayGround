@@ -303,6 +303,7 @@ impl Editor {
                             i += 1;
                         }
                         if !buf.is_empty() {
+                            process.output.push('\n');
                             process.output.push_str(&buf);
                             if let Some(widget) =
                                 self.widget_store.get_mut(process.parent_widget_id)

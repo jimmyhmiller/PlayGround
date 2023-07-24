@@ -5,16 +5,16 @@ use std::{
     str::{from_utf8, FromStr},
 };
 
-use framework::{app, macros::serde_json, App, Canvas, encode_base64};
+use framework::{app, encode_base64, macros::serde_json, App, Canvas, Ui, Size};
 use lsp_types::{
     notification::{DidChangeTextDocument, DidOpenTextDocument, Initialized, Notification},
-    request::{Initialize, Request, SemanticTokensFullRequest},
+    request::{Initialize, Request, SemanticTokensFullRequest, WorkspaceSymbolRequest},
     ClientCapabilities, DidChangeTextDocumentParams, DidOpenTextDocumentParams, InitializeParams,
-    InitializedParams, MessageActionItemCapabilities, PartialResultParams, Position, Range,
-    SemanticTokensParams, ShowDocumentClientCapabilities, ShowMessageRequestClientCapabilities,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem, Url,
-    VersionedTextDocumentIdentifier, WindowClientCapabilities, WorkDoneProgressParams,
-    WorkspaceFolder, InitializeResult,
+    InitializeResult, InitializedParams, MessageActionItemCapabilities, PartialResultParams,
+    Position, Range, SemanticTokensParams, ShowDocumentClientCapabilities,
+    ShowMessageRequestClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, Url, VersionedTextDocumentIdentifier, WindowClientCapabilities,
+    WorkDoneProgressParams, WorkspaceFolder, WorkspaceSymbolParams,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,9 @@ struct Data {
     state: State,
     message_type: HashMap<String, String>,
     last_request_id: usize,
+    messages_by_type: HashMap<String, Vec<String>>,
+    size: Size,
+    y_scroll_offset: f32,
 }
 
 #[derive(Copy, Clone, Deserialize, Serialize)]
@@ -148,6 +151,18 @@ impl ProcessSpawner {
         self.send_message(self.process_id, request);
     }
 
+    fn resolve_workspace_symbols(&mut self) {
+        let params: <WorkspaceSymbolRequest as Request>::Params = WorkspaceSymbolParams {
+            partial_result_params: PartialResultParams { partial_result_token: None },
+            work_done_progress_params: WorkDoneProgressParams { work_done_token: None },
+            query: "".to_string(),
+        };
+        self.send_request(
+            WorkspaceSymbolRequest::METHOD,
+            &serde_json::to_string(&params).unwrap(),
+        );
+    }
+
     fn open_file(&mut self) {
         let file = "/code/process-test/src/lib.rs";
 
@@ -269,6 +284,9 @@ impl App for ProcessSpawner {
                 state: State::Init,
                 message_type: HashMap::new(),
                 last_request_id: 0,
+                messages_by_type: HashMap::new(),
+                size: Size::default(),
+                y_scroll_offset: 0.0,
             },
             process_id: 0,
             root_path: "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2".to_string(),
@@ -280,17 +298,34 @@ impl App for ProcessSpawner {
     }
 
     fn draw(&mut self) {
-        let canvas = Canvas::new();
-        canvas.draw_rect(0.0, 0.0, 100.0, 100.0);
+
+        let mut canvas = Canvas::new();
+
+        let ui = Ui::new();
+        let ui = ui.pane(
+            self.state.size,
+            (0.0, self.state.y_scroll_offset),
+            ui.list(self.state.messages_by_type.iter(), |ui, item|
+                ui.container(ui.text(&format!("{}: {}", item.0, item.1.len())))
+            ),
+        );
+        ui.draw(&mut canvas);
     }
 
     fn on_click(&mut self, _x: f32, _y: f32) {
-        self.request_tokens();
+        // self.request_tokens();
+        self.resolve_workspace_symbols();
+
     }
 
     fn on_key(&mut self, _input: framework::KeyboardInput) {}
 
-    fn on_scroll(&mut self, _x: f64, _y: f64) {}
+    fn on_scroll(&mut self, _x: f64, _y: f64) {
+        self.state.y_scroll_offset += _y as f32;
+        if self.state.y_scroll_offset > 0.0 {
+            self.state.y_scroll_offset = 0.0;
+        }
+    }
 
     fn on_event(&mut self, kind: String, event: String) {
         let root_path = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2";
@@ -326,22 +361,36 @@ impl App for ProcessSpawner {
                     for message in messages {
                         // let method = message["method"].as_str();
                         if let Some(id) = message["id"].as_str() {
-                            println!("Id: {}", id);
                             if let Some(method) = self.state.message_type.get(id) {
+
+                                if let Some(messages) = self.state.messages_by_type.get_mut(method) {
+                                    messages.push(message.to_string());
+                                } else {
+                                    self.state.messages_by_type.insert(method.to_string(), vec![message.to_string()]);
+                                }
+
                                 if method == "textDocument/semanticTokens/full" {
-                                    self.send_event("tokens", encode_base64(&extract_tokens(&message)));
+                                    self.send_event(
+                                        "tokens",
+                                        encode_base64(&extract_tokens(&message)),
+                                    );
+                                }
+                                if method == "workspace/symbol" {
+                                    println!("Symbols: {}", message);
                                 }
                                 if method == "initialize" {
                                     let result = message.get("result").unwrap();
-                                    let parsed_message = serde_json::from_value::<InitializeResult>(result.clone()).unwrap();
-                                    if let Some(token_provider) = parsed_message.capabilities.semantic_tokens_provider {
-                                        println!("Token provider: {:?}", token_provider);
+                                    let parsed_message =
+                                        serde_json::from_value::<InitializeResult>(result.clone())
+                                            .unwrap();
+                                    if let Some(token_provider) =
+                                        parsed_message.capabilities.semantic_tokens_provider
+                                    {
                                         match token_provider {
                                             lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(options) => {
                                                 self.send_event("token_options", serde_json::to_string(&options.legend).unwrap());
                                             }
                                             lsp_types::SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(options) => {
-                                                println!("Did token options");
                                                 self.send_event("token_options", serde_json::to_string(&options.semantic_tokens_options.legend).unwrap());
                                             },
                                         }
@@ -361,9 +410,14 @@ impl App for ProcessSpawner {
         // println!("Process {} sent message {}", process_id, message);
     }
 
-    fn set_state(&mut self, _state: Self::State) {}
+    fn set_state(&mut self, state: Self::State) {
+        self.state.size = state.size;
+    }
 
-    fn on_size_change(&mut self, _width: f32, _height: f32) {}
+    fn on_size_change(&mut self, width: f32, height: f32) {
+        self.state.size.width = width;
+        self.state.size.height = height;
+    }
 }
 
 fn extract_tokens(message: &serde_json::Value) -> Vec<u8> {
