@@ -30,11 +30,8 @@ struct Data {
 
 #[derive(Copy, Clone, Deserialize, Serialize)]
 enum State {
-    Init,
-    Message,
-    Recieve,
+    Initializing,
     Initialized,
-    Progress,
 }
 
 struct ProcessSpawner {
@@ -273,6 +270,13 @@ impl ProcessSpawner {
         );
         self.send_message(self.process_id, request);
     }
+
+    fn initialized(&mut self) {
+        self.state.state = State::Initialized;
+        self.open_file();
+        self.resolve_workspace_symbols();
+        self.request_tokens();
+    }
 }
 
 impl App for ProcessSpawner {
@@ -281,7 +285,7 @@ impl App for ProcessSpawner {
     fn init() -> Self {
         let mut me = ProcessSpawner {
             state: Data {
-                state: State::Init,
+                state: State::Initializing,
                 message_type: HashMap::new(),
                 last_request_id: 0,
                 messages_by_type: HashMap::new(),
@@ -376,7 +380,7 @@ impl App for ProcessSpawner {
                                     );
                                 }
                                 if method == "workspace/symbol" {
-                                    println!("Symbols: {}", message);
+                                    self.send_event("workspace/symbols", message.to_string());
                                 }
                                 if method == "initialize" {
                                     let result = message.get("result").unwrap();
@@ -396,10 +400,24 @@ impl App for ProcessSpawner {
                                         }
                                     }
                                 }
-                                println!("Method: {:?}", method);
+
                             }
+                        } else {
+                            // This isn't in response to a message we sent
+                            let method = message["method"].as_str();
+                            if let Some(method) = method {
+                                if method == "$/progress" {
+                                    if let Some(100) = message.get("params")
+                                        .and_then(|x| x.get("value"))
+                                        .and_then(|x| x.get("percentage"))
+                                        .and_then(|x| x.as_u64()) {
+                                            self.initialized();
+                                        }
+                                }
+                            }
+
                         }
-                    }
+                    } 
                 }
                 Err(err) => {
                     println!("Error: {}", err);
@@ -411,6 +429,7 @@ impl App for ProcessSpawner {
     }
 
     fn set_state(&mut self, state: Self::State) {
+        println!("Setting state, {:?}", state.size);
         self.state.size = state.size;
     }
 

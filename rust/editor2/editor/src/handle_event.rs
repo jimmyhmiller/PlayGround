@@ -25,6 +25,7 @@ impl Editor {
                                 height: 800.0,
                             },
                             scale: 1.0,
+                            ephemeral: false,
                             data: WidgetData::Wasm {
                                 wasm: Wasm::new(path.to_str().unwrap().to_string()),
                                 wasm_id,
@@ -37,6 +38,7 @@ impl Editor {
                             on_click: vec![],
                             position: Position { x, y },
                             scale: 1.0,
+                            ephemeral: false,
                             size: Size {
                                 width: 800.0,
                                 height: 800.0,
@@ -73,6 +75,7 @@ impl Editor {
                         }
                     }
                 }
+                // TODO: Unused
                 Event::MoveWidgetRelative { selector, x, y } => {
                     let widget_ids = selector.select(&self.widget_store);
                     for widget_id in widget_ids {
@@ -80,6 +83,7 @@ impl Editor {
                             widget.position.x += x;
                             widget.position.y += y;
                         }
+                        
                     }
                 }
                 Event::MouseMove {
@@ -110,6 +114,11 @@ impl Editor {
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
                                 widget.position.x += x_diff;
                                 widget.position.y += y_diff;
+                                if widget.position.x > self.window.size.width - 300.0 {
+                                    widget.scale = 0.1;
+                                } else {
+                                    widget.scale = 1.0;
+                                }
                             }
                         }
                     }
@@ -195,6 +204,7 @@ impl Editor {
                         },
                         scale: 1.0,
                         on_click: vec![],
+                        ephemeral: true,
                         data: WidgetData::TextPane {
                             text_pane: TextPane::new(vec![], 40.0),
                         },

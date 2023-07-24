@@ -55,6 +55,8 @@ pub struct Widget {
     // Children might make sense
     // pub children: Vec<Widget>,
     pub data: WidgetData,
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 pub struct WidgetStore {
@@ -464,13 +466,12 @@ impl Widget {
         #[allow(unused)] values: &HashMap<String, Value>,
     ) -> Vec<WidgetId> {
         canvas.save();
-        canvas.scale((self.scale, self.scale));
         // Have to do this to deal with mut stuff
         if let WidgetData::Wasm { wasm: _, wasm_id } = &mut self.data {
             canvas.save();
             canvas.translate((self.position.x, self.position.y));
             canvas.clip_rect(Rect::from_wh(bounds.width, bounds.height), None, false);
-
+            canvas.scale((self.scale, self.scale));
             wasm_messenger.draw_widget(*wasm_id, canvas, bounds);
             // if let Some(widget_size) = widget_size {
             //     println!("widget size: {:?}", widget_size);
@@ -489,11 +490,14 @@ impl Widget {
         }
 
         match &self.data {
+            // TODO: Get rid of compound
             WidgetData::Compound { children } => {
                 canvas.restore();
                 return children.clone();
             }
             WidgetData::Image { data } => {
+                canvas.save();
+                canvas.scale((self.scale, self.scale));
                 // I tried to abstract this out and ran into the issue of returning a ref.
                 // Can't use a closure, could box, but seems unnecessary. Maybe this data belongs elsewhere?
                 // I mean the interior mutability is gross anyway.
@@ -506,31 +510,37 @@ impl Widget {
                 let image = data.cache.borrow();
                 let image = image.as_ref().unwrap();
                 canvas.draw_image(image, self.position, None);
+                canvas.restore();
             }
             WidgetData::TextPane { text_pane } => {
+                canvas.save();
                 let text_pane = &text_pane;
                 let foreground = Color::parse_hex("#dc9941");
                 let background = Color::parse_hex("#353f38");
 
                 let paint = background.to_paint();
                 canvas.save();
-                canvas.clip_rect(self.bounding_rect().with_outset((30.0, 30.0)), None, None);
+                canvas.translate((self.position.x, self.position.y));
+                canvas.clip_rect(Rect::from_wh(bounds.width, bounds.height), None, false);
+                canvas.scale((self.scale, self.scale));
+
+                let bounding_rect = Rect::new(0.0, 0.0, bounds.width, bounds.height);
 
                 let font = Font::new(
                     Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
                     32.0,
                 );
                 let mut path = Path::new();
-                path.add_rect(self.bounding_rect().with_outset((30.0, 30.0)), None);
+                path.add_rect(bounding_rect.with_outset((30.0, 30.0)), None);
 
-                let rrect = RRect::new_rect_xy(self.bounding_rect(), 20.0, 20.0);
+                let rrect = RRect::new_rect_xy(bounding_rect, 20.0, 20.0);
                 canvas.draw_rrect(rrect, &paint);
 
-                canvas.clip_rect(self.bounding_rect().with_inset((20, 20)), None, None);
+                canvas.clip_rect(bounding_rect.with_inset((20, 20)), None, None);
                 let fractional_offset = text_pane.fractional_line_offset();
                 canvas.translate((
-                    self.position.x + 30.0 - text_pane.offset.x,
-                    self.position.y + text_pane.line_height - fractional_offset + 10.0,
+                    30.0 - text_pane.offset.x,
+                    text_pane.line_height - fractional_offset + 10.0,
                 ));
 
                 for line in text_pane.visible_lines(self.size.height) {
@@ -539,8 +549,11 @@ impl Widget {
                 }
 
                 canvas.restore();
+                canvas.restore();
             }
             WidgetData::Text { text, text_options } => {
+                canvas.save();
+                canvas.scale((self.scale, self.scale));
                 let font = Font::new(
                     Typeface::new(
                         text_options.font_family.clone(),
@@ -556,8 +569,11 @@ impl Widget {
                     &font,
                     &paint,
                 );
+                canvas.restore();
             }
             WidgetData::Process { process } => {
+                canvas.save();
+                canvas.scale((self.scale, self.scale));
                 let file_name = process.file_path.file_name().unwrap().to_str().unwrap();
                 let font = Font::new(
                     Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(),
@@ -570,10 +586,14 @@ impl Widget {
                     &font,
                     white,
                 );
+                canvas.restore();
             }
             WidgetData::HoverFile { path: _ } => {
+                canvas.save();
+                canvas.scale((self.scale, self.scale));
                 let purple = Color::parse_hex("#1c041e");
                 canvas.draw_rect(self.bounding_rect(), &purple.to_paint());
+                canvas.restore();
             }
 
             _ => {}
@@ -586,9 +606,9 @@ impl Widget {
         let x = position.x;
         let y = position.y;
         let x_min = self.position.x;
-        let x_max = self.position.x + self.size.width;
+        let x_max = self.position.x + self.size.width * self.scale;
         let y_min = self.position.y;
-        let y_max = self.position.y + self.size.height;
+        let y_max = self.position.y + self.size.height * self.scale;
         x >= x_min && x <= x_max && y >= y_min && y <= y_max
     }
 
@@ -606,6 +626,9 @@ impl Widget {
     }
 
     pub fn save(&mut self, wasm_messenger: &mut WasmMessenger) {
+        if self.ephemeral {
+            return;
+        }
         match &mut self.data {
             WidgetData::Wasm { wasm, wasm_id } => match wasm_messenger.save_state(*wasm_id) {
                 wasm_messenger::SaveState::Unsaved => {
