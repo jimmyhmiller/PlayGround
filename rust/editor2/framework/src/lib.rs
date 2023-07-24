@@ -106,6 +106,77 @@ impl Rect {
     }
 }
 
+
+
+pub struct Ui {}
+pub enum Component {
+    Pane(Size, (f32, f32), Box<Component>),
+    List(Vec<Component>),
+    Container(Box<Component>),
+    Text(String),
+}
+
+impl Component {
+    pub fn draw(&self, canvas: &mut Canvas) {
+        match self {
+            Component::Pane(size, scroll_offset, child) => {
+                let background = Color::parse_hex("#353f38");
+
+                let bounding_rect = Rect::new(0.0, 0.0, size.width, size.height);
+
+                canvas.save();
+                canvas.set_color(&background);
+                canvas.clip_rect(bounding_rect);
+                canvas.draw_rrect(bounding_rect, 20.0);
+
+                canvas.clip_rect(bounding_rect.with_inset((20.0, 20.0)));
+                canvas.translate(scroll_offset.0, scroll_offset.1);
+                canvas.translate(0.0, 50.0);
+                child.draw(canvas);
+            }
+            Component::List(children) => {
+                for child in children.iter() {
+                    child.draw(canvas);
+                    // TODO: need to translate based on height of component
+                    canvas.translate(0.0, 30.0);
+                }
+            }
+            Component::Container(child) => {
+                child.draw(canvas);
+            }
+            Component::Text(text) => {
+                canvas.save();
+                canvas.set_color(&Color::parse_hex("#ffffff"));
+                canvas.draw_str(text, 40.0, 0.0);
+                canvas.restore();
+            }
+        }
+    }
+}
+
+impl Ui {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn pane(&self, size: Size, scroll_offset: (f32, f32), child: Component) -> Component {
+        Component::Pane(size, scroll_offset, Box::new(child))
+    }
+
+    pub fn list<Item,I>(&self, items: I, f: impl Fn(&Self, Item) -> Component) -> Component
+        where I: Iterator<Item = Item>, {
+        Component::List(items.map(|item| f(self, item)).collect())
+    }
+
+    pub fn container(&self, child: Component) -> Component {
+        Component::Container(Box::new(child))
+    }
+
+    pub fn text(&self, text: &str) -> Component {
+        Component::Text(text.to_string())
+    }
+}
+
 pub struct Canvas {
     tranlation: (f32, f32),
     translation_stack: Vec<(f32, f32)>,
