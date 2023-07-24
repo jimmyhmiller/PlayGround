@@ -24,8 +24,7 @@ use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use skia_safe::{
-    perlin_noise_shader, runtime_effect::ChildPtr, Data, Font, FontStyle, ISize, RuntimeEffect,
-    Shader, Typeface,
+    Font, FontStyle, Typeface,
 };
 
 pub struct Context {
@@ -67,6 +66,10 @@ impl Process {
     }
 }
 
+pub struct Window {
+    pub size: Size,
+}
+
 pub struct Editor {
     pub events: Events,
     pub fps_counter: FpsCounter,
@@ -85,6 +88,7 @@ pub struct Editor {
     pub processes: HashMap<usize, Process>,
     pub per_frame_actions: Vec<PerFrame>,
     pub event_listeners: HashMap<String, HashSet<WidgetId>>,
+    pub window: Window,
 }
 
 pub struct Events {
@@ -170,7 +174,9 @@ impl Editor {
                         event.iter().for_each(|event| {
                             let path = &event.path;
                             if path.to_str().unwrap() == widget_config_path {
-                                sender.send(Event::ReloadWidgets).unwrap();
+                                if sender.send(Event::ReloadWidgets).is_err() {
+                                    println!("Failed to reload widgets");
+                                }
                             } else if path.extension().unwrap() == "wasm" {
                                 sender
                                     .send(Event::ReloadWasm(path.to_str().unwrap().to_string()))
@@ -377,6 +383,9 @@ impl Editor {
             per_frame_actions: Vec::new(),
             processes: HashMap::new(),
             event_listeners: HashMap::new(),
+            window: Window {
+                size: Size { width: 800.0, height: 800.0},
+            },
         }
     }
 
@@ -385,36 +394,10 @@ impl Editor {
         use skia_safe::Size;
 
         let background = Color::parse_hex("#39463e");
-        // let darker = Color::parse_hex("#0d1d20");
-        // let lighter = Color::parse_hex("#425050");
-        let mut color = Color::parse_hex("#ffffff").to_color4f();
-        color.a = 0.0;
+
         canvas.clear(background.to_color4f());
 
         let canvas_size = Size::from(canvas.base_layer_size());
-
-        // let mut paint = Paint::new(darker.to_color4f(), None);
-        // paint.set_anti_alias(true);
-        // paint.set_style(PaintStyle::Fill);
-
-        // let grain_shader = make_grain_gradient_shader(
-        //     darker,
-        //     lighter,
-        //     0.95,
-        //     crate::widget::Size {
-        //         width: canvas_size.width,
-        //         height: canvas_size.height,
-        //     },
-        // );
-
-        // paint.set_shader(grain_shader);
-
-        // paint.set_dither(true);
-
-        // canvas.draw_rect(
-        //     Rect::from_xywh(0.0, 0.0, canvas_size.width, canvas_size.height),
-        //     &paint,
-        // );
 
         let font = Font::new(
             Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(),
@@ -679,6 +662,9 @@ impl Editor {
         }
         let mut result = String::new();
         for widget in self.widget_store.iter() {
+            if widget.ephemeral {
+                continue;
+            }
             let widget_serialized = &format!(
                 "{};\n",
                 ron::ser::to_string_pretty(widget, PrettyConfig::default()).unwrap()
@@ -691,106 +677,7 @@ impl Editor {
     }
 }
 
-#[allow(unused)]
-pub fn make_grain_gradient_shader(darker: Color, lighter: Color, alpha: f32, size: Size) -> Shader {
-    let noise_shader = perlin_noise_shader::turbulence(
-        (0.25, 0.25),
-        1,
-        0.0,
-        ISize {
-            width: size.width as i32 * 2,
-            height: size.height as i32 * 2,
-        },
-    )
-    .unwrap();
 
-    let new_gradient_shader = RuntimeEffect::make_for_shader(
-        "
-        uniform vec2 iResolution;
-        vec3 colorA = vec3(0.149,0.141,0.912);
-        vec3 colorB = vec3(1.000,0.833,0.224);
-        float alpha = 1.0;
-        
-        half4 main(vec2 fragCoord) {
-          vec2 st = fragCoord / iResolution.xy;
-          vec3 color = vec3(0.0);
-        
-          vec3 pct = vec3(st.x);
-        
-          // pct.r = smoothstep(0.0,1.0, st.x);
-          pct.g = sin(st.x*3.14 + st.y*2.616) * -0.488;
-          // pct.b = pow(st.x,0.5);
-        
-          color = mix(colorA, colorB, pct);
-          return vec4(color.r * alpha, color.g * alpha, color.b * alpha, alpha);
-        }
-    ",
-        None,
-    )
-    .unwrap();
-
-    let effect = RuntimeEffect::make_for_shader(
-        "
-                uniform shader noiseShader;
-                uniform shader gradientShader;
-                uniform vec4 colorLight;
-                uniform vec4 colorDark;
-                uniform float alpha;
-                
-                half4 main(vec2 fragcoord) { 
-                    vec4 noiseColor = noiseShader.eval(fragcoord);
-                    vec4 gradientColor = gradientShader.eval(fragcoord);
-                    // float noiseLuma = dot(noiseColor.rgb, vec3(0.299, 0.587, 0.114));
-                    gradientColor.r += noiseColor.r * 0.4;
-                    gradientColor.g += noiseColor.g * 0.4;
-                    gradientColor.b += noiseColor.b * 0.4;
-                    // vec4 white = vec4(1.0,1.0,1.0,1.0);
-                    // vec4 lighter = mix(gradientColor, white, 0.3);
-                    // vec4 black = vec4(0.0, 0.0, 0.0, 1);
-                    // vec4 darker = mix(gradientColor, black, 0.7);
-                    // float noiseLuma = dot(noiseColor.rgb, vec3(0.299, 0.587, 0.114));
-                    // vec4 duotone = mix(gradientColor, darker, noiseLuma);
-                    vec4 duotone = gradientColor;
-                    return vec4(duotone.r * alpha, duotone.g * alpha, duotone.b * alpha, alpha);
-                }
-
-        ",
-        None,
-    )
-    .unwrap();
-    let data = [size.width, size.height];
-
-    let len = data.len();
-    let ptr = data.as_ptr() as *const u8;
-    let data: &[u8] = unsafe { std::slice::from_raw_parts(ptr, len * 4) };
-    let new_gradient_shader = new_gradient_shader
-        .make_shader(Data::new_copy(data), &[], None, false)
-        .unwrap();
-    let darker4 = darker.to_color4f();
-    let lighter4 = lighter.to_color4f();
-    let data = [
-        darker4.r, darker4.g, darker4.b, darker4.a, lighter4.r, lighter4.g, lighter4.b, lighter4.a,
-        alpha,
-    ];
-
-    let len = data.len();
-    let ptr = data.as_ptr() as *const u8;
-    let data: &[u8] = unsafe { std::slice::from_raw_parts(ptr, len * 4) };
-
-    let uniforms = Data::new_copy(data);
-
-    effect
-        .make_shader(
-            uniforms,
-            &[
-                ChildPtr::Shader(noise_shader),
-                ChildPtr::Shader(new_gradient_shader),
-            ],
-            None,
-            false,
-        )
-        .unwrap()
-}
 
 // I need a way for processes to add widgets
 // I don't want them to need to remove widgets by holding onto a reference or something

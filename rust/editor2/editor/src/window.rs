@@ -39,7 +39,7 @@ pub fn setup_window(mut editor: editor::Editor) {
         .with_title("Lith2".to_string())
         .with_titlebar_transparent(true)
         .with_fullsize_content_view(true)
-        .with_transparent(true)
+        .with_transparent(false)
         .build(&events_loop)
         .unwrap();
 
@@ -51,7 +51,7 @@ pub fn setup_window(mut editor: editor::Editor) {
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_presents_with_transaction(false);
-        layer.set_opaque(false);
+        layer.set_opaque(true);
         // change some stuff to make resizing nice
         // https://thume.ca/2019/06/19/glitchless-metal-window-resizing/
 
@@ -116,6 +116,8 @@ pub fn setup_window(mut editor: editor::Editor) {
 
                         size.width = current_size.width as i32;
                         size.height = current_size.height as i32;
+                        editor.window.size.width = size.width as f32;
+                        editor.window.size.height = size.height as f32;
                         window.request_redraw();
                     }
                     _ => (),
