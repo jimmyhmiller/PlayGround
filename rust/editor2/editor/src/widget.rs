@@ -420,12 +420,14 @@ impl ImageData {
 pub struct Wasm {
     pub path: String,
     state: Option<String>,
+    partial_state: Option<String>,
 }
 
 impl Wasm {
     pub fn new(path: String) -> Self {
-        Self { path, state: None }
+        Self { path, state: None, partial_state: None }
     }
+    
 }
 
 impl Widget {
@@ -615,7 +617,7 @@ impl Widget {
     pub fn init(&mut self, wasm_messenger: &mut WasmMessenger) {
         match &mut self.data {
             WidgetData::Wasm { wasm, wasm_id } => {
-                let new_wasm_id = wasm_messenger.new_instance(&wasm.path);
+                let new_wasm_id = wasm_messenger.new_instance(&wasm.path, None);
                 *wasm_id = new_wasm_id;
                 if let Some(state) = &wasm.state {
                     wasm_messenger.send_set_state(*wasm_id, state);

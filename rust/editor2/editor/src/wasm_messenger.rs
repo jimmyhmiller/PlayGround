@@ -32,7 +32,7 @@ use crate::{
     editor::Value,
     event::Event,
     keyboard::KeyboardInput,
-    widget::{Color, Position, Size},
+    widget::{Color, Position, Size, decode_base64, encode_base64},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -59,6 +59,7 @@ enum Payload {
     Event(String, String),
     OnSizeChange(f32, f32),
     OnMouseMove(Position),
+    PartialState(Option<String>),
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +166,7 @@ impl WasmMessenger {
                     Payload::Event(_, _) => "Event",
                     Payload::OnSizeChange(_, _) => "OnSizeChange",
                     Payload::OnMouseMove(_) => "OnMouseMove",
+                    Payload::PartialState(_) => "PartialState",
                 });
             }
         }
@@ -189,7 +191,7 @@ impl WasmMessenger {
         self.last_wasm_id
     }
 
-    pub fn new_instance(&mut self, wasm_path: &str) -> WasmId {
+    pub fn new_instance(&mut self, wasm_path: &str, partial_state: Option<String>) -> WasmId {
         let id = self.next_wasm_id();
 
         let (sender, receiver) = channel::<Message>(100000);
@@ -226,6 +228,13 @@ impl WasmMessenger {
             ))
             .unwrap();
 
+        let message_id = self.next_message_id();
+        self.send_message(Message {
+            message_id,
+            wasm_id: id,
+            payload: Payload::PartialState(partial_state),
+        });
+
         id
     }
 
@@ -236,7 +245,6 @@ impl WasmMessenger {
         bounds: Size,
     ) -> Option<Size> {
         if let Some(commands) = self.wasm_draw_commands.get_mut(&wasm_id) {
-            
             let mut current_width = 0.0;
             let mut current_height = 0.0;
             let mut current_height_stack = vec![];
@@ -644,7 +652,10 @@ impl WasmManager {
         }
     }
 
-    pub async fn process_message(&mut self, message: Message) -> Result<OutMessage, Box<dyn Error>> {
+    pub async fn process_message(
+        &mut self,
+        message: Message,
+    ) -> Result<OutMessage, Box<dyn Error>> {
         let id = message.wasm_id;
         let default_return = Ok(OutMessage {
             wasm_id: message.wasm_id,
@@ -657,15 +668,11 @@ impl WasmManager {
                 panic!("Shouldn't get here")
             }
             Payload::OnClick(position) => {
-                self.instance
-                    .on_click(position.x, position.y)
-                    .await?;
+                self.instance.on_click(position.x, position.y).await?;
                 default_return
             }
             Payload::OnMouseMove(position) => {
-                self.instance
-                    .on_mouse_move(position.x, position.y)
-                    .await?;
+                self.instance.on_mouse_move(position.x, position.y).await?;
                 default_return
             }
             Payload::Draw(fn_name) => {
@@ -737,6 +744,18 @@ impl WasmManager {
                     }),
                 }
             }
+            Payload::PartialState(partial_state) => {
+                let state = self.instance.get_state().await;
+                if let Some(state) = state {
+                    let base64_decoded = decode_base64(&state.as_bytes().to_vec())?;
+                    let state = String::from_utf8(base64_decoded)?;
+                    let merged_state = merge_json(partial_state, state);
+                    let encoded_state = encode_base64(&merged_state);
+                    self.instance.set_state(&encoded_state.as_bytes()).await?;
+                }
+
+                default_return
+            }
             Payload::UpdatePosition(position) => {
                 self.instance.store.data_mut().position = position;
                 default_return
@@ -749,6 +768,34 @@ impl WasmManager {
                 self.instance.on_size_change(width, height).await?;
                 default_return
             }
+        }
+    }
+}
+
+fn merge_json(partial_state: Option<String>, state: String) -> String {
+    if let Some(partial_state) = partial_state {
+        let mut partial_state: serde_json::Value = serde_json::from_str(&partial_state).unwrap();
+        let mut state: serde_json::Value = serde_json::from_str(&state).unwrap();
+        merge(&mut state, &mut partial_state);
+        serde_json::to_string(&state).unwrap()
+    } else {
+        state
+    }
+}
+
+fn merge(state: &mut serde_json::Value, partial_state: &mut serde_json::Value) {
+    match (state, partial_state) {
+        (serde_json::Value::Object(state), serde_json::Value::Object(partial_state)) => {
+            for (key, value) in partial_state.iter_mut() {
+                if let Some(entry) = state.get_mut(key) {
+                    merge(entry, value);
+                } else {
+                    state.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        (state, partial_state) => {
+            *state = partial_state.clone();
         }
     }
 }
@@ -886,11 +933,14 @@ impl WasmInstance {
             std::fs::File::open("/Users/jimmyhmiller/.vscode/extensions/").unwrap(),
         );
 
+        let root_dir = Dir::from_std_file(std::fs::File::open("/").unwrap());
+
         let wasi = WasiCtxBuilder::new()
             .inherit_stdio()
             .inherit_args()?
             .preopened_dir(dir, ".")?
             .preopened_dir(code_dir, "/code")?
+            .preopened_dir(root_dir, "/")?
             // TODO: How do we handle this in the general case?
             .preopened_dir(
                 vs_code_extension_dir,

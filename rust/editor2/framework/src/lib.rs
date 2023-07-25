@@ -322,7 +322,7 @@ pub trait App {
             );
         }
     }
-    fn subscribe(&self, kind: String) {
+    fn subscribe(&self, kind: &str) {
         unsafe {
             subscribe_low_level(kind.as_ptr() as i32, kind.len() as i32);
         }

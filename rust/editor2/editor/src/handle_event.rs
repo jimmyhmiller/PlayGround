@@ -2,10 +2,13 @@ use std::{collections::HashSet, io::Write};
 
 use nonblock::NonBlockingReader;
 use notify::RecursiveMode;
+use serde_json::json;
 
 use crate::{
     editor::{self, Editor, PerFrame},
     event::Event,
+    keyboard::{KeyCode, KeyboardInput},
+    native::open_file_dialog,
     widget::{Position, Size, TextPane, Wasm, Widget, WidgetData},
 };
 
@@ -15,7 +18,7 @@ impl Editor {
             match event {
                 Event::DroppedFile { path, x, y } => {
                     if path.extension().unwrap() == "wasm" {
-                        let wasm_id = self.wasm_messenger.new_instance(path.to_str().unwrap());
+                        let wasm_id = self.wasm_messenger.new_instance(path.to_str().unwrap(), None);
                         self.widget_store.add_widget(Widget {
                             id: 0,
                             on_click: vec![],
@@ -83,7 +86,6 @@ impl Editor {
                             widget.position.x += x;
                             widget.position.y += y;
                         }
-                        
                     }
                 }
                 Event::MouseMove {
@@ -121,8 +123,7 @@ impl Editor {
                                 }
                             }
                         }
-                    }
-                    else {
+                    } else {
                         for widget in self.widget_store.iter() {
                             let position = Position { x, y };
                             let widget_x = position.x - widget.position.x;
@@ -133,9 +134,9 @@ impl Editor {
                             };
                             if widget.mouse_over(&position) {
                                 match &widget.data {
-                                    WidgetData::Wasm { wasm: _, wasm_id } => {
-                                        self.wasm_messenger.send_on_mouse_move(*wasm_id, &widget_space)
-                                    }
+                                    WidgetData::Wasm { wasm: _, wasm_id } => self
+                                        .wasm_messenger
+                                        .send_on_mouse_move(*wasm_id, &widget_space),
                                     _ => {}
                                 }
                             }
@@ -238,7 +239,7 @@ impl Editor {
                     let empty = &HashSet::new();
                     let specific = self.event_listeners.get(&kind).unwrap_or(empty);
                     let all = self.event_listeners.get("*").unwrap_or(empty);
-                    
+
                     let both = specific.union(all);
 
                     for widget_id in both {
@@ -269,6 +270,49 @@ impl Editor {
                     let widget_id = self.widget_store.get_widget_by_wasm_id(wasm_id).unwrap();
                     if let Some(listening_widgets) = self.event_listeners.get_mut(&kind) {
                         listening_widgets.retain(|x| *x != widget_id);
+                    }
+                }
+                Event::OpenFile(path) => {
+                    // TODO: Handle this better.
+                    // Ugly recursive hack and just need to refactor.
+                    self.handle_events(vec![Event::Event("lith/open-file".to_string(), json!({ "path": path }).to_string())]);
+                }
+                Event::KeyEvent {
+                    input:
+                        KeyboardInput {
+                            state: _,
+                            key_code,
+                            modifiers,
+                        },
+                } => {
+                    if modifiers.cmd && key_code == KeyCode::O {
+                        let path = open_file_dialog();
+                        if let Some(path) = path {
+                            let path = path.replace("file://", "");
+                            let code_editor = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/target/wasm32-wasi/debug/code_editor.wasm";
+                            let path_json = json!({
+                                "file_path": path
+                            }).to_string();
+                            let wasm_id = self.wasm_messenger.new_instance(code_editor, Some(path_json));
+                            self.widget_store.add_widget(Widget {
+                                id: 0,
+                                // TODO: Automatically find an open space
+                                // Or make it so you draw it?
+                                position: Position { x: 500.0, y: 500.0 },
+                                size: Size {
+                                    width: 800.0,
+                                    height: 800.0,
+                                },
+                                on_click: vec![],
+                                scale: 1.0,
+                                data: WidgetData::Wasm { 
+                                    wasm: Wasm::new(code_editor.to_string()),
+                                    wasm_id,
+                                },
+                                ephemeral: false,
+                            });
+                            self.events.push(Event::OpenFile(path));
+                        }
                     }
                 }
                 e => {
