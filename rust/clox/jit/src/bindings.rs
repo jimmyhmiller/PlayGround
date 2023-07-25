@@ -52,6 +52,9 @@ fn bindgen_test_layout_ValueArray() {
         )
     );
 }
+extern "C" {
+    pub fn printValue(value: Value);
+}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct Chunk {
@@ -213,15 +216,18 @@ fn bindgen_test_layout_Table() {
         )
     );
 }
-pub const ObjType_OBJ_BOUND_METHOD: ObjType = 0;
-pub const ObjType_OBJ_CLASS: ObjType = 1;
-pub const ObjType_OBJ_CLOSURE: ObjType = 2;
-pub const ObjType_OBJ_FUNCTION: ObjType = 3;
-pub const ObjType_OBJ_INSTANCE: ObjType = 4;
-pub const ObjType_OBJ_NATIVE: ObjType = 5;
-pub const ObjType_OBJ_STRING: ObjType = 6;
-pub const ObjType_OBJ_UPVALUE: ObjType = 7;
-pub type ObjType = u32;
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum ObjType {
+    OBJ_BOUND_METHOD = 0,
+    OBJ_CLASS = 1,
+    OBJ_CLOSURE = 2,
+    OBJ_FUNCTION = 3,
+    OBJ_INSTANCE = 4,
+    OBJ_NATIVE = 5,
+    OBJ_STRING = 6,
+    OBJ_UPVALUE = 7,
+}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct Obj {
