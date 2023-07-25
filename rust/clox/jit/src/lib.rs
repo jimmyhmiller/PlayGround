@@ -1,6 +1,8 @@
-use std::slice::from_raw_parts;
+use std::{slice::from_raw_parts, io::Write};
 
-use include_bindings::{ObjClosure, VM};
+use include_bindings::{ObjClosure, VM, Obj, ObjString};
+
+use crate::include_bindings::{printValue, ObjType};
 
 mod include_bindings;
 
@@ -119,6 +121,16 @@ fn is_obj(value: Value) -> bool {
     (value & (QNAN | SIGN_BIT)) == (QNAN | SIGN_BIT)
 }
 
+fn as_obj(value: u64) -> *mut Obj {
+    let mask = !(SIGN_BIT | QNAN);
+    (value & mask) as *mut Obj
+}
+
+fn as_string(value: *mut Obj) -> *mut ObjString {
+    let string = unsafe { std::mem::transmute::<*mut Obj, *mut ObjString>(value) };
+    string
+}
+
 
 fn value_to_num(value: Value) -> f64 {
     let num = unsafe { std::mem::transmute::<Value, f64>(value) };
@@ -150,11 +162,40 @@ pub extern "C" fn on_closure_call(vm: *mut VM, obj_closure: ObjClosure) {
             match op {
                 // Looks like I'm going to need to deal with nan-boxing for my jitted code.
                 OpCode::Constant(i) => {
-                    let function = *(*frame.closure).function;
                     let values = function.chunk.constants.values;
-                    let values: &[Value] = from_raw_parts(values as *mut Value, function.chunk.constants.count as usize * 8);
-                    let value = values[i as usize];
-                    println!("constant({}): {:?}", i, value_to_num(value));
+                    println!("constants: {:?}", function.chunk.constants);
+
+                    let values: &[u64] = from_raw_parts(values as *mut u64, function.chunk.constants.count as usize);
+                    let value: u64 = values[i as usize];
+                    if is_number(value) {
+                        println!("constant({}): {:?}", i, value_to_num(value));
+                    } else if is_bool(value) {
+                        println!("constant({}): {:?}", i, value == TRUE_VAL);
+                    } else if is_nil(value) {
+                        println!("constant({}): {:?}", i, "nil");
+                    } else if is_obj(value) {
+                        let obj_pointer = as_obj(value);
+                        let obj = *obj_pointer;
+                        match obj.type_ {
+                            ObjType::OBJ_BOUND_METHOD => println!("constant({}): {:?}", i, "bound method"),
+                            ObjType::OBJ_CLASS => println!("constant({}): {:?}", i, "class"),
+                            ObjType::OBJ_CLOSURE => println!("constant({}): {:?}", i, "closure"),
+                            ObjType::OBJ_FUNCTION => println!("constant({}): {:?}", i, "function"),
+                            ObjType::OBJ_INSTANCE => println!("constant({}): {:?}", i, "instance"),
+                            ObjType::OBJ_NATIVE => println!("constant({}): {:?}", i, "native"),
+                            ObjType::OBJ_STRING => {
+                                let string_pointer = as_string(obj_pointer);
+                                let c_string = (*string_pointer).chars;
+                                let rust_slice = from_raw_parts(c_string as *mut u8, (*string_pointer).length as usize);
+                                let rust_string = std::str::from_utf8(rust_slice).unwrap();
+                                println!("constant({}): {:?}", i, rust_string);
+                            },
+                            ObjType::OBJ_UPVALUE => println!("constant({}): {:?}", i, "upvalue"),
+                        }
+                    } else {
+                        println!("constant({}): {:?}", i, "unknown");
+                    }
+                    
                 }
                 _ => {}
             }

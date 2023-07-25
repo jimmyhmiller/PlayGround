@@ -20,12 +20,14 @@ fn main() {
         // The input header we would like to generate
         // bindings for.
         .header(clox_src.join("vm.h").to_str().unwrap())
+        .header(clox_src.join("value.h").to_str().unwrap())
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks))
         .whitelist_type("Chunk")
         .whitelist_type("Table")
         .whitelist_type("ObjType")
+        .rustified_enum("ObjType")
         .whitelist_type("ObjFunction")
         .whitelist_type("ObjNative")
         .whitelist_type("ObjString")
@@ -37,6 +39,7 @@ fn main() {
         .whitelist_type("CallFrame")
         .whitelist_type("VM")
         .whitelist_type("InterpretResult")
+        .whitelist_function("printValue")
         // Finish the builder and generate the bindings.
         .generate()
         // Unwrap the Result and panic on failure.
