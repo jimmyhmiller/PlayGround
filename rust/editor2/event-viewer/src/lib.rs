@@ -23,7 +23,7 @@ impl App for EventViewer {
             events: Vec::new(),
             y_scroll_offset: 0.0,
         };
-        me.subscribe("*".to_string());
+        me.subscribe("*");
         me
     }
 

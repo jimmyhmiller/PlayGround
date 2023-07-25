@@ -72,6 +72,7 @@ pub enum Event {
     Event(String, String),
     Subscribe(usize, String),
     Unsubscribe(usize, String),
+    OpenFile(String),
 }
 
 impl Event {

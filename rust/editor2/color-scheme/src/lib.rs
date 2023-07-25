@@ -33,7 +33,7 @@ impl App for ColorScheme {
             mouse_location: None,
             clicked: false,
         };
-        me.subscribe("token_options".to_string());
+        me.subscribe("token_options");
         me
     }
 

@@ -36,7 +36,7 @@ pub fn setup_window(mut editor: editor::Editor) {
 
     let window = WindowBuilder::new()
         .with_inner_size(size)
-        .with_title("Lith2".to_string())
+        .with_title("Lith".to_string())
         .with_titlebar_transparent(true)
         .with_fullsize_content_view(true)
         .with_transparent(false)

@@ -108,7 +108,7 @@ impl Events {
         }
     }
 
-    fn push(&mut self, event: Event) {
+    pub fn push(&mut self, event: Event) {
         self.events.push(event);
     }
 
@@ -533,6 +533,9 @@ impl Editor {
                 self.events.push(event);
             }
             Event::HoveredFileCancelled => {
+                self.events.push(event);
+            }
+            Event::OpenFile(_) => {
                 self.events.push(event);
             }
             Event::MoveWidgetRelative { .. } => {}

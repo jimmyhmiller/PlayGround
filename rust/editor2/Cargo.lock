@@ -508,6 +508,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "code-editor"
+version = "0.1.0"
+dependencies = [
+ "framework",
+ "headless_editor",
+ "once_cell",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "color-scheme"
 version = "0.1.0"
 dependencies = [
@@ -605,17 +616,6 @@ dependencies = [
  "core-graphics 0.19.2",
  "libc",
  "objc",
-]
-
-[[package]]
-name = "counter"
-version = "0.1.0"
-dependencies = [
- "framework",
- "headless_editor",
- "once_cell",
- "serde",
- "serde_json",
 ]
 
 [[package]]
