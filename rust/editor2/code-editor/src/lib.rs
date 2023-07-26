@@ -139,10 +139,6 @@ impl App for TextWidget {
         };
         me.subscribe("tokens");
         me.subscribe("color_mapping_changed");
-        // TODO: I think this is too early.
-        me.send_event("lith/open-file", json!({
-            "path": me.file_path,
-        }).to_string());
         me
     }
 
@@ -363,6 +359,9 @@ impl App for TextWidget {
             let contents = std::fs::read(file);
             match contents {
                 Ok(contents) => {
+                    self.send_event("lith/open-file", json!({
+                        "path": self.file_path,
+                    }).to_string());
                     self.text_pane.text_buffer.set_contents(&contents);
                 }
                 Err(e) => {

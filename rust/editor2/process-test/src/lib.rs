@@ -25,6 +25,7 @@ struct Data {
     last_request_id: usize,
     messages_by_type: HashMap<String, Vec<String>>,
     token_request_to_file: HashMap<String, String>,
+    open_files: Vec<String>,
     size: Size,
     y_scroll_offset: f32,
 }
@@ -173,7 +174,11 @@ impl ProcessSpawner {
         // read entire contents
         let mut file = File::open(path).unwrap();
         let mut contents = String::new();
-        file.read_to_string(&mut contents).unwrap();
+        let file_results = file.read_to_string(&mut contents);
+        if let Err(err) = file_results {
+            println!("Error reading file!: {} {}", path, err);
+            return;
+        }
 
         let params: <DidOpenTextDocument as Notification>::Params = DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
@@ -278,6 +283,9 @@ impl ProcessSpawner {
         // TODO: Get list of initial open files
         self.state.state = State::Initialized;
         self.resolve_workspace_symbols();
+        for file in self.state.open_files.clone().iter() {
+            self.request_tokens(file);
+        }
     }
 }
 
@@ -295,6 +303,7 @@ impl App for ProcessSpawner {
                 state: State::Initializing,
                 message_type: HashMap::new(),
                 token_request_to_file: HashMap::new(),
+                open_files: Vec::new(),
                 last_request_id: 0,
                 messages_by_type: HashMap::new(),
                 size: Size::default(),
@@ -356,7 +365,9 @@ impl App for ProcessSpawner {
             }
             "lith/open-file" => {
                 let info: OpenFileInfo = serde_json::from_str(&event).unwrap();
+                self.state.open_files.push(info.path.clone());
                 self.open_file(&info.path);
+                self.request_tokens(&info.path);
             }
             _ => {
                 println!("Unknown event: {}", kind);
