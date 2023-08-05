@@ -411,7 +411,7 @@ impl Instruction {
 fn generate_instruction_enum(instructions: &[Instruction]) -> String {
     let mut scope = Scope::new();
 
-    let enum_gen = scope.new_enum("Asm");
+    let enum_gen = scope.new_enum("ArmAsm");
     enum_gen.vis("pub");
     enum_gen.derive("Debug");
 
@@ -428,7 +428,7 @@ fn generate_instruction_enum(instructions: &[Instruction]) -> String {
 fn generate_encoding_instructions(instructions: &[Instruction]) -> String {
     // let instructions = instructions.iter().take(5).collect::<Vec<_>>();
     let mut scope = Scope::new();
-    let asm_impl = scope.new_impl("Asm");
+    let asm_impl = scope.new_impl("ArmAsm");
 
     let function = asm_impl.new_fn("encode");
     function.vis("pub");
@@ -444,7 +444,7 @@ fn generate_encoding_instructions(instructions: &[Instruction]) -> String {
             .collect::<Vec<String>>()
             .join(",");
         function.line(format!(
-            "Asm::{} {{ {} }} => {{",
+            "ArmAsm::{} {{ {} }} => {{",
             instruction.name, arguments
         ));
 
