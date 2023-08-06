@@ -9,10 +9,10 @@ use crate::arm::LowLevelArm;
 
 
 
-use ir::{Ir, hello_world};
-use mmap_rs::MmapOptions;
 
-fn compile_arm(arm: &mut LowLevelArm) -> Result<(), Box<dyn Error>>  {
+use mmap_rs::{MmapOptions, Mmap};
+
+fn compile_arm(arm: &mut LowLevelArm) -> Result<Mmap, Box<dyn Error>>  {
     let mut buffer = MmapOptions::new(MmapOptions::page_size())?.map_mut()?;
     let memory = &mut buffer[..];
 
@@ -28,28 +28,15 @@ fn compile_arm(arm: &mut LowLevelArm) -> Result<(), Box<dyn Error>>  {
     let exec = buffer.make_exec().unwrap_or_else(|(_map, e)| {
         panic!("Failed to make mmap executable: {}", e);
     });
-    let f : fn() -> u64 = unsafe { mem::transmute(exec.as_ref().as_ptr()) };
-    f();
-    Ok(())
+    Ok(exec)
 }
 
-fn test_fib(n: i64, arm: &mut LowLevelArm) -> Result<(), Box<dyn Error>> {
-    let mut buffer = MmapOptions::new(MmapOptions::page_size())?.map_mut()?;
-    let memory = &mut buffer[..];
-
-    let bytes = arm.compile_to_bytes();
-
-    for (index, byte) in bytes.iter().enumerate() {
-        memory[index] = *byte;
-    }
-
-    let size = buffer.size();
-    buffer.flush(0..size)?;
-
-    let exec = buffer.make_exec().unwrap_or_else(|(_map, e)| {
-        panic!("Failed to make mmap executable: {}", e);
-    });
-
+fn test_fib(n: i64) -> Result<(), Box<dyn Error>> {
+    let fib: ast::Ast = ast::fib();
+    let mut fib: ir::Ir = fib.compile(|ir| {});
+    let mut fib = fib.compile();
+    let exec = compile_arm(&mut fib)?;
+    
     let f: fn(i64) -> u64 = unsafe { mem::transmute(exec.as_ref().as_ptr()) };
 
     let time = Instant::now();
@@ -72,19 +59,17 @@ fn fib_rust(n: usize) -> usize {
 }
 
 
-
-
-
 fn main() -> Result<(), Box<dyn Error>> {
 
     let hello_ast = ast::hello_world();
     let mut hello_ir = hello_ast.compile(|ir| {
         ir.add_function("print", ir::print_value as *const u8);
     });
-
     let mut hello = hello_ir.compile();
 
-    compile_arm(&mut hello)?;
+    let mem = compile_arm(&mut hello)?;
+    let f : fn() -> u64 = unsafe { mem::transmute(mem.as_ref().as_ptr()) };
+    println!("{:?}", f());
     Ok(())
 }
 

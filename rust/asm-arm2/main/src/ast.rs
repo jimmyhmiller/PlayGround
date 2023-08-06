@@ -46,6 +46,7 @@ impl Ast {
             ast: self.clone(),
             variables: HashMap::new(),
             ir: Ir::new(),
+            name: "".to_string(),
         };
         init(&mut compiler.ir);
         compiler.compile()
@@ -56,6 +57,7 @@ pub struct AstCompiler {
     pub ast: Ast,
     pub variables: HashMap<String, VirtualRegister>,
     pub ir: Ir,
+    pub name: String,
 }
 
 impl AstCompiler {
@@ -69,10 +71,12 @@ impl AstCompiler {
     pub fn compile_to_ir(&mut self, ast: &Ast) -> Value {
         match ast.clone() {
             Ast::Function {
-                name: _,
+                name,
                 args,
                 body,
             } => {
+                assert!(self.name.is_empty());
+                self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);
                     self.variables.insert(arg.clone(), reg);
@@ -140,6 +144,9 @@ impl AstCompiler {
                 self.ir.recurse(args)
             }
             Ast::Call { name, args } => {
+                if name == self.name {
+                    return self.compile_to_ir(&Ast::Recurse { args });
+                }
                 let args = args
                     .iter()
                     .map(|arg| self.compile_to_ir(&Box::new(arg.clone())))
