@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, string};
 
-use asm::arm::Register;
+use asm::arm::{Register, X3};
 
 use crate::{
     arm::{LowLevelArm, RECURSE_PLACEHOLDER_REGISTER},
@@ -23,6 +23,9 @@ pub enum Value {
     Register(VirtualRegister),
     UnSignedConstant(usize),
     SignedConstant(isize),
+    // TODO: Think of a better representation
+    StringConstantId(usize),
+    Function(usize),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -44,6 +47,14 @@ impl From<usize> for Value {
     }
 }
 
+
+#[derive(Debug, Clone)]
+#[repr(C)]
+struct StringValue {
+    length: usize,
+    data: &'static [u8],
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum Instruction {
@@ -57,6 +68,8 @@ enum Instruction {
     Jump(Label),
     Ret(Value),
     Breakpoint,
+    LoadConstant(Value, Value),
+    Call(Value, Value, Vec<Value>),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -115,6 +128,20 @@ impl Instruction {
                     result.push(register);
                 }
                 result
+            }
+            Instruction::Call(a, b, args) => {
+                let mut result: Vec<VirtualRegister> =
+                    args.iter().filter_map(|arg| get_registers!(arg)).collect();
+                if let Ok(register) = a.try_into() {
+                    result.push(register);
+                }
+                if let Ok(register) = b.try_into() {
+                    result.push(register);
+                }
+                result
+            }
+            Instruction::LoadConstant(a, b) => {
+                get_registers!(a, b)
             }
             Instruction::JumpIf(_, _, a, b) => {
                 get_registers!(a, b)
@@ -181,6 +208,11 @@ pub struct Ir {
     labels: Vec<Label>,
     label_names: Vec<String>,
     label_locations: HashMap<usize, usize>,
+    string_constants: Vec<StringValue>,
+    // A bit of a weird way of representing this right?
+    function_names: Vec<String>,
+    // TODO: usize is defintely not the right type here
+    functions: HashMap<usize, usize>,
 }
 
 impl Ir {
@@ -191,6 +223,9 @@ impl Ir {
             labels: vec![],
             label_names: vec![],
             label_locations: HashMap::new(),
+            string_constants: vec![],
+            function_names: vec![],
+            functions: HashMap::new(),
         }
     }
 
@@ -433,7 +468,27 @@ impl Ir {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
                         lang.mov_64(register, *i);
                     }
+                    Value::StringConstantId(id) => {
+                        let register = alloc.allocate_register(index, *dest, &mut lang);
+                        let string = self.string_constants.get(*id).unwrap();
+                        let ptr = string as *const _ as u64;
+                        // tag the pointer as a string with the pattern 010 in the least significant bits
+                        let ptr = ptr | 0b010;
+                        lang.mov_64(register, ptr as isize);
+                    }
+                    Value::Function(id) => {
+                        let register = alloc.allocate_register(index, *dest, &mut lang);
+                        let function = self.functions.get(id).unwrap();
+                        lang.mov_64(register, *function as isize);
+                    }
                 },
+                Instruction::LoadConstant(dest, val) => {
+                    let val = val.try_into().unwrap();
+                    let val = alloc.allocate_register(index, val, &mut lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.mov_reg(dest, val);
+                }
                 Instruction::Recurse(dest, args) => {
                     let allocated_registers = lang.allocated_volatile_registers.clone();
                     for (index, register) in allocated_registers.iter().enumerate() {
@@ -455,6 +510,35 @@ impl Ir {
                     for (index, register) in allocated_registers.iter().enumerate() {
                         lang.load_from_stack(*register, index as i32 + 2)
                     }
+                }
+                Instruction::Call(dest, function, args) => {
+                    let allocated_registers = lang.allocated_volatile_registers.clone();
+                    for (index, register) in allocated_registers.iter().enumerate() {
+                        // TODO: I don't like this hardcoded 2 here
+                        // it is because the prelude stores 2 registers on the stack
+                        // But we might have locals on the stack as well
+                        // we will need to fix that.
+                        lang.store_on_stack(*register, index as i32 + 2)
+                    }
+                    for (index, arg) in args.iter().enumerate() {
+                        let arg = arg.try_into().unwrap();
+                        let arg = alloc.allocate_register(index, arg, &mut lang);
+                        lang.mov_reg(lang.arg(index as u8), arg);
+                    }
+                    // TODO:
+                    // I am not actually checking any tags here
+                    // or unmasking or anything. Just straight up calling it
+                    
+                    let function = alloc.allocate_register(index, function.try_into().unwrap(), &mut lang);
+                    lang.call(function);
+
+                    let dest = dest.try_into().unwrap();
+                    let register = alloc.allocate_register(index, dest, &mut lang);
+                    lang.mov_reg(register, lang.ret_reg());
+                    for (index, register) in allocated_registers.iter().enumerate() {
+                        lang.load_from_stack(*register, index as i32 + 2)
+                    }
+
                 }
                 Instruction::JumpIf(label, condition, a, b) => {
                     let a = a.try_into().unwrap();
@@ -494,7 +578,15 @@ impl Ir {
                         lang.mov_64(lang.ret_reg(), *i);
                         lang.jump(exit);
                     }
-                },
+                    Value::StringConstantId(id) => {
+                        lang.mov_64(lang.ret_reg(), *id as isize);
+                        lang.jump(exit);
+                    }
+                    Value::Function(id) => {
+                        lang.mov_64(lang.ret_reg(), *id as isize);
+                        lang.jump(exit);
+                    }
+                }
             }
         }
 
@@ -514,14 +606,50 @@ impl Ir {
     pub fn jump(&mut self, label: Label) {
         self.instructions.push(Instruction::Jump(label));
     }
+
+    fn string_constant(&mut self, arg: &'static str) -> Value {
+        let string_value = StringValue {
+            length: arg.len(),
+            data: arg.as_bytes()
+        };
+        self.string_constants.push(string_value);
+        let index = self.string_constants.len() - 1;
+        Value::StringConstantId(index)
+    }
+
+    fn load_constant(&mut self, string_constant: Value) -> Value {
+        let string_constant = self.assign_new(string_constant);
+        let register = self.volatile_register();
+        self.instructions.push(Instruction::LoadConstant(register.into(), string_constant.into()));
+        register.into()
+    }
+
+    fn function(&mut self, function_index: usize) -> Value {
+        assert!(self.functions.contains_key(&function_index));
+        let function = self.assign_new(Value::Function(function_index));
+        function.into()
+    }
+
+    fn call(&mut self, function: Value, vec: Vec<Value>) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions.push(Instruction::Call(dest, function, vec));
+        dest
+    }
+
+    fn add_function(&mut self, name: &str, function: *const u8) -> usize {
+        self.function_names.push(name.to_string());
+        let index = self.function_names.len() - 1;
+        self.functions.insert(index, function as usize);
+        index
+    }
 }
 
 
 
 #[allow(unused)]
-fn fib() -> Ir {
+pub fn fib() -> Ir {
     let mut ir = Ir::new();
-    // ir.breakpoint();
+    ir.breakpoint();
     let n = ir.arg(0);
 
     let early_exit = ir.label("early_exit");
@@ -548,3 +676,26 @@ fn fib() -> Ir {
 
     ir
 }
+
+
+pub fn hello_world() -> Ir {
+    let mut ir = Ir::new();
+    let print = ir.add_function("print", print_value as *const u8);
+    let string_constant = ir.string_constant("Hello World!");
+    let string_constant = ir.load_constant(string_constant);
+    let print = ir.function(print);
+    ir.call(print, vec![string_constant]);
+    ir
+}
+
+fn print_value(value: usize) {
+    assert!(value & 0b111 == 0b010);
+    let value = value & !0b111;
+    let string_value : &StringValue = unsafe { std::mem::transmute(value) };
+    let string = unsafe { std::str::from_utf8_unchecked(string_value.data) };
+    println!("{}", string);
+}
+
+
+// TODO:
+// I need to properly tag every value
