@@ -1,6 +1,6 @@
-use std::{collections::HashMap, string};
+use std::{collections::HashMap, mem};
 
-use asm::arm::{Register, X3};
+use asm::arm::Register;
 
 use crate::{
     arm::{LowLevelArm, RECURSE_PLACEHOLDER_REGISTER},
@@ -48,11 +48,13 @@ impl From<usize> for Value {
 }
 
 
+
+// Probably don't want to just use rust strings
+// could be confusing with lifetimes and such
 #[derive(Debug, Clone)]
 #[repr(C)]
 struct StringValue {
-    length: usize,
-    data: &'static [u8],
+    str: String,
 }
 
 #[derive(Debug, Clone)]
@@ -227,6 +229,10 @@ impl Ir {
             function_names: vec![],
             functions: HashMap::new(),
         }
+    }
+
+    pub fn get_function_by_name(&self, name: &str) -> Option<usize> {
+        self.function_names.iter().position(|n| n == name)
     }
 
     fn next_register(&mut self, argument: Option<usize>, volatile: bool) -> VirtualRegister {
@@ -607,36 +613,37 @@ impl Ir {
         self.instructions.push(Instruction::Jump(label));
     }
 
-    fn string_constant(&mut self, arg: &'static str) -> Value {
+    pub fn string_constant(&mut self, arg: String) -> Value {
+        // TODO: Make this correct
+        // We need to forget the string so we never clean it up
         let string_value = StringValue {
-            length: arg.len(),
-            data: arg.as_bytes()
+            str: arg,
         };
         self.string_constants.push(string_value);
         let index = self.string_constants.len() - 1;
         Value::StringConstantId(index)
     }
 
-    fn load_constant(&mut self, string_constant: Value) -> Value {
+    pub fn load_string_constant(&mut self, string_constant: Value) -> Value {
         let string_constant = self.assign_new(string_constant);
         let register = self.volatile_register();
         self.instructions.push(Instruction::LoadConstant(register.into(), string_constant.into()));
         register.into()
     }
 
-    fn function(&mut self, function_index: usize) -> Value {
+    pub fn function(&mut self, function_index: usize) -> Value {
         assert!(self.functions.contains_key(&function_index));
         let function = self.assign_new(Value::Function(function_index));
         function.into()
     }
 
-    fn call(&mut self, function: Value, vec: Vec<Value>) -> Value {
+    pub fn call(&mut self, function: Value, vec: Vec<Value>) -> Value {
         let dest = self.volatile_register().into();
         self.instructions.push(Instruction::Call(dest, function, vec));
         dest
     }
 
-    fn add_function(&mut self, name: &str, function: *const u8) -> usize {
+    pub fn add_function(&mut self, name: &str, function: *const u8) -> usize {
         self.function_names.push(name.to_string());
         let index = self.function_names.len() - 1;
         self.functions.insert(index, function as usize);
@@ -681,18 +688,18 @@ pub fn fib() -> Ir {
 pub fn hello_world() -> Ir {
     let mut ir = Ir::new();
     let print = ir.add_function("print", print_value as *const u8);
-    let string_constant = ir.string_constant("Hello World!");
-    let string_constant = ir.load_constant(string_constant);
+    let string_constant = ir.string_constant("Hello World!".to_string());
+    let string_constant = ir.load_string_constant(string_constant);
     let print = ir.function(print);
     ir.call(print, vec![string_constant]);
     ir
 }
 
-fn print_value(value: usize) {
+pub fn print_value(value: usize) {
     assert!(value & 0b111 == 0b010);
     let value = value & !0b111;
     let string_value : &StringValue = unsafe { std::mem::transmute(value) };
-    let string = unsafe { std::str::from_utf8_unchecked(string_value.data) };
+    let string = &string_value.str;
     println!("{}", string);
 }
 

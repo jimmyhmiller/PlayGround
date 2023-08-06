@@ -31,16 +31,23 @@ pub enum Ast {
     Recurse {
         args: Vec<Ast>,
     },
+    Call {
+        name: String,
+        args: Vec<Ast>,
+    },
     Constant(i64),
     Variable(String),
+    String(String),
 }
 
 impl Ast {
-    pub fn compile(&self) -> Ir {
+    pub fn compile<F>(&self, init: F) -> Ir where F: Fn(&mut Ir) -> () {
         let mut compiler = AstCompiler {
             ast: self.clone(),
             variables: HashMap::new(),
+            ir: Ir::new(),
         };
+        init(&mut compiler.ir);
         compiler.compile()
     }
 }
@@ -48,16 +55,18 @@ impl Ast {
 pub struct AstCompiler {
     pub ast: Ast,
     pub variables: HashMap<String, VirtualRegister>,
+    pub ir: Ir,
 }
 
 impl AstCompiler {
     pub fn compile(&mut self) -> Ir {
+        self.compile_to_ir(&Box::new(self.ast.clone()));
         let mut ir = Ir::new();
-        self.compile_to_ir(&Box::new(self.ast.clone()), &mut ir);
+        std::mem::swap(&mut ir, &mut self.ir);
         ir
     }
 
-    pub fn compile_to_ir(&mut self, ast: &Ast, ir: &mut Ir) -> Value {
+    pub fn compile_to_ir(&mut self, ast: &Ast) -> Value {
         match ast.clone() {
             Ast::Function {
                 name: _,
@@ -65,16 +74,16 @@ impl AstCompiler {
                 body,
             } => {
                 for (index, arg) in args.iter().enumerate() {
-                    let reg = ir.arg(index);
+                    let reg = self.ir.arg(index);
                     self.variables.insert(arg.clone(), reg);
                 }
 
                 for ast in body[..body.len() - 1].iter() {
-                    self.compile_to_ir(&Box::new(ast), ir);
+                    self.compile_to_ir(&Box::new(ast));
                 }
                 let last = body.last().unwrap();
-                let return_value = self.compile_to_ir(&Box::new(last), ir);
-                ir.ret(return_value)
+                let return_value = self.compile_to_ir(&Box::new(last));
+                self.ir.ret(return_value)
             }
             Ast::If {
                 condition,
@@ -89,24 +98,24 @@ impl AstCompiler {
                     right,
                 } = condition.as_ref()
                 {
-                    let a = self.compile_to_ir(left, ir);
-                    let b = self.compile_to_ir(right, ir);
-                    let end_if_label = ir.label("end_if");
+                    let a = self.compile_to_ir(left);
+                    let b = self.compile_to_ir(right);
+                    let end_if_label = self.ir.label("end_if");
 
-                    let result_reg = ir.volatile_register();
+                    let result_reg = self.ir.volatile_register();
 
-                    let then_label = ir.label("then");
-                    ir.jump_if(then_label, *operator, a, b);
+                    let then_label = self.ir.label("then");
+                    self.ir.jump_if(then_label, *operator, a, b);
 
-                    let else_result = self.compile_to_ir(&else_, ir);
-                    ir.assign(result_reg, else_result);
-                    ir.jump(end_if_label);
+                    let else_result = self.compile_to_ir(&else_);
+                    self.ir.assign(result_reg, else_result);
+                    self.ir.jump(end_if_label);
 
-                    ir.write_label(then_label);
-                    let then_result = self.compile_to_ir(&then, ir);
-                    ir.assign(result_reg, then_result);
+                    self.ir.write_label(then_label);
+                    let then_result = self.compile_to_ir(&then);
+                    self.ir.assign(result_reg, then_result);
 
-                    ir.write_label(end_if_label);
+                    self.ir.write_label(end_if_label);
 
                     result_reg.into()
                 } else {
@@ -114,21 +123,30 @@ impl AstCompiler {
                 }
             }
             Ast::Add { left, right } => {
-                let left = self.compile_to_ir(&left, ir);
-                let right = self.compile_to_ir(&right, ir);
-                ir.add(left, right)
+                let left = self.compile_to_ir(&left);
+                let right = self.compile_to_ir(&right);
+                self.ir.add(left, right)
             }
             Ast::Sub { left, right } => {
-                let left = self.compile_to_ir(&left, ir);
-                let right = self.compile_to_ir(&right, ir);
-                ir.sub(left, right)
+                let left = self.compile_to_ir(&left);
+                let right = self.compile_to_ir(&right);
+                self.ir.sub(left, right)
             }
             Ast::Recurse { args } => {
                 let args = args
                     .iter()
-                    .map(|arg| self.compile_to_ir(&Box::new(arg.clone()), ir))
+                    .map(|arg| self.compile_to_ir(&Box::new(arg.clone())))
                     .collect();
-                ir.recurse(args)
+                self.ir.recurse(args)
+            }
+            Ast::Call { name, args } => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.compile_to_ir(&Box::new(arg.clone())))
+                    .collect();
+                let function = self.ir.get_function_by_name(&name).expect(format!("Function {} not found", name).as_str());
+                let function = self.ir.function(function);
+                self.ir.call(function, args)
             }
             Ast::Constant(n) => Value::SignedConstant(n as isize),
             Ast::Variable(name) => {
@@ -138,7 +156,23 @@ impl AstCompiler {
             Ast::Condition { .. } => {
                 panic!("Condition should be handled by if")
             }
+            Ast::String(str) => {
+                let constant = self.ir.string_constant(str);
+                self.ir.load_string_constant(constant)
+            }
         }
+    }
+}
+
+impl Into<Ast> for i64 {
+    fn into(self) -> Ast {
+        Ast::Constant(self)
+    }
+}
+
+impl Into<Ast> for &'static str {
+    fn into(self) -> Ast {
+        Ast::String(self.to_string())
     }
 }
 
@@ -147,10 +181,10 @@ macro_rules! ast {
     ((fn $name:ident[]
         $body:tt
      )) => {
-        Ast::Func{
+        Ast::Function {
             name: stringify!($name).to_string(),
             args: vec![],
-            body: vec![Ast::Return(Box::new(ast!($body)))]
+            body: vec![ast!($body)]
         }
     };
     ((fn $name:ident[$arg:ident]
@@ -225,7 +259,8 @@ macro_rules! ast {
         Ast::Return(Box::new(ast!($arg)))
     };
     (($f:ident $arg:tt)) => {
-        Ast::Recurse {
+        Ast::Call {
+            name: stringify!($f).to_string(),
             args: vec![ast!($arg)]
         }
     };
@@ -241,8 +276,8 @@ macro_rules! ast {
     // (($f:ident $arg1:tt $arg2:tt $arg3:tt)) => {
     //     Ast::Call3(stringify!($f).to_string(), Box::new(ast!($arg1)), Box::new(ast!($arg2)), Box::new(ast!($arg3)))
     // };
-    ($int:literal) => {
-        Ast::Constant($int)
+    ($lit:literal) => {
+        $lit.into()
     };
     ($var:ident) => {
         Ast::Variable(stringify!($var).to_string())
@@ -272,3 +307,11 @@ pub fn fib2() -> Ast {
                     (+ (fib (- n 1)) (fib (- n 2))))))
     }
 }
+
+pub fn hello_world() -> Ast {
+    ast! {
+        (fn hello []
+            (print "Hello World!"))
+    }
+}
+

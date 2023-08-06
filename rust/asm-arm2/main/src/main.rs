@@ -76,15 +76,14 @@ fn fib_rust(n: usize) -> usize {
 
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // let new_fib = ast::fib2();
 
-    // let mut new_ir: Ir = new_fib.compile();
+    let hello_ast = ast::hello_world();
+    let mut hello_ir = hello_ast.compile(|ir| {
+        ir.add_function("print", ir::print_value as *const u8);
+    });
 
-    // let mut lang = new_ir.compile();
-    // test_fib(30, &mut lang)?;
+    let mut hello = hello_ir.compile();
 
-    let mut hello = ir::hello_world();
-    let mut hello = hello.compile();
     compile_arm(&mut hello)?;
     Ok(())
 }
