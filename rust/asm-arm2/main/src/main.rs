@@ -9,10 +9,31 @@ use crate::arm::LowLevelArm;
 
 
 
-use ir::Ir;
+use ir::{Ir, hello_world};
 use mmap_rs::MmapOptions;
 
-fn use_the_assembler(n: i64, arm: &mut LowLevelArm) -> Result<(), Box<dyn Error>> {
+fn compile_arm(arm: &mut LowLevelArm) -> Result<(), Box<dyn Error>>  {
+    let mut buffer = MmapOptions::new(MmapOptions::page_size())?.map_mut()?;
+    let memory = &mut buffer[..];
+
+    let bytes = arm.compile_to_bytes();
+
+    for (index, byte) in bytes.iter().enumerate() {
+        memory[index] = *byte;
+    }
+
+    let size = buffer.size();
+    buffer.flush(0..size)?;
+
+    let exec = buffer.make_exec().unwrap_or_else(|(_map, e)| {
+        panic!("Failed to make mmap executable: {}", e);
+    });
+    let f : fn() -> u64 = unsafe { mem::transmute(exec.as_ref().as_ptr()) };
+    f();
+    Ok(())
+}
+
+fn test_fib(n: i64, arm: &mut LowLevelArm) -> Result<(), Box<dyn Error>> {
     let mut buffer = MmapOptions::new(MmapOptions::page_size())?.map_mut()?;
     let memory = &mut buffer[..];
 
@@ -55,12 +76,16 @@ fn fib_rust(n: usize) -> usize {
 
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let new_fib = ast::fib2();
+    // let new_fib = ast::fib2();
 
-    let mut new_ir: Ir = new_fib.compile();
+    // let mut new_ir: Ir = new_fib.compile();
 
-    let mut lang = new_ir.compile();
-    use_the_assembler(30, &mut lang)?;
+    // let mut lang = new_ir.compile();
+    // test_fib(30, &mut lang)?;
+
+    let mut hello = ir::hello_world();
+    let mut hello = hello.compile();
+    compile_arm(&mut hello)?;
     Ok(())
 }
 
