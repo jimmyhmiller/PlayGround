@@ -16,6 +16,8 @@ extern "C" {
     fn draw_rrect(x: f32, y: f32, width: f32, height: f32, radius: f32);
     fn translate(x: f32, y: f32);
     fn restore();
+    #[link_name = "set_cursor_icon"]
+    fn set_cursor_icon_low_level(cursor_icon: u32);
     #[allow(unused)]
     fn start_process_low_level(ptr: i32, len: i32) -> i32;
     #[allow(unused)]
@@ -269,6 +271,25 @@ impl Size {
     }
 }
 
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum CursorIcon {
+    Default = 0,
+    Text = 1,
+}
+
+
+impl From<u32> for CursorIcon {
+    fn from(i: u32) -> Self {
+        match i {
+            0 => CursorIcon::Default,
+            1 => CursorIcon::Text,
+            _ => panic!("Unknown cursor icon"),
+        }
+    }
+}
+
+
 pub trait App {
     type State;
     fn init() -> Self;
@@ -331,6 +352,12 @@ pub trait App {
     fn unsubscribe(&self, kind: String) {
         unsafe {
             unsubscribe_low_level(kind.as_ptr() as i32, kind.len() as i32);
+        }
+    }
+
+    fn set_cursor_icon(&self, icon: CursorIcon) {
+        unsafe {
+            set_cursor_icon_low_level(icon as u32);
         }
     }
 

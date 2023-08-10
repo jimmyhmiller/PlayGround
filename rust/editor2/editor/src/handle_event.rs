@@ -1,5 +1,6 @@
 use std::{collections::HashSet, io::Write};
 
+use framework::CursorIcon;
 use nonblock::NonBlockingReader;
 use notify::RecursiveMode;
 use serde_json::json;
@@ -11,6 +12,13 @@ use crate::{
     native::open_file_dialog,
     widget::{Position, Size, TextPane, Wasm, Widget, WidgetData},
 };
+
+fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
+    match cursor_icon {
+        CursorIcon::Default => winit::window::CursorIcon::Default,
+        CursorIcon::Text => winit::window::CursorIcon::Text,
+    }
+}
 
 impl Editor {
     pub fn handle_events(&mut self, events: Vec<Event>) {
@@ -124,6 +132,7 @@ impl Editor {
                             }
                         }
                     } else {
+                        let mut was_over = false;
                         for widget in self.widget_store.iter() {
                             let position = Position { x, y };
                             let widget_x = position.x - widget.position.x;
@@ -132,7 +141,9 @@ impl Editor {
                                 x: widget_x,
                                 y: widget_y,
                             };
+                            // TODO: I should probably only send this for the top most widget
                             if widget.mouse_over(&position) {
+                                was_over = true;
                                 match &widget.data {
                                     WidgetData::Wasm { wasm: _, wasm_id } => self
                                         .wasm_messenger
@@ -140,6 +151,9 @@ impl Editor {
                                     _ => {}
                                 }
                             }
+                        }
+                        if !was_over {
+                            self.cursor_icon = into_wini_cursor_icon(CursorIcon::Default);
                         }
                     }
                 }
@@ -312,6 +326,16 @@ impl Editor {
                                 ephemeral: false,
                             });
                             self.events.push(Event::OpenFile(path));
+                        }
+                    }
+                }
+                Event::SetCursor(cursor) => {
+                    match cursor {
+                        framework::CursorIcon::Default => {
+                            self.cursor_icon = winit::window::CursorIcon::Default;
+                        }
+                        framework::CursorIcon::Text => {
+                            self.cursor_icon = winit::window::CursorIcon::Text;
                         }
                     }
                 }

@@ -89,6 +89,7 @@ pub struct Editor {
     pub per_frame_actions: Vec<PerFrame>,
     pub event_listeners: HashMap<String, HashSet<WidgetId>>,
     pub window: Window,
+    pub cursor_icon: CursorIcon
 }
 
 pub struct Events {
@@ -132,7 +133,7 @@ impl Events {
 
 #[cfg(all(target_os = "macos"))]
 use skia_safe::{Canvas, Color4f, Paint, Point};
-use winit::event_loop::EventLoopProxy;
+use winit::{event_loop::EventLoopProxy, window::CursorIcon};
 
 impl Editor {
     pub fn _set_mouse_position(&mut self, x: f32, y: f32) {
@@ -386,6 +387,7 @@ impl Editor {
             window: Window {
                 size: Size { width: 800.0, height: 800.0},
             },
+            cursor_icon: CursorIcon::Default,
         }
     }
 
@@ -563,6 +565,9 @@ impl Editor {
             Event::Unsubscribe(_, _) => {
                 self.events.push(event);
             }
+            Event::SetCursor(_) => {
+                self.events.push(event);
+            }
         }
     }
 
@@ -580,7 +585,11 @@ impl Editor {
             if widget.mouse_over(&self.context.mouse_position) {
                 found_a_widget = true;
                 mouse_over.push(widget.id);
-                self.selected_widgets.insert(widget.id);
+                // We are only selecting the widget for the purposes
+                // of dragging if ctrl is down
+                if self.context.modifiers.ctrl {
+                    self.selected_widgets.insert(widget.id);
+                }
                 // TODO: This is ugly, just setting the active widget
                 // over and over again then we will get the last one
                 // which would probably draw on top anyways.
@@ -597,6 +606,8 @@ impl Editor {
     }
 
     fn add_mouse_up(&mut self) {
+
+        println!("Add mouse_up");
         // This is only true now. I could have a selection mode
         // Or it could be click to select. So really not sure
         // what to do here. But for now I just want to be able to move widgets
@@ -620,6 +631,7 @@ impl Editor {
                     to_delete.push(widget.id);
                     continue;
                 }
+                println!("Mouse over click");
 
                 let events =
                     widget.on_click(&self.context.mouse_position, &mut self.wasm_messenger);
