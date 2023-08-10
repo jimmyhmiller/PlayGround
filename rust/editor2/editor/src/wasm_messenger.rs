@@ -9,6 +9,7 @@ use std::{
 
 use bytesize::ByteSize;
 
+use framework::CursorIcon;
 use futures::{
     channel::{
         mpsc::{channel, Receiver, Sender},
@@ -307,6 +308,13 @@ impl WasmMessenger {
                         canvas.restore();
                         current_height = current_height_stack.pop().unwrap();
                     }
+                    Command::SetCursor(cursor) => {
+                        self.external_sender
+                            .as_mut()
+                            .unwrap()
+                            .send(Event::SetCursor(*cursor))
+                            .unwrap();
+                    }
                     c => {
                         non_draw_commands.push(c.clone());
                     }
@@ -469,6 +477,7 @@ impl WasmMessenger {
 
     pub fn send_on_click(&mut self, wasm_id: WasmId, position: &Position) {
         let message_id = self.next_message_id();
+        println!("Sending on click!");
         self.send_message(Message {
             message_id,
             wasm_id,
@@ -844,6 +853,7 @@ enum Command {
     Event(String, String),
     Subscribe(String),
     Unsubscribe(String),
+    SetCursor(CursorIcon),
 }
 
 impl Command {
@@ -904,6 +914,7 @@ fn get_string_from_memory(
         }
     }
 }
+
 
 struct WasmInstance {
     instance: Instance,
@@ -1182,6 +1193,15 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, r: f32, g: f32, b: f32, a: f32| {
                 let state = caller.data_mut();
                 state.commands.push(Command::SetColor(r, g, b, a));
+            },
+        )?;
+        linker.func_wrap(
+            "host",
+            "set_cursor_icon",
+            |mut caller: Caller<'_, State>, cursor: u32| {
+                let cursor_icon = CursorIcon::from(cursor);
+                let state = caller.data_mut();
+                state.commands.push(Command::SetCursor(cursor_icon));
             },
         )?;
 

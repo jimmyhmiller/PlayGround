@@ -43,6 +43,7 @@ pub fn setup_window(mut editor: editor::Editor) {
         .build(&events_loop)
         .unwrap();
 
+
     let device = Device::system_default().expect("no device found");
 
     let metal_layer = {
@@ -125,6 +126,7 @@ pub fn setup_window(mut editor: editor::Editor) {
                 Event::MainEventsCleared => {
                     editor.end_frame();
                     editor.update();
+                    window.set_cursor_icon(editor.cursor_icon);
 
                     // This messes up fps counter
                     // Not sure how I would fix that

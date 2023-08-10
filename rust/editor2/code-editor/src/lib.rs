@@ -3,7 +3,7 @@ use std::{
     str::from_utf8,
 };
 
-use framework::{app, decode_base64, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect};
+use framework::{app, decode_base64, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, CursorIcon};
 use headless_editor::{
     parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor,
 };
@@ -258,6 +258,7 @@ impl App for TextWidget {
     }
 
     fn on_click(&mut self, x: f32, y: f32) {
+        println!("click!");
         // TODO: Need to handle margin here.
         let margin = 20;
         let lines_above = self.text_pane.lines_above_scroll();
@@ -375,13 +376,14 @@ impl App for TextWidget {
         if kind == "tokens" {
             if let Ok(data) = decode_base64(event.into_bytes()) {
                 if let Ok(tokens) = serde_json::from_str::<Tokens>(from_utf8(&data).unwrap()) {
-                    println!("Got tokens for {} my path is {}", tokens.path, self.file_path);
                     if tokens.path != self.file_path {
                         return;
                     }
-                    println!("Setting tokens");
                     let tokens = parse_tokens(&tokens.tokens);
-                    self.text_pane.text_buffer.set_tokens(tokens);
+                    if !tokens.is_empty() {
+                        self.text_pane.text_buffer.set_tokens(tokens);
+                    }
+
                 } else {
                     println!("Failed to parse tokens {}", from_utf8(&data).unwrap());
                 }
@@ -393,6 +395,10 @@ impl App for TextWidget {
                     self.text_pane.set_color_mapping(mapping);
                 }
         }
+    }
+
+    fn on_mouse_move(&mut self, _x: f32, _y: f32) {
+        self.set_cursor_icon(CursorIcon::Text);
     }
 
     fn on_size_change(&mut self, width: f32, height: f32) {

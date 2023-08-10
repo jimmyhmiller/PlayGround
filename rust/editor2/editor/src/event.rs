@@ -5,6 +5,7 @@ use crate::{
     widget::{Position, WidgetId, WidgetSelector},
 };
 
+use framework::CursorIcon;
 use serde::{Deserialize, Serialize};
 use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
 
@@ -73,6 +74,7 @@ pub enum Event {
     Subscribe(usize, String),
     Unsubscribe(usize, String),
     OpenFile(String),
+    SetCursor(CursorIcon),
 }
 
 impl Event {
