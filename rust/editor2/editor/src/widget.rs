@@ -473,7 +473,7 @@ impl Widget {
         if let WidgetData::Wasm { wasm: _, wasm_id } = &mut self.data {
             canvas.save();
             canvas.translate((self.position.x, self.position.y));
-            canvas.clip_rect(Rect::from_wh(bounds.width, bounds.height), None, false);
+            // canvas.clip_rect(Rect::from_wh(bounds.width, bounds.height), None, false);
             canvas.scale((self.scale, self.scale));
             wasm_messenger.draw_widget(*wasm_id, canvas, bounds);
             // if let Some(widget_size) = widget_size {

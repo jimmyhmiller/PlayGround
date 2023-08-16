@@ -1,9 +1,8 @@
-use std::{
-    collections::HashMap,
-    str::from_utf8,
-};
+use std::{collections::HashMap, str::from_utf8};
 
-use framework::{app, decode_base64, App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Rect, CursorIcon};
+use framework::{
+    app, decode_base64, App, Canvas, Color, CursorIcon, KeyCode, KeyState, KeyboardInput, Rect,
+};
 use headless_editor::{
     parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor,
 };
@@ -15,7 +14,6 @@ pub struct Position {
     pub x: f32,
     pub y: f32,
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TextPane {
@@ -143,11 +141,30 @@ impl App for TextWidget {
     }
 
     fn draw(&mut self) {
-
         let mut canvas = Canvas::new();
+
+
+        
 
         let foreground = Color::parse_hex("#dc9941");
         let background = Color::parse_hex("#353f38");
+
+        canvas.set_color(&foreground);
+        let cursor = self.text_pane.cursor;
+        let token_output = &format!(
+            "{:#?}",
+            self.text_pane
+                .text_buffer
+                .find_token(cursor.line(), cursor.column())
+        );
+        for (i, line) in token_output.lines().enumerate() {
+            canvas.draw_str(
+                line,
+                -600.0,
+                -400.0 + i as f32 * 32.0
+            );
+        }
+        
 
         let bounding_rect = Rect::new(
             0.0,
@@ -155,6 +172,7 @@ impl App for TextWidget {
             self.widget_data.size.width,
             self.widget_data.size.height,
         );
+
 
         canvas.save();
         canvas.set_color(&background);
@@ -175,11 +193,13 @@ impl App for TextWidget {
             cursor.column(),
             text_buffer.line_length(cursor.line())
         );
+
         canvas.draw_str(
             length_output,
             self.widget_data.size.width - length_output.len() as f32 * 18.0,
             self.widget_data.size.height - 40.0,
         );
+
 
         let fractional_offset = self.text_pane.fractional_line_offset();
         canvas.translate(
@@ -304,7 +324,8 @@ impl App for TextWidget {
                 serde_json::ser::to_string(&EditWithPath {
                     edit: edit.edit,
                     path: self.file_path.clone(),
-                 }).unwrap(),
+                })
+                .unwrap(),
             );
         }
 
@@ -360,9 +381,13 @@ impl App for TextWidget {
             let contents = std::fs::read(file);
             match contents {
                 Ok(contents) => {
-                    self.send_event("lith/open-file", json!({
-                        "path": self.file_path,
-                    }).to_string());
+                    self.send_event(
+                        "lith/open-file",
+                        json!({
+                            "path": self.file_path,
+                        })
+                        .to_string(),
+                    );
                     self.text_pane.text_buffer.set_contents(&contents);
                 }
                 Err(e) => {
@@ -383,17 +408,16 @@ impl App for TextWidget {
                     if !tokens.is_empty() {
                         self.text_pane.text_buffer.set_tokens(tokens);
                     }
-
                 } else {
                     println!("Failed to parse tokens {}", from_utf8(&data).unwrap());
                 }
             }
         } else if kind == "color_mapping_changed" {
-                if let Ok(mapping) = serde_json::from_str::<HashMap<usize, String>>(
-                    from_utf8(event.as_bytes()).unwrap(),
-                ) {
-                    self.text_pane.set_color_mapping(mapping);
-                }
+            if let Ok(mapping) =
+                serde_json::from_str::<HashMap<usize, String>>(from_utf8(event.as_bytes()).unwrap())
+            {
+                self.text_pane.set_color_mapping(mapping);
+            }
         }
     }
 
