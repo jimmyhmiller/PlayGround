@@ -1,6 +1,7 @@
 use core::cmp::min;
 use core::fmt::Debug;
 use std::collections::HashMap;
+use std::thread::current;
 // TODO: I probably do need to return actions here
 // for every time the cursor moves.
 
@@ -126,10 +127,17 @@ enum TokenAction {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum TokenWindowKind {
+    Inside,
+    Between,
+}
+
 #[allow(unused)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 
 pub struct TokenWindow {
+    pub kind: Option<TokenWindowKind>,
     pub index: usize,
     pub line: usize,
     pub column: usize,
@@ -223,9 +231,11 @@ where
         let mut center = None;
         let mut right = None;
         let mut last_token_end = 0;
+        let mut token_window_kind: Option<TokenWindowKind> = None;
 
         if target_line == 0 && target_column == 0 {
             return TokenWindow {
+                kind: None,
                 index,
                 line: current_line,
                 column: current_column,
@@ -247,58 +257,32 @@ where
             }
             current_column += token.delta_start;
 
-            let token_start = current_column;
-            let token_end = token_start + token.length;
-
             if current_line < target_line {
                 continue;
             }
 
-            if target_column > token_start && target_column < token_end {
-                // we are in the middle of a token
+            // check if we are in the center token
+            if inside(current_column, target_column, &center) {
                 index = i;
+                token_window_kind = Some(TokenWindowKind::Inside);
                 break;
             }
-            
 
-            // target_column = 0
-            // token_start = 0
-
-            if token_start > target_column  {
-                // we are past the token
+            // check if we are in between the left and center
+            if between(
+                current_column,
+                current_line,
+                target_column,
+                target_line,
+                &left,
+                &center,
+            ) {
+                token_window_kind = Some(TokenWindowKind::Between);
+                index = i;
                 right = center;
                 center = None;
-                index = i.saturating_sub(1);
                 break;
             }
-            
-
-            // I have something wrong on token_legend
-            if current_column < token_start && current_column >= last_token_end {
-                // we before the token
-                left = center;
-                center = None;
-                index = i.saturating_sub(1);
-                break;
-            }
-
-            if current_column >= token_end {
-                // we are past the token
-                right = center;
-                center = None;
-                index = i.saturating_sub(1);
-                break;
-            }
-
-            if current_line > target_line {
-                // we are past the line
-                right = center;
-                center = None;
-                index = i.saturating_sub(1);
-                break;
-            }
-
-            last_token_end = token_end;
         }
 
         if index == 0 {
@@ -306,6 +290,7 @@ where
         }
 
         TokenWindow {
+            kind: token_window_kind,
             index,
             line: target_line,
             column: target_column,
@@ -464,6 +449,36 @@ where
                 }
             }
         }
+    }
+}
+
+fn between(
+    current_column: usize,
+    current_line: usize,
+    target_column: usize,
+    target_line: usize,
+    left: &Option<Token>,
+    center: &Option<Token>,
+) -> bool {
+    if let (Some(left), Some(center)) = (left, center) {
+        let end_of_left = current_column - center.delta_start;
+        let start_of_center = current_column;
+        if center.delta_line > 0 {
+            // This criteria isn't correct. Go to the end of the first line
+            target_line < current_line + center.delta_line && target_column <= start_of_center
+        } else {
+            target_column > end_of_left && target_column <= start_of_center
+        }
+    } else {
+        false
+    }
+}
+
+fn inside(current_column: usize, target_column: usize, center: &Option<Token>) -> bool {
+    if let Some(center) = center {
+        target_column > current_column && target_column < current_column + center.length
+    } else {
+        false
     }
 }
 
