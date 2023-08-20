@@ -4,7 +4,7 @@ use framework::{
     app, decode_base64, App, Canvas, Color, CursorIcon, KeyCode, KeyState, KeyboardInput, Rect,
 };
 use headless_editor::{
-    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor,
+    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -105,6 +105,7 @@ struct TextWidget {
     edit_position: usize,
     #[serde(default)]
     file_path: String,
+    staged_tokens: Vec<Token>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -134,6 +135,7 @@ impl App for TextWidget {
             },
             file_path: "".to_string(),
             edit_position: 0,
+            staged_tokens: vec![],
         };
         me.subscribe("tokens");
         me.subscribe("color_mapping_changed");
@@ -143,28 +145,41 @@ impl App for TextWidget {
     fn draw(&mut self) {
         let mut canvas = Canvas::new();
 
-
-        
-
         let foreground = Color::parse_hex("#dc9941");
         let background = Color::parse_hex("#353f38");
 
         canvas.set_color(&foreground);
+
         let cursor = self.text_pane.cursor;
-        let token_output = &format!(
-            "{:#?}",
-            self.text_pane
-                .text_buffer
-                .find_token(cursor.line(), cursor.column())
-        );
-        for (i, line) in token_output.lines().enumerate() {
-            canvas.draw_str(
-                line,
-                -600.0,
-                -400.0 + i as f32 * 32.0
-            );
+        let current_token_window = self
+            .text_pane
+            .text_buffer
+            .find_token(cursor.line(), cursor.column());
+
+        let token_output: &String = &format!("{:#?}", current_token_window);
+        let context = 10;
+        let context_window = self
+            .text_pane
+            .text_buffer
+            .tokens
+            .iter()
+            .enumerate()
+            .skip(current_token_window.index.saturating_sub(context))
+            .take(context * 2 + 1);
+
+        for (i, (index, token)) in context_window.enumerate() {
+            if index == current_token_window.index {
+                canvas.set_color(&Color::parse_hex("#ffffff"));
+            } else {
+                canvas.set_color(&foreground);
+            }
+
+            canvas.draw_str(&format!("{:?}", token), 0.0, -700.0 + i as f32 * 32.0);
         }
-        
+
+        for (i, line) in token_output.lines().enumerate() {
+            canvas.draw_str(line, -600.0, -400.0 + i as f32 * 32.0);
+        }
 
         let bounding_rect = Rect::new(
             0.0,
@@ -172,7 +187,6 @@ impl App for TextWidget {
             self.widget_data.size.width,
             self.widget_data.size.height,
         );
-
 
         canvas.save();
         canvas.set_color(&background);
@@ -199,7 +213,6 @@ impl App for TextWidget {
             self.widget_data.size.width - length_output.len() as f32 * 18.0,
             self.widget_data.size.height - 40.0,
         );
-
 
         let fractional_offset = self.text_pane.fractional_line_offset();
         canvas.translate(
@@ -309,6 +322,14 @@ impl App for TextWidget {
                 .text_pane
                 .cursor
                 .delete_char(&mut self.text_pane.text_buffer),
+            KeyCode::S => {
+                if input.modifiers.cmd {
+                    self.text_pane
+                        .text_buffer
+                        .set_tokens(self.staged_tokens.clone());
+                    return;
+                }
+            }
             _ => {}
         }
         if let Some(char) = input.to_char() {
@@ -406,7 +427,8 @@ impl App for TextWidget {
                     }
                     let tokens = parse_tokens(&tokens.tokens);
                     if !tokens.is_empty() {
-                        self.text_pane.text_buffer.set_tokens(tokens);
+                        self.staged_tokens = tokens.clone();
+                        // self.text_pane.text_buffer.set_tokens(tokens);
                     }
                 } else {
                     println!("Failed to parse tokens {}", from_utf8(&data).unwrap());
