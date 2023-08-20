@@ -514,10 +514,12 @@ impl WasmMessenger {
 
     pub fn send_set_state(&mut self, wasm_id: WasmId, state: &str) {
         let message_id = self.next_message_id();
+        let base64_decoded = decode_base64(&state.as_bytes().to_vec()).unwrap();
+        let state = String::from_utf8(base64_decoded).unwrap();
         self.send_message(Message {
             message_id,
             wasm_id,
-            payload: Payload::SetState(state.to_string()),
+            payload: Payload::PartialState(Some(state.to_string())),
         });
     }
 

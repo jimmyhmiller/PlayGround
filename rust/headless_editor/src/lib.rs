@@ -1,7 +1,6 @@
 use core::cmp::min;
 use core::fmt::Debug;
 use std::collections::HashMap;
-use std::thread::current;
 // TODO: I probably do need to return actions here
 // for every time the cursor moves.
 
@@ -37,6 +36,7 @@ where
 pub trait TextBuffer {
     type Item;
     fn line_length(&self, line: usize) -> usize;
+    fn line_start(&self, line: usize) -> usize;
     fn line_count(&self) -> usize;
     // Rethink bytes because of utf8
     fn insert_bytes(&mut self, line: usize, column: usize, text: &[Self::Item]);
@@ -95,10 +95,11 @@ pub struct TokenTextBuffer<T: TextBuffer> {
     pub tokens: Vec<Token>,
     pub underlying_text_buffer: T,
     pub edits: Vec<EditEvent>,
+    pub token_actions: Vec<TokenAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-enum TokenAction {
+pub enum TokenAction {
     SplitToken {
         index: usize,
         length: usize,
@@ -127,10 +128,21 @@ enum TokenAction {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TokenWindowKind {
-    Inside,
-    Between,
+    Left(usize),
+    Inside(usize),
+    Right(usize)
+}
+
+impl TokenWindowKind {
+    fn get_index(&self) -> usize {
+        match self {
+            TokenWindowKind::Left(index) => *index,
+            TokenWindowKind::Inside(index) => *index,
+            TokenWindowKind::Right(index) => *index,
+        }
+    }
 }
 
 #[allow(unused)]
@@ -161,14 +173,13 @@ where
             .enumerate()
         {
             let line_number = relative_line_number + skip;
-            result.push(self.decorated_line(line_number, line, tokens));
+            result.push(self.decorated_line(line, tokens));
         }
         result
     }
 
     fn decorated_line<'a>(
         &self,
-        _line_number: usize,
         line: &'a [u8],
         tokens: &'a [Token],
     ) -> Vec<(&'a [u8], Option<&'a Token>)> {
@@ -210,6 +221,8 @@ where
     fn update_tokens_insert(&mut self, line: usize, column: usize, text: &[u8]) {
         let window: TokenWindow = self.find_token(line, column);
         let actions = self.resolve_token_action_insert(window, line, column, text);
+        self.token_actions.extend(actions.clone());
+        
         for action in actions.iter() {
             self.apply_token_action(action);
         }
@@ -218,87 +231,67 @@ where
     fn update_tokens_delete(&mut self, line: usize, column: usize, text: &[u8]) {
         let window: TokenWindow = self.find_token(line, column);
         let actions = self.result_token_action_delete(window, line, column, text);
+        self.token_actions.extend(actions.clone());
         for action in actions.iter() {
             self.apply_token_action(action);
         }
     }
 
     pub fn find_token(&self, target_line: usize, target_column: usize) -> TokenWindow {
-        let mut index: usize = 0;
-        let mut current_line = 0;
-        let mut current_column = 0;
-        let mut left = None;
-        let mut center = None;
-        let mut right = None;
-        let mut last_token_end = 0;
-        let mut token_window_kind: Option<TokenWindowKind> = None;
 
-        if target_line == 0 && target_column == 0 {
-            return TokenWindow {
-                kind: None,
-                index,
-                line: current_line,
-                column: current_column,
-                left,
-                center,
-                right: self.tokens.get(0).cloned(),
-            };
-        }
-        // remember, column resets if we change lines
-        for (i, token) in self.tokens.iter().enumerate() {
-            left = self.tokens.get(i.saturating_sub(1)).cloned();
-            center = self.tokens.get(i).cloned();
-            right = self.tokens.get(i + 1).cloned();
+        let mut total_tokens = 0;
+        for (line_number, line) in self.decorated_lines(0, self.line_count()).iter().enumerate() {
+            if line_number == target_line {
+                let token_window_kind : TokenWindowKind = self.find_token_in_line(line, target_column, total_tokens);
+                let mut index = token_window_kind.get_index();
+                // TODO: Only have center if in inside
 
-            if token.delta_line > 0 {
-                current_line += token.delta_line;
-                current_column = 0;
-                last_token_end = 0;
+                let mut center = self.tokens.get(index).cloned();
+                let mut left = if index == 0 {
+                    None
+                } else {
+                    self.tokens.get(index.saturating_sub(1)).cloned()
+                };
+                let right = self.tokens.get(index + 1).cloned();
+
+                match token_window_kind {
+                    TokenWindowKind::Left(_) => {
+                        center = None;
+                        index = index.saturating_sub(1);
+                    },
+                    TokenWindowKind::Inside(_) => {}
+                    TokenWindowKind::Right(_) => {
+                        left = center;
+                        center = None;
+                        index = index.saturating_sub(1);
+                    }
+                }
+                
+                return TokenWindow {
+                    kind: Some(token_window_kind),
+                    index,
+                    line: target_line,
+                    column: target_column,
+                    left,
+                    center,
+                    right,
+                }
             }
-            current_column += token.delta_start;
-
-            if current_line < target_line {
-                continue;
-            }
-
-            // check if we are in the center token
-            if inside(current_column, target_column, &center) {
-                index = i;
-                token_window_kind = Some(TokenWindowKind::Inside);
-                break;
-            }
-
-            // check if we are in between the left and center
-            if between(
-                current_column,
-                current_line,
-                target_column,
-                target_line,
-                &left,
-                &center,
-            ) {
-                token_window_kind = Some(TokenWindowKind::Between);
-                index = i;
-                right = center;
-                center = None;
-                break;
-            }
+            total_tokens += line.iter().filter(|(_, token)| token.is_some()).count();
         }
 
-        if index == 0 {
-            left = None
-        }
-
-        TokenWindow {
-            kind: token_window_kind,
-            index,
+        return TokenWindow {
+            kind: None,
+            index: 0,
             line: target_line,
             column: target_column,
-            left,
-            center,
-            right,
+            left: None,
+            center: None,
+            right: None,
         }
     }
+
+
 
     fn resolve_token_action_insert(
         &self,
@@ -436,6 +429,7 @@ where
                 if matches!(window.right, Some(_)) {
                     let token = self.tokens.get_mut(window.index + 1).unwrap();
                     token.delta_line += 1;
+                    token.delta_start = 0;
                 }
             }
             TokenAction::DeleteNewLine {
@@ -450,35 +444,29 @@ where
             }
         }
     }
-}
 
-fn between(
-    current_column: usize,
-    current_line: usize,
-    target_column: usize,
-    target_line: usize,
-    left: &Option<Token>,
-    center: &Option<Token>,
-) -> bool {
-    if let (Some(left), Some(center)) = (left, center) {
-        let end_of_left = current_column - center.delta_start;
-        let start_of_center = current_column;
-        if center.delta_line > 0 {
-            // This criteria isn't correct. Go to the end of the first line
-            target_line < current_line + center.delta_line && target_column <= start_of_center
-        } else {
-            target_column > end_of_left && target_column <= start_of_center
+    fn find_token_in_line(&self, line: &[(&[u8], Option<&Token>)], target_column: usize, starting_index: usize) -> TokenWindowKind {
+        let mut current_column = 0;
+        let mut current_index = starting_index;
+        for (text, token) in line {
+            let end = current_column + text.len();
+            if target_column < end && target_column > current_column {
+                if token.is_some() {
+                    return TokenWindowKind::Inside(current_index)
+                } else {
+                    return TokenWindowKind::Right(current_index)
+                }
+            } else if target_column == current_column {
+                return TokenWindowKind::Left(current_index)
+            }
+            if token.is_some() {
+                current_index += 1;
+            }
+            current_column += text.len();
         }
-    } else {
-        false
-    }
-}
+        // TODO: Is this right?
+        TokenWindowKind::Left(current_index)
 
-fn inside(current_column: usize, target_column: usize, center: &Option<Token>) -> bool {
-    if let Some(center) = center {
-        target_column > current_column && target_column < current_column + center.length
-    } else {
-        false
     }
 }
 
@@ -490,6 +478,10 @@ where
 
     fn line_length(&self, line: usize) -> usize {
         self.underlying_text_buffer.line_length(line)
+    }
+
+    fn line_start(&self, line: usize) -> usize {
+        self.underlying_text_buffer.line_start(line)
     }
 
     fn line_count(&self) -> usize {
@@ -536,6 +528,7 @@ impl TokenTextBuffer<SimpleTextBuffer> {
             tokens: vec![],
             underlying_text_buffer,
             edits: vec![],
+            token_actions: vec![],
         }
     }
 }
@@ -612,7 +605,13 @@ impl SimpleTextBuffer {
         self.bytes = contents.to_vec();
     }
 
-    pub fn line_start(&self, line: usize) -> usize {
+   
+}
+
+impl TextBuffer for SimpleTextBuffer {
+    type Item = u8;
+
+    fn line_start(&self, line: usize) -> usize {
         let mut line_start = 0;
         let mut lines_seen = 0;
 
@@ -627,10 +626,6 @@ impl SimpleTextBuffer {
         }
         line_start
     }
-}
-
-impl TextBuffer for SimpleTextBuffer {
-    type Item = u8;
 
     fn line_length(&self, line: usize) -> usize {
         let line_start = self.line_start(line);
@@ -644,6 +639,7 @@ impl TextBuffer for SimpleTextBuffer {
         }
         length
     }
+    
 
     fn line_count(&self) -> usize {
         self.bytes.iter().filter(|&&byte| byte == b'\n').count() + 1
@@ -1045,6 +1041,11 @@ impl EventTextBuffer {
 
 impl TextBuffer for EventTextBuffer {
     type Item = u8;
+
+    fn line_start(&self, line: usize) -> usize {
+        line * self.line_length(line)
+    }
+
     fn line_length(&self, _line: usize) -> usize {
         80
     }
