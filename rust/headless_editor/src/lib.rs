@@ -130,17 +130,17 @@ pub enum TokenAction {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TokenWindowKind {
-    Left { index: usize },
-    Inside{ index: usize, offset: usize },
+    Left { index: usize, offset: usize },
+    Inside { index: usize, offset: usize },
     Above { index: usize },
 }
 
 impl TokenWindowKind {
     fn get_index(&self) -> usize {
         match self {
-            TokenWindowKind::Left{ index } => *index,
-            TokenWindowKind::Inside{ index, offset } => *index,
-            TokenWindowKind::Above{ index } => *index,
+            TokenWindowKind::Left { index, .. } => *index,
+            TokenWindowKind::Inside { index, .. } => *index,
+            TokenWindowKind::Above { index } => *index,
         }
     }
 }
@@ -222,7 +222,7 @@ where
         let window: TokenWindow = self.find_token(line, column);
         let actions = self.resolve_token_action_insert(window, line, column, text);
         self.token_actions.extend(actions.clone());
-        
+
         for action in actions.iter() {
             self.apply_token_action(action);
         }
@@ -230,12 +230,11 @@ where
 
     fn update_tokens_delete(&mut self, line: usize, column: usize, text: &[u8]) {
         // We need to know where the cursor was,
-        // no the character.
+        // not the character.
         let mut cursor = Cursor::new(line, column);
         cursor.move_right(self);
 
         let window: TokenWindow = self.find_token(cursor.line(), cursor.column());
-        println!("DELETE WINDOW: {:?}", window);
         let actions = self.result_token_action_delete(window, line, column, text);
         self.token_actions.extend(actions.clone());
         for action in actions.iter() {
@@ -244,11 +243,15 @@ where
     }
 
     pub fn find_token(&self, target_line: usize, target_column: usize) -> TokenWindow {
-
         let mut total_tokens = 0;
-        for (line_number, line) in self.decorated_lines(0, self.line_count()).iter().enumerate() {
+        for (line_number, line) in self
+            .decorated_lines(0, self.line_count())
+            .iter()
+            .enumerate()
+        {
             if line_number == target_line {
-                let token_window_kind : TokenWindowKind = self.find_token_in_line(line, target_column, total_tokens);
+                let token_window_kind: TokenWindowKind =
+                    self.find_token_in_line(line, target_column, total_tokens);
                 let index = token_window_kind.get_index();
                 // TODO: Only have center if in inside
 
@@ -261,15 +264,15 @@ where
                 let right = self.tokens.get(index + 1).cloned();
 
                 match token_window_kind {
-                    TokenWindowKind::Left{ .. } => {
+                    TokenWindowKind::Left { .. } => {
                         center = None;
-                    },
-                    TokenWindowKind::Above{ .. } => {
+                    }
+                    TokenWindowKind::Above { .. } => {
                         center = None;
-                    },
-                    TokenWindowKind::Inside{ .. } => {},
+                    }
+                    TokenWindowKind::Inside { .. } => {}
                 }
-                
+
                 return TokenWindow {
                     kind: Some(token_window_kind),
                     index,
@@ -278,7 +281,7 @@ where
                     left,
                     center,
                     right,
-                }
+                };
             }
             total_tokens += line.iter().filter(|(_, token)| token.is_some()).count();
         }
@@ -291,10 +294,8 @@ where
             left: None,
             center: None,
             right: None,
-        }
+        };
     }
-
-
 
     fn resolve_token_action_insert(
         &self,
@@ -304,8 +305,10 @@ where
         text: &[u8],
     ) -> Vec<TokenAction> {
         let mut actions = vec![];
+
+        // TODO: Extend tokens based on offset
         match window.kind.unwrap() {
-            TokenWindowKind::Left{ .. } => {
+            TokenWindowKind::Left { .. } => {
                 for char in text {
                     match char {
                         b'\n' => {
@@ -314,14 +317,15 @@ where
                                 column,
                                 index: window.index,
                             });
-                        },
-                        _ => actions.push(
-                            TokenAction::OffsetToken { index: window.index, length: 1 }
-                        )
+                        }
+                        _ => actions.push(TokenAction::OffsetToken {
+                            index: window.index,
+                            length: 1,
+                        }),
                     }
                 }
-            },
-            TokenWindowKind::Inside{ offset, .. } => {
+            }
+            TokenWindowKind::Inside { offset, .. } => {
                 let mut token_splits = 0;
                 for char in text {
                     match char {
@@ -336,14 +340,15 @@ where
                                 column,
                                 index: window.index + token_splits,
                             });
-                        },
-                        _ => actions.push(
-                            TokenAction::ChangeTokenLength { index: window.index + token_splits, length: 1 }
-                        )
+                        }
+                        _ => actions.push(TokenAction::ChangeTokenLength {
+                            index: window.index + token_splits,
+                            length: 1,
+                        }),
                     }
                 }
-            },
-            TokenWindowKind::Above{ .. } => {
+            }
+            TokenWindowKind::Above { .. } => {
                 for char in text {
                     match char {
                         b'\n' => {
@@ -352,11 +357,11 @@ where
                                 column,
                                 index: window.index,
                             });
-                        },
+                        }
                         _ => {}
                     }
                 }
-            },
+            }
         }
         actions
     }
@@ -370,7 +375,8 @@ where
     ) -> Vec<TokenAction> {
         let mut actions = vec![];
         match window.kind.unwrap() {
-            TokenWindowKind::Left{ .. } => {
+            TokenWindowKind::Left { offset, .. } => {
+                let mut changed_offset: usize = 0;
                 for char in text {
                     match char {
                         b'\n' => {
@@ -379,14 +385,25 @@ where
                                 column,
                                 index: window.index,
                             });
-                        },
-                        _ => actions.push(
-                            TokenAction::OffsetToken { index: window.index, length: -1 }
-                        )
+                        }
+                        _ => {
+                            if offset.saturating_sub(changed_offset) == 0 {
+                                actions.push(TokenAction::ChangeTokenLength {
+                                    index: window.index.saturating_sub(1),
+                                    length: -1,
+                                });
+                                changed_offset += 1;
+                            } else {
+                                actions.push(TokenAction::OffsetToken {
+                                    index: window.index,
+                                    length: -1,
+                                })
+                            }
+                        }
                     }
                 }
-            },
-            TokenWindowKind::Inside{ offset, .. } => {
+            }
+            TokenWindowKind::Inside { offset, .. } => {
                 for char in text {
                     match char {
                         b'\n' => {
@@ -395,14 +412,15 @@ where
                                 column,
                                 index: window.index,
                             });
-                        },
-                        _ => actions.push(
-                            TokenAction::ChangeTokenLength { index: window.index, length: -1 }
-                        )
+                        }
+                        _ => actions.push(TokenAction::ChangeTokenLength {
+                            index: window.index,
+                            length: -1,
+                        }),
                     }
                 }
-            },
-            TokenWindowKind::Above{ .. } => {
+            }
+            TokenWindowKind::Above { .. } => {
                 for char in text {
                     match char {
                         b'\n' => {
@@ -411,24 +429,21 @@ where
                                 column,
                                 index: window.index,
                             });
-                        },
+                        }
                         _ => {}
                     }
                 }
-            },
+            }
         }
         actions
     }
 
-    // TODO: Backspace . or one before
+    // TODO: Backspace .
     // Add at end of token (Do I need right again?)
 
     fn apply_token_action(&mut self, action: &TokenAction) {
         match action {
-            TokenAction::SplitToken {
-                index,
-                offset,
-            } => {
+            TokenAction::SplitToken { index, offset } => {
                 if let Some(token) = self.tokens.get_mut(*index) {
                     token.length = *offset;
                     let remaining_length = token.length - offset;
@@ -459,7 +474,8 @@ where
                 }
                 if let Some(token) = self.tokens.get_mut(index + 1) {
                     if token.delta_line == 0 {
-                        token.delta_start = token.delta_start.checked_add_signed(*length).unwrap_or(0)
+                        token.delta_start =
+                            token.delta_start.checked_add_signed(*length).unwrap_or(0)
                     }
                 }
             }
@@ -473,7 +489,6 @@ where
                     if token.delta_line == 1 {
                         token.delta_start = 0;
                     }
-
                 }
             }
             TokenAction::DeleteNewLine {
@@ -491,14 +506,15 @@ where
                         }
                     } else {
                         let last_token = tokens.last().unwrap().clone();
-                        let end_of_last_token = tokens.iter().fold(0, |acc, token| {
-                            token.delta_start + acc
-                        }) + last_token.length;
+                        let end_of_last_token =
+                            tokens.iter().fold(0, |acc, token| token.delta_start + acc)
+                                + last_token.length;
                         let line_length = self.line_length(*line);
-        
+
                         if let Some(token) = self.tokens.get_mut(*index) {
                             token.delta_line = token.delta_line.saturating_sub(1);
-                            token.delta_start = (line_length.saturating_sub(end_of_last_token)) + last_token.length;
+                            token.delta_start =
+                                (line_length.saturating_sub(end_of_last_token)) + last_token.length;
                         }
                     }
                 } else {
@@ -508,12 +524,16 @@ where
                         token.delta_start = line_length;
                     }
                 }
-                
             }
         }
     }
 
-    fn find_token_in_line(&self, line: &[(&[u8], Option<&Token>)], target_column: usize, starting_index: usize) -> TokenWindowKind {
+    fn find_token_in_line(
+        &self,
+        line: &[(&[u8], Option<&Token>)],
+        target_column: usize,
+        starting_index: usize,
+    ) -> TokenWindowKind {
         let mut current_column = 0;
         let mut current_index = starting_index;
         for (index, (text, token)) in line.iter().enumerate() {
@@ -521,20 +541,37 @@ where
             if target_column < end && target_column > current_column {
                 if token.is_some() {
                     // TODO: offset is wrong
-                    let offset = end - target_column;
-                    return TokenWindowKind::Inside{ 
+                    let offset = target_column.saturating_sub(current_column);
+                    return TokenWindowKind::Inside {
                         index: current_index,
                         offset,
-                    }
+                    };
                 } else {
-                    
-                    return TokenWindowKind::Left { index: current_index }
+                    let offset = target_column - current_column;
+                    return TokenWindowKind::Left {
+                        index: current_index,
+                        offset,
+                    };
                 }
             } else if target_column == current_column {
                 if index == line.len() - 1 {
-                    return TokenWindowKind::Above { index: current_index }
+                    return TokenWindowKind::Above {
+                        index: current_index,
+                    };
                 } else {
-                    return TokenWindowKind::Left { index: current_index }
+                    let offset = if let Some(token) = token {
+                       if let Some(left_token) = self.tokens.get(current_index.saturating_sub(1)) {
+                            token.delta_start.saturating_sub(left_token.length)
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    return TokenWindowKind::Left {
+                        index: current_index,
+                        offset,
+                    };
                 }
             }
             if token.is_some() {
@@ -543,8 +580,9 @@ where
             current_column += text.len();
         }
         // TODO: Is this right?
-        TokenWindowKind::Above{ index: current_index }
-
+        TokenWindowKind::Above {
+            index: current_index,
+        }
     }
 }
 
@@ -683,8 +721,6 @@ impl SimpleTextBuffer {
     pub fn set_contents(&mut self, contents: &[u8]) {
         self.bytes = contents.to_vec();
     }
-
-   
 }
 
 impl TextBuffer for SimpleTextBuffer {
@@ -718,7 +754,6 @@ impl TextBuffer for SimpleTextBuffer {
         }
         length
     }
-    
 
     fn line_count(&self) -> usize {
         self.bytes.iter().filter(|&&byte| byte == b'\n').count() + 1
@@ -1224,3 +1259,8 @@ mod tests {
         }
     }
 }
+
+
+
+// TODO:
+// I need auto indent
