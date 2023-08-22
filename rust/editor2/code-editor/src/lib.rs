@@ -173,12 +173,17 @@ impl App for TextWidget {
             } else {
                 canvas.set_color(&foreground);
             }
-
             canvas.draw_str(&format!("{:?}", token), 0.0, -700.0 + i as f32 * 32.0);
         }
 
         for (i, line) in token_output.lines().enumerate() {
             canvas.draw_str(line, -600.0, -400.0 + i as f32 * 32.0);
+        }
+
+        let last_ten_token_actions = self.text_pane.text_buffer.token_actions.len().saturating_sub(10);
+        for (i, action) in self.text_pane.text_buffer.token_actions.iter().skip(last_ten_token_actions).enumerate() {
+            let action = format!("{:?}", action);
+            canvas.draw_str(&action, 1200.0, 0.0 + i as f32 * 32.0);
         }
 
         let bounding_rect = Rect::new(
@@ -296,11 +301,10 @@ impl App for TextWidget {
         let margin = 20;
         let lines_above = self.text_pane.lines_above_scroll();
         let line =
-            (((y - margin as f32) / self.text_pane.line_height).ceil() as usize + lines_above) - 1;
+            (((y - margin as f32) / self.text_pane.line_height).ceil() as usize + lines_above).saturating_sub(1);
         let char_width = 16.0;
         let column = (((x - margin as f32) / char_width).ceil() as usize)
-            .saturating_sub((self.text_pane.offset.x / char_width) as usize)
-            - 1;
+            .saturating_sub((self.text_pane.offset.x / char_width) as usize).saturating_sub(1);
         self.text_pane
             .cursor
             .move_to_bounded(line, column, &self.text_pane.text_buffer);

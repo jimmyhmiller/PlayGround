@@ -535,7 +535,7 @@ pub mod macros {
                 let mut s = s.into_bytes();
                 let ptr = s.as_mut_ptr() as usize;
                 let len = s.len();
-                std::mem::forget(ptr);
+                std::mem::forget(s);
                 unsafe { APP.set_get_state(ptr as u32, len as u32) };
             }
 

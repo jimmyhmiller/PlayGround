@@ -4,7 +4,7 @@
 use skia_safe::{scalar, ColorType, Size, Surface};
 use winit::platform::macos::WindowBuilderExtMacOS;
 
-use crate::editor;
+use crate::{editor, widget};
 
 pub fn setup_window(mut editor: editor::Editor) {
     use cocoa::{appkit::NSView, base::id as cocoa_id};
@@ -32,7 +32,6 @@ pub fn setup_window(mut editor: editor::Editor) {
 
     let event_loop_proxy = events_loop.create_proxy();
 
-    editor.on_window_create(event_loop_proxy);
 
     let window = WindowBuilder::new()
         .with_inner_size(size)
@@ -43,6 +42,11 @@ pub fn setup_window(mut editor: editor::Editor) {
         .build(&events_loop)
         .unwrap();
 
+    editor.on_window_create(event_loop_proxy, widget::Size {
+        width: (size.width as f64 * window.scale_factor()) as f32,
+        height: (size.height as f64 * window.scale_factor()) as f32,
+    });
+    
 
     let device = Device::system_default().expect("no device found");
 
