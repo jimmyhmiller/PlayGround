@@ -76,6 +76,7 @@ enum OutPayload {
     ErrorPayload(String),
     Complete,
     NeededValue(String, oneshot::Sender<String>),
+    Error(String),
 }
 
 struct OutMessage {
@@ -421,6 +422,8 @@ impl WasmMessenger {
                 // I am just setting the out message to id: 0.
                 if let Some(record) = self.outstanding_messages.get_mut(&message.wasm_id) {
                     record.remove(&message.message_id);
+                } else {
+                    println!("No outstanding message for {}", message.wasm_id)
                 }
 
                 match message.payload {
@@ -444,6 +447,9 @@ impl WasmMessenger {
                         }
                     }
                     OutPayload::Complete => {}
+                    OutPayload::Error(error) => {
+                        println!("Error: {}", error);
+                    }
                 }
             }
         }
@@ -651,6 +657,8 @@ impl WasmManager {
     pub async fn init(&mut self) {
         loop {
             let message = self.receiver.select_next_some().await;
+            let message_id = message.message_id;
+            let wasm_id = message.wasm_id;
             let out_message = self.process_message(message).await;
             match out_message {
                 Ok(out_message) => {
@@ -658,6 +666,12 @@ impl WasmManager {
                 }
                 Err(err) => {
                     println!("Error processing message: {}", err);
+                    let out_message = OutMessage {
+                        wasm_id,
+                        message_id,
+                        payload: OutPayload::Error(err.to_string()),
+                    };
+                    self.sender.start_send(out_message).unwrap();
                 }
             }
         }
@@ -1491,7 +1505,8 @@ impl WasmInstance {
 
         let json_string = get_string_from_memory(&memory, &mut self.store, ptr as i32, len as i32);
         if json_string.is_none() {
-            println!("No json string");
+            
+            println!("No json string {:?}", self.path);
         }
         json_string
     }

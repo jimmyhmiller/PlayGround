@@ -16,7 +16,7 @@ use crate::{
     wasm_messenger::{self, WasmId, WasmMessenger},
 };
 
-#[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq, PartialOrd)]
 pub struct Position {
     pub x: f32,
     pub y: f32,
@@ -40,6 +40,15 @@ impl From<Position> for Point {
 pub struct Size {
     pub width: f32,
     pub height: f32,
+}
+
+impl Into<Position> for Size {
+    fn into(self) -> Position {
+        Position {
+            x: self.width,
+            y: self.height,
+        }
+    }
 }
 
 pub type WidgetId = usize;

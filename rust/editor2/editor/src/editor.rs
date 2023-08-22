@@ -228,6 +228,13 @@ impl Editor {
         for widget in widgets {
             self.widget_store.add_widget(widget);
         }
+        for widget in self.widget_store.iter_mut() {
+            if widget.position.x >= self.window.size.width || widget.position.y >= self.window.size.height {
+                println!("Widget out of bounds, moving to edge of screen {}", widget.id);
+                widget.position.x = widget.position.x.min(self.window.size.width - widget.size.width * widget.scale);
+                widget.position.y = widget.position.y.min(self.window.size.height - widget.size.height * widget.scale);
+            }
+        }
     }
 
     pub fn update(&mut self) {
@@ -653,7 +660,8 @@ impl Editor {
         true
     }
 
-    pub fn on_window_create(&mut self, event_loop_proxy: EventLoopProxy<()>) {
+    pub fn on_window_create(&mut self, event_loop_proxy: EventLoopProxy<()>, size: Size) {
+        self.window.size = size;
         self.event_loop_proxy = Some(event_loop_proxy);
         self.setup_file_watcher();
         self.load_widgets();
