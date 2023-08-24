@@ -222,6 +222,13 @@ impl ProcessSpawner {
         column: usize,
         bytes: Vec<u8>,
     ) {
+
+        // TODO: This assumes there are no new lines
+        assert!(if bytes.len() > 1 {
+            bytes.contains(&b'\n') == false
+        } else {
+            true
+        });
         let params: <DidChangeTextDocument as Notification>::Params = DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier {
                 uri: Url::from_str(&format!("file://{}", path))
@@ -236,7 +243,7 @@ impl ProcessSpawner {
                     },
                     end: Position {
                         line: line as u32,
-                        character: column as u32,
+                        character: (column + bytes.len()) as u32,
                     },
                 }),
                 range_length: None,
