@@ -513,8 +513,6 @@ where
 
                         if let Some(token) = self.tokens.get_mut(*index) {
                             token.delta_line = token.delta_line.saturating_sub(1);
-                            token.delta_start =
-                                (line_length.saturating_sub(end_of_last_token)) + last_token.length;
                         }
                     }
                 } else {
@@ -534,13 +532,18 @@ where
         target_column: usize,
         starting_index: usize,
     ) -> TokenWindowKind {
+
+        // TODO: offset is wrong
+        // What exactly is offset supposed to be?
+        // I think I'm defining it as offset from last token
+        // but it should be last token on line
         let mut current_column = 0;
         let mut current_index = starting_index;
         for (index, (text, token)) in line.iter().enumerate() {
             let end = current_column + text.len();
             if target_column < end && target_column > current_column {
                 if token.is_some() {
-                    // TODO: offset is wrong
+
                     let offset = target_column.saturating_sub(current_column);
                     return TokenWindowKind::Inside {
                         index: current_index,
@@ -792,6 +795,9 @@ pub trait VirtualCursor: Clone + Debug {
     fn column(&self) -> usize;
     fn new(line: usize, column: usize) -> Self;
 
+
+    
+
     fn move_to_bounded<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) {
         let line = min(buffer.last_line(), line);
         let column = min(buffer.line_length(line), column);
@@ -853,6 +859,11 @@ pub trait VirtualCursor: Clone + Debug {
         }
     }
 
+    fn line_at<T: TextBuffer<Item = u8>>(&mut self, line: usize, buffer: &T) -> Option<String> {
+        let found_line = buffer.lines().skip(line).next();
+        found_line.and_then(|x| from_utf8(x).ok()).map(|x| x.to_string())
+    }
+
     fn right_of<T: TextBuffer>(&self, buffer: &T) -> Self {
         let mut cursor = self.clone();
         cursor.move_right(buffer);
@@ -865,7 +876,7 @@ pub trait VirtualCursor: Clone + Debug {
         cursor
     }
 
-    fn above<T: TextBuffer<Item = u8>>(&self, buffer: &T) -> Self {
+    fn above<T: TextBuffer>(&self, buffer: &T) -> Self {
         let mut cursor = self.clone();
         cursor.move_up(buffer);
         cursor
@@ -922,6 +933,52 @@ pub trait VirtualCursor: Clone + Debug {
             _ => false,
         }
     }
+    
+    fn is_new_line(byte: &[u8]) -> bool {
+        match byte {
+            b"\n" => true,
+            _ => false,
+        }
+    }
+
+    fn get_last_relevant_character<T: TextBuffer<Item = u8>>(&mut self, buffer: &mut T) -> Option<u8> {
+        let current_line = self.line_at(self.line(), buffer);
+        current_line
+            .and_then(|x| last_non_whitespace_character(&x))
+            .or_else(|| {
+                let previous_line = self.line_at(self.above(buffer).line(), buffer);
+                previous_line.and_then(|x| last_non_whitespace_character(&x))
+            })
+    }
+
+    fn get_last_line<T: TextBuffer<Item = u8>>(&mut self, buffer: &mut T) -> Option<String> {
+        self.line_at(self.line(), buffer)
+    }
+
+    fn auto_indent<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
+        let last_line : Option<String> = self.get_last_line(buffer);
+        if let Some(last_line) = last_line {
+            let indent = get_indent(&last_line);
+            let last_character = last_non_whitespace_character(&last_line);
+            match last_character {
+                Some(b'{') => {
+                    self.insert_normal_text(to_insert, buffer);
+                    self.handle_insert(increase_indent(indent).as_bytes(), buffer);
+                }
+                Some(b'}') => {
+                    self.insert_normal_text(to_insert, buffer);
+                    self.handle_insert(indent.as_bytes(), buffer);
+                }
+                _ => {
+                    self.insert_normal_text(to_insert, buffer);
+                    self.handle_insert(indent.as_bytes(), buffer);
+                }
+            };
+        } else {
+            self.insert_normal_text(to_insert, buffer);
+        }
+        
+    }
 
     fn handle_insert<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
         if Self::is_open_bracket(to_insert) {
@@ -934,10 +991,46 @@ pub trait VirtualCursor: Clone + Debug {
                 Some(right) if Self::is_close_bracket(&[*right]) => self.move_right(buffer),
                 _ => self.insert_normal_text(to_insert, buffer),
             }
+        } else if Self::is_new_line(to_insert) {
+            self.auto_indent(to_insert, buffer);
         } else {
             self.insert_normal_text(to_insert, buffer)
         }
     }
+}
+
+fn decrease_indent(indent: String) -> String {
+    if indent.starts_with("    ") {
+        indent[4..].to_string()
+    } else {
+        indent
+    }
+}
+
+fn increase_indent(indent: String) -> String {
+    indent + "    "
+}
+
+fn last_non_whitespace_character(line: &String) -> Option<u8> {
+    // last non_whitespace
+    for byte in line.as_bytes().iter().rev() {
+        if !byte.is_ascii_whitespace() {
+            return Some(*byte);
+        }
+    }
+    None
+}
+
+fn get_indent(last_line: &String) -> String {
+    let mut indent = String::new();
+    for byte in last_line.as_bytes() {
+        if byte.is_ascii_whitespace() {
+            indent.push(*byte as char);
+        } else {
+            break;
+        }
+    }
+    indent
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -1089,7 +1182,7 @@ impl<C: VirtualCursor> VirtualCursor for MultiCursor<C> {
         }
     }
 
-    fn above<T: TextBuffer<Item = u8>>(&self, buffer: &T) -> Self {
+    fn above<T: TextBuffer>(&self, buffer: &T) -> Self {
         Self {
             cursors: self.cursors.iter().map(|c| c.above(buffer)).collect(),
         }
