@@ -126,6 +126,7 @@ pub enum TokenAction {
         index: usize,
         length: isize,
     },
+    JoinLine { line: usize, column: usize, index: usize },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -380,7 +381,7 @@ where
                 for char in text {
                     match char {
                         b'\n' => {
-                            actions.push(TokenAction::DeleteNewLine {
+                            actions.push(TokenAction::JoinLine {
                                 line,
                                 column,
                                 index: window.index,
@@ -496,32 +497,16 @@ where
                 column: _,
                 index,
             } => {
-                // TODO: Fix this
-                if let Some(tokens) = self.tokens.token_lines().skip(*line).next() {
-                    if tokens.is_empty() {
-                        let line_length = self.line_length(*line);
-                        if let Some(token) = self.tokens.get_mut(*index) {
-                            token.delta_line -= 1;
-                            // token.delta_start = line_length;
-                        }
-                    } else {
-                        let last_token = tokens.last().unwrap().clone();
-                        let end_of_last_token =
-                            tokens.iter().fold(0, |acc, token| token.delta_start + acc)
-                                + last_token.length;
-                        let line_length = self.line_length(*line);
 
-                        if let Some(token) = self.tokens.get_mut(*index) {
-                            token.delta_line = token.delta_line.saturating_sub(1);
-                        }
-                    }
-                } else {
-                    let line_length = self.line_length(*line);
-                    if let Some(token) = self.tokens.get_mut(*index) {
-                        token.delta_line -= 1;
-                        token.delta_start = line_length;
-                    }
+                let line = self.tokens.token_lines().skip(*line).next();
+                assert!(line.is_some(), "Expected line to be found");
+                assert!(line.unwrap().is_empty(), "Expected line to be empty");
+                if let Some(token) = self.tokens.get_mut(*index) {
+                    token.delta_line -= 1;
                 }
+            },
+            TokenAction::JoinLine { line, column, index } => {
+
             }
         }
     }
@@ -564,7 +549,13 @@ where
                 } else {
                     let offset = if let Some(token) = token {
                        if let Some(left_token) = self.tokens.get(current_index.saturating_sub(1)) {
-                            token.delta_start.saturating_sub(left_token.length)
+                            if token.delta_line == 0 {
+                                token.delta_start.saturating_sub(left_token.length)
+                            }
+                            else {
+                                token.delta_start
+                            }
+
                         } else {
                             0
                         }
@@ -908,7 +899,7 @@ pub trait VirtualCursor: Clone + Debug {
             self.move_to(self.line(), 0);
         } else {
             // TODO: Do this more efficiently
-            for _ in 0..(to_insert.len() - 1) {
+            for _ in 0..(to_insert.len().saturating_sub(1)) {
                 self.move_right(buffer);
             }
             self.move_right(buffer)
@@ -955,6 +946,8 @@ pub trait VirtualCursor: Clone + Debug {
         self.line_at(self.line(), buffer)
     }
 
+    
+    /// Broken
     fn auto_indent<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
         let last_line : Option<String> = self.get_last_line(buffer);
         if let Some(last_line) = last_line {
