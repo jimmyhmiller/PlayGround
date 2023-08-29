@@ -5,7 +5,11 @@ use std::{
     str::{from_utf8, FromStr},
 };
 
-use framework::{app, encode_base64, macros::serde_json::{self, json}, App, Canvas, Ui, Size};
+use framework::{
+    app, encode_base64,
+    macros::serde_json::{self, json},
+    App, Canvas, Size, Ui,
+};
 use lsp_types::{
     notification::{DidChangeTextDocument, DidOpenTextDocument, Initialized, Notification},
     request::{Initialize, Request, SemanticTokensFullRequest, WorkspaceSymbolRequest},
@@ -19,12 +23,18 @@ use lsp_types::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Deserialize, Serialize)]
+struct TokenRequestMeta {
+    path: String,
+    document_version: usize,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 struct Data {
     state: State,
     message_type: HashMap<String, String>,
     last_request_id: usize,
     messages_by_type: HashMap<String, Vec<String>>,
-    token_request_to_file: HashMap<String, String>,
+    token_request_metadata: HashMap<String, TokenRequestMeta>,
     open_files: Vec<String>,
     size: Size,
     y_scroll_offset: f32,
@@ -48,12 +58,26 @@ pub enum Edit {
     Delete(usize, usize),
 }
 
-
 #[derive(Serialize, Deserialize, Clone)]
 struct EditWithPath {
     edit: Edit,
     path: String,
 }
+
+#[derive(Serialize, Deserialize, Clone)]
+struct MultiEditWithPath {
+    version: usize,
+    edits: Vec<Edit>,
+    path: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct TokensWithVersion {
+    tokens: Vec<u64>,
+    version: usize,
+    path: String,
+}
+
 // TODO:
 // I need to properly handle versions of tokens and make sure I always use the latest.
 // I need to actually update my tokens myself and then get the refresh.
@@ -65,7 +89,9 @@ impl ProcessSpawner {
     ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
         let mut results = vec![];
         if let Some(start_json_object) = message.find('{') {
-            let message = &message[start_json_object..];
+            let last_close_brace = message.rfind('}').unwrap();
+            let message = &message[start_json_object..last_close_brace + 1];
+            let message = message.trim();
             let deserializer = serde_json::Deserializer::from_str(message);
             let iterator: serde_json::StreamDeserializer<
                 '_,
@@ -99,7 +125,9 @@ impl ProcessSpawner {
     fn send_request(&mut self, method: &str, params: &str) -> String {
         let id = self.next_request_id();
         let request = self.request(id.clone(), method, params);
-        self.state.message_type.insert(id.clone(), method.to_string());
+        self.state
+            .message_type
+            .insert(id.clone(), method.to_string());
         self.send_message(self.process_id, request);
         id
     }
@@ -159,8 +187,12 @@ impl ProcessSpawner {
 
     fn resolve_workspace_symbols(&mut self) {
         let params: <WorkspaceSymbolRequest as Request>::Params = WorkspaceSymbolParams {
-            partial_result_params: PartialResultParams { partial_result_token: None },
-            work_done_progress_params: WorkDoneProgressParams { work_done_token: None },
+            partial_result_params: PartialResultParams {
+                partial_result_token: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
             query: "".to_string(),
         };
         self.send_request(
@@ -170,7 +202,6 @@ impl ProcessSpawner {
     }
 
     fn open_file(&mut self, path: &str) {
-
         // read entire contents
         let mut file = File::open(path).unwrap();
         let mut contents = String::new();
@@ -182,10 +213,9 @@ impl ProcessSpawner {
 
         let params: <DidOpenTextDocument as Notification>::Params = DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
-                uri: Url::from_str(&format!("file://{}", &path))
-                .unwrap(),
+                uri: Url::from_str(&format!("file://{}", &path)).unwrap(),
                 language_id: "rust".to_string(),
-                version: 1,
+                version: 0,
                 text: contents,
             },
         };
@@ -197,11 +227,10 @@ impl ProcessSpawner {
         self.send_message(self.process_id, notify);
     }
 
-    fn request_tokens(&mut self, path: &str) {
+    fn request_tokens(&mut self, path: &str, document_version: usize) {
         let params: <SemanticTokensFullRequest as Request>::Params = SemanticTokensParams {
             text_document: TextDocumentIdentifier {
-                uri: Url::from_str(&format!("file://{}", path))
-                .unwrap(),
+                uri: Url::from_str(&format!("file://{}", path)).unwrap(),
             },
             partial_result_params: PartialResultParams::default(),
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -212,17 +241,71 @@ impl ProcessSpawner {
             &serde_json::to_string(&params).unwrap(),
         );
 
-        self.state.token_request_to_file.insert(token_request, path.to_string());
+        self.state.token_request_metadata.insert(
+            token_request,
+            TokenRequestMeta {
+                path: path.to_string(),
+                document_version,
+            },
+        );
     }
 
-    fn update_document_insert(
-        &mut self,
-        path: &str,
-        line: usize,
-        column: usize,
-        bytes: Vec<u8>,
-    ) {
+    fn update_document(&mut self, edits: &MultiEditWithPath) {
+        let path = edits.path.clone();
+        let version = edits.version;
+        let mut content_changes = vec![];
+        for edit in edits.edits.iter() {
+            match edit {
+                Edit::Insert(line, column, bytes) => {
+                    content_changes.push(TextDocumentContentChangeEvent {
+                        range: Some(Range {
+                            start: Position {
+                                line: *line as u32,
+                                character: *column as u32,
+                            },
+                            end: Position {
+                                line: *line as u32,
+                                character: (column + bytes.len() - 1) as u32,
+                            },
+                        }),
+                        range_length: None,
+                        text: from_utf8(&bytes).unwrap().to_string(),
+                    })
+                }
+                Edit::Delete(line, column) => {
+                    content_changes.push(TextDocumentContentChangeEvent {
+                        range: Some(Range {
+                            start: Position {
+                                line: *line as u32,
+                                character: *column as u32,
+                            },
+                            end: Position {
+                                line: *line as u32,
+                                character: *column as u32 + 1,
+                            },
+                        }),
+                        range_length: None,
+                        text: "".to_string(),
+                    })
+                }
+            }
+        }
 
+        let params: <DidChangeTextDocument as Notification>::Params = DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: Url::from_str(&format!("file://{}", path)).unwrap(),
+                version: version as i32,
+            },
+            content_changes,
+        };
+        let request = self.notification(
+            DidChangeTextDocument::METHOD,
+            &serde_json::to_string(&params).unwrap(),
+        );
+        self.send_message(self.process_id, request);
+    }
+
+    fn update_document_insert(&mut self, path: &str, line: usize, column: usize, bytes: Vec<u8>) {
         // TODO: This assumes there are no new lines
         assert!(if bytes.len() > 1 {
             bytes.contains(&b'\n') == false
@@ -231,8 +314,7 @@ impl ProcessSpawner {
         });
         let params: <DidChangeTextDocument as Notification>::Params = DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier {
-                uri: Url::from_str(&format!("file://{}", path))
-                    .unwrap(),
+                uri: Url::from_str(&format!("file://{}", path)).unwrap(),
                 version: 0,
             },
             content_changes: vec![TextDocumentContentChangeEvent {
@@ -260,8 +342,7 @@ impl ProcessSpawner {
     fn update_document_delete(&mut self, path: &str, line: usize, column: usize) {
         let params: <DidChangeTextDocument as Notification>::Params = DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier {
-                uri: Url::from_str(&format!("file://{}", path))
-                    .unwrap(),
+                uri: Url::from_str(&format!("file://{}", path)).unwrap(),
                 version: 0,
             },
             content_changes: vec![TextDocumentContentChangeEvent {
@@ -291,7 +372,7 @@ impl ProcessSpawner {
         self.state.state = State::Initialized;
         self.resolve_workspace_symbols();
         for file in self.state.open_files.clone().iter() {
-            self.request_tokens(file);
+            self.request_tokens(file, 0);
         }
     }
 }
@@ -309,7 +390,7 @@ impl App for ProcessSpawner {
             state: Data {
                 state: State::Initializing,
                 message_type: HashMap::new(),
-                token_request_to_file: HashMap::new(),
+                token_request_metadata: HashMap::new(),
                 open_files: Vec::new(),
                 last_request_id: 0,
                 messages_by_type: HashMap::new(),
@@ -319,31 +400,28 @@ impl App for ProcessSpawner {
             process_id: 0,
             root_path: "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2".to_string(),
         };
-        me.subscribe("text_change");
+        me.subscribe("text_change_multi");
         me.subscribe("lith/open-file");
         me.initialize_rust_analyzer();
         me
     }
 
     fn draw(&mut self) {
-
         let mut canvas = Canvas::new();
 
         let ui = Ui::new();
         let ui = ui.pane(
             self.state.size,
             (0.0, self.state.y_scroll_offset),
-            ui.list(self.state.messages_by_type.iter(), |ui, item|
+            ui.list(self.state.messages_by_type.iter(), |ui, item| {
                 ui.container(ui.text(&format!("{}: {}", item.0, item.1.len())))
-            ),
+            }),
         );
         ui.draw(&mut canvas);
     }
 
     fn on_click(&mut self, _x: f32, _y: f32) {
-        // self.request_tokens();
         self.resolve_workspace_symbols();
-
     }
 
     fn on_key(&mut self, _input: framework::KeyboardInput) {}
@@ -356,25 +434,20 @@ impl App for ProcessSpawner {
     }
 
     fn on_event(&mut self, kind: String, event: String) {
+        println!("Got event: {}", kind);
         match kind.as_str() {
-            "text_change" => {
-                let edit: EditWithPath = serde_json::from_str(&event).unwrap();
-                match edit.edit {
-                    Edit::Insert(line, column, bytes) => {
-                        self.update_document_insert(&edit.path, line, column, bytes);
-                        self.request_tokens(&edit.path);
-                    }
-                    Edit::Delete(line, column) => {
-                        self.update_document_delete(&edit.path, line, column);
-                        self.request_tokens(&edit.path);
-                    }
-                }
+            "text_change_multi" => {
+
+                let edits: MultiEditWithPath = serde_json::from_str(&event).unwrap();
+                println!("Multi Version {}", edits.version);
+                self.update_document(&edits);
+                self.request_tokens(&edits.path, edits.version);
             }
             "lith/open-file" => {
                 let info: OpenFileInfo = serde_json::from_str(&event).unwrap();
                 self.state.open_files.push(info.path.clone());
                 self.open_file(&info.path);
-                self.request_tokens(&info.path);
+                self.request_tokens(&info.path, 0);
             }
             _ => {
                 println!("Unknown event: {}", kind);
@@ -395,20 +468,32 @@ impl App for ProcessSpawner {
                         // let method = message["method"].as_str();
                         if let Some(id) = message["id"].as_str() {
                             if let Some(method) = self.state.message_type.get(id) {
-
-                                if let Some(messages) = self.state.messages_by_type.get_mut(method) {
+                                if let Some(messages) = self.state.messages_by_type.get_mut(method)
+                                {
                                     messages.push(message.to_string());
                                 } else {
-                                    self.state.messages_by_type.insert(method.to_string(), vec![message.to_string()]);
+                                    self.state
+                                        .messages_by_type
+                                        .insert(method.to_string(), vec![message.to_string()]);
                                 }
-
 
                                 // TODO: Need to correlate this with file
                                 if method == "textDocument/semanticTokens/full" {
-                                    let path = self.state.token_request_to_file.get(id).unwrap();
+                                    let meta = self.state.token_request_metadata.get(id).unwrap();
+                                    // self.send_event(
+                                    //     "tokens",
+                                    //     encode_base64(&extract_tokens(meta.path.clone(), &message)),
+                                    // );
+                                    println!("Token version send {}", meta.document_version);
                                     self.send_event(
-                                        "tokens",
-                                        encode_base64(&extract_tokens(path.clone(), &message)),
+                                        "tokens_with_version",
+                                        serde_json::to_string(
+                                            &TokensWithVersion {
+                                                tokens: get_token_data(message.clone()),
+                                                version: meta.document_version,
+                                                path: meta.path.clone(),
+                                            },
+                                        ).unwrap()
                                     );
                                 }
                                 if method == "workspace/symbol" {
@@ -432,27 +517,27 @@ impl App for ProcessSpawner {
                                         }
                                     }
                                 }
-
                             }
                         } else {
                             // This isn't in response to a message we sent
                             let method = message["method"].as_str();
                             if let Some(method) = method {
                                 if method == "$/progress" {
-                                    if let Some(100) = message.get("params")
+                                    if let Some(100) = message
+                                        .get("params")
                                         .and_then(|x| x.get("value"))
                                         .and_then(|x| x.get("percentage"))
-                                        .and_then(|x| x.as_u64()) {
-                                            self.initialized();
-                                        }
+                                        .and_then(|x| x.as_u64())
+                                    {
+                                        self.initialized();
+                                    }
                                 }
                             }
-
                         }
-                    } 
+                    }
                 }
                 Err(err) => {
-                    println!("Error: {}", err);
+                    println!("Error Parsing: {}", err);
                     println!("Message: {}", message);
                 }
             }
@@ -477,7 +562,14 @@ fn extract_tokens(path: String, message: &serde_json::Value) -> Vec<u8> {
     serde_json::to_string(&json!({
         "path": path,
         "tokens": data,
-    })).unwrap().into_bytes()
+    }))
+    .unwrap()
+    .into_bytes()
+}
+
+fn get_token_data(message: serde_json::Value) -> Vec<u64> {
+    let result = &message["result"];
+    serde_json::from_value(result["data"].clone()).unwrap()
 }
 
 fn find_rust_analyzer() -> String {

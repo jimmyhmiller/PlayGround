@@ -115,6 +115,20 @@ struct EditWithPath {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+struct MultiEditWithPath {
+    version: usize,
+    edits: Vec<headless_editor::Edit>,
+    path: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct TokensWithVersion {
+    tokens: Vec<u64>,
+    version: usize,
+    path: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 struct Tokens {
     path: String,
     tokens: Vec<u64>,
@@ -137,7 +151,7 @@ impl App for TextWidget {
             edit_position: 0,
             staged_tokens: vec![],
         };
-        me.subscribe("tokens");
+        me.subscribe("tokens_with_version");
         me.subscribe("color_mapping_changed");
         me
     }
@@ -343,16 +357,26 @@ impl App for TextWidget {
                 .handle_insert(&[char as u8], &mut self.text_pane.text_buffer);
         }
 
-        for edit in self.text_pane.text_buffer.drain_edits() {
-            self.send_event(
-                "text_change",
-                serde_json::ser::to_string(&EditWithPath {
-                    edit: edit.edit,
-                    path: self.file_path.clone(),
-                })
-                .unwrap(),
-            );
-        }
+        let edits = self.text_pane.text_buffer.drain_edits();
+        println!("Version: {}", self.text_pane.text_buffer.document_version);
+        self.send_event(
+            "text_change_multi", 
+            serde_json::ser::to_string(&MultiEditWithPath {
+                version: self.text_pane.text_buffer.document_version,
+                edits: edits.iter().map(|x| x.edit.clone()).collect(),
+                path: self.file_path.clone(),
+            }).unwrap()
+        );
+        // for edit in edits.clone() {
+        //     self.send_event(
+        //         "text_change",
+        //         serde_json::ser::to_string(&EditWithPath {
+        //             edit: edit.edit,
+        //             path: self.file_path.clone(),
+        //         })
+        //         .unwrap(),
+        //     );
+        // }
 
         match input.key_code {
             KeyCode::UpArrow => {
@@ -397,6 +421,7 @@ impl App for TextWidget {
 
     fn set_state(&mut self, state: Self::State) {
         *self = state;
+        println!("set state {:?}", self.file_path);
         if !self.file_path.is_empty() {
             let file = &self.file_path;
             let contents = std::fs::read(file);
@@ -418,24 +443,31 @@ impl App for TextWidget {
         }
     }
 
-    fn on_event(&mut self, kind: String, event: String) {
-        if kind == "tokens" {
-            if let Ok(data) = decode_base64(event.into_bytes()) {
-                if let Ok(tokens) = serde_json::from_str::<Tokens>(from_utf8(&data).unwrap()) {
-                    if tokens.path != self.file_path {
-                        return;
-                    }
+    // TODO: I think something is wrong with the way we send changes
 
-                    // TODO: I need to make sure the tokens are the current edit
-                    let tokens = parse_tokens(&tokens.tokens);
-                    if !tokens.is_empty() {
-                        self.staged_tokens = tokens.clone();
-                        // self.text_pane.text_buffer.set_tokens(tokens);
-                    }
-                } else {
-                    println!("Failed to parse tokens {}", from_utf8(&data).unwrap());
+    fn on_event(&mut self, kind: String, event: String) {
+        println!("event: {}", kind);
+        if kind == "tokens_with_version" {
+
+            if let Ok(tokens) =  serde_json::from_str::<TokensWithVersion>(&event) {
+                if tokens.path != self.file_path {
+                    println!("path mismatch");
+                    return;
                 }
+                if tokens.version != self.text_pane.text_buffer.document_version {
+                    println!("version mismatch tokens: {}  pane: {}", tokens.version, self.text_pane.text_buffer.document_version);
+                    return;
+                }
+                let tokens = parse_tokens(&tokens.tokens);
+                if !tokens.is_empty() {
+                    println!("got tokens");
+                    // self.staged_tokens = tokens.clone();
+                    self.text_pane.text_buffer.set_tokens(tokens);
+                }
+            } else {
+                println!("Error parsing tokens: {}", event);
             }
+
         } else if kind == "color_mapping_changed" {
             if let Ok(mapping) =
                 serde_json::from_str::<HashMap<usize, String>>(from_utf8(event.as_bytes()).unwrap())

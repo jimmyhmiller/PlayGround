@@ -1251,6 +1251,7 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, process_id: i32, ptr: i32, len: i32| {
                 let message = get_string_from_caller(&mut caller, ptr, len);
                 let state = caller.data_mut();
+                println!("Sending {}", message);
                 state
                     .commands
                     .push(Command::SendProcessMessage(process_id, message));
