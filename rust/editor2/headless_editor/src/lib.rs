@@ -96,6 +96,7 @@ pub struct TokenTextBuffer<T: TextBuffer> {
     pub tokens: Vec<Token>,
     pub underlying_text_buffer: T,
     pub edits: Vec<EditEvent>,
+    pub document_version: usize,
     pub token_actions: Vec<TokenAction>,
 }
 
@@ -126,7 +127,12 @@ pub enum TokenAction {
         index: usize,
         length: isize,
     },
-    JoinLine { line: usize, column: usize, index: usize },
+    JoinLine {
+        line: usize,
+        column: usize,
+        index: usize,
+    },
+    NewLineAbove { line: usize, column: usize, index: usize },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -223,6 +229,7 @@ where
         let window: TokenWindow = self.find_token(line, column);
         let actions = self.resolve_token_action_insert(window, line, column, text);
         self.token_actions.extend(actions.clone());
+        println!("{:?}", actions);
 
         for action in actions.iter() {
             self.apply_token_action(action);
@@ -262,13 +269,15 @@ where
                 } else {
                     self.tokens.get(index.saturating_sub(1)).cloned()
                 };
-                let right = self.tokens.get(index + 1).cloned();
+                let mut right = self.tokens.get(index + 1).cloned();
 
                 match token_window_kind {
                     TokenWindowKind::Left { .. } => {
+                        right = center;
                         center = None;
                     }
                     TokenWindowKind::Above { .. } => {
+                        right = center;
                         center = None;
                     }
                     TokenWindowKind::Inside { .. } => {}
@@ -350,10 +359,12 @@ where
                 }
             }
             TokenWindowKind::Above { .. } => {
+                // TODO: A different action other than new line
+                // so we know not to change the offset
                 for char in text {
                     match char {
                         b'\n' => {
-                            actions.push(TokenAction::NewLine {
+                            actions.push(TokenAction::NewLineAbove {
                                 line,
                                 column,
                                 index: window.index,
@@ -407,6 +418,7 @@ where
             TokenWindowKind::Inside { offset, .. } => {
                 for char in text {
                     match char {
+                        // TODO: Is this possible?
                         b'\n' => {
                             actions.push(TokenAction::DeleteNewLine {
                                 line,
@@ -487,9 +499,16 @@ where
             } => {
                 if let Some(token) = self.tokens.get_mut(*index) {
                     token.delta_line += 1;
-                    if token.delta_line == 1 {
-                        token.delta_start = 0;
-                    }
+                    token.delta_start = 0;
+                }
+            }
+            TokenAction::NewLineAbove {
+                line: _,
+                column: _,
+                index,
+            } => {
+                if let Some(token) = self.tokens.get_mut(*index) {
+                    token.delta_line += 1;
                 }
             }
             TokenAction::DeleteNewLine {
@@ -497,16 +516,53 @@ where
                 column: _,
                 index,
             } => {
-
                 let line = self.tokens.token_lines().skip(*line).next();
                 assert!(line.is_some(), "Expected line to be found");
-                assert!(line.unwrap().is_empty(), "Expected line to be empty");
                 if let Some(token) = self.tokens.get_mut(*index) {
                     token.delta_line -= 1;
                 }
-            },
-            TokenAction::JoinLine { line, column, index } => {
-
+            }
+            TokenAction::JoinLine {
+                line,
+                column: _,
+                index,
+            } => {
+                let decorated_line = self.decorated_lines(*line, 1).first().cloned();
+                let mut extra_delta = 0;
+                // TODO: Need to get the last two
+                // So if the last isn't a token I can get the the second to last entry
+                // for a token length
+                if let Some(line) = decorated_line {
+                    let line : Vec<_> = line.iter().rev().take(2).rev().collect();
+                    match (line.get(0), line.get(1)) {
+                        (None, None) => {}
+                        (None, Some((text, None))) => {
+                            extra_delta = text.len()
+                        }
+                        (Some((text, None)), None) => {
+                            extra_delta = text.len()
+                        }
+                        (None, Some((_, Some(token)))) => {
+                            extra_delta = token.length
+                        }
+                        (Some((_, Some(token))), None) => {
+                            extra_delta = token.length
+                        }
+                        (_, Some((_, Some(token)))) => {
+                            extra_delta = token.length
+                        }
+                        (Some((_, Some(token))), Some((text, None))) => {
+                            extra_delta = token.length + text.len()
+                        }
+                        (Some((_, None)), Some((_, None))) => {
+                            unreachable!("Should not have this")
+                        }
+                    }
+                }
+                if let Some(token) = self.tokens.get_mut(*index) {
+                    token.delta_line -= 1;
+                    token.delta_start += extra_delta;
+                }
             }
         }
     }
@@ -517,7 +573,6 @@ where
         target_column: usize,
         starting_index: usize,
     ) -> TokenWindowKind {
-
         // TODO: offset is wrong
         // What exactly is offset supposed to be?
         // I think I'm defining it as offset from last token
@@ -528,13 +583,17 @@ where
             let end = current_column + text.len();
             if target_column < end && target_column > current_column {
                 if token.is_some() {
-
                     let offset = target_column.saturating_sub(current_column);
                     return TokenWindowKind::Inside {
                         index: current_index,
                         offset,
                     };
                 } else {
+                    if index == line.len() -1 {
+                        return TokenWindowKind::Above { 
+                            index: current_index,
+                        };
+                    }
                     let offset = target_column - current_column;
                     return TokenWindowKind::Left {
                         index: current_index,
@@ -542,31 +601,29 @@ where
                     };
                 }
             } else if target_column == current_column {
-                if index == line.len() - 1 {
-                    return TokenWindowKind::Above {
+                if index == line.len() -1 && token.is_none() {
+                    return TokenWindowKind::Above { 
                         index: current_index,
                     };
-                } else {
-                    let offset = if let Some(token) = token {
-                       if let Some(left_token) = self.tokens.get(current_index.saturating_sub(1)) {
-                            if token.delta_line == 0 {
-                                token.delta_start.saturating_sub(left_token.length)
-                            }
-                            else {
-                                token.delta_start
-                            }
+                }
 
+                let offset = if let Some(token) = token {
+                    if let Some(left_token) = self.tokens.get(current_index.saturating_sub(1)) {
+                        if token.delta_line == 0 {
+                            token.delta_start.saturating_sub(left_token.length)
                         } else {
-                            0
+                            token.delta_start
                         }
                     } else {
                         0
-                    };
-                    return TokenWindowKind::Left {
-                        index: current_index,
-                        offset,
-                    };
-                }
+                    }
+                } else {
+                    0
+                };
+                return TokenWindowKind::Left {
+                    index: current_index,
+                    offset,
+                };
             }
             if token.is_some() {
                 current_index += 1;
@@ -577,6 +634,11 @@ where
         TokenWindowKind::Above {
             index: current_index,
         }
+    }
+
+    fn add_edit_action(&mut self, event: EditEvent) {
+        self.document_version += 1;
+        self.edits.push(event);
     }
 }
 
@@ -601,9 +663,12 @@ where
     fn insert_bytes(&mut self, line: usize, column: usize, text: &[Self::Item]) {
         self.update_tokens_insert(line, column, text);
         self.underlying_text_buffer.insert_bytes(line, column, text);
-        self.edits.push(EditEvent {
+
+        let event = EditEvent {
             edit: Edit::Insert(line, column, text.to_vec()),
-        });
+        };
+
+        self.add_edit_action(event);
     }
 
     fn byte_at_pos(&self, line: usize, column: usize) -> Option<&Self::Item> {
@@ -636,6 +701,7 @@ impl TokenTextBuffer<SimpleTextBuffer> {
     pub fn new_with_contents(contents: &[u8]) -> Self {
         let underlying_text_buffer = SimpleTextBuffer::new_with_contents(contents);
         Self {
+            document_version: 0,
             tokens: vec![],
             underlying_text_buffer,
             edits: vec![],
@@ -786,9 +852,6 @@ pub trait VirtualCursor: Clone + Debug {
     fn column(&self) -> usize;
     fn new(line: usize, column: usize) -> Self;
 
-
-    
-
     fn move_to_bounded<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) {
         let line = min(buffer.last_line(), line);
         let column = min(buffer.line_length(line), column);
@@ -852,7 +915,9 @@ pub trait VirtualCursor: Clone + Debug {
 
     fn line_at<T: TextBuffer<Item = u8>>(&mut self, line: usize, buffer: &T) -> Option<String> {
         let found_line = buffer.lines().skip(line).next();
-        found_line.and_then(|x| from_utf8(x).ok()).map(|x| x.to_string())
+        found_line
+            .and_then(|x| from_utf8(x).ok())
+            .map(|x| x.to_string())
     }
 
     fn right_of<T: TextBuffer>(&self, buffer: &T) -> Self {
@@ -924,7 +989,7 @@ pub trait VirtualCursor: Clone + Debug {
             _ => false,
         }
     }
-    
+
     fn is_new_line(byte: &[u8]) -> bool {
         match byte {
             b"\n" => true,
@@ -932,48 +997,55 @@ pub trait VirtualCursor: Clone + Debug {
         }
     }
 
-    fn get_last_relevant_character<T: TextBuffer<Item = u8>>(&mut self, buffer: &mut T) -> Option<u8> {
-        let current_line = self.line_at(self.line(), buffer);
-        current_line
-            .and_then(|x| last_non_whitespace_character(&x))
-            .or_else(|| {
-                let previous_line = self.line_at(self.above(buffer).line(), buffer);
-                previous_line.and_then(|x| last_non_whitespace_character(&x))
-            })
-    }
-
     fn get_last_line<T: TextBuffer<Item = u8>>(&mut self, buffer: &mut T) -> Option<String> {
-        self.line_at(self.line(), buffer)
+        if self.line() == 0 {
+            return None;
+        }
+        let above = self.above(buffer);
+        self.line_at(above.line(), buffer)
     }
 
-    
     /// Broken
     fn auto_indent<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
-        let last_line : Option<String> = self.get_last_line(buffer);
-        if let Some(last_line) = last_line {
-            let indent = get_indent(&last_line);
-            let last_character = last_non_whitespace_character(&last_line);
-            match last_character {
-                Some(b'{') => {
-                    self.insert_normal_text(to_insert, buffer);
-                    self.handle_insert(increase_indent(indent).as_bytes(), buffer);
-                }
-                Some(b'}') => {
+        let last_line: Option<String> = self.get_last_line(buffer);
+        let current_line: Option<String> = self.line_at(self.line(), buffer);
+        if let (Some(last_line), Some(current_line)) = (last_line, current_line) {
+            let indent = get_indent(&current_line);
+            if let Some((last_character_index, last_character)) =
+                last_non_whitespace_character(&current_line)
+            {
+                if self.column() < last_character_index {
                     self.insert_normal_text(to_insert, buffer);
                     self.handle_insert(indent.as_bytes(), buffer);
+                } else {
+                    match last_character {
+                        b'{' => {
+                            self.insert_normal_text(to_insert, buffer);
+                            self.handle_insert(increase_indent(indent).as_bytes(), buffer);
+                        }
+                        b'}' => {
+                            self.insert_normal_text(to_insert, buffer);
+                            self.handle_insert(indent.as_bytes(), buffer);
+                        }
+                        _ => {
+                            self.insert_normal_text(to_insert, buffer);
+                            self.handle_insert(indent.as_bytes(), buffer);
+                        }
+                    };
                 }
-                _ => {
-                    self.insert_normal_text(to_insert, buffer);
-                    self.handle_insert(indent.as_bytes(), buffer);
-                }
-            };
+            } else {
+                self.insert_normal_text(to_insert, buffer);
+                self.handle_insert(indent.as_bytes(), buffer);
+            }
         } else {
             self.insert_normal_text(to_insert, buffer);
         }
-        
     }
 
     fn handle_insert<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
+        if to_insert.is_empty() {
+            return;
+        }
         if Self::is_open_bracket(to_insert) {
             // Would need to have a setting for this
             self.auto_bracket_insert(buffer, to_insert);
@@ -1004,11 +1076,11 @@ fn increase_indent(indent: String) -> String {
     indent + "    "
 }
 
-fn last_non_whitespace_character(line: &String) -> Option<u8> {
+fn last_non_whitespace_character(line: &String) -> Option<(usize, u8)> {
     // last non_whitespace
-    for byte in line.as_bytes().iter().rev() {
+    for (index, byte) in line.as_bytes().iter().enumerate().rev() {
         if !byte.is_ascii_whitespace() {
-            return Some(*byte);
+            return Some((index, *byte));
         }
     }
     None
@@ -1345,8 +1417,6 @@ mod tests {
         }
     }
 }
-
-
 
 // TODO:
 // I need auto indent
