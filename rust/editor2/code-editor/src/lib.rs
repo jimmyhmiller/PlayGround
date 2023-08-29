@@ -180,8 +180,9 @@ impl App for TextWidget {
             canvas.draw_str(line, -600.0, -400.0 + i as f32 * 32.0);
         }
 
-        let last_ten_token_actions = self.text_pane.text_buffer.token_actions.len().saturating_sub(10);
-        for (i, action) in self.text_pane.text_buffer.token_actions.iter().skip(last_ten_token_actions).enumerate() {
+        let x = 20;
+        let last_x_token_actions = self.text_pane.text_buffer.token_actions.len().saturating_sub(x);
+        for (i, action) in self.text_pane.text_buffer.token_actions.iter().skip(last_x_token_actions).enumerate() {
             let action = format!("{:?}", action);
             canvas.draw_str(&action, 1200.0, 0.0 + i as f32 * 32.0);
         }
@@ -342,7 +343,6 @@ impl App for TextWidget {
                 .handle_insert(&[char as u8], &mut self.text_pane.text_buffer);
         }
 
-        // TODO: I actually want the new edits, not all of them.
         for edit in self.text_pane.text_buffer.drain_edits() {
             self.send_event(
                 "text_change",
@@ -353,10 +353,6 @@ impl App for TextWidget {
                 .unwrap(),
             );
         }
-
-        // TODO: Send message about what changed
-        // Listen to that message and send to lsp
-        // Update tokens
 
         match input.key_code {
             KeyCode::UpArrow => {
@@ -429,6 +425,8 @@ impl App for TextWidget {
                     if tokens.path != self.file_path {
                         return;
                     }
+
+                    // TODO: I need to make sure the tokens are the current edit
                     let tokens = parse_tokens(&tokens.tokens);
                     if !tokens.is_empty() {
                         self.staged_tokens = tokens.clone();
