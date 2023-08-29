@@ -638,6 +638,7 @@ where
 
     fn add_edit_action(&mut self, event: EditEvent) {
         self.document_version += 1;
+        println!("INCREMENTING VERSION TO {}", self.document_version);
         self.edits.push(event);
     }
 }
@@ -683,7 +684,7 @@ where
             .clone();
         self.update_tokens_delete(line, column, &[byte]);
         self.underlying_text_buffer.delete_char(line, column);
-        self.edits.push(EditEvent {
+        self.add_edit_action(EditEvent {
             edit: Edit::Delete(line, column),
         });
     }

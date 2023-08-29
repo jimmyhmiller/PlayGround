@@ -308,8 +308,11 @@ pub trait App {
         unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
     }
     fn send_message(&mut self, process_id: i32, message: String) {
+        let ptr = message.as_ptr();
+        let len = message.len();
+        std::mem::forget(message);
         unsafe {
-            send_message_low_level(process_id, message.as_ptr() as i32, message.len() as i32);
+            send_message_low_level(process_id, ptr as i32, len as i32);
         }
     }
     fn on_process_message(&mut self, _process_id: i32, _message: String) {}
