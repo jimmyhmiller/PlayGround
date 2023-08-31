@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs::{self, File},
     io::Read,
-    str::{from_utf8, FromStr},
+    str::{from_utf8, FromStr}, thread::sleep, time::Duration,
 };
 
 use framework::{
@@ -372,6 +372,7 @@ impl ProcessSpawner {
         self.state.state = State::Initialized;
         self.resolve_workspace_symbols();
         for file in self.state.open_files.clone().iter() {
+            self.open_file(file);
             self.request_tokens(file, 0);
         }
     }
@@ -437,17 +438,19 @@ impl App for ProcessSpawner {
         println!("Got event: {}", kind);
         match kind.as_str() {
             "text_change_multi" => {
-
                 let edits: MultiEditWithPath = serde_json::from_str(&event).unwrap();
+                let path = &edits.path.clone();
+                if self.state.open_files.contains(path) == false {
+                    self.open_file(&path);
+                }
                 println!("Multi Version {}", edits.version);
                 self.update_document(&edits);
+                sleep(Duration::from_millis(10));
                 self.request_tokens(&edits.path, edits.version);
             }
             "lith/open-file" => {
                 let info: OpenFileInfo = serde_json::from_str(&event).unwrap();
                 self.state.open_files.push(info.path.clone());
-                self.open_file(&info.path);
-                self.request_tokens(&info.path, 0);
             }
             _ => {
                 println!("Unknown event: {}", kind);
