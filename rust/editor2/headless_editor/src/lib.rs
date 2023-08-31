@@ -1,5 +1,5 @@
 use core::cmp::min;
-use core::fmt::Debug;
+ use core::fmt::Debug;
 use std::collections::HashMap;
 use std::str::from_utf8;
 // TODO: I probably do need to return actions here
@@ -257,6 +257,7 @@ where
             .iter()
             .enumerate()
         {
+
             if line_number == target_line {
                 let token_window_kind: TokenWindowKind =
                     self.find_token_in_line(line, target_column, total_tokens);
@@ -715,12 +716,14 @@ pub struct TokenLineIter<'a> {
     current_position: usize,
     tokens: &'a [Token],
     empty_lines: usize,
+    inital_empty_lines: bool
 }
 
 impl<'a> Iterator for TokenLineIter<'a> {
     type Item = &'a [Token];
     fn next(&mut self) -> Option<Self::Item> {
         let original_position = self.current_position;
+
 
         if self.empty_lines > 0 {
             self.empty_lines -= 1;
@@ -734,6 +737,10 @@ impl<'a> Iterator for TokenLineIter<'a> {
             } else if self.current_position != original_position && token.delta_line > 1 {
                 self.empty_lines = token.delta_line - 1;
                 return Some(&self.tokens[original_position..self.current_position]);
+            } else if self.current_position == 0 && token.delta_line >= 1 && self.inital_empty_lines == false {
+                self.empty_lines = token.delta_line - 1;
+                self.inital_empty_lines = true;
+                return Some(&[]);
             }
             self.current_position += 1;
         }
@@ -755,6 +762,7 @@ impl<'a> TokenLinerIterExt<'a> for &'a [Token] {
             current_position: 0,
             tokens: self,
             empty_lines: 0,
+            inital_empty_lines: false,
         }
     }
 }

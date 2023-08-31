@@ -358,15 +358,17 @@ impl App for TextWidget {
         }
 
         let edits = self.text_pane.text_buffer.drain_edits();
-        println!("Version: {}", self.text_pane.text_buffer.document_version);
-        self.send_event(
-            "text_change_multi", 
-            serde_json::ser::to_string(&MultiEditWithPath {
-                version: self.text_pane.text_buffer.document_version,
-                edits: edits.iter().map(|x| x.edit.clone()).collect(),
-                path: self.file_path.clone(),
-            }).unwrap()
-        );
+        if !edits.is_empty() {
+            self.send_event(
+                "text_change_multi", 
+                serde_json::ser::to_string(&MultiEditWithPath {
+                    version: self.text_pane.text_buffer.document_version,
+                    edits: edits.iter().map(|x| x.edit.clone()).collect(),
+                    path: self.file_path.clone(),
+                }).unwrap()
+            );
+        }
+       
         // for edit in edits.clone() {
         //     self.send_event(
         //         "text_change",
