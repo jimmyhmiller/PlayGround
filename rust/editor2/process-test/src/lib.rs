@@ -425,7 +425,7 @@ impl App for ProcessSpawner {
         let ui = ui.pane(
             self.state.size,
             (0.0, self.state.y_scroll_offset),
-            ui.list(self.state.messages_by_type.iter(), |ui, item| {
+            ui.list((0.0, self.state.y_scroll_offset), self.state.messages_by_type.iter(), |ui, item| {
                 ui.container(ui.text(&format!("{}: {}", item.0, item.1.len())))
             }),
         );
@@ -521,6 +521,7 @@ impl App for ProcessSpawner {
                                     let parsed_message =
                                         serde_json::from_value::<InitializeResult>(result.clone())
                                             .unwrap();
+
                                     if let Some(token_provider) =
                                         parsed_message.capabilities.semantic_tokens_provider
                                     {

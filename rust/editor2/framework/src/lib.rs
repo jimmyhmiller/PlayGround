@@ -113,7 +113,7 @@ impl Rect {
 pub struct Ui {}
 pub enum Component {
     Pane(Size, (f32, f32), Box<Component>),
-    List(Vec<Component>),
+    List(Vec<Component>, (f32, f32)),
     Container(Box<Component>),
     Text(String),
 }
@@ -136,7 +136,7 @@ impl Component {
                 canvas.translate(0.0, 50.0);
                 child.draw(canvas);
             }
-            Component::List(children) => {
+            Component::List(children, scroll_offset) => {
                 for child in children.iter() {
                     child.draw(canvas);
                     // TODO: need to translate based on height of component
@@ -165,11 +165,13 @@ impl Ui {
         Component::Pane(size, scroll_offset, Box::new(child))
     }
 
-    pub fn list<Item, I>(&self, items: I, f: impl Fn(&Self, Item) -> Component) -> Component
+    pub fn list<Item, I>(&self, scroll_offset: (f32, f32), items: I, f: impl Fn(&Self, Item) -> Component) -> Component
     where
         I: Iterator<Item = Item>,
     {
-        Component::List(items.map(|item| f(self, item)).collect())
+        // TODO: Make skip and take not be ad-hoc
+        let to_skip = (-scroll_offset.1/30.0).floor() as usize;
+        Component::List(items.skip(to_skip).take(50).map(|item| f(self, item)).collect(), scroll_offset)
     }
 
     pub fn container(&self, child: Component) -> Component {

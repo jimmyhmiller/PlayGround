@@ -6,12 +6,13 @@ struct Event {
     kind: String,
     event: String,
 }
-
+ 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct EventViewer {
     size: Size,
     events: Vec<Event>,
     y_scroll_offset: f32,
+    x_scroll_offset: f32,
 }
 
 impl App for EventViewer {
@@ -22,6 +23,7 @@ impl App for EventViewer {
             size: Size::default(),
             events: Vec::new(),
             y_scroll_offset: 0.0,
+            x_scroll_offset: 0.0,
         };
         me.subscribe("*");
         me
@@ -34,9 +36,9 @@ impl App for EventViewer {
         let ui = Ui::new();
         let ui = ui.pane(
             self.size,
-            (0.0, self.y_scroll_offset),
-            ui.list(self.events.iter(), |ui, event|
-                ui.container(ui.text(&event.kind))
+            (self.x_scroll_offset, 0.0),
+            ui.list((0.0, self.y_scroll_offset), self.events.iter(), |ui, event|
+                ui.container(ui.text(&format!("{}, {}", event.kind, event.event)))
             ),
         );
         ui.draw(&mut canvas);
@@ -48,10 +50,14 @@ impl App for EventViewer {
 
     // TODO: It would be nice to have scroll work for free
     // by default and only need to deal with overriding it.
-    fn on_scroll(&mut self, _x: f64, y: f64) {
+    fn on_scroll(&mut self, x: f64, y: f64) {
         self.y_scroll_offset += y as f32;
         if self.y_scroll_offset > 0.0 {
             self.y_scroll_offset = 0.0;
+        }
+        self.x_scroll_offset -= x as f32;
+        if self.x_scroll_offset > 0.0 {
+            self.x_scroll_offset = 0.0;
         }
     }
 
