@@ -4,7 +4,7 @@ use std::{
     path::Path,
     sync::{mpsc, Arc},
     thread,
-    time::Duration,
+    time::Duration, io::Write,
 };
 
 use bytesize::ByteSize;
@@ -1255,6 +1255,19 @@ impl WasmInstance {
                 state
                     .commands
                     .push(Command::SendProcessMessage(process_id, message));
+            },
+        )?;
+
+        linker.func_wrap(
+            "host",
+            "save_file_low_level",
+            |mut caller: Caller<'_, State>, path_ptr: i32, path_len: i32, text_ptr: i32, text_len: i32| {
+                let path = get_string_from_caller(&mut caller, path_ptr, path_len);
+                let text = get_string_from_caller(&mut caller, text_ptr, text_len);
+                // open file at path and save text
+                // I should almost certainly do a command here but I just want to get it working
+                let mut file = std::fs::File::create(path).unwrap();
+                file.write_all(text.as_bytes()).unwrap();
             },
         )?;
 
