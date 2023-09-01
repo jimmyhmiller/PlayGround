@@ -311,7 +311,9 @@ impl App for TextWidget {
     }
 
     fn on_click(&mut self, x: f32, y: f32) {
-        println!("click!");
+        if self.text_pane.text_buffer.tokens.is_empty() {
+            self.send_open_file();
+        }
         // TODO: Need to handle margin here.
         let margin = 20;
         let lines_above = self.text_pane.lines_above_scroll();
@@ -429,13 +431,7 @@ impl App for TextWidget {
             let contents = std::fs::read(file);
             match contents {
                 Ok(contents) => {
-                    self.send_event(
-                        "lith/open-file",
-                        json!({
-                            "path": self.file_path,
-                        })
-                        .to_string(),
-                    );
+                    self.send_open_file();
                     self.text_pane.text_buffer.set_contents(&contents);
                 }
                 Err(e) => {
@@ -485,6 +481,19 @@ impl App for TextWidget {
 
     fn on_size_change(&mut self, width: f32, height: f32) {
         self.widget_data.size = Size { width, height };
+    }
+}
+
+impl TextWidget {
+    fn send_open_file(&mut self) {
+        self.send_event(
+            "lith/open-file",
+            json!({
+                "version": self.text_pane.text_buffer.document_version,
+                "path": self.file_path,
+            })
+            .to_string(),
+        );
     }
 }
 
