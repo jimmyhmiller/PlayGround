@@ -574,7 +574,7 @@ where
         target_column: usize,
         starting_index: usize,
     ) -> TokenWindowKind {
-        // TODO: offset is wrong
+        // TODO: offset is wrong on the first line when deleting spaces
         // What exactly is offset supposed to be?
         // I think I'm defining it as offset from last token
         // but it should be last token on line

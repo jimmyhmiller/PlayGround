@@ -181,25 +181,25 @@ impl App for TextWidget {
             .skip(current_token_window.index.saturating_sub(context))
             .take(context * 2 + 1);
 
-        for (i, (index, token)) in context_window.enumerate() {
-            if index == current_token_window.index {
-                canvas.set_color(&Color::parse_hex("#ffffff"));
-            } else {
-                canvas.set_color(&foreground);
-            }
-            canvas.draw_str(&format!("{:?}", token), 0.0, -700.0 + i as f32 * 32.0);
-        }
+        // for (i, (index, token)) in context_window.enumerate() {
+        //     if index == current_token_window.index {
+        //         canvas.set_color(&Color::parse_hex("#ffffff"));
+        //     } else {
+        //         canvas.set_color(&foreground);
+        //     }
+        //     canvas.draw_str(&format!("{:?}", token), 0.0, -700.0 + i as f32 * 32.0);
+        // }
 
-        for (i, line) in token_output.lines().enumerate() {
-            canvas.draw_str(line, -600.0, -400.0 + i as f32 * 32.0);
-        }
+        // for (i, line) in token_output.lines().enumerate() {
+        //     canvas.draw_str(line, -600.0, -400.0 + i as f32 * 32.0);
+        // }
 
-        let x = 20;
-        let last_x_token_actions = self.text_pane.text_buffer.token_actions.len().saturating_sub(x);
-        for (i, action) in self.text_pane.text_buffer.token_actions.iter().skip(last_x_token_actions).enumerate() {
-            let action = format!("{:?}", action);
-            canvas.draw_str(&action, 1200.0, 0.0 + i as f32 * 32.0);
-        }
+        // let x = 20;
+        // let last_x_token_actions = self.text_pane.text_buffer.token_actions.len().saturating_sub(x);
+        // for (i, action) in self.text_pane.text_buffer.token_actions.iter().skip(last_x_token_actions).enumerate() {
+        //     let action = format!("{:?}", action);
+        //     canvas.draw_str(&action, 1200.0, 0.0 + i as f32 * 32.0);
+        // }
 
         let bounding_rect = Rect::new(
             0.0,
