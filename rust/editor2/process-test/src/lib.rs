@@ -31,16 +31,17 @@ struct TokenRequestMeta {
 #[derive(Clone, Deserialize, Serialize)]
 struct Data {
     state: State,
+    pending_tokens: Vec<(String, usize)>,
     message_type: HashMap<String, String>,
     last_request_id: usize,
     messages_by_type: HashMap<String, Vec<String>>,
     token_request_metadata: HashMap<String, TokenRequestMeta>,
-    open_files: Vec<String>,
+    open_files: Vec<OpenFileInfo>,
     size: Size,
     y_scroll_offset: f32,
 }
 
-#[derive(Copy, Clone, Deserialize, Serialize)]
+#[derive(Copy, Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
 enum State {
     Initializing,
     Initialized,
@@ -228,6 +229,11 @@ impl ProcessSpawner {
     }
 
     fn request_tokens(&mut self, path: &str, document_version: usize) {
+
+        if self.state.state != State::Initialized {
+            self.state.pending_tokens.push((path.to_string(), document_version));
+            return;
+        }
         let params: <SemanticTokensFullRequest as Request>::Params = SemanticTokensParams {
             text_document: TextDocumentIdentifier {
                 uri: Url::from_str(&format!("file://{}", path)).unwrap(),
@@ -374,16 +380,17 @@ impl ProcessSpawner {
         // TODO: Get list of initial open files
         self.state.state = State::Initialized;
         self.resolve_workspace_symbols();
-        for file in self.state.open_files.clone().iter() {
-            self.open_file(file);
-            self.request_tokens(file, 0);
+        for info in self.state.open_files.clone().iter() {
+            self.open_file(&info.path);
+            self.request_tokens(&info.path, info.version);
         }
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq, Eq)]
 struct OpenFileInfo {
     path: String,
+    version: usize,
 }
 
 impl App for ProcessSpawner {
@@ -392,6 +399,7 @@ impl App for ProcessSpawner {
     fn init() -> Self {
         let mut me = ProcessSpawner {
             state: Data {
+                pending_tokens: Vec::new(),
                 state: State::Initializing,
                 message_type: HashMap::new(),
                 token_request_metadata: HashMap::new(),
@@ -443,19 +451,20 @@ impl App for ProcessSpawner {
             "text_change_multi" => {
                 let edits: MultiEditWithPath = serde_json::from_str(&event).unwrap();
                 let path = &edits.path.clone();
-                if !self.state.open_files.contains(path) {
-                    self.state.open_files.push(path.clone());
-                    self.open_file(&path);
-                }
                 println!("Multi Version {}", edits.version);
                 self.update_document(&edits);
                 self.request_tokens(&edits.path, edits.version);
             }
             "lith/open-file" => {
                 let info: OpenFileInfo = serde_json::from_str(&event).unwrap();
-                self.state.open_files.push(info.path.clone());
-                self.open_file(&info.path);
-                self.request_tokens(&info.path, 0);
+                if !self.state.open_files.contains(&info) {
+                    self.state.open_files.push(info.clone());
+                    self.request_tokens(&info.path, info.version);
+                    if self.state.state == State::Initialized {
+                        self.open_file(&info.path);
+                    }
+                }
+               
             }
             _ => {
                 println!("Unknown event: {}", kind);
