@@ -257,6 +257,8 @@ impl ProcessSpawner {
         for edit in edits.edits.iter() {
             match edit {
                 Edit::Insert(line, column, bytes) => {
+                    // NOTE: for inserts we just always do the starting position
+                    // I think we'd have do something else for replacements.
                     content_changes.push(TextDocumentContentChangeEvent {
                         range: Some(Range {
                             start: Position {
@@ -265,7 +267,7 @@ impl ProcessSpawner {
                             },
                             end: Position {
                                 line: *line as u32,
-                                character: (column + bytes.len() - 1) as u32,
+                                character: *column as u32
                             },
                         }),
                         range_length: None,
@@ -273,6 +275,7 @@ impl ProcessSpawner {
                     })
                 }
                 Edit::Delete(line, column) => {
+                    // TODO: Should we do a +1 here?
                     content_changes.push(TextDocumentContentChangeEvent {
                         range: Some(Range {
                             start: Position {
@@ -440,17 +443,19 @@ impl App for ProcessSpawner {
             "text_change_multi" => {
                 let edits: MultiEditWithPath = serde_json::from_str(&event).unwrap();
                 let path = &edits.path.clone();
-                if self.state.open_files.contains(path) == false {
+                if !self.state.open_files.contains(path) {
+                    self.state.open_files.push(path.clone());
                     self.open_file(&path);
                 }
                 println!("Multi Version {}", edits.version);
                 self.update_document(&edits);
-                sleep(Duration::from_millis(10));
                 self.request_tokens(&edits.path, edits.version);
             }
             "lith/open-file" => {
                 let info: OpenFileInfo = serde_json::from_str(&event).unwrap();
                 self.state.open_files.push(info.path.clone());
+                self.open_file(&info.path);
+                self.request_tokens(&info.path, 0);
             }
             _ => {
                 println!("Unknown event: {}", kind);
