@@ -48,6 +48,7 @@ pub trait TextBuffer {
         self.line_count().saturating_sub(1)
     }
     fn set_contents(&mut self, contents: &[Self::Item]);
+    fn contents(&self) -> &[Self::Item];
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -697,6 +698,10 @@ where
     fn set_contents(&mut self, contents: &[Self::Item]) {
         self.underlying_text_buffer.set_contents(contents);
     }
+
+    fn contents(&self) -> &[Self::Item] {
+        self.underlying_text_buffer.contents()
+    }
 }
 
 impl TokenTextBuffer<SimpleTextBuffer> {
@@ -852,6 +857,10 @@ impl TextBuffer for SimpleTextBuffer {
 
     fn set_contents(&mut self, contents: &[Self::Item]) {
         self.bytes = contents.to_vec();
+    }
+
+    fn contents(&self) -> &[Self::Item] {
+        &self.bytes
     }
 }
 
@@ -1361,6 +1370,10 @@ impl TextBuffer for EventTextBuffer {
     }
     fn set_contents(&mut self, contents: &[Self::Item]) {
         self.bytes = contents.to_vec();
+    }
+
+    fn contents(&self) -> &[Self::Item] {
+        &self.bytes
     }
 }
 

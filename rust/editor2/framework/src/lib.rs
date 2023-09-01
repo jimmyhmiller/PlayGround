@@ -21,6 +21,8 @@ extern "C" {
     #[allow(unused)]
     fn start_process_low_level(ptr: i32, len: i32) -> i32;
     #[allow(unused)]
+    fn save_file_low_level(path_ptr: i32, path_length: i32, text_ptr: i32, text_length: i32);
+    #[allow(unused)]
     fn send_message_low_level(process_id: i32, ptr: i32, len: i32);
     #[allow(improper_ctypes)]
     #[allow(unused)]
@@ -108,8 +110,6 @@ impl Rect {
     }
 }
 
-
-
 pub struct Ui {}
 pub enum Component {
     Pane(Size, (f32, f32), Box<Component>),
@@ -165,8 +165,10 @@ impl Ui {
         Component::Pane(size, scroll_offset, Box::new(child))
     }
 
-    pub fn list<Item,I>(&self, items: I, f: impl Fn(&Self, Item) -> Component) -> Component
-        where I: Iterator<Item = Item>, {
+    pub fn list<Item, I>(&self, items: I, f: impl Fn(&Self, Item) -> Component) -> Component
+    where
+        I: Iterator<Item = Item>,
+    {
         Component::List(items.map(|item| f(self, item)).collect())
     }
 
@@ -271,13 +273,11 @@ impl Size {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum CursorIcon {
     Default = 0,
     Text = 1,
 }
-
 
 impl From<u32> for CursorIcon {
     fn from(i: u32) -> Self {
@@ -288,7 +288,6 @@ impl From<u32> for CursorIcon {
         }
     }
 }
-
 
 pub trait App {
     type State;
@@ -306,6 +305,19 @@ pub trait App {
     fn set_state(&mut self, state: Self::State);
     fn start_process(&mut self, process: String) -> i32 {
         unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
+    }
+    // TODO: I need a standard way to send strings to host
+    // I have a forget in send_message because I'm pretty sure I needed it
+    // but I don't have it elsewhere. I should also probably look into WIT at some point
+    fn save_file(&self, path: String, text: String) {
+        unsafe {
+            save_file_low_level(
+                path.as_ptr() as i32,
+                path.len() as i32,
+                text.as_ptr() as i32,
+                text.len() as i32,
+            )
+        }
     }
     fn send_message(&mut self, process_id: i32, message: String) {
         let ptr = message.as_ptr();
@@ -395,7 +407,6 @@ pub trait App {
         let result = fetch_string(ptr);
         Some(result)
     }
-    
 }
 
 #[no_mangle]
@@ -547,8 +558,7 @@ pub mod macros {
                 let data =
                     unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
                 use framework::decode_base64;
-                let s = decode_base64(data)
-                    .map(|v| String::from_utf8(v).unwrap());
+                let s = decode_base64(data).map(|v| String::from_utf8(v).unwrap());
                 match s {
                     Ok(s) => {
                         if let Ok(state) = $crate::macros::serde_json::from_str(&s) {

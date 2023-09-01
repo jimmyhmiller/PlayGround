@@ -317,11 +317,13 @@ impl App for TextWidget {
         // TODO: Need to handle margin here.
         let margin = 20;
         let lines_above = self.text_pane.lines_above_scroll();
-        let line =
-            (((y - margin as f32) / self.text_pane.line_height).ceil() as usize + lines_above).saturating_sub(1);
+        let line = (((y - margin as f32) / self.text_pane.line_height).ceil() as usize
+            + lines_above)
+            .saturating_sub(1);
         let char_width = 16.0;
         let column = (((x - margin as f32) / char_width).ceil() as usize)
-            .saturating_sub((self.text_pane.offset.x / char_width) as usize).saturating_sub(1);
+            .saturating_sub((self.text_pane.offset.x / char_width) as usize)
+            .saturating_sub(1);
         self.text_pane
             .cursor
             .move_to_bounded(line, column, &self.text_pane.text_buffer);
@@ -345,9 +347,12 @@ impl App for TextWidget {
                 .delete_char(&mut self.text_pane.text_buffer),
             KeyCode::S => {
                 if input.modifiers.cmd {
-                    self.text_pane
-                        .text_buffer
-                        .set_tokens(self.staged_tokens.clone());
+                    self.save_file(
+                        self.file_path.clone(),
+                        from_utf8(self.text_pane.text_buffer.contents())
+                            .unwrap()
+                            .to_string(),
+                    );
                     return;
                 }
             }
@@ -362,15 +367,16 @@ impl App for TextWidget {
         let edits = self.text_pane.text_buffer.drain_edits();
         if !edits.is_empty() {
             self.send_event(
-                "text_change_multi", 
+                "text_change_multi",
                 serde_json::ser::to_string(&MultiEditWithPath {
                     version: self.text_pane.text_buffer.document_version,
                     edits: edits.iter().map(|x| x.edit.clone()).collect(),
                     path: self.file_path.clone(),
-                }).unwrap()
+                })
+                .unwrap(),
             );
         }
-       
+
         // for edit in edits.clone() {
         //     self.send_event(
         //         "text_change",
@@ -446,14 +452,16 @@ impl App for TextWidget {
     fn on_event(&mut self, kind: String, event: String) {
         println!("event: {}", kind);
         if kind == "tokens_with_version" {
-
-            if let Ok(tokens) =  serde_json::from_str::<TokensWithVersion>(&event) {
+            if let Ok(tokens) = serde_json::from_str::<TokensWithVersion>(&event) {
                 if tokens.path != self.file_path {
                     println!("path mismatch");
                     return;
                 }
                 if tokens.version != self.text_pane.text_buffer.document_version {
-                    println!("version mismatch tokens: {}  pane: {}", tokens.version, self.text_pane.text_buffer.document_version);
+                    println!(
+                        "version mismatch tokens: {}  pane: {}",
+                        tokens.version, self.text_pane.text_buffer.document_version
+                    );
                     return;
                 }
                 let tokens = parse_tokens(&tokens.tokens);
@@ -465,7 +473,6 @@ impl App for TextWidget {
             } else {
                 println!("Error parsing tokens: {}", event);
             }
-
         } else if kind == "color_mapping_changed" {
             if let Ok(mapping) =
                 serde_json::from_str::<HashMap<usize, String>>(from_utf8(event.as_bytes()).unwrap())
