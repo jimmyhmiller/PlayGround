@@ -318,6 +318,9 @@ where
     ) -> Vec<TokenAction> {
         let mut actions = vec![];
 
+        if window.kind.is_none() {
+            return vec![];
+        }
         // TODO: Extend tokens based on offset
         match window.kind.unwrap() {
             TokenWindowKind::Left { .. } => {
