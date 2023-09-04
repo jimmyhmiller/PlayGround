@@ -26,7 +26,9 @@ impl Editor {
             match event {
                 Event::DroppedFile { path, x, y } => {
                     if path.extension().unwrap() == "wasm" {
-                        let wasm_id = self.wasm_messenger.new_instance(path.to_str().unwrap(), None);
+                        let wasm_id = self
+                            .wasm_messenger
+                            .new_instance(path.to_str().unwrap(), None);
                         self.widget_store.add_widget(Widget {
                             id: 0,
                             on_click: vec![],
@@ -289,7 +291,10 @@ impl Editor {
                 Event::OpenFile(path) => {
                     // TODO: Handle this better.
                     // Ugly recursive hack and just need to refactor.
-                    self.handle_events(vec![Event::Event("lith/open-file".to_string(), json!({ "path": path }).to_string())]);
+                    self.handle_events(vec![Event::Event(
+                        "lith/open-file".to_string(),
+                        json!({ "path": path }).to_string(),
+                    )]);
                 }
                 Event::KeyEvent {
                     input:
@@ -304,10 +309,10 @@ impl Editor {
                         if let Some(path) = path {
                             let path = path.replace("file://", "");
                             let code_editor = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/target/wasm32-wasi/debug/code_editor.wasm";
-                            let path_json = json!({
-                                "file_path": path
-                            }).to_string();
-                            let wasm_id = self.wasm_messenger.new_instance(code_editor, Some(path_json));
+                            let path_json = json!({ "file_path": path }).to_string();
+                            let wasm_id = self
+                                .wasm_messenger
+                                .new_instance(code_editor, Some(path_json));
                             self.widget_store.add_widget(Widget {
                                 id: 0,
                                 // TODO: Automatically find an open space
@@ -319,7 +324,7 @@ impl Editor {
                                 },
                                 on_click: vec![],
                                 scale: 1.0,
-                                data: WidgetData::Wasm { 
+                                data: WidgetData::Wasm {
                                     wasm: Wasm::new(code_editor.to_string()),
                                     wasm_id,
                                 },
@@ -329,16 +334,14 @@ impl Editor {
                         }
                     }
                 }
-                Event::SetCursor(cursor) => {
-                    match cursor {
-                        framework::CursorIcon::Default => {
-                            self.cursor_icon = winit::window::CursorIcon::Default;
-                        }
-                        framework::CursorIcon::Text => {
-                            self.cursor_icon = winit::window::CursorIcon::Text;
-                        }
+                Event::SetCursor(cursor) => match cursor {
+                    framework::CursorIcon::Default => {
+                        self.cursor_icon = winit::window::CursorIcon::Default;
                     }
-                }
+                    framework::CursorIcon::Text => {
+                        self.cursor_icon = winit::window::CursorIcon::Text;
+                    }
+                },
                 e => {
                     println!("Unhandled event {:?}", e)
                 }

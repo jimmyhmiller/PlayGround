@@ -32,7 +32,6 @@ pub fn setup_window(mut editor: editor::Editor) {
 
     let event_loop_proxy = events_loop.create_proxy();
 
-
     let window = WindowBuilder::new()
         .with_inner_size(size)
         .with_title("Lith".to_string())
@@ -42,11 +41,13 @@ pub fn setup_window(mut editor: editor::Editor) {
         .build(&events_loop)
         .unwrap();
 
-    editor.on_window_create(event_loop_proxy, widget::Size {
-        width: (size.width as f64 * window.scale_factor()) as f32,
-        height: (size.height as f64 * window.scale_factor()) as f32,
-    });
-    
+    editor.on_window_create(
+        event_loop_proxy,
+        widget::Size {
+            width: (size.width as f64 * window.scale_factor()) as f32,
+            height: (size.height as f64 * window.scale_factor()) as f32,
+        },
+    );
 
     let device = Device::system_default().expect("no device found");
 

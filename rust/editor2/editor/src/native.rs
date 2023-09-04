@@ -1,12 +1,13 @@
 use cacao::foundation::NSURL;
-use cocoa::{appkit::{NSOpenPanel, NSSavePanel, NSModalResponse}, base::nil};
-
-
+use cocoa::{
+    appkit::{NSModalResponse, NSOpenPanel, NSSavePanel},
+    base::nil,
+};
 
 pub fn open_file_dialog() -> Option<String> {
     // make an NsOpenPanel
     unsafe {
-        let panel =  NSOpenPanel::openPanel(nil);
+        let panel = NSOpenPanel::openPanel(nil);
         panel.setCanChooseFiles_(true);
         panel.setCanChooseDirectories_(false);
         panel.setAllowsMultipleSelection_(false);
@@ -18,9 +19,7 @@ pub fn open_file_dialog() -> Option<String> {
                 let path = url.absolute_string();
                 Some(path)
             }
-            NSModalResponse::NSModalResponseCancel => None
+            NSModalResponse::NSModalResponseCancel => None,
         }
     }
-
-    
 }

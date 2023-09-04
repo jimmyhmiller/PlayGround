@@ -23,9 +23,7 @@ use notify::{FsEventWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
-use skia_safe::{
-    Font, FontStyle, Typeface,
-};
+use skia_safe::{Font, FontStyle, Typeface};
 
 pub struct Context {
     pub mouse_position: Position,
@@ -89,7 +87,7 @@ pub struct Editor {
     pub per_frame_actions: Vec<PerFrame>,
     pub event_listeners: HashMap<String, HashSet<WidgetId>>,
     pub window: Window,
-    pub cursor_icon: CursorIcon
+    pub cursor_icon: CursorIcon,
 }
 
 pub struct Events {
@@ -229,10 +227,21 @@ impl Editor {
             self.widget_store.add_widget(widget);
         }
         for widget in self.widget_store.iter_mut() {
-            if widget.position.x >= self.window.size.width || widget.position.y >= self.window.size.height {
-                println!("Widget out of bounds, moving to edge of screen {}", widget.id);
-                widget.position.x = widget.position.x.min(self.window.size.width - widget.size.width * widget.scale);
-                widget.position.y = widget.position.y.min(self.window.size.height - widget.size.height * widget.scale);
+            if widget.position.x >= self.window.size.width
+                || widget.position.y >= self.window.size.height
+            {
+                println!(
+                    "Widget out of bounds, moving to edge of screen {}",
+                    widget.id
+                );
+                widget.position.x = widget
+                    .position
+                    .x
+                    .min(self.window.size.width - widget.size.width * widget.scale);
+                widget.position.y = widget
+                    .position
+                    .y
+                    .min(self.window.size.height - widget.size.height * widget.scale);
             }
         }
     }
@@ -392,7 +401,10 @@ impl Editor {
             processes: HashMap::new(),
             event_listeners: HashMap::new(),
             window: Window {
-                size: Size { width: 800.0, height: 800.0},
+                size: Size {
+                    width: 800.0,
+                    height: 800.0,
+                },
             },
             cursor_icon: CursorIcon::Default,
         }
@@ -613,7 +625,6 @@ impl Editor {
     }
 
     fn add_mouse_up(&mut self) {
-
         println!("Add mouse_up");
         // This is only true now. I could have a selection mode
         // Or it could be click to select. So really not sure
@@ -699,8 +710,6 @@ impl Editor {
         file.write_all(result.as_bytes()).unwrap();
     }
 }
-
-
 
 // I need a way for processes to add widgets
 // I don't want them to need to remove widgets by holding onto a reference or something

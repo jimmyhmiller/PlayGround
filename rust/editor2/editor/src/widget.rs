@@ -134,8 +134,6 @@ pub struct Color {
     a: f32,
 }
 
-
-
 impl Color {
     pub fn to_paint(&self) -> Paint {
         Paint::new(Color4f::new(self.r, self.g, self.b, self.a), None)
@@ -434,9 +432,12 @@ pub struct Wasm {
 
 impl Wasm {
     pub fn new(path: String) -> Self {
-        Self { path, state: None, partial_state: None }
+        Self {
+            path,
+            state: None,
+            partial_state: None,
+        }
     }
-    
 }
 
 impl Widget {
