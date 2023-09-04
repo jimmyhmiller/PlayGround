@@ -314,68 +314,6 @@ impl ProcessSpawner {
         self.send_message(self.process_id, request);
     }
 
-    fn update_document_insert(&mut self, path: &str, line: usize, column: usize, bytes: Vec<u8>) {
-        // TODO: This assumes there are no new lines
-        assert!(if bytes.len() > 1 {
-            !bytes.contains(&b'\n')
-        } else {
-            true
-        });
-        let params: <DidChangeTextDocument as Notification>::Params = DidChangeTextDocumentParams {
-            text_document: VersionedTextDocumentIdentifier {
-                uri: Url::from_str(&format!("file://{}", path)).unwrap(),
-                version: 0,
-            },
-            content_changes: vec![TextDocumentContentChangeEvent {
-                range: Some(Range {
-                    start: Position {
-                        line: line as u32,
-                        character: column as u32,
-                    },
-                    end: Position {
-                        line: line as u32,
-                        character: (column + bytes.len()) as u32,
-                    },
-                }),
-                range_length: None,
-                text: from_utf8(&bytes).unwrap().to_string(),
-            }],
-        };
-        let request = self.notification(
-            DidChangeTextDocument::METHOD,
-            &serde_json::to_string(&params).unwrap(),
-        );
-        self.send_message(self.process_id, request);
-    }
-
-    fn update_document_delete(&mut self, path: &str, line: usize, column: usize) {
-        let params: <DidChangeTextDocument as Notification>::Params = DidChangeTextDocumentParams {
-            text_document: VersionedTextDocumentIdentifier {
-                uri: Url::from_str(&format!("file://{}", path)).unwrap(),
-                version: 0,
-            },
-            content_changes: vec![TextDocumentContentChangeEvent {
-                range: Some(Range {
-                    start: Position {
-                        line: line as u32,
-                        character: column as u32,
-                    },
-                    end: Position {
-                        line: line as u32,
-                        character: column as u32 + 1,
-                    },
-                }),
-                range_length: None,
-                text: "".to_string(),
-            }],
-        };
-        let request = self.notification(
-            DidChangeTextDocument::METHOD,
-            &serde_json::to_string(&params).unwrap(),
-        );
-        self.send_message(self.process_id, request);
-    }
-
     fn initialized(&mut self) {
         // TODO: Get list of initial open files
         self.state.state = State::Initialized;
@@ -446,7 +384,6 @@ impl App for ProcessSpawner {
     }
 
     fn on_event(&mut self, kind: String, event: String) {
-        println!("Got event: {}", kind);
         match kind.as_str() {
             "text_change_multi" => {
                 let edits: MultiEditWithPath = serde_json::from_str(&event).unwrap();
@@ -574,7 +511,7 @@ impl App for ProcessSpawner {
     }
 }
 
-fn extract_tokens(path: String, message: &serde_json::Value) -> Vec<u8> {
+fn _extract_tokens(path: String, message: &serde_json::Value) -> Vec<u8> {
     let result = &message["result"];
     let data = &result["data"];
     serde_json::to_string(&json!({
