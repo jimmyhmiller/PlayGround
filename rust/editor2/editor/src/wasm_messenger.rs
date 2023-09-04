@@ -4,7 +4,7 @@ use std::{
     path::Path,
     sync::{mpsc, Arc},
     thread,
-    time::Duration, io::Write,
+    time::{Duration, Instant}, io::Write,
 };
 
 use bytesize::ByteSize;
@@ -50,7 +50,6 @@ enum Payload {
     NewInstance(String),
     OnClick(Position),
     Draw(String),
-    SetState(String),
     OnScroll(f64, f64),
     OnKey(KeyboardInput),
     Reload,
@@ -158,7 +157,6 @@ impl WasmMessenger {
                     Payload::NewInstance(_) => "NewInstance",
                     Payload::OnClick(_) => "OnClick",
                     Payload::Draw(_) => "Draw",
-                    Payload::SetState(_) => "SetState",
                     Payload::OnScroll(_, _) => "OnScroll",
                     Payload::OnKey(_) => "OnKey",
                     Payload::Reload => "Reload",
@@ -483,7 +481,6 @@ impl WasmMessenger {
 
     pub fn send_on_click(&mut self, wasm_id: WasmId, position: &Position) {
         let message_id = self.next_message_id();
-        println!("Sending on click!");
         self.send_message(Message {
             message_id,
             wasm_id,
@@ -714,10 +711,6 @@ impl WasmManager {
                     }
                 }
             }
-            Payload::SetState(state) => {
-                self.instance.set_state(state.as_bytes()).await?;
-                default_return
-            }
             Payload::OnScroll(x, y) => {
                 self.instance.on_scroll(x, y).await?;
                 default_return
@@ -770,15 +763,16 @@ impl WasmManager {
                 }
             }
             Payload::PartialState(partial_state) => {
-                let state = self.instance.get_state().await;
-                if let Some(state) = state {
-                    let base64_decoded = decode_base64(&state.as_bytes().to_vec())?;
-                    let state = String::from_utf8(base64_decoded)?;
-                    let merged_state = merge_json(partial_state, state);
-                    let encoded_state = encode_base64(&merged_state);
-                    self.instance.set_state(encoded_state.as_bytes()).await?;
-                }
-
+                let encoded_state = encode_base64(&partial_state.unwrap_or("{}".to_string()));
+                self.instance.set_state(encoded_state.as_bytes()).await?;
+                // let state = self.instance.get_state().await;
+                // if let Some(state) = state {
+                //     let base64_decoded = decode_base64(&state.as_bytes().to_vec())?;
+                //     let state = String::from_utf8(base64_decoded)?;
+                //     let merged_state = merge_json(partial_state, state);
+                //     let encoded_state = encode_base64(&merged_state);
+                //     self.instance.set_state(encoded_state.as_bytes()).await?;
+                // }
                 default_return
             }
             Payload::UpdatePosition(position) => {
@@ -793,34 +787,6 @@ impl WasmManager {
                 self.instance.on_size_change(width, height).await?;
                 default_return
             }
-        }
-    }
-}
-
-fn merge_json(partial_state: Option<String>, state: String) -> String {
-    if let Some(partial_state) = partial_state {
-        let mut partial_state: serde_json::Value = serde_json::from_str(&partial_state).unwrap();
-        let mut state: serde_json::Value = serde_json::from_str(&state).unwrap();
-        merge(&mut state, &mut partial_state);
-        serde_json::to_string(&state).unwrap()
-    } else {
-        state
-    }
-}
-
-fn merge(state: &mut serde_json::Value, partial_state: &mut serde_json::Value) {
-    match (state, partial_state) {
-        (serde_json::Value::Object(state), serde_json::Value::Object(partial_state)) => {
-            for (key, value) in partial_state.iter_mut() {
-                if let Some(entry) = state.get_mut(key) {
-                    merge(entry, value);
-                } else {
-                    state.insert(key.clone(), value.clone());
-                }
-            }
-        }
-        (state, partial_state) => {
-            *state = partial_state.clone();
         }
     }
 }
@@ -1251,7 +1217,6 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, process_id: i32, ptr: i32, len: i32| {
                 let message = get_string_from_caller(&mut caller, ptr, len);
                 let state = caller.data_mut();
-                println!("Sending {}", message);
                 state
                     .commands
                     .push(Command::SendProcessMessage(process_id, message));
@@ -1366,14 +1331,16 @@ impl WasmInstance {
     pub async fn reload(&mut self) -> Result<(), Box<dyn Error>> {
         if let Ok(json_string) = self.get_state().await.ok_or("no get state function") {
             let data = json_string.as_bytes();
-
+            let now = Instant::now();
             let module = Module::from_file(&self.engine, &self.path)?;
             let instance = self
                 .linker
                 .instantiate_async(&mut self.store, &module)
                 .await?;
             self.instance = instance;
+            println!("Reload time: {:?}", now.elapsed());
             self.set_state(data).await?;
+            println!("Set state time: {:?}", now.elapsed());
         } else {
             let module = Module::from_file(&self.engine, &self.path)?;
             let instance = self

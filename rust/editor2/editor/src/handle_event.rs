@@ -241,7 +241,6 @@ impl Editor {
                 }
                 Event::SendProcessMessage(process_id, message) => {
                     if let Some(process) = self.processes.get_mut(&process_id) {
-                        println!("WRITING {}", message);
                         // TODO: Handle error
                         process.stdin.write_all(message.as_bytes()).unwrap();
                     }

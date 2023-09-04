@@ -6,7 +6,7 @@ struct Event {
     kind: String,
     event: String,
 }
- 
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct EventViewer {
     size: Size,

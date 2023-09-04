@@ -592,7 +592,13 @@ pub mod macros {
                 match s {
                     Ok(s) => {
                         if let Ok(state) = $crate::macros::serde_json::from_str(&s) {
-                            unsafe { APP.set_state(state) }
+                            let state : <$app as App>::State = state;
+                            let current_state = $crate::macros::serde_json::to_string(
+                                unsafe { &APP.get_state() },
+                            ).ok();
+                            let new_state = $crate::merge_json(Some(s), current_state.unwrap_or("{}".to_string()));
+                            let new_state = $crate::macros::serde_json::from_str(&new_state).unwrap();
+                            unsafe { APP.set_state(new_state) }
                         } else {
                             println!("Failed initial, merging with init");
                             let init_state = $crate::macros::serde_json::to_string(unsafe { &$app::init().get_state() }).unwrap();
