@@ -136,7 +136,7 @@ impl Component {
                 canvas.translate(0.0, 50.0);
                 child.draw(canvas);
             }
-            Component::List(children, scroll_offset) => {
+            Component::List(children, _scroll_offset) => {
                 for child in children.iter() {
                     child.draw(canvas);
                     // TODO: need to translate based on height of component

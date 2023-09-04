@@ -78,7 +78,7 @@ impl From<&[u64]> for Token {
 }
 
 pub fn parse_tokens(tokens: &[u64]) -> Vec<Token> {
-    tokens.chunks(5).map(|chunk| Token::from(chunk)).collect()
+    tokens.chunks(5).map(Token::from).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -180,7 +180,7 @@ where
             .zip(self.tokens.token_lines().skip(skip).take(take))
             .enumerate()
         {
-            let line_number = relative_line_number + skip;
+            let _line_number = relative_line_number + skip;
             result.push(self.decorated_line(line, tokens));
         }
         result
@@ -298,7 +298,7 @@ where
             total_tokens += line.iter().filter(|(_, token)| token.is_some()).count();
         }
 
-        return TokenWindow {
+        TokenWindow {
             kind: None,
             index: 0,
             line: target_line,
@@ -306,7 +306,7 @@ where
             left: None,
             center: None,
             right: None,
-        };
+        }
     }
 
     fn resolve_token_action_insert(
@@ -420,7 +420,7 @@ where
                     }
                 }
             }
-            TokenWindowKind::Inside { offset, .. } => {
+            TokenWindowKind::Inside {  .. } => {
                 for char in text {
                     match char {
                         // TODO: Is this possible?
@@ -479,7 +479,7 @@ where
             TokenAction::OffsetToken { index, length } => {
                 if let Some(token) = self.tokens.get_mut(*index) {
                     if length.is_negative() {
-                        token.delta_start = token.delta_start.saturating_sub(length.abs() as usize);
+                        token.delta_start = token.delta_start.saturating_sub(length.unsigned_abs());
                     } else {
                         token.delta_start += *length as usize;
                     }
@@ -521,7 +521,7 @@ where
                 column: _,
                 index,
             } => {
-                let line = self.tokens.token_lines().skip(*line).next();
+                let line = self.tokens.token_lines().nth(*line);
                 assert!(line.is_some(), "Expected line to be found");
                 if let Some(token) = self.tokens.get_mut(*index) {
                     token.delta_line -= 1;
@@ -682,11 +682,10 @@ where
     }
 
     fn delete_char(&mut self, line: usize, column: usize) {
-        let byte = self
+        let byte = *self
             .underlying_text_buffer
             .byte_at_pos(line, column)
-            .unwrap()
-            .clone();
+            .unwrap();
         self.update_tokens_delete(line, column, &[byte]);
         self.underlying_text_buffer.delete_char(line, column);
         self.add_edit_action(EditEvent {
@@ -745,7 +744,7 @@ impl<'a> Iterator for TokenLineIter<'a> {
             } else if self.current_position != original_position && token.delta_line > 1 {
                 self.empty_lines = token.delta_line - 1;
                 return Some(&self.tokens[original_position..self.current_position]);
-            } else if self.current_position == 0 && token.delta_line >= 1 && self.inital_empty_lines == false {
+            } else if self.current_position == 0 && token.delta_line >= 1 && !self.inital_empty_lines {
                 self.empty_lines = token.delta_line - 1;
                 self.inital_empty_lines = true;
                 return Some(&[]);
@@ -935,7 +934,7 @@ pub trait VirtualCursor: Clone + Debug {
     }
 
     fn line_at<T: TextBuffer<Item = u8>>(&mut self, line: usize, buffer: &T) -> Option<String> {
-        let found_line = buffer.lines().skip(line).next();
+        let found_line = buffer.lines().nth(line);
         found_line
             .and_then(|x| from_utf8(x).ok())
             .map(|x| x.to_string())
@@ -1030,7 +1029,7 @@ pub trait VirtualCursor: Clone + Debug {
     fn auto_indent<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
         let last_line: Option<String> = self.get_last_line(buffer);
         let current_line: Option<String> = self.line_at(self.line(), buffer);
-        if let (Some(last_line), Some(current_line)) = (last_line, current_line) {
+        if let (Some(_last_line), Some(current_line)) = (last_line, current_line) {
             let indent = get_indent(&current_line);
             if let Some((last_character_index, last_character)) =
                 last_non_whitespace_character(&current_line)
@@ -1169,7 +1168,7 @@ impl VirtualCursor for CursorWithHistory {
     }
 
     fn move_to(&mut self, line: usize, column: usize) {
-        self.history.push(self.cursor.clone());
+        self.history.push(self.cursor);
         self.cursor.move_to(line, column);
     }
 }

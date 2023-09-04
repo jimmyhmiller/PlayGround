@@ -525,7 +525,7 @@ impl WasmMessenger {
         self.send_message(Message {
             message_id,
             wasm_id,
-            payload: Payload::PartialState(Some(state.to_string())),
+            payload: Payload::PartialState(Some(state)),
         });
     }
 
@@ -776,7 +776,7 @@ impl WasmManager {
                     let state = String::from_utf8(base64_decoded)?;
                     let merged_state = merge_json(partial_state, state);
                     let encoded_state = encode_base64(&merged_state);
-                    self.instance.set_state(&encoded_state.as_bytes()).await?;
+                    self.instance.set_state(encoded_state.as_bytes()).await?;
                 }
 
                 default_return

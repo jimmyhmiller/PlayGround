@@ -42,11 +42,11 @@ pub struct Size {
     pub height: f32,
 }
 
-impl Into<Position> for Size {
-    fn into(self) -> Position {
+impl From<Size> for Position {
+    fn from(val: Size) -> Self {
         Position {
-            x: self.width,
-            y: self.height,
+            x: val.width,
+            y: val.height,
         }
     }
 }

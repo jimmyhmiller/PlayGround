@@ -2,11 +2,11 @@ use std::{
     collections::HashMap,
     fs::{self, File},
     io::Read,
-    str::{from_utf8, FromStr}, thread::sleep, time::Duration,
+    str::{from_utf8, FromStr},
 };
 
 use framework::{
-    app, encode_base64,
+    app,
     macros::serde_json::{self, json},
     App, Canvas, Size, Ui,
 };
@@ -277,7 +277,7 @@ impl ProcessSpawner {
                             },
                         }),
                         range_length: None,
-                        text: from_utf8(&bytes).unwrap().to_string(),
+                        text: from_utf8(bytes).unwrap().to_string(),
                     })
                 }
                 Edit::Delete(line, column) => {
@@ -317,7 +317,7 @@ impl ProcessSpawner {
     fn update_document_insert(&mut self, path: &str, line: usize, column: usize, bytes: Vec<u8>) {
         // TODO: This assumes there are no new lines
         assert!(if bytes.len() > 1 {
-            bytes.contains(&b'\n') == false
+            !bytes.contains(&b'\n')
         } else {
             true
         });
@@ -450,7 +450,7 @@ impl App for ProcessSpawner {
         match kind.as_str() {
             "text_change_multi" => {
                 let edits: MultiEditWithPath = serde_json::from_str(&event).unwrap();
-                let path = &edits.path.clone();
+                let _path = &edits.path.clone();
                 println!("Multi Version {}", edits.version);
                 self.update_document(&edits);
                 self.request_tokens(&edits.path, edits.version);
