@@ -4,10 +4,10 @@ mod fps_counter;
 // mod strokes;
 mod handle_event;
 mod keyboard;
+mod native;
 mod wasm_messenger;
 mod widget;
 mod window;
-mod native;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {

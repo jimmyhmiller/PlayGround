@@ -1,10 +1,11 @@
 use std::{
     collections::HashMap,
     error::Error,
+    io::Write,
     path::Path,
     sync::{mpsc, Arc},
     thread,
-    time::{Duration, Instant}, io::Write,
+    time::{Duration, Instant},
 };
 
 use bytesize::ByteSize;
@@ -33,7 +34,7 @@ use crate::{
     editor::Value,
     event::Event,
     keyboard::KeyboardInput,
-    widget::{Color, Position, Size, decode_base64, encode_base64},
+    widget::{decode_base64, encode_base64, Color, Position, Size},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -897,7 +898,6 @@ fn get_string_from_memory(
     }
 }
 
-
 struct WasmInstance {
     instance: Instance,
     store: Store<State>,
@@ -1226,7 +1226,11 @@ impl WasmInstance {
         linker.func_wrap(
             "host",
             "save_file_low_level",
-            |mut caller: Caller<'_, State>, path_ptr: i32, path_len: i32, text_ptr: i32, text_len: i32| {
+            |mut caller: Caller<'_, State>,
+             path_ptr: i32,
+             path_len: i32,
+             text_ptr: i32,
+             text_len: i32| {
                 let path = get_string_from_caller(&mut caller, path_ptr, path_len);
                 let text = get_string_from_caller(&mut caller, text_ptr, text_len);
                 // open file at path and save text
@@ -1486,7 +1490,6 @@ impl WasmInstance {
 
         let json_string = get_string_from_memory(&memory, &mut self.store, ptr as i32, len as i32);
         if json_string.is_none() {
-            
             println!("No json string {:?}", self.path);
         }
         json_string
