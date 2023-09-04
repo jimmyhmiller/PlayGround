@@ -299,11 +299,6 @@ impl App for TextWidget {
                     );
                     canvas.set_color(&foreground);
                     let text = from_utf8(text).unwrap().to_string();
-                    // let text = if let Some(token) = token {
-                    //     format!("length: {}, start: {}, text: {}", text.len(), token.delta_start, text)
-                    // } else {
-                    //     format!("empty: {}, text: {}", text.len(), text)
-                    // };
                     canvas.draw_str(&text, x, 0.0);
                     x += text.len() as f32 * 16.0;
                 }
