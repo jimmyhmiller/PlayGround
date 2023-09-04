@@ -86,19 +86,19 @@ impl TextPane {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct WidgetData {
     position: Position,
     size: Size,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub struct Size {
     pub width: f32,
     pub height: f32,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct TextWidget {
     text_pane: TextPane,
     widget_data: WidgetData,
@@ -106,6 +106,7 @@ struct TextWidget {
     #[serde(default)]
     file_path: String,
     staged_tokens: Vec<Token>,
+    x_margin: i32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -147,6 +148,7 @@ impl App for TextWidget {
                     height: 600.0,
                 },
             },
+            x_margin: 0,
             file_path: "".to_string(),
             edit_position: 0,
             staged_tokens: vec![],
@@ -164,22 +166,22 @@ impl App for TextWidget {
 
         canvas.set_color(&foreground);
 
-        let cursor = self.text_pane.cursor;
-        let current_token_window = self
-            .text_pane
-            .text_buffer
-            .find_token(cursor.line(), cursor.column());
+        // let cursor = self.text_pane.cursor;
+        // let current_token_window = self
+        //     .text_pane
+        //     .text_buffer
+        //     .find_token(cursor.line(), cursor.column());
 
-        let token_output: &String = &format!("{:#?}", current_token_window);
-        let context = 10;
-        let context_window = self
-            .text_pane
-            .text_buffer
-            .tokens
-            .iter()
-            .enumerate()
-            .skip(current_token_window.index.saturating_sub(context))
-            .take(context * 2 + 1);
+        // let token_output: &String = &format!("{:#?}", current_token_window);
+        // let context = 10;
+        // let context_window = self
+        //     .text_pane
+        //     .text_buffer
+        //     .tokens
+        //     .iter()
+        //     .enumerate()
+        //     .skip(current_token_window.index.saturating_sub(context))
+        //     .take(context * 2 + 1);
 
         // for (i, (index, token)) in context_window.enumerate() {
         //     if index == current_token_window.index {
@@ -235,13 +237,53 @@ impl App for TextWidget {
         );
 
         let fractional_offset = self.text_pane.fractional_line_offset();
+        self.x_margin = 30;
         canvas.translate(
-            30.0 - self.text_pane.offset.x,
+            self.x_margin as f32 - self.text_pane.offset.x,
             self.text_pane.line_height - fractional_offset + 20.0,
         );
 
         canvas.save();
+        let number_lines = self.text_pane.number_of_lines();
+        let number_of_digits = number_lines.to_string().len();
+        let current_line = self.text_pane.lines_above_scroll() + 1;
+        let max_line = current_line + self.text_pane.number_of_visible_lines(self.widget_data.size.height);
+        let max_line = max_line.min(number_lines);
+        for line in current_line..max_line {
+            canvas.set_color(&Color::parse_hex("#ffffff"));
+            let line_number = format!("{:width$}", line, width = number_of_digits);
+            canvas.draw_str(&line_number, 0.0, 0.0);
+            canvas.translate(0.0, self.text_pane.line_height);
+        }
+        canvas.restore();
 
+        canvas.save();
+        let line_number_margin = number_of_digits as f32 + 4.0 * 16.0;
+        self.x_margin += line_number_margin as i32;
+        canvas.translate(line_number_margin, 0.0);
+
+        let lines_above = self.text_pane.lines_above_scroll();
+        let num_lines = self
+            .text_pane
+            .number_of_visible_lines(self.widget_data.size.height);
+        let shown_lines = lines_above..lines_above + num_lines;
+
+        if shown_lines.contains(&cursor.line()) {
+            let nth_line = cursor.line() - lines_above;
+            let cursor_position_pane_x = cursor.column() as f32 * 16.0;
+            let cursor_position_pane_y = (nth_line as f32 - 1.0) * self.text_pane.line_height + 6.0;
+
+            canvas.set_color(&foreground);
+            canvas.draw_rect(
+                cursor_position_pane_x,
+                cursor_position_pane_y,
+                3.0,
+                self.text_pane.line_height,
+            );
+        }
+
+        // TODO: Make this render without tokens, but on one code path
+        // It might already work.
         if !self.text_pane.text_buffer.tokens.is_empty() {
             for line in self.text_pane.text_buffer.decorated_lines(
                 self.text_pane.lines_above_scroll(),
@@ -287,25 +329,7 @@ impl App for TextWidget {
         }
         canvas.restore();
 
-        let lines_above = self.text_pane.lines_above_scroll();
-        let num_lines = self
-            .text_pane
-            .number_of_visible_lines(self.widget_data.size.height);
-        let shown_lines = lines_above..lines_above + num_lines;
-
-        if shown_lines.contains(&cursor.line()) {
-            let nth_line = cursor.line() - lines_above;
-            let cursor_position_pane_x = cursor.column() as f32 * 16.0;
-            let cursor_position_pane_y = (nth_line as f32 - 1.0) * self.text_pane.line_height + 6.0;
-
-            canvas.set_color(&foreground);
-            canvas.draw_rect(
-                cursor_position_pane_x,
-                cursor_position_pane_y,
-                3.0,
-                self.text_pane.line_height,
-            );
-        }
+       
 
         canvas.restore();
     }
@@ -315,14 +339,14 @@ impl App for TextWidget {
             self.send_open_file();
         }
         // TODO: Need to handle margin here.
-        let margin = 20;
+        let x_margin = self.x_margin;
+        let y_margin = 32.0;
         let lines_above = self.text_pane.lines_above_scroll();
-        let line = (((y - margin as f32) / self.text_pane.line_height).ceil() as usize
+        let line = (((y - y_margin as f32) / self.text_pane.line_height).ceil() as usize
             + lines_above)
             .saturating_sub(1);
         let char_width = 16.0;
-        let column = (((x - margin as f32) / char_width).ceil() as usize)
-            .saturating_sub((self.text_pane.offset.x / char_width) as usize)
+        let column = (((x + self.text_pane.offset.x - x_margin as f32) / char_width).ceil() as usize)
             .saturating_sub(1);
         self.text_pane
             .cursor
@@ -431,7 +455,7 @@ impl App for TextWidget {
 
     fn set_state(&mut self, state: Self::State) {
         *self = state;
-        println!("set state {:?}", self.file_path);
+        println!("set state for file {:?}", self.file_path);
         if !self.file_path.is_empty() {
             let file = &self.file_path;
             let contents = std::fs::read(file);

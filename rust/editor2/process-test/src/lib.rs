@@ -22,13 +22,13 @@ use lsp_types::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, Debug)]
 struct TokenRequestMeta {
     path: String,
     document_version: usize,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, Debug)]
 struct Data {
     state: State,
     pending_tokens: Vec<(String, usize)>,
