@@ -142,10 +142,8 @@ impl ColorScheme {
     fn mouse_in_bounds(&self, canvas: &Canvas, width: f32, height: f32) -> bool {
         if let Some((x, y)) = self.mouse_location {
             let canvas_position = canvas.get_current_position();
-            if x > canvas_position.0 && x < canvas_position.0 + width {
-                if y > canvas_position.1 && y < canvas_position.1 + height {
-                    return true;
-                }
+            if x > canvas_position.0 && x < canvas_position.0 + width && y > canvas_position.1 && y < canvas_position.1 + height {
+                return true;
             }
         }
         false

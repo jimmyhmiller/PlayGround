@@ -1,7 +1,7 @@
 use std::{collections::HashMap, str::from_utf8};
 
 use framework::{
-    app, decode_base64, App, Canvas, Color, CursorIcon, KeyCode, KeyState, KeyboardInput, Rect,
+    app, App, Canvas, Color, CursorIcon, KeyCode, KeyState, KeyboardInput, Rect,
 };
 use headless_editor::{
     parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
