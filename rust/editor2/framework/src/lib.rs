@@ -437,6 +437,34 @@ pub fn fetch_string(str_ptr: u32) -> String {
     buffer
 }
 
+pub fn merge_json(partial_state: Option<String>, state: String) -> String {
+    if let Some(partial_state) = partial_state {
+        let mut partial_state: serde_json::Value = serde_json::from_str(&partial_state).unwrap();
+        let mut state: serde_json::Value = serde_json::from_str(&state).unwrap();
+        merge(&mut state, &mut partial_state);
+        serde_json::to_string(&state).unwrap()
+    } else {
+        state
+    }
+}
+
+pub fn merge(state: &mut serde_json::Value, partial_state: &mut serde_json::Value) {
+    match (state, partial_state) {
+        (serde_json::Value::Object(state), serde_json::Value::Object(partial_state)) => {
+            for (key, value) in partial_state.iter_mut() {
+                if let Some(entry) = state.get_mut(key) {
+                    merge(entry, value);
+                } else {
+                    state.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        (state, partial_state) => {
+            *state = partial_state.clone();
+        }
+    }
+}
+
 #[no_mangle]
 pub fn alloc_state(len: usize) -> *mut u8 {
     // create a new mutable buffer with capacity `len`
@@ -566,8 +594,14 @@ pub mod macros {
                         if let Ok(state) = $crate::macros::serde_json::from_str(&s) {
                             unsafe { APP.set_state(state) }
                         } else {
-                            // TODO: We should allow partial parsing of state
-                            println!("set_state: failed to parse state!");
+                            println!("Failed initial, merging with init");
+                            let init_state = $crate::macros::serde_json::to_string(unsafe { &$app::init().get_state() }).unwrap();
+                            let new_state = $crate::merge_json(Some(s), init_state);
+                            if let Ok(state) = $crate::macros::serde_json::from_str(&new_state) {
+                                unsafe { APP.set_state(state) }
+                            } else {
+                                println!("Failed to parse state even after merging");
+                            }
                         }
                     }
                     Err(err) => {
