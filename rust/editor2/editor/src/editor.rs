@@ -435,7 +435,7 @@ impl Editor {
 
         canvas.save();
         canvas.translate((canvas_size.width - 300.0, 60.0));
-        let counts = self.wasm_messenger.number_of_outstanding_messages();
+        let counts = self.wasm_messenger.number_of_pending_messages();
         for line in counts.lines() {
             canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
             canvas.translate((0.0, 30.0));
@@ -625,7 +625,6 @@ impl Editor {
     }
 
     fn add_mouse_up(&mut self) {
-        println!("Add mouse_up");
         // This is only true now. I could have a selection mode
         // Or it could be click to select. So really not sure
         // what to do here. But for now I just want to be able to move widgets
@@ -649,7 +648,6 @@ impl Editor {
                     to_delete.push(widget.id);
                     continue;
                 }
-                println!("Mouse over click");
 
                 let events =
                     widget.on_click(&self.context.mouse_position, &mut self.wasm_messenger);

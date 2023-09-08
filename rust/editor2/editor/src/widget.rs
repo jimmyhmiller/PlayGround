@@ -455,7 +455,6 @@ impl Widget {
         position: &Position,
         wasm_messenger: &mut WasmMessenger,
     ) -> Vec<Event> {
-        println!("On click editor!");
         let widget_x = position.x - self.position.x;
         let widget_y = position.y - self.position.y;
         let widget_space = Position {

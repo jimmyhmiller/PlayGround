@@ -600,7 +600,6 @@ pub mod macros {
                             let new_state = $crate::macros::serde_json::from_str(&new_state).unwrap();
                             unsafe { APP.set_state(new_state) }
                         } else {
-                            println!("Failed initial, merging with init");
                             let init_state = $crate::macros::serde_json::to_string(unsafe { &$app::init().get_state() }).unwrap();
                             let new_state = $crate::merge_json(Some(s), init_state);
                             if let Ok(state) = $crate::macros::serde_json::from_str(&new_state) {

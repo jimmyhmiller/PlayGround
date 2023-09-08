@@ -5,7 +5,7 @@ use std::{
     path::Path,
     sync::{mpsc, Arc},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use bytesize::ByteSize;
@@ -104,7 +104,7 @@ pub struct WasmMessenger {
     // but couldn't find a better way to dedup draws
     // Ideally, you can draw in the middle of click commands
     // I have some ideas.
-    outstanding_messages: HashMap<WasmId, HashMap<usize, Message>>,
+    pending_messages: HashMap<WasmId, HashMap<usize, Message>>,
     engine: Arc<Engine>,
     receivers: HashMap<WasmId, Receiver<OutMessage>>,
     senders: HashMap<WasmId, Sender<Message>>,
@@ -138,7 +138,7 @@ impl WasmMessenger {
             wasm_non_draw_commands: HashMap::new(),
             wasm_states: HashMap::new(),
             last_message_id: 1,
-            outstanding_messages: HashMap::new(),
+            pending_messages: HashMap::new(),
             engine,
             receivers: HashMap::new(),
             senders: HashMap::new(),
@@ -150,9 +150,9 @@ impl WasmMessenger {
         self.external_sender = Some(external_sender);
     }
 
-    pub fn number_of_outstanding_messages(&self) -> String {
+    pub fn number_of_pending_messages(&self) -> String {
         let mut stats: Vec<&str> = vec![];
-        for messages_per in self.outstanding_messages.values() {
+        for messages_per in self.pending_messages.values() {
             for message in messages_per.values() {
                 stats.push(match message.payload {
                     Payload::NewInstance(_) => "NewInstance",
@@ -405,7 +405,9 @@ impl WasmMessenger {
     }
 
     pub fn tick(&mut self, values: &mut HashMap<String, Value>) {
+        
         self.process_non_draw_commands(values);
+        // TODO: What is the right option here?
         self.local_pool
             .run_until(Delay::new(Duration::from_millis(4)));
 
@@ -419,10 +421,10 @@ impl WasmMessenger {
             while let Ok(Some(message)) = out_receiver.try_next() {
                 // Note: Right now if a message doesn't have a corresponding in-message
                 // I am just setting the out message to id: 0.
-                if let Some(record) = self.outstanding_messages.get_mut(&message.wasm_id) {
+                if let Some(record) = self.pending_messages.get_mut(&message.wasm_id) {
                     record.remove(&message.message_id);
                 } else {
-                    println!("No outstanding message for {}", message.wasm_id)
+                    println!("No pending message for {}", message.wasm_id)
                 }
 
                 match message.payload {
@@ -456,7 +458,7 @@ impl WasmMessenger {
 
     fn send_message(&mut self, message: Message) {
         let records = self
-            .outstanding_messages
+            .pending_messages
             .entry(message.wasm_id)
             .or_insert(HashMap::new());
 
@@ -657,6 +659,7 @@ impl WasmManager {
             let message = self.receiver.select_next_some().await;
             let message_id = message.message_id;
             let wasm_id = message.wasm_id;
+            // TODO: Can I wait for either this message or some reload message so I can kill infinite loops?
             let out_message = self.process_message(message).await;
             match out_message {
                 Ok(out_message) => {
@@ -1335,16 +1338,13 @@ impl WasmInstance {
     pub async fn reload(&mut self) -> Result<(), Box<dyn Error>> {
         if let Ok(json_string) = self.get_state().await.ok_or("no get state function") {
             let data = json_string.as_bytes();
-            let now = Instant::now();
             let module = Module::from_file(&self.engine, &self.path)?;
             let instance = self
                 .linker
                 .instantiate_async(&mut self.store, &module)
                 .await?;
             self.instance = instance;
-            println!("Reload time: {:?}", now.elapsed());
             self.set_state(data).await?;
-            println!("Set state time: {:?}", now.elapsed());
         } else {
             let module = Module::from_file(&self.engine, &self.path)?;
             let instance = self
