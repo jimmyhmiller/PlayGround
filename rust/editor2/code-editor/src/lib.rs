@@ -450,7 +450,6 @@ impl App for TextWidget {
 
     fn set_state(&mut self, state: Self::State) {
         *self = state;
-        println!("set state for file {:?}", self.file_path);
         if !self.file_path.is_empty() {
             let file = &self.file_path;
             let contents = std::fs::read(file);
@@ -466,14 +465,10 @@ impl App for TextWidget {
         }
     }
 
-    // TODO: I think something is wrong with the way we send changes
-
     fn on_event(&mut self, kind: String, event: String) {
-        println!("event: {}", kind);
         if kind == "tokens_with_version" {
             if let Ok(tokens) = serde_json::from_str::<TokensWithVersion>(&event) {
                 if tokens.path != self.file_path {
-                    println!("path mismatch");
                     return;
                 }
                 if tokens.version != self.text_pane.text_buffer.document_version {
@@ -485,7 +480,6 @@ impl App for TextWidget {
                 }
                 let tokens = parse_tokens(&tokens.tokens);
                 if !tokens.is_empty() {
-                    println!("got tokens");
                     // self.staged_tokens = tokens.clone();
                     self.text_pane.text_buffer.set_tokens(tokens);
                 }

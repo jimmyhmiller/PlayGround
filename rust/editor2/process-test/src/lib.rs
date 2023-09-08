@@ -388,7 +388,6 @@ impl App for ProcessSpawner {
             "text_change_multi" => {
                 let edits: MultiEditWithPath = serde_json::from_str(&event).unwrap();
                 let _path = &edits.path.clone();
-                println!("Multi Version {}", edits.version);
                 self.update_document(&edits);
                 self.request_tokens(&edits.path, edits.version);
             }
@@ -434,11 +433,6 @@ impl App for ProcessSpawner {
                                 // TODO: Need to correlate this with file
                                 if method == "textDocument/semanticTokens/full" {
                                     let meta = self.state.token_request_metadata.get(id).unwrap();
-                                    // self.send_event(
-                                    //     "tokens",
-                                    //     encode_base64(&extract_tokens(meta.path.clone(), &message)),
-                                    // );
-                                    println!("Token version send {}", meta.document_version);
                                     self.send_event(
                                         "tokens_with_version",
                                         serde_json::to_string(
@@ -501,7 +495,6 @@ impl App for ProcessSpawner {
     }
 
     fn set_state(&mut self, state: Self::State) {
-        println!("Setting state, {:?}", state.size);
         self.state.size = state.size;
     }
 

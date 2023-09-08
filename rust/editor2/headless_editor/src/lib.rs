@@ -643,7 +643,6 @@ where
 
     fn add_edit_action(&mut self, event: EditEvent) {
         self.document_version += 1;
-        println!("INCREMENTING VERSION TO {}", self.document_version);
         self.edits.push(event);
     }
 }
@@ -1084,7 +1083,7 @@ pub trait VirtualCursor: Clone + Debug {
     }
 }
 
-fn decrease_indent(indent: String) -> String {
+fn _decrease_indent(indent: String) -> String {
     if indent.starts_with("    ") {
         indent[4..].to_string()
     } else {
