@@ -295,7 +295,12 @@ pub trait App {
     type State;
     fn init() -> Self;
     fn draw(&mut self);
+    #[allow(unused)]
     fn on_click(&mut self, x: f32, y: f32);
+    #[allow(unused)]
+    fn on_mouse_up(&mut self, x: f32, y: f32) {}
+    #[allow(unused)]
+    fn on_mouse_down(&mut self, x: f32, y: f32) {}
     #[allow(unused)]
     fn on_mouse_move(&mut self, x: f32, y: f32) {}
     fn on_key(&mut self, input: KeyboardInput);
@@ -510,6 +515,16 @@ pub mod macros {
             #[no_mangle]
             pub extern "C" fn on_click(x: f32, y: f32) {
                 unsafe { APP.on_click(x, y) }
+            }
+
+            #[no_mangle]
+            pub extern "C" fn on_mouse_down(x: f32, y: f32) {
+                unsafe { APP.on_mouse_down(x, y) }
+            }
+
+            #[no_mangle]
+            pub extern "C" fn on_mouse_up(x: f32, y: f32) {
+                unsafe { APP.on_mouse_up(x, y) }
             }
 
             #[no_mangle]

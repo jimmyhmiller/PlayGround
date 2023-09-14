@@ -250,7 +250,7 @@ impl App for TextWidget {
         let max_line = current_line + self.text_pane.number_of_visible_lines(self.widget_data.size.height);
         let max_line = max_line.min(number_lines);
         for line in current_line..max_line {
-            canvas.set_color(&Color::parse_hex("#ffffff"));
+            canvas.set_color(&Color::parse_hex("#83CDA1"));
             let line_number = format!("{:width$}", line, width = number_of_digits);
             canvas.draw_str(&line_number, 0.0, 0.0);
             canvas.translate(0.0, self.text_pane.line_height);
@@ -333,19 +333,20 @@ impl App for TextWidget {
         if self.text_pane.text_buffer.tokens.is_empty() {
             self.send_open_file();
         }
-        // TODO: Need to handle margin here.
-        let x_margin = self.x_margin;
-        let y_margin = 32.0;
-        let lines_above = self.text_pane.lines_above_scroll();
-        let line = (((y - y_margin as f32) / self.text_pane.line_height).ceil() as usize
-            + lines_above)
-            .saturating_sub(1);
-        let char_width = 16.0;
-        let column = (((x + self.text_pane.offset.x - x_margin as f32) / char_width).ceil() as usize)
-            .saturating_sub(1);
+
+        let (line, column) = self.find_cursor_text_position(x, y);
+
         self.text_pane
             .cursor
             .move_to_bounded(line, column, &self.text_pane.text_buffer);
+    }
+
+    fn on_mouse_down(&mut self, x: f32, y: f32) {
+        println!("Start Drag at {:?}", self.find_cursor_text_position(x, y));
+    }
+
+    fn on_mouse_up(&mut self, x: f32, y: f32) {
+        println!("End Drag at {:?}", self.find_cursor_text_position(x, y));
     }
 
     fn on_key(&mut self, input: KeyboardInput) {
@@ -514,6 +515,20 @@ impl TextWidget {
             })
             .to_string(),
         );
+    }
+
+    fn find_cursor_text_position(&mut self, x: f32, y: f32,) -> (usize, usize) {
+        // TODO: Need to handle margin here.
+        let x_margin = self.x_margin;
+        let y_margin = 32.0;
+        let lines_above = self.text_pane.lines_above_scroll();
+        let line = (((y - y_margin as f32) / self.text_pane.line_height).ceil() as usize
+            + lines_above)
+            .saturating_sub(1);
+        let char_width = 16.0;
+        let column = (((x + self.text_pane.offset.x - x_margin as f32) / char_width).ceil() as usize)
+            .saturating_sub(1);
+        (line, column)
     }
 }
 

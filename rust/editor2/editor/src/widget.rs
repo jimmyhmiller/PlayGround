@@ -455,18 +455,51 @@ impl Widget {
         position: &Position,
         wasm_messenger: &mut WasmMessenger,
     ) -> Vec<Event> {
-        let widget_x = position.x - self.position.x;
-        let widget_y = position.y - self.position.y;
-        let widget_space = Position {
-            x: widget_x,
-            y: widget_y,
-        };
+        let widget_space = self.widget_space(position);
         match &mut self.data {
             WidgetData::Wasm { wasm: _, wasm_id } => {
                 wasm_messenger.send_on_click(*wasm_id, &widget_space);
                 vec![]
             }
             _ => self.on_click.clone(),
+        }
+    }
+
+    fn widget_space(&mut self, position: &Position) -> Position {
+        let widget_x = position.x - self.position.x;
+        let widget_y = position.y - self.position.y;
+        let widget_space = Position {
+            x: widget_x,
+            y: widget_y,
+        };
+        widget_space
+    }
+
+    pub fn on_mouse_down(
+        &mut self,
+        position: &Position,
+        wasm_messenger: &mut WasmMessenger,
+    ) {
+        let widget_space = self.widget_space(position);
+        match &mut self.data {
+            WidgetData::Wasm { wasm: _, wasm_id } => {
+                wasm_messenger.send_on_mouse_down(*wasm_id, &widget_space);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn on_mouse_up(
+        &mut self,
+        position: &Position,
+        wasm_messenger: &mut WasmMessenger,
+    ) {
+        let widget_space = self.widget_space(position);
+        match &mut self.data {
+            WidgetData::Wasm { wasm: _, wasm_id } => {
+                wasm_messenger.send_on_mouse_up(*wasm_id, &widget_space);
+            }
+            _ => {}
         }
     }
 

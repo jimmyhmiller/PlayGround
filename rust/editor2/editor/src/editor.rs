@@ -600,7 +600,7 @@ impl Editor {
         // Maybe I should do the first? Or the last?
         // Not sure
         let mut found_a_widget = false;
-        for widget in self.widget_store.iter() {
+        for widget in self.widget_store.iter_mut() {
             if widget.mouse_over(&self.context.mouse_position) {
                 found_a_widget = true;
                 mouse_over.push(widget.id);
@@ -608,6 +608,8 @@ impl Editor {
                 // of dragging if ctrl is down
                 if self.context.modifiers.ctrl {
                     self.selected_widgets.insert(widget.id);
+                } else {
+                    widget.on_mouse_down(&self.context.mouse_position, &mut self.wasm_messenger);
                 }
                 // TODO: This is ugly, just setting the active widget
                 // over and over again then we will get the last one
@@ -630,15 +632,12 @@ impl Editor {
         // what to do here. But for now I just want to be able to move widgets
 
         self.selected_widgets.clear();
-        if self.context.cancel_click {
-            self.context.cancel_click = false;
-            return;
-        }
+
 
         let mut to_delete = vec![];
 
         let mut mouse_over = vec![];
-        // I would need some sort of hierarchy here
+        // TODO: Probably only top widget
         for widget in self.widget_store.iter_mut() {
             if widget.mouse_over(&self.context.mouse_position) {
                 mouse_over.push(widget.id);
@@ -649,10 +648,16 @@ impl Editor {
                     continue;
                 }
 
-                let events =
-                    widget.on_click(&self.context.mouse_position, &mut self.wasm_messenger);
-                for event in events.iter() {
-                    self.events.push(event.clone());
+                if self.context.cancel_click {
+                    self.context.cancel_click = false;
+                    widget.on_mouse_up(&self.context.mouse_position, &mut self.wasm_messenger);
+                } else {
+
+                    let events =
+                        widget.on_click(&self.context.mouse_position, &mut self.wasm_messenger);
+                    for event in events.iter() {
+                        self.events.push(event.clone());
+                    }
                 }
             }
         }

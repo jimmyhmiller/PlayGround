@@ -61,6 +61,8 @@ enum Payload {
     OnSizeChange(f32, f32),
     OnMouseMove(Position),
     PartialState(Option<String>),
+    OnMouseDown(Position),
+    OnMouseUp(Position),
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +170,8 @@ impl WasmMessenger {
                     Payload::OnSizeChange(_, _) => "OnSizeChange",
                     Payload::OnMouseMove(_) => "OnMouseMove",
                     Payload::PartialState(_) => "PartialState",
+                    Payload::OnMouseDown(_) => "OnMouseDown",
+                    Payload::OnMouseUp(_) => "OnMouseUp",
                 });
             }
         }
@@ -491,6 +495,24 @@ impl WasmMessenger {
         });
     }
 
+    pub fn send_on_mouse_down(&mut self, wasm_id: WasmId, position: &Position) {
+        let message_id = self.next_message_id();
+        self.send_message(Message {
+            message_id,
+            wasm_id,
+            payload: Payload::OnMouseDown(*position),
+        });
+    }
+
+    pub fn send_on_mouse_up(&mut self, wasm_id: WasmId, position: &Position) {
+        let message_id = self.next_message_id();
+        self.send_message(Message {
+            message_id,
+            wasm_id,
+            payload: Payload::OnMouseUp(*position),
+        });
+    }
+
     pub fn send_on_mouse_move(&mut self, wasm_id: WasmId, position: &Position) {
         let message_id = self.next_message_id();
         self.send_message(Message {
@@ -695,6 +717,14 @@ impl WasmManager {
             }
             Payload::OnClick(position) => {
                 self.instance.on_click(position.x, position.y).await?;
+                default_return
+            }
+            Payload::OnMouseDown(position) => {
+                self.instance.on_mouse_down(position.x, position.y).await?;
+                default_return
+            }
+            Payload::OnMouseUp(position) => {
+                self.instance.on_mouse_up(position.x, position.y).await?;
                 default_return
             }
             Payload::OnMouseMove(position) => {
@@ -1299,6 +1329,18 @@ impl WasmInstance {
         Ok(())
     }
 
+    async fn on_mouse_down(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.call_typed_func::<(f32, f32), ()>("on_mouse_down", (x, y), 1)
+        .await?;
+        Ok(())
+    }
+
+    async fn on_mouse_up(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.call_typed_func::<(f32, f32), ()>("on_mouse_up", (x, y), 1)
+        .await?;
+    Ok(())
+    }
+
     pub async fn on_mouse_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.call_typed_func::<(f32, f32), ()>("on_mouse_move", (x, y), 1)
             .await?;
@@ -1508,4 +1550,6 @@ impl WasmInstance {
             .await?;
         Ok(())
     }
+
+
 }

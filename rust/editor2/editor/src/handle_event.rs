@@ -105,7 +105,9 @@ impl Editor {
                     y,
                 } => {
                     // We are dragging, so don't click
-                    if !self.selected_widgets.is_empty() && x_diff != 0.0 && y_diff != 0.0 {
+                    // TODO: This isn't really how this should work
+                    // We need to let a widget decide or something
+                    if x_diff != 0.0 && y_diff != 0.0 {
                         self.context.cancel_click = true;
                     }
 
