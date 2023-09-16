@@ -107,6 +107,7 @@ struct TextWidget {
     file_path: String,
     staged_tokens: Vec<Token>,
     x_margin: i32,
+    selecting: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -152,11 +153,13 @@ impl App for TextWidget {
             file_path: "".to_string(),
             edit_position: 0,
             staged_tokens: vec![],
+            selecting: false,
         };
         me.subscribe("tokens_with_version");
         me.subscribe("color_mapping_changed");
         me
     }
+
 
     fn draw(&mut self) {
         let mut canvas = Canvas::new();
@@ -164,44 +167,10 @@ impl App for TextWidget {
         let foreground = Color::parse_hex("#dc9941");
         let background = Color::parse_hex("#353f38");
 
+
         canvas.set_color(&foreground);
 
-        // let cursor = self.text_pane.cursor;
-        // let current_token_window = self
-        //     .text_pane
-        //     .text_buffer
-        //     .find_token(cursor.line(), cursor.column());
-
-        // let token_output: &String = &format!("{:#?}", current_token_window);
-        // let context = 10;
-        // let context_window = self
-        //     .text_pane
-        //     .text_buffer
-        //     .tokens
-        //     .iter()
-        //     .enumerate()
-        //     .skip(current_token_window.index.saturating_sub(context))
-        //     .take(context * 2 + 1);
-
-        // for (i, (index, token)) in context_window.enumerate() {
-        //     if index == current_token_window.index {
-        //         canvas.set_color(&Color::parse_hex("#ffffff"));
-        //     } else {
-        //         canvas.set_color(&foreground);
-        //     }
-        //     canvas.draw_str(&format!("{:?}", token), 0.0, -700.0 + i as f32 * 32.0);
-        // }
-
-        // for (i, line) in token_output.lines().enumerate() {
-        //     canvas.draw_str(line, -600.0, -400.0 + i as f32 * 32.0);
-        // }
-
-        // let x = 20;
-        // let last_x_token_actions = self.text_pane.text_buffer.token_actions.len().saturating_sub(x);
-        // for (i, action) in self.text_pane.text_buffer.token_actions.iter().skip(last_x_token_actions).enumerate() {
-        //     let action = format!("{:?}", action);
-        //     canvas.draw_str(&action, 1200.0, 0.0 + i as f32 * 32.0);
-        // }
+        // self.draw_debug(&mut canvas);
 
         let bounding_rect = Rect::new(
             0.0,
@@ -282,46 +251,32 @@ impl App for TextWidget {
             );
         }
 
-        // TODO: Make this render without tokens, but on one code path
-        // It might already work.
-        if !self.text_pane.text_buffer.tokens.is_empty() {
-            for line in self.text_pane.text_buffer.decorated_lines(
-                self.text_pane.lines_above_scroll(),
-                self.text_pane
-                    .number_of_visible_lines(self.widget_data.size.height),
-            ) {
-                let mut x = 0.0;
-                for (text, token) in line {
-                    let foreground = Color::parse_hex(
-                        token
-                            .and_then(|token| self.text_pane.color_mapping.get(&token.kind))
-                            .unwrap_or(&"#aa9941".to_string()),
-                    );
-                    canvas.set_color(&foreground);
-                    let text = from_utf8(text).unwrap().to_string();
-                    canvas.draw_str(&text, x, 0.0);
-                    x += text.len() as f32 * 16.0;
-                }
-                canvas.translate(0.0, self.text_pane.line_height);
-            }
-        } else {
-            for line in self
-                .text_pane
-                .text_buffer
-                .lines()
-                .skip(self.text_pane.lines_above_scroll())
-                .take(
-                    self.text_pane
-                        .number_of_visible_lines(self.widget_data.size.height),
-                )
-            {
+
+        canvas.draw_str(&format!("{:?}", self.text_pane.cursor.selection()), 300.0, 300.0);
+
+        let mut current_line = self.text_pane.lines_above_scroll();
+        for line in self.text_pane.text_buffer.decorated_lines(
+            current_line,
+            self.text_pane
+                .number_of_visible_lines(self.widget_data.size.height),
+        ) {
+            self.draw_selection(current_line.saturating_add(1), &mut canvas);
+            let mut x = 0.0;
+            for (text, token) in line {
+                let foreground = Color::parse_hex(
+                    token
+                        .and_then(|token| self.text_pane.color_mapping.get(&token.kind))
+                        .unwrap_or(&"#aa9941".to_string()),
+                );
                 canvas.set_color(&foreground);
-                if let Ok(line) = from_utf8(line) {
-                    canvas.draw_str(line, 0.0, 0.0);
-                    canvas.translate(0.0, self.text_pane.line_height);
-                }
+                let text = from_utf8(text).unwrap().to_string();
+                canvas.draw_str(&text, x, 0.0);
+                x += text.len() as f32 * 16.0;
             }
+            canvas.translate(0.0, self.text_pane.line_height);
+            current_line += 1;
         }
+
         canvas.restore();
 
        
@@ -339,14 +294,33 @@ impl App for TextWidget {
         self.text_pane
             .cursor
             .move_to_bounded(line, column, &self.text_pane.text_buffer);
+
+        self.text_pane.cursor.set_selection_ordered(None);
     }
 
     fn on_mouse_down(&mut self, x: f32, y: f32) {
-        println!("Start Drag at {:?}", self.find_cursor_text_position(x, y));
+        let (line, column) = self.find_cursor_text_position(x, y);
+        self.text_pane.cursor.set_selection_ordered(Some(((line, column), (line, column))));
+        self.selecting = true;
     }
 
     fn on_mouse_up(&mut self, x: f32, y: f32) {
-        println!("End Drag at {:?}", self.find_cursor_text_position(x, y));
+        let (line, column) = self.find_cursor_text_position(x, y);
+        if let Some(current_selection) = self.text_pane.cursor.selection() {
+            let new_selection = ((current_selection.0), (line, column));
+            self.text_pane.cursor.set_selection_ordered(Some(new_selection));
+        }
+        self.selecting = false;
+    }
+
+    fn on_mouse_move(&mut self, x: f32, y: f32) {
+        if self.selecting {
+            if let Some(current_selection) = self.text_pane.cursor.selection() {
+                let (line, column) = self.find_cursor_text_position(x, y);
+                self.text_pane.cursor.set_selection_movement((line, column));
+            }
+            self.set_cursor_icon(CursorIcon::Text);
+        }
     }
 
     fn on_key(&mut self, input: KeyboardInput) {
@@ -496,9 +470,6 @@ impl App for TextWidget {
         }
     }
 
-    fn on_mouse_move(&mut self, _x: f32, _y: f32) {
-        self.set_cursor_icon(CursorIcon::Text);
-    }
 
     fn on_size_change(&mut self, width: f32, height: f32) {
         self.widget_data.size = Size { width, height };
@@ -530,6 +501,83 @@ impl TextWidget {
             .saturating_sub(1);
         (line, column)
     }
+
+    #[allow(unused)]
+    fn draw_debug(&mut self, canvas: &mut Canvas) {
+
+        let foreground = Color::parse_hex("#dc9941");
+
+        let cursor = self.text_pane.cursor;
+        let current_token_window = self
+            .text_pane
+            .text_buffer
+            .find_token(cursor.line(), cursor.column());
+
+        let token_output: &String = &format!("{:#?}", current_token_window);
+        let context = 10;
+        let context_window = self
+            .text_pane
+            .text_buffer
+            .tokens
+            .iter()
+            .enumerate()
+            .skip(current_token_window.index.saturating_sub(context))
+            .take(context * 2 + 1);
+
+        for (i, (index, token)) in context_window.enumerate() {
+            if index == current_token_window.index {
+                canvas.set_color(&Color::parse_hex("#ffffff"));
+            } else {
+                canvas.set_color(&foreground);
+            }
+            canvas.draw_str(&format!("{:?}", token), 0.0, -700.0 + i as f32 * 32.0);
+        }
+
+        for (i, line) in token_output.lines().enumerate() {
+            canvas.draw_str(line, -600.0, -400.0 + i as f32 * 32.0);
+        }
+
+        let x = 20;
+        let last_x_token_actions = self.text_pane.text_buffer.token_actions.len().saturating_sub(x);
+        for (i, action) in self.text_pane.text_buffer.token_actions.iter().skip(last_x_token_actions).enumerate() {
+            let action = format!("{:?}", action);
+            canvas.draw_str(&action, 1200.0, 0.0 + i as f32 * 32.0);
+        }
+    }
+
+    fn draw_selection(&self, line: usize, canvas: &mut Canvas) {
+        canvas.save();
+        canvas.set_color(&Color::parse_hex("#83CDA1").with_alpha(0.2));
+        if let Some((start, end)) = self.text_pane.cursor.selection() {
+
+            if line > start.0 && line < end.0 {
+                let line_length = self.text_pane.text_buffer.line_length(line).max(1);
+                canvas.draw_rect(0.0, 0.0, (line_length*16) as f32, 30.0);
+            } else if line == end.0 {
+                let line_length = self.text_pane.text_buffer.line_length(line).max(1);
+                let selection_length = if start.0 == end.0 {
+                    end.1.saturating_sub(start.1)
+                } else {
+                    end.1
+                };
+                let draw_length = selection_length.min(line_length);
+                canvas.draw_rect(0.0, 0.0, (draw_length*16) as f32, 30.0);
+
+            } else if line == start.0 {
+                let line_offset = start.1;
+                let line_length = self.text_pane.text_buffer.line_length(line).max(1);
+                let selection_length = if start.0 == end.0 {
+                    end.1 - start.1
+                } else {
+                    line_length.saturating_sub(line_offset)
+                };
+                let draw_length = selection_length.min(line_length);
+                canvas.draw_rect((line_offset*16) as f32, 0.0, (draw_length*16) as f32, 30.0);
+            }
+        }
+        canvas.restore();
+    }
+
 }
 
 app!(TextWidget);
