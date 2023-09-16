@@ -252,8 +252,6 @@ impl App for TextWidget {
         }
 
 
-        canvas.draw_str(&format!("{:?}", self.text_pane.cursor.selection()), 300.0, 300.0);
-
         let mut current_line = self.text_pane.lines_above_scroll();
         for line in self.text_pane.text_buffer.decorated_lines(
             current_line,
@@ -296,20 +294,23 @@ impl App for TextWidget {
             .move_to_bounded(line, column, &self.text_pane.text_buffer);
 
         self.text_pane.cursor.set_selection_ordered(None);
+
+        println!("CLICK!");
     }
 
     fn on_mouse_down(&mut self, x: f32, y: f32) {
+        let (line, column) = self.find_cursor_text_position(x, y);
+
+        self.text_pane
+            .cursor
+            .move_to_bounded(line, column, &self.text_pane.text_buffer);
+        
         let (line, column) = self.find_cursor_text_position(x, y);
         self.text_pane.cursor.set_selection_ordered(Some(((line, column), (line, column))));
         self.selecting = true;
     }
 
     fn on_mouse_up(&mut self, x: f32, y: f32) {
-        let (line, column) = self.find_cursor_text_position(x, y);
-        if let Some(current_selection) = self.text_pane.cursor.selection() {
-            let new_selection = ((current_selection.0), (line, column));
-            self.text_pane.cursor.set_selection_ordered(Some(new_selection));
-        }
         self.selecting = false;
     }
 
@@ -545,6 +546,7 @@ impl TextWidget {
         }
     }
 
+    // TODO: Doesn't work on first line
     fn draw_selection(&self, line: usize, canvas: &mut Canvas) {
         canvas.save();
         canvas.set_color(&Color::parse_hex("#83CDA1").with_alpha(0.2));
