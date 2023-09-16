@@ -885,21 +885,20 @@ pub trait VirtualCursor: Clone + Debug {
         }
     }
 
-    // TODO, it is really about which direction I'm moving I think
+    // TODO: This isn't quite right, my cursor should be at the start
+    // of the selection and I should base things on the end
     fn set_selection_movement(&mut self, new_location: (usize, usize)) {
-        if let Some((start, end)) = self.selection() {
-           // if our new location is further than the end, then we need to replace the end
-           // if it before the start, we need to replace the start
-              // otherwise we need to replace the end
-            if new_location < start {
-                self.set_selection_ordered(Some((new_location, end)));
-            } else if new_location > start && new_location < end {
-                self.set_selection_ordered(Some((start, new_location)));
-            } else if new_location > end {
-                self.set_selection_ordered(Some((start, new_location)));
-            }
+        let (start_line, start_column) = new_location;
+        let new_start_line = start_line.min(self.line());
+        let line = self.line().max(start_line);
+        let mut column = self.column();
+        let new_start_column = if new_start_line != start_line || start_line == line && start_column > column {
+            std::mem::replace(&mut column, start_column)
         } else {
-        }
+            start_column
+        };
+    
+        self.set_selection(Some(((new_start_line, new_start_column), (line, column))));
     }
 
     fn move_to_bounded<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) {
