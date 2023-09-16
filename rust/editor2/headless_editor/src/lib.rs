@@ -869,7 +869,38 @@ pub trait VirtualCursor: Clone + Debug {
     fn move_to(&mut self, line: usize, column: usize);
     fn line(&self) -> usize;
     fn column(&self) -> usize;
+    fn selection(&self) -> Option<((usize, usize), (usize, usize))>;
+    fn set_selection(&mut self, selection: Option<((usize, usize), (usize, usize))>);
     fn new(line: usize, column: usize) -> Self;
+
+    fn set_selection_ordered(&mut self, selection: Option<((usize, usize), (usize, usize))>) {
+        if let Some(((line1, column1), (line2, column2))) = selection {
+            if line1 > line2 || (line1 == line2 && column1 > column2) {
+                self.set_selection(Some(((line2, column2), (line1, column1))));
+            } else {
+                self.set_selection(Some(((line1, column1), (line2, column2))));
+            }
+        } else {
+            self.set_selection(selection);
+        }
+    }
+
+    // TODO, it is really about which direction I'm moving I think
+    fn set_selection_movement(&mut self, new_location: (usize, usize)) {
+        if let Some((start, end)) = self.selection() {
+           // if our new location is further than the end, then we need to replace the end
+           // if it before the start, we need to replace the start
+              // otherwise we need to replace the end
+            if new_location < start {
+                self.set_selection_ordered(Some((new_location, end)));
+            } else if new_location > start && new_location < end {
+                self.set_selection_ordered(Some((start, new_location)));
+            } else if new_location > end {
+                self.set_selection_ordered(Some((start, new_location)));
+            }
+        } else {
+        }
+    }
 
     fn move_to_bounded<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) {
         let line = min(buffer.last_line(), line);
@@ -1121,11 +1152,12 @@ fn get_indent(last_line: &String) -> String {
 pub struct Cursor {
     line: usize,
     column: usize,
+    selection: Option<((usize, usize), (usize, usize))>,
 }
 
 impl VirtualCursor for Cursor {
     fn new(line: usize, column: usize) -> Self {
-        Self { line, column }
+        Self { line, column, selection: None }
     }
 
     fn line(&self) -> usize {
@@ -1139,6 +1171,14 @@ impl VirtualCursor for Cursor {
     fn move_to(&mut self, line: usize, column: usize) {
         self.line = line;
         self.column = column;
+    }
+
+    fn selection(&self) -> Option<((usize, usize), (usize, usize))> {
+        self.selection
+    }
+
+    fn set_selection(&mut self, selection: Option<((usize, usize), (usize, usize))>) {
+        self.selection = selection;
     }
 }
 
@@ -1164,6 +1204,14 @@ impl VirtualCursor for CursorWithHistory {
 
     fn column(&self) -> usize {
         self.cursor.column()
+    }
+
+    fn selection(&self) -> Option<((usize, usize), (usize, usize))> {
+        self.cursor.selection()
+    }
+
+    fn set_selection(&mut self, selection: Option<((usize, usize), (usize, usize))>) {
+        self.cursor.set_selection(selection);
     }
 
     fn move_to(&mut self, line: usize, column: usize) {
@@ -1228,12 +1276,23 @@ impl<C: VirtualCursor> VirtualCursor for MultiCursor<C> {
         self.cursors = vec![C::new(line, column)];
     }
 
+    // TODO: These don't really make sense
     fn line(&self) -> usize {
         self.cursors.get(0).map(C::line).unwrap_or(0)
     }
 
     fn column(&self) -> usize {
         self.cursors.get(0).map(C::column).unwrap_or(0)
+    }
+
+    fn selection(&self) -> Option<((usize, usize), (usize, usize))> {
+        self.cursors.get(0).and_then(C::selection)
+    }
+
+    fn set_selection(&mut self, selection: Option<((usize, usize), (usize, usize))>) {
+        for cursor in &mut self.cursors {
+            cursor.set_selection(selection);
+        }
     }
 
     fn new(line: usize, column: usize) -> Self {

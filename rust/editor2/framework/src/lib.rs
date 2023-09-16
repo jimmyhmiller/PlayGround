@@ -661,6 +661,10 @@ impl Color {
         let b = i64::from_str_radix(&hex[start + 4..start + 6], 16).unwrap() as f32;
         Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
     }
+
+    pub fn with_alpha(&self, arg: f64) -> Color {
+        Color::new(self.r, self.g, self.b, arg as f32)
+    }
 }
 
 #[repr(u32)]
