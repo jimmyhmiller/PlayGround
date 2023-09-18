@@ -306,6 +306,7 @@ impl App for TextWidget {
             .move_to_bounded(line, column, &self.text_pane.text_buffer);
         
         let (line, column) = self.find_cursor_text_position(x, y);
+        // TODO: I'm getting false positive selections
         self.text_pane.cursor.set_selection_ordered(Some(((line, column), (line, column))));
         self.selecting = true;
     }
