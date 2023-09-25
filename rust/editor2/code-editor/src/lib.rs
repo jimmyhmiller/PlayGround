@@ -170,6 +170,9 @@ impl App for TextWidget {
 
         canvas.set_color(&foreground);
 
+
+
+
         // self.draw_debug(&mut canvas);
 
         let bounding_rect = Rect::new(
@@ -198,6 +201,10 @@ impl App for TextWidget {
             cursor.column(),
             text_buffer.line_length(cursor.line())
         );
+
+        canvas.draw_str(&format!("{:?}", self.text_pane.cursor.selection()), 700.0, 700.0);
+
+
 
         canvas.draw_str(
             length_output,
@@ -251,14 +258,13 @@ impl App for TextWidget {
             );
         }
 
-
         let mut current_line = self.text_pane.lines_above_scroll();
         for line in self.text_pane.text_buffer.decorated_lines(
             current_line,
             self.text_pane
                 .number_of_visible_lines(self.widget_data.size.height),
         ) {
-            self.draw_selection(current_line.saturating_add(1), &mut canvas);
+            self.draw_selection(current_line, &mut canvas);
             let mut x = 0.0;
             for (text, token) in line {
                 let foreground = Color::parse_hex(
@@ -305,20 +311,30 @@ impl App for TextWidget {
             .cursor
             .move_to_bounded(line, column, &self.text_pane.text_buffer);
         
-        let (line, column) = self.find_cursor_text_position(x, y);
+        let line = self.text_pane.cursor.line();
+        let column = self.text_pane.cursor.column();
         // TODO: I'm getting false positive selections
-        self.text_pane.cursor.set_selection_ordered(Some(((line, column), (line, column))));
+        self.text_pane.cursor.set_selection(Some(((line, column), (line, column))));
         self.selecting = true;
     }
 
-    fn on_mouse_up(&mut self, x: f32, y: f32) {
+    fn on_mouse_up(&mut self, _x: f32, _y: f32) {
         self.selecting = false;
     }
 
-    fn on_mouse_move(&mut self, x: f32, y: f32) {
+    fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) {
+
+
+        if x_diff.abs() < 0.001 && y_diff.abs() < 0.001 {
+            return;
+        }
         if self.selecting {
             if let Some(current_selection) = self.text_pane.cursor.selection() {
                 let (line, column) = self.find_cursor_text_position(x, y);
+                // TODO: I need to find this in text space bounded
+                let bounded_cursor = self.text_pane.cursor.nearest_text_position(line, column, &self.text_pane.text_buffer);
+                let line = bounded_cursor.line();
+                let column = bounded_cursor.column();
                 self.text_pane.cursor.set_selection_movement((line, column));
             }
             self.set_cursor_icon(CursorIcon::Text);
@@ -550,22 +566,14 @@ impl TextWidget {
     // TODO: Doesn't work on first line
     fn draw_selection(&self, line: usize, canvas: &mut Canvas) {
         canvas.save();
+        canvas.translate(0.0, -30.0);
+
         canvas.set_color(&Color::parse_hex("#83CDA1").with_alpha(0.2));
         if let Some((start, end)) = self.text_pane.cursor.selection() {
-
+            // println!("line: {}, start: {}", line, start.0);
             if line > start.0 && line < end.0 {
                 let line_length = self.text_pane.text_buffer.line_length(line).max(1);
                 canvas.draw_rect(0.0, 0.0, (line_length*16) as f32, 30.0);
-            } else if line == end.0 {
-                let line_length = self.text_pane.text_buffer.line_length(line).max(1);
-                let selection_length = if start.0 == end.0 {
-                    end.1.saturating_sub(start.1)
-                } else {
-                    end.1
-                };
-                let draw_length = selection_length.min(line_length);
-                canvas.draw_rect(0.0, 0.0, (draw_length*16) as f32, 30.0);
-
             } else if line == start.0 {
                 let line_offset = start.1;
                 let line_length = self.text_pane.text_buffer.line_length(line).max(1);
@@ -576,6 +584,16 @@ impl TextWidget {
                 };
                 let draw_length = selection_length.min(line_length);
                 canvas.draw_rect((line_offset*16) as f32, 0.0, (draw_length*16) as f32, 30.0);
+            } else if line == end.0 {
+                let line_length = self.text_pane.text_buffer.line_length(line).max(1);
+                let selection_length = if start.0 == end.0 {
+                    end.1.saturating_sub(start.1)
+                } else {
+                    end.1
+                };
+                let draw_length = selection_length.min(line_length);
+                canvas.draw_rect(0.0, 0.0, (draw_length*16) as f32, 30.0);
+
             }
         }
         canvas.restore();

@@ -302,7 +302,7 @@ pub trait App {
     #[allow(unused)]
     fn on_mouse_down(&mut self, x: f32, y: f32) {}
     #[allow(unused)]
-    fn on_mouse_move(&mut self, x: f32, y: f32) {}
+    fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) {}
     fn on_key(&mut self, input: KeyboardInput);
     fn on_scroll(&mut self, x: f64, y: f64);
     #[allow(unused)]
@@ -564,8 +564,8 @@ pub mod macros {
             }
 
             #[no_mangle]
-            pub extern "C" fn on_mouse_move(x: f32, y: f32) {
-                unsafe { APP.on_mouse_move(x, y) }
+            pub extern "C" fn on_mouse_move(x: f32, y: f32, x_diff: f32, y_diff: f32) {
+                unsafe { APP.on_mouse_move(x, y, x_diff, y_diff) }
             }
 
             #[no_mangle]
