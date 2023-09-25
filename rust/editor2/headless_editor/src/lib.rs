@@ -907,6 +907,12 @@ pub trait VirtualCursor: Clone + Debug {
         self.move_to(line, column);
     }
 
+    fn nearest_text_position<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) -> Self {
+        let mut new_cursor = Self::new(line, column);
+        new_cursor.move_to_bounded(line, column, buffer);
+        new_cursor
+    }
+
     fn move_up<T: TextBuffer>(&mut self, buffer: &T) {
         let previous_line = self.line().saturating_sub(1);
         self.move_to(

@@ -102,7 +102,7 @@ impl App for ColorScheme {
     fn on_click(&mut self, _x: f32, _y: f32) {
         self.clicked = true;
     }
-    fn on_mouse_move(&mut self, x: f32, y: f32) {
+    fn on_mouse_move(&mut self, x: f32, y: f32, _x_diff: f32, _y_diff: f32) {
         self.mouse_location = Some((x, y));
     }
     

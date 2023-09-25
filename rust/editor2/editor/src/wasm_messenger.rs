@@ -59,7 +59,7 @@ enum Payload {
     ProcessMessage(usize, String),
     Event(String, String),
     OnSizeChange(f32, f32),
-    OnMouseMove(Position),
+    OnMouseMove(Position, f32, f32),
     PartialState(Option<String>),
     OnMouseDown(Position),
     OnMouseUp(Position),
@@ -168,7 +168,7 @@ impl WasmMessenger {
                     Payload::ProcessMessage(_, _) => "ProcessMessage",
                     Payload::Event(_, _) => "Event",
                     Payload::OnSizeChange(_, _) => "OnSizeChange",
-                    Payload::OnMouseMove(_) => "OnMouseMove",
+                    Payload::OnMouseMove(_, _, _) => "OnMouseMove",
                     Payload::PartialState(_) => "PartialState",
                     Payload::OnMouseDown(_) => "OnMouseDown",
                     Payload::OnMouseUp(_) => "OnMouseUp",
@@ -513,12 +513,12 @@ impl WasmMessenger {
         });
     }
 
-    pub fn send_on_mouse_move(&mut self, wasm_id: WasmId, position: &Position) {
+    pub fn send_on_mouse_move(&mut self, wasm_id: WasmId, position: &Position, x_diff: f32, y_diff: f32) {
         let message_id = self.next_message_id();
         self.send_message(Message {
             message_id,
             wasm_id,
-            payload: Payload::OnMouseMove(*position),
+            payload: Payload::OnMouseMove(*position, x_diff, y_diff),
         });
     }
 
@@ -727,8 +727,8 @@ impl WasmManager {
                 self.instance.on_mouse_up(position.x, position.y).await?;
                 default_return
             }
-            Payload::OnMouseMove(position) => {
-                self.instance.on_mouse_move(position.x, position.y).await?;
+            Payload::OnMouseMove(position, x_diff, y_diff) => {
+                self.instance.on_mouse_move(position.x, position.y, x_diff, y_diff).await?;
                 default_return
             }
             Payload::Draw(fn_name) => {
@@ -1341,8 +1341,8 @@ impl WasmInstance {
     Ok(())
     }
 
-    pub async fn on_mouse_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
-        self.call_typed_func::<(f32, f32), ()>("on_mouse_move", (x, y), 1)
+    pub async fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) -> Result<(), Box<dyn Error>> {
+        self.call_typed_func::<(f32, f32, f32, f32), ()>("on_mouse_move", (x, y, x_diff, y_diff), 1)
             .await?;
         Ok(())
     }

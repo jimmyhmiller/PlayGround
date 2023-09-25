@@ -151,7 +151,7 @@ impl Editor {
                                 match &widget.data {
                                     WidgetData::Wasm { wasm: _, wasm_id } => self
                                         .wasm_messenger
-                                        .send_on_mouse_move(*wasm_id, &widget_space),
+                                        .send_on_mouse_move(*wasm_id, &widget_space, x_diff, y_diff),
                                     _ => {}
                                 }
                             }
