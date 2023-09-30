@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell, collections::HashMap, fs::File, io::Read, path::PathBuf, process::ChildStdout,
+    cell::RefCell, collections::{HashMap, HashSet}, fs::File, io::Read, path::PathBuf, process::ChildStdout,
     str::from_utf8,
 };
 
@@ -70,6 +70,7 @@ pub struct Widget {
 
 pub struct WidgetStore {
     widgets: Vec<Widget>,
+    widget_images: HashMap<WidgetId, Image>,
     next_id: WidgetId,
 }
 
@@ -93,8 +94,60 @@ impl WidgetStore {
     pub fn new() -> WidgetStore {
         WidgetStore {
             widgets: Vec::new(),
+            widget_images: HashMap::new(),
             next_id: 0,
         }
+    }
+
+    pub fn draw(&mut self, canvas: &mut Canvas, wasm_messenger: &mut WasmMessenger, dirty_widgets: &HashSet<usize>, values: &HashMap<String, Value>) {
+
+        let mut dirty_widgets = dirty_widgets.clone();
+        for widget in self.iter() {
+            if !self.widget_images.contains_key(&widget.id) {
+                dirty_widgets.insert(widget.id);
+            }
+        }
+        let mut images_to_insert = vec![];
+        for widget_id in dirty_widgets.iter() {
+            if let Some(widget) = self.get_mut(*widget_id) {
+                if let Some(mut surface) = canvas.new_surface(&canvas.image_info(), None) {
+                    let canvas = surface.canvas();
+
+                    let can_draw = match widget.data {
+                        WidgetData::Wasm { wasm: _, wasm_id } => {
+                            wasm_messenger.has_draw_commands(wasm_id)
+                        }
+                        _ => true
+                    };
+
+                    if !can_draw {
+                        continue;
+                    }
+    
+                    widget.draw(
+                        canvas,
+                        wasm_messenger,
+                        widget.size,
+                        values,
+                    );
+    
+                    let image = surface.image_snapshot();
+                    images_to_insert.push((widget.id, image));
+                }
+            } else {
+                println!("Widget not found for id: {}", widget_id);
+            }
+           
+        }
+
+        for (id, image) in images_to_insert {
+            self.widget_images.insert(id, image);
+        }
+
+        for (_, image) in self.widget_images.iter() {
+            canvas.draw_image(image, (0.0, 0.0), None);
+        }
+        
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Widget> {
