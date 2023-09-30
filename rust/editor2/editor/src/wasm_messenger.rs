@@ -639,6 +639,10 @@ impl WasmMessenger {
             payload: Payload::OnSizeChange(width, height),
         });
     }
+
+    pub fn has_draw_commands(&self, wasm_id: u64) -> bool {
+        self.wasm_draw_commands.get(&wasm_id).map(|x| !x.is_empty()).unwrap_or(false)
+    }
 }
 
 // I think I need to:

@@ -737,6 +737,7 @@ pub enum KeyCode {
     UpArrow,
     DownArrow,
     BackSpace,
+    Tab,
 }
 
 impl KeyCode {
@@ -809,6 +810,7 @@ impl KeyCode {
             64 => Some(KeyCode::UpArrow),
             65 => Some(KeyCode::DownArrow),
             66 => Some(KeyCode::BackSpace),
+            146 => Some(KeyCode::Tab),
             _ => None,
         }
     }
@@ -892,7 +894,7 @@ impl KeyboardInput {
     pub fn from_u32(key: u32, state: u32, modifiers: u32) -> Self {
         Self {
             state: KeyState::from_u32(state),
-            key_code: KeyCode::from_u32(key).unwrap(),
+            key_code: KeyCode::from_u32(key).expect(&format!("Unknown key code {}", key)),
             modifiers: Modifiers::from_u32(modifiers),
         }
     }

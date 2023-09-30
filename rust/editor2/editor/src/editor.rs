@@ -23,7 +23,7 @@ use notify::{FsEventWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
-use skia_safe::{Font, FontStyle, Typeface};
+use skia_safe::{Font, FontStyle, Typeface, ImageInfo};
 
 pub struct Context {
     pub mouse_position: Position,
@@ -88,6 +88,8 @@ pub struct Editor {
     pub event_listeners: HashMap<String, HashSet<WidgetId>>,
     pub window: Window,
     pub cursor_icon: CursorIcon,
+    pub dirty_widgets: HashSet<usize>,
+    pub first_frame: bool,
 }
 
 pub struct Events {
@@ -145,6 +147,8 @@ impl Editor {
 
     pub fn next_frame(&mut self) {
         self.events.next_frame();
+        self.dirty_widgets.clear();
+        self.first_frame = false;
     }
 
     pub fn setup(&mut self) {}
@@ -247,6 +251,7 @@ impl Editor {
     }
 
     pub fn update(&mut self) {
+        // TODO: Only update position if it has changed
         for widget in self.widget_store.iter_mut() {
             match &widget.data {
                 WidgetData::Wasm { wasm: _, wasm_id } => {
@@ -259,6 +264,9 @@ impl Editor {
 
         // TODO: Put in better place
         for widget in self.widget_store.iter_mut() {
+            // if !self.first_frame && !self.dirty_widgets.contains(&widget.id) {
+            //     continue;
+            // }
             match &widget.data {
                 WidgetData::Wasm { wasm: _, wasm_id } => {
                     self.wasm_messenger.send_draw(*wasm_id, "draw");
@@ -407,10 +415,15 @@ impl Editor {
                 },
             },
             cursor_icon: CursorIcon::Default,
+            dirty_widgets: HashSet::new(),
+            first_frame: true,
         }
     }
 
     pub fn draw(&mut self, canvas: &mut Canvas) {
+
+
+
         self.fps_counter.tick();
         use skia_safe::Size;
 
@@ -425,6 +438,20 @@ impl Editor {
             32.0,
         );
         let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
+
+
+        let image = if let Some(mut surface) = canvas.new_surface(&canvas.image_info(), None) {
+            let canvas = surface.canvas();
+            canvas.draw_str("test", Point::new(100.0, 100.0), &font, white);
+            Some(surface.image_snapshot())
+        } else {
+            None
+        };
+
+
+        if let Some(image) = image {
+            canvas.draw_image(image, (100.0, 100.0), Some(white));
+        }
 
         canvas.draw_str(
             self.fps_counter.fps.to_string(),
@@ -442,29 +469,32 @@ impl Editor {
         }
         canvas.restore();
 
-        let mut to_draw = vec![];
-        for widget in self.widget_store.iter_mut() {
-            let before_count = canvas.save();
-            to_draw.extend(widget.draw(
-                canvas,
-                &mut self.wasm_messenger,
-                widget.size,
-                &self.values,
-            ));
-            canvas.restore_to_count(before_count);
-            canvas.restore();
-        }
+
+        self.widget_store.draw(canvas, &mut self.wasm_messenger, &self.dirty_widgets, &self.values);
+
+        // let mut to_draw = vec![];
+        // for widget in self.widget_store.iter_mut() {
+        //     let before_count = canvas.save();
+        //     to_draw.extend(widget.draw(
+        //         canvas,
+        //         &mut self.wasm_messenger,
+        //         widget.size,
+        //         &self.values,
+        //     ));
+        //     canvas.restore_to_count(before_count);
+        //     canvas.restore();
+        // }
 
         // TODO: This is bad, I need to traverse the tree. Being lazy
         // Also not even sure about compound right now
-        for widget_id in to_draw {
-            if let Some(widget) = self.widget_store.get_mut(widget_id) {
-                let before_count = canvas.save();
-                widget.draw(canvas, &mut self.wasm_messenger, widget.size, &self.values);
-                canvas.restore_to_count(before_count);
-                canvas.restore();
-            }
-        }
+        // for widget_id in to_draw {
+        //     if let Some(widget) = self.widget_store.get_mut(widget_id) {
+        //         let before_count = canvas.save();
+        //         widget.draw(canvas, &mut self.wasm_messenger, widget.size, &self.values);
+        //         canvas.restore_to_count(before_count);
+        //         canvas.restore();
+        //     }
+        // }
     }
 
     pub fn add_event(&mut self, event: &winit::event::Event<'_, ()>) {
@@ -711,6 +741,10 @@ impl Editor {
         }
         let mut file = File::create(&self.widget_config_path).unwrap();
         file.write_all(result.as_bytes()).unwrap();
+    }
+
+    pub fn mark_widget_dirty(&mut self, id: usize) {
+        self.dirty_widgets.insert(id);
     }
 }
 

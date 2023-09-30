@@ -22,6 +22,7 @@ fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
 
 impl Editor {
     pub fn handle_events(&mut self, events: Vec<Event>) {
+        let mut dirty_widgets = HashSet::new();
         for event in events {
             match event {
                 Event::DroppedFile { path, x, y } => {
@@ -78,9 +79,11 @@ impl Editor {
                         if widget.mouse_over(&mouse) {
                             match &mut widget.data {
                                 WidgetData::TextPane { text_pane } => {
+                                    dirty_widgets.insert(widget.id);
                                     text_pane.on_scroll(x, y, widget.size.height);
                                 }
                                 WidgetData::Wasm { wasm: _, wasm_id } => {
+                                    dirty_widgets.insert(widget.id);
                                     self.wasm_messenger.send_on_scroll(*wasm_id, x, y);
                                 }
                                 _ => {}
@@ -92,6 +95,7 @@ impl Editor {
                 Event::MoveWidgetRelative { selector, x, y } => {
                     let widget_ids = selector.select(&self.widget_store);
                     for widget_id in widget_ids {
+                        dirty_widgets.insert(widget_id);
                         if let Some(widget) = self.widget_store.get_mut(widget_id) {
                             widget.position.x += x;
                             widget.position.y += y;
@@ -114,6 +118,7 @@ impl Editor {
                     if self.context.modifiers.ctrl && self.context.modifiers.option {
                         for widget_id in self.selected_widgets.iter() {
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
+                                dirty_widgets.insert(widget.id);
                                 widget.size.width += x_diff;
                                 widget.size.height += y_diff;
                                 widget.on_size_change(
@@ -126,6 +131,7 @@ impl Editor {
                     } else if self.context.modifiers.ctrl {
                         for widget_id in self.selected_widgets.iter() {
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
+                                dirty_widgets.insert(widget.id);
                                 widget.position.x += x_diff;
                                 widget.position.y += y_diff;
                                 if widget.position.x > self.window.size.width - 300.0 {
@@ -149,9 +155,12 @@ impl Editor {
                             if widget.mouse_over(&position) {
                                 was_over = true;
                                 match &widget.data {
-                                    WidgetData::Wasm { wasm: _, wasm_id } => self
-                                        .wasm_messenger
-                                        .send_on_mouse_move(*wasm_id, &widget_space, x_diff, y_diff),
+                                    WidgetData::Wasm { wasm: _, wasm_id } => {
+                                        self
+                                            .wasm_messenger
+                                            .send_on_mouse_move(*wasm_id, &widget_space, x_diff, y_diff);
+                                        dirty_widgets.insert(widget.id);
+                                    },
                                     _ => {}
                                 }
                             }
@@ -171,6 +180,7 @@ impl Editor {
                 Event::ReloadWasm(path) => {
                     for widget in self.widget_store.iter_mut() {
                         if let WidgetData::Wasm { wasm, wasm_id } = &mut widget.data {
+                            dirty_widgets.insert(widget.id);
                             if path == wasm.path {
                                 self.wasm_messenger.send_reload(*wasm_id);
                                 // wasm.reload();
@@ -264,6 +274,7 @@ impl Editor {
                         if let Some(widget) = self.widget_store.get_mut(*widget_id) {
                             match &mut widget.data {
                                 WidgetData::Wasm { wasm: _, wasm_id } => {
+                                    dirty_widgets.insert(widget.id);
                                     self.wasm_messenger.send_event(
                                         *wasm_id,
                                         kind.clone(),
@@ -348,6 +359,9 @@ impl Editor {
                     println!("Unhandled event {:?}", e)
                 }
             }
+        }
+        for widget_id in dirty_widgets {
+           self.mark_widget_dirty(widget_id)
         }
     }
 }

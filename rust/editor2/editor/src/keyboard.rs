@@ -134,6 +134,7 @@ pub enum KeyCode {
     UpArrow,
     DownArrow,
     BackSpace,
+    Tab = 146,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +216,7 @@ impl KeyCode {
             Up => Some(KeyCode::UpArrow),
             Down => Some(KeyCode::DownArrow),
             Back => Some(KeyCode::BackSpace),
+            Tab => Some(KeyCode::Tab),
             _ => None,
         }
     }
@@ -288,6 +290,7 @@ impl KeyCode {
             64 => Some(KeyCode::UpArrow),
             65 => Some(KeyCode::DownArrow),
             66 => Some(KeyCode::BackSpace),
+            146 => Some(KeyCode::Tab),
             _ => None,
         }
     }

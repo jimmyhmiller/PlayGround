@@ -136,6 +136,18 @@ struct Tokens {
     tokens: Vec<u64>,
 }
 
+
+fn get_last_three_segments(path: &str) -> Option<String> {
+    use std::path::Path;
+    let path = Path::new(path);
+    let mut components = path.components().rev();
+    let file_name = components.next()?;
+    let folder_name = components.next()?;
+    let parent_folder = components.next()?;
+    Some(format!("{}/{}/{}", parent_folder.as_os_str().to_string_lossy(), folder_name.as_os_str().to_string_lossy(), file_name.as_os_str().to_string_lossy()))
+}
+
+
 impl App for TextWidget {
     type State = TextWidget;
 
@@ -171,8 +183,6 @@ impl App for TextWidget {
         canvas.set_color(&foreground);
 
 
-
-
         // self.draw_debug(&mut canvas);
 
         let bounding_rect = Rect::new(
@@ -202,8 +212,7 @@ impl App for TextWidget {
             text_buffer.line_length(cursor.line())
         );
 
-        canvas.draw_str(&format!("{:?}", self.text_pane.cursor.selection()), 700.0, 700.0);
-
+        // canvas.draw_str(&format!("{:?}", self.text_pane.cursor.selection()), 700.0, 700.0);
 
 
         canvas.draw_str(
@@ -211,6 +220,12 @@ impl App for TextWidget {
             self.widget_data.size.width - length_output.len() as f32 * 18.0,
             self.widget_data.size.height - 40.0,
         );
+        
+        if let Some(file_and_folder) = get_last_three_segments(&self.file_path) {
+            canvas.draw_str(&file_and_folder, 20.0, 48.0);
+        }
+        
+        canvas.translate(0.0, 64.0);
 
         let fractional_offset = self.text_pane.fractional_line_offset();
         self.x_margin = 30;
@@ -234,7 +249,7 @@ impl App for TextWidget {
         canvas.restore();
 
         canvas.save();
-        let line_number_margin = number_of_digits as f32 + 4.0 * 16.0;
+        let line_number_margin =(number_of_digits as f32 + 4.0 * 16.0) + 16.0;
         self.x_margin += line_number_margin as i32;
         canvas.translate(line_number_margin, 0.0);
 
@@ -345,7 +360,9 @@ impl App for TextWidget {
         if !matches!(input.state, KeyState::Pressed) {
             return;
         }
+        println!("{:?}", input.key_code);
         match input.key_code {
+            KeyCode::Tab => self.text_pane.cursor.handle_insert("    ".as_bytes(), &mut self.text_pane.text_buffer),
             KeyCode::LeftArrow => self.text_pane.cursor.move_left(&self.text_pane.text_buffer),
             KeyCode::RightArrow => self
                 .text_pane
@@ -509,7 +526,7 @@ impl TextWidget {
     fn find_cursor_text_position(&mut self, x: f32, y: f32,) -> (usize, usize) {
         // TODO: Need to handle margin here.
         let x_margin = self.x_margin;
-        let y_margin = 32.0;
+        let y_margin = 80.0;
         let lines_above = self.text_pane.lines_above_scroll();
         let line = (((y - y_margin as f32) / self.text_pane.line_height).ceil() as usize
             + lines_above)
@@ -567,7 +584,7 @@ impl TextWidget {
     fn draw_selection(&self, line: usize, canvas: &mut Canvas) {
         canvas.save();
         canvas.translate(0.0, -30.0);
-
+        
         canvas.set_color(&Color::parse_hex("#83CDA1").with_alpha(0.2));
         if let Some((start, end)) = self.text_pane.cursor.selection() {
             // println!("line: {}, start: {}", line, start.0);
