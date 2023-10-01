@@ -79,8 +79,6 @@ impl App for EventViewer {
     }
 
     fn on_event(&mut self, kind: String, event: String) {
-
-        println!("{}", self.events.len());
         self.events.push(Event { kind, event });
         if self.events.len() > 100 {
             self.events.drain(0..(self.events.len() - 100));
