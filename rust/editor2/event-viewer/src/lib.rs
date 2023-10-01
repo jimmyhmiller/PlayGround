@@ -44,7 +44,11 @@ impl App for EventViewer {
         ui.draw(&mut canvas);
     }
 
-    fn on_click(&mut self, _x: f32, _y: f32) {}
+    fn on_click(&mut self, _x: f32, _y: f32) {
+        if self.events.len() > 100 {
+            self.events.drain(0..(self.events.len() - 100));
+        }
+    }
 
     fn on_key(&mut self, _input: framework::KeyboardInput) {}
 
@@ -75,7 +79,12 @@ impl App for EventViewer {
     }
 
     fn on_event(&mut self, kind: String, event: String) {
+
+        println!("{}", self.events.len());
         self.events.push(Event { kind, event });
+        if self.events.len() > 100 {
+            self.events.drain(0..(self.events.len() - 100));
+        }
     }
 }
 
