@@ -360,7 +360,6 @@ impl App for TextWidget {
         if !matches!(input.state, KeyState::Pressed) {
             return;
         }
-        println!("{:?}", input.key_code);
         match input.key_code {
             KeyCode::Tab => self.text_pane.cursor.handle_insert("    ".as_bytes(), &mut self.text_pane.text_buffer),
             KeyCode::LeftArrow => self.text_pane.cursor.move_left(&self.text_pane.text_buffer),
@@ -476,11 +475,13 @@ impl App for TextWidget {
     }
 
     fn on_event(&mut self, kind: String, event: String) {
+        println!("got event!!!!!!!!!!!!!!!!");
         if kind == "tokens_with_version" {
             if let Ok(tokens) = serde_json::from_str::<TokensWithVersion>(&event) {
                 if tokens.path != self.file_path {
                     return;
                 }
+                println!("Got some tokens"); 
                 if tokens.version != self.text_pane.text_buffer.document_version {
                     println!(
                         "version mismatch tokens: {}  pane: {}",

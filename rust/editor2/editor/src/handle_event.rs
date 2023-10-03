@@ -180,9 +180,8 @@ impl Editor {
                 Event::ReloadWasm(path) => {
                     for widget in self.widget_store.iter_mut() {
                         if let WidgetData::Wasm { wasm, wasm_id } = &mut widget.data {
-                            dirty_widgets.insert(widget.id);
                             if path == wasm.path {
-                                self.wasm_messenger.send_reload(*wasm_id);
+                                self.wasm_messenger.send_reload(*wasm_id, widget.id);
                                 // wasm.reload();
                             }
                         }
@@ -312,7 +311,7 @@ impl Editor {
                 Event::KeyEvent {
                     input:
                         KeyboardInput {
-                            state: _,
+                            state,
                             key_code,
                             modifiers,
                         },
@@ -345,6 +344,24 @@ impl Editor {
                             });
                             self.events.push(Event::OpenFile(path));
                         }
+                    } else {
+                        if let Some(widget_id) = self.active_widget {
+                            self.mark_widget_dirty(widget_id);
+                            if let Some(widget) = self.widget_store.get_mut(widget_id) {
+                                match widget.data {
+                                    WidgetData::Wasm { wasm: _, wasm_id } => {
+                                        self.wasm_messenger.send_on_key(wasm_id,
+                                            KeyboardInput {
+                                                state,
+                                                key_code,
+                                                modifiers,
+                                            }
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
                 }
                 Event::SetCursor(cursor) => match cursor {
@@ -354,6 +371,9 @@ impl Editor {
                     framework::CursorIcon::Text => {
                         self.cursor_icon = winit::window::CursorIcon::Text;
                     }
+                },
+                Event::Redraw(widget_id) => {
+                    self.mark_widget_dirty(widget_id)
                 },
                 e => {
                     println!("Unhandled event {:?}", e)

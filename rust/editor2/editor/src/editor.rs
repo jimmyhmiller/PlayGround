@@ -147,7 +147,6 @@ impl Editor {
 
     pub fn next_frame(&mut self) {
         self.events.next_frame();
-        self.dirty_widgets.clear();
         self.first_frame = false;
     }
 
@@ -269,6 +268,7 @@ impl Editor {
             // }
             match &widget.data {
                 WidgetData::Wasm { wasm: _, wasm_id } => {
+                    self.wasm_messenger.send_update(*wasm_id);
                     self.wasm_messenger.send_draw(*wasm_id, "draw");
                 }
                 _ => {}
@@ -286,6 +286,7 @@ impl Editor {
             for event in receiver.try_iter() {
                 {
                     self.events.push_current_frame(event);
+
                 }
             }
         }
@@ -439,20 +440,6 @@ impl Editor {
         );
         let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
 
-
-        let image = if let Some(mut surface) = canvas.new_surface(&canvas.image_info(), None) {
-            let canvas = surface.canvas();
-            canvas.draw_str("test", Point::new(100.0, 100.0), &font, white);
-            Some(surface.image_snapshot())
-        } else {
-            None
-        };
-
-
-        if let Some(image) = image {
-            canvas.draw_image(image, (100.0, 100.0), Some(white));
-        }
-
         canvas.draw_str(
             self.fps_counter.fps.to_string(),
             Point::new(canvas_size.width - 60.0, 30.0),
@@ -471,6 +458,7 @@ impl Editor {
 
 
         self.widget_store.draw(canvas, &mut self.wasm_messenger, &self.dirty_widgets, &self.values);
+        self.dirty_widgets.clear();
 
         // let mut to_draw = vec![];
         // for widget in self.widget_store.iter_mut() {
@@ -513,19 +501,12 @@ impl Editor {
             Event::WidgetMouseUp { widget_id: _ } => {
                 self.events.push(event);
             }
+            Event::Redraw(_) => {
+                self.events.push(event);
+            }
             Event::Noop => {}
             Event::KeyEvent { input } => {
                 self.events.push(event);
-                if let Some(widget_id) = self.active_widget {
-                    if let Some(widget) = self.widget_store.get_mut(widget_id) {
-                        match widget.data {
-                            WidgetData::Wasm { wasm: _, wasm_id } => {
-                                self.wasm_messenger.send_on_key(wasm_id, input);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
             }
             Event::ModifiersChanged(_) => {
                 self.events.push(event);

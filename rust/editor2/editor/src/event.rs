@@ -75,6 +75,7 @@ pub enum Event {
     Unsubscribe(usize, String),
     OpenFile(String),
     SetCursor(CursorIcon),
+    Redraw(usize),
 }
 
 impl Event {
