@@ -53,7 +53,7 @@ enum Payload {
     Draw(String),
     OnScroll(f64, f64),
     OnKey(KeyboardInput),
-    Reload,
+    Reload(usize),
     SaveState,
     UpdatePosition(Position),
     ProcessMessage(usize, String),
@@ -63,6 +63,7 @@ enum Payload {
     PartialState(Option<String>),
     OnMouseDown(Position),
     OnMouseUp(Position),
+    Update,
 }
 
 #[derive(Clone, Debug)]
@@ -73,12 +74,14 @@ struct Message {
 }
 
 enum OutPayload {
-    DrawCommands(Vec<Command>),
+    DrawCommands(Vec<DrawCommands>),
     Saved(SaveState),
     ErrorPayload(String),
     Complete,
     NeededValue(String, oneshot::Sender<String>),
     Error(String),
+    Reloaded(usize),
+    Update(Vec<Commands>),
 }
 
 struct OutMessage {
@@ -98,8 +101,8 @@ pub struct WasmMessenger {
     local_pool: futures::executor::LocalPool,
     local_spawner: LocalSpawner,
     last_wasm_id: u64,
-    wasm_draw_commands: HashMap<WasmId, Vec<Command>>,
-    wasm_non_draw_commands: HashMap<WasmId, Vec<Command>>,
+    wasm_draw_commands: HashMap<WasmId, Vec<DrawCommands>>,
+    wasm_non_draw_commands: HashMap<WasmId, Vec<Commands>>,
     wasm_states: HashMap<WasmId, SaveState>,
     last_message_id: usize,
     // Not a huge fan of this solution,
@@ -162,7 +165,7 @@ impl WasmMessenger {
                     Payload::Draw(_) => "Draw",
                     Payload::OnScroll(_, _) => "OnScroll",
                     Payload::OnKey(_) => "OnKey",
-                    Payload::Reload => "Reload",
+                    Payload::Reload(_) => "Reload",
                     Payload::SaveState => "SaveState",
                     Payload::UpdatePosition(_) => "UpdatePosition",
                     Payload::ProcessMessage(_, _) => "ProcessMessage",
@@ -172,6 +175,7 @@ impl WasmMessenger {
                     Payload::PartialState(_) => "PartialState",
                     Payload::OnMouseDown(_) => "OnMouseDown",
                     Payload::OnMouseUp(_) => "OnMouseUp",
+                    Payload::Update => "Update",
                 });
             }
         }
@@ -255,18 +259,17 @@ impl WasmMessenger {
             let mut current_height_stack = vec![];
 
             let mut paint = skia_safe::Paint::default();
-            let mut non_draw_commands = vec![];
             for command in commands.iter() {
                 match command {
-                    Command::SetColor(r, g, b, a) => {
+                    DrawCommands::SetColor(r, g, b, a) => {
                         let color = Color::new(*r, *g, *b, *a);
                         paint.set_color(color.to_color4f().to_color());
                     }
-                    Command::DrawRect(x, y, width, height) => {
+                    DrawCommands::DrawRect(x, y, width, height) => {
                         canvas
                             .draw_rect(skia_safe::Rect::from_xywh(*x, *y, *width, *height), &paint);
                     }
-                    Command::DrawString(str, x, y) => {
+                    DrawCommands::DrawString(str, x, y) => {
                         let mut paint = paint.clone();
                         paint.set_shader(None);
                         if current_height > bounds.height {
@@ -284,14 +287,14 @@ impl WasmMessenger {
                         canvas.draw_str(str, (*x, *y), &font, &paint);
                     }
 
-                    Command::ClipRect(x, y, width, height) => {
+                    DrawCommands::ClipRect(x, y, width, height) => {
                         canvas.clip_rect(
                             skia_safe::Rect::from_xywh(*x, *y, *width, *height),
                             None,
                             None,
                         );
                     }
-                    Command::DrawRRect(x, y, width, height, radius) => {
+                    DrawCommands::DrawRRect(x, y, width, height, radius) => {
                         let rrect = skia_safe::RRect::new_rect_xy(
                             skia_safe::Rect::from_xywh(*x, *y, *width, *height),
                             *radius,
@@ -299,34 +302,21 @@ impl WasmMessenger {
                         );
                         canvas.draw_rrect(rrect, &paint);
                     }
-                    Command::Translate(x, y) => {
+                    DrawCommands::Translate(x, y) => {
                         current_height += *y;
                         current_width += *x;
                         canvas.translate((*x, *y));
                     }
-                    Command::Save => {
+                    DrawCommands::Save => {
                         canvas.save();
                         current_height_stack.push(current_height);
                     }
-                    Command::Restore => {
+                    DrawCommands::Restore => {
                         canvas.restore();
                         current_height = current_height_stack.pop().unwrap();
                     }
-                    Command::SetCursor(cursor) => {
-                        self.external_sender
-                            .as_mut()
-                            .unwrap()
-                            .send(Event::SetCursor(*cursor))
-                            .unwrap();
-                    }
-                    c => {
-                        non_draw_commands.push(c.clone());
-                    }
                 }
             }
-            commands.retain(|x| x.is_draw());
-            self.wasm_non_draw_commands
-                .insert(wasm_id, non_draw_commands);
             Some(Size {
                 width: current_width,
                 height: current_height,
@@ -340,9 +330,7 @@ impl WasmMessenger {
         for (wasm_id, commands) in self.wasm_non_draw_commands.iter() {
             for command in commands.iter() {
                 match command {
-                    Command::Restore => println!("Unhandled"),
-                    Command::Save => println!("Unhandled"),
-                    Command::StartProcess(process_id, process_command) => {
+                    Commands::StartProcess(process_id, process_command) => {
                         self.external_sender
                             .as_mut()
                             .unwrap()
@@ -354,7 +342,7 @@ impl WasmMessenger {
                             ))
                             .unwrap();
                     }
-                    Command::SendProcessMessage(process_id, message) => {
+                    Commands::SendProcessMessage(process_id, message) => {
                         self.external_sender
                             .as_mut()
                             .unwrap()
@@ -364,22 +352,22 @@ impl WasmMessenger {
                             ))
                             .unwrap();
                     }
-                    Command::ReceiveLastProcessMessage(_) => println!("Unhandled"),
-                    Command::ProvideF32(name, val) => {
+                    Commands::ReceiveLastProcessMessage(_) => println!("Unhandled"),
+                    Commands::ProvideF32(name, val) => {
                         values.insert(name.to_string(), Value::F32(*val));
                     }
-                    Command::ProvideBytes(name, data) => {
+                    Commands::ProvideBytes(name, data) => {
                         // TODO: Get rid of clone here
                         values.insert(name.to_string(), Value::Bytes(data.clone()));
                     }
-                    Command::Event(kind, event) => {
+                    Commands::Event(kind, event) => {
                         self.external_sender
                             .as_mut()
                             .unwrap()
                             .send(Event::Event(kind.clone(), event.clone()))
                             .unwrap();
                     }
-                    Command::Subscribe(kind) => {
+                    Commands::Subscribe(kind) => {
                         self.external_sender
                             .as_mut()
                             .unwrap()
@@ -390,7 +378,7 @@ impl WasmMessenger {
                             ))
                             .unwrap();
                     }
-                    Command::Unsubscribe(kind) => {
+                    Commands::Unsubscribe(kind) => {
                         self.external_sender
                             .as_mut()
                             .unwrap()
@@ -401,7 +389,12 @@ impl WasmMessenger {
                             ))
                             .unwrap();
                     }
-                    _ => println!("Draw command ended up here"),
+                    Commands::Redraw(widget_id) => {
+                        self.external_sender.as_mut().unwrap().send(Event::Redraw(*widget_id)).unwrap();
+                    }
+                    Commands::SetCursor(cursor) => {
+                        self.external_sender.as_mut().unwrap().send(Event::SetCursor(*cursor)).unwrap();
+                    }
                 }
             }
         }
@@ -435,6 +428,13 @@ impl WasmMessenger {
                     OutPayload::DrawCommands(commands) => {
                         self.wasm_draw_commands.insert(message.wasm_id, commands);
                     }
+                    OutPayload::Update(commands) => {
+                        let current_commands = self
+                            .wasm_non_draw_commands
+                            .entry(message.wasm_id)
+                            .or_insert(vec![]);
+                        current_commands.extend(commands);
+                    }
                     OutPayload::Saved(saved) => {
                         self.wasm_states.insert(message.wasm_id, saved);
                     }
@@ -450,6 +450,13 @@ impl WasmMessenger {
                         } else {
                             // println!("Can't find value {}", name);
                         }
+                    }
+                    OutPayload::Reloaded(widget_id) => {
+                        let commands = self
+                            .wasm_non_draw_commands
+                            .entry(message.wasm_id)
+                            .or_insert(vec![]);
+                        commands.push(Commands::Redraw(widget_id));
                     }
                     OutPayload::Complete => {}
                     OutPayload::Error(error) => {
@@ -540,6 +547,15 @@ impl WasmMessenger {
         });
     }
 
+    pub fn send_update(&mut self, wasm_id: WasmId) {
+        let message_id = self.next_message_id();
+        self.send_message(Message {
+            message_id,
+            wasm_id,
+            payload: Payload::Update,
+        });
+    }
+
     pub fn send_set_state(&mut self, wasm_id: WasmId, state: &str) {
         let message_id = self.next_message_id();
         let base64_decoded = decode_base64(&state.as_bytes().to_vec()).unwrap();
@@ -569,12 +585,12 @@ impl WasmMessenger {
         });
     }
 
-    pub fn send_reload(&mut self, wasm_id: u64) {
+    pub fn send_reload(&mut self, wasm_id: u64, widget_id: usize) {
         let message_id = self.next_message_id();
         self.send_message(Message {
             message_id,
             wasm_id,
-            payload: Payload::Reload,
+            payload: Payload::Reload(widget_id),
         });
     }
 
@@ -749,6 +765,14 @@ impl WasmManager {
                     }
                 }
             }
+            Payload::Update => {
+                let commands = self.instance.get_and_clear_commands();
+                Ok(OutMessage {
+                    message_id: message.message_id,
+                    wasm_id: id,
+                    payload: OutPayload::Update(commands),
+                })
+            }
             Payload::OnScroll(x, y) => {
                 self.instance.on_scroll(x, y).await?;
                 default_return
@@ -771,14 +795,18 @@ impl WasmManager {
                     }),
                 }
             }
-            Payload::Reload => {
+            Payload::Reload(widget_id) => {
                 match self.instance.reload().await {
                     Ok(_) => {}
                     Err(e) => {
                         println!("Error reloading {}", e);
                     }
                 }
-                default_return
+                Ok(OutMessage {
+                    message_id: message.message_id,
+                    wasm_id: id,
+                    payload: OutPayload::Reloaded(widget_id),
+                })
             }
             Payload::SaveState => {
                 let state = self.instance.get_state().await;
@@ -831,7 +859,9 @@ impl WasmManager {
 
 struct State {
     wasi: wasmtime_wasi::WasiCtx,
-    commands: Vec<Command>,
+    draw_commands: Vec<DrawCommands>,
+    // TODO: Make separate type
+    commands: Vec<Commands>,
     get_state_info: (u32, u32),
     // Probably not the best structure
     // but lets start here
@@ -845,6 +875,7 @@ impl State {
     fn new(wasi: wasmtime_wasi::WasiCtx, sender: Sender<OutMessage>, wasm_id: u64) -> Self {
         Self {
             wasi,
+            draw_commands: Vec::new(),
             commands: Vec::new(),
             process_messages: HashMap::new(),
             get_state_info: (0, 0),
@@ -856,15 +887,7 @@ impl State {
 }
 
 #[derive(Debug, Clone)]
-enum Command {
-    DrawRect(f32, f32, f32, f32),
-    DrawString(String, f32, f32),
-    ClipRect(f32, f32, f32, f32),
-    DrawRRect(f32, f32, f32, f32, f32),
-    Translate(f32, f32),
-    SetColor(f32, f32, f32, f32),
-    Restore,
-    Save,
+enum Commands {
     StartProcess(u32, String),
     SendProcessMessage(i32, String),
     ReceiveLastProcessMessage(i32),
@@ -874,22 +897,20 @@ enum Command {
     Subscribe(String),
     Unsubscribe(String),
     SetCursor(CursorIcon),
+    Redraw(usize),
 }
 
-impl Command {
-    fn is_draw(&self) -> bool {
-        match &self {
-            Command::DrawRect(_, _, _, _) => true,
-            Command::DrawString(_, _, _) => true,
-            Command::ClipRect(_, _, _, _) => true,
-            Command::DrawRRect(_, _, _, _, _) => true,
-            Command::Translate(_, _) => true,
-            Command::SetColor(_, _, _, _) => true,
-            Command::Restore => true,
-            Command::Save => true,
-            _ => false,
-        }
-    }
+
+#[derive(Debug, Clone)]
+enum DrawCommands {
+    DrawRect(f32, f32, f32, f32),
+    DrawString(String, f32, f32),
+    ClipRect(f32, f32, f32, f32),
+    DrawRRect(f32, f32, f32, f32, f32),
+    Translate(f32, f32),
+    SetColor(f32, f32, f32, f32),
+    Restore,
+    Save,
 }
 
 fn get_bytes_from_caller<'a>(caller: &mut Caller<State>, ptr: i32, len: i32) -> Vec<u8> {
@@ -1020,7 +1041,7 @@ impl WasmInstance {
             "draw_rect",
             |mut caller: Caller<'_, State>, x: f32, y: f32, width: f32, height: f32| {
                 let state = caller.data_mut();
-                state.commands.push(Command::DrawRect(x, y, width, height));
+                state.draw_commands.push(DrawCommands::DrawRect(x, y, width, height));
             },
         )?;
         linker.func_wrap2_async(
@@ -1102,7 +1123,7 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, ptr: i32, len: i32, x: f32, y: f32| {
                 let string = get_string_from_caller(&mut caller, ptr, len);
                 let state = caller.data_mut();
-                state.commands.push(Command::DrawString(string, x, y));
+                state.draw_commands.push(DrawCommands::DrawString(string, x, y));
             },
         )?;
         linker.func_wrap(
@@ -1111,7 +1132,7 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, ptr: i32, len: i32, val: f32| {
                 let string = get_string_from_caller(&mut caller, ptr, len);
                 let state = caller.data_mut();
-                state.commands.push(Command::ProvideF32(string, val));
+                state.commands.push(Commands::ProvideF32(string, val));
             },
         )?;
         linker.func_wrap(
@@ -1125,7 +1146,7 @@ impl WasmInstance {
                 let kind = get_string_from_caller(&mut caller, kind_ptr, kind_len);
                 let event = get_string_from_caller(&mut caller, event_ptr, event_len);
                 let state = caller.data_mut();
-                state.commands.push(Command::Event(kind, event));
+                state.commands.push(Commands::Event(kind, event));
             },
         )?;
 
@@ -1135,7 +1156,7 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, kind_ptr: i32, kind_len: i32| {
                 let kind = get_string_from_caller(&mut caller, kind_ptr, kind_len);
                 let state = caller.data_mut();
-                state.commands.push(Command::Subscribe(kind));
+                state.commands.push(Commands::Subscribe(kind));
             },
         )?;
 
@@ -1145,7 +1166,7 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, kind_ptr: i32, kind_len: i32| {
                 let kind = get_string_from_caller(&mut caller, kind_ptr, kind_len);
                 let state = caller.data_mut();
-                state.commands.push(Command::Unsubscribe(kind));
+                state.commands.push(Commands::Unsubscribe(kind));
             },
         )?;
 
@@ -1156,7 +1177,7 @@ impl WasmInstance {
                 let string = get_string_from_caller(&mut caller, name_ptr, name_len);
                 let data = get_bytes_from_caller(&mut caller, ptr, len).to_vec();
                 let state = caller.data_mut();
-                state.commands.push(Command::ProvideBytes(string, data));
+                state.commands.push(Commands::ProvideBytes(string, data));
             },
         )?;
         linker.func_wrap("host", "get_x", |mut caller: Caller<'_, State>| {
@@ -1172,7 +1193,7 @@ impl WasmInstance {
             "clip_rect",
             |mut caller: Caller<'_, State>, x: f32, y: f32, width: f32, height: f32| {
                 let state = caller.data_mut();
-                state.commands.push(Command::ClipRect(x, y, width, height));
+                state.draw_commands.push(DrawCommands::ClipRect(x, y, width, height));
             },
         )?;
         linker.func_wrap(
@@ -1186,8 +1207,8 @@ impl WasmInstance {
              radius: f32| {
                 let state = caller.data_mut();
                 state
-                    .commands
-                    .push(Command::DrawRRect(x, y, width, height, radius));
+                    .draw_commands
+                    .push(DrawCommands::DrawRRect(x, y, width, height, radius));
             },
         )?;
         linker.func_wrap(
@@ -1195,23 +1216,23 @@ impl WasmInstance {
             "translate",
             |mut caller: Caller<'_, State>, x: f32, y: f32| {
                 let state = caller.data_mut();
-                state.commands.push(Command::Translate(x, y));
+                state.draw_commands.push(DrawCommands::Translate(x, y));
             },
         )?;
         linker.func_wrap("host", "save", |mut caller: Caller<'_, State>| {
             let state = caller.data_mut();
-            state.commands.push(Command::Save);
+            state.draw_commands.push(DrawCommands::Save);
         })?;
         linker.func_wrap("host", "restore", |mut caller: Caller<'_, State>| {
             let state = caller.data_mut();
-            state.commands.push(Command::Restore);
+            state.draw_commands.push(DrawCommands::Restore);
         })?;
         linker.func_wrap(
             "host",
             "set_color",
             |mut caller: Caller<'_, State>, r: f32, g: f32, b: f32, a: f32| {
                 let state = caller.data_mut();
-                state.commands.push(Command::SetColor(r, g, b, a));
+                state.draw_commands.push(DrawCommands::SetColor(r, g, b, a));
             },
         )?;
         linker.func_wrap(
@@ -1220,7 +1241,7 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, cursor: u32| {
                 let cursor_icon = CursorIcon::from(cursor);
                 let state = caller.data_mut();
-                state.commands.push(Command::SetCursor(cursor_icon));
+                state.commands.push(Commands::SetCursor(cursor_icon));
             },
         )?;
 
@@ -1234,7 +1255,7 @@ impl WasmInstance {
                 let process_id = 0;
                 state
                     .commands
-                    .push(Command::StartProcess(process_id, process));
+                    .push(Commands::StartProcess(process_id, process));
                 process_id
             },
         )?;
@@ -1256,7 +1277,7 @@ impl WasmInstance {
                 let state = caller.data_mut();
                 state
                     .commands
-                    .push(Command::SendProcessMessage(process_id, message));
+                    .push(Commands::SendProcessMessage(process_id, message));
             },
         )?;
 
@@ -1285,7 +1306,7 @@ impl WasmInstance {
                     let state = caller.data_mut();
                     state
                         .commands
-                        .push(Command::ReceiveLastProcessMessage(process_id));
+                        .push(Commands::ReceiveLastProcessMessage(process_id));
                 }
                 let state = caller.data_mut();
                 let message = state
@@ -1313,7 +1334,7 @@ impl WasmInstance {
         Ok(())
     }
 
-    pub async fn draw(&mut self, fn_name: &str) -> Result<Vec<Command>, Box<dyn Error>> {
+    pub async fn draw(&mut self, fn_name: &str) -> Result<Vec<DrawCommands>, Box<dyn Error>> {
         let _max_width = 0.0;
         let _max_height = 0.0;
 
@@ -1322,9 +1343,16 @@ impl WasmInstance {
         let state = &mut self.store.data_mut();
 
         let _paint = skia_safe::Paint::default();
+        let commands = state.draw_commands.clone();
+        state.draw_commands.clear();
+        Ok(commands)
+    }
+
+    pub fn get_and_clear_commands(&mut self) -> Vec<Commands> {
+        let state = &mut self.store.data_mut();
         let commands = state.commands.clone();
         state.commands.clear();
-        Ok(commands)
+        commands
     }
 
     pub async fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {

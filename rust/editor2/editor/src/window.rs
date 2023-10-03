@@ -191,7 +191,7 @@ pub fn setup_window(mut editor: editor::Editor) {
                         command_buffer.present_drawable(drawable);
                         command_buffer.commit();
                     }
-                    editor.next_frame();
+                    // editor.next_frame();
                 }
                 _ => {}
             }

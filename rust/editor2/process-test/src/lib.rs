@@ -89,6 +89,7 @@ impl ProcessSpawner {
         message: &str,
     ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
         let mut results = vec![];
+        println!("Parsing message: {}", message);
         if let Some(start_json_object) = message.find('{') {
             let last_close_brace = message.rfind('}').unwrap();
             let message = &message[start_json_object..last_close_brace + 1];
@@ -183,6 +184,7 @@ impl ProcessSpawner {
             Initialized::METHOD,
             &serde_json::to_string(&params).unwrap(),
         );
+        println!("Initialized: {}", request);
         self.send_message(self.process_id, request);
     }
 
@@ -203,6 +205,7 @@ impl ProcessSpawner {
     }
 
     fn open_file(&mut self, path: &str) {
+        println!("Opening file: {}", path);
         // read entire contents
         let mut file = File::open(path).unwrap();
         let mut contents = String::new();
@@ -386,6 +389,7 @@ impl App for ProcessSpawner {
     fn on_event(&mut self, kind: String, event: String) {
         match kind.as_str() {
             "text_change_multi" => {
+                println!("Got text change multi");
                 let edits: MultiEditWithPath = serde_json::from_str(&event).unwrap();
                 let _path = &edits.path.clone();
                 self.update_document(&edits);
@@ -418,6 +422,7 @@ impl App for ProcessSpawner {
             match self.parse_message(message) {
                 Ok(messages) => {
                     for message in messages {
+                        // println!("parsed message: {:?}", message);
                         // let method = message["method"].as_str();
                         if let Some(id) = message["id"].as_str() {
                             if let Some(method) = self.state.message_type.get(id) {
@@ -472,11 +477,11 @@ impl App for ProcessSpawner {
                             let method = message["method"].as_str();
                             if let Some(method) = method {
                                 if method == "$/progress" {
-                                    if let Some(100) = message
+                                    if let Some("end") = message
                                         .get("params")
                                         .and_then(|x| x.get("value"))
-                                        .and_then(|x| x.get("percentage"))
-                                        .and_then(|x| x.as_u64())
+                                        .and_then(|x| x.get("kind"))
+                                        .and_then(|x| x.as_str())
                                     {
                                         self.initialized();
                                     }

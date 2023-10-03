@@ -113,6 +113,8 @@ impl WidgetStore {
                 if let Some(mut surface) = canvas.new_surface(&canvas.image_info(), None) {
                     let canvas = surface.canvas();
 
+                    let before_count = canvas.save();
+
                     let can_draw = match widget.data {
                         WidgetData::Wasm { wasm: _, wasm_id } => {
                             wasm_messenger.has_draw_commands(wasm_id)
@@ -130,9 +132,12 @@ impl WidgetStore {
                         widget.size,
                         values,
                     );
+                    canvas.restore_to_count(before_count);
+                    canvas.restore();
     
                     let image = surface.image_snapshot();
                     images_to_insert.push((widget.id, image));
+
                 }
             } else {
                 println!("Widget not found for id: {}", widget_id);
@@ -166,6 +171,7 @@ impl WidgetStore {
     pub fn delete_widget(&mut self, widget_id: usize) {
         // TODO: Need a better way rather than tombstones
         self.widgets[widget_id].data = WidgetData::Deleted;
+        self.widget_images.remove(&widget_id);
     }
 
     pub fn get_widget_by_wasm_id(&self, expected_wasm_id: usize) -> Option<usize> {
