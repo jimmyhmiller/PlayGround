@@ -294,6 +294,7 @@ impl From<u32> for CursorIcon {
 pub trait App {
     type State;
     fn init() -> Self;
+    fn start(&mut self) {}
     fn draw(&mut self);
     #[allow(unused)]
     fn on_click(&mut self, x: f32, y: f32);
@@ -510,7 +511,11 @@ pub mod macros {
     macro_rules! app {
         ($app:ident) => {
             use framework::DEBUG;
-            static mut APP: $crate::macros::Lazy<$app> = $crate::macros::Lazy::new(|| $app::init());
+            static mut APP: $crate::macros::Lazy<$app> = $crate::macros::Lazy::new(|| {
+                let mut app = $app::init();
+                app.start();
+                app
+            });
 
             #[no_mangle]
             pub extern "C" fn on_click(x: f32, y: f32) {

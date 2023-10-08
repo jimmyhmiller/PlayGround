@@ -282,6 +282,12 @@ impl Editor {
 
         self.wasm_messenger.tick(&mut self.values);
 
+        for wasm_id in self.wasm_messenger.get_and_drain_diry_wasm() {
+            if let Some(widget) = self.widget_store.get_mut(wasm_id as usize) {
+                self.dirty_widgets.insert(widget.id);
+            }
+        }
+
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
                 {
@@ -355,6 +361,7 @@ impl Editor {
 
             for process in self.processes.values() {
                 let widget_id = process.output_widget_id;
+                self.dirty_widgets.insert(widget_id);
                 let widget = self.widget_store.get_mut(widget_id).unwrap();
                 let output = &process.output;
                 match &mut widget.data {
