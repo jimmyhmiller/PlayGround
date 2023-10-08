@@ -36,7 +36,7 @@ struct Data {
     last_request_id: usize,
     messages_by_type: HashMap<String, Vec<String>>,
     token_request_metadata: HashMap<String, TokenRequestMeta>,
-    open_files: HashSet<OpenFileInfo>,
+    open_files: HashSet<String>,
     files_to_open: HashSet<OpenFileInfo>,
     size: Size,
     y_scroll_offset: f32,
@@ -205,6 +205,8 @@ impl ProcessSpawner {
         );
     }
 
+    // TODO: I should probably ask the editor what files are open
+
     fn open_file(&mut self, file_info: &OpenFileInfo) {
         println!("Opening file: {}", file_info.path);
         // read entire contents
@@ -230,7 +232,7 @@ impl ProcessSpawner {
             &serde_json::to_string(&params).unwrap(),
         );
         self.send_message(self.process_id, notify);
-        self.state.open_files.insert(file_info.clone());
+        self.state.open_files.insert(file_info.path.clone());
         self.state.files_to_open.remove(&file_info);
     }
 
@@ -342,7 +344,7 @@ impl App for ProcessSpawner {
     type State = Data;
 
     fn init() -> Self {
-        let mut me = ProcessSpawner {
+        ProcessSpawner {
             state: Data {
                 pending_tokens: Vec::new(),
                 state: State::Initializing,
@@ -357,8 +359,7 @@ impl App for ProcessSpawner {
             },
             process_id: 0,
             root_path: "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2".to_string(),
-        };
-        me
+        }
     }
 
     fn start(&mut self) {
@@ -403,12 +404,18 @@ impl App for ProcessSpawner {
         match kind.as_str() {
             "text_change_multi" => {
                 let edits: MultiEditWithPath = serde_json::from_str(&event).unwrap();
+                if !self.state.open_files.contains(&edits.path) {
+                    self.open_file(&OpenFileInfo {
+                        path: edits.path.clone(),
+                        version: 0,
+                    });
+                }
                 self.update_document(&edits);
                 self.request_tokens(&edits.path, edits.version);
             }
             "lith/open-file" => {
                 let info: OpenFileInfo = serde_json::from_str(&event).unwrap();
-                if self.state.open_files.contains(&info) {
+                if self.state.open_files.contains(&info.path) {
                     return
                 }
                 self.state.files_to_open.insert(info.clone());
