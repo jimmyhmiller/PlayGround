@@ -149,7 +149,10 @@ impl Component {
             Component::Text(text) => {
                 canvas.save();
                 canvas.set_color(&Color::parse_hex("#ffffff"));
-                canvas.draw_str(text, 40.0, 0.0);
+                for line in text.lines() {
+                    canvas.draw_str(line, 40.0, 0.0);
+                    canvas.translate(0.0, 30.0);
+                }
                 canvas.restore();
             }
         }

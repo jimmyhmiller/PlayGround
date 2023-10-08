@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::Read,
     str::{from_utf8, FromStr},
@@ -36,7 +36,8 @@ struct Data {
     last_request_id: usize,
     messages_by_type: HashMap<String, Vec<String>>,
     token_request_metadata: HashMap<String, TokenRequestMeta>,
-    open_files: Vec<OpenFileInfo>,
+    open_files: HashSet<OpenFileInfo>,
+    files_to_open: HashSet<OpenFileInfo>,
     size: Size,
     y_scroll_offset: f32,
 }
@@ -204,20 +205,20 @@ impl ProcessSpawner {
         );
     }
 
-    fn open_file(&mut self, path: &str) {
-        println!("Opening file: {}", path);
+    fn open_file(&mut self, file_info: &OpenFileInfo) {
+        println!("Opening file: {}", file_info.path);
         // read entire contents
-        let mut file = File::open(path).unwrap();
+        let mut file = File::open(file_info.path.clone()).unwrap();
         let mut contents = String::new();
         let file_results = file.read_to_string(&mut contents);
         if let Err(err) = file_results {
-            println!("Error reading file!: {} {}", path, err);
+            println!("Error reading file!: {} {}", file_info.path, err);
             return;
         }
 
         let params: <DidOpenTextDocument as Notification>::Params = DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
-                uri: Url::from_str(&format!("file://{}", &path)).unwrap(),
+                uri: Url::from_str(&format!("file://{}", &file_info.path)).unwrap(),
                 language_id: "rust".to_string(),
                 version: 0,
                 text: contents,
@@ -229,6 +230,8 @@ impl ProcessSpawner {
             &serde_json::to_string(&params).unwrap(),
         );
         self.send_message(self.process_id, notify);
+        self.state.open_files.insert(file_info.clone());
+        self.state.files_to_open.remove(&file_info);
     }
 
     fn request_tokens(&mut self, path: &str, document_version: usize) {
@@ -321,14 +324,15 @@ impl ProcessSpawner {
         // TODO: Get list of initial open files
         self.state.state = State::Initialized;
         self.resolve_workspace_symbols();
-        for info in self.state.open_files.clone().iter() {
-            self.open_file(&info.path);
+        println!("Opening files: {:?}", self.state.files_to_open);
+        for info in self.state.files_to_open.clone().iter() {
+            self.open_file(&info);
             self.request_tokens(&info.path, info.version);
         }
     }
 }
 
-#[derive(Clone, Deserialize, Serialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq, Eq, Hash)]
 struct OpenFileInfo {
     path: String,
     version: usize,
@@ -344,7 +348,8 @@ impl App for ProcessSpawner {
                 state: State::Initializing,
                 message_type: HashMap::new(),
                 token_request_metadata: HashMap::new(),
-                open_files: Vec::new(),
+                open_files: HashSet::new(),
+                files_to_open: HashSet::new(),
                 last_request_id: 0,
                 messages_by_type: HashMap::new(),
                 size: Size::default(),
@@ -374,6 +379,11 @@ impl App for ProcessSpawner {
             }),
         );
         ui.draw(&mut canvas);
+        
+        canvas.translate(0.0, 100.0);
+        let ui = Ui::new();
+        let ui = ui.text(&format!("{:#?}", self.state.open_files));
+        ui.draw(&mut canvas);
     }
 
     fn on_click(&mut self, _x: f32, _y: f32) {
@@ -392,22 +402,20 @@ impl App for ProcessSpawner {
     fn on_event(&mut self, kind: String, event: String) {
         match kind.as_str() {
             "text_change_multi" => {
-                println!("Got text change multi");
                 let edits: MultiEditWithPath = serde_json::from_str(&event).unwrap();
-                let _path = &edits.path.clone();
                 self.update_document(&edits);
                 self.request_tokens(&edits.path, edits.version);
             }
             "lith/open-file" => {
                 let info: OpenFileInfo = serde_json::from_str(&event).unwrap();
-                if !self.state.open_files.contains(&info) {
-                    self.state.open_files.push(info.clone());
-                    self.request_tokens(&info.path, info.version);
-                    if self.state.state == State::Initialized {
-                        self.open_file(&info.path);
-                    }
+                if self.state.open_files.contains(&info) {
+                    return
                 }
-               
+                self.state.files_to_open.insert(info.clone());
+                self.request_tokens(&info.path, info.version);
+                if self.state.state == State::Initialized {
+                    self.open_file(&info);
+                }
             }
             _ => {
                 println!("Unknown event: {}", kind);
@@ -480,11 +488,11 @@ impl App for ProcessSpawner {
                             let method = message["method"].as_str();
                             if let Some(method) = method {
                                 if method == "$/progress" {
-                                    if let Some("end") = message
+                                    if let Some(100) = message
                                         .get("params")
                                         .and_then(|x| x.get("value"))
-                                        .and_then(|x| x.get("kind"))
-                                        .and_then(|x| x.as_str())
+                                        .and_then(|x| x.get("percentage"))
+                                        .and_then(|x| x.as_u64())
                                     {
                                         self.initialized();
                                     }
