@@ -89,7 +89,6 @@ impl ProcessSpawner {
         message: &str,
     ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
         let mut results = vec![];
-        println!("Parsing message: {}", message);
         if let Some(start_json_object) = message.find('{') {
             let last_close_brace = message.rfind('}').unwrap();
             let message = &message[start_json_object..last_close_brace + 1];
@@ -145,6 +144,7 @@ impl ProcessSpawner {
     }
 
     fn initialize_rust_analyzer(&mut self) {
+        println!("Initializing rust analyzer");
         let process_id = self.start_process(find_rust_analyzer());
         self.process_id = process_id;
 
@@ -353,10 +353,13 @@ impl App for ProcessSpawner {
             process_id: 0,
             root_path: "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2".to_string(),
         };
-        me.subscribe("text_change_multi");
-        me.subscribe("lith/open-file");
-        me.initialize_rust_analyzer();
         me
+    }
+
+    fn start(&mut self) {
+        self.subscribe("text_change_multi");
+        self.subscribe("lith/open-file");
+        self.initialize_rust_analyzer();
     }
 
     fn draw(&mut self) {

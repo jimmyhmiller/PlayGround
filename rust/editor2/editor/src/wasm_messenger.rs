@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error,
     io::Write,
     path::Path,
@@ -114,6 +114,7 @@ pub struct WasmMessenger {
     receivers: HashMap<WasmId, Receiver<OutMessage>>,
     senders: HashMap<WasmId, Sender<Message>>,
     external_sender: Option<mpsc::Sender<Event>>,
+    dirty_wasm: HashSet<WasmId>,
 }
 
 impl WasmMessenger {
@@ -148,7 +149,14 @@ impl WasmMessenger {
             receivers: HashMap::new(),
             senders: HashMap::new(),
             external_sender,
+            dirty_wasm: HashSet::new(),
         }
+    }
+
+    pub fn get_and_drain_diry_wasm(&mut self) -> HashSet<WasmId> {
+        let mut dirty_wasm = HashSet::new();
+        std::mem::swap(&mut dirty_wasm, &mut self.dirty_wasm);
+        dirty_wasm
     }
 
     pub fn set_external_sender(&mut self, external_sender: mpsc::Sender<Event>) {
@@ -423,6 +431,13 @@ impl WasmMessenger {
                 } else {
                     println!("No pending message for {}", message.wasm_id)
                 }
+
+                // TODO: This just means we update everything every frame
+                // Because the draw content might not have changed
+                // but we still request it every frame. We should only request it
+                // if things have actually changed
+                // Or we should only consider it dirty if things changed.
+                self.dirty_wasm.insert(message.wasm_id);
 
                 match message.payload {
                     OutPayload::DrawCommands(commands) => {

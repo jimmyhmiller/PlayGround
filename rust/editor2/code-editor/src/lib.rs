@@ -475,7 +475,6 @@ impl App for TextWidget {
     }
 
     fn on_event(&mut self, kind: String, event: String) {
-        println!("got event!!!!!!!!!!!!!!!!");
         if kind == "tokens_with_version" {
             if let Ok(tokens) = serde_json::from_str::<TokensWithVersion>(&event) {
                 if tokens.path != self.file_path {
