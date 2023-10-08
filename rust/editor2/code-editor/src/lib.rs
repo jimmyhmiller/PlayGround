@@ -344,7 +344,7 @@ impl App for TextWidget {
             return;
         }
         if self.selecting {
-            if let Some(current_selection) = self.text_pane.cursor.selection() {
+            if let Some(_current_selection) = self.text_pane.cursor.selection() {
                 let (line, column) = self.find_cursor_text_position(x, y);
                 // TODO: I need to find this in text space bounded
                 let bounded_cursor = self.text_pane.cursor.nearest_text_position(line, column, &self.text_pane.text_buffer);
