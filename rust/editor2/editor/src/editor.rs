@@ -23,7 +23,7 @@ use notify::{FsEventWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
-use skia_safe::{Font, FontStyle, Typeface, ImageInfo};
+use skia_safe::{Font, FontStyle, Typeface};
 
 pub struct Context {
     pub mouse_position: Position,
@@ -512,7 +512,7 @@ impl Editor {
                 self.events.push(event);
             }
             Event::Noop => {}
-            Event::KeyEvent { input } => {
+            Event::KeyEvent { input: _ } => {
                 self.events.push(event);
             }
             Event::ModifiersChanged(_) => {
