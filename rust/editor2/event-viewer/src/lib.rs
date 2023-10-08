@@ -15,6 +15,10 @@ struct EventViewer {
     x_scroll_offset: f32,
 }
 
+// TODO: This is okay, but the scrolling should be smooth
+// Why is the color syntax not working now? Is it because I saved?
+// Or is it because I closed that panel?
+
 impl App for EventViewer {
     type State = Self;
 
@@ -36,10 +40,14 @@ impl App for EventViewer {
         let ui = Ui::new();
         let ui = ui.pane(
             self.size,
-            (self.x_scroll_offset, 0.0),
-            ui.list((0.0, self.y_scroll_offset), self.events.iter(), |ui, event|
-                ui.container(ui.text(&format!("{}, {}", event.kind, event.event)))
-            ),
+            (0.0, 0.0),
+            ui.list((0.0, self.y_scroll_offset), self.events.iter(), |ui, event| {
+                let line_offset_start = self.x_scroll_offset.abs() as usize / 16;
+                let line_length = self.size.width as usize / 16;
+                let text = &format!("{}, {}", event.kind, event.event);
+                let text = text.get(line_offset_start..(line_offset_start + line_length).min(text.len())).unwrap_or("");
+                return ui.container(ui.text(text))
+            }),
         );
         ui.draw(&mut canvas);
     }

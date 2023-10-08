@@ -480,7 +480,6 @@ impl App for TextWidget {
                 if tokens.path != self.file_path {
                     return;
                 }
-                println!("Got some tokens"); 
                 if tokens.version != self.text_pane.text_buffer.document_version {
                     println!(
                         "version mismatch tokens: {}  pane: {}",
