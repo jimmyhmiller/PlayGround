@@ -24,6 +24,9 @@ use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use skia_safe::{Font, FontStyle, Typeface};
+use skia_safe::{Canvas, Color4f, Paint, Point};
+use winit::{event_loop::EventLoopProxy, window::CursorIcon};
+
 
 pub struct Context {
     pub mouse_position: Position,
@@ -130,10 +133,6 @@ impl Events {
         self.frame_end_index = self.events.len();
     }
 }
-
-#[cfg(all(target_os = "macos"))]
-use skia_safe::{Canvas, Color4f, Paint, Point};
-use winit::{event_loop::EventLoopProxy, window::CursorIcon};
 
 impl Editor {
     pub fn _set_mouse_position(&mut self, x: f32, y: f32) {
@@ -250,7 +249,10 @@ impl Editor {
     }
 
     pub fn update(&mut self) {
+
         // TODO: Only update position if it has changed
+        // This doesn't actually move the widget
+        // it just tells the widget where it is
         for widget in self.widget_store.iter_mut() {
             match &widget.data {
                 WidgetData::Wasm { wasm: _, wasm_id } => {
@@ -260,12 +262,8 @@ impl Editor {
                 _ => {}
             }
         }
-
         // TODO: Put in better place
         for widget in self.widget_store.iter_mut() {
-            // if !self.first_frame && !self.dirty_widgets.contains(&widget.id) {
-            //     continue;
-            // }
             match &widget.data {
                 WidgetData::Wasm { wasm: _, wasm_id } => {
                     self.wasm_messenger.send_update(*wasm_id);
@@ -290,10 +288,7 @@ impl Editor {
 
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
-                {
-                    self.events.push_current_frame(event);
-
-                }
+                self.events.push_current_frame(event);
             }
         }
 
@@ -437,7 +432,7 @@ impl Editor {
 
         let background = Color::parse_hex("#39463e");
 
-        canvas.clear(background.to_color4f());
+        canvas.clear(background.as_color4f());
 
         let canvas_size = Size::from(canvas.base_layer_size());
 

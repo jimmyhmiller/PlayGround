@@ -233,7 +233,7 @@ impl ProcessSpawner {
         );
         self.send_message(self.process_id, notify);
         self.state.open_files.insert(file_info.path.clone());
-        self.state.files_to_open.remove(&file_info);
+        self.state.files_to_open.remove(file_info);
     }
 
     fn request_tokens(&mut self, path: &str, document_version: usize) {
@@ -328,7 +328,7 @@ impl ProcessSpawner {
         self.resolve_workspace_symbols();
         println!("Opening files: {:?}", self.state.files_to_open);
         for info in self.state.files_to_open.clone().iter() {
-            self.open_file(&info);
+            self.open_file(info);
             self.request_tokens(&info.path, info.version);
         }
     }

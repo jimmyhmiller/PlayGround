@@ -46,7 +46,7 @@ impl App for EventViewer {
                 let line_length = self.size.width as usize / 16;
                 let text = &format!("{}, {}", event.kind, event.event);
                 let text = text.get(line_offset_start..(line_offset_start + line_length).min(text.len())).unwrap_or("");
-                return ui.container(ui.text(text))
+                ui.container(ui.text(text))
             }),
         );
         ui.draw(&mut canvas);
