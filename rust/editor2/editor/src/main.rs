@@ -1,3 +1,4 @@
+#![allow(clippy::single_match)]
 mod editor;
 mod event;
 mod fps_counter;
@@ -14,7 +15,6 @@ fn main() {
     println!("This is only supported on macos")
 }
 
-#[cfg(all(target_os = "macos"))]
 fn main() {
     use editor::Editor;
 

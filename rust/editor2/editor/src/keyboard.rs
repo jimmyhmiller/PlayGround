@@ -9,7 +9,7 @@ pub enum KeyState {
 }
 
 impl KeyState {
-    fn to_u32(&self) -> u32 {
+    fn as_u32(&self) -> u32 {
         match self {
             KeyState::Pressed => 0,
             KeyState::Released => 1,
@@ -46,7 +46,7 @@ impl Modifiers {
             cmd: (modifiers & 8) != 0,
         }
     }
-    fn to_u32(&self) -> u32 {
+    fn as_u32(&self) -> u32 {
         let mut result = 0;
         if self.shift {
             result |= 1;
@@ -295,7 +295,7 @@ impl KeyCode {
         }
     }
 
-    fn to_u32(&self) -> u32 {
+    fn as_u32(&self) -> u32 {
         *self as u32
     }
 }
@@ -310,11 +310,11 @@ impl KeyboardInput {
         }
     }
 
-    pub fn to_u32_tuple(&self) -> (u32, u32, u32) {
+    pub fn as_u32_tuple(&self) -> (u32, u32, u32) {
         (
-            self.key_code.to_u32(),
-            self.state.to_u32(),
-            self.modifiers.to_u32(),
+            self.key_code.as_u32(),
+            self.state.as_u32(),
+            self.modifiers.as_u32(),
         )
     }
 }

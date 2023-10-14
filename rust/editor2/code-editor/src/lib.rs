@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::from_utf8};
+use std::{collections::HashMap, str::from_utf8, cmp};
 
 use framework::{
     app, App, Canvas, Color, CursorIcon, KeyCode, KeyState, KeyboardInput, Rect,
@@ -174,6 +174,8 @@ impl App for TextWidget {
 
 
     fn draw(&mut self) {
+
+        // TODO: I'm not showing fractional lines like I should
         let mut canvas = Canvas::new();
 
         let foreground = Color::parse_hex("#dc9941");
@@ -418,11 +420,15 @@ impl App for TextWidget {
 
         match input.key_code {
             KeyCode::UpArrow => {
-                if self.text_pane.cursor.line() == self.text_pane.lines_above_scroll() {
-                    // round down to the fraction of a line so the whole text is visible
-                    self.text_pane.offset.y -= self.text_pane.fractional_line_offset();
-                } else if self.text_pane.cursor.line() < self.text_pane.lines_above_scroll() {
-                    self.text_pane.offset.y -= self.text_pane.line_height;
+                match self.text_pane.cursor.line().cmp(&self.text_pane.lines_above_scroll()) {
+                    cmp::Ordering::Equal => {
+                        // round down to the fraction of a line so the whole text is visible
+                        self.text_pane.offset.y -= self.text_pane.fractional_line_offset();
+                    }
+                    cmp::Ordering::Less => {
+                        self.text_pane.offset.y -= self.text_pane.line_height;
+                    }
+                    cmp::Ordering::Greater => {}
                 }
             }
             KeyCode::DownArrow => {

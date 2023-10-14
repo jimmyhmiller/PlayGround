@@ -111,6 +111,12 @@ impl Rect {
 }
 
 pub struct Ui {}
+
+impl Default for Ui {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 pub enum Component {
     Pane(Size, (f32, f32), Box<Component>),
     List(Vec<Component>, (f32, f32)),
@@ -191,6 +197,12 @@ pub struct Canvas {
     translation_stack: Vec<(f32, f32)>,
 }
 
+impl Default for Canvas {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Canvas {
     pub fn new() -> Self {
         Self {
@@ -268,8 +280,8 @@ pub struct Size {
     pub height: f32,
 }
 
-impl Size {
-    pub fn default() -> Self {
+impl Default for Size {
+    fn default() -> Self {
         // We don't want things to be sized to zero by default
         Self {
             width: 100.0,
@@ -824,7 +836,7 @@ impl KeyCode {
     }
 
     #[allow(unused)]
-    fn to_u32(&self) -> u32 {
+    fn as_u32(&self) -> u32 {
         *self as u32
     }
 }
@@ -902,7 +914,7 @@ impl KeyboardInput {
     pub fn from_u32(key: u32, state: u32, modifiers: u32) -> Self {
         Self {
             state: KeyState::from_u32(state),
-            key_code: KeyCode::from_u32(key).expect(&format!("Unknown key code {}", key)),
+            key_code: KeyCode::from_u32(key).unwrap_or_else(|| panic!("Unknown key code {}", key)),
             modifiers: Modifiers::from_u32(modifiers),
         }
     }
@@ -910,7 +922,7 @@ impl KeyboardInput {
     #[allow(unused)]
     pub fn to_u32_tuple(&self) -> (u32, u32, u32) {
         (
-            self.key_code.to_u32(),
+            self.key_code.as_u32(),
             self.state.to_u32(),
             self.modifiers.to_u32(),
         )

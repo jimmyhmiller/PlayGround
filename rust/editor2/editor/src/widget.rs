@@ -194,17 +194,17 @@ pub struct Color {
 }
 
 impl Color {
-    pub fn to_paint(&self) -> Paint {
+    pub fn as_paint(&self) -> Paint {
         Paint::new(Color4f::new(self.r, self.g, self.b, self.a), None)
     }
 
-    pub fn to_color4f(&self) -> Color4f {
+    pub fn as_color4f(&self) -> Color4f {
         Color4f::new(self.r, self.g, self.b, self.a)
     }
 
     #[allow(unused)]
-    pub fn to_sk_color(&self) -> skia_safe::Color {
-        self.to_color4f().to_color()
+    pub fn as_sk_color(&self) -> skia_safe::Color {
+        self.as_color4f().to_color()
     }
 
     pub fn new(r: f32, g: f32, b: f32, a: f32) -> Color {
@@ -274,10 +274,7 @@ pub enum WidgetData {
 
 impl WidgetData {
     pub fn is_deleted(&self) -> bool {
-        match self {
-            WidgetData::Deleted => true,
-            _ => false,
-        }
+        matches!(self, WidgetData::Deleted)
     }
 }
 
@@ -340,7 +337,7 @@ pub fn decode_base64(data: &Vec<u8>) -> Result<Vec<u8>, Box<dyn std::error::Erro
     Ok(data)
 }
 
-fn serialize_text<S>(x: &Vec<u8>, s: S) -> Result<S::Ok, S::Error>
+fn serialize_text<S>(x: &[u8], s: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -527,11 +524,11 @@ impl Widget {
     fn widget_space(&mut self, position: &Position) -> Position {
         let widget_x = position.x - self.position.x;
         let widget_y = position.y - self.position.y;
-        let widget_space = Position {
+        
+        Position {
             x: widget_x,
             y: widget_y,
-        };
-        widget_space
+        }
     }
 
     pub fn on_mouse_down(
@@ -622,7 +619,7 @@ impl Widget {
                 let foreground = Color::parse_hex("#dc9941");
                 let background = Color::parse_hex("#353f38");
 
-                let paint = background.to_paint();
+                let paint = background.as_paint();
                 canvas.save();
                 canvas.translate((self.position.x, self.position.y));
                 canvas.clip_rect(Rect::from_wh(bounds.width, bounds.height), None, false);
@@ -648,7 +645,7 @@ impl Widget {
                 ));
 
                 for line in text_pane.visible_lines(self.size.height) {
-                    canvas.draw_str(line, Point::new(0.0, 0.0), &font, &foreground.to_paint());
+                    canvas.draw_str(line, Point::new(0.0, 0.0), &font, &foreground.as_paint());
                     canvas.translate((0.0, text_pane.line_height));
                 }
 
@@ -666,7 +663,7 @@ impl Widget {
                     .unwrap(),
                     text_options.size,
                 );
-                let paint = text_options.color.to_paint();
+                let paint = text_options.color.as_paint();
                 canvas.draw_str(
                     text,
                     (self.position.x, self.position.y + self.size.height),
@@ -696,7 +693,7 @@ impl Widget {
                 canvas.save();
                 canvas.scale((self.scale, self.scale));
                 let purple = Color::parse_hex("#1c041e");
-                canvas.draw_rect(self.bounding_rect(), &purple.to_paint());
+                canvas.draw_rect(self.bounding_rect(), &purple.as_paint());
                 canvas.restore();
             }
 

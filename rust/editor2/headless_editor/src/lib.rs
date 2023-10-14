@@ -1,3 +1,4 @@
+#![allow(clippy::single_match)]
 use core::cmp::min;
 use core::fmt::Debug;
 use std::collections::HashMap;
@@ -778,6 +779,12 @@ pub struct SimpleTextBuffer {
     pub bytes: Vec<u8>,
 }
 
+impl Default for SimpleTextBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // These are really bad implementations
 // probably need to actually know where lines start
 // and stop in some data structure.
@@ -1032,24 +1039,18 @@ pub trait VirtualCursor: Clone + Debug {
     }
 
     fn is_open_bracket(byte: &[u8]) -> bool {
-        match byte {
-            b"(" | b"[" | b"{" | b"\"" => true,
-            _ => false,
-        }
+        matches!(byte, b"(" | b"[" | b"{" | b"\"")
     }
 
+    // TODO: I actually need to use an matching_close_bracket
+    // This logic makes it so I do the wrong thing if we have
+    // something like {(}
     fn is_close_bracket(byte: &[u8]) -> bool {
-        match byte {
-            b")" | b"]" | b"}" | b"\"" => true,
-            _ => false,
-        }
+        matches!(byte, b")" | b"]" | b"}" | b"\"")
     }
 
     fn is_new_line(byte: &[u8]) -> bool {
-        match byte {
-            b"\n" => true,
-            _ => false,
-        }
+        matches!(byte, b"\n")
     }
 
     fn get_last_line<T: TextBuffer<Item = u8>>(&mut self, buffer: &mut T) -> Option<String> {
@@ -1120,8 +1121,8 @@ pub trait VirtualCursor: Clone + Debug {
 }
 
 fn _decrease_indent(indent: String) -> String {
-    if indent.starts_with("    ") {
-        indent[4..].to_string()
+    if let Some(stripped) = indent.strip_prefix("    ") {
+        stripped.to_string()
     } else {
         indent
     }
@@ -1228,6 +1229,12 @@ impl VirtualCursor for CursorWithHistory {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MultiCursor<C: VirtualCursor> {
     cursors: Vec<C>,
+}
+
+impl Default for MultiCursor<Cursor> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MultiCursor<Cursor> {
@@ -1452,8 +1459,8 @@ mod tests {
         let mut buffer = EventTextBuffer::new();
         let my_string = b"Hello World";
         cursor.handle_insert(my_string, &mut buffer);
-        for i in 0..my_string.len() {
-            assert_eq!(buffer.byte_at_pos(0, i), Some(&my_string[i]));
+        for (i, item) in my_string.iter().enumerate() {
+            assert_eq!(buffer.byte_at_pos(0, i), Some(item));
         }
         for _ in 0..my_string.len() {
             cursor.delete_char(&mut buffer);
@@ -1476,8 +1483,8 @@ mod tests {
         multi_cursor.handle_insert(my_string, &mut buffer);
 
         for cursor in multi_cursor.cursors.iter() {
-            for i in 0..my_string.len() {
-                assert_eq!(buffer.byte_at_pos(cursor.line(), i), Some(&my_string[i]));
+            for (i, item) in my_string.iter().enumerate() {
+                assert_eq!(buffer.byte_at_pos(cursor.line(), i), Some(item));
             }
         }
 

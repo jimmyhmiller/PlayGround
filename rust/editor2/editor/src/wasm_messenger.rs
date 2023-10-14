@@ -271,7 +271,7 @@ impl WasmMessenger {
                 match command {
                     DrawCommands::SetColor(r, g, b, a) => {
                         let color = Color::new(*r, *g, *b, *a);
-                        paint.set_color(color.to_color4f().to_color());
+                        paint.set_color(color.as_color4f().to_color());
                     }
                     DrawCommands::DrawRect(x, y, width, height) => {
                         canvas
@@ -447,7 +447,7 @@ impl WasmMessenger {
                         let current_commands = self
                             .wasm_non_draw_commands
                             .entry(message.wasm_id)
-                            .or_insert(vec![]);
+                            .or_default();
                         current_commands.extend(commands);
                     }
                     OutPayload::Saved(saved) => {
@@ -470,7 +470,7 @@ impl WasmMessenger {
                         let commands = self
                             .wasm_non_draw_commands
                             .entry(message.wasm_id)
-                            .or_insert(vec![]);
+                            .or_default();
                         commands.push(Commands::Redraw(widget_id));
                     }
                     OutPayload::Complete => {}
@@ -486,7 +486,7 @@ impl WasmMessenger {
         let records = self
             .pending_messages
             .entry(message.wasm_id)
-            .or_insert(HashMap::new());
+            .or_default();
 
         let mut already_drawing = false;
         if matches!(message.payload, Payload::Draw(_)) {
@@ -799,7 +799,7 @@ impl WasmManager {
                 default_return
             }
             Payload::OnKey(input) => {
-                let (key_code, state, modifiers) = input.to_u32_tuple();
+                let (key_code, state, modifiers) = input.as_u32_tuple();
                 let result = self.instance.on_key(key_code, state, modifiers).await;
                 match result {
                     Ok(_) => default_return,
@@ -928,7 +928,7 @@ enum DrawCommands {
     Save,
 }
 
-fn get_bytes_from_caller<'a>(caller: &mut Caller<State>, ptr: i32, len: i32) -> Vec<u8> {
+fn get_bytes_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> Vec<u8> {
     // Use our `caller` context to learn about the memory export of the
     // module which called this host function.
     let mem = caller.get_export("memory").unwrap();

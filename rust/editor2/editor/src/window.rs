@@ -1,6 +1,6 @@
 // use cacao::{webview::{WebView, WebViewConfig, WebViewDelegate}, layer::Layer, layout::LayoutAnchorX, view::View};
 
-#[cfg(all(target_os = "macos"))]
+use metal_rs::MetalLayerRef;
 use skia_safe::{scalar, ColorType, Size, Surface};
 use winit::platform::macos::WindowBuilderExtMacOS;
 
@@ -10,7 +10,7 @@ pub fn setup_window(mut editor: editor::Editor) {
     use cocoa::{appkit::NSView, base::id as cocoa_id};
 
     use core_graphics_types::geometry::CGSize;
-    use std::mem;
+    
 
     use foreign_types_shared::{ForeignType, ForeignTypeRef};
     use metal_rs::{Device, MTLPixelFormat, MetalLayer};
@@ -53,7 +53,7 @@ pub fn setup_window(mut editor: editor::Editor) {
 
     let metal_layer = {
         let draw_size = window.inner_size();
-        let layer = MetalLayer::new();
+        let layer: MetalLayer = MetalLayer::new();
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_presents_with_transaction(false);
@@ -64,7 +64,7 @@ pub fn setup_window(mut editor: editor::Editor) {
         unsafe {
             let view = window.ns_view() as cocoa_id;
             view.setWantsLayer(YES);
-            view.setLayer(mem::transmute(layer.as_ref()));
+            view.setLayer(layer.as_ref() as *const MetalLayerRef as *mut objc::runtime::Object);
         }
         layer.set_drawable_size(CGSize::new(draw_size.width as f64, draw_size.height as f64));
         layer

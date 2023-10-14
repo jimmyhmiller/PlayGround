@@ -345,22 +345,20 @@ impl Editor {
                             });
                             self.events.push(Event::OpenFile(path));
                         }
-                    } else {
-                        if let Some(widget_id) = self.active_widget {
-                            self.mark_widget_dirty(widget_id);
-                            if let Some(widget) = self.widget_store.get_mut(widget_id) {
-                                match widget.data {
-                                    WidgetData::Wasm { wasm: _, wasm_id } => {
-                                        self.wasm_messenger.send_on_key(wasm_id,
-                                            KeyboardInput {
-                                                state,
-                                                key_code,
-                                                modifiers,
-                                            }
-                                        );
-                                    }
-                                    _ => {}
+                    } else if let Some(widget_id) = self.active_widget {
+                        self.mark_widget_dirty(widget_id);
+                        if let Some(widget) = self.widget_store.get_mut(widget_id) {
+                            match widget.data {
+                                WidgetData::Wasm { wasm: _, wasm_id } => {
+                                    self.wasm_messenger.send_on_key(wasm_id,
+                                        KeyboardInput {
+                                            state,
+                                            key_code,
+                                            modifiers,
+                                        }
+                                    );
                                 }
+                                _ => {}
                             }
                         }
                     }
