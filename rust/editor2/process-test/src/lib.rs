@@ -237,9 +237,10 @@ impl ProcessSpawner {
     }
 
     fn request_tokens(&mut self, path: &str, document_version: usize) {
-
         if self.state.state != State::Initialized {
-            self.state.pending_tokens.push((path.to_string(), document_version));
+            self.state
+                .pending_tokens
+                .push((path.to_string(), document_version));
             return;
         }
         let params: <SemanticTokensFullRequest as Request>::Params = SemanticTokensParams {
@@ -281,7 +282,7 @@ impl ProcessSpawner {
                             },
                             end: Position {
                                 line: *line as u32,
-                                character: *column as u32
+                                character: *column as u32,
                             },
                         }),
                         range_length: None,
@@ -375,12 +376,14 @@ impl App for ProcessSpawner {
         let ui = ui.pane(
             self.state.widget_data.size,
             (0.0, self.state.y_scroll_offset),
-            ui.list((0.0, self.state.y_scroll_offset), self.state.messages_by_type.iter(), |ui, item| {
-                ui.container(ui.text(&format!("{}: {}", item.0, item.1.len())))
-            }),
+            ui.list(
+                (0.0, self.state.y_scroll_offset),
+                self.state.messages_by_type.iter(),
+                |ui, item| ui.container(ui.text(&format!("{}: {}", item.0, item.1.len()))),
+            ),
         );
         ui.draw(&mut canvas);
-        
+
         canvas.translate(0.0, 100.0);
         let ui = Ui::new();
         let ui = ui.text(&format!("{:#?}", self.state.open_files));
@@ -416,7 +419,7 @@ impl App for ProcessSpawner {
             "lith/open-file" => {
                 let info: OpenFileInfo = serde_json::from_str(&event).unwrap();
                 if self.state.open_files.contains(&info.path) {
-                    return
+                    return;
                 }
                 self.state.files_to_open.insert(info.clone());
                 self.request_tokens(&info.path, info.version);
@@ -458,13 +461,12 @@ impl App for ProcessSpawner {
                                     let meta = self.state.token_request_metadata.get(id).unwrap();
                                     self.send_event(
                                         "tokens_with_version",
-                                        serde_json::to_string(
-                                            &TokensWithVersion {
-                                                tokens: get_token_data(message.clone()),
-                                                version: meta.document_version,
-                                                path: meta.path.clone(),
-                                            },
-                                        ).unwrap()
+                                        serde_json::to_string(&TokensWithVersion {
+                                            tokens: get_token_data(message.clone()),
+                                            version: meta.document_version,
+                                            path: meta.path.clone(),
+                                        })
+                                        .unwrap(),
                                     );
                                 }
                                 if method == "workspace/symbol" {

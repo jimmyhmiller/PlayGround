@@ -1,7 +1,8 @@
-use std::{collections::HashMap, str::from_utf8, cmp};
+use std::{cmp, collections::HashMap, str::from_utf8};
 
 use framework::{
-    app, App, Canvas, Color, CursorIcon, KeyCode, KeyState, KeyboardInput, Rect, Position, WidgetData, Size,
+    app, App, Canvas, Color, CursorIcon, KeyCode, KeyState, KeyboardInput, Position, Rect, Size,
+    WidgetData,
 };
 use headless_editor::{
     parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
@@ -80,8 +81,6 @@ impl TextPane {
     }
 }
 
-
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct TextWidget {
     text_pane: TextPane,
@@ -120,7 +119,6 @@ struct Tokens {
     tokens: Vec<u64>,
 }
 
-
 fn get_last_three_segments(path: &str) -> Option<String> {
     use std::path::Path;
     let path = Path::new(path);
@@ -128,9 +126,13 @@ fn get_last_three_segments(path: &str) -> Option<String> {
     let file_name = components.next()?;
     let folder_name = components.next()?;
     let parent_folder = components.next()?;
-    Some(format!("{}/{}/{}", parent_folder.as_os_str().to_string_lossy(), folder_name.as_os_str().to_string_lossy(), file_name.as_os_str().to_string_lossy()))
+    Some(format!(
+        "{}/{}/{}",
+        parent_folder.as_os_str().to_string_lossy(),
+        folder_name.as_os_str().to_string_lossy(),
+        file_name.as_os_str().to_string_lossy()
+    ))
 }
-
 
 impl App for TextWidget {
     type State = TextWidget;
@@ -156,18 +158,14 @@ impl App for TextWidget {
         me
     }
 
-
     fn draw(&mut self) {
-
         // TODO: I'm not showing fractional lines like I should
         let mut canvas = Canvas::new();
 
         let foreground = Color::parse_hex("#dc9941");
         let background = Color::parse_hex("#353f38");
 
-
         canvas.set_color(&foreground);
-
 
         // self.draw_debug(&mut canvas);
 
@@ -185,7 +183,6 @@ impl App for TextWidget {
 
         canvas.clip_rect(bounding_rect.with_inset((20.0, 20.0)));
 
-
         let cursor = &self.text_pane.cursor;
         let text_buffer = &self.text_pane.text_buffer;
 
@@ -199,17 +196,16 @@ impl App for TextWidget {
 
         // canvas.draw_str(&format!("{:?}", self.text_pane.cursor.selection()), 700.0, 700.0);
 
-
         canvas.draw_str(
             length_output,
             self.widget_data.size.width - length_output.len() as f32 * 18.0,
             self.widget_data.size.height - 40.0,
         );
-        
+
         if let Some(file_and_folder) = get_last_three_segments(&self.file_path) {
             canvas.draw_str(&file_and_folder, 20.0, 48.0);
         }
-        
+
         canvas.translate(0.0, 64.0);
 
         let fractional_offset = self.text_pane.fractional_line_offset();
@@ -223,7 +219,10 @@ impl App for TextWidget {
         let number_lines = self.text_pane.number_of_lines();
         let number_of_digits = number_lines.to_string().len();
         let current_line = self.text_pane.lines_above_scroll() + 1;
-        let max_line = current_line + self.text_pane.number_of_visible_lines(self.widget_data.size.height);
+        let max_line = current_line
+            + self
+                .text_pane
+                .number_of_visible_lines(self.widget_data.size.height);
         let max_line = max_line.min(number_lines);
         for line in current_line..max_line {
             canvas.set_color(&Color::parse_hex("#83CDA1"));
@@ -234,7 +233,7 @@ impl App for TextWidget {
         canvas.restore();
 
         canvas.save();
-        let line_number_margin =(number_of_digits as f32 + 4.0 * 16.0) + 16.0;
+        let line_number_margin = (number_of_digits as f32 + 4.0 * 16.0) + 16.0;
         self.x_margin += line_number_margin as i32;
         canvas.translate(line_number_margin, 0.0);
 
@@ -283,8 +282,6 @@ impl App for TextWidget {
 
         canvas.restore();
 
-       
-
         canvas.restore();
     }
 
@@ -300,7 +297,6 @@ impl App for TextWidget {
             .move_to_bounded(line, column, &self.text_pane.text_buffer);
 
         self.text_pane.cursor.set_selection_ordered(None);
-
     }
 
     fn on_mouse_down(&mut self, x: f32, y: f32) {
@@ -309,11 +305,13 @@ impl App for TextWidget {
         self.text_pane
             .cursor
             .move_to_bounded(line, column, &self.text_pane.text_buffer);
-        
+
         let line = self.text_pane.cursor.line();
         let column = self.text_pane.cursor.column();
         // TODO: I'm getting false positive selections
-        self.text_pane.cursor.set_selection(Some(((line, column), (line, column))));
+        self.text_pane
+            .cursor
+            .set_selection(Some(((line, column), (line, column))));
         self.selecting = true;
     }
 
@@ -322,8 +320,6 @@ impl App for TextWidget {
     }
 
     fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) {
-
-
         if x_diff.abs() < 0.001 && y_diff.abs() < 0.001 {
             return;
         }
@@ -331,7 +327,11 @@ impl App for TextWidget {
             if let Some(_current_selection) = self.text_pane.cursor.selection() {
                 let (line, column) = self.find_cursor_text_position(x, y);
                 // TODO: I need to find this in text space bounded
-                let bounded_cursor = self.text_pane.cursor.nearest_text_position(line, column, &self.text_pane.text_buffer);
+                let bounded_cursor = self.text_pane.cursor.nearest_text_position(
+                    line,
+                    column,
+                    &self.text_pane.text_buffer,
+                );
                 let line = bounded_cursor.line();
                 let column = bounded_cursor.column();
                 self.text_pane.cursor.set_selection_movement((line, column));
@@ -345,7 +345,10 @@ impl App for TextWidget {
             return;
         }
         match input.key_code {
-            KeyCode::Tab => self.text_pane.cursor.handle_insert("    ".as_bytes(), &mut self.text_pane.text_buffer),
+            KeyCode::Tab => self
+                .text_pane
+                .cursor
+                .handle_insert("    ".as_bytes(), &mut self.text_pane.text_buffer),
             KeyCode::LeftArrow => self.text_pane.cursor.move_left(&self.text_pane.text_buffer),
             KeyCode::RightArrow => self
                 .text_pane
@@ -402,7 +405,12 @@ impl App for TextWidget {
 
         match input.key_code {
             KeyCode::UpArrow => {
-                match self.text_pane.cursor.line().cmp(&self.text_pane.lines_above_scroll()) {
+                match self
+                    .text_pane
+                    .cursor
+                    .line()
+                    .cmp(&self.text_pane.lines_above_scroll())
+                {
                     cmp::Ordering::Equal => {
                         // round down to the fraction of a line so the whole text is visible
                         self.text_pane.offset.y -= self.text_pane.fractional_line_offset();
@@ -492,7 +500,6 @@ impl App for TextWidget {
         }
     }
 
-
     fn on_size_change(&mut self, width: f32, height: f32) {
         self.widget_data.size = Size { width, height };
     }
@@ -514,7 +521,7 @@ impl TextWidget {
         );
     }
 
-    fn find_cursor_text_position(&mut self, x: f32, y: f32,) -> (usize, usize) {
+    fn find_cursor_text_position(&mut self, x: f32, y: f32) -> (usize, usize) {
         // TODO: Need to handle margin here.
         let x_margin = self.x_margin;
         let y_margin = 80.0;
@@ -523,14 +530,14 @@ impl TextWidget {
             + lines_above)
             .saturating_sub(1);
         let char_width = 16.0;
-        let column = (((x + self.text_pane.offset.x - x_margin as f32) / char_width).ceil() as usize)
+        let column = (((x + self.text_pane.offset.x - x_margin as f32) / char_width).ceil()
+            as usize)
             .saturating_sub(1);
         (line, column)
     }
 
     #[allow(unused)]
     fn draw_debug(&mut self, canvas: &mut Canvas) {
-
         let foreground = Color::parse_hex("#dc9941");
 
         let cursor = self.text_pane.cursor;
@@ -564,8 +571,20 @@ impl TextWidget {
         }
 
         let x = 20;
-        let last_x_token_actions = self.text_pane.text_buffer.token_actions.len().saturating_sub(x);
-        for (i, action) in self.text_pane.text_buffer.token_actions.iter().skip(last_x_token_actions).enumerate() {
+        let last_x_token_actions = self
+            .text_pane
+            .text_buffer
+            .token_actions
+            .len()
+            .saturating_sub(x);
+        for (i, action) in self
+            .text_pane
+            .text_buffer
+            .token_actions
+            .iter()
+            .skip(last_x_token_actions)
+            .enumerate()
+        {
             let action = format!("{:?}", action);
             canvas.draw_str(&action, 1200.0, 0.0 + i as f32 * 32.0);
         }
@@ -575,13 +594,13 @@ impl TextWidget {
     fn draw_selection(&self, line: usize, canvas: &mut Canvas) {
         canvas.save();
         canvas.translate(0.0, -30.0);
-        
+
         canvas.set_color(&Color::parse_hex("#83CDA1").with_alpha(0.2));
         if let Some((start, end)) = self.text_pane.cursor.selection() {
             // println!("line: {}, start: {}", line, start.0);
             if line > start.0 && line < end.0 {
                 let line_length = self.text_pane.text_buffer.line_length(line).max(1);
-                canvas.draw_rect(0.0, 0.0, (line_length*16) as f32, 30.0);
+                canvas.draw_rect(0.0, 0.0, (line_length * 16) as f32, 30.0);
             } else if line == start.0 {
                 let line_offset = start.1;
                 let line_length = self.text_pane.text_buffer.line_length(line).max(1);
@@ -591,7 +610,12 @@ impl TextWidget {
                     line_length.saturating_sub(line_offset)
                 };
                 let draw_length = selection_length.min(line_length);
-                canvas.draw_rect((line_offset*16) as f32, 0.0, (draw_length*16) as f32, 30.0);
+                canvas.draw_rect(
+                    (line_offset * 16) as f32,
+                    0.0,
+                    (draw_length * 16) as f32,
+                    30.0,
+                );
             } else if line == end.0 {
                 let line_length = self.text_pane.text_buffer.line_length(line).max(1);
                 let selection_length = if start.0 == end.0 {
@@ -600,13 +624,11 @@ impl TextWidget {
                     end.1
                 };
                 let draw_length = selection_length.min(line_length);
-                canvas.draw_rect(0.0, 0.0, (draw_length*16) as f32, 30.0);
-
+                canvas.draw_rect(0.0, 0.0, (draw_length * 16) as f32, 30.0);
             }
         }
         canvas.restore();
     }
-
 }
 
 app!(TextWidget);

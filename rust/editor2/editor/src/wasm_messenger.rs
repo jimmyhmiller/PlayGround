@@ -166,8 +166,16 @@ impl WasmMessenger {
     }
 
     pub fn number_of_pending_requests(&self) -> usize {
-        let non_draw_commands_count = self.wasm_non_draw_commands.iter().map(|(_, v)| v.len()).sum::<usize>();
-        let pending_message_count =   self.pending_messages.iter().map(|(_, v)| v.len()).sum::<usize>();
+        let non_draw_commands_count = self
+            .wasm_non_draw_commands
+            .iter()
+            .map(|(_, v)| v.len())
+            .sum::<usize>();
+        let pending_message_count = self
+            .pending_messages
+            .iter()
+            .map(|(_, v)| v.len())
+            .sum::<usize>();
         non_draw_commands_count + pending_message_count
     }
 
@@ -406,10 +414,18 @@ impl WasmMessenger {
                             .unwrap();
                     }
                     Commands::Redraw(widget_id) => {
-                        self.external_sender.as_mut().unwrap().send(Event::Redraw(*widget_id)).unwrap();
+                        self.external_sender
+                            .as_mut()
+                            .unwrap()
+                            .send(Event::Redraw(*widget_id))
+                            .unwrap();
                     }
                     Commands::SetCursor(cursor) => {
-                        self.external_sender.as_mut().unwrap().send(Event::SetCursor(*cursor)).unwrap();
+                        self.external_sender
+                            .as_mut()
+                            .unwrap()
+                            .send(Event::SetCursor(*cursor))
+                            .unwrap();
                     }
                 }
             }
@@ -418,7 +434,6 @@ impl WasmMessenger {
     }
 
     pub fn tick(&mut self, values: &mut HashMap<String, Value>) {
-        
         self.process_non_draw_commands(values);
         // TODO: What is the right option here?
         self.local_pool
@@ -507,10 +522,7 @@ impl WasmMessenger {
     }
 
     fn send_message(&mut self, message: Message) {
-        let records = self
-            .pending_messages
-            .entry(message.wasm_id)
-            .or_default();
+        let records = self.pending_messages.entry(message.wasm_id).or_default();
 
         let mut already_drawing = false;
         if matches!(message.payload, Payload::Draw(_)) {
@@ -559,7 +571,13 @@ impl WasmMessenger {
         });
     }
 
-    pub fn send_on_mouse_move(&mut self, wasm_id: WasmId, position: &Position, x_diff: f32, y_diff: f32) {
+    pub fn send_on_mouse_move(
+        &mut self,
+        wasm_id: WasmId,
+        position: &Position,
+        x_diff: f32,
+        y_diff: f32,
+    ) {
         let message_id = self.next_message_id();
         self.send_message(Message {
             message_id,
@@ -696,7 +714,10 @@ impl WasmMessenger {
     }
 
     pub fn has_draw_commands(&self, wasm_id: u64) -> bool {
-        self.wasm_draw_commands.get(&wasm_id).map(|x| !x.is_empty()).unwrap_or(false)
+        self.wasm_draw_commands
+            .get(&wasm_id)
+            .map(|x| !x.is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -787,7 +808,9 @@ impl WasmManager {
                 default_return
             }
             Payload::OnMouseMove(position, x_diff, y_diff) => {
-                self.instance.on_mouse_move(position.x, position.y, x_diff, y_diff).await?;
+                self.instance
+                    .on_mouse_move(position.x, position.y, x_diff, y_diff)
+                    .await?;
                 default_return
             }
             Payload::Draw(fn_name) => {
@@ -882,7 +905,7 @@ impl WasmManager {
             }
             Payload::OnMove(x, y) => {
                 self.instance.store.data_mut().position = Position { x, y };
-                self.instance.on_move(x,y).await?;
+                self.instance.on_move(x, y).await?;
                 default_return
             }
             Payload::Event(kind, event) => {
@@ -939,7 +962,6 @@ enum Commands {
     SetCursor(CursorIcon),
     Redraw(usize),
 }
-
 
 #[derive(Debug, Clone, PartialEq)]
 enum DrawCommands {
@@ -1081,7 +1103,9 @@ impl WasmInstance {
             "draw_rect",
             |mut caller: Caller<'_, State>, x: f32, y: f32, width: f32, height: f32| {
                 let state = caller.data_mut();
-                state.draw_commands.push(DrawCommands::DrawRect(x, y, width, height));
+                state
+                    .draw_commands
+                    .push(DrawCommands::DrawRect(x, y, width, height));
             },
         )?;
         linker.func_wrap2_async(
@@ -1163,7 +1187,9 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, ptr: i32, len: i32, x: f32, y: f32| {
                 let string = get_string_from_caller(&mut caller, ptr, len);
                 let state = caller.data_mut();
-                state.draw_commands.push(DrawCommands::DrawString(string, x, y));
+                state
+                    .draw_commands
+                    .push(DrawCommands::DrawString(string, x, y));
             },
         )?;
         linker.func_wrap(
@@ -1233,7 +1259,9 @@ impl WasmInstance {
             "clip_rect",
             |mut caller: Caller<'_, State>, x: f32, y: f32, width: f32, height: f32| {
                 let state = caller.data_mut();
-                state.draw_commands.push(DrawCommands::ClipRect(x, y, width, height));
+                state
+                    .draw_commands
+                    .push(DrawCommands::ClipRect(x, y, width, height));
             },
         )?;
         linker.func_wrap(
@@ -1403,19 +1431,29 @@ impl WasmInstance {
 
     async fn on_mouse_down(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.call_typed_func::<(f32, f32), ()>("on_mouse_down", (x, y), 1)
-        .await?;
+            .await?;
         Ok(())
     }
 
     async fn on_mouse_up(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.call_typed_func::<(f32, f32), ()>("on_mouse_up", (x, y), 1)
-        .await?;
-    Ok(())
+            .await?;
+        Ok(())
     }
 
-    pub async fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) -> Result<(), Box<dyn Error>> {
-        self.call_typed_func::<(f32, f32, f32, f32), ()>("on_mouse_move", (x, y, x_diff, y_diff), 1)
-            .await?;
+    pub async fn on_mouse_move(
+        &mut self,
+        x: f32,
+        y: f32,
+        x_diff: f32,
+        y_diff: f32,
+    ) -> Result<(), Box<dyn Error>> {
+        self.call_typed_func::<(f32, f32, f32, f32), ()>(
+            "on_mouse_move",
+            (x, y, x_diff, y_diff),
+            1,
+        )
+        .await?;
         Ok(())
     }
 
@@ -1628,6 +1666,4 @@ impl WasmInstance {
             .await?;
         Ok(())
     }
-
-
 }

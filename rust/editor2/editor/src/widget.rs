@@ -1,5 +1,10 @@
 use std::{
-    cell::RefCell, collections::{HashMap, HashSet}, fs::File, io::Read, path::PathBuf, process::ChildStdout,
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    fs::File,
+    io::Read,
+    path::PathBuf,
+    process::ChildStdout,
     str::from_utf8,
 };
 
@@ -99,8 +104,13 @@ impl WidgetStore {
         }
     }
 
-    pub fn draw(&mut self, canvas: &mut Canvas, wasm_messenger: &mut WasmMessenger, dirty_widgets: &HashSet<usize>, values: &HashMap<String, Value>) {
-
+    pub fn draw(
+        &mut self,
+        canvas: &mut Canvas,
+        wasm_messenger: &mut WasmMessenger,
+        dirty_widgets: &HashSet<usize>,
+        values: &HashMap<String, Value>,
+    ) {
         let mut dirty_widgets = dirty_widgets.clone();
         for widget in self.iter() {
             if !self.widget_images.contains_key(&widget.id) {
@@ -119,30 +129,23 @@ impl WidgetStore {
                         WidgetData::Wasm { wasm: _, wasm_id } => {
                             wasm_messenger.has_draw_commands(wasm_id)
                         }
-                        _ => true
+                        _ => true,
                     };
 
                     if !can_draw {
                         continue;
                     }
-    
-                    widget.draw(
-                        canvas,
-                        wasm_messenger,
-                        widget.size,
-                        values,
-                    );
+
+                    widget.draw(canvas, wasm_messenger, widget.size, values);
                     canvas.restore_to_count(before_count);
                     canvas.restore();
-    
+
                     let image = surface.image_snapshot();
                     images_to_insert.push((widget.id, image));
-
                 }
             } else {
                 println!("Widget not found for id: {}", widget_id);
             }
-           
         }
 
         for (id, image) in images_to_insert {
@@ -152,7 +155,6 @@ impl WidgetStore {
         for (_, image) in self.widget_images.iter() {
             canvas.draw_image(image, (0.0, 0.0), None);
         }
-        
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Widget> {
@@ -524,18 +526,14 @@ impl Widget {
     fn widget_space(&mut self, position: &Position) -> Position {
         let widget_x = position.x - self.position.x;
         let widget_y = position.y - self.position.y;
-        
+
         Position {
             x: widget_x,
             y: widget_y,
         }
     }
 
-    pub fn on_mouse_down(
-        &mut self,
-        position: &Position,
-        wasm_messenger: &mut WasmMessenger,
-    ) {
+    pub fn on_mouse_down(&mut self, position: &Position, wasm_messenger: &mut WasmMessenger) {
         let widget_space = self.widget_space(position);
         match &mut self.data {
             WidgetData::Wasm { wasm: _, wasm_id } => {
@@ -545,11 +543,7 @@ impl Widget {
         }
     }
 
-    pub fn on_mouse_up(
-        &mut self,
-        position: &Position,
-        wasm_messenger: &mut WasmMessenger,
-    ) {
+    pub fn on_mouse_up(&mut self, position: &Position, wasm_messenger: &mut WasmMessenger) {
         let widget_space = self.widget_space(position);
         match &mut self.data {
             WidgetData::Wasm { wasm: _, wasm_id } => {
