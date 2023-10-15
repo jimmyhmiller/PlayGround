@@ -1,4 +1,4 @@
-use framework::{app, App, Canvas, Ui, WidgetData, Position};
+use framework::{app, App, Canvas, Position, Ui, WidgetData};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34,20 +34,25 @@ impl App for EventViewer {
     }
 
     fn draw(&mut self) {
-
         let mut canvas = Canvas::new();
 
         let ui = Ui::new();
         let ui = ui.pane(
             self.widget_data.size,
             (0.0, 0.0),
-            ui.list((0.0, self.y_scroll_offset), self.events.iter(), |ui, event| {
-                let line_offset_start = self.x_scroll_offset.abs() as usize / 16;
-                let line_length = self.widget_data.size.width as usize / 16;
-                let text = &format!("{}, {}", event.kind, event.event);
-                let text = text.get(line_offset_start..(line_offset_start + line_length).min(text.len())).unwrap_or("");
-                ui.container(ui.text(text))
-            }),
+            ui.list(
+                (0.0, self.y_scroll_offset),
+                self.events.iter(),
+                |ui, event| {
+                    let line_offset_start = self.x_scroll_offset.abs() as usize / 16;
+                    let line_length = self.widget_data.size.width as usize / 16;
+                    let text = &format!("{}, {}", event.kind, event.event);
+                    let text = text
+                        .get(line_offset_start..(line_offset_start + line_length).min(text.len()))
+                        .unwrap_or("");
+                    ui.container(ui.text(text))
+                },
+            ),
         );
         ui.draw(&mut canvas);
     }

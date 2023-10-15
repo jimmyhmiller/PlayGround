@@ -174,13 +174,25 @@ impl Ui {
         Component::Pane(size, scroll_offset, Box::new(child))
     }
 
-    pub fn list<Item, I>(&self, scroll_offset: (f32, f32), items: I, f: impl Fn(&Self, Item) -> Component) -> Component
+    pub fn list<Item, I>(
+        &self,
+        scroll_offset: (f32, f32),
+        items: I,
+        f: impl Fn(&Self, Item) -> Component,
+    ) -> Component
     where
         I: Iterator<Item = Item>,
     {
         // TODO: Make skip and take not be ad-hoc
-        let to_skip = (-scroll_offset.1/30.0).floor() as usize;
-        Component::List(items.skip(to_skip).take(50).map(|item| f(self, item)).collect(), scroll_offset)
+        let to_skip = (-scroll_offset.1 / 30.0).floor() as usize;
+        Component::List(
+            items
+                .skip(to_skip)
+                .take(50)
+                .map(|item| f(self, item))
+                .collect(),
+            scroll_offset,
+        )
     }
 
     pub fn container(&self, child: Component) -> Component {
@@ -289,7 +301,6 @@ impl Default for Size {
         }
     }
 }
-
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug, Default)]
 pub struct Position {
@@ -646,15 +657,22 @@ pub mod macros {
                 match s {
                     Ok(s) => {
                         if let Ok(state) = $crate::macros::serde_json::from_str(&s) {
-                            let state : <$app as App>::State = state;
-                            let current_state = $crate::macros::serde_json::to_string(
-                                unsafe { &APP.get_state() },
-                            ).ok();
-                            let new_state = $crate::merge_json(Some(s), current_state.unwrap_or("{}".to_string()));
-                            let new_state = $crate::macros::serde_json::from_str(&new_state).unwrap();
+                            let state: <$app as App>::State = state;
+                            let current_state =
+                                $crate::macros::serde_json::to_string(unsafe { &APP.get_state() })
+                                    .ok();
+                            let new_state = $crate::merge_json(
+                                Some(s),
+                                current_state.unwrap_or("{}".to_string()),
+                            );
+                            let new_state =
+                                $crate::macros::serde_json::from_str(&new_state).unwrap();
                             unsafe { APP.set_state(new_state) }
                         } else {
-                            let init_state = $crate::macros::serde_json::to_string(unsafe { &$app::init().get_state() }).unwrap();
+                            let init_state = $crate::macros::serde_json::to_string(unsafe {
+                                &$app::init().get_state()
+                            })
+                            .unwrap();
                             let new_state = $crate::merge_json(Some(s), init_state);
                             if let Ok(state) = $crate::macros::serde_json::from_str(&new_state) {
                                 unsafe { APP.set_state(state) }

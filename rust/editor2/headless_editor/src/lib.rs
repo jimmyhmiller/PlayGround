@@ -134,7 +134,11 @@ pub enum TokenAction {
         column: usize,
         index: usize,
     },
-    NewLineAbove { line: usize, column: usize, index: usize },
+    NewLineAbove {
+        line: usize,
+        column: usize,
+        index: usize,
+    },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -259,7 +263,6 @@ where
             .iter()
             .enumerate()
         {
-
             if line_number == target_line {
                 let token_window_kind: TokenWindowKind =
                     self.find_token_in_line(line, target_column, total_tokens);
@@ -421,7 +424,7 @@ where
                     }
                 }
             }
-            TokenWindowKind::Inside {  .. } => {
+            TokenWindowKind::Inside { .. } => {
                 for char in text {
                     match char {
                         // TODO: Is this possible?
@@ -539,24 +542,14 @@ where
                 // So if the last isn't a token I can get the the second to last entry
                 // for a token length
                 if let Some(line) = decorated_line {
-                    let line : Vec<_> = line.iter().rev().take(2).rev().collect();
+                    let line: Vec<_> = line.iter().rev().take(2).rev().collect();
                     match (line.get(0), line.get(1)) {
                         (None, None) => {}
-                        (None, Some((text, None))) => {
-                            extra_delta = text.len()
-                        }
-                        (Some((text, None)), None) => {
-                            extra_delta = text.len()
-                        }
-                        (None, Some((_, Some(token)))) => {
-                            extra_delta = token.length
-                        }
-                        (Some((_, Some(token))), None) => {
-                            extra_delta = token.length
-                        }
-                        (_, Some((_, Some(token)))) => {
-                            extra_delta = token.length
-                        }
+                        (None, Some((text, None))) => extra_delta = text.len(),
+                        (Some((text, None)), None) => extra_delta = text.len(),
+                        (None, Some((_, Some(token)))) => extra_delta = token.length,
+                        (Some((_, Some(token))), None) => extra_delta = token.length,
+                        (_, Some((_, Some(token)))) => extra_delta = token.length,
                         (Some((_, Some(token))), Some((text, None))) => {
                             extra_delta = token.length + text.len()
                         }
@@ -595,8 +588,8 @@ where
                         offset,
                     };
                 } else {
-                    if index == line.len() -1 {
-                        return TokenWindowKind::Above { 
+                    if index == line.len() - 1 {
+                        return TokenWindowKind::Above {
                             index: current_index,
                         };
                     }
@@ -607,8 +600,8 @@ where
                     };
                 }
             } else if target_column == current_column {
-                if index == line.len() -1 && token.is_none() {
-                    return TokenWindowKind::Above { 
+                if index == line.len() - 1 && token.is_none() {
+                    return TokenWindowKind::Above {
                         index: current_index,
                     };
                 }
@@ -723,14 +716,13 @@ pub struct TokenLineIter<'a> {
     current_position: usize,
     tokens: &'a [Token],
     empty_lines: usize,
-    inital_empty_lines: bool
+    inital_empty_lines: bool,
 }
 
 impl<'a> Iterator for TokenLineIter<'a> {
     type Item = &'a [Token];
     fn next(&mut self) -> Option<Self::Item> {
         let original_position = self.current_position;
-
 
         if self.empty_lines > 0 {
             self.empty_lines -= 1;
@@ -744,7 +736,10 @@ impl<'a> Iterator for TokenLineIter<'a> {
             } else if self.current_position != original_position && token.delta_line > 1 {
                 self.empty_lines = token.delta_line - 1;
                 return Some(&self.tokens[original_position..self.current_position]);
-            } else if self.current_position == 0 && token.delta_line >= 1 && !self.inital_empty_lines {
+            } else if self.current_position == 0
+                && token.delta_line >= 1
+                && !self.inital_empty_lines
+            {
                 self.empty_lines = token.delta_line - 1;
                 self.inital_empty_lines = true;
                 return Some(&[]);
@@ -899,12 +894,13 @@ pub trait VirtualCursor: Clone + Debug {
         let new_start_line = start_line.min(self.line());
         let line = self.line().max(start_line);
         let mut column = self.column();
-        let new_start_column = if new_start_line != start_line || start_line == line && start_column > column {
-            std::mem::replace(&mut column, start_column)
-        } else {
-            start_column
-        };
-    
+        let new_start_column =
+            if new_start_line != start_line || start_line == line && start_column > column {
+                std::mem::replace(&mut column, start_column)
+            } else {
+                start_column
+            };
+
         self.set_selection(Some(((new_start_line, new_start_column), (line, column))));
     }
 
@@ -914,7 +910,12 @@ pub trait VirtualCursor: Clone + Debug {
         self.move_to(line, column);
     }
 
-    fn nearest_text_position<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) -> Self {
+    fn nearest_text_position<T: TextBuffer>(
+        &mut self,
+        line: usize,
+        column: usize,
+        buffer: &T,
+    ) -> Self {
         let mut new_cursor = Self::new(line, column);
         new_cursor.move_to_bounded(line, column, buffer);
         new_cursor
@@ -1163,7 +1164,11 @@ pub struct Cursor {
 
 impl VirtualCursor for Cursor {
     fn new(line: usize, column: usize) -> Self {
-        Self { line, column, selection: None }
+        Self {
+            line,
+            column,
+            selection: None,
+        }
     }
 
     fn line(&self) -> usize {

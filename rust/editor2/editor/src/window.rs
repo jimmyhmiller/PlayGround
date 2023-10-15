@@ -10,7 +10,6 @@ pub fn setup_window(mut editor: editor::Editor) {
     use cocoa::{appkit::NSView, base::id as cocoa_id};
 
     use core_graphics_types::geometry::CGSize;
-    
 
     use foreign_types_shared::{ForeignType, ForeignTypeRef};
     use metal_rs::{Device, MTLPixelFormat, MetalLayer};
@@ -130,7 +129,6 @@ pub fn setup_window(mut editor: editor::Editor) {
                     _ => (),
                 },
                 Event::MainEventsCleared => {
-
                     // TODO: I would need to signal if there is any waiting
                     // work left to do from our wasm modules.
                     // If there is no work left, we don't need to do anything
@@ -148,7 +146,6 @@ pub fn setup_window(mut editor: editor::Editor) {
                     if editor.wasm_messenger.number_of_pending_requests() > 0 {
                         needs_update = true;
                     }
-                
                 }
                 Event::RedrawRequested(_) => {
                     // TODO: Determine if this is a good idea or not.
@@ -179,7 +176,6 @@ pub fn setup_window(mut editor: editor::Editor) {
                             window.request_redraw();
                         }
                     }
-                    
 
                     if let Some(drawable) = metal_layer.next_drawable() {
                         let drawable_size = {

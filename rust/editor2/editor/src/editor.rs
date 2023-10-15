@@ -23,10 +23,9 @@ use notify::{FsEventWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
-use skia_safe::{Font, FontStyle, Typeface};
 use skia_safe::{Canvas, Color4f, Paint, Point};
+use skia_safe::{Font, FontStyle, Typeface};
 use winit::{event_loop::EventLoopProxy, window::CursorIcon};
-
 
 pub struct Context {
     pub mouse_position: Position,
@@ -249,7 +248,6 @@ impl Editor {
     }
 
     pub fn update(&mut self) -> bool {
-
         // TODO: Put in better place
         for widget in self.widget_store.iter_mut() {
             match &widget.data {
@@ -264,7 +262,6 @@ impl Editor {
         // events with my start and end
 
         self.wasm_messenger.tick(&mut self.values);
-        
 
         for wasm_id in self.wasm_messenger.get_and_drain_diry_wasm() {
             if let Some(widget) = self.widget_store.get_mut(wasm_id as usize) {
@@ -274,7 +271,7 @@ impl Editor {
 
         for widget in self.widget_store.iter_mut() {
             if !self.dirty_widgets.contains(&widget.id) {
-                continue
+                continue;
             }
             match &widget.data {
                 WidgetData::Wasm { wasm: _, wasm_id } => {
@@ -283,8 +280,6 @@ impl Editor {
                 _ => {}
             }
         }
-
-
 
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
@@ -427,9 +422,6 @@ impl Editor {
     }
 
     pub fn draw(&mut self, canvas: &mut Canvas) {
-
-
-
         self.fps_counter.tick();
         use skia_safe::Size;
 
@@ -461,8 +453,12 @@ impl Editor {
         }
         canvas.restore();
 
-
-        self.widget_store.draw(canvas, &mut self.wasm_messenger, &self.dirty_widgets, &self.values);
+        self.widget_store.draw(
+            canvas,
+            &mut self.wasm_messenger,
+            &self.dirty_widgets,
+            &self.values,
+        );
         self.dirty_widgets.clear();
 
         // let mut to_draw = vec![];
@@ -649,7 +645,6 @@ impl Editor {
 
         self.selected_widgets.clear();
 
-
         let mut to_delete = vec![];
 
         let mut mouse_over = vec![];
@@ -668,7 +663,6 @@ impl Editor {
                     self.context.cancel_click = false;
                     widget.on_mouse_up(&self.context.mouse_position, &mut self.wasm_messenger);
                 } else {
-
                     let events =
                         widget.on_click(&self.context.mouse_position, &mut self.wasm_messenger);
                     for event in events.iter() {

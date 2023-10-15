@@ -1,10 +1,8 @@
-
 use std::collections::HashMap;
 
-use framework::{App, app, Canvas, Color, macros::serde_json, Rect, Position, WidgetData};
+use framework::{app, macros::serde_json, App, Canvas, Color, Position, Rect, WidgetData};
 use lsp_types::SemanticTokensLegend;
-use serde::{Serialize, Deserialize};
-
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ColorScheme {
@@ -17,7 +15,6 @@ struct ColorScheme {
     clicked: bool,
 }
 
-
 impl App for ColorScheme {
     type State = Self;
 
@@ -26,9 +23,12 @@ impl App for ColorScheme {
             widget_data: WidgetData::default(),
             token_legend: None,
             colors: vec![
-                "#D36247", "#FFB5A3", "#F58C73", "#B54226", "#D39147", "#FFD4A3", "#F5B873", "#7CAABD",
-                "#4C839A", "#33985C", "#83CDA1", "#53B079", "#1C8245",
-            ].iter().map(|s| s.to_string()).collect(),
+                "#D36247", "#FFB5A3", "#F58C73", "#B54226", "#D39147", "#FFD4A3", "#F5B873",
+                "#7CAABD", "#4C839A", "#33985C", "#83CDA1", "#53B079", "#1C8245",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             color_mapping: HashMap::new(),
             y_scroll_offset: 0.0,
             mouse_location: None,
@@ -79,7 +79,10 @@ impl App for ColorScheme {
                     if self.mouse_in_bounds(&canvas, 20.0, 20.0) {
                         if self.clicked {
                             self.color_mapping.insert(index, color.to_string());
-                            self.send_event("color_mapping_changed", serde_json::to_string(&self.color_mapping).unwrap());
+                            self.send_event(
+                                "color_mapping_changed",
+                                serde_json::to_string(&self.color_mapping).unwrap(),
+                            );
                         }
                         canvas.set_color(&Color::parse_hex("#ffffff"));
                         canvas.draw_rect(-1.0, -1.0, 22.0, 22.0);
@@ -94,7 +97,6 @@ impl App for ColorScheme {
         self.clicked = false;
     }
 
-
     // TODO: I need a nicer way to do deal with clicks.
     // Right now I have to do things to figure out what was clicked
     // on for each UI. I need to do this generically like
@@ -105,7 +107,7 @@ impl App for ColorScheme {
     fn on_mouse_move(&mut self, x: f32, y: f32, _x_diff: f32, _y_diff: f32) {
         self.mouse_location = Some((x, y));
     }
-    
+
     fn on_key(&mut self, _input: framework::KeyboardInput) {
         // Need to be able to access clipboard
     }
@@ -139,14 +141,17 @@ impl App for ColorScheme {
             self.token_legend = Some(serde_json::from_str(&event).unwrap());
         }
     }
-
 }
 
 impl ColorScheme {
     fn mouse_in_bounds(&self, canvas: &Canvas, width: f32, height: f32) -> bool {
         if let Some((x, y)) = self.mouse_location {
             let canvas_position = canvas.get_current_position();
-            if x > canvas_position.0 && x < canvas_position.0 + width && y > canvas_position.1 && y < canvas_position.1 + height {
+            if x > canvas_position.0
+                && x < canvas_position.0 + width
+                && y > canvas_position.1
+                && y < canvas_position.1 + height
+            {
                 return true;
             }
         }

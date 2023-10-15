@@ -161,11 +161,14 @@ impl Editor {
                                 was_over = true;
                                 match &widget.data {
                                     WidgetData::Wasm { wasm: _, wasm_id } => {
-                                        self
-                                            .wasm_messenger
-                                            .send_on_mouse_move(*wasm_id, &widget_space, x_diff, y_diff);
+                                        self.wasm_messenger.send_on_mouse_move(
+                                            *wasm_id,
+                                            &widget_space,
+                                            x_diff,
+                                            y_diff,
+                                        );
                                         dirty_widgets.insert(widget.id);
-                                    },
+                                    }
                                     _ => {}
                                 }
                             }
@@ -355,12 +358,13 @@ impl Editor {
                         if let Some(widget) = self.widget_store.get_mut(widget_id) {
                             match widget.data {
                                 WidgetData::Wasm { wasm: _, wasm_id } => {
-                                    self.wasm_messenger.send_on_key(wasm_id,
+                                    self.wasm_messenger.send_on_key(
+                                        wasm_id,
                                         KeyboardInput {
                                             state,
                                             key_code,
                                             modifiers,
-                                        }
+                                        },
                                     );
                                 }
                                 _ => {}
@@ -376,16 +380,14 @@ impl Editor {
                         self.cursor_icon = winit::window::CursorIcon::Text;
                     }
                 },
-                Event::Redraw(widget_id) => {
-                    self.mark_widget_dirty(widget_id)
-                },
+                Event::Redraw(widget_id) => self.mark_widget_dirty(widget_id),
                 e => {
                     println!("Unhandled event {:?}", e)
                 }
             }
         }
         for widget_id in dirty_widgets {
-           self.mark_widget_dirty(widget_id)
+            self.mark_widget_dirty(widget_id)
         }
     }
 }
