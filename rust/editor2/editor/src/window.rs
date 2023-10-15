@@ -103,6 +103,7 @@ pub fn setup_window(mut editor: editor::Editor) {
     };
 
     let mut context = DirectContext::new_metal(&backend, None).unwrap();
+    let mut needs_update = true;
 
     events_loop.run(move |event, _, control_flow| {
         autoreleasepool(|| {
@@ -136,17 +137,18 @@ pub fn setup_window(mut editor: editor::Editor) {
                     // Well, as long as we define this properly. A module could
                     // need a tick, because they are totally driven by the editor
                     editor.end_frame();
-                    editor.update();
-                    window.set_cursor_icon(editor.cursor_icon);
 
-                    // This messes up fps counter
-                    // Not sure how I would fix that
-                    // I guess I could separate the editor
-                    // from the fps counter?
-                    // Really not sure
-                    if editor.should_redraw() {
-                        window.request_redraw();
+                    // This needs to happen unconditonally, because
+                    // these are external things that can create events
+                    editor.process_per_frame_actions();
+
+                    if editor.events.events_for_frame().len() > 0 {
+                        needs_update = true;
                     }
+                    if editor.wasm_messenger.number_of_pending_requests() > 0 {
+                        needs_update = true;
+                    }
+                
                 }
                 Event::RedrawRequested(_) => {
                     // TODO: Determine if this is a good idea or not.
@@ -161,6 +163,23 @@ pub fn setup_window(mut editor: editor::Editor) {
 
                     //     editor.set_mouse_position(physical_point.x as f32, physical_point.y as f32);
                     // }
+
+                    if needs_update {
+                        needs_update = editor.update();
+                    }
+                    window.set_cursor_icon(editor.cursor_icon);
+
+                    // This messes up fps counter
+                    // Not sure how I would fix that
+                    // I guess I could separate the editor
+                    // from the fps counter?
+                    // Really not sure
+                    if needs_update {
+                        if editor.should_redraw() {
+                            window.request_redraw();
+                        }
+                    }
+                    
 
                     if let Some(drawable) = metal_layer.next_drawable() {
                         let drawable_size = {
