@@ -121,7 +121,7 @@ impl Events {
         self.frame_end_index = self.events.len();
     }
 
-    fn events_for_frame(&self) -> &[Event] {
+    pub fn events_for_frame(&self) -> &[Event] {
         &self.events[self.frame_start_index..self.frame_end_index]
     }
 
@@ -248,7 +248,7 @@ impl Editor {
         }
     }
 
-    pub fn update(&mut self) {
+    pub fn update(&mut self) -> bool {
 
         // TODO: Put in better place
         for widget in self.widget_store.iter_mut() {
@@ -262,8 +262,6 @@ impl Editor {
 
         // Todo: Need to test that I am not missing any
         // events with my start and end
-
-        self.process_per_frame_actions();
 
         self.wasm_messenger.tick(&mut self.values);
         
@@ -297,14 +295,17 @@ impl Editor {
         let events = self.events.events_for_frame().to_vec();
         self.next_frame();
 
-        if !events.is_empty() {
+        let events_empty = events.is_empty();
+
+        if !events_empty {
             self.should_redraw = true;
         }
 
         self.handle_events(events);
+        !events_empty || self.wasm_messenger.number_of_pending_requests() > 0
     }
 
-    fn process_per_frame_actions(&mut self) {
+    pub fn process_per_frame_actions(&mut self) {
         let mut to_delete = HashSet::new();
         for action in self.per_frame_actions.iter() {
             match action {
@@ -453,7 +454,7 @@ impl Editor {
 
         canvas.save();
         canvas.translate((canvas_size.width - 300.0, 60.0));
-        let counts = self.wasm_messenger.number_of_pending_messages();
+        let counts = self.wasm_messenger.pending_message_counts();
         for line in counts.lines() {
             canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
             canvas.translate((0.0, 30.0));

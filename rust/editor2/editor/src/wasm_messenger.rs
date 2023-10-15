@@ -55,7 +55,6 @@ enum Payload {
     OnKey(KeyboardInput),
     Reload(usize),
     SaveState,
-    UpdatePosition(Position),
     ProcessMessage(usize, String),
     Event(String, String),
     OnSizeChange(f32, f32),
@@ -166,7 +165,13 @@ impl WasmMessenger {
         self.external_sender = Some(external_sender);
     }
 
-    pub fn number_of_pending_messages(&self) -> String {
+    pub fn number_of_pending_requests(&self) -> usize {
+        let non_draw_commands_count = self.wasm_non_draw_commands.iter().map(|(_, v)| v.len()).sum::<usize>();
+        let pending_message_count =   self.pending_messages.iter().map(|(_, v)| v.len()).sum::<usize>();
+        non_draw_commands_count + pending_message_count
+    }
+
+    pub fn pending_message_counts(&self) -> String {
         let mut stats: Vec<&str> = vec![];
         for messages_per in self.pending_messages.values() {
             for message in messages_per.values() {
@@ -178,7 +183,6 @@ impl WasmMessenger {
                     Payload::OnKey(_) => "OnKey",
                     Payload::Reload(_) => "Reload",
                     Payload::SaveState => "SaveState",
-                    Payload::UpdatePosition(_) => "UpdatePosition",
                     Payload::ProcessMessage(_, _) => "ProcessMessage",
                     Payload::Event(_, _) => "Event",
                     Payload::OnSizeChange(_, _) => "OnSizeChange",
@@ -564,15 +568,6 @@ impl WasmMessenger {
         });
     }
 
-    pub fn send_update_position(&mut self, wasm_id: WasmId, position: &Position) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::UpdatePosition(*position),
-        });
-    }
-
     pub fn send_draw(&mut self, wasm_id: WasmId, fn_name: &str) {
         let message_id = self.next_message_id();
         self.send_message(Message {
@@ -883,10 +878,6 @@ impl WasmManager {
                 //     let encoded_state = encode_base64(&merged_state);
                 //     self.instance.set_state(encoded_state.as_bytes()).await?;
                 // }
-                default_return
-            }
-            Payload::UpdatePosition(position) => {
-                self.instance.store.data_mut().position = position;
                 default_return
             }
             Payload::OnMove(x, y) => {
