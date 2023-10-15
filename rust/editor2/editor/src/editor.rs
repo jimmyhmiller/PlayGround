@@ -250,24 +250,11 @@ impl Editor {
 
     pub fn update(&mut self) {
 
-        // TODO: Only update position if it has changed
-        // This doesn't actually move the widget
-        // it just tells the widget where it is
-        for widget in self.widget_store.iter_mut() {
-            match &widget.data {
-                WidgetData::Wasm { wasm: _, wasm_id } => {
-                    self.wasm_messenger
-                        .send_update_position(*wasm_id, &widget.position);
-                }
-                _ => {}
-            }
-        }
         // TODO: Put in better place
         for widget in self.widget_store.iter_mut() {
             match &widget.data {
                 WidgetData::Wasm { wasm: _, wasm_id } => {
                     self.wasm_messenger.send_update(*wasm_id);
-                    self.wasm_messenger.send_draw(*wasm_id, "draw");
                 }
                 _ => {}
             }
@@ -279,12 +266,27 @@ impl Editor {
         self.process_per_frame_actions();
 
         self.wasm_messenger.tick(&mut self.values);
+        
 
         for wasm_id in self.wasm_messenger.get_and_drain_diry_wasm() {
             if let Some(widget) = self.widget_store.get_mut(wasm_id as usize) {
                 self.dirty_widgets.insert(widget.id);
             }
         }
+
+        for widget in self.widget_store.iter_mut() {
+            if !self.dirty_widgets.contains(&widget.id) {
+                continue
+            }
+            match &widget.data {
+                WidgetData::Wasm { wasm: _, wasm_id } => {
+                    self.wasm_messenger.send_draw(*wasm_id, "draw");
+                }
+                _ => {}
+            }
+        }
+
+
 
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
@@ -683,7 +685,6 @@ impl Editor {
     }
 
     pub fn should_redraw(&self) -> bool {
-        // self.should_redraw
         true
     }
 

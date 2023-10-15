@@ -1,14 +1,14 @@
 
 use std::collections::HashMap;
 
-use framework::{App, app, Size, Canvas, Color, macros::serde_json, Rect};
+use framework::{App, app, Canvas, Color, macros::serde_json, Rect, Position, WidgetData};
 use lsp_types::SemanticTokensLegend;
 use serde::{Serialize, Deserialize};
 
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ColorScheme {
-    size: Size,
+    widget_data: WidgetData,
     token_legend: Option<SemanticTokensLegend>,
     colors: Vec<String>,
     y_scroll_offset: f32,
@@ -23,7 +23,7 @@ impl App for ColorScheme {
 
     fn init() -> Self {
         let me = Self {
-            size: Size::default(),
+            widget_data: WidgetData::default(),
             token_legend: None,
             colors: vec![
                 "#D36247", "#FFB5A3", "#F58C73", "#B54226", "#D39147", "#FFD4A3", "#F5B873", "#7CAABD",
@@ -45,8 +45,8 @@ impl App for ColorScheme {
         let bounding_rect = Rect::new(
             0.0,
             0.0,
-            self.size.width,
-            self.size.height,
+            self.widget_data.size.width,
+            self.widget_data.size.height,
         );
 
         canvas.save();
@@ -118,8 +118,12 @@ impl App for ColorScheme {
     }
 
     fn on_size_change(&mut self, width: f32, height: f32) {
-        self.size.width = width;
-        self.size.height = height;
+        self.widget_data.size.width = width;
+        self.widget_data.size.height = height;
+    }
+
+    fn on_move(&mut self, x: f32, y: f32) {
+        self.widget_data.position = Position { x, y };
     }
 
     fn get_state(&self) -> Self::State {

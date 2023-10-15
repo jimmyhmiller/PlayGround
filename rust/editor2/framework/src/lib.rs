@@ -290,6 +290,19 @@ impl Default for Size {
     }
 }
 
+
+#[derive(Copy, Clone, Serialize, Deserialize, Debug, Default)]
+pub struct Position {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct WidgetData {
+    pub position: Position,
+    pub size: Size,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum CursorIcon {
     Default = 0,
@@ -324,6 +337,7 @@ pub trait App {
     #[allow(unused)]
     fn on_event(&mut self, kind: String, event: String) {}
     fn on_size_change(&mut self, width: f32, height: f32);
+    fn on_move(&mut self, x: f32, y: f32);
     fn get_state(&self) -> Self::State;
     fn set_state(&mut self, state: Self::State);
     fn start_process(&mut self, process: String) -> i32 {
@@ -598,6 +612,11 @@ pub mod macros {
             #[no_mangle]
             pub extern "C" fn on_size_change(width: f32, height: f32) {
                 unsafe { APP.on_size_change(width, height) }
+            }
+
+            #[no_mangle]
+            pub extern "C" fn on_move(x: f32, y: f32) {
+                unsafe { APP.on_move(x, y) }
             }
 
             #[no_mangle]

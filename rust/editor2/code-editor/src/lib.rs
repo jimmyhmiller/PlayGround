@@ -1,19 +1,13 @@
 use std::{collections::HashMap, str::from_utf8, cmp};
 
 use framework::{
-    app, App, Canvas, Color, CursorIcon, KeyCode, KeyState, KeyboardInput, Rect,
+    app, App, Canvas, Color, CursorIcon, KeyCode, KeyState, KeyboardInput, Rect, Position, WidgetData, Size,
 };
 use headless_editor::{
     parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-
-#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
-pub struct Position {
-    pub x: f32,
-    pub y: f32,
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TextPane {
@@ -86,17 +80,7 @@ impl TextPane {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct WidgetData {
-    position: Position,
-    size: Size,
-}
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
-pub struct Size {
-    pub width: f32,
-    pub height: f32,
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct TextWidget {
@@ -201,7 +185,6 @@ impl App for TextWidget {
 
         canvas.clip_rect(bounding_rect.with_inset((20.0, 20.0)));
 
-        canvas.translate(self.widget_data.position.x, self.widget_data.position.y);
 
         let cursor = &self.text_pane.cursor;
         let text_buffer = &self.text_pane.text_buffer;
@@ -318,7 +301,6 @@ impl App for TextWidget {
 
         self.text_pane.cursor.set_selection_ordered(None);
 
-        println!("CLICK!");
     }
 
     fn on_mouse_down(&mut self, x: f32, y: f32) {
@@ -513,6 +495,10 @@ impl App for TextWidget {
 
     fn on_size_change(&mut self, width: f32, height: f32) {
         self.widget_data.size = Size { width, height };
+    }
+
+    fn on_move(&mut self, x: f32, y: f32) {
+        self.widget_data.position = Position { x, y };
     }
 }
 

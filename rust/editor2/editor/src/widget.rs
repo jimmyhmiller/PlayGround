@@ -784,6 +784,15 @@ impl Widget {
             _ => {}
         }
     }
+
+    pub fn on_move(&mut self, x: f32, y: f32, wasm_messenger: &mut WasmMessenger) {
+        match &mut self.data {
+            WidgetData::Wasm { wasm: _, wasm_id } => {
+                wasm_messenger.send_on_move(*wasm_id, x, y);
+            }
+            _ => {}
+        }
+    }
 }
 
 // TODO: I might need tags or things like that

@@ -134,6 +134,11 @@ impl Editor {
                                 dirty_widgets.insert(widget.id);
                                 widget.position.x += x_diff;
                                 widget.position.y += y_diff;
+                                widget.on_move(
+                                    widget.position.x,
+                                    widget.position.y,
+                                    &mut self.wasm_messenger,
+                                );
                                 if widget.position.x > self.window.size.width - 300.0 {
                                     widget.scale = 0.1;
                                 } else {
