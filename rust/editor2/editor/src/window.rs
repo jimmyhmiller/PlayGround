@@ -146,20 +146,6 @@ pub fn setup_window(mut editor: editor::Editor) {
                     if editor.wasm_messenger.number_of_pending_requests() > 0 {
                         needs_update = true;
                     }
-                }
-                Event::RedrawRequested(_) => {
-                    // TODO: Determine if this is a good idea or not.
-                    // I am also setting this with move. Maybe I shouldn't?
-                    // This lets me drop things in the correct spot
-                    // unsafe {
-                    //     let size = window.inner_size();
-                    //     let point = NSWindow::mouseLocationOutsideOfEventStream(window.ns_window() as cocoa_id);
-                    //     let logical_height = size.to_logical::<i32>(window.scale_factor()).height;
-                    //     let logical_point = LogicalPosition::new(point.x as i32, logical_height - point.y as i32);
-                    //     let physical_point = logical_point.to_physical::<i32>(window.scale_factor());
-
-                    //     editor.set_mouse_position(physical_point.x as f32, physical_point.y as f32);
-                    // }
 
                     if needs_update {
                         needs_update = editor.update();
@@ -176,6 +162,22 @@ pub fn setup_window(mut editor: editor::Editor) {
                             window.request_redraw();
                         }
                     }
+
+                }
+                Event::RedrawRequested(_) => {
+                    // TODO: Determine if this is a good idea or not.
+                    // I am also setting this with move. Maybe I shouldn't?
+                    // This lets me drop things in the correct spot
+                    // unsafe {
+                    //     let size = window.inner_size();
+                    //     let point = NSWindow::mouseLocationOutsideOfEventStream(window.ns_window() as cocoa_id);
+                    //     let logical_height = size.to_logical::<i32>(window.scale_factor()).height;
+                    //     let logical_point = LogicalPosition::new(point.x as i32, logical_height - point.y as i32);
+                    //     let physical_point = logical_point.to_physical::<i32>(window.scale_factor());
+
+                    //     editor.set_mouse_position(physical_point.x as f32, physical_point.y as f32);
+                    // }
+
 
                     if let Some(drawable) = metal_layer.next_drawable() {
                         let drawable_size = {
