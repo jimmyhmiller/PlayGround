@@ -1,4 +1,4 @@
-use framework::{app, App, Canvas, Size, Ui};
+use framework::{app, App, Canvas, Ui, WidgetData, Position};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -9,7 +9,7 @@ struct Event {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct EventViewer {
-    size: Size,
+    widget_data: WidgetData,
     events: Vec<Event>,
     y_scroll_offset: f32,
     x_scroll_offset: f32,
@@ -24,7 +24,7 @@ impl App for EventViewer {
 
     fn init() -> Self {
         let me = Self {
-            size: Size::default(),
+            widget_data: WidgetData::default(),
             events: Vec::new(),
             y_scroll_offset: 0.0,
             x_scroll_offset: 0.0,
@@ -39,11 +39,11 @@ impl App for EventViewer {
 
         let ui = Ui::new();
         let ui = ui.pane(
-            self.size,
+            self.widget_data.size,
             (0.0, 0.0),
             ui.list((0.0, self.y_scroll_offset), self.events.iter(), |ui, event| {
                 let line_offset_start = self.x_scroll_offset.abs() as usize / 16;
-                let line_length = self.size.width as usize / 16;
+                let line_length = self.widget_data.size.width as usize / 16;
                 let text = &format!("{}, {}", event.kind, event.event);
                 let text = text.get(line_offset_start..(line_offset_start + line_length).min(text.len())).unwrap_or("");
                 ui.container(ui.text(text))
@@ -74,8 +74,12 @@ impl App for EventViewer {
     }
 
     fn on_size_change(&mut self, width: f32, height: f32) {
-        self.size.width = width;
-        self.size.height = height;
+        self.widget_data.size.width = width;
+        self.widget_data.size.height = height;
+    }
+
+    fn on_move(&mut self, x: f32, y: f32) {
+        self.widget_data.position = Position { x, y };
     }
 
     fn get_state(&self) -> Self::State {

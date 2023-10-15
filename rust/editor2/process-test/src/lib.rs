@@ -8,7 +8,7 @@ use std::{
 use framework::{
     app,
     macros::serde_json::{self, json},
-    App, Canvas, Size, Ui,
+    App, Canvas, Ui, WidgetData,
 };
 use lsp_types::{
     notification::{DidChangeTextDocument, DidOpenTextDocument, Initialized, Notification},
@@ -38,7 +38,7 @@ struct Data {
     token_request_metadata: HashMap<String, TokenRequestMeta>,
     open_files: HashSet<String>,
     files_to_open: HashSet<OpenFileInfo>,
-    size: Size,
+    widget_data: WidgetData,
     y_scroll_offset: f32,
 }
 
@@ -354,7 +354,7 @@ impl App for ProcessSpawner {
                 files_to_open: HashSet::new(),
                 last_request_id: 0,
                 messages_by_type: HashMap::new(),
-                size: Size::default(),
+                widget_data: WidgetData::default(),
                 y_scroll_offset: 0.0,
             },
             process_id: 0,
@@ -373,7 +373,7 @@ impl App for ProcessSpawner {
 
         let ui = Ui::new();
         let ui = ui.pane(
-            self.state.size,
+            self.state.widget_data.size,
             (0.0, self.state.y_scroll_offset),
             ui.list((0.0, self.state.y_scroll_offset), self.state.messages_by_type.iter(), |ui, item| {
                 ui.container(ui.text(&format!("{}: {}", item.0, item.1.len())))
@@ -518,12 +518,16 @@ impl App for ProcessSpawner {
     }
 
     fn set_state(&mut self, state: Self::State) {
-        self.state.size = state.size;
+        self.state.widget_data = state.widget_data;
     }
 
     fn on_size_change(&mut self, width: f32, height: f32) {
-        self.state.size.width = width;
-        self.state.size.height = height;
+        self.state.widget_data.size.width = width;
+        self.state.widget_data.size.height = height;
+    }
+
+    fn on_move(&mut self, x: f32, y: f32) {
+        self.state.widget_data.position = framework::Position { x, y };
     }
 }
 

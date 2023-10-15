@@ -64,6 +64,7 @@ enum Payload {
     OnMouseDown(Position),
     OnMouseUp(Position),
     Update,
+    OnMove(f32, f32),
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +74,7 @@ struct Message {
     payload: Payload,
 }
 
+#[derive(Debug)]
 enum OutPayload {
     DrawCommands(Vec<DrawCommands>),
     Saved(SaveState),
@@ -84,6 +86,7 @@ enum OutPayload {
     Update(Vec<Commands>),
 }
 
+#[derive(Debug)]
 struct OutMessage {
     message_id: usize,
     wasm_id: WasmId,
@@ -184,6 +187,7 @@ impl WasmMessenger {
                     Payload::OnMouseDown(_) => "OnMouseDown",
                     Payload::OnMouseUp(_) => "OnMouseUp",
                     Payload::Update => "Update",
+                    Payload::OnMove(_, _) => "OnMove",
                 });
             }
         }
@@ -437,10 +441,17 @@ impl WasmMessenger {
                 // but we still request it every frame. We should only request it
                 // if things have actually changed
                 // Or we should only consider it dirty if things changed.
-                self.dirty_wasm.insert(message.wasm_id);
+
+                let mut should_mark_dirty = true;
 
                 match message.payload {
                     OutPayload::DrawCommands(commands) => {
+                        // TODO: Is this a performance issue?
+                        // I'm thinking not? It seems to actually work because
+                        // we only do this every once in a while
+                        if self.wasm_draw_commands.get(&message.wasm_id) == Some(&commands) {
+                            should_mark_dirty = false;
+                        }
                         self.wasm_draw_commands.insert(message.wasm_id, commands);
                     }
                     OutPayload::Update(commands) => {
@@ -448,6 +459,9 @@ impl WasmMessenger {
                             .wasm_non_draw_commands
                             .entry(message.wasm_id)
                             .or_default();
+                        if current_commands.is_empty() {
+                            should_mark_dirty = false;
+                        }
                         current_commands.extend(commands);
                     }
                     OutPayload::Saved(saved) => {
@@ -465,6 +479,7 @@ impl WasmMessenger {
                         } else {
                             // println!("Can't find value {}", name);
                         }
+                        should_mark_dirty = false;
                     }
                     OutPayload::Reloaded(widget_id) => {
                         let commands = self
@@ -473,10 +488,15 @@ impl WasmMessenger {
                             .or_default();
                         commands.push(Commands::Redraw(widget_id));
                     }
-                    OutPayload::Complete => {}
+                    OutPayload::Complete => {
+                        // should_mark_dirty = false;
+                    }
                     OutPayload::Error(error) => {
                         println!("Error: {}", error);
                     }
+                }
+                if should_mark_dirty {
+                    self.dirty_wasm.insert(message.wasm_id);
                 }
             }
         }
@@ -671,6 +691,15 @@ impl WasmMessenger {
         });
     }
 
+    pub fn send_on_move(&mut self, wasm_id: u64, x: f32, y: f32) {
+        let message_id = self.next_message_id();
+        self.send_message(Message {
+            message_id,
+            wasm_id,
+            payload: Payload::OnMove(x, y),
+        });
+    }
+
     pub fn has_draw_commands(&self, wasm_id: u64) -> bool {
         self.wasm_draw_commands.get(&wasm_id).map(|x| !x.is_empty()).unwrap_or(false)
     }
@@ -860,6 +889,11 @@ impl WasmManager {
                 self.instance.store.data_mut().position = position;
                 default_return
             }
+            Payload::OnMove(x, y) => {
+                self.instance.store.data_mut().position = Position { x, y };
+                self.instance.on_move(x,y).await?;
+                default_return
+            }
             Payload::Event(kind, event) => {
                 self.instance.on_event(kind, event).await?;
                 default_return
@@ -916,7 +950,7 @@ enum Commands {
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum DrawCommands {
     DrawRect(f32, f32, f32, f32),
     DrawString(String, f32, f32),
@@ -1594,6 +1628,12 @@ impl WasmInstance {
 
     pub async fn on_size_change(&mut self, width: f32, height: f32) -> Result<(), Box<dyn Error>> {
         self.call_typed_func::<(f32, f32), ()>("on_size_change", (width, height), 1)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn on_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.call_typed_func::<(f32, f32), ()>("on_move", (x, y), 1)
             .await?;
         Ok(())
     }

@@ -129,6 +129,12 @@ pub fn setup_window(mut editor: editor::Editor) {
                     _ => (),
                 },
                 Event::MainEventsCleared => {
+
+                    // TODO: I would need to signal if there is any waiting
+                    // work left to do from our wasm modules.
+                    // If there is no work left, we don't need to do anything
+                    // Well, as long as we define this properly. A module could
+                    // need a tick, because they are totally driven by the editor
                     editor.end_frame();
                     editor.update();
                     window.set_cursor_icon(editor.cursor_icon);
