@@ -486,10 +486,12 @@ impl Editor {
         // }
     }
 
-    pub fn add_event(&mut self, event: &winit::event::Event<'_, ()>) {
+    pub fn add_event(&mut self, event: &winit::event::Event<'_, ()>) -> bool {
         if let Some(event) = Event::from_winit_event(event, self.context.modifiers) {
             self.respond_to_event(event);
+            return true
         }
+        false
     }
 
     // TODO: Do I need this indirection?

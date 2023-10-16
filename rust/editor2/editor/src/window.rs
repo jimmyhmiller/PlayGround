@@ -2,7 +2,7 @@
 
 use metal_rs::MetalLayerRef;
 use skia_safe::{scalar, ColorType, Size, Surface};
-use winit::platform::macos::WindowBuilderExtMacOS;
+use winit::{platform::macos::WindowBuilderExtMacOS, event::StartCause};
 
 use crate::{editor, widget};
 
@@ -103,11 +103,15 @@ pub fn setup_window(mut editor: editor::Editor) {
 
     let mut context = DirectContext::new_metal(&backend, None).unwrap();
     let mut needs_update = true;
+    let mut event_added = false;
 
     events_loop.run(move |event, _, control_flow| {
         autoreleasepool(|| {
             *control_flow = ControlFlow::Wait;
-            editor.add_event(&event);
+            let was_added = editor.add_event(&event);
+            if was_added {
+                event_added = true;
+            }
             match event {
                 Event::WindowEvent { event, .. } => match event {
                     WindowEvent::CloseRequested => {
@@ -129,6 +133,8 @@ pub fn setup_window(mut editor: editor::Editor) {
                     _ => (),
                 },
                 Event::MainEventsCleared => {
+
+
                     // TODO: I would need to signal if there is any waiting
                     // work left to do from our wasm modules.
                     // If there is no work left, we don't need to do anything
@@ -145,6 +151,24 @@ pub fn setup_window(mut editor: editor::Editor) {
                     }
                     if editor.wasm_messenger.number_of_pending_requests() > 0 {
                         needs_update = true;
+                    }
+
+                    // TODO:
+                    // if I want to have 0 cpu usage when I'm not actually
+                    // doing anything I need to signal to winit when I am
+                    // doing things. That means I need to have some other thread
+                    // looking at if there is work to be done and signalling here
+                    // Or maybe I'm just not think clearly enough about this
+                    // But I think that is the case for my process stuff
+                    // It would be nice to have something checking on that.
+                    // But I also think I can make that part more event driven
+                    // rather than per thread.
+
+                    // if !event_added && !needs_update {
+                    //     return;
+                    // }
+                    if event_added {
+                        event_added = false;
                     }
 
                     if needs_update {
