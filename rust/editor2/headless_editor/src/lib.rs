@@ -1035,8 +1035,16 @@ pub trait VirtualCursor: Clone + Debug {
     }
 
     fn delete_char<T: TextBuffer>(&mut self, buffer: &mut T) {
-        self.move_left(buffer);
-        buffer.delete_char(self.line(), self.column());
+        if let Some((start, end)) = self.selection() {
+            self.move_to(end.0, end.1);
+            self.set_selection(None);
+            while self.line() != start.0 || self.column() != start.1 {
+                self.delete_char(buffer);
+            }
+        } else {
+            self.move_left(buffer);
+            buffer.delete_char(self.line(), self.column());
+        }
     }
 
     fn is_open_bracket(byte: &[u8]) -> bool {

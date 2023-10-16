@@ -429,7 +429,6 @@ impl Editor {
 
         canvas.clear(background.as_color4f());
 
-        let canvas_size = Size::from(canvas.base_layer_size());
 
         let font = Font::new(
             Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(),
@@ -437,13 +436,18 @@ impl Editor {
         );
         let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
 
-        canvas.draw_str(
-            self.fps_counter.fps.to_string(),
-            Point::new(canvas_size.width - 60.0, 30.0),
-            &font,
-            white,
-        );
 
+        // Not drawing fps because it is wrong now that we don't
+        // update every frame
+
+        // canvas.draw_str(
+        //     self.fps_counter.fps.to_string(),
+        //     Point::new(canvas_size.width - 60.0, 30.0),
+        //     &font,
+        //     white,
+        // );
+
+        let canvas_size = Size::from(canvas.base_layer_size());
         canvas.save();
         canvas.translate((canvas_size.width - 300.0, 60.0));
         let counts = self.wasm_messenger.pending_message_counts();
@@ -495,25 +499,11 @@ impl Editor {
     }
 
     // TODO: Do I need this indirection?
-    fn respond_to_event(&mut self, mut event: Event) {
+    pub fn respond_to_event(&mut self, mut event: Event) {
         event.patch_mouse_event(&self.context.mouse_position);
         match event {
-            Event::WidgetMouseDown { widget_id: _ } => {
-                self.events.push(event);
-            }
-            Event::WidgetMouseUp { widget_id: _ } => {
-                self.events.push(event);
-            }
-            Event::Redraw(_) => {
-                self.events.push(event);
-            }
+
             Event::Noop => {}
-            Event::KeyEvent { input: _ } => {
-                self.events.push(event);
-            }
-            Event::ModifiersChanged(_) => {
-                self.events.push(event);
-            }
             Event::MouseMove { x, y, .. } => {
                 // I want to be able to respond to mouse move events
                 // I just might not want to save them?
@@ -528,159 +518,14 @@ impl Editor {
                 });
                 self.context.mouse_position = Position { x, y };
             }
-            Event::LeftMouseDown { .. } => {
-                self.events.push(event);
-                self.context.left_mouse_down = true;
-                self.context.cancel_click = false;
-                self.add_mouse_down();
-            }
-            Event::LeftMouseUp { .. } => {
-                self.events.push(event);
-                // Probably not the right place.
-                // Maybe need events on last cycle?
-                self.context.left_mouse_down = false;
-                self.add_mouse_up();
-                // self.points = vec![];
-            }
-            Event::RightMouseDown { .. } => {
-                self.events.push(event);
-                self.context.right_mouse_down = true;
-            }
-            Event::RightMouseUp { .. } => {
-                self.events.push(event);
-                self.context.right_mouse_down = false;
-            }
-            Event::Scroll { x: _, y: _ } => {
-                self.events.push(event);
-            }
-            Event::HoveredFile {
-                path: _,
-                x: _,
-                y: _,
-            } => {
-                self.events.push(event);
-            }
-            Event::DroppedFile {
-                path: _,
-                x: _,
-                y: _,
-            } => {
-                self.events.push(event);
-            }
-            Event::HoveredFileCancelled => {
-                self.events.push(event);
-            }
-            Event::OpenFile(_) => {
-                self.events.push(event);
-            }
-            Event::MoveWidgetRelative { .. } => {}
-            Event::ReloadWidgets => {
-                self.events.push(event);
-            }
-            Event::SaveWidgets => {
-                self.events.push(event);
-            }
-            Event::ReloadWasm(_) => {
-                self.events.push(event);
-            }
-            Event::StartProcess(_, _, _) => {
-                self.events.push(event);
-            }
-            Event::SendProcessMessage(_, _) => {
-                self.events.push(event);
-            }
-            Event::Event(_, _) => {
-                self.events.push(event);
-            }
-            Event::Subscribe(_, _) => {
-                self.events.push(event);
-            }
-            Event::Unsubscribe(_, _) => {
-                self.events.push(event);
-            }
-            Event::SetCursor(_) => {
+            event => {
                 self.events.push(event);
             }
         }
+        
     }
 
-    fn add_mouse_down(&mut self) {
-        self.context.cancel_click = false;
-        let mut mouse_over = vec![];
-        // I would need some sort of hierarchy here
-        // Right now if widgets are in a stack I would say mouse down
-        // on all of them, rather than z-order
-        // But I don't have a real defined z-order
-        // Maybe I should do the first? Or the last?
-        // Not sure
-        let mut found_a_widget = false;
-        for widget in self.widget_store.iter_mut() {
-            if widget.mouse_over(&self.context.mouse_position) {
-                found_a_widget = true;
-                mouse_over.push(widget.id);
-                // We are only selecting the widget for the purposes
-                // of dragging if ctrl is down
-                if self.context.modifiers.ctrl {
-                    self.selected_widgets.insert(widget.id);
-                } else {
-                    widget.on_mouse_down(&self.context.mouse_position, &mut self.wasm_messenger);
-                }
-                // TODO: This is ugly, just setting the active widget
-                // over and over again then we will get the last one
-                // which would probably draw on top anyways.
-                // Should do better
-                self.active_widget = Some(widget.id);
-            }
-            if !found_a_widget {
-                self.active_widget = None;
-            }
-        }
-        for id in mouse_over {
-            self.respond_to_event(Event::WidgetMouseDown { widget_id: id });
-        }
-    }
-
-    fn add_mouse_up(&mut self) {
-        // This is only true now. I could have a selection mode
-        // Or it could be click to select. So really not sure
-        // what to do here. But for now I just want to be able to move widgets
-
-        self.selected_widgets.clear();
-
-        let mut to_delete = vec![];
-
-        let mut mouse_over = vec![];
-        // TODO: Probably only top widget
-        for widget in self.widget_store.iter_mut() {
-            if widget.mouse_over(&self.context.mouse_position) {
-                mouse_over.push(widget.id);
-
-                let modifiers = self.context.modifiers;
-                if modifiers.cmd && modifiers.ctrl && modifiers.option {
-                    to_delete.push(widget.id);
-                    continue;
-                }
-
-                if self.context.cancel_click {
-                    self.context.cancel_click = false;
-                    widget.on_mouse_up(&self.context.mouse_position, &mut self.wasm_messenger);
-                } else {
-                    let events =
-                        widget.on_click(&self.context.mouse_position, &mut self.wasm_messenger);
-                    for event in events.iter() {
-                        self.events.push(event.clone());
-                    }
-                }
-            }
-        }
-        for id in mouse_over {
-            self.respond_to_event(Event::WidgetMouseUp { widget_id: id });
-        }
-        for widget_id in to_delete {
-            self.widget_store.delete_widget(widget_id);
-        }
-    }
-
+    
     pub fn should_redraw(&self) -> bool {
         true
     }

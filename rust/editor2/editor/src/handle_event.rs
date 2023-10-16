@@ -21,6 +21,9 @@ fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
 }
 
 impl Editor {
+
+
+
     pub fn handle_events(&mut self, events: Vec<Event>) {
         let mut dirty_widgets = HashSet::new();
         for event in events {
@@ -91,6 +94,15 @@ impl Editor {
                         }
                     }
                 }
+                Event::LeftMouseDown {..} => {
+                    self.context.left_mouse_down = true;
+                    self.context.cancel_click = false;
+                    self.add_mouse_down();
+                }
+                Event::LeftMouseUp { .. } => {
+                    self.context.left_mouse_down = false;
+                    self.add_mouse_up();
+                }
                 // TODO: Unused
                 Event::MoveWidgetRelative { selector, x, y } => {
                     let widget_ids = selector.select(&self.widget_store);
@@ -111,7 +123,7 @@ impl Editor {
                     // We are dragging, so don't click
                     // TODO: This isn't really how this should work
                     // We need to let a widget decide or something
-                    if x_diff != 0.0 && y_diff != 0.0 {
+                    if x_diff != 0.0 || y_diff != 0.0 {
                         self.context.cancel_click = true;
                     }
 
@@ -390,4 +402,82 @@ impl Editor {
             self.mark_widget_dirty(widget_id)
         }
     }
+
+    fn add_mouse_down(&mut self) {
+        self.context.cancel_click = false;
+        let mut mouse_over = vec![];
+        // I would need some sort of hierarchy here
+        // Right now if widgets are in a stack I would say mouse down
+        // on all of them, rather than z-order
+        // But I don't have a real defined z-order
+        // Maybe I should do the first? Or the last?
+        // Not sure
+        let mut found_a_widget = false;
+        for widget in self.widget_store.iter_mut() {
+            if widget.mouse_over(&self.context.mouse_position) {
+                found_a_widget = true;
+                mouse_over.push(widget.id);
+                // We are only selecting the widget for the purposes
+                // of dragging if ctrl is down
+                if self.context.modifiers.ctrl {
+                    self.selected_widgets.insert(widget.id);
+                } else {
+                    widget.on_mouse_down(&self.context.mouse_position, &mut self.wasm_messenger);
+                }
+                // TODO: This is ugly, just setting the active widget
+                // over and over again then we will get the last one
+                // which would probably draw on top anyways.
+                // Should do better
+                self.active_widget = Some(widget.id);
+            }
+            if !found_a_widget {
+                self.active_widget = None;
+            }
+        }
+        for id in mouse_over {
+            self.respond_to_event(Event::WidgetMouseDown { widget_id: id });
+        }
+    }
+
+    fn add_mouse_up(&mut self) {
+
+        // This is only true now. I could have a selection mode
+        // Or it could be click to select. So really not sure
+        // what to do here. But for now I just want to be able to move widgets
+        self.selected_widgets.clear();
+
+        let mut to_delete = vec![];
+
+        let mut mouse_over = vec![];
+        // TODO: Probably only top widget
+        for widget in self.widget_store.iter_mut() {
+            if widget.mouse_over(&self.context.mouse_position) {
+                mouse_over.push(widget.id);
+
+                let modifiers = self.context.modifiers;
+                if modifiers.cmd && modifiers.ctrl && modifiers.option {
+                    to_delete.push(widget.id);
+                    continue;
+                }
+
+                if self.context.cancel_click {
+                    self.context.cancel_click = false;
+                    widget.on_mouse_up(&self.context.mouse_position, &mut self.wasm_messenger);
+                } else {
+                    let events =
+                        widget.on_click(&self.context.mouse_position, &mut self.wasm_messenger);
+                    for event in events.iter() {
+                        self.events.push(event.clone());
+                    }
+                }
+            }
+        }
+        for id in mouse_over {
+            self.respond_to_event(Event::WidgetMouseUp { widget_id: id });
+        }
+        for widget_id in to_delete {
+            self.widget_store.delete_widget(widget_id);
+        }
+    }
+
 }

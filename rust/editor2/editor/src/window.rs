@@ -2,7 +2,7 @@
 
 use metal_rs::MetalLayerRef;
 use skia_safe::{scalar, ColorType, Size, Surface};
-use winit::{platform::macos::WindowBuilderExtMacOS, event::StartCause};
+use winit::platform::macos::WindowBuilderExtMacOS;
 
 use crate::{editor, widget};
 
