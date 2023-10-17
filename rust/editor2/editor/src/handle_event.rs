@@ -346,7 +346,7 @@ impl Editor {
                             let wasm_id = self
                                 .wasm_messenger
                                 .new_instance(code_editor, Some(path_json));
-                            self.widget_store.add_widget(Widget {
+                            let widget_id = self.widget_store.add_widget(Widget {
                                 id: 0,
                                 // TODO: Automatically find an open space
                                 // Or make it so you draw it?
@@ -363,6 +363,7 @@ impl Editor {
                                 },
                                 ephemeral: false,
                             });
+                            self.mark_widget_dirty(wid)
                             self.events.push(Event::OpenFile(path));
                         }
                     } else if let Some(widget_id) = self.active_widget {
