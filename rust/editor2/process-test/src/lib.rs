@@ -151,6 +151,7 @@ impl ProcessSpawner {
 
         #[allow(deprecated)]
         // Root path is deprecated, but I also need to specify it
+        // TODO: set initialization options like rust-analyzer.semanticHighlighting.punctuation.enable
         let mut initialize_params = InitializeParams {
             process_id: Some(self.process_id as u32),
             root_path: Some(self.root_path.to_string()),

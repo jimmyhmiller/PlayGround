@@ -263,23 +263,12 @@ impl Editor {
 
         self.wasm_messenger.tick(&mut self.values);
 
-        for wasm_id in self.wasm_messenger.get_and_drain_diry_wasm() {
+        for wasm_id in self.wasm_messenger.get_and_drain_dirty_wasm() {
             if let Some(widget) = self.widget_store.get_mut(wasm_id as usize) {
                 self.dirty_widgets.insert(widget.id);
             }
         }
-
-        for widget in self.widget_store.iter_mut() {
-            if !self.dirty_widgets.contains(&widget.id) {
-                continue;
-            }
-            match &widget.data {
-                WidgetData::Wasm { wasm: _, wasm_id } => {
-                    self.wasm_messenger.send_draw(*wasm_id, "draw");
-                }
-                _ => {}
-            }
-        }
+        
 
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
@@ -297,6 +286,19 @@ impl Editor {
         }
 
         self.handle_events(events);
+
+
+        for widget in self.widget_store.iter_mut() {
+            match &widget.data {
+                WidgetData::Wasm { wasm: _, wasm_id } => {
+                    if !self.dirty_widgets.contains(&widget.id) && self.wasm_messenger.has_draw_commands(*wasm_id) {
+                        continue;
+                    }
+                    self.wasm_messenger.send_draw(*wasm_id, "draw");
+                }
+                _ => {}
+            }
+        }
         !events_empty || self.wasm_messenger.number_of_pending_requests() > 0
     }
 

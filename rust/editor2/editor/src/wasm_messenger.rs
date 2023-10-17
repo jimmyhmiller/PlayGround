@@ -155,7 +155,7 @@ impl WasmMessenger {
         }
     }
 
-    pub fn get_and_drain_diry_wasm(&mut self) -> HashSet<WasmId> {
+    pub fn get_and_drain_dirty_wasm(&mut self) -> HashSet<WasmId> {
         let mut dirty_wasm = HashSet::new();
         std::mem::swap(&mut dirty_wasm, &mut self.dirty_wasm);
         dirty_wasm

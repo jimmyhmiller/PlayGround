@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use framework::{app, macros::serde_json, App, Canvas, Color, Position, Rect, WidgetData};
+use framework::{app, macros::serde_json, App, Canvas, Color, Position, Rect, WidgetData, CursorIcon};
 use lsp_types::SemanticTokensLegend;
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +68,7 @@ impl App for ColorScheme {
                 let white = &"#ffffff".to_string();
                 let text_color = self.color_mapping.get(&index).unwrap_or(white).clone();
                 canvas.set_color(&Color::parse_hex(&text_color));
-                canvas.draw_str(kind.as_str(), 40.0, 0.0);
+                canvas.draw_str(&format!("{} {}", kind.as_str(), index), 40.0, 0.0);
                 canvas.save();
                 canvas.translate(400.0, -20.0);
                 for color in self.colors.iter() {
@@ -106,6 +106,7 @@ impl App for ColorScheme {
     }
     fn on_mouse_move(&mut self, x: f32, y: f32, _x_diff: f32, _y_diff: f32) {
         self.mouse_location = Some((x, y));
+        self.set_cursor_icon(CursorIcon::Default);
     }
 
     fn on_key(&mut self, _input: framework::KeyboardInput) {

@@ -192,7 +192,7 @@ impl App for TextWidget {
             cursor.line(),
             cursor.column(),
             text_buffer.line_length(cursor.line())
-        );
+        ); 
 
         // canvas.draw_str(&format!("{:?}", self.text_pane.cursor.selection()), 700.0, 700.0);
 
@@ -206,19 +206,19 @@ impl App for TextWidget {
             canvas.draw_str(&file_and_folder, 20.0, 48.0);
         }
 
-        canvas.translate(0.0, 64.0);
-
+        canvas.translate(0.0, 84.0);
+        canvas.clip_rect(bounding_rect);
         let fractional_offset = self.text_pane.fractional_line_offset();
         self.x_margin = 30;
         canvas.translate(
             self.x_margin as f32 - self.text_pane.offset.x,
-            self.text_pane.line_height - fractional_offset + 20.0,
+            self.text_pane.line_height - fractional_offset,
         );
 
         canvas.save();
         let number_lines = self.text_pane.number_of_lines();
         let number_of_digits = number_lines.to_string().len();
-        let current_line = self.text_pane.lines_above_scroll() + 1;
+        let current_line = self.text_pane.lines_above_scroll();
         let max_line = current_line
             + self
                 .text_pane
@@ -226,7 +226,7 @@ impl App for TextWidget {
         let max_line = max_line.min(number_lines);
         for line in current_line..max_line {
             canvas.set_color(&Color::parse_hex("#83CDA1"));
-            let line_number = format!("{:width$}", line, width = number_of_digits);
+            let line_number = format!("{:width$}", line + 1, width = number_of_digits);
             canvas.draw_str(&line_number, 0.0, 0.0);
             canvas.translate(0.0, self.text_pane.line_height);
         }
