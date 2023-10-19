@@ -363,7 +363,7 @@ impl Editor {
                                 },
                                 ephemeral: false,
                             });
-                            self.mark_widget_dirty(wid)
+                            self.mark_widget_dirty(widget_id);
                             self.events.push(Event::OpenFile(path));
                         }
                     } else if let Some(widget_id) = self.active_widget {
