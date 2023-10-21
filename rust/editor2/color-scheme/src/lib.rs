@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use framework::{app, macros::serde_json, App, Canvas, Color, Position, Rect, WidgetData, CursorIcon};
+use framework::{
+    app, macros::serde_json, App, Canvas, Color, CursorIcon, Position, Rect, WidgetData,
+};
 use lsp_types::SemanticTokensLegend;
 use serde::{Deserialize, Serialize};
 

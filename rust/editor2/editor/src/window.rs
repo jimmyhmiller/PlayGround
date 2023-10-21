@@ -133,8 +133,6 @@ pub fn setup_window(mut editor: editor::Editor) {
                     _ => (),
                 },
                 Event::MainEventsCleared => {
-
-
                     // TODO: I would need to signal if there is any waiting
                     // work left to do from our wasm modules.
                     // If there is no work left, we don't need to do anything
@@ -186,7 +184,6 @@ pub fn setup_window(mut editor: editor::Editor) {
                             window.request_redraw();
                         }
                     }
-
                 }
                 Event::RedrawRequested(_) => {
                     // TODO: Determine if this is a good idea or not.
@@ -201,7 +198,6 @@ pub fn setup_window(mut editor: editor::Editor) {
 
                     //     editor.set_mouse_position(physical_point.x as f32, physical_point.y as f32);
                     // }
-
 
                     if let Some(drawable) = metal_layer.next_drawable() {
                         let drawable_size = {
