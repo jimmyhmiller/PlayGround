@@ -268,7 +268,6 @@ impl Editor {
                 self.dirty_widgets.insert(widget.id);
             }
         }
-        
 
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
@@ -287,11 +286,12 @@ impl Editor {
 
         self.handle_events(events);
 
-
         for widget in self.widget_store.iter_mut() {
             match &widget.data {
                 WidgetData::Wasm { wasm: _, wasm_id } => {
-                    if !self.dirty_widgets.contains(&widget.id) && self.wasm_messenger.has_draw_commands(*wasm_id) {
+                    if !self.dirty_widgets.contains(&widget.id)
+                        && self.wasm_messenger.has_draw_commands(*wasm_id)
+                    {
                         continue;
                     }
                     self.wasm_messenger.send_draw(*wasm_id, "draw");
@@ -431,13 +431,11 @@ impl Editor {
 
         canvas.clear(background.as_color4f());
 
-
         let font = Font::new(
             Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(),
             32.0,
         );
         let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-
 
         // Not drawing fps because it is wrong now that we don't
         // update every frame
@@ -495,7 +493,7 @@ impl Editor {
     pub fn add_event(&mut self, event: &winit::event::Event<'_, ()>) -> bool {
         if let Some(event) = Event::from_winit_event(event, self.context.modifiers) {
             self.respond_to_event(event);
-            return true
+            return true;
         }
         false
     }
@@ -504,7 +502,6 @@ impl Editor {
     pub fn respond_to_event(&mut self, mut event: Event) {
         event.patch_mouse_event(&self.context.mouse_position);
         match event {
-
             Event::Noop => {}
             Event::MouseMove { x, y, .. } => {
                 // I want to be able to respond to mouse move events
@@ -524,10 +521,8 @@ impl Editor {
                 self.events.push(event);
             }
         }
-        
     }
 
-    
     pub fn should_redraw(&self) -> bool {
         true
     }

@@ -50,6 +50,13 @@ pub trait TextBuffer {
     }
     fn set_contents(&mut self, contents: &[Self::Item]);
     fn contents(&self) -> &[Self::Item];
+    fn max_line_length(&self) -> usize {
+        let mut max = 0;
+        for i in 0..self.line_count() {
+            max = max.max(self.line_length(i));
+        }
+        return max;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

@@ -21,9 +21,6 @@ fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
 }
 
 impl Editor {
-
-
-
     pub fn handle_events(&mut self, events: Vec<Event>) {
         let mut dirty_widgets = HashSet::new();
         for event in events {
@@ -94,7 +91,7 @@ impl Editor {
                         }
                     }
                 }
-                Event::LeftMouseDown {..} => {
+                Event::LeftMouseDown { .. } => {
                     self.context.left_mouse_down = true;
                     self.context.cancel_click = false;
                     self.add_mouse_down();
@@ -441,7 +438,6 @@ impl Editor {
     }
 
     fn add_mouse_up(&mut self) {
-
         // This is only true now. I could have a selection mode
         // Or it could be click to select. So really not sure
         // what to do here. But for now I just want to be able to move widgets
@@ -480,5 +476,4 @@ impl Editor {
             self.widget_store.delete_widget(widget_id);
         }
     }
-
 }

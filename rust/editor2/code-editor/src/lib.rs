@@ -17,6 +17,7 @@ pub struct TextPane {
     cursor: Cursor,
     text_buffer: TokenTextBuffer<SimpleTextBuffer>,
     color_mapping: HashMap<usize, String>,
+    max_line_length: Option<usize>,
 }
 
 // TODO: Got some weird token missing that refreshing state fixes
@@ -29,6 +30,7 @@ impl TextPane {
             cursor: Cursor::new(0, 0),
             text_buffer: TokenTextBuffer::new_with_contents(&contents),
             color_mapping: HashMap::new(),
+            max_line_length: None,
         }
     }
 
@@ -45,21 +47,38 @@ impl TextPane {
         self.text_buffer.line_count()
     }
 
-    pub fn on_scroll(&mut self, x: f64, y: f64, height: f32) {
+    pub fn on_scroll(&mut self, x: f64, y: f64, width: f32, height: f32, y_margin: i32) {
         // this is all terribly wrong. I don't get the bounds correctly.
         // Need to deal with that.
+
+        //self.max_line_length = None;
+
+        if self.max_line_length.is_none() {
+            self.max_line_length = Some(self.text_buffer.max_line_length());
+        }
 
         self.offset.x += x as f32;
         if self.offset.x < 0.0 {
             self.offset.x = 0.0;
         }
+
+        let character_width = 18;
+        if let Some(max_line) = self.max_line_length {
+            // self.offset.x = 0.0;
+            let max_width = character_width * max_line;
+            if self.offset.x + width > max_width as f32 {
+                self.offset.x = max_width as f32 - width;
+            }
+        }
+
         // TODO: Handle x scrolling too far
         self.offset.y -= y as f32;
 
         let scroll_with_last_line_visible =
             self.number_of_lines()
                 .saturating_sub(self.number_of_visible_lines(height)) as f32
-                * self.line_height;
+                * self.line_height
+                + y_margin as f32;
 
         // TODO: Deal with margin properly
 
@@ -90,6 +109,7 @@ struct TextWidget {
     file_path: String,
     staged_tokens: Vec<Token>,
     x_margin: i32,
+    y_margin: i32,
     selecting: bool,
 }
 
@@ -148,6 +168,7 @@ impl App for TextWidget {
                 },
             },
             x_margin: 0,
+            y_margin: 87,
             file_path: "".to_string(),
             edit_position: 0,
             staged_tokens: vec![],
@@ -159,7 +180,6 @@ impl App for TextWidget {
     }
 
     fn draw(&mut self) {
-        // TODO: I'm not showing fractional lines like I should
         let mut canvas = Canvas::new();
 
         let foreground = Color::parse_hex("#dc9941");
@@ -192,7 +212,7 @@ impl App for TextWidget {
             cursor.line(),
             cursor.column(),
             text_buffer.line_length(cursor.line())
-        ); 
+        );
 
         // canvas.draw_str(&format!("{:?}", self.text_pane.cursor.selection()), 700.0, 700.0);
 
@@ -344,6 +364,12 @@ impl App for TextWidget {
         if !matches!(input.state, KeyState::Pressed) {
             return;
         }
+
+        if input.modifiers.ctrl && matches!(input.key_code, KeyCode::DownArrow) {
+            self.y_margin += 1;
+            return;
+        }
+
         match input.key_code {
             KeyCode::Tab => self
                 .text_pane
@@ -446,7 +472,13 @@ impl App for TextWidget {
     }
 
     fn on_scroll(&mut self, x: f64, y: f64) {
-        self.text_pane.on_scroll(x, y, self.widget_data.size.height);
+        self.text_pane.on_scroll(
+            x,
+            y,
+            self.widget_data.size.width,
+            self.widget_data.size.height,
+            self.y_margin,
+        );
     }
 
     fn get_state(&self) -> Self::State {
