@@ -215,6 +215,8 @@ pub fn setup_window(mut editor: editor::Editor) {
                                 &texture_info,
                             );
 
+                            // UMMM, I can get a crash here.
+                            // not sure how
                             Surface::from_backend_render_target(
                                 &mut context,
                                 &backend_render_target,
