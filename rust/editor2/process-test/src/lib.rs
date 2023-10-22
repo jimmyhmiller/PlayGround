@@ -18,7 +18,8 @@ use lsp_types::{
     Position, Range, SemanticTokensParams, ShowDocumentClientCapabilities,
     ShowMessageRequestClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier,
     TextDocumentItem, Url, VersionedTextDocumentIdentifier, WindowClientCapabilities,
-    WorkDoneProgressParams, WorkspaceFolder, WorkspaceSymbolParams,
+    WorkDoneProgressParams, WorkspaceFolder, WorkspaceSymbolParams, PublishDiagnosticsClientCapabilities,
+    TextDocumentClientCapabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -175,6 +176,11 @@ impl ProcessSpawner {
             }),
             show_document: Some(ShowDocumentClientCapabilities { support: true }),
         });
+        
+        let mut text_document = TextDocumentClientCapabilities::default();
+        text_document.publish_diagnostics = Some(PublishDiagnosticsClientCapabilities::default());
+        
+        initialize_params.capabilities.text_document = Some(TextDocumentClientCapabilities::default());
 
         self.send_request(
             Initialize::METHOD,
@@ -497,15 +503,23 @@ impl App for ProcessSpawner {
                             // This isn't in response to a message we sent
                             let method = message["method"].as_str();
                             if let Some(method) = method {
-                                if method == "$/progress" {
-                                    if let Some(100) = message
-                                        .get("params")
-                                        .and_then(|x| x.get("value"))
-                                        .and_then(|x| x.get("percentage"))
-                                        .and_then(|x| x.as_u64())
-                                    {
-                                        self.initialized();
+                                
+                                match method {
+                                    "$/progress" => {
+                                        if let Some(100) = message
+                                            .get("params")
+                                            .and_then(|x| x.get("value"))
+                                            .and_then(|x| x.get("percentage"))
+                                            .and_then(|x| x.as_u64())
+                                        {
+                                            self.initialized();
+                                        }
+                                    
                                     }
+                                    "textDocument/publishDiagnostics" => {
+                                        self.send_event("diagnostics", serde_json::to_string(&message.get("params")).unwrap());
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
