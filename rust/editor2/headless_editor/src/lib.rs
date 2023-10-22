@@ -184,6 +184,15 @@ where
 {
     // TODO: Make this an iterator instead
     pub fn decorated_lines(&self, skip: usize, take: usize) -> Vec<Vec<(&[u8], Option<&Token>)>> {
+        
+        if self.tokens.is_empty() {
+            return self.lines()
+                .skip(skip)
+                .take(take)
+                .map(|line| vec![(line, None)])
+                .collect();
+        }
+        
         let mut result = vec![];
         for (relative_line_number, (line, tokens)) in self
             .lines()
@@ -242,7 +251,6 @@ where
         let window: TokenWindow = self.find_token(line, column);
         let actions = self.resolve_token_action_insert(window, line, column, text);
         self.token_actions.extend(actions.clone());
-        println!("{:?}", actions);
 
         for action in actions.iter() {
             self.apply_token_action(action);
@@ -401,6 +409,9 @@ where
         column: usize,
         text: &[u8],
     ) -> Vec<TokenAction> {
+        if window.kind.is_none() {
+            return vec![];
+        }
         let mut actions = vec![];
         match window.kind.unwrap() {
             TokenWindowKind::Left { offset, .. } => {
@@ -532,6 +543,9 @@ where
                 column: _,
                 index,
             } => {
+                if self.tokens.is_empty() {
+                    return;
+                }
                 let line = self.tokens.token_lines().nth(*line);
                 assert!(line.is_some(), "Expected line to be found");
                 if let Some(token) = self.tokens.get_mut(*index) {

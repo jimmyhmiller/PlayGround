@@ -145,7 +145,7 @@ impl ProcessSpawner {
     }
 
     fn initialize_rust_analyzer(&mut self) {
-        println!("Initializing rust analyzer");
+        // println!("Initializing rust analyzer");
         let process_id = self.start_process(find_rust_analyzer());
         self.process_id = process_id;
 
@@ -186,7 +186,7 @@ impl ProcessSpawner {
             Initialized::METHOD,
             &serde_json::to_string(&params).unwrap(),
         );
-        println!("Initialized: {}", request);
+        // println!("Initialized: {}", request);
         self.send_message(self.process_id, request);
     }
 
@@ -209,7 +209,7 @@ impl ProcessSpawner {
     // TODO: I should probably ask the editor what files are open
 
     fn open_file(&mut self, file_info: &OpenFileInfo) {
-        println!("Opening file: {}", file_info.path);
+        // println!("Opening file: {}", file_info.path);
         // read entire contents
         let mut file = File::open(file_info.path.clone()).unwrap();
         let mut contents = String::new();
@@ -328,7 +328,7 @@ impl ProcessSpawner {
         // TODO: Get list of initial open files
         self.state.state = State::Initialized;
         self.resolve_workspace_symbols();
-        println!("Opening files: {:?}", self.state.files_to_open);
+        // println!("Opening files: {:?}", self.state.files_to_open);
         for info in self.state.files_to_open.clone().iter() {
             self.open_file(info);
             self.request_tokens(&info.path, info.version);

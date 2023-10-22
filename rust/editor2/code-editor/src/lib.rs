@@ -48,27 +48,23 @@ impl TextPane {
     }
 
     pub fn on_scroll(&mut self, x: f64, y: f64, width: f32, height: f32, y_margin: i32) {
-        // this is all terribly wrong. I don't get the bounds correctly.
-        // Need to deal with that.
-
-        //self.max_line_length = None;
 
         if self.max_line_length.is_none() {
             self.max_line_length = Some(self.text_buffer.max_line_length());
         }
 
         self.offset.x += x as f32;
-        if self.offset.x < 0.0 {
-            self.offset.x = 0.0;
-        }
 
         let character_width = 18;
         if let Some(max_line) = self.max_line_length {
-            // self.offset.x = 0.0;
             let max_width = character_width * max_line;
             if self.offset.x + width > max_width as f32 {
                 self.offset.x = max_width as f32 - width;
             }
+        }
+        
+        if self.offset.x < 0.0 {
+            self.offset.x = 0.0;
         }
 
         // TODO: Handle x scrolling too far
@@ -365,8 +361,13 @@ impl App for TextWidget {
             return;
         }
 
-        if input.modifiers.ctrl && matches!(input.key_code, KeyCode::DownArrow) {
-            self.y_margin += 1;
+        if input.modifiers.ctrl && matches!(input.key_code, KeyCode::E) {
+            self.text_pane.cursor.end_of_line(&self.text_pane.text_buffer);
+            return;
+        }
+        
+        if input.modifiers.ctrl && matches!(input.key_code, KeyCode::A) {
+            self.text_pane.cursor.start_of_line();
             return;
         }
 
@@ -622,7 +623,6 @@ impl TextWidget {
         }
     }
 
-    // TODO: Doesn't work on first line
     fn draw_selection(&self, line: usize, canvas: &mut Canvas) {
         canvas.save();
         canvas.translate(0.0, -30.0);
