@@ -391,8 +391,8 @@ impl Editor {
                     }
                 },
                 Event::Redraw(widget_id) => self.mark_widget_dirty(widget_id),
-                e => {
-                    println!("Unhandled event {:?}", e)
+                _e => {
+                    // println!("Unhandled event {:?}", e)
                 }
             }
         }
