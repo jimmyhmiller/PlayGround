@@ -23,14 +23,16 @@ impl App for EventViewer {
     type State = Self;
 
     fn init() -> Self {
-        let me = Self {
+        Self {
             widget_data: WidgetData::default(),
             events: Vec::new(),
             y_scroll_offset: 0.0,
             x_scroll_offset: 0.0,
-        };
-        me.subscribe("*");
-        me
+        }
+    }
+
+    fn start(&mut self) {
+        self.subscribe("*");
     }
 
     fn draw(&mut self) {
