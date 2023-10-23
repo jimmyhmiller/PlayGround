@@ -274,7 +274,7 @@ impl WasmMessenger {
     pub fn draw_widget(
         &mut self,
         wasm_id: WasmId,
-        canvas: &mut Canvas,
+        canvas: &Canvas,
         bounds: Size,
     ) -> Option<Size> {
         if let Some(commands) = self.wasm_draw_commands.get_mut(&wasm_id) {
@@ -1606,11 +1606,12 @@ impl WasmInstance {
             (data.len() as f32 / ByteSize::kb(64).as_u64() as f32).ceil() as usize;
         if data_length_in_64k_multiples > memory_size {
             let delta = data_length_in_64k_multiples;
+            println!("Growing memory by {}", delta);
             memory.grow(&mut self.store, delta as u64 + 10).unwrap();
         }
 
         let ptr = self
-            .call_typed_func::<u32, u32>("alloc_state", data.len() as u32, 1)
+            .call_typed_func::<u32, u32>("alloc_string", data.len() as u32, 1)
             .await?;
         let memory = self
             .instance

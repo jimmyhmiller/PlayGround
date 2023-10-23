@@ -1,7 +1,7 @@
 // use cacao::{webview::{WebView, WebViewConfig, WebViewDelegate}, layer::Layer, layout::LayoutAnchorX, view::View};
 
 use metal_rs::MetalLayerRef;
-use skia_safe::{scalar, ColorType, Size, Surface};
+use skia_safe::{scalar, ColorType, Size, gpu};
 use winit::platform::macos::WindowBuilderExtMacOS;
 
 use crate::{editor, widget};
@@ -57,6 +57,7 @@ pub fn setup_window(mut editor: editor::Editor) {
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_presents_with_transaction(false);
         layer.set_opaque(true);
+        layer.set_display_sync_enabled(true);
         // change some stuff to make resizing nice
         // https://thume.ca/2019/06/19/glitchless-metal-window-resizing/
 
@@ -105,6 +106,7 @@ pub fn setup_window(mut editor: editor::Editor) {
     let mut needs_update = true;
     let mut event_added = false;
 
+
     events_loop.run(move |event, _, control_flow| {
         autoreleasepool(|| {
             *control_flow = ControlFlow::Wait;
@@ -139,6 +141,7 @@ pub fn setup_window(mut editor: editor::Editor) {
                     // Well, as long as we define this properly. A module could
                     // need a tick, because they are totally driven by the editor
                     editor.end_frame();
+
 
                     // This needs to happen unconditonally, because
                     // these are external things that can create events
@@ -198,7 +201,6 @@ pub fn setup_window(mut editor: editor::Editor) {
 
                     //     editor.set_mouse_position(physical_point.x as f32, physical_point.y as f32);
                     // }
-
                     if let Some(drawable) = metal_layer.next_drawable() {
                         let drawable_size = {
                             let size = metal_layer.drawable_size();
@@ -211,13 +213,10 @@ pub fn setup_window(mut editor: editor::Editor) {
 
                             let backend_render_target = BackendRenderTarget::new_metal(
                                 (drawable_size.width as i32, drawable_size.height as i32),
-                                1,
                                 &texture_info,
                             );
 
-                            // UMMM, I can get a crash here.
-                            // not sure how
-                            Surface::from_backend_render_target(
+                            gpu::surfaces::wrap_backend_render_target(
                                 &mut context,
                                 &backend_render_target,
                                 SurfaceOrigin::TopLeft,
@@ -230,13 +229,13 @@ pub fn setup_window(mut editor: editor::Editor) {
 
                         editor.draw(surface.canvas());
 
-                        surface.flush_and_submit();
+                        context.flush_and_submit();
+                        drop(surface);
 
                         let command_buffer = command_queue.new_command_buffer();
                         command_buffer.present_drawable(drawable);
                         command_buffer.commit();
                     }
-                    // editor.next_frame();
                 }
                 _ => {}
             }

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug, ffi::CString};
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -368,13 +368,22 @@ pub trait App {
         }
     }
     fn send_message(&mut self, process_id: i32, message: String) {
-        let ptr = message.as_ptr();
-        let len = message.len();
-        std::mem::forget(message);
+        let c_message = CString::new(message).unwrap();
+        let ptr = c_message.as_ptr();
+        let len = c_message.to_bytes().len();
+    
         unsafe {
             send_message_low_level(process_id, ptr as i32, len as i32);
         }
     }
+    // fn send_message(&mut self, process_id: i32, message: String) {
+    //     let ptr = message.as_ptr();
+    //     let len = message.len();
+    //     std::mem::forget(message);
+    //     unsafe {
+    //         send_message_low_level(process_id, ptr as i32, len as i32);
+    //     }
+    // }
     fn on_process_message(&mut self, _process_id: i32, _message: String) {}
     fn set_get_state(&mut self, ptr: u32, len: u32) {
         unsafe { set_get_state(ptr, len) };
@@ -457,6 +466,7 @@ pub trait App {
     }
 }
 
+
 #[no_mangle]
 pub fn alloc_string(len: usize) -> *mut u8 {
     // create a new mutable buffer with capacity `len`
@@ -479,6 +489,7 @@ pub fn fetch_string(str_ptr: u32) -> String {
     unsafe {
         let len = STRING_PTR_TO_LEN.get(&str_ptr).unwrap();
         buffer = String::from_raw_parts(str_ptr as *mut u8, *len as usize, *len as usize);
+        STRING_PTR_TO_LEN.remove(&str_ptr);
     }
     buffer
 }
@@ -511,21 +522,6 @@ pub fn merge(state: &mut serde_json::Value, partial_state: &mut serde_json::Valu
     }
 }
 
-#[no_mangle]
-pub fn alloc_state(len: usize) -> *mut u8 {
-    // create a new mutable buffer with capacity `len`
-    let mut buf = Vec::with_capacity(len);
-    // take a mutable pointer to the buffer
-    let ptr = buf.as_mut_ptr();
-    // take ownership of the memory block and
-    // ensure that its destructor is not
-    // called when the object goes out of scope
-    // at the end of the function
-    std::mem::forget(buf);
-    // return the pointer so the runtime
-    // can write data at this offset
-    ptr
-}
 
 pub fn encode_base64(data: &[u8]) -> String {
     use base64::Engine;
@@ -638,13 +634,12 @@ pub mod macros {
             #[no_mangle]
             pub extern "C" fn get_state() {
                 use framework::encode_base64;
-                let s: String =
-                    $crate::macros::serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
+                let s: String = $crate::macros::serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
                 let s = encode_base64(&s.into_bytes());
                 let mut s = s.into_bytes();
                 let ptr = s.as_mut_ptr() as usize;
                 let len = s.len();
-                std::mem::forget(s);
+            
                 unsafe { APP.set_get_state(ptr as u32, len as u32) };
             }
 

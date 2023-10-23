@@ -106,7 +106,7 @@ impl WidgetStore {
 
     pub fn draw(
         &mut self,
-        canvas: &mut Canvas,
+        canvas: &Canvas,
         wasm_messenger: &mut WasmMessenger,
         dirty_widgets: &HashSet<usize>,
         values: &HashMap<String, Value>,
@@ -555,7 +555,7 @@ impl Widget {
 
     pub fn draw(
         &mut self,
-        canvas: &mut Canvas,
+        canvas: &Canvas,
         wasm_messenger: &mut WasmMessenger,
         bounds: Size,
         #[allow(unused)] values: &HashMap<String, Value>,
@@ -764,6 +764,7 @@ impl Widget {
             WidgetData::Wasm { wasm: _, wasm_id } => {
                 wasm_messenger.send_process_message(*wasm_id, process_id, buf);
             }
+            WidgetData::Deleted => {}
             _ => {
                 panic!("Can't send process message to non-wasm widget");
             }

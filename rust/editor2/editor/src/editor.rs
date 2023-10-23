@@ -423,7 +423,7 @@ impl Editor {
         }
     }
 
-    pub fn draw(&mut self, canvas: &mut Canvas) {
+    pub fn draw(&mut self, canvas: &Canvas) {
         self.fps_counter.tick();
         use skia_safe::Size;
 
@@ -457,7 +457,7 @@ impl Editor {
         }
         canvas.restore();
 
-        self.widget_store.draw(
+    self.widget_store.draw(
             canvas,
             &mut self.wasm_messenger,
             &self.dirty_widgets,

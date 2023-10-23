@@ -1,4 +1,4 @@
-use std::{cmp, collections::HashMap, str::from_utf8};
+use std::{cmp, collections::{HashMap, HashSet}, str::from_utf8};
 
 use framework::{
     app, App, Canvas, Color, CursorIcon, KeyCode, KeyState, KeyboardInput, Position, Rect, Size,
@@ -7,7 +7,7 @@ use framework::{
 use headless_editor::{
     parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Deserializer, de};
 use serde_json::json;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -107,6 +107,7 @@ struct TextWidget {
     x_margin: i32,
     y_margin: i32,
     selecting: bool,
+    diagnostics: DiagnosticMessage,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -135,7 +136,71 @@ struct Tokens {
     tokens: Vec<u64>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct LineCharacter {
+    line: usize,
+    character: usize
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Range {
+    start: LineCharacter,
+    end: LineCharacter,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Href {
+    href: String,
+}
+
+
+// TODO: Make this work for serialize and deserialize
+#[derive(Serialize, Clone, Debug)]
+#[repr(u8)]
+enum Severity {
+    Error = 1,
+    Warning = 2,
+    Information = 3,
+    Hint = 4,
+}
+
+impl<'de> Deserialize<'de> for Severity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let code = u8::deserialize(deserializer)?;
+        match code {
+            1 => Ok(Severity::Error),
+            2 => Ok(Severity::Warning),
+            3 => Ok(Severity::Information),
+            4 => Ok(Severity::Hint),
+            _ => Err(de::Error::custom("Invalid value")),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Diagnostic {
+    range: Range,
+    severity: usize,
+    code: String,
+    #[serde(rename="codeDescription")]
+    code_description: Href,
+    source: String,
+    message: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct DiagnosticMessage {
+    uri: String,
+    diagnostics: Vec<Diagnostic>,
+    version: usize,
+}
+
+
 fn get_last_three_segments(path: &str) -> Option<String> {
+    
     use std::path::Path;
     let path = Path::new(path);
     let mut components = path.components().rev();
@@ -154,7 +219,7 @@ impl App for TextWidget {
     type State = TextWidget;
 
     fn init() -> Self {
-        let me = Self {
+        Self {
             text_pane: TextPane::new(vec![], 30.0),
             widget_data: WidgetData {
                 position: Position { x: 0.0, y: 0.0 },
@@ -169,10 +234,18 @@ impl App for TextWidget {
             edit_position: 0,
             staged_tokens: vec![],
             selecting: false,
-        };
-        me.subscribe("tokens_with_version");
-        me.subscribe("color_mapping_changed");
-        me
+            diagnostics: DiagnosticMessage {
+                uri: "".to_string(),
+                diagnostics: vec![],
+                version: 0,
+            },
+        }
+    }
+    
+    fn start(&mut self) {
+        self.subscribe("tokens_with_version");
+        self.subscribe("color_mapping_changed");
+        self.subscribe("diagnostics");
     }
 
     fn draw(&mut self) {
@@ -181,8 +254,8 @@ impl App for TextWidget {
         let foreground = Color::parse_hex("#dc9941");
         let background = Color::parse_hex("#353f38");
 
-        canvas.set_color(&foreground);
-
+        canvas.set_color(&foreground); 
+        
         // self.draw_debug(&mut canvas);
 
         let bounding_rect = Rect::new(
@@ -191,6 +264,7 @@ impl App for TextWidget {
             self.widget_data.size.width,
             self.widget_data.size.height,
         );
+        
 
         canvas.save();
         canvas.set_color(&background);
@@ -230,6 +304,8 @@ impl App for TextWidget {
             self.x_margin as f32 - self.text_pane.offset.x,
             self.text_pane.line_height - fractional_offset,
         );
+        
+        let diagnostic_lines = self.diagnostics.diagnostics.iter().map(|x| x.range.start.line).collect::<HashSet<usize>>();
 
         canvas.save();
         let number_lines = self.text_pane.number_of_lines();
@@ -242,6 +318,9 @@ impl App for TextWidget {
         let max_line = max_line.min(number_lines);
         for line in current_line..max_line {
             canvas.set_color(&Color::parse_hex("#83CDA1"));
+            if diagnostic_lines.contains(&(line)) {
+                canvas.set_color(&Color::parse_hex("#ff0000"));
+            }  
             let line_number = format!("{:width$}", line + 1, width = number_of_digits);
             canvas.draw_str(&line_number, 0.0, 0.0);
             canvas.translate(0.0, self.text_pane.line_height);
@@ -529,6 +608,14 @@ impl App for TextWidget {
                 serde_json::from_str::<HashMap<usize, String>>(from_utf8(event.as_bytes()).unwrap())
             {
                 self.text_pane.set_color_mapping(mapping);
+            }
+        } else if kind == "diagnostics" {
+            if let Ok(diagnostics) = serde_json::from_str::<DiagnosticMessage>(&event) {
+                if diagnostics.uri == format!("file://{}", self.file_path) {
+                    self.diagnostics = diagnostics;
+                }
+            } else {
+                println!("NOPE {}", event);
             }
         }
     }

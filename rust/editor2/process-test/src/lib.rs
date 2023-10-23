@@ -5,6 +5,7 @@ use std::{
     str::{from_utf8, FromStr},
 };
 
+
 use framework::{
     app,
     macros::serde_json::{self, json},
@@ -92,6 +93,7 @@ impl ProcessSpawner {
     ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
         let mut results = vec![];
         if let Some(start_json_object) = message.find('{') {
+            // TODO: This can crash
             let last_close_brace = message.rfind('}').unwrap();
             let message = &message[start_json_object..last_close_brace + 1];
             let message = message.trim();
