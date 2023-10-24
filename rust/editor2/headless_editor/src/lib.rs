@@ -921,8 +921,16 @@ pub trait VirtualCursor: Clone + Debug {
             } else {
                 start_column
             };
-
-        self.set_selection(Some(((new_start_line, new_start_column), (line, column))));
+            
+         self.set_selection(Some(((new_start_line, new_start_column), (line, column))));
+    }
+    
+    fn remove_empty_selection(&mut self) {
+        if let Some(((l1, c1), (l2, c2))) = self.selection() {
+            if l1 == l2 && c1 == c2 {
+                self.set_selection(None)
+            }
+        }
     }
 
     fn move_to_bounded<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) {

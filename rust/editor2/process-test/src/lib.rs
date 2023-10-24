@@ -217,8 +217,11 @@ impl ProcessSpawner {
     // TODO: I should probably ask the editor what files are open
 
     fn open_file(&mut self, file_info: &OpenFileInfo) {
-        // println!("Opening file: {}", file_info.path);
-        // read entire contents
+        
+        if !file_info.path.ends_with(".rs") {
+            return;
+        }
+        
         let mut file = File::open(file_info.path.clone()).unwrap();
         let mut contents = String::new();
         let file_results = file.read_to_string(&mut contents);
@@ -416,6 +419,12 @@ impl App for ProcessSpawner {
         match kind.as_str() {
             "text_change_multi" => {
                 let edits: MultiEditWithPath = serde_json::from_str(&event).unwrap();
+                
+                // TODO: I need a list of file types for which
+                // I have an lsp
+                if !edits.path.ends_with(".rs") {
+                    return
+                }
                 if !self.state.open_files.contains(&edits.path) {
                     self.open_file(&OpenFileInfo {
                         path: edits.path.clone(),
@@ -562,8 +571,14 @@ fn _extract_tokens(path: String, message: &serde_json::Value) -> Vec<u8> {
 }
 
 fn get_token_data(message: serde_json::Value) -> Vec<u64> {
+    // TODO: This can error
     let result = &message["result"];
-    serde_json::from_value(result["data"].clone()).unwrap()
+    let result = serde_json::from_value(result["data"].clone());
+    if let Ok(result) = result {
+        result
+    } else {
+        panic!("Failed to get tokens from {}", message);
+    }
 }
 
 fn find_rust_analyzer() -> String {

@@ -639,8 +639,17 @@ pub mod macros {
                 let mut s = s.into_bytes();
                 let ptr = s.as_mut_ptr() as usize;
                 let len = s.len();
+                std::mem::forget(s);
             
                 unsafe { APP.set_get_state(ptr as u32, len as u32) };
+            }
+
+            #[no_mangle]
+            pub extern "C" fn finish_get_state(ptr: usize, len: usize) {
+                // Deallocates get_state string
+                unsafe {
+                    let _s = Vec::from_raw_parts(ptr as *mut u8, len, len);
+                }
             }
 
             #[no_mangle]
@@ -936,6 +945,7 @@ impl Modifiers {
     }
 }
 
+#[derive(Debug)]
 pub struct KeyboardInput {
     pub state: KeyState,
     pub key_code: KeyCode,
