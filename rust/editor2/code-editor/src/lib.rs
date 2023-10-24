@@ -412,6 +412,7 @@ impl App for TextWidget {
 
     fn on_mouse_up(&mut self, _x: f32, _y: f32) {
         self.selecting = false;
+        self.text_pane.cursor.remove_empty_selection();
     }
 
     fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) {
@@ -436,6 +437,7 @@ impl App for TextWidget {
     }
 
     fn on_key(&mut self, input: KeyboardInput) {
+
         if !matches!(input.state, KeyState::Pressed) {
             return;
         }
@@ -462,10 +464,12 @@ impl App for TextWidget {
                 .move_right(&self.text_pane.text_buffer),
             KeyCode::UpArrow => self.text_pane.cursor.move_up(&self.text_pane.text_buffer),
             KeyCode::DownArrow => self.text_pane.cursor.move_down(&self.text_pane.text_buffer),
-            KeyCode::BackSpace => self
-                .text_pane
-                .cursor
-                .delete_char(&mut self.text_pane.text_buffer),
+            KeyCode::BackSpace => {
+                self
+                    .text_pane
+                    .cursor
+                    .delete_char(&mut self.text_pane.text_buffer)
+            }
             KeyCode::S => {
                 if input.modifiers.cmd {
                     self.save_file(
