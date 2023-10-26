@@ -1,7 +1,7 @@
 // use cacao::{webview::{WebView, WebViewConfig, WebViewDelegate}, layer::Layer, layout::LayoutAnchorX, view::View};
 
 use metal_rs::MetalLayerRef;
-use skia_safe::{scalar, ColorType, Size, gpu};
+use skia_safe::{gpu, scalar, ColorType, Size};
 use winit::platform::macos::WindowBuilderExtMacOS;
 
 use crate::{editor, widget};
@@ -106,7 +106,6 @@ pub fn setup_window(mut editor: editor::Editor) {
     let mut needs_update = true;
     let mut event_added = false;
 
-
     events_loop.run(move |event, _, control_flow| {
         autoreleasepool(|| {
             *control_flow = ControlFlow::Wait;
@@ -141,7 +140,6 @@ pub fn setup_window(mut editor: editor::Editor) {
                     // Well, as long as we define this properly. A module could
                     // need a tick, because they are totally driven by the editor
                     editor.end_frame();
-
 
                     // This needs to happen unconditonally, because
                     // these are external things that can create events

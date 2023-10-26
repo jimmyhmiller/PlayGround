@@ -457,7 +457,7 @@ impl Editor {
         }
         canvas.restore();
 
-    self.widget_store.draw(
+        self.widget_store.draw(
             canvas,
             &mut self.wasm_messenger,
             &self.dirty_widgets,

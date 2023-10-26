@@ -271,12 +271,7 @@ impl WasmMessenger {
         id
     }
 
-    pub fn draw_widget(
-        &mut self,
-        wasm_id: WasmId,
-        canvas: &Canvas,
-        bounds: Size,
-    ) -> Option<Size> {
+    pub fn draw_widget(&mut self, wasm_id: WasmId, canvas: &Canvas, bounds: Size) -> Option<Size> {
         if let Some(commands) = self.wasm_draw_commands.get_mut(&wasm_id) {
             let mut current_width = 0.0;
             let mut current_height = 0.0;
@@ -890,7 +885,7 @@ impl WasmManager {
                             wasm_id: id,
                             payload: OutPayload::Saved(SaveState::Empty),
                         })
-                    },
+                    }
                 }
             }
             Payload::PartialState(partial_state) => {
