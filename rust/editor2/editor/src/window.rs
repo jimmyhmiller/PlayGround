@@ -145,7 +145,7 @@ pub fn setup_window(mut editor: editor::Editor) {
                     // these are external things that can create events
                     editor.process_per_frame_actions();
 
-                    if editor.events.events_for_frame().len() > 0 {
+                    if !editor.events.events_for_frame().is_empty() {
                         needs_update = true;
                     }
                     if editor.wasm_messenger.number_of_pending_requests() > 0 {
@@ -180,10 +180,8 @@ pub fn setup_window(mut editor: editor::Editor) {
                     // I guess I could separate the editor
                     // from the fps counter?
                     // Really not sure
-                    if needs_update {
-                        if editor.should_redraw() {
-                            window.request_redraw();
-                        }
+                    if needs_update && editor.should_redraw() {
+                        window.request_redraw();
                     }
                 }
                 Event::RedrawRequested(_) => {

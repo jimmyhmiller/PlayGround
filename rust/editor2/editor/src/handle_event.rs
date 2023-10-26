@@ -318,7 +318,7 @@ impl Editor {
                         listening_widgets.retain(|x| *x != widget_id);
                     }
                 }
-                Event::OpenFile(path) => {
+                Event::OpenFile(_path) => {
                     // TODO: Handle this better.
                     // Ugly recursive hack and just need to refactor.
                     // self.handle_events(vec![Event::Event(
