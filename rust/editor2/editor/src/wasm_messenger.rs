@@ -167,10 +167,14 @@ impl WasmMessenger {
 
     pub fn number_of_pending_requests(&self) -> usize {
         let non_draw_commands_count = self
-            .wasm_non_draw_commands.values().map(|v| v.len())
+            .wasm_non_draw_commands
+            .values()
+            .map(|v| v.len())
             .sum::<usize>();
         let pending_message_count = self
-            .pending_messages.values().map(|v| v.len())
+            .pending_messages
+            .values()
+            .map(|v| v.len())
             .sum::<usize>();
         non_draw_commands_count + pending_message_count
     }
