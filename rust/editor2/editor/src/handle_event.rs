@@ -321,10 +321,10 @@ impl Editor {
                 Event::OpenFile(path) => {
                     // TODO: Handle this better.
                     // Ugly recursive hack and just need to refactor.
-                    self.handle_events(vec![Event::Event(
-                        "lith/open-file".to_string(),
-                        json!({ "path": path }).to_string(),
-                    )]);
+                    // self.handle_events(vec![Event::Event(
+                    //     "lith/open-file".to_string(),
+                    //     json!({ "path": path }).to_string(),
+                    // )]);
                 }
                 Event::KeyEvent {
                     input:

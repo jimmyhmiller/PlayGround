@@ -76,10 +76,15 @@ impl TextPane {
                 * self.line_height
                 + y_margin as f32;
 
+        if height - y_margin as f32 > self.number_of_lines() as f32 * self.line_height {
+            self.offset.y = 0.0;
+            return;
+        }
+
         // TODO: Deal with margin properly
 
-        if self.offset.y > scroll_with_last_line_visible + 40.0 {
-            self.offset.y = scroll_with_last_line_visible + 40.0;
+        if self.offset.y > scroll_with_last_line_visible {
+            self.offset.y = scroll_with_last_line_visible;
         }
 
         if self.offset.y < 0.0 {
@@ -186,7 +191,7 @@ struct Diagnostic {
     severity: usize,
     code: String,
     #[serde(rename="codeDescription")]
-    code_description: Href,
+    code_description: Option<Href>,
     source: String,
     message: String,
 }
@@ -195,7 +200,7 @@ struct Diagnostic {
 struct DiagnosticMessage {
     uri: String,
     diagnostics: Vec<Diagnostic>,
-    version: usize,
+    version: Option<usize>,
 }
 
 
@@ -237,7 +242,7 @@ impl App for TextWidget {
             diagnostics: DiagnosticMessage {
                 uri: "".to_string(),
                 diagnostics: vec![],
-                version: 0,
+                version: Some(0),
             },
         }
     }
@@ -616,7 +621,10 @@ impl App for TextWidget {
         } else if kind == "diagnostics" {
             if let Ok(diagnostics) = serde_json::from_str::<DiagnosticMessage>(&event) {
                 if diagnostics.uri == format!("file://{}", self.file_path) {
-                    self.diagnostics = diagnostics;
+                    if diagnostics.version.is_none() || self.diagnostics.version <= diagnostics.version {
+                        println!("{:?}", diagnostics);
+                        self.diagnostics = diagnostics;
+                    }
                 }
             } else {
                 println!("NOPE {}", event);

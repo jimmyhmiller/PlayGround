@@ -366,6 +366,7 @@ pub trait App {
                 text.len() as i32,
             )
         }
+        self.send_event("lith/save_file", path);
     }
     fn send_message(&mut self, process_id: i32, message: String) {
         let c_message = CString::new(message).unwrap();

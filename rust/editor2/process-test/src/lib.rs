@@ -12,7 +12,7 @@ use framework::{
     App, Canvas, Ui, WidgetData,
 };
 use lsp_types::{
-    notification::{DidChangeTextDocument, DidOpenTextDocument, Initialized, Notification},
+    notification::{DidChangeTextDocument, DidOpenTextDocument, Initialized, Notification, DidSaveTextDocument},
     request::{Initialize, Request, SemanticTokensFullRequest, WorkspaceSymbolRequest},
     ClientCapabilities, DidChangeTextDocumentParams, DidOpenTextDocumentParams, InitializeParams,
     InitializeResult, InitializedParams, MessageActionItemCapabilities, PartialResultParams,
@@ -20,7 +20,7 @@ use lsp_types::{
     ShowMessageRequestClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier,
     TextDocumentItem, Url, VersionedTextDocumentIdentifier, WindowClientCapabilities,
     WorkDoneProgressParams, WorkspaceFolder, WorkspaceSymbolParams, PublishDiagnosticsClientCapabilities,
-    TextDocumentClientCapabilities,
+    TextDocumentClientCapabilities, DidSaveTextDocumentParams,
 };
 use serde::{Deserialize, Serialize};
 
@@ -180,7 +180,9 @@ impl ProcessSpawner {
         });
         
         let mut text_document = TextDocumentClientCapabilities::default();
-        text_document.publish_diagnostics = Some(PublishDiagnosticsClientCapabilities::default());
+        let mut publish = PublishDiagnosticsClientCapabilities::default();
+        publish.version_support = Some(true);
+        text_document.publish_diagnostics = Some(publish);
         
         initialize_params.capabilities.text_document = Some(TextDocumentClientCapabilities::default());
 
@@ -378,6 +380,7 @@ impl App for ProcessSpawner {
     fn start(&mut self) {
         self.subscribe("text_change_multi");
         self.subscribe("lith/open-file");
+        self.subscribe("lith/save_file");
         self.initialize_rust_analyzer();
     }
 
@@ -439,11 +442,28 @@ impl App for ProcessSpawner {
                 if self.state.open_files.contains(&info.path) {
                     return;
                 }
+                if !info.path.ends_with(".rs") {
+                    return
+                }
                 self.state.files_to_open.insert(info.clone());
                 self.request_tokens(&info.path, info.version);
                 if self.state.state == State::Initialized {
                     self.open_file(&info);
                 }
+            }
+            "lith/save_file" => {
+                let path = event;
+                let params: <DidSaveTextDocument as Notification>::Params = DidSaveTextDocumentParams {
+                    text_document: TextDocumentIdentifier { uri: Url::from_str(&format!("file://{}", path)).unwrap() },
+                    // TODO: Send the text to be safe
+                    text: None,
+                };
+        
+                let notify = self.notification(
+                    DidSaveTextDocument::METHOD,
+                    &serde_json::to_string(&params).unwrap(),
+                );
+                self.send_message(self.process_id, notify);
             }
             _ => {
                 println!("Unknown event: {}", kind);
