@@ -32,7 +32,7 @@ where
             return Some(line);
         }
         None
-    }
+     }
 }
 
 pub trait TextBuffer {

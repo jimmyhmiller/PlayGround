@@ -883,11 +883,14 @@ impl WasmManager {
                             payload: OutPayload::Saved(SaveState::Saved(state)),
                         })
                     }
-                    None => Ok(OutMessage {
-                        message_id: message.message_id,
-                        wasm_id: id,
-                        payload: OutPayload::Saved(SaveState::Empty),
-                    }),
+                    None => {
+                        println!("Failed to get state");
+                        Ok(OutMessage {
+                            message_id: message.message_id,
+                            wasm_id: id,
+                            payload: OutPayload::Saved(SaveState::Empty),
+                        })
+                    },
                 }
             }
             Payload::PartialState(partial_state) => {
@@ -1645,6 +1648,9 @@ impl WasmInstance {
         if json_string.is_none() {
             println!("No json string {:?}", self.path);
         }
+        self.call_typed_func::<(u32, u32), ()>("finish_get_state", (ptr, len), 1)
+            .await
+            .ok()?;
         json_string
     }
 
