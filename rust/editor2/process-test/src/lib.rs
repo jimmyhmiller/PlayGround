@@ -94,6 +94,8 @@ impl ProcessSpawner {
         let mut results = vec![];
         if let Some(start_json_object) = message.find('{') {
             // TODO: This can crash
+            // I need to investigate this closer
+            // Probably need to hold onto the message until we get this?
             let last_close_brace = message.rfind('}').unwrap();
             let message = &message[start_json_object..last_close_brace + 1];
             let message = message.trim();

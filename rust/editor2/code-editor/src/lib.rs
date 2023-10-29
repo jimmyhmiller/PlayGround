@@ -5,13 +5,13 @@ use framework::{
     WidgetData,
 };
 use headless_editor::{
-    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor,
+    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor, transaction::TransactingVirtualCursor,
 };
 use serde::{Deserialize, Serialize, Deserializer, de};
 use serde_json::json;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct TextPane {
+pub struct TextPane<Cursor: VirtualCursor> {
     line_height: f32,
     offset: Position,
     cursor: Cursor,
@@ -22,7 +22,7 @@ pub struct TextPane {
 
 // TODO: Got some weird token missing that refreshing state fixes
 
-impl TextPane {
+impl<Cursor: VirtualCursor> TextPane<Cursor> {
     pub fn new(contents: Vec<u8>, line_height: f32) -> Self {
         Self {
             line_height,
@@ -103,7 +103,7 @@ impl TextPane {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct TextWidget {
-    text_pane: TextPane,
+    text_pane: TextPane<TransactingVirtualCursor<Cursor>>,
     widget_data: WidgetData,
     edit_position: usize,
     #[serde(default)]
@@ -442,122 +442,8 @@ impl App for TextWidget {
     }
 
     fn on_key(&mut self, input: KeyboardInput) {
-
-        if !matches!(input.state, KeyState::Pressed) {
-            return;
-        }
-
-        if input.modifiers.ctrl && matches!(input.key_code, KeyCode::E) {
-            self.text_pane.cursor.end_of_line(&self.text_pane.text_buffer);
-            return;
-        }
-        
-        if input.modifiers.ctrl && matches!(input.key_code, KeyCode::A) {
-            self.text_pane.cursor.start_of_line();
-            return;
-        }
-
-        match input.key_code {
-            KeyCode::Tab => self
-                .text_pane
-                .cursor
-                .handle_insert("    ".as_bytes(), &mut self.text_pane.text_buffer),
-            KeyCode::LeftArrow => self.text_pane.cursor.move_left(&self.text_pane.text_buffer),
-            KeyCode::RightArrow => self
-                .text_pane
-                .cursor
-                .move_right(&self.text_pane.text_buffer),
-            KeyCode::UpArrow => self.text_pane.cursor.move_up(&self.text_pane.text_buffer),
-            KeyCode::DownArrow => self.text_pane.cursor.move_down(&self.text_pane.text_buffer),
-            KeyCode::BackSpace => {
-                self
-                    .text_pane
-                    .cursor
-                    .delete_char(&mut self.text_pane.text_buffer)
-            }
-            KeyCode::S => {
-                if input.modifiers.cmd {
-                    self.save_file(
-                        self.file_path.clone(),
-                        from_utf8(self.text_pane.text_buffer.contents())
-                            .unwrap()
-                            .to_string(),
-                    );
-                    return;
-                }
-            }
-            _ => {}
-        }
-        if let Some(char) = input.to_char() {
-            self.text_pane
-                .cursor
-                .handle_insert(&[char as u8], &mut self.text_pane.text_buffer);
-        }
-
-        let edits = self.text_pane.text_buffer.drain_edits();
-        if !edits.is_empty() {
-            self.send_event(
-                "text_change_multi",
-                serde_json::ser::to_string(&MultiEditWithPath {
-                    version: self.text_pane.text_buffer.document_version,
-                    edits: edits.iter().map(|x| x.edit.clone()).collect(),
-                    path: self.file_path.clone(),
-                })
-                .unwrap(),
-            );
-        }
-
-        // for edit in edits.clone() {
-        //     self.send_event(
-        //         "text_change",
-        //         serde_json::ser::to_string(&EditWithPath {
-        //             edit: edit.edit,
-        //             path: self.file_path.clone(),
-        //         })
-        //         .unwrap(),
-        //     );
-        // }
-
-        match input.key_code {
-            KeyCode::UpArrow => {
-                match self
-                    .text_pane
-                    .cursor
-                    .line()
-                    .cmp(&self.text_pane.lines_above_scroll())
-                {
-                    cmp::Ordering::Equal => {
-                        // round down to the fraction of a line so the whole text is visible
-                        self.text_pane.offset.y -= self.text_pane.fractional_line_offset();
-                    }
-                    cmp::Ordering::Less => {
-                        self.text_pane.offset.y -= self.text_pane.line_height;
-                    }
-                    cmp::Ordering::Greater => {}
-                }
-            }
-            KeyCode::DownArrow => {
-                let drawable_area_height = self.widget_data.size.height - 40.0;
-                let logical_line =
-                    self.text_pane.cursor.line() - self.text_pane.lines_above_scroll();
-                let line_top = logical_line as f32 * self.text_pane.line_height
-                    - self.text_pane.fractional_line_offset();
-                let diff = drawable_area_height - line_top;
-
-                if diff > 0.0 && diff < self.text_pane.line_height {
-                    // not quite right yet
-                    self.text_pane.offset.y += self.text_pane.line_height - diff;
-                } else if self.text_pane.cursor.line() + 1
-                    >= self.text_pane.lines_above_scroll()
-                        + self
-                            .text_pane
-                            .number_of_visible_lines(self.widget_data.size.height)
-                {
-                    self.text_pane.offset.y += self.text_pane.line_height;
-                }
-            }
-            _ => {}
-        }
+        self.handle_key_press(input);
+        self.handle_edits();
     }
 
     fn on_scroll(&mut self, x: f64, y: f64) {
@@ -612,6 +498,7 @@ impl App for TextWidget {
             } else {
                 println!("Error parsing tokens: {}", event);
             }
+            
         } else if kind == "color_mapping_changed" {
             if let Ok(mapping) =
                 serde_json::from_str::<HashMap<usize, String>>(from_utf8(event.as_bytes()).unwrap())
@@ -622,12 +509,11 @@ impl App for TextWidget {
             if let Ok(diagnostics) = serde_json::from_str::<DiagnosticMessage>(&event) {
                 if diagnostics.uri == format!("file://{}", self.file_path) {
                     if diagnostics.version.is_none() || self.diagnostics.version <= diagnostics.version {
-                        println!("{:?}", diagnostics);
                         self.diagnostics = diagnostics;
                     }
                 }
             } else {
-                println!("NOPE {}", event);
+                println!("Couldn't parse {}", event);
             }
         }
     }
@@ -642,6 +528,127 @@ impl App for TextWidget {
 }
 
 impl TextWidget {
+
+    fn handle_key_press(&mut self, input: KeyboardInput) {
+        if !matches!(input.state, KeyState::Pressed) {
+            return;
+        }
+
+        // Order matters here
+        if input.modifiers.cmd && input.modifiers.shift && matches!(input.key_code, KeyCode::Z) {
+            self.text_pane.cursor.redo(&mut self.text_pane.text_buffer);
+            return;
+        }
+        if input.modifiers.cmd && matches!(input.key_code, KeyCode::Z) {
+            self.text_pane.cursor.undo(&mut self.text_pane.text_buffer);
+            return;
+        }
+
+        if input.modifiers.ctrl && matches!(input.key_code, KeyCode::E) {
+            self.text_pane.cursor.end_of_line(&self.text_pane.text_buffer);
+            return;
+        }
+        
+        if input.modifiers.ctrl && matches!(input.key_code, KeyCode::A) {
+            self.text_pane.cursor.start_of_line();
+            return;
+        }
+
+        match input.key_code {
+            KeyCode::Tab => self
+                .text_pane
+                .cursor
+                .handle_insert("    ".as_bytes(), &mut self.text_pane.text_buffer),
+            KeyCode::LeftArrow => self.text_pane.cursor.move_left(&self.text_pane.text_buffer),
+            KeyCode::RightArrow => self
+                .text_pane
+                .cursor
+                .move_right(&self.text_pane.text_buffer),
+            KeyCode::UpArrow => self.text_pane.cursor.move_up(&self.text_pane.text_buffer),
+            KeyCode::DownArrow => self.text_pane.cursor.move_down(&self.text_pane.text_buffer),
+            KeyCode::BackSpace => {
+                self
+                    .text_pane
+                    .cursor
+                    .delete(&mut self.text_pane.text_buffer)
+            }
+            KeyCode::S => {
+                if input.modifiers.cmd {
+                    self.save_file(
+                        self.file_path.clone(),
+                        from_utf8(self.text_pane.text_buffer.contents())
+                            .unwrap()
+                            .to_string(),
+                    );
+                    return;
+                }
+            }
+            _ => {}
+        }
+        if let Some(char) = input.to_char() {
+            self.text_pane
+                .cursor
+                .handle_insert(&[char as u8], &mut self.text_pane.text_buffer);
+        }
+
+        match input.key_code {
+            KeyCode::UpArrow => {
+                match self
+                    .text_pane
+                    .cursor
+                    .line()
+                    .cmp(&self.text_pane.lines_above_scroll())
+                {
+                    cmp::Ordering::Equal => {
+                        // round down to the fraction of a line so the whole text is visible
+                        self.text_pane.offset.y -= self.text_pane.fractional_line_offset();
+                    }
+                    cmp::Ordering::Less => {
+                        self.text_pane.offset.y -= self.text_pane.line_height;
+                    }
+                    cmp::Ordering::Greater => {}
+                }
+            }
+            KeyCode::DownArrow => {
+                let drawable_area_height = self.widget_data.size.height - 40.0;
+                let logical_line =
+                    self.text_pane.cursor.line() - self.text_pane.lines_above_scroll();
+                let line_top = logical_line as f32 * self.text_pane.line_height
+                    - self.text_pane.fractional_line_offset();
+                let diff = drawable_area_height - line_top;
+
+                if diff > 0.0 && diff < self.text_pane.line_height {
+                    // not quite right yet
+                    self.text_pane.offset.y += self.text_pane.line_height - diff;
+                } else if self.text_pane.cursor.line() + 1
+                    >= self.text_pane.lines_above_scroll()
+                        + self
+                            .text_pane
+                            .number_of_visible_lines(self.widget_data.size.height)
+                {
+                    self.text_pane.offset.y += self.text_pane.line_height;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_edits(&mut self) {
+        let edits = self.text_pane.text_buffer.drain_edits();
+        if !edits.is_empty() {
+            self.send_event(
+                "text_change_multi",
+                serde_json::ser::to_string(&MultiEditWithPath {
+                    version: self.text_pane.text_buffer.document_version,
+                    edits: edits.iter().map(|x| x.edit.clone()).collect(),
+                    path: self.file_path.clone(),
+                })
+                .unwrap(),
+            );
+        }
+    }
+
+    
     fn send_open_file(&mut self) {
         self.send_event(
             "lith/open-file",
@@ -672,7 +679,7 @@ impl TextWidget {
     fn draw_debug(&mut self, canvas: &mut Canvas) {
         let foreground = Color::parse_hex("#dc9941");
 
-        let cursor = self.text_pane.cursor;
+        let cursor = self.text_pane.cursor.clone();
         let current_token_window = self
             .text_pane
             .text_buffer
