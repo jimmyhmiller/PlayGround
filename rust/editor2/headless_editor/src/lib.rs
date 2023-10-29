@@ -6,6 +6,8 @@ use std::str::from_utf8;
 // TODO: I probably do need to return actions here
 // for every time the cursor moves.
 
+pub mod transaction;
+
 pub struct LineIter<'a, Item> {
     current_position: usize,
     items: &'a [Item],
@@ -47,6 +49,15 @@ pub trait TextBuffer {
     fn lines(&self) -> LineIter<Self::Item>;
     fn last_line(&self) -> usize {
         self.line_count().saturating_sub(1)
+    }
+    fn get_line(&self, index: usize) -> Option<&[Self::Item]>;
+    fn get_line_start_end(&self, index: usize) -> Option<(usize, usize)> {
+        let start = self.line_start(index);
+        let length = self.line_length(index);
+        if length == 0 {
+            return None;
+        }
+        Some((start, start + length))
     }
     fn set_contents(&mut self, contents: &[Self::Item]);
     fn contents(&self) -> &[Self::Item];
@@ -711,6 +722,10 @@ where
         self.underlying_text_buffer.lines()
     }
 
+    fn get_line(&self, index: usize) -> Option<&[Self::Item]> {
+        self.underlying_text_buffer.get_line(index)
+    }
+
     fn set_contents(&mut self, contents: &[Self::Item]) {
         self.underlying_text_buffer.set_contents(contents);
     }
@@ -877,6 +892,10 @@ impl TextBuffer for SimpleTextBuffer {
             items: &self.bytes,
             newline: &b'\n',
         }
+    }
+
+    fn get_line(&self, index: usize) -> Option<&[Self::Item]> {
+        self.lines().nth(index)
     }
 
     fn set_contents(&mut self, contents: &[Self::Item]) {
@@ -1063,17 +1082,31 @@ pub trait VirtualCursor: Clone + Debug {
         };
     }
 
-    fn delete_char<T: TextBuffer>(&mut self, buffer: &mut T) {
-        if let Some((start, end)) = self.selection() {
-            self.move_to(end.0, end.1);
-            self.set_selection(None);
-            while self.line() != start.0 || self.column() != start.1 {
-                self.delete_char(buffer);
-            }
+    fn delete<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T) {
+        if self.selection().is_some() {
+            self.delete_selection(buffer);
         } else {
-            self.move_left(buffer);
-            buffer.delete_char(self.line(), self.column());
+            self.delete_char(buffer);
         }
+    }
+
+    fn delete_chars<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T, start: (usize, usize), end: (usize, usize)) {
+        self.move_to(end.0, end.1);
+        while self.line() != start.0 || self.column() != start.1 {
+            self.delete_char(buffer);
+        }
+    }
+
+    fn delete_selection<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T) {
+        if let Some((start, end)) = self.selection() {
+            self.set_selection(None);
+            self.delete_chars(buffer, start, end);
+        }
+    }
+
+    fn delete_char<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T) {
+        self.move_left(buffer);
+        buffer.delete_char(self.line(), self.column());
     }
 
     fn is_open_bracket(byte: &[u8]) -> bool {
@@ -1403,7 +1436,7 @@ impl<C: VirtualCursor> VirtualCursor for MultiCursor<C> {
         }
     }
 
-    fn delete_char<T: TextBuffer>(&mut self, buffer: &mut T) {
+    fn delete_char<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T) {
         for cursor in &mut self.cursors {
             cursor.delete_char(buffer);
         }
@@ -1482,6 +1515,11 @@ impl TextBuffer for EventTextBuffer {
             newline: &b'\n',
         }
     }
+
+    fn get_line(&self, index: usize) -> Option<&[Self::Item]> {
+        self.lines().nth(index)
+    }
+    
     fn set_contents(&mut self, contents: &[Self::Item]) {
         self.bytes = contents.to_vec();
     }
