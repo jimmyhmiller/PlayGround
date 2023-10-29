@@ -78,40 +78,41 @@
           (broadcast (:clients new-view-state) (.toString out)))))))
 
 (defn make-ws-handler [internal-state-atom on-event]
-  ;; We let bind live-view-context to make sure the closure captures
-  ;; it becasue these functions will be called by jetty, not us and
-  ;; won't necessarily have the clojure dynamic vars set.
-  (let [live-view-context (or *live-view-context* {})]
-    {:on-connect (fn [ws]
-                   (binding [*live-view-context* (or live-view-context {})]
-                     (swap! internal-state-atom update :clients assoc ws {:metadata {}})))
-     :on-error (fn [ws e] (println "error" e))
-     :on-close (fn [ws status-code reason]
-                 (binding [*live-view-context* (or live-view-context {})]
-                   (swap! internal-state-atom update :clients dissoc ws)))
-     :on-text (fn [ws text-message]
-                (binding [*live-view-context* (or live-view-context {})]
-                  (if (= text-message "init")
-                    (send-transit! ws {:type :init
-                                       :value (:view-state @internal-state-atom)})
-                    (try
-                      ;; Should we acknowlege event handling?
-                      (on-event {:action (read-transit text-message)})
-                      (catch Exception e
-                        (.printStackTrace e))))))
-     :on-bytes (fn [ws bytes offset len])
-     :on-ping (fn [ws bytebuffer])
-     :on-pong (fn [ws bytebuffer])}))
+  (fn [upgrade-request]
+    (let [provided-subprotocols (:websocket-subprotocols upgrade-request)
+          provided-extensions (:websocket-extensions upgrade-request)]
+      ;; We let bind live-view-context to make sure the closure captures
+      ;; it becasue these functions will be called by jetty, not us and
+      ;; won't necessarily have the clojure dynamic vars set.
+      (let [live-view-context (or *live-view-context* {})]
+        {:on-connect (fn [ws]
+                       (binding [*live-view-context* (or live-view-context {})]
+                         (swap! internal-state-atom update :clients assoc ws {:metadata {}})))
+         :on-error (fn [ws e] (println "error" e))
+         :on-close (fn [ws status-code reason]
+                     (binding [*live-view-context* (or live-view-context {})]
+                       (swap! internal-state-atom update :clients dissoc ws)))
+         :on-text (fn [ws text-message]
+                    (binding [*live-view-context* (or live-view-context {})]
+                      (if (= text-message "init")
+                        (send-transit! ws {:type :init
+                                           :value (:view-state @internal-state-atom)})
+                        (try
+                          ;; Should we acknowlege event handling?
+                          (on-event {:action (read-transit text-message)})
+                          (catch Exception e
+                            (.printStackTrace e))))))
+         :on-bytes (fn [ws bytes offset len])
+         :on-ping (fn [ws bytebuffer])
+         :on-pong (fn [ws bytebuffer])
+         ;; select subprotocol
+         :subprotocol (first provided-subprotocols)
+         ;; exntension negotiation
+         :extensions provided-extensions}))))
 
 
 
-(defn web-handler [req]
-  (binding [*live-view-context* (or *live-view-context* {})]
-    (let [uri (:uri req)]
-      (case uri
-        "/" {:body  (slurp (io/resource "index.html"))
-             :headers {"Content-Type" "text/html"}}
-        "/main.js" {:body (slurp (io/resource "main.js"))}))))
+
 
 
 (defn run-queue-worker [message-queue {:keys [skip-frames-allowed? live-view-context]}]
@@ -145,7 +146,17 @@
         (when (not (Thread/interrupted))
           (recur))))))
 
-
+(defn make-web-handler [internal-state live-view-context event-handler]
+  (fn [req]
+    (binding [*live-view-context* (or live-view-context {})]
+      (if (jetty/ws-upgrade-request? req)
+        (jetty/ws-upgrade-response  (make-ws-handler internal-state event-handler))
+        (binding [*live-view-context* (or *live-view-context* {})]
+          (let [uri (:uri req)]
+            (case uri
+              "/" {:body  (slurp (io/resource "index.html"))
+                   :headers {"Content-Type" "text/html"}}
+              "/main.js" {:body (slurp (io/resource "main.js"))})))))))
 
 ;; TODO: Need to break things apart so you can run this on your own server
 ;; TODO: Need to make broadcast overridable, but it needs more context
@@ -188,17 +199,42 @@
                               broadcast]))))
 
         (let [live-view-context *live-view-context*
-              server (jetty/run-jetty (ring.middleware.resource/wrap-resource #'web-handler "/")
-                                      {:websockets {"/loc" (fn [_req]
-                                                             (binding [*live-view-context* (or live-view-context {})]
-                                                               (make-ws-handler internal-state event-handler)))}
-                                       :port (or port 50505)
+              web-handler (make-web-handler internal-state live-view-context event-handler)
+              server (jetty/run-jetty (ring.middleware.resource/wrap-resource web-handler "/")
+                                      {:port (or port 50505)
                                        :join? false})]
           {:server server
            :queue-worker queue-worker})))))
 
 
 
+
+
+(comment
+
+  (def state (atom {:greet "Hello "}))
+
+  (defn view [state]
+    [:h1 (:greet state) "jimmy"])
+
+  (defn event-handler [_])
+
+  (swap! state assoc :greet "You are awesome ")
+
+
+  (defn start []
+    (start-live-view-server
+     {:state state
+      :view #'view
+      :event-handler #'event-handler
+      :port 7777}))
+
+  (comment
+    (def live-view-server (start))
+    (.stop (:server live-view-server))
+    (future-cancel (:queue-worker live-view-server)))
+
+  )
 
 
 ;; Notes
