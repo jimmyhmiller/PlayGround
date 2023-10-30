@@ -18,27 +18,6 @@ struct ColorScheme {
 }
 
 impl App for ColorScheme {
-    type State = Self;
-
-    fn init() -> Self {
-        let me = Self {
-            widget_data: WidgetData::default(),
-            token_legend: None,
-            colors: vec![
-                "#D36247", "#FFB5A3", "#F58C73", "#B54226", "#D39147", "#FFD4A3", "#F5B873",
-                "#7CAABD", "#4C839A", "#33985C", "#83CDA1", "#53B079", "#1C8245",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-            color_mapping: HashMap::new(),
-            y_scroll_offset: 0.0,
-            mouse_location: None,
-            clicked: false,
-        };
-        me.subscribe("token_options");
-        me
-    }
 
     fn draw(&mut self) {
         let mut canvas = Canvas::new();
@@ -131,12 +110,13 @@ impl App for ColorScheme {
         self.widget_data.position = Position { x, y };
     }
 
-    fn get_state(&self) -> Self::State {
-        self.clone()
+    fn get_state(&self) -> String {
+        serde_json::to_string(&self).unwrap()
     }
 
-    fn set_state(&mut self, state: Self::State) {
-        *self = state;
+    fn set_state<'a>(&mut self, state: String) {
+        let value = serde_json::from_str(&state).unwrap();
+        *self = value;
     }
 
     fn on_event(&mut self, kind: String, event: String) {
@@ -144,9 +124,35 @@ impl App for ColorScheme {
             self.token_legend = Some(serde_json::from_str(&event).unwrap());
         }
     }
+
+    fn get_initial_state(&self) -> String {
+        let init = Self::init();
+        serde_json::to_string(&init).unwrap()
+    }
 }
 
 impl ColorScheme {
+
+    fn init() -> Self {
+        let me = Self {
+            widget_data: WidgetData::default(),
+            token_legend: None,
+            colors: vec![
+                "#D36247", "#FFB5A3", "#F58C73", "#B54226", "#D39147", "#FFD4A3", "#F5B873",
+                "#7CAABD", "#4C839A", "#33985C", "#83CDA1", "#53B079", "#1C8245",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            color_mapping: HashMap::new(),
+            y_scroll_offset: 0.0,
+            mouse_location: None,
+            clicked: false,
+        };
+        me.subscribe("token_options");
+        me
+    }
+
     fn mouse_in_bounds(&self, canvas: &Canvas, width: f32, height: f32) -> bool {
         if let Some((x, y)) = self.mouse_location {
             let canvas_position = canvas.get_current_position();

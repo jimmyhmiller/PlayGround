@@ -150,7 +150,7 @@ impl<Cursor: VirtualCursor> EditAction<Cursor>  {
     pub fn undo<Buffer: TextBuffer<Item = u8>>(&self, cursor: &mut Cursor, text_buffer: &mut Buffer) {
         match self {
             EditAction::Insert((line, column), text_to_insert) => {
-                let mut new_position = Cursor::new(*line, *column);
+                let new_position = Cursor::new(*line, *column);
                 // TODO: Make faster
                 // for _ in 0..text_to_insert.len() {
                 //     new_position.move_right(text_buffer);
@@ -160,7 +160,7 @@ impl<Cursor: VirtualCursor> EditAction<Cursor>  {
                 }
                 cursor.move_to(new_position.line(), new_position.column());
             },
-            EditAction::Delete(start, end, text_to_delete) => {
+            EditAction::Delete(start, _end, text_to_delete) => {
                 cursor.move_to(start.0, start.1);
                 cursor.move_left(text_buffer);
                 cursor.insert_normal_text(&text_to_delete, text_buffer);

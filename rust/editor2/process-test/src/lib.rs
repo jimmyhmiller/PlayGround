@@ -358,26 +358,6 @@ struct OpenFileInfo {
 }
 
 impl App for ProcessSpawner {
-    type State = Data;
-
-    fn init() -> Self {
-        ProcessSpawner {
-            state: Data {
-                pending_tokens: Vec::new(),
-                state: State::Initializing,
-                message_type: HashMap::new(),
-                token_request_metadata: HashMap::new(),
-                open_files: HashSet::new(),
-                files_to_open: HashSet::new(),
-                last_request_id: 0,
-                messages_by_type: HashMap::new(),
-                widget_data: WidgetData::default(),
-                y_scroll_offset: 0.0,
-            },
-            process_id: 0,
-            root_path: "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2".to_string(),
-        }
-    }
 
     fn start(&mut self) {
         self.subscribe("text_change_multi");
@@ -473,8 +453,8 @@ impl App for ProcessSpawner {
         }
     }
 
-    fn get_state(&self) -> Self::State {
-        self.state.clone()
+    fn get_state(&self) -> String {
+        serde_json::to_string(&self.state).unwrap()
     }
 
     fn on_process_message(&mut self, _process_id: i32, message: String) {
@@ -487,16 +467,11 @@ impl App for ProcessSpawner {
                         // let method = message["method"].as_str();
                         if let Some(id) = message["id"].as_str() {
                             if let Some(method) = self.state.message_type.get(id) {
-                                if let Some(messages) = self.state.messages_by_type.get_mut(method)
-                                {
-                                    messages.push(message.to_string());
-                                } else {
-                                    self.state
-                                        .messages_by_type
-                                        .insert(method.to_string(), vec![message.to_string()]);
-                                }
 
-                                // TODO: Need to correlate this with file
+                                self.state.messages_by_type
+                                    .entry(method.to_string())
+                                    .or_insert(vec![]).push(message.to_string());
+
                                 if method == "textDocument/semanticTokens/full" {
                                     let meta = self.state.token_request_metadata.get(id).unwrap();
                                     self.send_event(
@@ -550,7 +525,11 @@ impl App for ProcessSpawner {
                                     
                                     }
                                     "textDocument/publishDiagnostics" => {
-                                        self.send_event("diagnostics", serde_json::to_string(&message.get("params")).unwrap());
+                                        let diagnostic = serde_json::to_string(&message.get("params")).unwrap();
+                                        self.state.messages_by_type
+                                            .entry("diagnostics".to_string())
+                                            .or_insert(vec![]).push(diagnostic.clone());
+                                        self.send_event("diagnostics", diagnostic);
                                     }
                                     _ => {}
                                 }
@@ -567,8 +546,9 @@ impl App for ProcessSpawner {
         // println!("Process {} sent message {}", process_id, message);
     }
 
-    fn set_state(&mut self, state: Self::State) {
-        self.state.widget_data = state.widget_data;
+    fn set_state(&mut self, state: String) {
+        let value: Data = serde_json::from_str(&state).unwrap();
+        self.state.widget_data = value.widget_data;
     }
 
     fn on_size_change(&mut self, width: f32, height: f32) {
@@ -578,6 +558,32 @@ impl App for ProcessSpawner {
 
     fn on_move(&mut self, x: f32, y: f32) {
         self.state.widget_data.position = framework::Position { x, y };
+    }
+
+    fn get_initial_state(&self) -> String {
+        let init = Self::init();
+        serde_json::to_string(&init.state).unwrap()
+    }
+}
+
+impl ProcessSpawner {
+    fn init() -> Self {
+        ProcessSpawner {
+            state: Data {
+                pending_tokens: Vec::new(),
+                state: State::Initializing,
+                message_type: HashMap::new(),
+                token_request_metadata: HashMap::new(),
+                open_files: HashSet::new(),
+                files_to_open: HashSet::new(),
+                last_request_id: 0,
+                messages_by_type: HashMap::new(),
+                widget_data: WidgetData::default(),
+                y_scroll_offset: 0.0,
+            },
+            process_id: 0,
+            root_path: "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2".to_string(),
+        }
     }
 }
 
@@ -622,5 +628,7 @@ fn find_rust_analyzer() -> String {
 
     format!("{}/server/rust-analyzer", folder.to_str().unwrap())
 }
+
+
 
 app!(ProcessSpawner);

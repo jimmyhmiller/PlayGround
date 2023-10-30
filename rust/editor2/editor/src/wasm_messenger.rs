@@ -1067,13 +1067,15 @@ impl WasmInstance {
         let module = Module::from_file(&engine, wasm_path)?;
 
         let instance = linker.instantiate_async(&mut store, &module).await?;
-        Ok(Self {
+        let mut me = Self {
             instance,
             store,
             engine,
             linker,
             path: wasm_path.to_string(),
-        })
+        };
+        me.call_typed_func("main", (), 1).await?;
+        Ok(me)
     }
 
     async fn call_typed_func<Params, Results>(
@@ -1494,6 +1496,7 @@ impl WasmInstance {
                 .instantiate_async(&mut self.store, &module)
                 .await?;
             self.instance = instance;
+            self.call_typed_func("main", (), 1).await?;
             self.set_state(data).await?;
         } else {
             let module = Module::from_file(&self.engine, &self.path)?;
@@ -1502,6 +1505,7 @@ impl WasmInstance {
                 .instantiate_async(&mut self.store, &module)
                 .await?;
             self.instance = instance;
+            self.call_typed_func("main", (), 1).await?;
         }
 
         Ok(())

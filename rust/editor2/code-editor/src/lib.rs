@@ -221,36 +221,15 @@ fn get_last_three_segments(path: &str) -> Option<String> {
 }
 
 impl App for TextWidget {
-    type State = TextWidget;
-
-    fn init() -> Self {
-        Self {
-            text_pane: TextPane::new(vec![], 30.0),
-            widget_data: WidgetData {
-                position: Position { x: 0.0, y: 0.0 },
-                size: Size {
-                    width: 600.0,
-                    height: 600.0,
-                },
-            },
-            x_margin: 0,
-            y_margin: 87,
-            file_path: "".to_string(),
-            edit_position: 0,
-            staged_tokens: vec![],
-            selecting: false,
-            diagnostics: DiagnosticMessage {
-                uri: "".to_string(),
-                diagnostics: vec![],
-                version: Some(0),
-            },
-        }
-    }
-    
     fn start(&mut self) {
         self.subscribe("tokens_with_version");
         self.subscribe("color_mapping_changed");
         self.subscribe("diagnostics");
+    }
+
+    fn get_initial_state(&self) -> String {
+        let init_self = Self::init();
+        serde_json::to_string(&init_self).unwrap()
     }
 
     fn draw(&mut self) {
@@ -437,8 +416,8 @@ impl App for TextWidget {
                 let column = bounded_cursor.column();
                 self.text_pane.cursor.set_selection_movement((line, column));
             }
-            self.set_cursor_icon(CursorIcon::Text);
         }
+        self.set_cursor_icon(CursorIcon::Text);
     }
 
     fn on_key(&mut self, input: KeyboardInput) {
@@ -456,12 +435,13 @@ impl App for TextWidget {
         );
     }
 
-    fn get_state(&self) -> Self::State {
-        self.clone()
+    fn get_state<'a>(&self) -> String {
+        serde_json::to_string(&self).unwrap()
     }
 
-    fn set_state(&mut self, state: Self::State) {
-        *self = state;
+    fn set_state<'a>(&mut self, state: String) {
+        let value : Self = serde_json::from_str(&state).unwrap();
+        *self = value;
         if !self.file_path.is_empty() {
             let file = &self.file_path;
             let contents = std::fs::read(file);
@@ -528,6 +508,30 @@ impl App for TextWidget {
 }
 
 impl TextWidget {
+
+    fn init() -> Self {
+        Self {
+            text_pane: TextPane::new(vec![], 30.0),
+            widget_data: WidgetData {
+                position: Position { x: 0.0, y: 0.0 },
+                size: Size {
+                    width: 600.0,
+                    height: 600.0,
+                },
+            },
+            x_margin: 0,
+            y_margin: 87,
+            file_path: "".to_string(),
+            edit_position: 0,
+            staged_tokens: vec![],
+            selecting: false,
+            diagnostics: DiagnosticMessage {
+                uri: "".to_string(),
+                diagnostics: vec![],
+                version: Some(0),
+            },
+        }
+    }
 
     fn handle_key_press(&mut self, input: KeyboardInput) {
         if !matches!(input.state, KeyState::Pressed) {
