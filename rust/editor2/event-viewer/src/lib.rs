@@ -1,4 +1,4 @@
-use framework::{app, App, Canvas, Position, Ui, WidgetData};
+use framework::{app, App, Canvas, Position, Ui, WidgetData, macros::serde_json};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -20,16 +20,6 @@ struct EventViewer {
 // Or is it because I closed that panel?
 
 impl App for EventViewer {
-    type State = Self;
-
-    fn init() -> Self {
-        Self {
-            widget_data: WidgetData::default(),
-            events: Vec::new(),
-            y_scroll_offset: 0.0,
-            x_scroll_offset: 0.0,
-        }
-    }
 
     fn start(&mut self) {
         self.subscribe("*");
@@ -89,12 +79,13 @@ impl App for EventViewer {
         self.widget_data.position = Position { x, y };
     }
 
-    fn get_state(&self) -> Self::State {
-        self.clone()
+    fn get_state(&self) -> String {
+        serde_json::to_string(&self).unwrap()
     }
 
-    fn set_state(&mut self, state: Self::State) {
-        *self = state;
+    fn set_state(&mut self, state: String) {
+        let value = serde_json::from_str(&state).unwrap();
+        *self = value;
     }
 
     fn on_event(&mut self, kind: String, event: String) {
@@ -103,6 +94,23 @@ impl App for EventViewer {
             self.events.drain(0..(self.events.len() - 100));
         }
     }
+
+    fn get_initial_state(&self) -> String {
+        let init = Self::init();
+        serde_json::to_string(&init).unwrap()
+    }
+}
+
+impl EventViewer {
+    fn init() -> Self {
+        Self {
+            widget_data: WidgetData::default(),
+            events: Vec::new(),
+            y_scroll_offset: 0.0,
+            x_scroll_offset: 0.0,
+        }
+    }
+
 }
 
 app!(EventViewer);

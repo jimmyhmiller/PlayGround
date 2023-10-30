@@ -1,3 +1,4 @@
+#![allow(unused)]
 use std::{collections::HashMap, fmt::Debug, ffi::CString};
 
 use once_cell::sync::Lazy;
@@ -31,8 +32,6 @@ extern "C" {
     fn provide_f32_low_level(ptr: i32, len: i32, val: f32);
     #[link_name = "provide_bytes"]
     fn provide_bytes_low_level(name_ptr: i32, name_len: i32, ptr: i32, len: i32);
-    fn get_x() -> f32;
-    fn get_y() -> f32;
     fn get_value(ptr: i32, len: i32) -> u32;
     #[allow(unused)]
     fn try_get_value(ptr: i32, len: i32) -> u32;
@@ -330,9 +329,80 @@ impl From<u32> for CursorIcon {
     }
 }
 
+#[no_mangle]
+pub fn alloc_string(len: usize) -> *mut u8 {
+    // create a new mutable buffer with capacity `len`
+    let mut buf = Vec::with_capacity(len);
+    // take a mutable pointer to the buffer
+    let ptr = buf.as_mut_ptr();
+    // take ownership of the memory block and
+    // ensure that its destructor is not
+    // called when the object goes out of scope
+    // at the end of the function
+    std::mem::forget(buf);
+    // return the pointer so the runtime
+    // can write data at this offset
+    unsafe { STRING_PTR_TO_LEN.insert(ptr as u32, len as u32) };
+    ptr
+}
+
+pub fn fetch_string(str_ptr: u32) -> String {
+    let buffer;
+    unsafe {
+        let len = STRING_PTR_TO_LEN.get(&str_ptr).unwrap();
+        buffer = String::from_raw_parts(str_ptr as *mut u8, *len as usize, *len as usize);
+        STRING_PTR_TO_LEN.remove(&str_ptr);
+    }
+    buffer
+}
+
+pub fn merge_json(partial_state: Option<String>, state: String) -> String {
+    if let Some(partial_state) = partial_state {
+        let mut partial_state: serde_json::Value = serde_json::from_str(&partial_state).unwrap();
+        let mut state: serde_json::Value = serde_json::from_str(&state).unwrap();
+
+        assert!(partial_state.is_object(), "{:?}", partial_state);
+        assert!(state.is_object());
+
+        merge(&mut state, &mut partial_state);
+        serde_json::to_string(&state).unwrap()
+    } else {
+        state
+    }
+}
+
+pub fn merge(state: &mut serde_json::Value, partial_state: &mut serde_json::Value) {
+    match (state, partial_state) {
+        (serde_json::Value::Object(state), serde_json::Value::Object(partial_state)) => {
+            for (key, value) in partial_state.iter_mut() {
+                if let Some(entry) = state.get_mut(key) {
+                    merge(entry, value);
+                } else {
+                    state.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        (state, partial_state) => {
+            *state = partial_state.clone();
+        }
+    }
+}
+
+
+pub fn encode_base64(data: &[u8]) -> String {
+    use base64::Engine;
+
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+pub fn decode_base64(data: Vec<u8>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.decode(data)?;
+    Ok(data)
+}
+
+
 pub trait App {
-    type State;
-    fn init() -> Self;
     fn start(&mut self) {}
     fn draw(&mut self);
     #[allow(unused)]
@@ -349,8 +419,9 @@ pub trait App {
     fn on_event(&mut self, kind: String, event: String) {}
     fn on_size_change(&mut self, width: f32, height: f32);
     fn on_move(&mut self, x: f32, y: f32);
-    fn get_state(&self) -> Self::State;
-    fn set_state(&mut self, state: Self::State);
+    fn get_initial_state(&self) -> String;
+    fn get_state(&self) -> String;
+    fn set_state(&mut self, state: String);
     fn start_process(&mut self, process: String) -> i32 {
         unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
     }
@@ -377,14 +448,6 @@ pub trait App {
             send_message_low_level(process_id, ptr as i32, len as i32);
         }
     }
-    // fn send_message(&mut self, process_id: i32, message: String) {
-    //     let ptr = message.as_ptr();
-    //     let len = message.len();
-    //     std::mem::forget(message);
-    //     unsafe {
-    //         send_message_low_level(process_id, ptr as i32, len as i32);
-    //     }
-    // }
     fn on_process_message(&mut self, _process_id: i32, _message: String) {}
     fn set_get_state(&mut self, ptr: u32, len: u32) {
         unsafe { set_get_state(ptr, len) };
@@ -442,14 +505,6 @@ pub trait App {
         }
         buffer
     }
-    fn add_debug<T: Debug>(&self, name: &str, value: T) {
-        unsafe {
-            DEBUG.push(format!("{}: {:?}", name, value));
-        }
-    }
-    fn get_position(&self) -> (f32, f32) {
-        unsafe { (get_x(), get_y()) }
-    }
 
     fn get_value(&self, name: &str) -> String {
         let ptr = unsafe { get_value(name.as_ptr() as i32, name.len() as i32) };
@@ -467,74 +522,173 @@ pub trait App {
     }
 }
 
+pub static mut APPS: Lazy<Vec<Box<dyn App>>> = Lazy::new(|| vec![]);
+
+
+pub fn register_app(app: Box<dyn App>) {
+    unsafe {
+        APPS.push(app);
+    }
+}
+
+
 
 #[no_mangle]
-pub fn alloc_string(len: usize) -> *mut u8 {
-    // create a new mutable buffer with capacity `len`
-    let mut buf = Vec::with_capacity(len);
-    // take a mutable pointer to the buffer
-    let ptr = buf.as_mut_ptr();
-    // take ownership of the memory block and
-    // ensure that its destructor is not
-    // called when the object goes out of scope
-    // at the end of the function
-    std::mem::forget(buf);
-    // return the pointer so the runtime
-    // can write data at this offset
-    unsafe { STRING_PTR_TO_LEN.insert(ptr as u32, len as u32) };
-    ptr
+pub extern "C" fn on_click(x: f32, y: f32) {
+    let app = get_app!();
+    unsafe { app.on_click(x, y) }
 }
 
-pub fn fetch_string(str_ptr: u32) -> String {
-    let buffer;
+#[no_mangle]
+pub extern "C" fn on_mouse_down(x: f32, y: f32) {
+    let app = get_app!();
+    unsafe { app.on_mouse_down(x, y) }
+}
+
+#[no_mangle]
+pub extern "C" fn on_mouse_up(x: f32, y: f32) {
+    let app = get_app!();
+    unsafe { app.on_mouse_up(x, y) }
+}
+
+#[no_mangle]
+pub extern "C" fn on_process_message(process_id: i32, str_ptr: u32) {
+    let app = get_app!();
+    let message = fetch_string(str_ptr);
+    unsafe { app.on_process_message(process_id, message) }
+}
+
+#[no_mangle]
+pub extern "C" fn draw_debug() {
+    let debug = unsafe { &DEBUG };
+    if debug.len() == 0 {
+        return;
+    }
+    let foreground = Color::parse_hex("#62b4a6");
+    let background = Color::parse_hex("#1c041e");
+    let mut canvas = Canvas::new();
+    canvas.set_color(&background);
+    canvas.draw_rrect(Rect::new(0.0, 0.0, 300.0, 300.0), 20.0);
+    canvas.set_color(&foreground);
+    canvas.translate(0.0, 30.0);
+    canvas.draw_str(&format!("Debug {}", unsafe { &DEBUG }.len()), 0.0, 0.0);
+    canvas.translate(0.0, 30.0);
+    for line in unsafe { &DEBUG } {
+        canvas.draw_str(line, 0.0, 0.0);
+        canvas.translate(0.0, 30.0);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn on_key(key: u32, state: u32, modifiers: u32) {
+    let app = get_app!();
+    unsafe { app.on_key(KeyboardInput::from_u32(key, state, modifiers)) }
+}
+
+#[no_mangle]
+pub extern "C" fn on_mouse_move(x: f32, y: f32, x_diff: f32, y_diff: f32) {
+    let app = get_app!();
+    unsafe { app.on_mouse_move(x, y, x_diff, y_diff) }
+}
+
+#[no_mangle]
+pub extern "C" fn on_event(kind_ptr: u32, event_ptr: u32) {
+    let app = get_app!();
+    let kind = fetch_string(kind_ptr);
+    let event = fetch_string(event_ptr);
+    unsafe { app.on_event(kind, event) }
+}
+
+#[no_mangle]
+pub extern "C" fn on_size_change(width: f32, height: f32) {
+    let app = get_app!();
+    unsafe { app.on_size_change(width, height) }
+}
+
+#[no_mangle]
+pub extern "C" fn on_move(x: f32, y: f32) {
+    let app = get_app!();
+    unsafe { app.on_move(x, y) }
+}
+
+#[no_mangle]
+pub extern "C" fn on_scroll(x: f64, y: f64) {
+    let app = get_app!();
+    unsafe { app.on_scroll(x, y) }
+}
+
+#[no_mangle]
+pub extern "C" fn get_state() {
+    let app = get_app!();
+    let s: String =  app.get_state();
+    let s = encode_base64(&s.into_bytes());
+    let mut s = s.into_bytes();
+    let ptr = s.as_mut_ptr() as usize;
+    let len = s.len();
+    std::mem::forget(s);
+
+    unsafe { app.set_get_state(ptr as u32, len as u32) };
+}
+
+#[no_mangle]
+pub extern "C" fn finish_get_state(ptr: usize, len: usize) {
+    // Deallocates get_state string
     unsafe {
-        let len = STRING_PTR_TO_LEN.get(&str_ptr).unwrap();
-        buffer = String::from_raw_parts(str_ptr as *mut u8, *len as usize, *len as usize);
-        STRING_PTR_TO_LEN.remove(&str_ptr);
-    }
-    buffer
-}
-
-pub fn merge_json(partial_state: Option<String>, state: String) -> String {
-    if let Some(partial_state) = partial_state {
-        let mut partial_state: serde_json::Value = serde_json::from_str(&partial_state).unwrap();
-        let mut state: serde_json::Value = serde_json::from_str(&state).unwrap();
-        merge(&mut state, &mut partial_state);
-        serde_json::to_string(&state).unwrap()
-    } else {
-        state
+        let _s = Vec::from_raw_parts(ptr as *mut u8, len, len);
     }
 }
 
-pub fn merge(state: &mut serde_json::Value, partial_state: &mut serde_json::Value) {
-    match (state, partial_state) {
-        (serde_json::Value::Object(state), serde_json::Value::Object(partial_state)) => {
-            for (key, value) in partial_state.iter_mut() {
-                if let Some(entry) = state.get_mut(key) {
-                    merge(entry, value);
-                } else {
-                    state.insert(key.clone(), value.clone());
-                }
-            }
+#[no_mangle]
+pub extern "C" fn set_state<'a>(ptr: u32, size: u32) {
+    let app = get_app!();
+    let data =
+        unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
+    let s = decode_base64(data).map(|v| String::from_utf8(v).unwrap());
+    match s {
+        Ok(s) => {
+
+            // Not quite the same logic here
+            // I need set_state to signal failure
+            let initial_state = app.get_initial_state();
+            let new_state = merge_json(Some(s), initial_state);
+            app.set_state(new_state);
+
+
+            // if let Ok(state) = serde_json::from_str(&s) {
+            //     let current_state =
+            //         serde_json::to_string(unsafe { &app.get_state() })
+            //             .ok();
+            //     let new_state = merge_json(
+            //         Some(s),
+            //         current_state.unwrap_or("{}".to_string()),
+            //     );
+            //     let new_state = serde_json::from_str(&new_state).unwrap();
+            //     unsafe { app.set_state(new_state) }
+            // } else {
+                // let init_state = serde_json::to_string(unsafe {
+                //     &$app::init().get_state()
+                // })
+                // .unwrap();
+                // let new_state = merge_json(Some(s), init_state);
+                // if let Ok(state) = serde_json::from_str(&new_state) {
+                    // unsafe { app.set_state(state) }
+                // } else {
+                //     println!("Failed to parse state even after merging");
+                // }
+            // }
         }
-        (state, partial_state) => {
-            *state = partial_state.clone();
+        Err(err) => {
+            println!("error getting state {:?}", err);
         }
     }
 }
 
-
-pub fn encode_base64(data: &[u8]) -> String {
-    use base64::Engine;
-
-    base64::engine::general_purpose::STANDARD.encode(data)
+#[no_mangle]
+pub extern "C" fn draw() {
+    let app = get_app!();
+    unsafe { app.draw() }
 }
 
-pub fn decode_base64(data: Vec<u8>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    use base64::Engine;
-    let data = base64::engine::general_purpose::STANDARD.decode(data)?;
-    Ok(data)
-}
 
 pub mod macros {
     pub use once_cell::sync::Lazy;
@@ -547,154 +701,27 @@ pub mod macros {
     #[macro_export]
     macro_rules! app {
         ($app:ident) => {
-            use framework::DEBUG;
-            static mut APP: $crate::macros::Lazy<$app> = $crate::macros::Lazy::new(|| {
+
+            #[no_mangle]
+            fn main() {
                 let mut app = $app::init();
                 app.start();
-                app
-            });
-
-            #[no_mangle]
-            pub extern "C" fn on_click(x: f32, y: f32) {
-                unsafe { APP.on_click(x, y) }
-            }
-
-            #[no_mangle]
-            pub extern "C" fn on_mouse_down(x: f32, y: f32) {
-                unsafe { APP.on_mouse_down(x, y) }
-            }
-
-            #[no_mangle]
-            pub extern "C" fn on_mouse_up(x: f32, y: f32) {
-                unsafe { APP.on_mouse_up(x, y) }
-            }
-
-            #[no_mangle]
-            pub extern "C" fn on_process_message(process_id: i32, str_ptr: u32) {
-                let message = framework::fetch_string(str_ptr);
-                unsafe { APP.on_process_message(process_id, message) }
-            }
-
-            #[no_mangle]
-            pub extern "C" fn draw_debug() {
-                use framework::Canvas;
-                use framework::Color;
-                use framework::Rect;
-                let debug = unsafe { &DEBUG };
-                if debug.len() == 0 {
-                    return;
-                }
-                let foreground = Color::parse_hex("#62b4a6");
-                let background = Color::parse_hex("#1c041e");
-                let mut canvas = Canvas::new();
-                canvas.set_color(&background);
-                canvas.draw_rrect(Rect::new(0.0, 0.0, 300.0, 300.0), 20.0);
-                canvas.set_color(&foreground);
-                canvas.translate(0.0, 30.0);
-                canvas.draw_str(&format!("Debug {}", unsafe { &DEBUG }.len()), 0.0, 0.0);
-                canvas.translate(0.0, 30.0);
-                for line in unsafe { &DEBUG } {
-                    canvas.draw_str(line, 0.0, 0.0);
-                    canvas.translate(0.0, 30.0);
-                }
-            }
-
-            #[no_mangle]
-            pub extern "C" fn on_key(key: u32, state: u32, modifiers: u32) {
-                use framework::KeyboardInput;
-                unsafe { APP.on_key(KeyboardInput::from_u32(key, state, modifiers)) }
-            }
-
-            #[no_mangle]
-            pub extern "C" fn on_mouse_move(x: f32, y: f32, x_diff: f32, y_diff: f32) {
-                unsafe { APP.on_mouse_move(x, y, x_diff, y_diff) }
-            }
-
-            #[no_mangle]
-            pub extern "C" fn on_event(kind_ptr: u32, event_ptr: u32) {
-                let kind = framework::fetch_string(kind_ptr);
-                let event = framework::fetch_string(event_ptr);
-                unsafe { APP.on_event(kind, event) }
-            }
-
-            #[no_mangle]
-            pub extern "C" fn on_size_change(width: f32, height: f32) {
-                unsafe { APP.on_size_change(width, height) }
-            }
-
-            #[no_mangle]
-            pub extern "C" fn on_move(x: f32, y: f32) {
-                unsafe { APP.on_move(x, y) }
-            }
-
-            #[no_mangle]
-            pub extern "C" fn on_scroll(x: f64, y: f64) {
-                unsafe { APP.on_scroll(x, y) }
-            }
-
-            #[no_mangle]
-            pub extern "C" fn get_state() {
-                use framework::encode_base64;
-                let s: String = $crate::macros::serde_json::to_string(unsafe { &APP.get_state() }).unwrap();
-                let s = encode_base64(&s.into_bytes());
-                let mut s = s.into_bytes();
-                let ptr = s.as_mut_ptr() as usize;
-                let len = s.len();
-                std::mem::forget(s);
-            
-                unsafe { APP.set_get_state(ptr as u32, len as u32) };
-            }
-
-            #[no_mangle]
-            pub extern "C" fn finish_get_state(ptr: usize, len: usize) {
-                // Deallocates get_state string
                 unsafe {
-                    let _s = Vec::from_raw_parts(ptr as *mut u8, len, len);
+                    framework::APPS.push(Box::new(app));
                 }
             }
+        }
+    }
 
-            #[no_mangle]
-            pub extern "C" fn set_state(ptr: u32, size: u32) {
-                let data =
-                    unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
-                use framework::decode_base64;
-                let s = decode_base64(data).map(|v| String::from_utf8(v).unwrap());
-                match s {
-                    Ok(s) => {
-                        if let Ok(state) = $crate::macros::serde_json::from_str(&s) {
-                            let state: <$app as App>::State = state;
-                            let current_state =
-                                $crate::macros::serde_json::to_string(unsafe { &APP.get_state() })
-                                    .ok();
-                            let new_state = $crate::merge_json(
-                                Some(s),
-                                current_state.unwrap_or("{}".to_string()),
-                            );
-                            let new_state =
-                                $crate::macros::serde_json::from_str(&new_state).unwrap();
-                            unsafe { APP.set_state(new_state) }
-                        } else {
-                            let init_state = $crate::macros::serde_json::to_string(unsafe {
-                                &$app::init().get_state()
-                            })
-                            .unwrap();
-                            let new_state = $crate::merge_json(Some(s), init_state);
-                            if let Ok(state) = $crate::macros::serde_json::from_str(&new_state) {
-                                unsafe { APP.set_state(state) }
-                            } else {
-                                println!("Failed to parse state even after merging");
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        println!("error getting state {:?}", err);
-                    }
+    #[macro_export]
+    macro_rules! get_app {
+        () => {
+            unsafe {
+                if let Some(app) = APPS.get_mut(0) {
+                    app
+                } else {
+                    panic!("need to figure this out")
                 }
-            }
-
-            #[no_mangle]
-            pub extern "C" fn draw() {
-                unsafe { APP.draw() }
             }
         };
     }
