@@ -552,7 +552,7 @@ impl Widget {
         &mut self,
         canvas: &Canvas,
         wasm_messenger: &mut WasmMessenger,
-        bounds: Size
+        bounds: Size,
     ) -> Vec<WidgetId> {
         canvas.save();
         // Have to do this to deal with mut stuff
