@@ -16,7 +16,6 @@ use skia_safe::{
 };
 
 use crate::{
-    editor::Value,
     event::Event,
     wasm_messenger::{self, WasmId, WasmMessenger},
 };
@@ -109,7 +108,6 @@ impl WidgetStore {
         canvas: &Canvas,
         wasm_messenger: &mut WasmMessenger,
         dirty_widgets: &HashSet<usize>,
-        values: &HashMap<String, Value>,
     ) {
         let mut dirty_widgets = dirty_widgets.clone();
         for widget in self.iter() {
@@ -136,7 +134,7 @@ impl WidgetStore {
                         continue;
                     }
 
-                    widget.draw(canvas, wasm_messenger, widget.size, values);
+                    widget.draw(canvas, wasm_messenger, widget.size);
                     canvas.restore_to_count(before_count);
                     canvas.restore();
 
@@ -243,9 +241,6 @@ pub enum WidgetData {
     Circle {
         radius: f32,
         color: Color,
-    },
-    Compound {
-        children: Vec<WidgetId>,
     },
     Image {
         data: ImageData,
@@ -557,39 +552,20 @@ impl Widget {
         &mut self,
         canvas: &Canvas,
         wasm_messenger: &mut WasmMessenger,
-        bounds: Size,
-        #[allow(unused)] values: &HashMap<String, Value>,
+        bounds: Size
     ) -> Vec<WidgetId> {
         canvas.save();
         // Have to do this to deal with mut stuff
         if let WidgetData::Wasm { wasm: _, wasm_id } = &mut self.data {
             canvas.save();
             canvas.translate((self.position.x, self.position.y));
-            // canvas.clip_rect(Rect::from_wh(bounds.width, bounds.height), None, false);
             canvas.scale((self.scale, self.scale));
             wasm_messenger.draw_widget(*wasm_id, canvas, bounds);
-            // if let Some(widget_size) = widget_size {
-            //     println!("widget size: {:?}", widget_size);
-            // };
-
-            // if let Some(size) = wasm_messenger.draw_widget(*wasm_id, canvas, bounds) {
-            //     self.size = size;
-            // }
             canvas.translate((self.size.width, 0.0));
-            // wasm.draw_debug(canvas);
-            // if let Some(size) = wasm.draw_debug(canvas) {
-            //     self.size.width += size.width;
-            //     self.size.height += size.height;
-            // }
             canvas.restore();
         }
 
         match &self.data {
-            // TODO: Get rid of compound
-            WidgetData::Compound { children } => {
-                canvas.restore();
-                return children.clone();
-            }
             WidgetData::Image { data } => {
                 canvas.save();
                 canvas.scale((self.scale, self.scale));
