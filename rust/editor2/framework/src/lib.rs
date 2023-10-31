@@ -421,6 +421,7 @@ pub trait App {
 
 impl<T: App + ?Sized> AppExtensions for T {}
 
+// I didn't really need to do this. But it is kind of interesting
 pub trait AppExtensions {
     fn start_process(&mut self, process: String) -> i32 {
         unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
