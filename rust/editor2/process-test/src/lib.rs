@@ -8,7 +8,7 @@ use std::{
 
 use framework::{
     app,
-    macros::serde_json::{self, json},
+    serde_json::{self, json},
     App, Canvas, Ui, WidgetData,
 };
 use lsp_types::{

@@ -1,4 +1,4 @@
-use framework::{app, App, Canvas, Position, Ui, WidgetData, macros::serde_json};
+use framework::{app, App, Canvas, Position, Ui, WidgetData, serde_json};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -461,7 +461,6 @@ impl Editor {
             canvas,
             &mut self.wasm_messenger,
             &self.dirty_widgets,
-            &self.values,
         );
         self.dirty_widgets.clear();
 

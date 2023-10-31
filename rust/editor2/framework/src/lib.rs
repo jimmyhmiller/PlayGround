@@ -531,8 +531,6 @@ pub fn register_app(app: Box<dyn App>) {
     }
 }
 
-
-
 #[no_mangle]
 pub extern "C" fn on_click(x: f32, y: f32) {
     let app = get_app!();
@@ -688,15 +686,12 @@ pub extern "C" fn draw() {
     let app = get_app!();
     unsafe { app.draw() }
 }
-
+// TODO: get rid of this
+pub use serde_json;
 
 pub mod macros {
-    pub use once_cell::sync::Lazy;
-    pub use serde_json;
 
-    pub fn init_lazy<T>(f: fn() -> T) -> Lazy<T> {
-        Lazy::new(f)
-    }
+
 
     #[macro_export]
     macro_rules! app {

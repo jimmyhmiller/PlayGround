@@ -233,6 +233,7 @@ impl App for TextWidget {
     }
 
     fn draw(&mut self) {
+
         let mut canvas = Canvas::new();
 
         let foreground = Color::parse_hex("#dc9941");
@@ -376,6 +377,7 @@ impl App for TextWidget {
             .move_to_bounded(line, column, &self.text_pane.text_buffer);
 
         self.text_pane.cursor.set_selection_ordered(None);
+
     }
 
     fn on_mouse_down(&mut self, x: f32, y: f32) {
