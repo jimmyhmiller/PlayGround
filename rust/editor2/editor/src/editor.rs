@@ -457,11 +457,8 @@ impl Editor {
         }
         canvas.restore();
 
-        self.widget_store.draw(
-            canvas,
-            &mut self.wasm_messenger,
-            &self.dirty_widgets,
-        );
+        self.widget_store
+            .draw(canvas, &mut self.wasm_messenger, &self.dirty_widgets);
         self.dirty_widgets.clear();
 
         // let mut to_draw = vec![];
