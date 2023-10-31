@@ -9,6 +9,7 @@ mod native;
 mod wasm_messenger;
 mod widget;
 mod window;
+mod widget2;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {

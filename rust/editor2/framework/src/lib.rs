@@ -401,27 +401,27 @@ pub fn decode_base64(data: Vec<u8>) -> Result<Vec<u8>, Box<dyn std::error::Error
     Ok(data)
 }
 
-
 pub trait App {
     fn start(&mut self) {}
     fn draw(&mut self);
-    #[allow(unused)]
     fn on_click(&mut self, x: f32, y: f32);
-    #[allow(unused)]
     fn on_mouse_up(&mut self, x: f32, y: f32) {}
-    #[allow(unused)]
     fn on_mouse_down(&mut self, x: f32, y: f32) {}
-    #[allow(unused)]
     fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) {}
     fn on_key(&mut self, input: KeyboardInput);
     fn on_scroll(&mut self, x: f64, y: f64);
-    #[allow(unused)]
     fn on_event(&mut self, kind: String, event: String) {}
     fn on_size_change(&mut self, width: f32, height: f32);
     fn on_move(&mut self, x: f32, y: f32);
     fn get_initial_state(&self) -> String;
     fn get_state(&self) -> String;
     fn set_state(&mut self, state: String);
+    fn on_process_message(&mut self, _process_id: i32, _message: String) {}
+}
+
+impl<T: App + ?Sized> AppExtensions for T {}
+
+pub trait AppExtensions {
     fn start_process(&mut self, process: String) -> i32 {
         unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
     }
@@ -448,7 +448,6 @@ pub trait App {
             send_message_low_level(process_id, ptr as i32, len as i32);
         }
     }
-    fn on_process_message(&mut self, _process_id: i32, _message: String) {}
     fn set_get_state(&mut self, ptr: u32, len: u32) {
         unsafe { set_get_state(ptr, len) };
     }
@@ -522,7 +521,7 @@ pub trait App {
     }
 }
 
-pub static mut APPS: Lazy<Vec<Box<dyn App>>> = Lazy::new(|| vec![]);
+pub static mut APPS: Lazy<Vec<Box<dyn App>>> = Lazy::new(Vec::new);
 
 
 pub fn register_app(app: Box<dyn App>) {
@@ -559,7 +558,7 @@ pub extern "C" fn on_process_message(process_id: i32, str_ptr: u32) {
 #[no_mangle]
 pub extern "C" fn draw_debug() {
     let debug = unsafe { &DEBUG };
-    if debug.len() == 0 {
+    if debug.is_empty(){
         return;
     }
     let foreground = Color::parse_hex("#62b4a6");
@@ -637,7 +636,7 @@ pub extern "C" fn finish_get_state(ptr: usize, len: usize) {
 }
 
 #[no_mangle]
-pub extern "C" fn set_state<'a>(ptr: u32, size: u32) {
+pub extern "C" fn set_state(ptr: u32, size: u32) {
     let app = get_app!();
     let data =
         unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
@@ -696,7 +695,7 @@ pub mod macros {
     #[macro_export]
     macro_rules! app {
         ($app:ident) => {
-
+            use framework::AppExtensions;
             #[no_mangle]
             fn main() {
                 let mut app = $app::init();
@@ -968,7 +967,7 @@ impl Modifiers {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct KeyboardInput {
     pub state: KeyState,
     pub key_code: KeyCode,
