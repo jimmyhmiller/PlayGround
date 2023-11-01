@@ -1,7 +1,10 @@
-use std::error::Error;
+use std::{error::Error, collections::HashSet};
 
 use framework::{Position, KeyboardInput};
 use futures::channel::mpsc::Sender;
+use skia_safe::Canvas;
+
+use crate::wasm_messenger::WasmMessenger;
 
 pub trait Widget {
     fn start(&mut self) -> Result<(), Box<dyn Error>>;
@@ -128,6 +131,84 @@ impl Widget for WasmWidget {
     }
 }
 
+struct WidgetWithMessenger<'a> {
+    widget: crate::widget::Widget,
+    wasm_messenger: &'a mut WasmMessenger,
+    canvas: &'a Canvas
+}
+
+impl Widget for WidgetWithMessenger {
+    fn start(&mut self) -> Result<(), Box<dyn Error>> {
+        self.widget.init(self.wasm_messenger);
+        Ok(())
+    }
+
+    fn draw(&mut self) -> Result<(), Box<dyn Error>> {
+        self.widget.draw(self.canvas, self.wasm_messenger, self.widget.size);
+        Ok(())
+    }
+
+    fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.widget.on_click(&crate::widget::Position{ x, y }, self.wasm_messenger);
+        Ok(())
+    }
+
+    fn on_mouse_up(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.widget.on_mouse_up(&crate::widget::Position{ x, y }, self.wasm_messenger);
+        Ok(())
+    }
+
+    fn on_mouse_down(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.widget.on_mouse_down(&crate::widget::Position{ x, y }, self.wasm_messenger);
+        Ok(())
+    }
+
+    fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) -> Result<(), Box<dyn Error>> {
+        todo!()
+    }
+
+    fn on_key(&mut self, input: KeyboardInput) -> Result<(), Box<dyn Error>> {
+        todo!()
+    }
+
+    fn on_scroll(&mut self, x: f64, y: f64) -> Result<(), Box<dyn Error>> {
+        todo!()
+    }
+
+    fn on_event(&mut self, kind: String, event: String) -> Result<(), Box<dyn Error>> {
+        todo!()
+    }
+
+    fn on_size_change(&mut self, width: f32, height: f32) -> Result<(), Box<dyn Error>> {
+        self.widget.on_size_change(width, height, self.wasm_messenger);
+        Ok(())
+    }
+
+    fn on_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.widget.on_move(x, y, self.wasm_messenger);
+        Ok(())
+    }
+
+    fn set_state(&mut self, state: String) -> Result<(), Box<dyn Error>> {
+        todo!()
+    }
+
+    fn on_process_message(&mut self, _process_id: i32, _message: String) -> Result<(), Box<dyn Error>> {
+        todo!()
+    }
+
+    fn save(&mut self) -> std::result::Result<(), Box<dyn Error>> {
+        todo!()
+    }
+
+    fn reload(&mut self) -> std::result::Result<(), Box<dyn Error>> {
+        todo!()
+    }
+
+    fn update(&mut self) -> std::result::Result<(), Box<dyn Error>> {
+        todo!()
+    }
+}
 
 
 // These are things widgets can do.
