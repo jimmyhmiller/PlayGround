@@ -14,7 +14,8 @@ use crate::{
     fps_counter::FpsCounter,
     keyboard::Modifiers,
     wasm_messenger::WasmMessenger,
-    widget::{Color, Position, Size, Widget, WidgetData, WidgetId, WidgetStore},
+    widget::{Position, Size, Widget, WidgetData, WidgetId, WidgetStore},
+    color::Color
 };
 
 use nonblock::NonBlockingReader;
@@ -363,8 +364,6 @@ impl Editor {
                     WidgetData::TextPane { text_pane } => {
                         text_pane.set_text(output);
                     }
-                    // Shouldn't this be a process?
-                    WidgetData::Process { process: _ } => todo!(),
                     WidgetData::Deleted => {
                         to_delete.insert(process.process_id);
                     }

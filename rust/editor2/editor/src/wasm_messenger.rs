@@ -34,7 +34,9 @@ use crate::{
     editor::Value,
     event::Event,
     keyboard::KeyboardInput,
-    widget::{decode_base64, encode_base64, Color, Position, Size},
+    widget::{Position, Size},
+    color::Color,
+    util::{decode_base64, encode_base64},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

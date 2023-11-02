@@ -10,6 +10,8 @@ mod wasm_messenger;
 mod widget;
 mod window;
 mod widget2;
+mod color;
+mod util;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {

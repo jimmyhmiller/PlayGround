@@ -317,4 +317,17 @@ impl KeyboardInput {
             self.modifiers.as_u32(),
         )
     }
+
+    pub fn to_framework(&self) -> framework::KeyboardInput {
+        let (key, state, modifiers) = self.as_u32_tuple();
+        framework::KeyboardInput::from_u32(key, state, modifiers)
+    }
+
+    pub fn from_framework(input: framework::KeyboardInput) -> Self {
+        Self {
+            state: KeyState::from_u32(input.state as u32),
+            key_code: KeyCode::from_u32(input.key_code as u32).unwrap(),
+            modifiers: Modifiers::from_u32(input.modifiers.to_u32()),
+        }
+    }
 }

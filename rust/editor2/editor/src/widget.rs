@@ -4,22 +4,20 @@ use std::{
     fs::File,
     io::Read,
     path::PathBuf,
-    process::ChildStdout,
-    str::from_utf8,
 };
 
 
-use nonblock::NonBlockingReader;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use skia_safe::{
     font_style::{Slant, Weight, Width},
-    Canvas, Color4f, Data, Font, FontStyle, Image, Paint, Path, Point, RRect, Rect, Typeface,
+    Canvas, Data, Font, FontStyle, Image, Path, Point, RRect, Rect, Typeface,
 };
 
 use crate::{
     event::Event,
-    wasm_messenger::{self, WasmId, WasmMessenger},
+    wasm_messenger::{self, WasmId, WasmMessenger}, keyboard::KeyboardInput, widget2::{Widget as Widget2, TextPane}, color::Color,
 };
+
 
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq, PartialOrd)]
@@ -59,6 +57,8 @@ impl From<Size> for Position {
 
 pub type WidgetId = usize;
 
+
+// use crate::widget2::{widget_serialize, widget_deserialize};
 #[derive(Serialize, Deserialize)]
 pub struct Widget {
     #[serde(skip)]
@@ -70,6 +70,9 @@ pub struct Widget {
     // Children might make sense
     // pub children: Vec<Widget>,
     pub data: WidgetData,
+    #[serde(skip)]
+    // #[serde(serialize_with = "widget_serialize", deserialize_with = "widget_deserialize")]
+    pub data2: Box<dyn Widget2>,
     #[serde(default)]
     pub ephemeral: bool,
 }
@@ -187,63 +190,10 @@ impl WidgetStore {
     }
 }
 
-#[derive(Copy, Clone, Serialize, Deserialize)]
-pub struct Color {
-    r: f32,
-    g: f32,
-    b: f32,
-    a: f32,
-}
-
-impl Color {
-    pub fn as_paint(&self) -> Paint {
-        Paint::new(Color4f::new(self.r, self.g, self.b, self.a), None)
-    }
-
-    pub fn as_color4f(&self) -> Color4f {
-        Color4f::new(self.r, self.g, self.b, self.a)
-    }
-
-    #[allow(unused)]
-    pub fn as_sk_color(&self) -> skia_safe::Color {
-        self.as_color4f().to_color()
-    }
-
-    pub fn new(r: f32, g: f32, b: f32, a: f32) -> Color {
-        Color { r, g, b, a }
-    }
-
-    #[allow(unused)]
-    pub fn from_color4f(color4f: &Color4f) -> Self {
-        Color {
-            r: color4f.r,
-            g: color4f.g,
-            b: color4f.b,
-            a: color4f.a,
-        }
-    }
-
-    pub fn parse_hex(hex: &str) -> Color {
-        let mut start = 0;
-        if hex.starts_with('#') {
-            start = 1;
-        }
-
-        let r = i64::from_str_radix(&hex[start..start + 2], 16).unwrap() as f32;
-        let g = i64::from_str_radix(&hex[start + 2..start + 4], 16).unwrap() as f32;
-        let b = i64::from_str_radix(&hex[start + 4..start + 6], 16).unwrap() as f32;
-        Color::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
-    }
-}
-
 // I could go the interface route here.
 // I like enums. Will consider it later.
 #[derive(Serialize, Deserialize)]
 pub enum WidgetData {
-    Circle {
-        radius: f32,
-        color: Color,
-    },
     Image {
         data: ImageData,
     },
@@ -254,19 +204,10 @@ pub enum WidgetData {
         text: String,
         text_options: TextOptions,
     },
-    Process {
-        process: Process,
-    },
     Wasm {
         wasm: Wasm,
         #[serde(skip)]
         wasm_id: WasmId,
-    },
-    // I probably don't need this
-    // But I think no with my mouse fix
-    // I could do something cool with it?
-    HoverFile {
-        path: String,
     },
     Deleted,
 }
@@ -277,27 +218,7 @@ impl WidgetData {
     }
 }
 
-// TODO: watch for file changes
-#[derive(Serialize, Deserialize)]
-pub struct Process {
-    file_path: PathBuf,
-    #[serde(skip)]
-    #[allow(dead_code)]
-    file: Option<File>,
-    #[serde(skip)]
-    #[allow(dead_code)]
-    stdout: Option<NonBlockingReader<ChildStdout>>,
-}
 
-impl Process {
-    pub fn _new(file_path: PathBuf) -> Process {
-        Process {
-            file_path,
-            file: None,
-            stdout: None,
-        }
-    }
-}
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub enum FontWeight {
@@ -324,119 +245,6 @@ pub struct TextOptions {
     pub color: Color,
 }
 
-pub fn encode_base64(data: &str) -> String {
-    use base64::Engine;
-
-    base64::engine::general_purpose::STANDARD.encode(data)
-}
-
-pub fn decode_base64(data: &Vec<u8>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    use base64::Engine;
-    let data = base64::engine::general_purpose::STANDARD.decode(data)?;
-    Ok(data)
-}
-
-fn serialize_text<S>(x: &[u8], s: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    s.serialize_str(&encode_base64(from_utf8(x).unwrap()))
-}
-
-fn deserialize_text<'de, D>(d: D) -> Result<Vec<u8>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s = String::deserialize(d)?;
-    let bytes = s.into_bytes();
-    if let Ok(s) = decode_base64(&bytes) {
-        Ok(s)
-    } else {
-        // TODO: Fail?
-        Ok(bytes)
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TextPane {
-    #[serde(serialize_with = "serialize_text")]
-    #[serde(deserialize_with = "deserialize_text")]
-    contents: Vec<u8>,
-    line_height: f32,
-    offset: Position,
-}
-
-impl TextPane {
-    pub fn new(contents: Vec<u8>, line_height: f32) -> Self {
-        Self {
-            contents,
-            line_height,
-            offset: Position { x: 0.0, y: 0.0 },
-        }
-    }
-
-    fn lines_above_scroll(&self) -> usize {
-        (self.offset.y / self.line_height).floor() as usize
-    }
-
-    // TODO: Deal with margin!
-    fn number_of_visible_lines(&self, height: f32) -> usize {
-        ((height - 40.0) / self.line_height).ceil() as usize
-    }
-
-    // TODO: obviously need to not compute this everytime.
-    fn get_lines(&self) -> impl std::iter::Iterator<Item = &str> + '_ {
-        let text = std::str::from_utf8(&self.contents).unwrap();
-        let lines = text.split('\n');
-        lines
-    }
-
-    fn number_of_lines(&self) -> usize {
-        self.get_lines().count()
-    }
-
-    fn visible_lines(&self, height: f32) -> impl std::iter::Iterator<Item = &str> + '_ {
-        self.get_lines()
-            .skip(self.lines_above_scroll())
-            .take(self.number_of_visible_lines(height))
-    }
-
-    pub fn on_scroll(&mut self, x: f64, y: f64, height: f32) {
-        // this is all terribly wrong. I don't get the bounds correctly.
-        // Need to deal with that.
-
-        self.offset.x += x as f32;
-        if self.offset.x < 0.0 {
-            self.offset.x = 0.0;
-        }
-        // TODO: Handle x scrolling too far
-        self.offset.y -= y as f32;
-
-        let scroll_with_last_line_visible =
-            self.number_of_lines()
-                .saturating_sub(self.number_of_visible_lines(height)) as f32
-                * self.line_height;
-
-        // TODO: Deal with margin properly
-
-        if self.offset.y > scroll_with_last_line_visible + 20.0 {
-            self.offset.y = scroll_with_last_line_visible + 20.0;
-        }
-
-        if self.offset.y < 0.0 {
-            self.offset.y = 0.0;
-        }
-    }
-
-    fn fractional_line_offset(&self) -> f32 {
-        self.offset.y % self.line_height
-    }
-
-    pub fn set_text(&mut self, output: &str) {
-        self.contents = output.into();
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct ImageData {
     path: String,
@@ -451,12 +259,6 @@ pub struct ImageData {
 }
 
 impl ImageData {
-    pub fn _new(path: String) -> Self {
-        Self {
-            path,
-            cache: RefCell::new(None),
-        }
-    }
 
     fn load_image(&self) {
         // TODO: Get rid of clone
@@ -475,8 +277,6 @@ impl ImageData {
     }
 }
 
-// I need to also keep track of how to recompile
-// things at some point.
 
 #[derive(Serialize, Deserialize)]
 pub struct Wasm {
@@ -496,14 +296,6 @@ impl Wasm {
 }
 
 impl Widget {
-    fn bounding_rect(&self) -> Rect {
-        Rect::from_xywh(
-            self.position.x,
-            self.position.y,
-            self.size.width,
-            self.size.height,
-        )
-    }
 
     pub fn on_click(
         &mut self,
@@ -529,6 +321,7 @@ impl Widget {
             y: widget_y,
         }
     }
+    
 
     pub fn on_mouse_down(&mut self, position: &Position, wasm_messenger: &mut WasmMessenger) {
         let widget_space = self.widget_space(position);
@@ -644,31 +437,6 @@ impl Widget {
                 );
                 canvas.restore();
             }
-            WidgetData::Process { process } => {
-                canvas.save();
-                canvas.scale((self.scale, self.scale));
-                let file_name = process.file_path.file_name().unwrap().to_str().unwrap();
-                let font = Font::new(
-                    Typeface::new("Ubuntu Mono", FontStyle::bold()).unwrap(),
-                    32.0,
-                );
-                let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-                canvas.draw_str(
-                    file_name,
-                    Point::new(self.position.x, self.position.y),
-                    &font,
-                    white,
-                );
-                canvas.restore();
-            }
-            WidgetData::HoverFile { path: _ } => {
-                canvas.save();
-                canvas.scale((self.scale, self.scale));
-                let purple = Color::parse_hex("#1c041e");
-                canvas.draw_rect(self.bounding_rect(), &purple.as_paint());
-                canvas.restore();
-            }
-
             _ => {}
         }
         canvas.restore();
@@ -723,9 +491,6 @@ impl Widget {
             WidgetData::Wasm { wasm, .. } => {
                 vec![wasm.path.clone()]
             }
-            WidgetData::Process { process } => {
-                vec![process.file_path.to_str().unwrap().to_string()]
-            }
             _ => {
                 vec![]
             }
@@ -766,40 +531,67 @@ impl Widget {
             _ => {}
         }
     }
-}
 
-// TODO: I might need tags or things like that
-// I need a much richer notion for widgets if I'm going
-// to let you select them. Yes I know I'm recreating a browser
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum WidgetSelector {
-    This,
-    ById(WidgetId),
-    ByName(String),
-    ByArea {
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    },
-}
+    pub fn on_scroll(&mut self, x: f64, y: f64, wasm_messenger: &mut WasmMessenger) -> bool {
+        match &mut self.data {
+            WidgetData::TextPane { text_pane } => {
+                text_pane.on_scroll(x, y, self.size.height);
+                true
+            }
+            WidgetData::Wasm { wasm: _, wasm_id } => {
+                wasm_messenger.send_on_scroll(*wasm_id, x, y);
+                true
+            }
+            _ => {
+                false
+            }
+        }
+    }
 
-impl WidgetSelector {
-    // TODO: In order for this to work I need to track
-    // the originator of the event and pass it here.
-    pub fn select(&self, _widgets: &WidgetStore) -> Vec<WidgetId> {
-        match self {
-            WidgetSelector::This => {
-                todo!("Need to track event originator");
+    pub fn on_event(&mut self, kind: &str, event: &str, wasm_messenger: &mut WasmMessenger) -> bool {
+        match &mut self.data {
+            WidgetData::Wasm { wasm: _, wasm_id } => {
+                wasm_messenger.send_event(
+                    *wasm_id,
+                    kind.to_string(),
+                    event.to_string(),
+                );
+                true
             }
-            WidgetSelector::ById(id) => {
-                vec![*id]
+            _ => { 
+                false
             }
-            WidgetSelector::ByName(_) => {
-                todo!("By name selector");
+        }
+    }
+
+    pub fn on_key(&mut self, input: KeyboardInput, wasm_messenger: &mut WasmMessenger) -> bool {
+        match self.data {
+            WidgetData::Wasm { wasm: _, wasm_id } => {
+                wasm_messenger.send_on_key(
+                    wasm_id,
+                    input,
+                );
+                true
             }
-            WidgetSelector::ByArea { .. } => {
-                todo!("By area selector");
+            _ => {
+                false
+            }
+        }
+    }
+
+    pub fn on_mouse_move(&self, widget_space: &Position, x_diff: f32, y_diff: f32, wasm_messenger: &mut WasmMessenger) -> bool {
+        match &self.data {
+            WidgetData::Wasm { wasm: _, wasm_id } => {
+                wasm_messenger.send_on_mouse_move(
+                    *wasm_id,
+                    widget_space,
+                    x_diff,
+                    y_diff,
+                );
+                true
+            }
+            _ => {
+                false
             }
         }
     }

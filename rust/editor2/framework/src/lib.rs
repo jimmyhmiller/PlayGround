@@ -931,7 +931,7 @@ impl KeyState {
 }
 
 // Not the most efficient representation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,
@@ -968,7 +968,7 @@ impl Modifiers {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyboardInput {
     pub state: KeyState,
     pub key_code: KeyCode,
