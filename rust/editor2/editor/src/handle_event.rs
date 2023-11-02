@@ -10,7 +10,7 @@ use crate::{
     event::Event,
     keyboard::{KeyCode, KeyboardInput},
     native::open_file_dialog,
-    widget::{Position, Size, TextPane, Wasm, Widget, WidgetData},
+    widget::{Position, Size, Wasm, Widget, WidgetData}, widget2::TextPane,
 };
 
 fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
@@ -44,6 +44,7 @@ impl Editor {
                                 wasm: Wasm::new(path.to_str().unwrap().to_string()),
                                 wasm_id,
                             },
+                            data2: Box::new(()),
                         });
                     } else {
                         self.widget_store.add_widget(Widget {
@@ -63,6 +64,7 @@ impl Editor {
                                     40.0,
                                 ),
                             },
+                            data2: Box::new(()),
                         });
                     }
                     if let Some(watcher) = &mut self.debounce_watcher {
@@ -77,16 +79,9 @@ impl Editor {
                     let mouse = self.context.mouse_position;
                     for widget in self.widget_store.iter_mut() {
                         if widget.mouse_over(&mouse) {
-                            match &mut widget.data {
-                                WidgetData::TextPane { text_pane } => {
-                                    dirty_widgets.insert(widget.id);
-                                    text_pane.on_scroll(x, y, widget.size.height);
-                                }
-                                WidgetData::Wasm { wasm: _, wasm_id } => {
-                                    dirty_widgets.insert(widget.id);
-                                    self.wasm_messenger.send_on_scroll(*wasm_id, x, y);
-                                }
-                                _ => {}
+                            let modified = widget.on_scroll(x, y, &mut self.wasm_messenger);
+                            if modified {
+                                dirty_widgets.insert(widget.id);
                             }
                         }
                     }
@@ -99,17 +94,6 @@ impl Editor {
                 Event::LeftMouseUp { .. } => {
                     self.context.left_mouse_down = false;
                     self.add_mouse_up();
-                }
-                // TODO: Unused
-                Event::MoveWidgetRelative { selector, x, y } => {
-                    let widget_ids = selector.select(&self.widget_store);
-                    for widget_id in widget_ids {
-                        dirty_widgets.insert(widget_id);
-                        if let Some(widget) = self.widget_store.get_mut(widget_id) {
-                            widget.position.x += x;
-                            widget.position.y += y;
-                        }
-                    }
                 }
                 Event::MouseMove {
                     x_diff,
@@ -168,17 +152,14 @@ impl Editor {
                             // TODO: I should probably only send this for the top most widget
                             if widget.mouse_over(&position) {
                                 was_over = true;
-                                match &widget.data {
-                                    WidgetData::Wasm { wasm: _, wasm_id } => {
-                                        self.wasm_messenger.send_on_mouse_move(
-                                            *wasm_id,
-                                            &widget_space,
-                                            x_diff,
-                                            y_diff,
-                                        );
-                                        dirty_widgets.insert(widget.id);
-                                    }
-                                    _ => {}
+                                let modified = widget.on_mouse_move(
+                                    &widget_space,
+                                    x_diff,
+                                    y_diff,
+                                    &mut self.wasm_messenger,
+                                );
+                                if modified {
+                                    dirty_widgets.insert(widget.id);
                                 }
                             }
                         }
@@ -188,6 +169,9 @@ impl Editor {
                     }
                 }
                 Event::ReloadWidgets => {
+                    // TODO: This explains weird behavior
+                    // I don't actually save the widgets first?
+                    // I would need to save, wait and then reload
                     self.widget_store.clear();
                     self.load_widgets();
                 }
@@ -253,6 +237,7 @@ impl Editor {
                         data: WidgetData::TextPane {
                             text_pane: TextPane::new(vec![], 40.0),
                         },
+                        data2: Box::new(()),
                     });
 
                     self.processes.insert(
@@ -289,16 +274,9 @@ impl Editor {
 
                     for widget_id in both {
                         if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                            match &mut widget.data {
-                                WidgetData::Wasm { wasm: _, wasm_id } => {
-                                    dirty_widgets.insert(widget.id);
-                                    self.wasm_messenger.send_event(
-                                        *wasm_id,
-                                        kind.clone(),
-                                        event.clone(),
-                                    );
-                                }
-                                _ => {}
+                            let modified = widget.on_event(&kind, &event, &mut self.wasm_messenger);
+                            if modified {
+                                dirty_widgets.insert(widget.id);
                             }
                         }
                     }
@@ -327,9 +305,9 @@ impl Editor {
                     // )]);
                 }
                 Event::KeyEvent {
-                    input:
+                    input: input @
                         KeyboardInput {
-                            state,
+                            state: _,
                             key_code,
                             modifiers,
                         },
@@ -358,6 +336,7 @@ impl Editor {
                                     wasm: Wasm::new(code_editor.to_string()),
                                     wasm_id,
                                 },
+                                data2: Box::new(()),
                                 ephemeral: false,
                             });
                             self.mark_widget_dirty(widget_id);
@@ -366,19 +345,7 @@ impl Editor {
                     } else if let Some(widget_id) = self.active_widget {
                         self.mark_widget_dirty(widget_id);
                         if let Some(widget) = self.widget_store.get_mut(widget_id) {
-                            match widget.data {
-                                WidgetData::Wasm { wasm: _, wasm_id } => {
-                                    self.wasm_messenger.send_on_key(
-                                        wasm_id,
-                                        KeyboardInput {
-                                            state,
-                                            key_code,
-                                            modifiers,
-                                        },
-                                    );
-                                }
-                                _ => {}
-                            }
+                            widget.on_key(input, &mut self.wasm_messenger);
                         }
                     }
                 }

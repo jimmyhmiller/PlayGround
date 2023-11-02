@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::{
     keyboard::{KeyCode, KeyState, KeyboardInput, Modifiers},
-    widget::{Position, WidgetId, WidgetSelector},
+    widget::{Position, WidgetId},
 };
 
 use framework::CursorIcon;
@@ -59,11 +59,6 @@ pub enum Event {
     },
     WidgetMouseUp {
         widget_id: WidgetId,
-    },
-    MoveWidgetRelative {
-        selector: WidgetSelector,
-        x: f32,
-        y: f32,
     },
     ReloadWidgets,
     ReloadWasm(String),
