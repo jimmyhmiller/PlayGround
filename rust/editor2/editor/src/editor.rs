@@ -15,7 +15,7 @@ use crate::{
     keyboard::Modifiers,
     wasm_messenger::WasmMessenger,
     widget::{Position, Size, Widget, WidgetData, WidgetId, WidgetStore},
-    color::Color
+    color::Color, widget2::TextPane
 };
 
 use nonblock::NonBlockingReader;
@@ -363,6 +363,10 @@ impl Editor {
                 match &mut widget.data {
                     WidgetData::TextPane { text_pane } => {
                         text_pane.set_text(output);
+                        if let Some(text_pane) = widget.data2.as_any_mut().downcast_mut::<TextPane>() {
+                            text_pane.set_text(output);
+
+                        }
                     }
                     WidgetData::Deleted => {
                         to_delete.insert(process.process_id);

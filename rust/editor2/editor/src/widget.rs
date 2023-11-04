@@ -10,7 +10,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use skia_safe::{
     font_style::{Slant, Weight, Width},
-    Canvas, Data, Font, FontStyle, Image, Path, Point, RRect, Rect, Typeface,
+    Canvas, Data, Font, FontStyle, Image, Point, Typeface,
 };
 
 use crate::{
@@ -378,44 +378,45 @@ impl Widget {
                 canvas.draw_image(image, self.position, None);
                 canvas.restore();
             }
-            WidgetData::TextPane { text_pane } => {
-                canvas.save();
-                let text_pane = &text_pane;
-                let foreground = Color::parse_hex("#dc9941");
-                let background = Color::parse_hex("#353f38");
+            WidgetData::TextPane { text_pane: _ } => {
+                self.data2.draw(canvas, bounds).unwrap();
+                // canvas.save();
+                // let text_pane = &text_pane;
+                // let foreground = Color::parse_hex("#dc9941");
+                // let background = Color::parse_hex("#353f38");
 
-                let paint = background.as_paint();
-                canvas.save();
-                canvas.translate((self.position.x, self.position.y));
-                canvas.clip_rect(Rect::from_wh(bounds.width, bounds.height), None, false);
-                canvas.scale((self.scale, self.scale));
+                // let paint = background.as_paint();
+                // canvas.save();
+                // canvas.translate((self.position.x, self.position.y));
+                // canvas.clip_rect(Rect::from_wh(bounds.width, bounds.height), None, false);
+                // canvas.scale((self.scale, self.scale));
 
-                let bounding_rect = Rect::new(0.0, 0.0, bounds.width, bounds.height);
+                // let bounding_rect = Rect::new(0.0, 0.0, bounds.width, bounds.height);
 
-                let font = Font::new(
-                    Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
-                    32.0,
-                );
-                let mut path = Path::new();
-                path.add_rect(bounding_rect.with_outset((30.0, 30.0)), None);
+                // let font = Font::new(
+                //     Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
+                //     32.0,
+                // );
+                // let mut path = Path::new();
+                // path.add_rect(bounding_rect.with_outset((30.0, 30.0)), None);
 
-                let rrect = RRect::new_rect_xy(bounding_rect, 20.0, 20.0);
-                canvas.draw_rrect(rrect, &paint);
+                // let rrect = RRect::new_rect_xy(bounding_rect, 20.0, 20.0);
+                // canvas.draw_rrect(rrect, &paint);
 
-                canvas.clip_rect(bounding_rect.with_inset((20, 20)), None, None);
-                let fractional_offset = text_pane.fractional_line_offset();
-                canvas.translate((
-                    30.0 - text_pane.offset.x,
-                    text_pane.line_height - fractional_offset + 10.0,
-                ));
+                // canvas.clip_rect(bounding_rect.with_inset((20, 20)), None, None);
+                // let fractional_offset = text_pane.fractional_line_offset();
+                // canvas.translate((
+                //     30.0 - text_pane.offset.x,
+                //     text_pane.line_height - fractional_offset + 10.0,
+                // ));
 
-                for line in text_pane.visible_lines(self.size.height) {
-                    canvas.draw_str(line, Point::new(0.0, 0.0), &font, &foreground.as_paint());
-                    canvas.translate((0.0, text_pane.line_height));
-                }
+                // for line in text_pane.visible_lines(self.size.height) {
+                //     canvas.draw_str(line, Point::new(0.0, 0.0), &font, &foreground.as_paint());
+                //     canvas.translate((0.0, text_pane.line_height));
+                // }
 
-                canvas.restore();
-                canvas.restore();
+                // canvas.restore();
+                // canvas.restore();
             }
             WidgetData::Text { text, text_options } => {
                 canvas.save();
@@ -528,14 +529,17 @@ impl Widget {
             WidgetData::Wasm { wasm: _, wasm_id } => {
                 wasm_messenger.send_on_move(*wasm_id, x, y);
             }
+            WidgetData::TextPane { .. } => {
+                self.data2.on_move(x, y).unwrap();
+            }
             _ => {}
         }
     }
 
     pub fn on_scroll(&mut self, x: f64, y: f64, wasm_messenger: &mut WasmMessenger) -> bool {
         match &mut self.data {
-            WidgetData::TextPane { text_pane } => {
-                text_pane.on_scroll(x, y, self.size.height);
+            WidgetData::TextPane { .. } => {
+                self.data2.on_scroll(x, y).unwrap();
                 true
             }
             WidgetData::Wasm { wasm: _, wasm_id } => {
