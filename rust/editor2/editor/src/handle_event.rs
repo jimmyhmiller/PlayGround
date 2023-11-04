@@ -10,7 +10,7 @@ use crate::{
     event::Event,
     keyboard::{KeyCode, KeyboardInput},
     native::open_file_dialog,
-    widget::{Position, Size, Wasm, Widget, WidgetData}, widget2::TextPane,
+    widget::{Position, Size, Wasm, Widget, WidgetData}, widget2::{TextPane, WidgetMeta},
 };
 
 fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
@@ -62,9 +62,14 @@ impl Editor {
                                 text_pane: TextPane::new(
                                     std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
                                     40.0,
+                                    WidgetMeta::new(Position { x, y }, Size { width: 800.0, height: 800.0}, 1.0)
                                 ),
                             },
-                            data2: Box::new(()),
+                            data2: Box::new(TextPane::new(
+                                std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
+                                40.0,
+                                WidgetMeta::new(Position { x, y }, Size { width: 800.0, height: 800.0}, 1.0)
+                            )),
                         });
                     }
                     if let Some(watcher) = &mut self.debounce_watcher {
@@ -235,9 +240,9 @@ impl Editor {
                         on_click: vec![],
                         ephemeral: true,
                         data: WidgetData::TextPane {
-                            text_pane: TextPane::new(vec![], 40.0),
+                            text_pane: TextPane::new(vec![], 40.0, WidgetMeta::new(position, Size { width: 800.0, height: 800.0}, 1.0)),
                         },
-                        data2: Box::new(()),
+                        data2: Box::new(TextPane::new(vec![], 40.0, WidgetMeta::new(position, Size { width: 800.0, height: 800.0}, 1.0))),
                     });
 
                     self.processes.insert(

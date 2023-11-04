@@ -1,14 +1,16 @@
-use std::{error::Error, str::from_utf8};
+use std::{error::Error, str::from_utf8, any::Any};
 
-use framework::{Position, KeyboardInput};
+use framework::KeyboardInput;
 use futures::channel::mpsc::Sender;
 use serde::{Serializer, Deserializer, Deserialize, Serialize};
 use skia_safe::{Canvas, Rect, Font, FontStyle, Typeface, Path, RRect, Point};
 
-use crate::{wasm_messenger::WasmMessenger, widget::Size, color::Color, util::{encode_base64, decode_base64}};
+use crate::{widget::{Size, Position}, color::Color, util::{encode_base64, decode_base64}};
 
 #[allow(unused)]
 pub trait Widget {
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
     fn start(&mut self) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
@@ -82,6 +84,13 @@ where
 
 #[allow(unused)]
 impl Widget for () {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
     fn position(&self) -> Position {
         todo!()
     }
@@ -126,6 +135,13 @@ struct WasmWidget {
 
 #[allow(unused)]
 impl Widget for WasmWidget {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Result<(), Box<dyn Error>> {
         self.sender.try_send(Event::Draw)?;
@@ -220,125 +236,6 @@ impl Widget for WasmWidget {
     }
 }
 
-pub struct WidgetWithMessenger<'a> {
-    widget: &'a mut crate::widget::Widget,
-    wasm_messenger: Option<&'a mut WasmMessenger>,
-    canvas: Option<&'a Canvas>
-}
-
-impl<'a> WidgetWithMessenger<'a> {
-    #[allow(unused)]
-    pub fn new(widget: &'a mut crate::widget::Widget, wasm_messenger: &'a mut WasmMessenger, canvas: &'a Canvas) -> Self {
-        Self {
-            widget,
-            wasm_messenger: Some(wasm_messenger),
-            canvas: Some(canvas),
-        }
-    }
-}
-
-#[allow(unused)]
-impl<'a> Widget for WidgetWithMessenger<'a> {
-
-    fn start(&mut self) -> Result<(), Box<dyn Error>> {
-        self.widget.init(self.wasm_messenger.as_mut().ok_or("error")?);
-        Ok(())
-    }
-
-    fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Result<(), Box<dyn Error>> {
-        self.widget.draw(self.canvas.as_ref().ok_or("error")?, self.wasm_messenger.as_mut().ok_or("error")?, self.widget.size);
-        Ok(())
-    }
-
-    fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
-        self.widget.on_click(
-            &crate::widget::Position{ x, y }, 
-            self.wasm_messenger.as_mut().ok_or("error")?,
-        );
-        Ok(())
-    }
-
-    fn on_mouse_up(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
-        self.widget.on_mouse_up(&crate::widget::Position{ x, y }, self.wasm_messenger.as_mut().ok_or("error")?);
-        Ok(())
-    }
-
-    fn on_mouse_down(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
-        self.widget.on_mouse_down(&crate::widget::Position{ x, y }, self.wasm_messenger.as_mut().ok_or("error")?);
-        Ok(())
-    }
-
-    fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) -> Result<(), Box<dyn Error>> {
-        self.widget.on_mouse_move(&crate::widget::Position{ x, y }, x_diff, y_diff, self.wasm_messenger.as_mut().ok_or("error")?);
-        Ok(())
-    }
-
-    fn on_key(&mut self, input: KeyboardInput) -> Result<(), Box<dyn Error>> {
-        self.widget.on_key(crate::keyboard::KeyboardInput::from_framework(input), self.wasm_messenger.as_mut().ok_or("error")?);
-        Ok(())
-    }
-
-    fn on_scroll(&mut self, x: f64, y: f64) -> Result<(), Box<dyn Error>> {
-        // TODO: Need to signal that scroll happened so we can mark dirty
-        self.widget.on_scroll(x, y, self.wasm_messenger.as_mut().ok_or("error")?);
-        Ok(())
-    }
-
-    fn on_event(&mut self, kind: String, event: String) -> Result<(), Box<dyn Error>> {
-        // TODO: Need to signal that event happened so we can mark dirty
-        self.widget.on_event(&kind, &event, self.wasm_messenger.as_mut().ok_or("error")?);
-        Ok(())
-    }
-
-    fn on_size_change(&mut self, width: f32, height: f32) -> Result<(), Box<dyn Error>> {
-        self.widget.on_size_change(width, height, self.wasm_messenger.as_mut().ok_or("error")?);
-        Ok(())
-    }
-
-    fn on_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
-        self.widget.on_move(x, y, self.wasm_messenger.as_mut().ok_or("error")?);
-        Ok(())
-    }
-
-    fn set_state(&mut self, state: String) -> Result<(), Box<dyn Error>> {
-        println!("set_state");
-        Ok(())
-    }
-
-    fn on_process_message(&mut self, _process_id: i32, _message: String) -> Result<(), Box<dyn Error>> {
-        println!("on_process_message");
-        Ok(())
-    }
-
-    fn save(&mut self) -> std::result::Result<(), Box<dyn Error>> {
-        self.widget.save(self.wasm_messenger.as_mut().ok_or("error")?);
-        Ok(())
-    }
-
-    fn reload(&mut self) -> std::result::Result<(), Box<dyn Error>> {
-        println!("reload");
-        Ok(())
-    }
-
-    fn update(&mut self) -> std::result::Result<(), Box<dyn Error>> {
-        println!("update");
-        Ok(())
-    }
-
-    fn position(&self) -> Position {
-        todo!()
-    }
-
-    fn scale(&self) -> f32 {
-        todo!()
-    }
-
-    fn size(&self) -> Size {
-        todo!()
-    }
-}
-
-
 fn serialize_text<S>(x: &[u8], s: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -361,21 +258,40 @@ where
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct WidgetMeta {
+    position: Position,
+    scale: f32,
+    size: Size,
+}
+
+impl WidgetMeta {
+    pub fn new(position: Position, size: Size, scale: f32, ) -> Self {
+        Self {
+            position,
+            scale,
+            size,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct TextPane {
     #[serde(serialize_with = "serialize_text")]
     #[serde(deserialize_with = "deserialize_text")]
     contents: Vec<u8>,
     pub line_height: f32,
     pub offset: Position,
+    pub meta: WidgetMeta,
 }
 
 #[allow(unused)]
 impl TextPane {
-    pub fn new(contents: Vec<u8>, line_height: f32) -> Self {
+    pub fn new(contents: Vec<u8>, line_height: f32, meta: WidgetMeta) -> Self {
         Self {
             contents,
             line_height,
             offset: Position { x: 0.0, y: 0.0 },
+            meta,
         }
     }
 
@@ -444,6 +360,13 @@ impl TextPane {
 
 #[allow(unused)]
 impl Widget for TextPane {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Result<(), Box<dyn Error>> {
         canvas.save();
@@ -486,20 +409,27 @@ impl Widget for TextPane {
         Ok(())
     }
 
+    fn on_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.meta.position.x = x;
+        self.meta.position.y = y;
+        Ok(())
+    }
+
     fn on_scroll(&mut self, x: f64, y: f64) -> Result<(), Box<dyn Error>> {
-        todo!("on_scroll")
+        self.on_scroll(x, y, self.size().height);
+        Ok(())
     }
 
     fn position(&self) -> Position {
-        todo!()
+        self.meta.position
     }
 
     fn scale(&self) -> f32 {
-        todo!()
+        self.meta.scale
     }
 
     fn size(&self) -> Size {
-        todo!()
+        self.meta.size
     }
 }
 
