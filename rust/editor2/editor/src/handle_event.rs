@@ -10,7 +10,7 @@ use crate::{
     event::Event,
     keyboard::{KeyCode, KeyboardInput},
     native::open_file_dialog,
-    widget::{Position, Size, Wasm, Widget, WidgetData}, widget2::{TextPane, WidgetMeta},
+    widget::{Position, Size, Wasm, Widget, WidgetData}, widget2::{TextPane, WidgetMeta, WasmWidget},
 };
 
 fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
@@ -27,7 +27,7 @@ impl Editor {
             match event {
                 Event::DroppedFile { path, x, y } => {
                     if path.extension().unwrap() == "wasm" {
-                        let wasm_id = self
+                        let (wasm_id, receiver) = self
                             .wasm_messenger
                             .new_instance(path.to_str().unwrap(), None);
                         self.widget_store.add_widget(Widget {
@@ -44,7 +44,13 @@ impl Editor {
                                 wasm: Wasm::new(path.to_str().unwrap().to_string()),
                                 wasm_id,
                             },
-                            data2: Box::new(()),
+                            data2: Box::new(
+                                WasmWidget {
+                                    draw_commands: vec![],
+                                    sender: self.wasm_messenger.get_sender(wasm_id),
+                                    receiver,
+                                }
+                            )
                         });
                     } else {
                         self.widget_store.add_widget(Widget {
@@ -323,7 +329,7 @@ impl Editor {
                             let path = path.replace("file://", "");
                             let code_editor = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/target/wasm32-wasi/debug/code_editor.wasm";
                             let path_json = json!({ "file_path": path }).to_string();
-                            let wasm_id = self
+                            let (wasm_id, receiver) = self
                                 .wasm_messenger
                                 .new_instance(code_editor, Some(path_json));
                             let widget_id = self.widget_store.add_widget(Widget {
@@ -341,7 +347,13 @@ impl Editor {
                                     wasm: Wasm::new(code_editor.to_string()),
                                     wasm_id,
                                 },
-                                data2: Box::new(()),
+                                data2: Box::new(
+                                    WasmWidget {
+                                        draw_commands: vec![],
+                                        sender: self.wasm_messenger.get_sender(wasm_id),
+                                        receiver,
+                                    }
+                                ),
                                 ephemeral: false,
                             });
                             self.mark_widget_dirty(widget_id);

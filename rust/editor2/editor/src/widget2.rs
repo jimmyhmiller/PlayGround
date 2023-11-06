@@ -5,7 +5,7 @@ use futures::channel::mpsc::Sender;
 use serde::{Serializer, Deserializer, Deserialize, Serialize};
 use skia_safe::{Canvas, Rect, Font, FontStyle, Typeface, Path, RRect, Point};
 
-use crate::{widget::{Size, Position}, color::Color, util::{encode_base64, decode_base64}};
+use crate::{widget::{Size, Position}, color::Color, util::{encode_base64, decode_base64}, wasm_messenger::{Message, Payload, DrawCommands, OutMessage, OutPayload}};
 
 #[allow(unused)]
 pub trait Widget {
@@ -104,24 +104,32 @@ impl Widget for () {
     }
 }
 
-#[derive(Debug, Clone)]
-enum Event {
-    Start,
-    OnClick(Position),
-    Draw,
-    OnScroll(f64, f64),
-    OnKey(KeyboardInput),
-    Reload,
-    SaveState,
-    ProcessMessage(usize, String),
-    Event(String, String),
-    OnSizeChange(f32, f32),
-    OnMouseMove(Position, f32, f32),
-    SetState(Option<String>),
-    OnMouseDown(Position),
-    OnMouseUp(Position),
-    Update,
-    OnMove(f32, f32),
+// #[derive(Debug, Clone)]
+// enum Event {
+//     Start,
+//     OnClick(Position),
+//     Draw,
+//     OnScroll(f64, f64),
+//     OnKey(KeyboardInput),
+//     Reload,
+//     SaveState,
+//     ProcessMessage(usize, String),
+//     Event(String, String),
+//     OnSizeChange(f32, f32),
+//     OnMouseMove(Position, f32, f32),
+//     SetState(Option<String>),
+//     OnMouseDown(Position),
+//     OnMouseUp(Position),
+//     Update,
+//     OnMove(f32, f32),
+// }
+
+fn wrap_payload(payload: Payload) -> Message {
+    Message {
+        message_id: 0,
+        wasm_id: 0,
+        payload,
+    }
 }
 
 impl Default for Box<dyn Widget> {
@@ -129,8 +137,13 @@ impl Default for Box<dyn Widget> {
         Box::new(())
     }
 }
-struct WasmWidget {
-    sender: Sender<Event>,
+pub struct WasmWidget {
+    pub sender: Sender<Message>,
+    // I think the idea would be that on update
+    // we grab out these draw commands
+    // Or I could do a send and receive setup
+    pub draw_commands: Vec<DrawCommands>,
+    pub receiver: futures::channel::mpsc::Receiver<OutMessage>,
 }
 
 #[allow(unused)]
@@ -144,82 +157,217 @@ impl Widget for WasmWidget {
     }
 
     fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::Draw)?;
+        let mut current_width = 0.0;
+        let mut current_height = 0.0;
+        let mut current_height_stack = vec![];
+
+        let mut paint = skia_safe::Paint::default();
+        for command in self.draw_commands.iter() {
+            match command {
+                DrawCommands::SetColor(r, g, b, a) => {
+                    let color = Color::new(*r, *g, *b, *a);
+                    paint.set_color(color.as_color4f().to_color());
+                }
+                DrawCommands::DrawRect(x, y, width, height) => {
+                    canvas
+                        .draw_rect(skia_safe::Rect::from_xywh(*x, *y, *width, *height), &paint);
+                }
+                DrawCommands::DrawString(str, x, y) => {
+                    let mut paint = paint.clone();
+                    paint.set_shader(None);
+                    if current_height > bounds.height {
+                        continue;
+                    }
+                    if current_height < 0.0 {
+                        continue;
+                    }
+                    let font = Font::new(
+                        Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
+                        32.0,
+                    );
+
+                    // No good way right now to find bounds. Need to think about this properly
+                    canvas.draw_str(str, (*x, *y), &font, &paint);
+                }
+
+                DrawCommands::ClipRect(x, y, width, height) => {
+                    canvas.clip_rect(
+                        skia_safe::Rect::from_xywh(*x, *y, *width, *height),
+                        None,
+                        None,
+                    );
+                }
+                DrawCommands::DrawRRect(x, y, width, height, radius) => {
+                    let rrect = skia_safe::RRect::new_rect_xy(
+                        skia_safe::Rect::from_xywh(*x, *y, *width, *height),
+                        *radius,
+                        *radius,
+                    );
+                    canvas.draw_rrect(rrect, &paint);
+                }
+                DrawCommands::Translate(x, y) => {
+                    current_height += *y;
+                    current_width += *x;
+                    canvas.translate((*x, *y));
+                }
+                DrawCommands::Save => {
+                    canvas.save();
+                    current_height_stack.push(current_height);
+                }
+                DrawCommands::Restore => {
+                    canvas.restore();
+                    current_height = current_height_stack.pop().unwrap();
+                }
+            }
+        }
         Ok(())
     }
 
     fn on_click(&mut self, x: f32, y: f32) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::OnClick(Position { x, y }))?;
+        self.sender.try_send(wrap_payload(Payload::OnClick(Position { x, y })))?;
         Ok(())
     }
 
     fn on_key(&mut self, input: KeyboardInput) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::OnKey(input))?;
+        self.sender.try_send(wrap_payload(Payload::OnKey(crate::keyboard::KeyboardInput::from_framework((input)))))?;
         Ok(())
     }
 
     fn on_scroll(&mut self, x: f64, y: f64) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::OnScroll(x, y))?;
+        self.sender.try_send(wrap_payload(Payload::OnScroll(x, y)))?;
         Ok(())
     }
 
     fn on_size_change(&mut self, width: f32, height: f32) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::OnSizeChange(width, height))?;
+        self.sender.try_send(wrap_payload(Payload::OnSizeChange(width, height)))?;
         Ok(())
     }
 
     fn on_move(&mut self, x: f32, y: f32) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::OnMove(x, y))?;
+        self.sender.try_send(wrap_payload(Payload::OnMove(x, y)))?;
         Ok(())
     }
 
     fn save(&mut self) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::SaveState)?;
+        self.sender.try_send(wrap_payload(Payload::SaveState))?;
         Ok(())
     }
     
     fn reload(&mut self) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::Reload)?;
+        // self.sender.try_send(wrap_payload(Payload::Reload))?;
         Ok(())
     }
 
     fn set_state(&mut self, state: String) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::SetState(Some(state)))?;
+        // self.sender.try_send(wrap_payload(Payload::SetState(Some(state))))?;
         Ok(())
     }
 
     fn start(&mut self) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::Start)?;
+        // self.sender.try_send(wrap_payload(Payload::Start))?;
         Ok(())
     }
 
     fn on_mouse_up(&mut self, x: f32, y: f32) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::OnMouseUp(Position { x, y }))?;
+        self.sender.try_send(wrap_payload(Payload::OnMouseUp(Position { x, y })))?;
         Ok(())
     }
 
     fn on_mouse_down(&mut self, x: f32, y: f32) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::OnMouseDown(Position { x, y }))?;
+        self.sender.try_send(wrap_payload(Payload::OnMouseDown(Position { x, y })))?;
         Ok(())
     }
 
     fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::OnMouseMove(Position { x, y }, x_diff, y_diff))?;
+        self.sender.try_send(wrap_payload(Payload::OnMouseMove(Position { x, y }, x_diff, y_diff)))?;
         Ok(())
     }
 
     fn on_event(&mut self, kind: String, event: String) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::Event(kind, event))?;
+        self.sender.try_send(wrap_payload(Payload::Event(kind, event)))?;
         Ok(())
     }
 
     fn on_process_message(&mut self, process_id: i32, message: String) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::ProcessMessage(process_id as usize, message))?;
+        self.sender.try_send(wrap_payload(Payload::ProcessMessage(process_id as usize, message)))?;
         Ok(())
     }
 
     fn update(&mut self) -> std::result::Result<(), Box<dyn Error>> {
-        self.sender.try_send(Event::Update)?;
+        // TODO: Change this
+        self.sender.try_send(wrap_payload(Payload::Draw("draw".to_string())))?;
+        while let Ok(Some(message)) = self.receiver.try_next() {
+            // Note: Right now if a message doesn't have a corresponding in-message
+            // I am just setting the out message to id: 0.
+            // if let Some(record) = self.pending_messages.get_mut(&message.wasm_id) {
+            //     record.remove(&message.message_id);
+            // } else {
+            //     println!("No pending message for {}", message.wasm_id)
+            // }
+
+            // TODO: This just means we update everything every frame
+            // Because the draw content might not have changed
+            // but we still request it every frame. We should only request it
+            // if things have actually changed
+            // Or we should only consider it dirty if things changed.
+
+            let mut should_mark_dirty = true;
+
+            // println!("Got message: {:?}", message.payload);
+
+            match message.payload {
+                OutPayload::DrawCommands(commands) => {
+                    // TODO: Is this a performance issue?
+                    // I'm thinking not? It seems to actually work because
+                    // we only do this every once in a while
+                    // if self.draw_commands.get(&message.wasm_id) == Some(&commands) {
+                    //     should_mark_dirty = false;
+                    // }
+                    // self.wasm_draw_commands.insert(message.wasm_id, commands);
+                    self.draw_commands = commands;
+                }
+                OutPayload::Update(commands) => {
+                    // let current_commands = self
+                    //     .wasm_non_draw_commands
+                    //     .entry(message.wasm_id)
+                    //     .or_default();
+                    // if current_commands.is_empty() {
+                    //     should_mark_dirty = false;
+                    // }
+                    // current_commands.extend(commands);
+                }
+                OutPayload::Saved(saved) => {
+                    // self.wasm_states.insert(message.wasm_id, saved);
+                }
+                OutPayload::ErrorPayload(error_message) => {
+                    println!("Error: {}", error_message);
+                }
+                OutPayload::NeededValue(name, sender) => {
+                    // If I don't have the value, what should I do?
+                    // Should I save this message and re-enqueue or signal failure?
+                    // if let Some(value) = values.get(&name) {
+                    //     let serialized = serde_json::to_string(value).unwrap();
+                    //     sender.send(serialized).unwrap();
+                    // } else {
+                    //     // println!("Can't find value {}", name);
+                    // }
+                    // should_mark_dirty = false;
+                }
+                OutPayload::Reloaded(widget_id) => {
+                    // let commands = self
+                    //     .wasm_non_draw_commands
+                    //     .entry(message.wasm_id)
+                    //     .or_default();
+                    // commands.push(Commands::Redraw(widget_id));
+                }
+                OutPayload::Complete => {
+                    // should_mark_dirty = false;
+                }
+                OutPayload::Error(error) => {
+                    println!("Error: {}", error);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -235,6 +383,7 @@ impl Widget for WasmWidget {
         todo!()
     }
 }
+
 
 fn serialize_text<S>(x: &[u8], s: S) -> Result<S::Ok, S::Error>
 where

@@ -295,7 +295,8 @@ impl Editor {
                     {
                         continue;
                     }
-                    self.wasm_messenger.send_draw(*wasm_id, "draw");
+                    widget.data2.update().unwrap();
+                    // self.wasm_messenger.send_draw(*wasm_id, "draw");
                 }
                 _ => {}
             }

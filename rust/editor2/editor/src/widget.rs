@@ -15,7 +15,7 @@ use skia_safe::{
 
 use crate::{
     event::Event,
-    wasm_messenger::{self, WasmId, WasmMessenger}, keyboard::KeyboardInput, widget2::{Widget as Widget2, TextPane}, color::Color,
+    wasm_messenger::{self, WasmId, WasmMessenger}, keyboard::KeyboardInput, widget2::{Widget as Widget2, TextPane, WasmWidget}, color::Color,
 };
 
 
@@ -128,16 +128,19 @@ impl WidgetStore {
 
                     let before_count = canvas.save();
 
-                    let can_draw = match widget.data {
-                        WidgetData::Wasm { wasm: _, wasm_id } => {
-                            wasm_messenger.has_draw_commands(wasm_id)
-                        }
-                        _ => true,
-                    };
+                    // TODO: Still broken because of dirty checking
+                    // but we are drawing 
 
-                    if !can_draw {
-                        continue;
-                    }
+                    // let can_draw = match widget.data {
+                    //     WidgetData::Wasm { wasm: _, wasm_id } => {
+                    //         widget.data2.has_draw_commands(wasm_id)
+                    //     }
+                    //     _ => true,
+                    // };
+
+                    // if !can_draw {
+                    //     continue;
+                    // }
 
                     widget.draw(canvas, wasm_messenger, widget.size);
                     canvas.restore_to_count(before_count);
@@ -355,7 +358,8 @@ impl Widget {
             canvas.save();
             canvas.translate((self.position.x, self.position.y));
             canvas.scale((self.scale, self.scale));
-            wasm_messenger.draw_widget(*wasm_id, canvas, bounds);
+            // wasm_messenger.draw_widget(*wasm_id, canvas, bounds);
+            self.data2.draw(canvas, bounds).unwrap();
             canvas.translate((self.size.width, 0.0));
             canvas.restore();
         }
@@ -380,43 +384,6 @@ impl Widget {
             }
             WidgetData::TextPane { text_pane: _ } => {
                 self.data2.draw(canvas, bounds).unwrap();
-                // canvas.save();
-                // let text_pane = &text_pane;
-                // let foreground = Color::parse_hex("#dc9941");
-                // let background = Color::parse_hex("#353f38");
-
-                // let paint = background.as_paint();
-                // canvas.save();
-                // canvas.translate((self.position.x, self.position.y));
-                // canvas.clip_rect(Rect::from_wh(bounds.width, bounds.height), None, false);
-                // canvas.scale((self.scale, self.scale));
-
-                // let bounding_rect = Rect::new(0.0, 0.0, bounds.width, bounds.height);
-
-                // let font = Font::new(
-                //     Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
-                //     32.0,
-                // );
-                // let mut path = Path::new();
-                // path.add_rect(bounding_rect.with_outset((30.0, 30.0)), None);
-
-                // let rrect = RRect::new_rect_xy(bounding_rect, 20.0, 20.0);
-                // canvas.draw_rrect(rrect, &paint);
-
-                // canvas.clip_rect(bounding_rect.with_inset((20, 20)), None, None);
-                // let fractional_offset = text_pane.fractional_line_offset();
-                // canvas.translate((
-                //     30.0 - text_pane.offset.x,
-                //     text_pane.line_height - fractional_offset + 10.0,
-                // ));
-
-                // for line in text_pane.visible_lines(self.size.height) {
-                //     canvas.draw_str(line, Point::new(0.0, 0.0), &font, &foreground.as_paint());
-                //     canvas.translate((0.0, text_pane.line_height));
-                // }
-
-                // canvas.restore();
-                // canvas.restore();
             }
             WidgetData::Text { text, text_options } => {
                 canvas.save();
@@ -457,9 +424,16 @@ impl Widget {
     pub fn init(&mut self, wasm_messenger: &mut WasmMessenger) {
         match &mut self.data {
             WidgetData::Wasm { wasm, wasm_id } => {
-                let new_wasm_id = wasm_messenger.new_instance(&wasm.path, None);
+                let (new_wasm_id, receiver) = wasm_messenger.new_instance(&wasm.path, None);
+
+                self.data2 = Box::new(WasmWidget {
+                    draw_commands: vec![],
+                    sender: wasm_messenger.get_sender(new_wasm_id),
+                    receiver,
+                });
                 *wasm_id = new_wasm_id;
                 if let Some(state) = &wasm.state {
+                    self.data2.set_state(state.clone()).unwrap();
                     wasm_messenger.send_set_state(*wasm_id, state);
                 }
             }

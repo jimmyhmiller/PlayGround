@@ -48,7 +48,7 @@ struct PointerLengthString {
 pub type WasmId = u64;
 
 #[derive(Debug, Clone)]
-enum Payload {
+pub enum Payload {
     #[allow(unused)]
     NewInstance(String),
     OnClick(Position),
@@ -69,14 +69,14 @@ enum Payload {
 }
 
 #[derive(Clone, Debug)]
-struct Message {
-    message_id: usize,
-    wasm_id: WasmId,
-    payload: Payload,
+pub struct Message {
+    pub message_id: usize,
+    pub wasm_id: WasmId,
+    pub payload: Payload,
 }
 
 #[derive(Debug)]
-enum OutPayload {
+pub enum OutPayload {
     DrawCommands(Vec<DrawCommands>),
     Saved(SaveState),
     ErrorPayload(String),
@@ -88,10 +88,10 @@ enum OutPayload {
 }
 
 #[derive(Debug)]
-struct OutMessage {
-    message_id: usize,
-    wasm_id: WasmId,
-    payload: OutPayload,
+pub struct OutMessage {
+    pub message_id: usize,
+    pub wasm_id: WasmId,
+    pub payload: OutPayload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -181,6 +181,10 @@ impl WasmMessenger {
         non_draw_commands_count + pending_message_count
     }
 
+    pub fn get_sender(&self, id: WasmId) -> Sender<Message> {
+        self.senders.get(&id).unwrap().clone()
+    }
+
     pub fn pending_message_counts(&self) -> String {
         let mut stats: Vec<&str> = vec![];
         for messages_per in self.pending_messages.values() {
@@ -226,13 +230,13 @@ impl WasmMessenger {
         self.last_wasm_id
     }
 
-    pub fn new_instance(&mut self, wasm_path: &str, partial_state: Option<String>) -> WasmId {
+    pub fn new_instance(&mut self, wasm_path: &str, partial_state: Option<String>) -> (WasmId, Receiver<OutMessage>) {
         let id = self.next_wasm_id();
 
         let (sender, receiver) = channel::<Message>(100000);
         let (out_sender, out_receiver) = channel::<OutMessage>(100000);
 
-        self.receivers.insert(id, out_receiver);
+        // self.receivers.insert(id, out_receiver);
         self.senders.insert(id, sender);
 
         async fn spawn_instance(
@@ -270,7 +274,7 @@ impl WasmMessenger {
             payload: Payload::PartialState(partial_state),
         });
 
-        id
+        (id, out_receiver)
     }
 
     pub fn draw_widget(&mut self, wasm_id: WasmId, canvas: &Canvas, bounds: Size) -> Option<Size> {
@@ -757,7 +761,7 @@ impl WasmManager {
         loop {
             let message = self.receiver.select_next_some().await;
             let message_id = message.message_id;
-            let wasm_id = message.wasm_id;
+            let wasm_id = self.id;
             // TODO: Can I wait for either this message or some reload message so I can kill infinite loops?
             let out_message = self.process_message(message).await;
             match out_message {
@@ -781,9 +785,9 @@ impl WasmManager {
         &mut self,
         message: Message,
     ) -> Result<OutMessage, Box<dyn Error>> {
-        let id = message.wasm_id;
+        let id = self.id;
         let default_return = Ok(OutMessage {
-            wasm_id: message.wasm_id,
+            wasm_id: self.id,
             message_id: message.message_id,
             payload: OutPayload::Complete,
         });
@@ -848,7 +852,7 @@ impl WasmManager {
                 match result {
                     Ok(_) => default_return,
                     Err(err) => Ok(OutMessage {
-                        wasm_id: message.wasm_id,
+                        wasm_id: self.id,
                         message_id: message.message_id,
                         payload: OutPayload::ErrorPayload(err.to_string()),
                     }),
@@ -950,7 +954,7 @@ impl State {
 }
 
 #[derive(Debug, Clone)]
-enum Commands {
+pub enum Commands {
     StartProcess(u32, String),
     SendProcessMessage(i32, String),
     ReceiveLastProcessMessage(i32),
@@ -964,7 +968,7 @@ enum Commands {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum DrawCommands {
+pub enum DrawCommands {
     DrawRect(f32, f32, f32, f32),
     DrawString(String, f32, f32),
     ClipRect(f32, f32, f32, f32),
@@ -1370,7 +1374,7 @@ impl WasmInstance {
 
         linker.func_wrap(
             "host",
-            "recieve_last_message_low_level",
+            "receive_last_message_low_level",
             |mut caller: Caller<'_, State>, ptr: i32, process_id: i32| {
                 {
                     let state = caller.data_mut();
