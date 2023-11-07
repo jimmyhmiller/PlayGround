@@ -15,7 +15,7 @@ use skia_safe::{
 
 use crate::{
     event::Event,
-    wasm_messenger::{self, WasmId, WasmMessenger}, keyboard::KeyboardInput, widget2::{Widget as Widget2, TextPane, WasmWidget}, color::Color,
+    wasm_messenger::{self, WasmId, WasmMessenger}, keyboard::KeyboardInput, widget2::{Widget as Widget2, TextPane, WasmWidget, WidgetMeta}, color::Color,
 };
 
 
@@ -353,13 +353,7 @@ impl Widget {
         canvas.save();
         // Have to do this to deal with mut stuff
         if let WidgetData::Wasm { .. } = &mut self.data {
-            canvas.save();
-            canvas.translate((self.position.x, self.position.y));
-            canvas.scale((self.scale, self.scale));
-            // wasm_messenger.draw_widget(*wasm_id, canvas, bounds);
             self.data2.draw(canvas, bounds).unwrap();
-            canvas.translate((self.size.width, 0.0));
-            canvas.restore();
         }
 
         match &self.data {
@@ -428,6 +422,7 @@ impl Widget {
                     draw_commands: vec![],
                     sender: wasm_messenger.get_sender(new_wasm_id),
                     receiver,
+                    meta: WidgetMeta::new(self.position, self.size, self.scale),
                 });
                 *wasm_id = new_wasm_id;
                 if let Some(state) = &wasm.state {
@@ -498,8 +493,8 @@ impl Widget {
 
     pub fn on_move(&mut self, x: f32, y: f32, wasm_messenger: &mut WasmMessenger) {
         match &mut self.data {
-            WidgetData::Wasm { wasm: _, wasm_id } => {
-                wasm_messenger.send_on_move(*wasm_id, x, y);
+            WidgetData::Wasm { .. } => {
+                self.data2.on_move(x, y).unwrap();
             }
             WidgetData::TextPane { .. } => {
                 self.data2.on_move(x, y).unwrap();
@@ -542,11 +537,8 @@ impl Widget {
 
     pub fn on_key(&mut self, input: KeyboardInput, wasm_messenger: &mut WasmMessenger) -> bool {
         match self.data {
-            WidgetData::Wasm { wasm: _, wasm_id } => {
-                wasm_messenger.send_on_key(
-                    wasm_id,
-                    input,
-                );
+            WidgetData::Wasm { .. } => {
+               self.data2.on_key(input.to_framework()).unwrap();
                 true
             }
             _ => {
@@ -555,15 +547,10 @@ impl Widget {
         }
     }
 
-    pub fn on_mouse_move(&self, widget_space: &Position, x_diff: f32, y_diff: f32, wasm_messenger: &mut WasmMessenger) -> bool {
+    pub fn on_mouse_move(&mut self, widget_space: &Position, x_diff: f32, y_diff: f32) -> bool {
         match &self.data {
-            WidgetData::Wasm { wasm: _, wasm_id } => {
-                wasm_messenger.send_on_mouse_move(
-                    *wasm_id,
-                    widget_space,
-                    x_diff,
-                    y_diff,
-                );
+            WidgetData::Wasm { .. } => {
+                self.data2.on_mouse_move(widget_space.x, widget_space.y, x_diff, y_diff).unwrap();
                 true
             }
             _ => {

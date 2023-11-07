@@ -496,30 +496,6 @@ impl WasmMessenger {
         });
     }
 
-    pub fn send_on_mouse_move(
-        &mut self,
-        wasm_id: WasmId,
-        position: &Position,
-        x_diff: f32,
-        y_diff: f32,
-    ) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::OnMouseMove(*position, x_diff, y_diff),
-        });
-    }
-
-    pub fn send_update(&mut self, wasm_id: WasmId) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::Update,
-        });
-    }
-
     pub fn send_set_state(&mut self, wasm_id: WasmId, state: &str) {
         let message_id = self.next_message_id();
         let base64_decoded = decode_base64(&state.as_bytes().to_vec()).unwrap();

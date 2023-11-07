@@ -49,6 +49,7 @@ impl Editor {
                                     draw_commands: vec![],
                                     sender: self.wasm_messenger.get_sender(wasm_id),
                                     receiver,
+                                    meta: WidgetMeta::new(Position { x, y }, Size { width: 800.0, height: 800.0}, 1.0),
                                 }
                             )
                         });
@@ -152,7 +153,7 @@ impl Editor {
                         }
                     } else {
                         let mut was_over = false;
-                        for widget in self.widget_store.iter() {
+                        for widget in self.widget_store.iter_mut() {
                             let position = Position { x, y };
                             let widget_x = position.x - widget.position.x;
                             let widget_y = position.y - widget.position.y;
@@ -167,7 +168,6 @@ impl Editor {
                                     &widget_space,
                                     x_diff,
                                     y_diff,
-                                    &mut self.wasm_messenger,
                                 );
                                 if modified {
                                     dirty_widgets.insert(widget.id);
@@ -352,6 +352,7 @@ impl Editor {
                                         draw_commands: vec![],
                                         sender: self.wasm_messenger.get_sender(wasm_id),
                                         receiver,
+                                        meta: WidgetMeta::new(Position { x: 500.0, y: 500.0 }, Size { width: 800.0, height: 800.0}, 1.0),
                                     }
                                 ),
                                 ephemeral: false,
