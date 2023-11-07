@@ -23,7 +23,6 @@ use futures::{
 use futures_timer::Delay;
 use itertools::Itertools;
 
-use skia_safe::{Canvas, Font, FontStyle, Typeface};
 use wasmtime::{
     AsContextMut, Caller, Config, Engine, Instance, Linker, Memory, Module, Store, Val, WasmParams,
     WasmResults,
@@ -34,8 +33,7 @@ use crate::{
     editor::Value,
     event::Event,
     keyboard::KeyboardInput,
-    widget::{Position, Size},
-    color::Color,
+    widget::Position,
     util::{decode_base64, encode_base64},
 };
 
@@ -277,80 +275,6 @@ impl WasmMessenger {
         (id, out_receiver)
     }
 
-    pub fn draw_widget(&mut self, wasm_id: WasmId, canvas: &Canvas, bounds: Size) -> Option<Size> {
-        if let Some(commands) = self.wasm_draw_commands.get_mut(&wasm_id) {
-            let mut current_width = 0.0;
-            let mut current_height = 0.0;
-            let mut current_height_stack = vec![];
-
-            let mut paint = skia_safe::Paint::default();
-            for command in commands.iter() {
-                match command {
-                    DrawCommands::SetColor(r, g, b, a) => {
-                        let color = Color::new(*r, *g, *b, *a);
-                        paint.set_color(color.as_color4f().to_color());
-                    }
-                    DrawCommands::DrawRect(x, y, width, height) => {
-                        canvas
-                            .draw_rect(skia_safe::Rect::from_xywh(*x, *y, *width, *height), &paint);
-                    }
-                    DrawCommands::DrawString(str, x, y) => {
-                        let mut paint = paint.clone();
-                        paint.set_shader(None);
-                        if current_height > bounds.height {
-                            continue;
-                        }
-                        if current_height < 0.0 {
-                            continue;
-                        }
-                        let font = Font::new(
-                            Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
-                            32.0,
-                        );
-
-                        // No good way right now to find bounds. Need to think about this properly
-                        canvas.draw_str(str, (*x, *y), &font, &paint);
-                    }
-
-                    DrawCommands::ClipRect(x, y, width, height) => {
-                        canvas.clip_rect(
-                            skia_safe::Rect::from_xywh(*x, *y, *width, *height),
-                            None,
-                            None,
-                        );
-                    }
-                    DrawCommands::DrawRRect(x, y, width, height, radius) => {
-                        let rrect = skia_safe::RRect::new_rect_xy(
-                            skia_safe::Rect::from_xywh(*x, *y, *width, *height),
-                            *radius,
-                            *radius,
-                        );
-                        canvas.draw_rrect(rrect, &paint);
-                    }
-                    DrawCommands::Translate(x, y) => {
-                        current_height += *y;
-                        current_width += *x;
-                        canvas.translate((*x, *y));
-                    }
-                    DrawCommands::Save => {
-                        canvas.save();
-                        current_height_stack.push(current_height);
-                    }
-                    DrawCommands::Restore => {
-                        canvas.restore();
-                        current_height = current_height_stack.pop().unwrap();
-                    }
-                }
-            }
-            Some(Size {
-                width: current_width,
-                height: current_height,
-            })
-        } else {
-            None
-        }
-    }
-
     pub fn process_non_draw_commands(&mut self, values: &mut HashMap<String, Value>) {
         for (wasm_id, commands) in self.wasm_non_draw_commands.iter() {
             for command in commands.iter() {
@@ -584,15 +508,6 @@ impl WasmMessenger {
             message_id,
             wasm_id,
             payload: Payload::OnMouseMove(*position, x_diff, y_diff),
-        });
-    }
-
-    pub fn send_draw(&mut self, wasm_id: WasmId, fn_name: &str) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::Draw(fn_name.to_string()),
         });
     }
 

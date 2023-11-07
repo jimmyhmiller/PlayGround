@@ -111,7 +111,6 @@ impl WidgetStore {
     pub fn draw(
         &mut self,
         canvas: &Canvas,
-        wasm_messenger: &mut WasmMessenger,
         dirty_widgets: &HashSet<usize>,
     ) {
         let mut dirty_widgets = dirty_widgets.clone();
@@ -142,7 +141,7 @@ impl WidgetStore {
                     //     continue;
                     // }
 
-                    widget.draw(canvas, wasm_messenger, widget.size);
+                    widget.draw(canvas, widget.size);
                     canvas.restore_to_count(before_count);
                     canvas.restore();
 
@@ -349,12 +348,11 @@ impl Widget {
     pub fn draw(
         &mut self,
         canvas: &Canvas,
-        wasm_messenger: &mut WasmMessenger,
         bounds: Size,
     ) -> Vec<WidgetId> {
         canvas.save();
         // Have to do this to deal with mut stuff
-        if let WidgetData::Wasm { wasm: _, wasm_id } = &mut self.data {
+        if let WidgetData::Wasm { .. } = &mut self.data {
             canvas.save();
             canvas.translate((self.position.x, self.position.y));
             canvas.scale((self.scale, self.scale));
