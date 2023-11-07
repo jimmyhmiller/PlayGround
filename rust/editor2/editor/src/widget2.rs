@@ -104,27 +104,9 @@ impl Widget for () {
     }
 }
 
-// #[derive(Debug, Clone)]
-// enum Event {
-//     Start,
-//     OnClick(Position),
-//     Draw,
-//     OnScroll(f64, f64),
-//     OnKey(KeyboardInput),
-//     Reload,
-//     SaveState,
-//     ProcessMessage(usize, String),
-//     Event(String, String),
-//     OnSizeChange(f32, f32),
-//     OnMouseMove(Position, f32, f32),
-//     SetState(Option<String>),
-//     OnMouseDown(Position),
-//     OnMouseUp(Position),
-//     Update,
-//     OnMove(f32, f32),
-// }
 
 fn wrap_payload(payload: Payload) -> Message {
+    // TODO: Message id
     Message {
         message_id: 0,
         wasm_id: 0,
@@ -139,11 +121,13 @@ impl Default for Box<dyn Widget> {
 }
 pub struct WasmWidget {
     pub sender: Sender<Message>,
-    // I think the idea would be that on update
-    // we grab out these draw commands
-    // Or I could do a send and receive setup
     pub draw_commands: Vec<DrawCommands>,
     pub receiver: futures::channel::mpsc::Receiver<OutMessage>,
+    pub meta: WidgetMeta,
+    // TODO:
+    // Maybe we make a "mark dirty" sender
+    // That way each widget can decide it is dirty
+    // and needs to be drawn just by sending a message
 }
 
 #[allow(unused)]
@@ -157,6 +141,11 @@ impl Widget for WasmWidget {
     }
 
     fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Result<(), Box<dyn Error>> {
+
+        canvas.save();
+        canvas.translate((self.position().x, self.position().y));
+        canvas.scale((self.scale(), self.scale()));
+
         let mut current_width = 0.0;
         let mut current_height = 0.0;
         let mut current_height_stack = vec![];
@@ -220,6 +209,9 @@ impl Widget for WasmWidget {
                 }
             }
         }
+        canvas.translate((self.size().width, 0.0));
+        canvas.restore();
+
         Ok(())
     }
 
@@ -244,6 +236,7 @@ impl Widget for WasmWidget {
     }
 
     fn on_move(&mut self, x: f32, y: f32) -> std::result::Result<(), Box<dyn Error>> {
+        self.meta.position = Position { x, y };
         self.sender.try_send(wrap_payload(Payload::OnMove(x, y)))?;
         Ok(())
     }
@@ -296,6 +289,7 @@ impl Widget for WasmWidget {
     fn update(&mut self) -> std::result::Result<(), Box<dyn Error>> {
         // TODO: Change this
         self.sender.try_send(wrap_payload(Payload::Draw("draw".to_string())))?;
+        self.sender.try_send(wrap_payload(Payload::Update))?;
         while let Ok(Some(message)) = self.receiver.try_next() {
             // Note: Right now if a message doesn't have a corresponding in-message
             // I am just setting the out message to id: 0.
@@ -372,15 +366,15 @@ impl Widget for WasmWidget {
     }
 
     fn position(&self) -> Position {
-        todo!()
+        self.meta.position
     }
 
     fn scale(&self) -> f32 {
-        todo!()
+        self.meta.scale
     }
 
     fn size(&self) -> Size {
-        todo!()
+        self.meta.size
     }
 }
 

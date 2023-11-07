@@ -252,8 +252,8 @@ impl Editor {
         // TODO: Put in better place
         for widget in self.widget_store.iter_mut() {
             match &widget.data {
-                WidgetData::Wasm { wasm: _, wasm_id } => {
-                    self.wasm_messenger.send_update(*wasm_id);
+                WidgetData::Wasm { .. } => {
+                    widget.data2.update().unwrap()
                 }
                 _ => {}
             }
