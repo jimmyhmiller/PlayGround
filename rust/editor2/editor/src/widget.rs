@@ -516,14 +516,10 @@ impl Widget {
         }
     }
 
-    pub fn on_event(&mut self, kind: &str, event: &str, wasm_messenger: &mut WasmMessenger) -> bool {
+    pub fn on_event(&mut self, kind: &str, event: &str) -> bool {
         match &mut self.data {
-            WidgetData::Wasm { wasm: _, wasm_id } => {
-                wasm_messenger.send_event(
-                    *wasm_id,
-                    kind.to_string(),
-                    event.to_string(),
-                );
+            WidgetData::Wasm { .. } => {
+                self.data2.on_event(kind.to_string(), event.to_string()).unwrap();
                 true
             }
             _ => { 
