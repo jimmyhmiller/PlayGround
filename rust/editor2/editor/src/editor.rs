@@ -462,32 +462,9 @@ impl Editor {
         canvas.restore();
 
         self.widget_store
-            .draw(canvas, &mut self.wasm_messenger, &self.dirty_widgets);
+            .draw(canvas,  &self.dirty_widgets);
         self.dirty_widgets.clear();
 
-        // let mut to_draw = vec![];
-        // for widget in self.widget_store.iter_mut() {
-        //     let before_count = canvas.save();
-        //     to_draw.extend(widget.draw(
-        //         canvas,
-        //         &mut self.wasm_messenger,
-        //         widget.size,
-        //         &self.values,
-        //     ));
-        //     canvas.restore_to_count(before_count);
-        //     canvas.restore();
-        // }
-
-        // TODO: This is bad, I need to traverse the tree. Being lazy
-        // Also not even sure about compound right now
-        // for widget_id in to_draw {
-        //     if let Some(widget) = self.widget_store.get_mut(widget_id) {
-        //         let before_count = canvas.save();
-        //         widget.draw(canvas, &mut self.wasm_messenger, widget.size, &self.values);
-        //         canvas.restore_to_count(before_count);
-        //         canvas.restore();
-        //     }
-        // }
     }
 
     pub fn add_event(&mut self, event: &winit::event::Event<'_, ()>) -> bool {
