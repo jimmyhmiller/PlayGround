@@ -283,7 +283,7 @@ impl Editor {
 
                     for widget_id in both {
                         if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                            let modified = widget.on_event(&kind, &event, &mut self.wasm_messenger);
+                            let modified = widget.on_event(&kind, &event);
                             if modified {
                                 dirty_widgets.insert(widget.id);
                             }

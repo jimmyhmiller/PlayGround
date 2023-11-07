@@ -505,15 +505,6 @@ impl WasmMessenger {
             .clone()
     }
 
-    pub fn send_event(&mut self, wasm_id: u64, kind: String, event: String) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::Event(kind, event),
-        });
-    }
-
     pub fn has_draw_commands(&self, wasm_id: u64) -> bool {
         self.wasm_draw_commands
             .get(&wasm_id)
