@@ -34,7 +34,7 @@ use crate::{
     event::Event,
     keyboard::KeyboardInput,
     widget::Position,
-    util::{decode_base64, encode_base64},
+    util::encode_base64,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -53,7 +53,7 @@ pub enum Payload {
     Draw(String),
     OnScroll(f64, f64),
     OnKey(KeyboardInput),
-    Reload(usize),
+    Reload,
     SaveState,
     ProcessMessage(usize, String),
     Event(String, String),
@@ -81,7 +81,7 @@ pub enum OutPayload {
     Complete,
     NeededValue(String, oneshot::Sender<String>),
     Error(String),
-    Reloaded(usize),
+    Reloaded,
     Update(Vec<Commands>),
 }
 
@@ -193,7 +193,7 @@ impl WasmMessenger {
                     Payload::Draw(_) => "Draw",
                     Payload::OnScroll(_, _) => "OnScroll",
                     Payload::OnKey(_) => "OnKey",
-                    Payload::Reload(_) => "Reload",
+                    Payload::Reload => "Reload",
                     Payload::SaveState => "SaveState",
                     Payload::ProcessMessage(_, _) => "ProcessMessage",
                     Payload::Event(_, _) => "Event",
@@ -338,11 +338,13 @@ impl WasmMessenger {
                             ))
                             .unwrap();
                     }
-                    Commands::Redraw(widget_id) => {
+                    Commands::Redraw => {
+                        // TODO: Fix widget id once we move for widgets
+                        // to handle this themselves
                         self.external_sender
                             .as_mut()
                             .unwrap()
-                            .send(Event::Redraw(*widget_id))
+                            .send(Event::Redraw(0))
                             .unwrap();
                     }
                     Commands::SetCursor(cursor) => {
@@ -425,12 +427,12 @@ impl WasmMessenger {
                         }
                         should_mark_dirty = false;
                     }
-                    OutPayload::Reloaded(widget_id) => {
+                    OutPayload::Reloaded => {
                         let commands = self
                             .wasm_non_draw_commands
                             .entry(message.wasm_id)
                             .or_default();
-                        commands.push(Commands::Redraw(widget_id));
+                        commands.push(Commands::Redraw);
                     }
                     OutPayload::Complete => {
                         // should_mark_dirty = false;
@@ -468,81 +470,6 @@ impl WasmMessenger {
             }
         }
     }
-
-    pub fn send_on_click(&mut self, wasm_id: WasmId, position: &Position) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::OnClick(*position),
-        });
-    }
-
-    pub fn send_on_mouse_down(&mut self, wasm_id: WasmId, position: &Position) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::OnMouseDown(*position),
-        });
-    }
-
-    pub fn send_on_mouse_up(&mut self, wasm_id: WasmId, position: &Position) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::OnMouseUp(*position),
-        });
-    }
-
-    pub fn send_set_state(&mut self, wasm_id: WasmId, state: &str) {
-        let message_id = self.next_message_id();
-        let base64_decoded = decode_base64(&state.as_bytes().to_vec()).unwrap();
-        let state = String::from_utf8(base64_decoded).unwrap();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::PartialState(Some(state)),
-        });
-    }
-
-    pub fn send_on_scroll(&mut self, wasm_id: u64, x: f64, y: f64) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::OnScroll(x, y),
-        });
-    }
-
-    pub fn send_on_key(&mut self, wasm_id: u64, input: KeyboardInput) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::OnKey(input),
-        });
-    }
-
-    pub fn send_reload(&mut self, wasm_id: u64, widget_id: usize) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::Reload(widget_id),
-        });
-    }
-
-    pub fn send_process_message(&mut self, wasm_id: u64, process_id: usize, buf: &str) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::ProcessMessage(process_id, buf.to_string()),
-        });
-    }
-
     // Sometimes state is corrupt by going too long on the string. Not sure why.
     // Need to track down the issue
     pub fn save_state(&mut self, wasm_id: WasmId) -> SaveState {
@@ -584,24 +511,6 @@ impl WasmMessenger {
             message_id,
             wasm_id,
             payload: Payload::Event(kind, event),
-        });
-    }
-
-    pub fn send_on_size_change(&mut self, wasm_id: u64, width: f32, height: f32) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::OnSizeChange(width, height),
-        });
-    }
-
-    pub fn send_on_move(&mut self, wasm_id: u64, x: f32, y: f32) {
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::OnMove(x, y),
         });
     }
 
@@ -749,7 +658,7 @@ impl WasmManager {
                     }),
                 }
             }
-            Payload::Reload(widget_id) => {
+            Payload::Reload => {
                 match self.instance.reload().await {
                     Ok(_) => {}
                     Err(e) => {
@@ -759,7 +668,7 @@ impl WasmManager {
                 Ok(OutMessage {
                     message_id: message.message_id,
                     wasm_id: id,
-                    payload: OutPayload::Reloaded(widget_id),
+                    payload: OutPayload::Reloaded,
                 })
             }
             Payload::SaveState => {
@@ -855,7 +764,7 @@ pub enum Commands {
     Subscribe(String),
     Unsubscribe(String),
     SetCursor(CursorIcon),
-    Redraw(usize),
+    Redraw,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -296,7 +296,7 @@ impl Editor {
                         continue;
                     }
                     widget.data2.update().unwrap();
-                    // self.wasm_messenger.send_draw(*wasm_id, "draw");
+                    // self.self.data2.draw("draw");
                 }
                 _ => {}
             }
@@ -346,7 +346,6 @@ impl Editor {
                                 widget.send_process_message(
                                     *process_id,
                                     &buf,
-                                    &mut self.wasm_messenger,
                                 );
                             }
                         }

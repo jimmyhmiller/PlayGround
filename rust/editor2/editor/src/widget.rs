@@ -302,12 +302,11 @@ impl Widget {
     pub fn on_click(
         &mut self,
         position: &Position,
-        wasm_messenger: &mut WasmMessenger,
     ) -> Vec<Event> {
         let widget_space = self.widget_space(position);
         match &mut self.data {
-            WidgetData::Wasm { wasm: _, wasm_id } => {
-                wasm_messenger.send_on_click(*wasm_id, &widget_space);
+            WidgetData::Wasm { .. } => {
+                self.data2.on_click(widget_space.x, widget_space.y).unwrap();
                 vec![]
             }
             _ => self.on_click.clone(),
@@ -325,21 +324,21 @@ impl Widget {
     }
     
 
-    pub fn on_mouse_down(&mut self, position: &Position, wasm_messenger: &mut WasmMessenger) {
+    pub fn on_mouse_down(&mut self, position: &Position) {
         let widget_space = self.widget_space(position);
         match &mut self.data {
-            WidgetData::Wasm { wasm: _, wasm_id } => {
-                wasm_messenger.send_on_mouse_down(*wasm_id, &widget_space);
+            WidgetData::Wasm { .. } => {
+                self.data2.on_mouse_down(widget_space.x, widget_space.y).unwrap();
             }
             _ => {}
         }
     }
 
-    pub fn on_mouse_up(&mut self, position: &Position, wasm_messenger: &mut WasmMessenger) {
+    pub fn on_mouse_up(&mut self, position: &Position) {
         let widget_space = self.widget_space(position);
         match &mut self.data {
-            WidgetData::Wasm { wasm: _, wasm_id } => {
-                wasm_messenger.send_on_mouse_up(*wasm_id, &widget_space);
+            WidgetData::Wasm { .. } => {
+                self.data2.on_mouse_up(widget_space.x, widget_space.y).unwrap();
             }
             _ => {}
         }
@@ -427,7 +426,6 @@ impl Widget {
                 *wasm_id = new_wasm_id;
                 if let Some(state) = &wasm.state {
                     self.data2.set_state(state.clone()).unwrap();
-                    wasm_messenger.send_set_state(*wasm_id, state);
                 }
             }
             _ => {}
@@ -466,14 +464,13 @@ impl Widget {
     }
 
     pub fn send_process_message(
-        &self,
+        &mut self,
         process_id: usize,
         buf: &str,
-        wasm_messenger: &mut WasmMessenger,
     ) {
         match &self.data {
-            WidgetData::Wasm { wasm: _, wasm_id } => {
-                wasm_messenger.send_process_message(*wasm_id, process_id, buf);
+            WidgetData::Wasm { .. } => {
+                self.data2.on_process_message(process_id as i32, buf.to_string()).unwrap();
             }
             WidgetData::Deleted => {}
             _ => {
@@ -482,16 +479,16 @@ impl Widget {
         }
     }
 
-    pub fn on_size_change(&mut self, width: f32, height: f32, wasm_messenger: &mut WasmMessenger) {
+    pub fn on_size_change(&mut self, width: f32, height: f32) {
         match &mut self.data {
-            WidgetData::Wasm { wasm: _, wasm_id } => {
-                wasm_messenger.send_on_size_change(*wasm_id, width, height);
+            WidgetData::Wasm { .. } => {
+                self.data2.on_size_change(width, height).unwrap();
             }
             _ => {}
         }
     }
 
-    pub fn on_move(&mut self, x: f32, y: f32, wasm_messenger: &mut WasmMessenger) {
+    pub fn on_move(&mut self, x: f32, y: f32) {
         match &mut self.data {
             WidgetData::Wasm { .. } => {
                 self.data2.on_move(x, y).unwrap();
@@ -503,14 +500,14 @@ impl Widget {
         }
     }
 
-    pub fn on_scroll(&mut self, x: f64, y: f64, wasm_messenger: &mut WasmMessenger) -> bool {
+    pub fn on_scroll(&mut self, x: f64, y: f64) -> bool {
         match &mut self.data {
             WidgetData::TextPane { .. } => {
                 self.data2.on_scroll(x, y).unwrap();
                 true
             }
-            WidgetData::Wasm { wasm: _, wasm_id } => {
-                wasm_messenger.send_on_scroll(*wasm_id, x, y);
+            WidgetData::Wasm { .. } => {
+                self.data2.on_scroll(x, y).unwrap();
                 true
             }
             _ => {
@@ -535,7 +532,7 @@ impl Widget {
         }
     }
 
-    pub fn on_key(&mut self, input: KeyboardInput, wasm_messenger: &mut WasmMessenger) -> bool {
+    pub fn on_key(&mut self, input: KeyboardInput) -> bool {
         match self.data {
             WidgetData::Wasm { .. } => {
                self.data2.on_key(input.to_framework()).unwrap();

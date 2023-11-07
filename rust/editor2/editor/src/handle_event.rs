@@ -91,7 +91,7 @@ impl Editor {
                     let mouse = self.context.mouse_position;
                     for widget in self.widget_store.iter_mut() {
                         if widget.mouse_over(&mouse) {
-                            let modified = widget.on_scroll(x, y, &mut self.wasm_messenger);
+                            let modified = widget.on_scroll(x, y);
                             if modified {
                                 dirty_widgets.insert(widget.id);
                             }
@@ -129,7 +129,6 @@ impl Editor {
                                 widget.on_size_change(
                                     widget.size.width,
                                     widget.size.height,
-                                    &mut self.wasm_messenger,
                                 );
                             }
                         }
@@ -142,7 +141,6 @@ impl Editor {
                                 widget.on_move(
                                     widget.position.x,
                                     widget.position.y,
-                                    &mut self.wasm_messenger,
                                 );
                                 if widget.position.x > self.window.size.width - 300.0 {
                                     widget.scale = 0.1;
@@ -191,9 +189,9 @@ impl Editor {
                 }
                 Event::ReloadWasm(path) => {
                     for widget in self.widget_store.iter_mut() {
-                        if let WidgetData::Wasm { wasm, wasm_id } = &mut widget.data {
+                        if let WidgetData::Wasm { wasm, .. } = &mut widget.data {
                             if path == wasm.path {
-                                self.wasm_messenger.send_reload(*wasm_id, widget.id);
+                                widget.data2.reload().unwrap();
                                 // wasm.reload();
                             }
                         }
@@ -363,7 +361,7 @@ impl Editor {
                     } else if let Some(widget_id) = self.active_widget {
                         self.mark_widget_dirty(widget_id);
                         if let Some(widget) = self.widget_store.get_mut(widget_id) {
-                            widget.on_key(input, &mut self.wasm_messenger);
+                            widget.on_key(input);
                         }
                     }
                 }
@@ -405,7 +403,7 @@ impl Editor {
                 if self.context.modifiers.ctrl {
                     self.selected_widgets.insert(widget.id);
                 } else {
-                    widget.on_mouse_down(&self.context.mouse_position, &mut self.wasm_messenger);
+                    widget.on_mouse_down(&self.context.mouse_position);
                 }
                 // TODO: This is ugly, just setting the active widget
                 // over and over again then we will get the last one
@@ -444,10 +442,10 @@ impl Editor {
 
                 if self.context.cancel_click {
                     self.context.cancel_click = false;
-                    widget.on_mouse_up(&self.context.mouse_position, &mut self.wasm_messenger);
+                    widget.on_mouse_up(&self.context.mouse_position);
                 } else {
                     let events =
-                        widget.on_click(&self.context.mouse_position, &mut self.wasm_messenger);
+                        widget.on_click(&self.context.mouse_position);
                     for event in events.iter() {
                         self.events.push(event.clone());
                     }
