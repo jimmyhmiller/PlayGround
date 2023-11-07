@@ -247,12 +247,14 @@ impl Widget for WasmWidget {
     }
     
     fn reload(&mut self) -> std::result::Result<(), Box<dyn Error>> {
-        // self.sender.try_send(wrap_payload(Payload::Reload))?;
+        self.sender.try_send(wrap_payload(Payload::Reload))?;
         Ok(())
     }
 
     fn set_state(&mut self, state: String) -> std::result::Result<(), Box<dyn Error>> {
-        // self.sender.try_send(wrap_payload(Payload::SetState(Some(state))))?;
+        let base64_decoded = decode_base64(&state.as_bytes().to_vec()).unwrap();
+        let state = String::from_utf8(base64_decoded).unwrap();
+        self.sender.try_send(wrap_payload(Payload::PartialState(Some(state))))?;
         Ok(())
     }
 
@@ -347,7 +349,10 @@ impl Widget for WasmWidget {
                     // }
                     // should_mark_dirty = false;
                 }
-                OutPayload::Reloaded(widget_id) => {
+                OutPayload::Reloaded => {
+                    // TODO: Don't need widget id
+                    // from message, but probably do need
+                    // to know what widget we are.
                     // let commands = self
                     //     .wasm_non_draw_commands
                     //     .entry(message.wasm_id)
