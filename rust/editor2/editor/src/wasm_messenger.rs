@@ -101,7 +101,6 @@ pub struct WasmMessenger {
     last_wasm_id: u64,
     wasm_draw_commands: HashMap<WasmId, Vec<DrawCommands>>,
     wasm_non_draw_commands: HashMap<WasmId, Vec<Commands>>,
-    wasm_states: HashMap<WasmId, SaveState>,
     last_message_id: usize,
     // Not a huge fan of this solution,
     // but couldn't find a better way to dedup draws
@@ -109,7 +108,6 @@ pub struct WasmMessenger {
     // I have some ideas.
     pending_messages: HashMap<WasmId, HashMap<usize, Message>>,
     engine: Arc<Engine>,
-    receivers: HashMap<WasmId, Receiver<OutMessage>>,
     senders: HashMap<WasmId, Sender<Message>>,
     external_sender: Option<mpsc::Sender<Event>>,
     dirty_wasm: HashSet<WasmId>,
@@ -140,11 +138,9 @@ impl WasmMessenger {
             last_wasm_id: 0,
             wasm_draw_commands: HashMap::new(),
             wasm_non_draw_commands: HashMap::new(),
-            wasm_states: HashMap::new(),
             last_message_id: 1,
             pending_messages: HashMap::new(),
             engine,
-            receivers: HashMap::new(),
             senders: HashMap::new(),
             external_sender,
             dirty_wasm: HashSet::new(),
@@ -338,15 +334,6 @@ impl WasmMessenger {
                             ))
                             .unwrap();
                     }
-                    Commands::Redraw => {
-                        // TODO: Fix widget id once we move for widgets
-                        // to handle this themselves
-                        self.external_sender
-                            .as_mut()
-                            .unwrap()
-                            .send(Event::Redraw(0))
-                            .unwrap();
-                    }
                     Commands::SetCursor(cursor) => {
                         self.external_sender
                             .as_mut()
@@ -366,87 +353,8 @@ impl WasmMessenger {
         self.local_pool
             .run_until(Delay::new(Duration::from_millis(4)));
 
-        // I need to do this slightly differently because I need to draw in the context
-        // of the widget.
-        // But on tick I could get the pending drawings and then draw them
-        // for each widget
-
-        // TODO: need to time this out
-        for out_receiver in self.receivers.values_mut() {
-            while let Ok(Some(message)) = out_receiver.try_next() {
-                // Note: Right now if a message doesn't have a corresponding in-message
-                // I am just setting the out message to id: 0.
-                if let Some(record) = self.pending_messages.get_mut(&message.wasm_id) {
-                    record.remove(&message.message_id);
-                } else {
-                    println!("No pending message for {}", message.wasm_id)
-                }
-
-                // TODO: This just means we update everything every frame
-                // Because the draw content might not have changed
-                // but we still request it every frame. We should only request it
-                // if things have actually changed
-                // Or we should only consider it dirty if things changed.
-
-                let mut should_mark_dirty = true;
-
-                match message.payload {
-                    OutPayload::DrawCommands(commands) => {
-                        // TODO: Is this a performance issue?
-                        // I'm thinking not? It seems to actually work because
-                        // we only do this every once in a while
-                        if self.wasm_draw_commands.get(&message.wasm_id) == Some(&commands) {
-                            should_mark_dirty = false;
-                        }
-                        self.wasm_draw_commands.insert(message.wasm_id, commands);
-                    }
-                    OutPayload::Update(commands) => {
-                        let current_commands = self
-                            .wasm_non_draw_commands
-                            .entry(message.wasm_id)
-                            .or_default();
-                        if current_commands.is_empty() {
-                            should_mark_dirty = false;
-                        }
-                        current_commands.extend(commands);
-                    }
-                    OutPayload::Saved(saved) => {
-                        self.wasm_states.insert(message.wasm_id, saved);
-                    }
-                    OutPayload::ErrorPayload(error_message) => {
-                        println!("Error: {}", error_message);
-                    }
-                    OutPayload::NeededValue(name, sender) => {
-                        // If I don't have the value, what should I do?
-                        // Should I save this message and re-enqueue or signal failure?
-                        if let Some(value) = values.get(&name) {
-                            let serialized = serde_json::to_string(value).unwrap();
-                            sender.send(serialized).unwrap();
-                        } else {
-                            // println!("Can't find value {}", name);
-                        }
-                        should_mark_dirty = false;
-                    }
-                    OutPayload::Reloaded => {
-                        let commands = self
-                            .wasm_non_draw_commands
-                            .entry(message.wasm_id)
-                            .or_default();
-                        commands.push(Commands::Redraw);
-                    }
-                    OutPayload::Complete => {
-                        // should_mark_dirty = false;
-                    }
-                    OutPayload::Error(error) => {
-                        println!("Error: {}", error);
-                    }
-                }
-                if should_mark_dirty {
-                    self.dirty_wasm.insert(message.wasm_id);
-                }
-            }
-        }
     }
+        
 
     fn send_message(&mut self, message: Message) {
         let records = self.pending_messages.entry(message.wasm_id).or_default();
@@ -721,7 +629,6 @@ pub enum Commands {
     Subscribe(String),
     Unsubscribe(String),
     SetCursor(CursorIcon),
-    Redraw,
 }
 
 #[derive(Debug, Clone, PartialEq)]

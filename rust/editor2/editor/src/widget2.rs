@@ -82,6 +82,7 @@ pub trait Widget {
 
     fn position(&self) -> Position;
     fn scale(&self) -> f32;
+    fn set_scale(&mut self, scale: f32);
     fn size(&self) -> Size;
 }
 
@@ -117,6 +118,10 @@ impl Widget for () {
     }
 
     fn scale(&self) -> f32 {
+        todo!()
+    }
+
+    fn set_scale(&mut self, scale: f32) {
         todo!()
     }
 
@@ -474,6 +479,10 @@ impl Widget for WasmWidget {
         self.meta.scale
     }
 
+    fn set_scale(&mut self, scale: f32) {
+        self.meta.scale = scale;
+    }
+
     fn size(&self) -> Size {
         self.meta.size
     }
@@ -683,6 +692,10 @@ impl Widget for TextPane {
         self.meta.size
     }
 
+    fn set_scale(&mut self, scale: f32) {
+        self.meta.scale = scale;
+    }
+
     fn get_state(&self) -> String {
         "".to_string()
     }
@@ -713,6 +726,10 @@ impl Widget for Text {
         self.meta.scale
     }
 
+    fn set_scale(&mut self, scale: f32) {
+        self.meta.scale = scale;
+    }
+
     fn size(&self) -> Size {
         self.meta.size
     }
@@ -740,6 +757,12 @@ impl Widget for Text {
     }
     fn get_state(&self) -> String {
         "".to_string()
+    }
+
+    fn on_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.meta.position.x = x;
+        self.meta.position.y = y;
+        Ok(())
     }
 }
 
@@ -773,6 +796,10 @@ impl Widget for Image {
 
     fn scale(&self) -> f32 {
         self.meta.scale
+    }
+
+    fn set_scale(&mut self, scale: f32) {
+        self.meta.scale = scale;
     }
 
     fn size(&self) -> Size {
@@ -840,6 +867,10 @@ impl Widget for Deleted {
 
     fn scale(&self) -> f32 {
         1.0
+    }
+
+    fn set_scale(&mut self, _scale: f32) {
+        
     }
 
     fn size(&self) -> Size {

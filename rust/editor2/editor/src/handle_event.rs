@@ -156,8 +156,10 @@ impl Editor {
                                 widget.position.y += y_diff;
                                 widget.on_move(widget.position.x, widget.position.y);
                                 if widget.position.x > self.window.size.width - 300.0 {
+                                    widget.data2.set_scale(0.1);
                                     widget.scale = 0.1;
                                 } else {
+                                    widget.data2.set_scale(1.0);
                                     widget.scale = 1.0;
                                 }
                             }

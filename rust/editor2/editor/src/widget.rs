@@ -100,13 +100,14 @@ impl WidgetStore {
         }
     }
 
-    pub fn draw(&mut self, canvas: &Canvas, dirty_widgets: &HashSet<usize>) {
-        let mut dirty_widgets = dirty_widgets.clone();
-        for widget in self.iter() {
-            if !self.widget_images.contains_key(&widget.id) {
-                dirty_widgets.insert(widget.id);
-            }
-        }
+    pub fn draw(&mut self, canvas: &Canvas, _dirty_widgets: &HashSet<usize>) {
+        let dirty_widgets : HashSet<usize> = self.widgets.iter().map(|x| x.id).collect();
+        // let mut dirty_widgets = dirty_widgets.clone();
+        // for widget in self.iter() {
+        //     if !self.widget_images.contains_key(&widget.id) {
+        //         dirty_widgets.insert(widget.id);
+        //     }
+        // }
         let mut images_to_insert = vec![];
         for widget_id in dirty_widgets.iter() {
             if let Some(widget) = self.get_mut(*widget_id) {
@@ -151,11 +152,11 @@ impl WidgetStore {
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Widget> {
-        self.widgets.iter_mut().filter(|x| !x.data.is_deleted())
+        self.widgets.iter_mut()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Widget> {
-        self.widgets.iter().filter(|x| !x.data.is_deleted())
+        self.widgets.iter()
     }
 
     pub fn clear(&mut self) {
@@ -202,11 +203,6 @@ pub enum WidgetData {
     Deleted,
 }
 
-impl WidgetData {
-    pub fn is_deleted(&self) -> bool {
-        matches!(self, WidgetData::Deleted)
-    }
-}
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub enum FontWeight {
@@ -273,26 +269,14 @@ impl Widget {
 
     pub fn on_mouse_down(&mut self, position: &Position) {
         let widget_space = self.widget_space(position);
-        match &mut self.data {
-            WidgetData::Wasm { .. } => {
-                self.data2
-                    .on_mouse_down(widget_space.x, widget_space.y)
-                    .unwrap();
-            }
-            _ => {}
-        }
+        self.data2.on_mouse_down(widget_space.x, widget_space.y).unwrap();
     }
 
     pub fn on_mouse_up(&mut self, position: &Position) {
         let widget_space = self.widget_space(position);
-        match &mut self.data {
-            WidgetData::Wasm { .. } => {
-                self.data2
-                    .on_mouse_up(widget_space.x, widget_space.y)
-                    .unwrap();
-            }
-            _ => {}
-        }
+        self.data2
+            .on_mouse_up(widget_space.x, widget_space.y)
+            .unwrap();
     }
 
     pub fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Vec<WidgetId> {
@@ -395,85 +379,40 @@ impl Widget {
     }
 
     pub fn send_process_message(&mut self, process_id: usize, buf: &str) {
-        match &self.data {
-            WidgetData::Wasm { .. } => {
-                self.data2
-                    .on_process_message(process_id as i32, buf.to_string())
-                    .unwrap();
-            }
-            WidgetData::Deleted => {}
-            _ => {
-                panic!("Can't send process message to non-wasm widget");
-            }
-        }
+        self.data2
+            .on_process_message(process_id as i32, buf.to_string())
+            .unwrap();
     }
 
     pub fn on_size_change(&mut self, width: f32, height: f32) {
-        match &mut self.data {
-            WidgetData::Wasm { .. } => {
-                self.data2.on_size_change(width, height).unwrap();
-            }
-            _ => {}
-        }
+        self.data2.on_size_change(width, height).unwrap();
     }
 
     pub fn on_move(&mut self, x: f32, y: f32) {
-        match &mut self.data {
-            WidgetData::Wasm { .. } => {
-                self.data2.on_move(x, y).unwrap();
-            }
-            WidgetData::TextPane { .. } => {
-                self.data2.on_move(x, y).unwrap();
-            }
-            _ => {}
-        }
+        self.data2.on_move(x, y).unwrap();
     }
 
     pub fn on_scroll(&mut self, x: f64, y: f64) -> bool {
-        match &mut self.data {
-            WidgetData::TextPane { .. } => {
-                self.data2.on_scroll(x, y).unwrap();
-                true
-            }
-            WidgetData::Wasm { .. } => {
-                self.data2.on_scroll(x, y).unwrap();
-                true
-            }
-            _ => false,
-        }
+        self.data2.on_scroll(x, y).unwrap();
+        true
     }
 
     pub fn on_event(&mut self, kind: &str, event: &str) -> bool {
-        match &mut self.data {
-            WidgetData::Wasm { .. } => {
-                self.data2
-                    .on_event(kind.to_string(), event.to_string())
-                    .unwrap();
-                true
-            }
-            _ => false,
-        }
+        self.data2
+            .on_event(kind.to_string(), event.to_string())
+            .unwrap();
+        true
     }
 
     pub fn on_key(&mut self, input: KeyboardInput) -> bool {
-        match self.data {
-            WidgetData::Wasm { .. } => {
-                self.data2.on_key(input.to_framework()).unwrap();
-                true
-            }
-            _ => false,
-        }
+        self.data2.on_key(input.to_framework()).unwrap();
+        true
     }
 
     pub fn on_mouse_move(&mut self, widget_space: &Position, x_diff: f32, y_diff: f32) -> bool {
-        match &self.data {
-            WidgetData::Wasm { .. } => {
-                self.data2
-                    .on_mouse_move(widget_space.x, widget_space.y, x_diff, y_diff)
-                    .unwrap();
-                true
-            }
-            _ => false,
-        }
+        self.data2
+            .on_mouse_move(widget_space.x, widget_space.y, x_diff, y_diff)
+            .unwrap();
+        true
     }
 }

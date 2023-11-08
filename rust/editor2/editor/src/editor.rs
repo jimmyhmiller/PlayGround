@@ -252,10 +252,7 @@ impl Editor {
     pub fn update(&mut self) -> bool {
         // TODO: Put in better place
         for widget in self.widget_store.iter_mut() {
-            match &widget.data {
-                WidgetData::Wasm { .. } => widget.data2.update().unwrap(),
-                _ => {}
-            }
+            widget.data2.update().unwrap();
         }
 
         // Todo: Need to test that I am not missing any
@@ -287,18 +284,7 @@ impl Editor {
         self.handle_events(events);
 
         for widget in self.widget_store.iter_mut() {
-            match &widget.data {
-                WidgetData::Wasm { wasm: _, wasm_id } => {
-                    if !self.dirty_widgets.contains(&widget.id)
-                        && self.wasm_messenger.has_draw_commands(*wasm_id)
-                    {
-                        continue;
-                    }
-                    widget.data2.update().unwrap();
-                    // self.self.data2.draw("draw");
-                }
-                _ => {}
-            }
+            widget.data2.update().unwrap();
         }
         !events_empty || self.wasm_messenger.number_of_pending_requests() > 0
     }
