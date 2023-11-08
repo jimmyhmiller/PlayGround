@@ -1,21 +1,18 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
-    fs::File,
-    io::Read,
-    path::PathBuf,
 };
 
 
 use serde::{Deserialize, Serialize};
 use skia_safe::{
     font_style::{Slant, Weight, Width},
-    Canvas, Data, Font, FontStyle, Image, Point, Typeface,
+    Canvas, FontStyle, Image, Point,
 };
 
 use crate::{
     event::Event,
-    wasm_messenger::{self, WasmId, WasmMessenger}, keyboard::KeyboardInput, widget2::{Widget as Widget2, TextPane, WasmWidget, WidgetMeta}, color::Color,
+    wasm_messenger::{self, WasmId, WasmMessenger}, keyboard::KeyboardInput, widget2::{Widget as Widget2, TextPane, WasmWidget, WidgetMeta, Text, self}, color::Color,
 };
 
 
@@ -239,7 +236,7 @@ impl From<FontWeight> for FontStyle {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TextOptions {
     pub font_family: String,
     pub font_weight: FontWeight,
@@ -250,34 +247,9 @@ pub struct TextOptions {
 #[derive(Serialize, Deserialize)]
 pub struct ImageData {
     path: String,
-    // I am not sure about having this local
-    // One thing I should maybe consider is only have
-    // images in memory if they are visible.
-    // How to do that though? Do I have a lifecycle for widgets
-    // no longer being visible?
-    // If I handled this globally all of that might be easier.
-    #[serde(skip)]
-    cache: RefCell<Option<Image>>,
 }
 
-impl ImageData {
 
-    fn load_image(&self) {
-        // TODO: Get rid of clone
-        let path = if self.path.starts_with("./") {
-            let mut base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            base.push(&self.path);
-            base.to_str().unwrap().to_string()
-        } else {
-            self.path.clone()
-        };
-        let mut file = File::open(path).unwrap();
-        let mut image_data = vec![];
-        file.read_to_end(&mut image_data).unwrap();
-        let image = Image::from_encoded(Data::new_copy(image_data.as_ref())).unwrap();
-        self.cache.replace(Some(image));
-    }
-}
 
 
 #[derive(Serialize, Deserialize)]
@@ -356,45 +328,14 @@ impl Widget {
         }
 
         match &self.data {
-            WidgetData::Image { data } => {
-                canvas.save();
-                canvas.scale((self.scale, self.scale));
-                // I tried to abstract this out and ran into the issue of returning a ref.
-                // Can't use a closure, could box, but seems unnecessary. Maybe this data belongs elsewhere?
-                // I mean the interior mutability is gross anyway.
-                let image = data.cache.borrow();
-                if image.is_none() {
-                    // Need to drop because we just borrowed.
-                    drop(image);
-                    data.load_image();
-                }
-                let image = data.cache.borrow();
-                let image = image.as_ref().unwrap();
-                canvas.draw_image(image, self.position, None);
-                canvas.restore();
+            WidgetData::Image { .. } => {
+               self.data2.draw(canvas, bounds).unwrap();
             }
             WidgetData::TextPane { text_pane: _ } => {
                 self.data2.draw(canvas, bounds).unwrap();
             }
-            WidgetData::Text { text, text_options } => {
-                canvas.save();
-                canvas.scale((self.scale, self.scale));
-                let font = Font::new(
-                    Typeface::new(
-                        text_options.font_family.clone(),
-                        text_options.font_weight.into(),
-                    )
-                    .unwrap(),
-                    text_options.size,
-                );
-                let paint = text_options.color.as_paint();
-                canvas.draw_str(
-                    text,
-                    (self.position.x, self.position.y + self.size.height),
-                    &font,
-                    &paint,
-                );
-                canvas.restore();
+            WidgetData::Text { .. } => {
+                self.data2.draw(canvas, bounds).unwrap();
             }
             _ => {}
         }
@@ -427,6 +368,23 @@ impl Widget {
                 if let Some(state) = &wasm.state {
                     self.data2.set_state(state.clone()).unwrap();
                 }
+            }
+            WidgetData::Text { text, text_options } => {
+                self.data2 = Box::new(Text {
+                    text: text.clone(),
+                    text_options: text_options.clone(),
+                    meta: WidgetMeta::new(self.position, self.size, self.scale),
+                });
+            }
+            WidgetData::TextPane { text_pane } => {
+                self.data2 = Box::new(text_pane.clone());
+            }
+            WidgetData::Image { data } => {
+                self.data2 = Box::new(widget2::Image {
+                    path: data.path.clone(),
+                    cache: RefCell::new(None),
+                    meta: WidgetMeta::new(self.position, self.size, self.scale),
+                });
             }
             _ => {}
         }
