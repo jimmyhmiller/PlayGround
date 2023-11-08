@@ -30,11 +30,7 @@ use wasmtime::{
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
 use crate::{
-    editor::Value,
-    event::Event,
-    keyboard::KeyboardInput,
-    widget::Position,
-    util::encode_base64,
+    editor::Value, event::Event, keyboard::KeyboardInput, util::encode_base64, widget::Position,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -228,7 +224,11 @@ impl WasmMessenger {
         self.last_wasm_id
     }
 
-    pub fn new_instance(&mut self, wasm_path: &str, partial_state: Option<String>) -> (WasmId, Receiver<OutMessage>) {
+    pub fn new_instance(
+        &mut self,
+        wasm_path: &str,
+        partial_state: Option<String>,
+    ) -> (WasmId, Receiver<OutMessage>) {
         let id = self.next_wasm_id();
 
         let (sender, receiver) = channel::<Message>(100000);

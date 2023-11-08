@@ -1,6 +1,5 @@
-use serde::{Serialize, Deserialize};
-use skia_safe::{Paint, Color4f};
-
+use serde::{Deserialize, Serialize};
+use skia_safe::{Color4f, Paint};
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub struct Color {
@@ -19,17 +18,15 @@ impl Color {
         Color4f::new(self.r, self.g, self.b, self.a)
     }
 
-
     pub fn new(r: f32, g: f32, b: f32, a: f32) -> Color {
         Color { r, g, b, a }
     }
-
 
     #[allow(unused)]
     pub fn as_sk_color(&self) -> skia_safe::Color {
         self.as_color4f().to_color()
     }
-    
+
     #[allow(unused)]
     pub fn from_color4f(color4f: &Color4f) -> Self {
         Color {

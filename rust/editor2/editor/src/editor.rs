@@ -10,12 +10,13 @@ use std::{
 };
 
 use crate::{
+    color::Color,
     event::Event,
     fps_counter::FpsCounter,
     keyboard::Modifiers,
     wasm_messenger::WasmMessenger,
     widget::{Position, Size, Widget, WidgetData, WidgetId, WidgetStore},
-    color::Color, widget2::TextPane
+    widget2::TextPane,
 };
 
 use nonblock::NonBlockingReader;
@@ -252,9 +253,7 @@ impl Editor {
         // TODO: Put in better place
         for widget in self.widget_store.iter_mut() {
             match &widget.data {
-                WidgetData::Wasm { .. } => {
-                    widget.data2.update().unwrap()
-                }
+                WidgetData::Wasm { .. } => widget.data2.update().unwrap(),
                 _ => {}
             }
         }
@@ -343,10 +342,7 @@ impl Editor {
                             if let Some(widget) =
                                 self.widget_store.get_mut(process.parent_widget_id)
                             {
-                                widget.send_process_message(
-                                    *process_id,
-                                    &buf,
-                                );
+                                widget.send_process_message(*process_id, &buf);
                             }
                         }
                     } else {
@@ -363,9 +359,10 @@ impl Editor {
                 match &mut widget.data {
                     WidgetData::TextPane { text_pane } => {
                         text_pane.set_text(output);
-                        if let Some(text_pane) = widget.data2.as_any_mut().downcast_mut::<TextPane>() {
+                        if let Some(text_pane) =
+                            widget.data2.as_any_mut().downcast_mut::<TextPane>()
+                        {
                             text_pane.set_text(output);
-
                         }
                     }
                     WidgetData::Deleted => {
@@ -460,10 +457,8 @@ impl Editor {
         }
         canvas.restore();
 
-        self.widget_store
-            .draw(canvas,  &self.dirty_widgets);
+        self.widget_store.draw(canvas, &self.dirty_widgets);
         self.dirty_widgets.clear();
-
     }
 
     pub fn add_event(&mut self, event: &winit::event::Event<'_, ()>) -> bool {

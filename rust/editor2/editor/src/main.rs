@@ -3,15 +3,15 @@ mod editor;
 mod event;
 mod fps_counter;
 // mod strokes;
+mod color;
 mod handle_event;
 mod keyboard;
 mod native;
+mod util;
 mod wasm_messenger;
 mod widget;
-mod window;
 mod widget2;
-mod color;
-mod util;
+mod window;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
