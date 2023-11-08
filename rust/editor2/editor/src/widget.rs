@@ -3,7 +3,6 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-
 use serde::{Deserialize, Serialize};
 use skia_safe::{
     font_style::{Slant, Weight, Width},
@@ -11,10 +10,11 @@ use skia_safe::{
 };
 
 use crate::{
-    wasm_messenger::{self, WasmId, WasmMessenger, SaveState}, keyboard::KeyboardInput, widget2::{Widget as Widget2, TextPane, WasmWidget, WidgetMeta, Text, self}, color::Color,
+    color::Color,
+    keyboard::KeyboardInput,
+    wasm_messenger::{self, SaveState, WasmId, WasmMessenger},
+    widget2::{self, Text, TextPane, WasmWidget, Widget as Widget2, WidgetMeta},
 };
-
-
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq, PartialOrd)]
 pub struct Position {
@@ -52,7 +52,6 @@ impl From<Size> for Position {
 }
 
 pub type WidgetId = usize;
-
 
 // use crate::widget2::{widget_serialize, widget_deserialize};
 #[derive(Serialize, Deserialize)]
@@ -101,11 +100,7 @@ impl WidgetStore {
         }
     }
 
-    pub fn draw(
-        &mut self,
-        canvas: &Canvas,
-        dirty_widgets: &HashSet<usize>,
-    ) {
+    pub fn draw(&mut self, canvas: &Canvas, dirty_widgets: &HashSet<usize>) {
         let mut dirty_widgets = dirty_widgets.clone();
         for widget in self.iter() {
             if !self.widget_images.contains_key(&widget.id) {
@@ -121,7 +116,7 @@ impl WidgetStore {
                     let before_count = canvas.save();
 
                     // TODO: Still broken because of dirty checking
-                    // but we are drawing 
+                    // but we are drawing
 
                     // let can_draw = match widget.data {
                     //     WidgetData::Wasm { wasm: _, wasm_id } => {
@@ -213,8 +208,6 @@ impl WidgetData {
     }
 }
 
-
-
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub enum FontWeight {
     Light,
@@ -245,9 +238,6 @@ pub struct ImageData {
     path: String,
 }
 
-
-
-
 #[derive(Serialize, Deserialize)]
 pub struct Wasm {
     pub path: String,
@@ -266,7 +256,6 @@ impl Wasm {
 }
 
 impl Widget {
-
     pub fn on_click(&mut self, position: &Position) {
         let widget_space = self.widget_space(position);
         self.data2.on_click(widget_space.x, widget_space.y).unwrap();
@@ -281,13 +270,14 @@ impl Widget {
             y: widget_y,
         }
     }
-    
 
     pub fn on_mouse_down(&mut self, position: &Position) {
         let widget_space = self.widget_space(position);
         match &mut self.data {
             WidgetData::Wasm { .. } => {
-                self.data2.on_mouse_down(widget_space.x, widget_space.y).unwrap();
+                self.data2
+                    .on_mouse_down(widget_space.x, widget_space.y)
+                    .unwrap();
             }
             _ => {}
         }
@@ -297,17 +287,15 @@ impl Widget {
         let widget_space = self.widget_space(position);
         match &mut self.data {
             WidgetData::Wasm { .. } => {
-                self.data2.on_mouse_up(widget_space.x, widget_space.y).unwrap();
+                self.data2
+                    .on_mouse_up(widget_space.x, widget_space.y)
+                    .unwrap();
             }
             _ => {}
         }
     }
 
-    pub fn draw(
-        &mut self,
-        canvas: &Canvas,
-        bounds: Size,
-    ) -> Vec<WidgetId> {
+    pub fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Vec<WidgetId> {
         canvas.save();
         self.data2.draw(canvas, bounds).unwrap();
         canvas.restore();
@@ -370,11 +358,10 @@ impl Widget {
         loop {
             match &mut self.data {
                 WidgetData::Wasm { wasm, .. } => {
-
                     self.data2.save().unwrap();
                     wasm_messenger.tick(&mut HashMap::new());
                     self.data2.update().unwrap();
-                    let wasm_widget : &WasmWidget = self.data2.as_any().downcast_ref().unwrap();
+                    let wasm_widget: &WasmWidget = self.data2.as_any().downcast_ref().unwrap();
                     match &wasm_widget.save_state {
                         wasm_messenger::SaveState::Unsaved => {
                             continue;
@@ -407,14 +394,12 @@ impl Widget {
         }
     }
 
-    pub fn send_process_message(
-        &mut self,
-        process_id: usize,
-        buf: &str,
-    ) {
+    pub fn send_process_message(&mut self, process_id: usize, buf: &str) {
         match &self.data {
             WidgetData::Wasm { .. } => {
-                self.data2.on_process_message(process_id as i32, buf.to_string()).unwrap();
+                self.data2
+                    .on_process_message(process_id as i32, buf.to_string())
+                    .unwrap();
             }
             WidgetData::Deleted => {}
             _ => {
@@ -454,45 +439,41 @@ impl Widget {
                 self.data2.on_scroll(x, y).unwrap();
                 true
             }
-            _ => {
-                false
-            }
+            _ => false,
         }
     }
 
     pub fn on_event(&mut self, kind: &str, event: &str) -> bool {
         match &mut self.data {
             WidgetData::Wasm { .. } => {
-                self.data2.on_event(kind.to_string(), event.to_string()).unwrap();
+                self.data2
+                    .on_event(kind.to_string(), event.to_string())
+                    .unwrap();
                 true
             }
-            _ => { 
-                false
-            }
+            _ => false,
         }
     }
 
     pub fn on_key(&mut self, input: KeyboardInput) -> bool {
         match self.data {
             WidgetData::Wasm { .. } => {
-               self.data2.on_key(input.to_framework()).unwrap();
+                self.data2.on_key(input.to_framework()).unwrap();
                 true
             }
-            _ => {
-                false
-            }
+            _ => false,
         }
     }
 
     pub fn on_mouse_move(&mut self, widget_space: &Position, x_diff: f32, y_diff: f32) -> bool {
         match &self.data {
             WidgetData::Wasm { .. } => {
-                self.data2.on_mouse_move(widget_space.x, widget_space.y, x_diff, y_diff).unwrap();
+                self.data2
+                    .on_mouse_move(widget_space.x, widget_space.y, x_diff, y_diff)
+                    .unwrap();
                 true
             }
-            _ => {
-                false
-            }
+            _ => false,
         }
     }
 }

@@ -10,7 +10,9 @@ use crate::{
     event::Event,
     keyboard::{KeyCode, KeyboardInput},
     native::open_file_dialog,
-    widget::{Position, Size, Wasm, Widget, WidgetData}, widget2::{TextPane, WidgetMeta, WasmWidget}, wasm_messenger::SaveState,
+    wasm_messenger::SaveState,
+    widget::{Position, Size, Wasm, Widget, WidgetData},
+    widget2::{TextPane, WasmWidget, WidgetMeta},
 };
 
 fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
@@ -43,15 +45,20 @@ impl Editor {
                                 wasm: Wasm::new(path.to_str().unwrap().to_string()),
                                 wasm_id,
                             },
-                            data2: Box::new(
-                                WasmWidget {
-                                    draw_commands: vec![],
-                                    sender: Some(self.wasm_messenger.get_sender(wasm_id)),
-                                    receiver: Some(receiver),
-                                    meta: WidgetMeta::new(Position { x, y }, Size { width: 800.0, height: 800.0}, 1.0),
-                                    save_state: SaveState::Unsaved,
-                                }
-                            )
+                            data2: Box::new(WasmWidget {
+                                draw_commands: vec![],
+                                sender: Some(self.wasm_messenger.get_sender(wasm_id)),
+                                receiver: Some(receiver),
+                                meta: WidgetMeta::new(
+                                    Position { x, y },
+                                    Size {
+                                        width: 800.0,
+                                        height: 800.0,
+                                    },
+                                    1.0,
+                                ),
+                                save_state: SaveState::Unsaved,
+                            }),
                         });
                     } else {
                         self.widget_store.add_widget(Widget {
@@ -67,13 +74,27 @@ impl Editor {
                                 text_pane: TextPane::new(
                                     std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
                                     40.0,
-                                    WidgetMeta::new(Position { x, y }, Size { width: 800.0, height: 800.0}, 1.0)
+                                    WidgetMeta::new(
+                                        Position { x, y },
+                                        Size {
+                                            width: 800.0,
+                                            height: 800.0,
+                                        },
+                                        1.0,
+                                    ),
                                 ),
                             },
                             data2: Box::new(TextPane::new(
                                 std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
                                 40.0,
-                                WidgetMeta::new(Position { x, y }, Size { width: 800.0, height: 800.0}, 1.0)
+                                WidgetMeta::new(
+                                    Position { x, y },
+                                    Size {
+                                        width: 800.0,
+                                        height: 800.0,
+                                    },
+                                    1.0,
+                                ),
                             )),
                         });
                     }
@@ -124,10 +145,7 @@ impl Editor {
                                 dirty_widgets.insert(widget.id);
                                 widget.size.width += x_diff;
                                 widget.size.height += y_diff;
-                                widget.on_size_change(
-                                    widget.size.width,
-                                    widget.size.height,
-                                );
+                                widget.on_size_change(widget.size.width, widget.size.height);
                             }
                         }
                     } else if self.context.modifiers.ctrl {
@@ -136,10 +154,7 @@ impl Editor {
                                 dirty_widgets.insert(widget.id);
                                 widget.position.x += x_diff;
                                 widget.position.y += y_diff;
-                                widget.on_move(
-                                    widget.position.x,
-                                    widget.position.y,
-                                );
+                                widget.on_move(widget.position.x, widget.position.y);
                                 if widget.position.x > self.window.size.width - 300.0 {
                                     widget.scale = 0.1;
                                 } else {
@@ -160,11 +175,7 @@ impl Editor {
                             // TODO: I should probably only send this for the top most widget
                             if widget.mouse_over(&position) {
                                 was_over = true;
-                                let modified = widget.on_mouse_move(
-                                    &widget_space,
-                                    x_diff,
-                                    y_diff,
-                                );
+                                let modified = widget.on_mouse_move(&widget_space, x_diff, y_diff);
                                 if modified {
                                     dirty_widgets.insert(widget.id);
                                 }
@@ -241,9 +252,31 @@ impl Editor {
                         scale: 1.0,
                         ephemeral: true,
                         data: WidgetData::TextPane {
-                            text_pane: TextPane::new(vec![], 40.0, WidgetMeta::new(position, Size { width: 800.0, height: 800.0}, 1.0)),
+                            text_pane: TextPane::new(
+                                vec![],
+                                40.0,
+                                WidgetMeta::new(
+                                    position,
+                                    Size {
+                                        width: 800.0,
+                                        height: 800.0,
+                                    },
+                                    1.0,
+                                ),
+                            ),
                         },
-                        data2: Box::new(TextPane::new(vec![], 40.0, WidgetMeta::new(position, Size { width: 800.0, height: 800.0}, 1.0))),
+                        data2: Box::new(TextPane::new(
+                            vec![],
+                            40.0,
+                            WidgetMeta::new(
+                                position,
+                                Size {
+                                    width: 800.0,
+                                    height: 800.0,
+                                },
+                                1.0,
+                            ),
+                        )),
                     });
 
                     self.processes.insert(
@@ -311,8 +344,8 @@ impl Editor {
                     // )]);
                 }
                 Event::KeyEvent {
-                    input: input @
-                        KeyboardInput {
+                    input:
+                        input @ KeyboardInput {
                             state: _,
                             key_code,
                             modifiers,
@@ -341,15 +374,20 @@ impl Editor {
                                     wasm: Wasm::new(code_editor.to_string()),
                                     wasm_id,
                                 },
-                                data2: Box::new(
-                                    WasmWidget {
-                                        draw_commands: vec![],
-                                        sender: Some(self.wasm_messenger.get_sender(wasm_id)),
-                                        receiver: Some(receiver),
-                                        meta: WidgetMeta::new(Position { x: 500.0, y: 500.0 }, Size { width: 800.0, height: 800.0}, 1.0),
-                                        save_state: SaveState::Unsaved,
-                                    }
-                                ),
+                                data2: Box::new(WasmWidget {
+                                    draw_commands: vec![],
+                                    sender: Some(self.wasm_messenger.get_sender(wasm_id)),
+                                    receiver: Some(receiver),
+                                    meta: WidgetMeta::new(
+                                        Position { x: 500.0, y: 500.0 },
+                                        Size {
+                                            width: 800.0,
+                                            height: 800.0,
+                                        },
+                                        1.0,
+                                    ),
+                                    save_state: SaveState::Unsaved,
+                                }),
                                 ephemeral: false,
                             });
                             self.mark_widget_dirty(widget_id);
