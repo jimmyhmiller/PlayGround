@@ -10,7 +10,7 @@ use crate::{
     event::Event,
     keyboard::{KeyCode, KeyboardInput},
     native::open_file_dialog,
-    widget::{Position, Size, Wasm, Widget, WidgetData}, widget2::{TextPane, WidgetMeta, WasmWidget},
+    widget::{Position, Size, Wasm, Widget, WidgetData}, widget2::{TextPane, WidgetMeta, WasmWidget}, wasm_messenger::SaveState,
 };
 
 fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
@@ -32,7 +32,6 @@ impl Editor {
                             .new_instance(path.to_str().unwrap(), None);
                         self.widget_store.add_widget(Widget {
                             id: 0,
-                            on_click: vec![],
                             position: Position { x, y },
                             size: Size {
                                 width: 800.0,
@@ -47,17 +46,16 @@ impl Editor {
                             data2: Box::new(
                                 WasmWidget {
                                     draw_commands: vec![],
-                                    sender: self.wasm_messenger.get_sender(wasm_id),
-                                    receiver,
+                                    sender: Some(self.wasm_messenger.get_sender(wasm_id)),
+                                    receiver: Some(receiver),
                                     meta: WidgetMeta::new(Position { x, y }, Size { width: 800.0, height: 800.0}, 1.0),
+                                    save_state: SaveState::Unsaved,
                                 }
                             )
                         });
                     } else {
                         self.widget_store.add_widget(Widget {
                             id: 0,
-                            // TODO: Temp for testing
-                            on_click: vec![],
                             position: Position { x, y },
                             scale: 1.0,
                             ephemeral: false,
@@ -241,7 +239,6 @@ impl Editor {
                             height: 800.0,
                         },
                         scale: 1.0,
-                        on_click: vec![],
                         ephemeral: true,
                         data: WidgetData::TextPane {
                             text_pane: TextPane::new(vec![], 40.0, WidgetMeta::new(position, Size { width: 800.0, height: 800.0}, 1.0)),
@@ -339,7 +336,6 @@ impl Editor {
                                     width: 800.0,
                                     height: 800.0,
                                 },
-                                on_click: vec![],
                                 scale: 1.0,
                                 data: WidgetData::Wasm {
                                     wasm: Wasm::new(code_editor.to_string()),
@@ -348,9 +344,10 @@ impl Editor {
                                 data2: Box::new(
                                     WasmWidget {
                                         draw_commands: vec![],
-                                        sender: self.wasm_messenger.get_sender(wasm_id),
-                                        receiver,
+                                        sender: Some(self.wasm_messenger.get_sender(wasm_id)),
+                                        receiver: Some(receiver),
                                         meta: WidgetMeta::new(Position { x: 500.0, y: 500.0 }, Size { width: 800.0, height: 800.0}, 1.0),
+                                        save_state: SaveState::Unsaved,
                                     }
                                 ),
                                 ephemeral: false,
@@ -444,11 +441,7 @@ impl Editor {
                     self.context.cancel_click = false;
                     widget.on_mouse_up(&self.context.mouse_position);
                 } else {
-                    let events =
-                        widget.on_click(&self.context.mouse_position);
-                    for event in events.iter() {
-                        self.events.push(event.clone());
-                    }
+                    widget.on_click(&self.context.mouse_position);
                 }
             }
         }
