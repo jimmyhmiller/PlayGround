@@ -470,40 +470,6 @@ impl WasmMessenger {
             }
         }
     }
-    // Sometimes state is corrupt by going too long on the string. Not sure why.
-    // Need to track down the issue
-    pub fn save_state(&mut self, wasm_id: WasmId) -> SaveState {
-        self.wasm_states.insert(wasm_id, SaveState::Unsaved);
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id,
-            payload: Payload::SaveState,
-        });
-        // TODO: Maybe not the best design, but I also want to ensure I save
-        loop {
-            // TODO: Fix this
-            self.tick(&mut HashMap::new());
-            if let Some(state) = self.wasm_states.get(&wasm_id) {
-                match state {
-                    SaveState::Saved(state) => {
-                        if state.starts_with('\"') {
-                            assert!(state.ends_with('\"'), "State is corrupt: {}", state);
-                        }
-                        break;
-                    }
-                    SaveState::Empty => {
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        self.wasm_states
-            .get(&wasm_id)
-            .unwrap_or(&SaveState::Empty)
-            .clone()
-    }
 
     pub fn has_draw_commands(&self, wasm_id: u64) -> bool {
         self.wasm_draw_commands

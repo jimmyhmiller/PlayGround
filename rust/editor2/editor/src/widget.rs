@@ -11,8 +11,7 @@ use skia_safe::{
 };
 
 use crate::{
-    event::Event,
-    wasm_messenger::{self, WasmId, WasmMessenger}, keyboard::KeyboardInput, widget2::{Widget as Widget2, TextPane, WasmWidget, WidgetMeta, Text, self}, color::Color,
+    wasm_messenger::{self, WasmId, WasmMessenger, SaveState}, keyboard::KeyboardInput, widget2::{Widget as Widget2, TextPane, WasmWidget, WidgetMeta, Text, self}, color::Color,
 };
 
 
@@ -62,13 +61,10 @@ pub struct Widget {
     pub id: WidgetId,
     pub position: Position,
     pub size: Size,
-    pub on_click: Vec<Event>,
     pub scale: f32,
     // Children might make sense
     // pub children: Vec<Widget>,
     pub data: WidgetData,
-    #[serde(skip)]
-    // #[serde(serialize_with = "widget_serialize", deserialize_with = "widget_deserialize")]
     pub data2: Box<dyn Widget2>,
     #[serde(default)]
     pub ephemeral: bool,
@@ -271,18 +267,9 @@ impl Wasm {
 
 impl Widget {
 
-    pub fn on_click(
-        &mut self,
-        position: &Position,
-    ) -> Vec<Event> {
+    pub fn on_click(&mut self, position: &Position) {
         let widget_space = self.widget_space(position);
-        match &mut self.data {
-            WidgetData::Wasm { .. } => {
-                self.data2.on_click(widget_space.x, widget_space.y).unwrap();
-                vec![]
-            }
-            _ => self.on_click.clone(),
-        }
+        self.data2.on_click(widget_space.x, widget_space.y).unwrap();
     }
 
     fn widget_space(&mut self, position: &Position) -> Position {
@@ -322,23 +309,7 @@ impl Widget {
         bounds: Size,
     ) -> Vec<WidgetId> {
         canvas.save();
-        // Have to do this to deal with mut stuff
-        if let WidgetData::Wasm { .. } = &mut self.data {
-            self.data2.draw(canvas, bounds).unwrap();
-        }
-
-        match &self.data {
-            WidgetData::Image { .. } => {
-               self.data2.draw(canvas, bounds).unwrap();
-            }
-            WidgetData::TextPane { text_pane: _ } => {
-                self.data2.draw(canvas, bounds).unwrap();
-            }
-            WidgetData::Text { .. } => {
-                self.data2.draw(canvas, bounds).unwrap();
-            }
-            _ => {}
-        }
+        self.data2.draw(canvas, bounds).unwrap();
         canvas.restore();
         vec![]
     }
@@ -360,9 +331,10 @@ impl Widget {
 
                 self.data2 = Box::new(WasmWidget {
                     draw_commands: vec![],
-                    sender: wasm_messenger.get_sender(new_wasm_id),
-                    receiver,
+                    sender: Some(wasm_messenger.get_sender(new_wasm_id)),
+                    receiver: Some(receiver),
                     meta: WidgetMeta::new(self.position, self.size, self.scale),
+                    save_state: SaveState::Unsaved,
                 });
                 *wasm_id = new_wasm_id;
                 if let Some(state) = &wasm.state {
@@ -394,19 +366,33 @@ impl Widget {
         if self.ephemeral {
             return;
         }
-        match &mut self.data {
-            WidgetData::Wasm { wasm, wasm_id } => match wasm_messenger.save_state(*wasm_id) {
-                wasm_messenger::SaveState::Unsaved => {
-                    panic!("Wasm instance {} is unsaved", wasm_id)
+        // TODO: Clean up this mess
+        loop {
+            match &mut self.data {
+                WidgetData::Wasm { wasm, .. } => {
+
+                    self.data2.save().unwrap();
+                    wasm_messenger.tick(&mut HashMap::new());
+                    self.data2.update().unwrap();
+                    let wasm_widget : &WasmWidget = self.data2.as_any().downcast_ref().unwrap();
+                    match &wasm_widget.save_state {
+                        wasm_messenger::SaveState::Unsaved => {
+                            continue;
+                        }
+                        wasm_messenger::SaveState::Empty => {
+                            wasm.state = None;
+                            break;
+                        }
+                        wasm_messenger::SaveState::Saved(state) => {
+                            wasm.state = Some(state.clone());
+                            break;
+                        }
+                    }
                 }
-                wasm_messenger::SaveState::Empty => {
-                    wasm.state = None;
+                _ => {
+                    break;
                 }
-                wasm_messenger::SaveState::Saved(state) => {
-                    wasm.state = Some(state);
-                }
-            },
-            _ => {}
+            }
         }
     }
 
