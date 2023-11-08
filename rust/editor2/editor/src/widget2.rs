@@ -1,11 +1,11 @@
-use std::{error::Error, str::from_utf8, any::Any};
+use std::{error::Error, str::from_utf8, any::Any, cell::RefCell, path::PathBuf, fs::File, io::Read};
 
 use framework::KeyboardInput;
 use futures::channel::mpsc::Sender;
 use serde::{Serializer, Deserializer, Deserialize, Serialize};
-use skia_safe::{Canvas, Rect, Font, FontStyle, Typeface, Path, RRect, Point};
+use skia_safe::{Canvas, Rect, Font, FontStyle, Typeface, Path, RRect, Point, Data};
 
-use crate::{widget::{Size, Position}, color::Color, util::{encode_base64, decode_base64}, wasm_messenger::{Message, Payload, DrawCommands, OutMessage, OutPayload}};
+use crate::{widget::{Size, Position, TextOptions}, color::Color, util::{encode_base64, decode_base64}, wasm_messenger::{Message, Payload, DrawCommands, OutMessage, OutPayload}};
 
 #[allow(unused)]
 pub trait Widget {
@@ -405,7 +405,7 @@ where
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct WidgetMeta {
     position: Position,
     scale: f32,
@@ -422,7 +422,7 @@ impl WidgetMeta {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TextPane {
     #[serde(serialize_with = "serialize_text")]
     #[serde(deserialize_with = "deserialize_text")]
@@ -580,6 +580,131 @@ impl Widget for TextPane {
         self.meta.size
     }
 }
+
+pub struct Text {
+    pub text: String,
+    pub text_options: TextOptions,
+    pub meta: WidgetMeta,
+}
+
+impl Widget for Text{
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn position(&self) -> Position {
+        self.meta.position
+    }
+
+    fn scale(&self) -> f32 {
+        self.meta.scale
+    }
+
+    fn size(&self) -> Size {
+        self.meta.size
+    }
+
+    fn draw(&mut self, canvas: &Canvas, _bounds: Size) -> Result<(), Box<dyn Error>> {
+        canvas.save();
+        canvas.scale((self.scale(), self.scale()));
+        let font = Font::new(
+            Typeface::new(
+                self.text_options.font_family.clone(),
+                self.text_options.font_weight.into(),
+            )
+            .unwrap(),
+            self.text_options.size,
+        );
+        let paint = self.text_options.color.as_paint();
+        canvas.draw_str(
+            self.text.clone(),
+            (self.position().x, self.position().y + self.size().height),
+            &font,
+            &paint,
+        );
+        canvas.restore();
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Image {
+    pub path: String,
+    // I am not sure about having this local
+    // One thing I should maybe consider is only have
+    // images in memory if they are visible.
+    // How to do that though? Do I have a lifecycle for widgets
+    // no longer being visible?
+    // If I handled this globally all of that might be easier.
+    #[serde(skip)]
+    pub cache: RefCell<Option<skia_safe::Image>>,
+    pub meta: WidgetMeta,
+}
+
+impl Widget for Image {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn position(&self) -> Position {
+        self.meta.position
+    }
+
+    fn scale(&self) -> f32 {
+        self.meta.scale
+    }
+
+    fn size(&self) -> Size {
+        self.meta.size
+    }
+
+    fn draw(&mut self, canvas: &Canvas, _bounds: Size) -> Result<(), Box<dyn Error>> {
+        canvas.save();
+        canvas.scale((self.scale(), self.scale()));
+        // I tried to abstract this out and ran into the issue of returning a ref.
+        // Can't use a closure, could box, but seems unnecessary. Maybe this data belongs elsewhere?
+        // I mean the interior mutability is gross anyway.
+        let image = self.cache.borrow();
+        if image.is_none() {
+            // Need to drop because we just borrowed.
+            drop(image);
+            self.load_image();
+        }
+        let image = self.cache.borrow();
+        let image = image.as_ref().unwrap();
+        canvas.draw_image(image, self.position(), None);
+        canvas.restore();
+        Ok(())
+    }
+}
+
+impl Image {
+
+    fn load_image(&self) {
+        // TODO: Get rid of clone
+        let path = if self.path.starts_with("./") {
+            let mut base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            base.push(&self.path);
+            base.to_str().unwrap().to_string()
+        } else {
+            self.path.clone()
+        };
+        let mut file = File::open(path).unwrap();
+        let mut image_data = vec![];
+        file.read_to_end(&mut image_data).unwrap();
+        let image = skia_safe::Image::from_encoded(Data::new_copy(image_data.as_ref())).unwrap();
+        self.cache.replace(Some(image));
+    }
+}
+
 
 
 // These are things widgets can do.
