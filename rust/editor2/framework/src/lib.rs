@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 extern "C" {
     #[link_name = "draw_str"]
     fn draw_str_low_level(ptr: i32, len: i32, x: f32, y: f32);
-    #[allow(unused)]
     fn draw_rect(x: f32, y: f32, width: f32, height: f32);
     fn set_color(r: f32, g: f32, b: f32, a: f32);
     fn save();
@@ -19,21 +18,16 @@ extern "C" {
     fn restore();
     #[link_name = "set_cursor_icon"]
     fn set_cursor_icon_low_level(cursor_icon: u32);
-    #[allow(unused)]
     fn start_process_low_level(ptr: i32, len: i32) -> i32;
-    #[allow(unused)]
     fn save_file_low_level(path_ptr: i32, path_length: i32, text_ptr: i32, text_length: i32);
-    #[allow(unused)]
     fn send_message_low_level(process_id: i32, ptr: i32, len: i32);
     #[allow(improper_ctypes)]
-    #[allow(unused)]
     fn recieve_last_message_low_level(process_id: i32) -> (i32, i32);
     #[link_name = "provide_f32"]
     fn provide_f32_low_level(ptr: i32, len: i32, val: f32);
     #[link_name = "provide_bytes"]
     fn provide_bytes_low_level(name_ptr: i32, name_len: i32, ptr: i32, len: i32);
     fn get_value(ptr: i32, len: i32) -> u32;
-    #[allow(unused)]
     fn try_get_value(ptr: i32, len: i32) -> u32;
     #[link_name = "send_event"]
     fn send_event_low_level(kind_ptr: i32, kind_len: i32, ptr: i32, len: i32);

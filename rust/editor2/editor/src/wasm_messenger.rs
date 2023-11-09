@@ -41,8 +41,6 @@ pub type WasmId = u64;
 
 #[derive(Debug, Clone)]
 pub enum Payload {
-    #[allow(unused)]
-    NewInstance(String),
     OnClick(Position),
     Draw(String),
     OnScroll(f64, f64),
@@ -170,7 +168,6 @@ impl WasmMessenger {
         for messages_per in self.pending_messages.values() {
             for message in messages_per.values() {
                 stats.push(match message.payload {
-                    Payload::NewInstance(_) => "NewInstance",
                     Payload::OnClick(_) => "OnClick",
                     Payload::Draw(_) => "Draw",
                     Payload::OnScroll(_, _) => "OnScroll",
@@ -296,12 +293,9 @@ impl WasmMessenger {
 // 2. Have senders and receivers per instance
 
 struct WasmManager {
-    #[allow(unused)]
     id: WasmId,
     instance: WasmInstance,
     receiver: Receiver<Message>,
-    #[allow(unused)]
-    engine: Arc<Engine>,
     sender: Sender<OutMessage>,
 }
 
@@ -321,7 +315,6 @@ impl WasmManager {
             id: wasm_id,
             instance,
             receiver,
-            engine,
             sender,
         }
     }
@@ -368,9 +361,6 @@ impl WasmManager {
         });
 
         match message.payload {
-            Payload::NewInstance(_) => {
-                panic!("Shouldn't get here")
-            }
             Payload::OnClick(position) => {
                 self.instance.on_click(position.x, position.y).await?;
                 default_return
