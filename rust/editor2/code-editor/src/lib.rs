@@ -489,10 +489,8 @@ impl App for TextWidget {
             }
         } else if kind == "diagnostics" {
             if let Ok(diagnostics) = serde_json::from_str::<DiagnosticMessage>(&event) {
-                if diagnostics.uri == format!("file://{}", self.file_path) {
-                    if diagnostics.version.is_none() || self.diagnostics.version <= diagnostics.version {
-                        self.diagnostics = diagnostics;
-                    }
+                if diagnostics.uri == format!("file://{}", self.file_path) && (diagnostics.version.is_none() || self.diagnostics.version <= diagnostics.version) {
+                    self.diagnostics = diagnostics;
                 }
             } else {
                 println!("Couldn't parse {}", event);

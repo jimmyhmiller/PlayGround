@@ -181,12 +181,15 @@ impl ProcessSpawner {
             show_document: Some(ShowDocumentClientCapabilities { support: true }),
         });
         
-        let mut text_document = TextDocumentClientCapabilities::default();
-        let mut publish = PublishDiagnosticsClientCapabilities::default();
-        publish.version_support = Some(true);
-        text_document.publish_diagnostics = Some(publish);
+        let text_document = TextDocumentClientCapabilities {
+            publish_diagnostics: Some(PublishDiagnosticsClientCapabilities { 
+                version_support: Some(true),
+                ..PublishDiagnosticsClientCapabilities::default()
+            }),
+            ..TextDocumentClientCapabilities::default()
+        };
         
-        initialize_params.capabilities.text_document = Some(TextDocumentClientCapabilities::default());
+        initialize_params.capabilities.text_document = Some(text_document);
 
         self.send_request(
             Initialize::METHOD,
@@ -198,7 +201,6 @@ impl ProcessSpawner {
             Initialized::METHOD,
             &serde_json::to_string(&params).unwrap(),
         );
-        // println!("Initialized: {}", request);
         self.send_message(self.process_id, request);
     }
 
@@ -470,7 +472,7 @@ impl App for ProcessSpawner {
 
                                 self.state.messages_by_type
                                     .entry(method.to_string())
-                                    .or_insert(vec![]).push(message.to_string());
+                                    .or_default().push(message.to_string());
 
                                 if method == "textDocument/semanticTokens/full" {
                                     let meta = self.state.token_request_metadata.get(id).unwrap();
@@ -528,7 +530,7 @@ impl App for ProcessSpawner {
                                         let diagnostic = serde_json::to_string(&message.get("params")).unwrap();
                                         self.state.messages_by_type
                                             .entry("diagnostics".to_string())
-                                            .or_insert(vec![]).push(diagnostic.clone());
+                                            .or_default().push(diagnostic.clone());
                                         self.send_event("diagnostics", diagnostic);
                                     }
                                     _ => {}

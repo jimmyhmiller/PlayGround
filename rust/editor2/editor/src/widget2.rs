@@ -273,7 +273,7 @@ impl Widget for WasmWidget {
             .as_mut()
             .unwrap()
             .try_send(wrap_payload(Payload::OnKey(
-                crate::keyboard::KeyboardInput::from_framework((input)),
+                crate::keyboard::KeyboardInput::from_framework(input),
             )))?;
         Ok(())
     }
