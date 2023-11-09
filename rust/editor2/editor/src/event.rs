@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use crate::{
     keyboard::{KeyCode, KeyState, KeyboardInput, Modifiers},
-    widget::{Position, WidgetId},
+    widget::WidgetId,
 };
 
-use framework::CursorIcon;
+use framework::{CursorIcon, Position};
 use serde::{Deserialize, Serialize};
 use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
 

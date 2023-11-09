@@ -15,10 +15,11 @@ use crate::{
     fps_counter::FpsCounter,
     keyboard::Modifiers,
     wasm_messenger::WasmMessenger,
-    widget::{Position, Size, Widget, WidgetId, WidgetStore},
+    widget::{Widget, WidgetId, WidgetStore},
     widget2::{TextPane, WasmWidget, Deleted},
 };
 
+use framework::{Position, Size};
 use nonblock::NonBlockingReader;
 use notify::{FsEventWatcher, RecursiveMode};
 

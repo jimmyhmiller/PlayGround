@@ -1,53 +1,16 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, ops::{Deref, DerefMut}};
 
+use framework::{Position, Size};
 use serde::{Deserialize, Serialize};
 use skia_safe::{
-    font_style::{Slant, Weight, Width},
-    Canvas, FontStyle, Image, Point,
+    Canvas, Image,
 };
 
 use crate::{
-    color::Color,
     keyboard::KeyboardInput,
     wasm_messenger::{self, SaveState, WasmMessenger},
     widget2::{self, WasmWidget, Widget as Widget2},
 };
-
-#[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq, PartialOrd)]
-pub struct Position {
-    pub x: f32,
-    pub y: f32,
-}
-impl Position {
-    pub fn offset(&self, x: f32, y: f32) -> Position {
-        Position {
-            x: self.x + x,
-            y: self.y + y,
-        }
-    }
-}
-
-impl From<Position> for Point {
-    fn from(val: Position) -> Self {
-        Point { x: val.x, y: val.y }
-    }
-}
-
-#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
-pub struct Size {
-    pub width: f32,
-    pub height: f32,
-}
-
-impl From<Size> for Position {
-    fn from(val: Size) -> Self {
-        Position {
-            x: val.width,
-            y: val.height,
-        }
-    }
-}
-
 
 pub type WidgetId = usize;
 
@@ -55,172 +18,18 @@ pub type WidgetId = usize;
 pub struct Widget {
     pub data: Box<dyn Widget2>,
 }
+impl Deref for Widget {
+    type Target = dyn Widget2;
 
-impl Widget {
-    pub fn scale(&self) -> f32 {
-        self.data.scale()
-    }
-    pub fn position(&self) -> Position {
-        self.data.position()
-    }
-
-    pub fn size(&self) -> Size {
-        self.data.size()
-    }
-
-    pub fn id(&self) -> WidgetId {
-        self.data.id()
+    fn deref(&self) -> &Self::Target {
+        self.data.deref()
     }
 }
 
-pub struct WidgetStore {
-    widgets: Vec<Widget>,
-    widget_images: HashMap<WidgetId, Image>,
-    next_id: WidgetId,
-}
-
-impl WidgetStore {
-
-    pub fn next_id(&mut self) -> WidgetId {
-        let current = self.next_id;
-        self.next_id += 1;
-        current
+impl DerefMut for Widget {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.data.deref_mut()
     }
-    pub fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
-        if widget.id() == 0 {
-            let id = self.next_id;
-            self.next_id += 1;
-            widget.data.set_id(id);
-        }
-        let id = widget.id();
-        self.widgets.push(widget);
-        id
-    }
-
-    pub fn get(&self, id: usize) -> Option<&Widget> {
-        self.widgets.get(id)
-    }
-
-    pub fn get_mut(&mut self, id: usize) -> Option<&mut Widget> {
-        self.widgets.get_mut(id)
-    }
-
-    pub fn new() -> WidgetStore {
-        WidgetStore {
-            widgets: Vec::new(),
-            widget_images: HashMap::new(),
-            next_id: 0,
-        }
-    }
-
-    pub fn draw(&mut self, canvas: &Canvas, _dirty_widgets: &HashSet<usize>) {
-        let dirty_widgets : HashSet<usize> = self.widgets.iter().map(|x| x.id()).collect();
-        // let mut dirty_widgets = dirty_widgets.clone();
-        // for widget in self.iter() {
-        //     if !self.widget_images.contains_key(&widget.id) {
-        //         dirty_widgets.insert(widget.id);
-        //     }
-        // }
-        let mut images_to_insert = vec![];
-        for widget_id in dirty_widgets.iter() {
-            if let Some(widget) = self.get_mut(*widget_id) {
-                if let Some(mut surface) = canvas.new_surface(&canvas.image_info(), None) {
-                    let canvas = surface.canvas();
-
-                    let before_count = canvas.save();
-
-                    // TODO: Still broken because of dirty checking
-                    // but we are drawing
-
-                    // let can_draw = match widget.data {
-                    //     WidgetData::Wasm { wasm: _, wasm_id } => {
-                    //         widget.data2.has_draw_commands(wasm_id)
-                    //     }
-                    //     _ => true,
-                    // };
-
-                    // if !can_draw {
-                    //     continue;
-                    // }
-
-                    widget.draw(canvas, widget.size());
-                    canvas.restore_to_count(before_count);
-                    canvas.restore();
-
-                    let image = surface.image_snapshot();
-                    images_to_insert.push((widget.id(), image));
-                }
-            } else {
-                println!("Widget not found for id: {}", widget_id);
-            }
-        }
-
-        for (id, image) in images_to_insert {
-            self.widget_images.insert(id, image);
-        }
-
-        for (_, image) in self.widget_images.iter() {
-            canvas.draw_image(image, (0.0, 0.0), None);
-        }
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Widget> {
-        self.widgets.iter_mut()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Widget> {
-        self.widgets.iter()
-    }
-
-    pub fn clear(&mut self) {
-        self.next_id = 0;
-        self.widgets.clear();
-    }
-
-    pub fn delete_widget(&mut self, widget_id: usize) {
-        // TODO: Need a better way rather than tombstones
-        self.widgets[widget_id].data = Box::new(widget2::Deleted {});
-        self.widget_images.remove(&widget_id);
-    }
-}
-
-
-
-#[derive(Copy, Clone, Serialize, Deserialize)]
-pub enum FontWeight {
-    Light,
-    Normal,
-    Bold,
-}
-
-impl From<FontWeight> for FontStyle {
-    fn from(val: FontWeight) -> Self {
-        match val {
-            FontWeight::Light => FontStyle::new(Weight::LIGHT, Width::NORMAL, Slant::Upright),
-            FontWeight::Normal => FontStyle::normal(),
-            FontWeight::Bold => FontStyle::bold(),
-        }
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct TextOptions {
-    pub font_family: String,
-    pub font_weight: FontWeight,
-    pub size: f32,
-    pub color: Color,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ImageData {
-    path: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct Wasm {
-    pub path: String,
-    state: Option<String>,
-    partial_state: Option<String>,
 }
 
 
@@ -360,3 +169,117 @@ impl Widget {
         true
     }
 }
+
+pub struct WidgetStore {
+    widgets: Vec<Widget>,
+    widget_images: HashMap<WidgetId, Image>,
+    next_id: WidgetId,
+}
+
+impl WidgetStore {
+
+    pub fn next_id(&mut self) -> WidgetId {
+        let current = self.next_id;
+        self.next_id += 1;
+        current
+    }
+    pub fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
+        if widget.id() == 0 {
+            let id = self.next_id;
+            self.next_id += 1;
+            widget.data.set_id(id);
+        }
+        let id = widget.id();
+        self.widgets.push(widget);
+        id
+    }
+
+    pub fn get(&self, id: usize) -> Option<&Widget> {
+        self.widgets.get(id)
+    }
+
+    pub fn get_mut(&mut self, id: usize) -> Option<&mut Widget> {
+        self.widgets.get_mut(id)
+    }
+
+    pub fn new() -> WidgetStore {
+        WidgetStore {
+            widgets: Vec::new(),
+            widget_images: HashMap::new(),
+            next_id: 0,
+        }
+    }
+
+    pub fn draw(&mut self, canvas: &Canvas, _dirty_widgets: &HashSet<usize>) {
+        let dirty_widgets : HashSet<usize> = self.widgets.iter().map(|x| x.id()).collect();
+        // let mut dirty_widgets = dirty_widgets.clone();
+        // for widget in self.iter() {
+        //     if !self.widget_images.contains_key(&widget.id) {
+        //         dirty_widgets.insert(widget.id);
+        //     }
+        // }
+        let mut images_to_insert = vec![];
+        for widget_id in dirty_widgets.iter() {
+            if let Some(widget) = self.get_mut(*widget_id) {
+                if let Some(mut surface) = canvas.new_surface(&canvas.image_info(), None) {
+                    let canvas = surface.canvas();
+
+                    let before_count = canvas.save();
+
+                    // TODO: Still broken because of dirty checking
+                    // but we are drawing
+
+                    // let can_draw = match widget.data {
+                    //     WidgetData::Wasm { wasm: _, wasm_id } => {
+                    //         widget.data2.has_draw_commands(wasm_id)
+                    //     }
+                    //     _ => true,
+                    // };
+
+                    // if !can_draw {
+                    //     continue;
+                    // }
+
+                    widget.draw(canvas, widget.size());
+                    canvas.restore_to_count(before_count);
+                    canvas.restore();
+
+                    let image = surface.image_snapshot();
+                    images_to_insert.push((widget.id(), image));
+                }
+            } else {
+                println!("Widget not found for id: {}", widget_id);
+            }
+        }
+
+        for (id, image) in images_to_insert {
+            self.widget_images.insert(id, image);
+        }
+
+        for (_, image) in self.widget_images.iter() {
+            canvas.draw_image(image, (0.0, 0.0), None);
+        }
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Widget> {
+        self.widgets.iter_mut()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Widget> {
+        self.widgets.iter()
+    }
+
+    pub fn clear(&mut self) {
+        self.next_id = 0;
+        self.widgets.clear();
+    }
+
+    pub fn delete_widget(&mut self, widget_id: usize) {
+        // TODO: Need a better way rather than tombstones
+        self.widgets[widget_id].data = Box::new(widget2::Deleted {});
+        self.widget_images.remove(&widget_id);
+    }
+}
+
+
+

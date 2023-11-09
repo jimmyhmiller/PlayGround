@@ -301,10 +301,22 @@ impl Default for Size {
     }
 }
 
-#[derive(Copy, Clone, Serialize, Deserialize, Debug, Default)]
+#[derive(Copy, Clone, Serialize, Deserialize, Debug, Default, PartialEq)]
 pub struct Position {
     pub x: f32,
     pub y: f32,
+}
+
+impl Position {
+    pub fn offset(&self, x: f32, y: f32) -> Self {
+        Self {
+            x: self.x + x,
+            y: self.y + y,
+        }
+    }
+    pub fn as_tuple(&self) -> (f32, f32) {
+        (self.x, self.y)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
