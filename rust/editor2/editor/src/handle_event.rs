@@ -1,6 +1,6 @@
 use std::{collections::HashSet, io::Write};
 
-use framework::CursorIcon;
+use framework::{CursorIcon, Position, Size};
 use nonblock::NonBlockingReader;
 use notify::RecursiveMode;
 use serde_json::json;
@@ -11,7 +11,7 @@ use crate::{
     keyboard::{KeyCode, KeyboardInput},
     native::open_file_dialog,
     wasm_messenger::SaveState,
-    widget::{Position, Size, Widget},
+    widget::{Widget},
     widget2::{TextPane, WasmWidget, WidgetMeta, Widget as _, Ephemeral},
 };
 

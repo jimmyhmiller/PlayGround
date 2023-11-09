@@ -2,16 +2,16 @@ use std::{
     any::Any, cell::RefCell, error::Error, fs::File, io::Read, path::PathBuf, str::from_utf8, collections::HashMap, ops::{Deref, DerefMut},
 };
 
-use framework::KeyboardInput;
+use framework::{KeyboardInput, Position, Size};
 use futures::channel::mpsc::Sender;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use skia_safe::{Canvas, Data, Font, FontStyle, Path, Point, RRect, Rect, Typeface};
+use skia_safe::{Canvas, Data, Font, FontStyle, Path, Point, RRect, Rect, Typeface, font_style::{Weight, Width, Slant}};
 
 use crate::{
     color::Color,
     util::{decode_base64, encode_base64},
-    wasm_messenger::{DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState, Commands},
-    widget::{Position, Size, TextOptions}, editor::Value, event::Event,
+    wasm_messenger::{DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState, Commands}, 
+    editor::Value, event::Event,
 };
 
 #[allow(unused)]
@@ -78,6 +78,7 @@ pub trait Widget {
     fn update(&mut self) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+    
     fn get_state(&self) -> String;
 
     fn position(&self) -> Position;
@@ -815,6 +816,32 @@ impl Widget for TextPane {
     }
 }
 
+
+#[derive(Copy, Clone, Serialize, Deserialize)]
+pub enum FontWeight {
+    Light,
+    Normal,
+    Bold,
+}
+
+impl From<FontWeight> for FontStyle {
+    fn from(val: FontWeight) -> Self {
+        match val {
+            FontWeight::Light => FontStyle::new(Weight::LIGHT, Width::NORMAL, Slant::Upright),
+            FontWeight::Normal => FontStyle::normal(),
+            FontWeight::Bold => FontStyle::bold(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TextOptions {
+    pub font_family: String,
+    pub font_weight: FontWeight,
+    pub size: f32,
+    pub color: Color,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Text {
     pub text: String,
@@ -954,7 +981,7 @@ impl Widget for Image {
         }
         let image = self.cache.borrow();
         let image = image.as_ref().unwrap();
-        canvas.draw_image(image, self.position(), None);
+        canvas.draw_image(image, self.position().as_tuple(), None);
         canvas.restore();
         Ok(())
     }

@@ -10,7 +10,7 @@ use std::{
 
 use bytesize::ByteSize;
 
-use framework::CursorIcon;
+use framework::{CursorIcon, Position};
 use futures::{
     channel::{
         mpsc::{channel, Receiver, Sender},
@@ -30,7 +30,7 @@ use wasmtime::{
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
 use crate::{
-    keyboard::KeyboardInput, util::encode_base64, widget::Position,
+    keyboard::KeyboardInput, util::encode_base64
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

@@ -4,7 +4,7 @@ use metal_rs::MetalLayerRef;
 use skia_safe::{gpu, scalar, ColorType, Size};
 use winit::platform::macos::WindowBuilderExtMacOS;
 
-use crate::{editor, widget};
+use crate::{editor};
 
 pub fn setup_window(mut editor: editor::Editor) {
     use cocoa::{appkit::NSView, base::id as cocoa_id};
@@ -42,7 +42,7 @@ pub fn setup_window(mut editor: editor::Editor) {
 
     editor.on_window_create(
         event_loop_proxy,
-        widget::Size {
+        framework::Size {
             width: (size.width as f64 * window.scale_factor()) as f32,
             height: (size.height as f64 * window.scale_factor()) as f32,
         },
