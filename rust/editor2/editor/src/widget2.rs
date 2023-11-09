@@ -171,6 +171,8 @@ pub struct WasmWidget {
     pub wasm_non_draw_commands: Vec<Commands>,
     #[serde(skip)]
     pub external_sender: Option<std::sync::mpsc::Sender<Event>>,
+    #[serde(default)]
+    pub path: String,
     // TODO:
     // Maybe we make a "mark dirty" sender
     // That way each widget can decide it is dirty
@@ -1031,3 +1033,8 @@ impl Widget for Deleted {
 // I can play with the shell independent of the editor details
 // The ultimate goal of this refactor is to make it easy for wasm
 // modules to have multiple panes.
+
+
+
+// TODO: I need to setup dirty widget stuff
+// I'm not super happy with the whole meta thing.

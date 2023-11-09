@@ -1,7 +1,4 @@
-use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-};
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use skia_safe::{
@@ -12,8 +9,8 @@ use skia_safe::{
 use crate::{
     color::Color,
     keyboard::KeyboardInput,
-    wasm_messenger::{self, SaveState, WasmId, WasmMessenger},
-    widget2::{self, Text, TextPane, WasmWidget, Widget as Widget2, WidgetMeta},
+    wasm_messenger::{self, SaveState, WasmMessenger},
+    widget2::{self, WasmWidget, Widget as Widget2},
 };
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq, PartialOrd)]
@@ -62,10 +59,7 @@ pub struct Widget {
     pub position: Position,
     pub size: Size,
     pub scale: f32,
-    // Children might make sense
-    // pub children: Vec<Widget>,
-    pub data: WidgetData,
-    pub data2: Box<dyn Widget2>,
+    pub data: Box<dyn Widget2>,
     #[serde(default)]
     pub ephemeral: bool,
 }
@@ -88,7 +82,7 @@ impl WidgetStore {
             let id = self.next_id;
             self.next_id += 1;
             widget.id = id;
-            widget.data2.set_id(id);
+            widget.data.set_id(id);
         }
         let id = widget.id;
         self.widgets.push(widget);
@@ -177,33 +171,11 @@ impl WidgetStore {
 
     pub fn delete_widget(&mut self, widget_id: usize) {
         // TODO: Need a better way rather than tombstones
-        self.widgets[widget_id].data = WidgetData::Deleted;
-        self.widgets[widget_id].data2 = Box::new(widget2::Deleted {});
+        self.widgets[widget_id].data = Box::new(widget2::Deleted {});
         self.widget_images.remove(&widget_id);
     }
 }
 
-// I could go the interface route here.
-// I like enums. Will consider it later.
-#[derive(Serialize, Deserialize)]
-pub enum WidgetData {
-    Image {
-        data: ImageData,
-    },
-    TextPane {
-        text_pane: TextPane,
-    },
-    Text {
-        text: String,
-        text_options: TextOptions,
-    },
-    Wasm {
-        wasm: Wasm,
-        #[serde(skip)]
-        wasm_id: WasmId,
-    },
-    Deleted,
-}
 
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
@@ -243,20 +215,11 @@ pub struct Wasm {
     partial_state: Option<String>,
 }
 
-impl Wasm {
-    pub fn new(path: String) -> Self {
-        Self {
-            path,
-            state: None,
-            partial_state: None,
-        }
-    }
-}
 
 impl Widget {
     pub fn on_click(&mut self, position: &Position) {
         let widget_space = self.widget_space(position);
-        self.data2.on_click(widget_space.x, widget_space.y).unwrap();
+        self.data.on_click(widget_space.x, widget_space.y).unwrap();
     }
 
     fn widget_space(&mut self, position: &Position) -> Position {
@@ -271,19 +234,19 @@ impl Widget {
 
     pub fn on_mouse_down(&mut self, position: &Position) {
         let widget_space = self.widget_space(position);
-        self.data2.on_mouse_down(widget_space.x, widget_space.y).unwrap();
+        self.data.on_mouse_down(widget_space.x, widget_space.y).unwrap();
     }
 
     pub fn on_mouse_up(&mut self, position: &Position) {
         let widget_space = self.widget_space(position);
-        self.data2
+        self.data
             .on_mouse_up(widget_space.x, widget_space.y)
             .unwrap();
     }
 
     pub fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Vec<WidgetId> {
         canvas.save();
-        self.data2.draw(canvas, bounds).unwrap();
+        self.data.draw(canvas, bounds).unwrap();
         canvas.restore();
         vec![]
     }
@@ -299,42 +262,17 @@ impl Widget {
     }
 
     pub fn init(&mut self, wasm_messenger: &mut WasmMessenger) {
-        match &mut self.data {
-            WidgetData::Wasm { wasm, wasm_id } => {
-                let (new_wasm_id, receiver) = wasm_messenger.new_instance(&wasm.path, None);
-
-                self.data2 = Box::new(WasmWidget {
-                    draw_commands: vec![],
-                    sender: Some(wasm_messenger.get_sender(new_wasm_id)),
-                    receiver: Some(receiver),
-                    meta: WidgetMeta::new(self.position, self.size, self.scale, self.id),
-                    save_state: SaveState::Unsaved,
-                    wasm_non_draw_commands: vec![],
-                    external_sender: None,
-                });
-                *wasm_id = new_wasm_id;
-                if let Some(state) = &wasm.state {
-                    self.data2.set_state(state.clone()).unwrap();
-                }
+        if let Some(widget) = self.data.as_any_mut().downcast_mut::<WasmWidget>() {
+            let (new_wasm_id, receiver) = wasm_messenger.new_instance(&widget.path, None);
+            widget.sender = Some(wasm_messenger.get_sender(new_wasm_id));
+            widget.receiver = Some(receiver);
+            match &widget.save_state {
+                SaveState::Unsaved => todo!(),
+                SaveState::Empty => todo!(),
+                SaveState::Saved(state) => {
+                    widget.set_state(state.clone()).unwrap();
+                },
             }
-            WidgetData::Text { text, text_options } => {
-                self.data2 = Box::new(Text {
-                    text: text.clone(),
-                    text_options: text_options.clone(),
-                    meta: WidgetMeta::new(self.position, self.size, self.scale, self.id),
-                });
-            }
-            WidgetData::TextPane { text_pane } => {
-                self.data2 = Box::new(text_pane.clone());
-            }
-            WidgetData::Image { data } => {
-                self.data2 = Box::new(widget2::Image {
-                    path: data.path.clone(),
-                    cache: RefCell::new(None),
-                    meta: WidgetMeta::new(self.position, self.size, self.scale, self.id),
-                });
-            }
-            _ => {}
         }
     }
 
@@ -344,77 +282,70 @@ impl Widget {
         }
         // TODO: Clean up this mess
         loop {
-            match &mut self.data {
-                WidgetData::Wasm { wasm, .. } => {
-                    self.data2.save().unwrap();
-                    wasm_messenger.tick();
-                    self.data2.update().unwrap();
-                    let wasm_widget: &WasmWidget = self.data2.as_any().downcast_ref().unwrap();
-                    match &wasm_widget.save_state {
-                        wasm_messenger::SaveState::Unsaved => {
-                            continue;
-                        }
-                        wasm_messenger::SaveState::Empty => {
-                            wasm.state = None;
-                            break;
-                        }
-                        wasm_messenger::SaveState::Saved(state) => {
-                            wasm.state = Some(state.clone());
-                            break;
-                        }
+
+            if let Some(widget) = self.data.as_any_mut().downcast_mut::<WasmWidget>() {
+                widget.save().unwrap();
+                wasm_messenger.tick();
+                widget.update().unwrap();
+                match &widget.save_state {
+                    wasm_messenger::SaveState::Unsaved => {
+                        continue;
+                    }
+                    wasm_messenger::SaveState::Empty => {
+                        break;
+                    }
+                    wasm_messenger::SaveState::Saved(_) => {
+                        break;
                     }
                 }
-                _ => {
-                    break;
-                }
+            } else {
+                break;
             }
+
         }
     }
 
     pub fn files_to_watch(&self) -> Vec<String> {
-        match &self.data {
-            WidgetData::Wasm { wasm, .. } => {
-                vec![wasm.path.clone()]
-            }
-            _ => {
-                vec![]
-            }
+        if let Some(widget) = self.data.as_any().downcast_ref::<WasmWidget>() {
+            return vec![widget.path.clone()];
+        } else {
+            vec![]
         }
     }
 
     pub fn send_process_message(&mut self, process_id: usize, buf: &str) {
-        self.data2
+        self.data
             .on_process_message(process_id as i32, buf.to_string())
             .unwrap();
     }
 
     pub fn on_size_change(&mut self, width: f32, height: f32) {
-        self.data2.on_size_change(width, height).unwrap();
+        self.data.on_size_change(width, height).unwrap();
     }
 
     pub fn on_move(&mut self, x: f32, y: f32) {
-        self.data2.on_move(x, y).unwrap();
+        self.data.on_move(x, y).unwrap();
     }
 
     pub fn on_scroll(&mut self, x: f64, y: f64) -> bool {
-        self.data2.on_scroll(x, y).unwrap();
+        self.data.on_scroll(x, y).unwrap();
         true
     }
 
     pub fn on_event(&mut self, kind: &str, event: &str) -> bool {
-        self.data2
+        self.data
             .on_event(kind.to_string(), event.to_string())
             .unwrap();
         true
     }
 
     pub fn on_key(&mut self, input: KeyboardInput) -> bool {
-        self.data2.on_key(input.to_framework()).unwrap();
+        self.data.on_key(input.to_framework()).unwrap();
         true
     }
 
     pub fn on_mouse_move(&mut self, widget_space: &Position, x_diff: f32, y_diff: f32) -> bool {
-        self.data2
+        self.data
             .on_mouse_move(widget_space.x, widget_space.y, x_diff, y_diff)
             .unwrap();
         true
