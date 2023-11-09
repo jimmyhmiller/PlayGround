@@ -352,7 +352,7 @@ impl Editor {
                 if let Some(widget) = widget.data.as_any_mut().downcast_mut::<TextPane>() {
                     widget.set_text(output);
                 }
-                if let Some(_) = widget.data.as_any().downcast_ref::<Deleted>() {
+                if widget.data.as_any().downcast_ref::<Deleted>().is_some() {
                     to_delete.insert(process.process_id);
                 }
             }

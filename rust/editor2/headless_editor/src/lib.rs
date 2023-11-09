@@ -66,7 +66,7 @@ pub trait TextBuffer {
         for i in 0..self.line_count() {
             max = max.max(self.line_length(i));
         }
-        return max;
+        max
     }
 }
 

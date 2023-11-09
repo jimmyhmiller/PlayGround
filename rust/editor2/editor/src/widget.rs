@@ -101,31 +101,27 @@ impl Widget {
             return;
         }
         // TODO: Clean up this mess
-        loop {
-            if let Some(widget) = self.data.as_any_mut().downcast_mut::<WasmWidget>() {
-                widget.save().unwrap();
-                wasm_messenger.tick();
-                widget.update().unwrap();
-                match &widget.save_state {
-                    wasm_messenger::SaveState::Unsaved => {
-                        continue;
-                    }
-                    wasm_messenger::SaveState::Empty => {
-                        break;
-                    }
-                    wasm_messenger::SaveState::Saved(_) => {
-                        break;
-                    }
+        while let Some(widget) = self.data.as_any_mut().downcast_mut::<WasmWidget>() { 
+            widget.save().unwrap();
+            wasm_messenger.tick();
+            widget.update().unwrap();
+            match &widget.save_state {
+                wasm_messenger::SaveState::Unsaved => {
+                    continue;
                 }
-            } else {
-                break;
+                wasm_messenger::SaveState::Empty => {
+                    break;
+                }
+                wasm_messenger::SaveState::Saved(_) => {
+                    break;
+                }
             }
-        }
+         }
     }
 
     pub fn files_to_watch(&self) -> Vec<String> {
         if let Some(widget) = self.data.as_any().downcast_ref::<WasmWidget>() {
-            return vec![widget.path.clone()];
+            vec![widget.path.clone()]
         } else {
             vec![]
         }
@@ -158,7 +154,7 @@ impl Widget {
     }
 
     pub fn on_key(&mut self, input: KeyboardInput) -> bool {
-        self.data.on_key(input.to_framework()).unwrap();
+        self.data.on_key(input.as_framework()).unwrap();
         true
     }
 

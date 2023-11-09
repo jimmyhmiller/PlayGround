@@ -10,7 +10,7 @@ pub struct Transaction<Cursor: VirtualCursor> {
     pub action: EditAction<Cursor>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct TransactionManager<Cursor: VirtualCursor> {
     pub transactions: Vec<Transaction<Cursor>>,
     pub current_transaction: usize,
@@ -163,7 +163,7 @@ impl<Cursor: VirtualCursor> EditAction<Cursor>  {
             EditAction::Delete(start, _end, text_to_delete) => {
                 cursor.move_to(start.0, start.1);
                 cursor.move_left(text_buffer);
-                cursor.insert_normal_text(&text_to_delete, text_buffer);
+                cursor.insert_normal_text(text_to_delete, text_buffer);
             },
             EditAction::CursorPosition(old_cursor) => {
                 cursor.move_to(old_cursor.line(), old_cursor.column());

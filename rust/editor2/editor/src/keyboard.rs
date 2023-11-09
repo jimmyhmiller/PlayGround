@@ -318,7 +318,7 @@ impl KeyboardInput {
         )
     }
 
-    pub fn to_framework(&self) -> framework::KeyboardInput {
+    pub fn as_framework(&self) -> framework::KeyboardInput {
         let (key, state, modifiers) = self.as_u32_tuple();
         framework::KeyboardInput::from_u32(key, state, modifiers)
     }
