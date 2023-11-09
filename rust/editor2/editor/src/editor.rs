@@ -230,7 +230,7 @@ impl Editor {
             self.widget_store.add_widget(widget);
         }
         for widget in self.widget_store.iter_mut() {
-            if let Some(widget) = widget.data2.as_any_mut().downcast_mut::<WasmWidget>() {
+            if let Some(widget) = widget.data.as_any_mut().downcast_mut::<WasmWidget>() {
                 widget.external_sender = Some(self.external_sender.as_ref().unwrap().clone());
             }
             if widget.position.x >= self.window.size.width
@@ -255,7 +255,7 @@ impl Editor {
     pub fn update(&mut self) -> bool {
         // TODO: Put in better place
         for widget in self.widget_store.iter_mut() {
-            widget.data2.update().unwrap();
+            widget.data.update().unwrap();
         }
 
         // Todo: Need to test that I am not missing any
@@ -287,7 +287,7 @@ impl Editor {
         self.handle_events(events);
 
         for widget in self.widget_store.iter_mut() {
-            widget.data2.update().unwrap();
+            widget.data.update().unwrap();
         }
         !events_empty || self.wasm_messenger.number_of_pending_requests() > 0
     }
@@ -346,10 +346,10 @@ impl Editor {
                 let widget = self.widget_store.get_mut(widget_id).unwrap();
                 let output = &process.output;
                 
-                if let Some(widget) = widget.data2.as_any_mut().downcast_mut::<TextPane>() {
+                if let Some(widget) = widget.data.as_any_mut().downcast_mut::<TextPane>() {
                     widget.set_text(output);
                 }
-                if let Some(_) = widget.data2.as_any().downcast_ref::<Deleted>() {
+                if let Some(_) = widget.data.as_any().downcast_ref::<Deleted>() {
                     to_delete.insert(process.process_id);
                 }
             }

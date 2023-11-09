@@ -11,8 +11,8 @@ use crate::{
     keyboard::{KeyCode, KeyboardInput},
     native::open_file_dialog,
     wasm_messenger::SaveState,
-    widget::{Position, Size, Wasm, Widget, WidgetData},
-    widget2::{TextPane, WasmWidget, WidgetMeta},
+    widget::{Position, Size, Widget},
+    widget2::{TextPane, WasmWidget, WidgetMeta, Widget as _},
 };
 
 fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
@@ -42,11 +42,7 @@ impl Editor {
                             },
                             scale: 1.0,
                             ephemeral: false,
-                            data: WidgetData::Wasm {
-                                wasm: Wasm::new(path.to_str().unwrap().to_string()),
-                                wasm_id,
-                            },
-                            data2: Box::new(WasmWidget {
+                            data: Box::new(WasmWidget {
                                 draw_commands: vec![],
                                 sender: Some(self.wasm_messenger.get_sender(wasm_id)),
                                 receiver: Some(receiver),
@@ -62,6 +58,7 @@ impl Editor {
                                 save_state: SaveState::Unsaved,
                                 wasm_non_draw_commands: vec![],
                                 external_sender: None,
+                                path: path.to_str().unwrap().to_string(),
                             }),
                         });
                     } else {
@@ -75,22 +72,7 @@ impl Editor {
                                 width: 800.0,
                                 height: 800.0,
                             },
-                            data: WidgetData::TextPane {
-                                text_pane: TextPane::new(
-                                    std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
-                                    40.0,
-                                    WidgetMeta::new(
-                                        Position { x, y },
-                                        Size {
-                                            width: 800.0,
-                                            height: 800.0,
-                                        },
-                                        1.0,
-                                        next_id,
-                                    ),
-                                ),
-                            },
-                            data2: Box::new(TextPane::new(
+                            data: Box::new(TextPane::new(
                                 std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
                                 40.0,
                                 WidgetMeta::new(
@@ -163,10 +145,10 @@ impl Editor {
                                 widget.position.y += y_diff;
                                 widget.on_move(widget.position.x, widget.position.y);
                                 if widget.position.x > self.window.size.width - 300.0 {
-                                    widget.data2.set_scale(0.1);
+                                    widget.data.set_scale(0.1);
                                     widget.scale = 0.1;
                                 } else {
-                                    widget.data2.set_scale(1.0);
+                                    widget.data.set_scale(1.0);
                                     widget.scale = 1.0;
                                 }
                             }
@@ -207,10 +189,10 @@ impl Editor {
                 }
                 Event::ReloadWasm(path) => {
                     for widget in self.widget_store.iter_mut() {
-                        if let WidgetData::Wasm { wasm, .. } = &mut widget.data {
-                            if path == wasm.path {
-                                widget.data2.reload().unwrap();
-                                // wasm.reload();
+                        if let Some(widget) = widget.data.as_any_mut().downcast_mut::<WasmWidget>()
+                        {
+                            if path == widget.path {
+                                widget.reload().unwrap();
                             }
                         }
                     }
@@ -260,22 +242,7 @@ impl Editor {
                         },
                         scale: 1.0,
                         ephemeral: true,
-                        data: WidgetData::TextPane {
-                            text_pane: TextPane::new(
-                                vec![],
-                                40.0,
-                                WidgetMeta::new(
-                                    position,
-                                    Size {
-                                        width: 800.0,
-                                        height: 800.0,
-                                    },
-                                    1.0,
-                                    next_id,
-                                ),
-                            ),
-                        },
-                        data2: Box::new(TextPane::new(
+                        data: Box::new(TextPane::new(
                             vec![],
                             40.0,
                             WidgetMeta::new(
@@ -380,11 +347,7 @@ impl Editor {
                                     height: 800.0,
                                 },
                                 scale: 1.0,
-                                data: WidgetData::Wasm {
-                                    wasm: Wasm::new(code_editor.to_string()),
-                                    wasm_id,
-                                },
-                                data2: Box::new(WasmWidget {
+                                data: Box::new(WasmWidget {
                                     draw_commands: vec![],
                                     sender: Some(self.wasm_messenger.get_sender(wasm_id)),
                                     receiver: Some(receiver),
@@ -400,6 +363,7 @@ impl Editor {
                                     save_state: SaveState::Unsaved,
                                     wasm_non_draw_commands: vec![],
                                     external_sender: None,
+                                    path: path.clone(),
                                 }),
                                 ephemeral: false,
                             });
