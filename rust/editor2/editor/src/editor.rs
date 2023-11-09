@@ -16,7 +16,7 @@ use crate::{
     keyboard::Modifiers,
     wasm_messenger::WasmMessenger,
     widget::{Widget, WidgetId, WidgetStore},
-    widget2::{TextPane, WasmWidget, Deleted},
+    widget2::{Deleted, TextPane, WasmWidget},
 };
 
 use framework::{Position, Size};
@@ -241,7 +241,7 @@ impl Editor {
                     "Widget out of bounds, moving to edge of screen {}",
                     widget.id()
                 );
-               let x = widget
+                let x = widget
                     .position()
                     .x
                     .min(self.window.size.width - widget.size().width * widget.scale());
@@ -249,9 +249,8 @@ impl Editor {
                     .position()
                     .y
                     .min(self.window.size.height - widget.size().height * widget.scale());
-                
-                widget.data.on_move(x, y).unwrap();
 
+                widget.data.on_move(x, y).unwrap();
             }
         }
     }
@@ -349,7 +348,7 @@ impl Editor {
                 self.dirty_widgets.insert(widget_id);
                 let widget = self.widget_store.get_mut(widget_id).unwrap();
                 let output = &process.output;
-                
+
                 if let Some(widget) = widget.data.as_any_mut().downcast_mut::<TextPane>() {
                     widget.set_text(output);
                 }

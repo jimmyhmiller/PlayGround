@@ -29,9 +29,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
-use crate::{
-    keyboard::KeyboardInput, util::encode_base64
-};
+use crate::{keyboard::KeyboardInput, util::encode_base64};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct PointerLengthString {
@@ -267,9 +265,7 @@ impl WasmMessenger {
         // TODO: What is the right option here?
         self.local_pool
             .run_until(Delay::new(Duration::from_millis(4)));
-
     }
-        
 
     fn send_message(&mut self, message: Message) {
         let records = self.pending_messages.entry(message.wasm_id).or_default();

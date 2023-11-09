@@ -11,8 +11,8 @@ use crate::{
     keyboard::{KeyCode, KeyboardInput},
     native::open_file_dialog,
     wasm_messenger::SaveState,
-    widget::{Widget},
-    widget2::{TextPane, WasmWidget, WidgetMeta, Widget as _, Ephemeral},
+    widget::Widget,
+    widget2::{Ephemeral, TextPane, WasmWidget, Widget as _, WidgetMeta},
 };
 
 fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
@@ -229,9 +229,7 @@ impl Editor {
                         ),
                     ))));
 
-                    let output_widget_id = self.widget_store.add_widget(Widget {
-                        data,
-                    });
+                    let output_widget_id = self.widget_store.add_widget(Widget { data });
 
                     self.processes.insert(
                         process_id,
