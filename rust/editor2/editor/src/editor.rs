@@ -233,21 +233,24 @@ impl Editor {
             if let Some(widget) = widget.data.as_any_mut().downcast_mut::<WasmWidget>() {
                 widget.external_sender = Some(self.external_sender.as_ref().unwrap().clone());
             }
-            if widget.position.x >= self.window.size.width
-                || widget.position.y >= self.window.size.height
+            if widget.position().x >= self.window.size.width
+                || widget.position().y >= self.window.size.height
             {
                 println!(
                     "Widget out of bounds, moving to edge of screen {}",
-                    widget.id
+                    widget.id()
                 );
-                widget.position.x = widget
-                    .position
+               let x = widget
+                    .position()
                     .x
-                    .min(self.window.size.width - widget.size.width * widget.scale);
-                widget.position.y = widget
-                    .position
+                    .min(self.window.size.width - widget.size().width * widget.scale());
+                let y = widget
+                    .position()
                     .y
-                    .min(self.window.size.height - widget.size.height * widget.scale);
+                    .min(self.window.size.height - widget.size().height * widget.scale());
+                
+                widget.data.on_move(x, y).unwrap();
+
             }
         }
     }
@@ -265,7 +268,7 @@ impl Editor {
 
         for wasm_id in self.wasm_messenger.get_and_drain_dirty_wasm() {
             if let Some(widget) = self.widget_store.get_mut(wasm_id as usize) {
-                self.dirty_widgets.insert(widget.id);
+                self.dirty_widgets.insert(widget.id());
             }
         }
 
@@ -505,7 +508,8 @@ impl Editor {
         }
         let mut result = String::new();
         for widget in self.widget_store.iter() {
-            if widget.ephemeral {
+            // TODO: Change this
+            if widget.data.typetag_name() == "Ephemeral" {
                 continue;
             }
             let widget_serialized = &format!(

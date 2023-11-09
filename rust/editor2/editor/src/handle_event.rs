@@ -12,7 +12,7 @@ use crate::{
     native::open_file_dialog,
     wasm_messenger::SaveState,
     widget::{Position, Size, Widget},
-    widget2::{TextPane, WasmWidget, WidgetMeta, Widget as _},
+    widget2::{TextPane, WasmWidget, WidgetMeta, Widget as _, Ephemeral},
 };
 
 fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
@@ -34,14 +34,6 @@ impl Editor {
                             .new_instance(path.to_str().unwrap(), None);
                         let next_id = self.widget_store.next_id();
                         self.widget_store.add_widget(Widget {
-                            id: next_id,
-                            position: Position { x, y },
-                            size: Size {
-                                width: 800.0,
-                                height: 800.0,
-                            },
-                            scale: 1.0,
-                            ephemeral: false,
                             data: Box::new(WasmWidget {
                                 draw_commands: vec![],
                                 sender: Some(self.wasm_messenger.get_sender(wasm_id)),
@@ -64,14 +56,6 @@ impl Editor {
                     } else {
                         let next_id = self.widget_store.next_id();
                         self.widget_store.add_widget(Widget {
-                            id: next_id,
-                            position: Position { x, y },
-                            scale: 1.0,
-                            ephemeral: false,
-                            size: Size {
-                                width: 800.0,
-                                height: 800.0,
-                            },
                             data: Box::new(TextPane::new(
                                 std::fs::read_to_string(path.clone()).unwrap().into_bytes(),
                                 40.0,
@@ -101,7 +85,7 @@ impl Editor {
                         if widget.mouse_over(&mouse) {
                             let modified = widget.on_scroll(x, y);
                             if modified {
-                                dirty_widgets.insert(widget.id);
+                                dirty_widgets.insert(widget.id());
                             }
                         }
                     }
@@ -131,25 +115,23 @@ impl Editor {
                     if self.context.modifiers.ctrl && self.context.modifiers.option {
                         for widget_id in self.selected_widgets.iter() {
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                                dirty_widgets.insert(widget.id);
-                                widget.size.width += x_diff;
-                                widget.size.height += y_diff;
-                                widget.on_size_change(widget.size.width, widget.size.height);
+                                dirty_widgets.insert(widget.id());
+                                widget.size().width += x_diff;
+                                widget.size().height += y_diff;
+                                widget.on_size_change(widget.size().width, widget.size().height);
                             }
                         }
                     } else if self.context.modifiers.ctrl {
                         for widget_id in self.selected_widgets.iter() {
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                                dirty_widgets.insert(widget.id);
-                                widget.position.x += x_diff;
-                                widget.position.y += y_diff;
-                                widget.on_move(widget.position.x, widget.position.y);
-                                if widget.position.x > self.window.size.width - 300.0 {
+                                dirty_widgets.insert(widget.id());
+                                let x = widget.position().x + x_diff;
+                                let y = widget.position().y + y_diff;
+                                widget.on_move(x, y);
+                                if x > self.window.size.width - 300.0 {
                                     widget.data.set_scale(0.1);
-                                    widget.scale = 0.1;
                                 } else {
                                     widget.data.set_scale(1.0);
-                                    widget.scale = 1.0;
                                 }
                             }
                         }
@@ -157,8 +139,8 @@ impl Editor {
                         let mut was_over = false;
                         for widget in self.widget_store.iter_mut() {
                             let position = Position { x, y };
-                            let widget_x = position.x - widget.position.x;
-                            let widget_y = position.y - widget.position.y;
+                            let widget_x = position.x - widget.position().x;
+                            let widget_y = position.y - widget.position().y;
                             let widget_space = Position {
                                 x: widget_x,
                                 y: widget_y,
@@ -168,7 +150,7 @@ impl Editor {
                                 was_over = true;
                                 let modified = widget.on_mouse_move(&widget_space, x_diff, y_diff);
                                 if modified {
-                                    dirty_widgets.insert(widget.id);
+                                    dirty_widgets.insert(widget.id());
                                 }
                             }
                         }
@@ -216,12 +198,12 @@ impl Editor {
                     let parent_widget_id = widget_id;
 
                     let parent = self.widget_store.get(parent_widget_id).unwrap();
-                    let mut position = parent.position.offset(parent.size.width + 50.0, 0.0);
+                    let mut position = parent.position().offset(parent.size().width + 50.0, 0.0);
 
                     loop {
                         let mut should_move = false;
                         for widget in self.widget_store.iter() {
-                            if widget.position == position {
+                            if widget.position() == position {
                                 should_move = true;
                             }
                         }
@@ -233,28 +215,22 @@ impl Editor {
                     }
 
                     let next_id = self.widget_store.next_id();
+                    let data = Box::new(Ephemeral::wrap(Box::new(TextPane::new(
+                        vec![],
+                        40.0,
+                        WidgetMeta::new(
+                            position,
+                            Size {
+                                width: 800.0,
+                                height: 800.0,
+                            },
+                            1.0,
+                            next_id,
+                        ),
+                    ))));
+
                     let output_widget_id = self.widget_store.add_widget(Widget {
-                        id: next_id,
-                        position,
-                        size: Size {
-                            width: 800.0,
-                            height: 800.0,
-                        },
-                        scale: 1.0,
-                        ephemeral: true,
-                        data: Box::new(TextPane::new(
-                            vec![],
-                            40.0,
-                            WidgetMeta::new(
-                                position,
-                                Size {
-                                    width: 800.0,
-                                    height: 800.0,
-                                },
-                                1.0,
-                                next_id,
-                            ),
-                        )),
+                        data,
                     });
 
                     self.processes.insert(
@@ -293,7 +269,7 @@ impl Editor {
                         if let Some(widget) = self.widget_store.get_mut(*widget_id) {
                             let modified = widget.on_event(&kind, &event);
                             if modified {
-                                dirty_widgets.insert(widget.id);
+                                dirty_widgets.insert(widget.id());
                             }
                         }
                     }
@@ -338,15 +314,8 @@ impl Editor {
                                 .new_instance(code_editor, Some(path_json));
                             let next_id = self.widget_store.next_id();
                             let widget_id = self.widget_store.add_widget(Widget {
-                                id: next_id,
                                 // TODO: Automatically find an open space
                                 // Or make it so you draw it?
-                                position: Position { x: 500.0, y: 500.0 },
-                                size: Size {
-                                    width: 800.0,
-                                    height: 800.0,
-                                },
-                                scale: 1.0,
                                 data: Box::new(WasmWidget {
                                     draw_commands: vec![],
                                     sender: Some(self.wasm_messenger.get_sender(wasm_id)),
@@ -365,7 +334,6 @@ impl Editor {
                                     external_sender: None,
                                     path: path.clone(),
                                 }),
-                                ephemeral: false,
                             });
                             self.mark_widget_dirty(widget_id);
                             self.events.push(Event::OpenFile(path));
@@ -409,11 +377,11 @@ impl Editor {
         for widget in self.widget_store.iter_mut() {
             if widget.mouse_over(&self.context.mouse_position) {
                 found_a_widget = true;
-                mouse_over.push(widget.id);
+                mouse_over.push(widget.id());
                 // We are only selecting the widget for the purposes
                 // of dragging if ctrl is down
                 if self.context.modifiers.ctrl {
-                    self.selected_widgets.insert(widget.id);
+                    self.selected_widgets.insert(widget.id());
                 } else {
                     widget.on_mouse_down(&self.context.mouse_position);
                 }
@@ -421,7 +389,7 @@ impl Editor {
                 // over and over again then we will get the last one
                 // which would probably draw on top anyways.
                 // Should do better
-                self.active_widget = Some(widget.id);
+                self.active_widget = Some(widget.id());
             }
             if !found_a_widget {
                 self.active_widget = None;
@@ -444,11 +412,11 @@ impl Editor {
         // TODO: Probably only top widget
         for widget in self.widget_store.iter_mut() {
             if widget.mouse_over(&self.context.mouse_position) {
-                mouse_over.push(widget.id);
+                mouse_over.push(widget.id());
 
                 let modifiers = self.context.modifiers;
                 if modifiers.cmd && modifiers.ctrl && modifiers.option {
-                    to_delete.push(widget.id);
+                    to_delete.push(widget.id());
                     continue;
                 }
 

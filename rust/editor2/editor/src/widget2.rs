@@ -1,5 +1,5 @@
 use std::{
-    any::Any, cell::RefCell, error::Error, fs::File, io::Read, path::PathBuf, str::from_utf8, collections::HashMap,
+    any::Any, cell::RefCell, error::Error, fs::File, io::Read, path::PathBuf, str::from_utf8, collections::HashMap, ops::{Deref, DerefMut},
 };
 
 use framework::KeyboardInput;
@@ -69,13 +69,13 @@ pub trait Widget {
     ) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn save(&mut self) -> std::result::Result<(), Box<dyn Error>> {
+    fn save(&mut self) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn reload(&mut self) -> std::result::Result<(), Box<dyn Error>> {
+    fn reload(&mut self) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn update(&mut self) -> std::result::Result<(), Box<dyn Error>> {
+    fn update(&mut self) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
     fn get_state(&self) -> String;
@@ -263,7 +263,7 @@ impl Widget for WasmWidget {
         Ok(())
     }
 
-    fn on_click(&mut self, x: f32, y: f32) -> std::result::Result<(), Box<dyn Error>> {
+    fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.sender
             .as_mut()
             .unwrap()
@@ -271,7 +271,7 @@ impl Widget for WasmWidget {
         Ok(())
     }
 
-    fn on_key(&mut self, input: KeyboardInput) -> std::result::Result<(), Box<dyn Error>> {
+    fn on_key(&mut self, input: KeyboardInput) -> Result<(), Box<dyn Error>> {
         self.sender
             .as_mut()
             .unwrap()
@@ -281,7 +281,7 @@ impl Widget for WasmWidget {
         Ok(())
     }
 
-    fn on_scroll(&mut self, x: f64, y: f64) -> std::result::Result<(), Box<dyn Error>> {
+    fn on_scroll(&mut self, x: f64, y: f64) -> Result<(), Box<dyn Error>> {
         self.sender
             .as_mut()
             .unwrap()
@@ -293,7 +293,7 @@ impl Widget for WasmWidget {
         &mut self,
         width: f32,
         height: f32,
-    ) -> std::result::Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         self.sender
             .as_mut()
             .unwrap()
@@ -301,7 +301,7 @@ impl Widget for WasmWidget {
         Ok(())
     }
 
-    fn on_move(&mut self, x: f32, y: f32) -> std::result::Result<(), Box<dyn Error>> {
+    fn on_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.meta.position = Position { x, y };
         self.sender
             .as_mut()
@@ -310,7 +310,7 @@ impl Widget for WasmWidget {
         Ok(())
     }
 
-    fn save(&mut self) -> std::result::Result<(), Box<dyn Error>> {
+    fn save(&mut self) -> Result<(), Box<dyn Error>> {
         self.sender
             .as_mut()
             .unwrap()
@@ -318,7 +318,7 @@ impl Widget for WasmWidget {
         Ok(())
     }
 
-    fn reload(&mut self) -> std::result::Result<(), Box<dyn Error>> {
+    fn reload(&mut self) -> Result<(), Box<dyn Error>> {
         self.sender
             .as_mut()
             .unwrap()
@@ -326,7 +326,7 @@ impl Widget for WasmWidget {
         Ok(())
     }
 
-    fn set_state(&mut self, state: String) -> std::result::Result<(), Box<dyn Error>> {
+    fn set_state(&mut self, state: String) -> Result<(), Box<dyn Error>> {
         let base64_decoded = decode_base64(&state.as_bytes().to_vec()).unwrap();
         let state = String::from_utf8(base64_decoded).unwrap();
         self.sender
@@ -336,12 +336,12 @@ impl Widget for WasmWidget {
         Ok(())
     }
 
-    fn start(&mut self) -> std::result::Result<(), Box<dyn Error>> {
+    fn start(&mut self) -> Result<(), Box<dyn Error>> {
         // self.sender.as_mut().unwrap().try_send(wrap_payload(Payload::Start))?;
         Ok(())
     }
 
-    fn on_mouse_up(&mut self, x: f32, y: f32) -> std::result::Result<(), Box<dyn Error>> {
+    fn on_mouse_up(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.sender
             .as_mut()
             .unwrap()
@@ -349,7 +349,7 @@ impl Widget for WasmWidget {
         Ok(())
     }
 
-    fn on_mouse_down(&mut self, x: f32, y: f32) -> std::result::Result<(), Box<dyn Error>> {
+    fn on_mouse_down(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.sender
             .as_mut()
             .unwrap()
@@ -363,7 +363,7 @@ impl Widget for WasmWidget {
         y: f32,
         x_diff: f32,
         y_diff: f32,
-    ) -> std::result::Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         self.sender
             .as_mut()
             .unwrap()
@@ -375,7 +375,7 @@ impl Widget for WasmWidget {
         Ok(())
     }
 
-    fn on_event(&mut self, kind: String, event: String) -> std::result::Result<(), Box<dyn Error>> {
+    fn on_event(&mut self, kind: String, event: String) -> Result<(), Box<dyn Error>> {
         self.sender
             .as_mut()
             .unwrap()
@@ -387,7 +387,7 @@ impl Widget for WasmWidget {
         &mut self,
         process_id: i32,
         message: String,
-    ) -> std::result::Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         self.sender
             .as_mut()
             .unwrap()
@@ -398,7 +398,7 @@ impl Widget for WasmWidget {
         Ok(())
     }
 
-    fn update(&mut self) -> std::result::Result<(), Box<dyn Error>> {
+    fn update(&mut self) -> Result<(), Box<dyn Error>> {
         // TODO: Change this
         self.sender
             .as_mut()
@@ -1020,6 +1020,140 @@ impl Widget for Deleted {
         "".to_string()
     }
 }
+
+
+#[derive(Serialize, Deserialize)]
+pub struct Ephemeral {
+    widget: Box<dyn Widget>
+}
+
+impl Ephemeral {
+    pub fn wrap(widget: Box<dyn Widget>) -> Ephemeral {
+        Ephemeral {
+            widget
+        }
+    }
+}
+
+impl Deref for Ephemeral {
+    type Target = Box<dyn Widget>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.widget
+    }
+}
+
+impl DerefMut for Ephemeral {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.widget
+    }
+}
+
+#[typetag::serde]
+impl Widget for Ephemeral {
+    fn as_any(&self) ->  &dyn Any {
+        self.widget.as_any()
+    }
+
+    fn as_any_mut(&mut self) ->  &mut dyn Any {
+        self.widget.as_any_mut()
+    }
+
+    fn get_state(&self) -> String {
+        self.widget.get_state()
+    }
+
+    fn position(&self) -> Position {
+        self.widget.position()
+    }
+
+    fn scale(&self) -> f32 {
+        self.widget.scale()
+    }
+
+    fn set_scale(&mut self, scale: f32) {
+        self.widget.set_scale(scale)
+    }
+
+    fn size(&self) -> Size {
+        self.widget.size()
+    }
+
+    fn id(&self) -> usize {
+        self.widget.id()
+    }
+
+    fn set_id(&mut self, id: usize) {
+        self.widget.set_id(id)
+    }
+
+    fn start(&mut self) -> Result<(),Box<dyn Error> >{
+        self.widget.start()
+    }
+
+    fn draw(&mut self,canvas: &Canvas,bounds:Size) -> Result<(),Box<dyn Error> >{
+        self.widget.draw(canvas,bounds)
+    }
+
+    fn on_click(&mut self,x:f32,y:f32) -> Result<(),Box<dyn Error> >{
+        self.widget.on_click(x,y)
+    }
+
+    fn on_mouse_up(&mut self,x:f32,y:f32) -> Result<(),Box<dyn Error> >{
+        self.widget.on_mouse_up(x,y)
+    }
+
+    fn on_mouse_down(&mut self,x:f32,y:f32) -> Result<(),Box<dyn Error> >{
+        self.widget.on_mouse_down(x,y)
+    }
+
+    fn on_mouse_move(&mut self,x:f32,y:f32,x_diff:f32,y_diff:f32,) -> Result<(),Box<dyn Error> >{
+        self.widget.on_mouse_move(x,y,x_diff,y_diff) 
+    }
+
+    fn on_key(&mut self,input:KeyboardInput) -> Result<(),Box<dyn Error> >{
+        self.widget.on_key(input)
+    }
+
+    fn on_scroll(&mut self,x:f64,y:f64) -> Result<(),Box<dyn Error> >{
+        self.widget.on_scroll(x,y)
+    }
+
+    fn on_event(&mut self,kind:String,event:String) -> Result<(),Box<dyn Error> >{
+        self.widget.on_event(kind,event)
+    }
+
+    fn on_size_change(&mut self,width:f32,height:f32) -> Result<(),Box<dyn Error> >{
+        self.widget.on_size_change(width,height)
+    }
+
+    fn on_move(&mut self,x:f32,y:f32) -> Result<(),Box<dyn Error> >{
+        self.widget.on_move(x,y)
+    }
+
+    fn set_state(&mut self,state:String) -> Result<(),Box<dyn Error> >{
+        self.widget.set_state(state)
+    }
+
+    fn on_process_message(&mut self,_process_id:i32,_message:String,) -> Result<(),Box<dyn Error> >{
+        self.widget.on_process_message(_process_id,_message)
+    }
+
+    fn save(&mut self) -> Result<(),Box<dyn Error> >{
+        
+        Ok(())
+    }
+
+    fn reload(&mut self) -> Result<(),Box<dyn Error> >{
+        self.widget.reload()
+    }
+
+    fn update(&mut self) -> Result<(),Box<dyn Error> >{
+        self.widget.update()
+    }
+
+}
+
 
 // These are things widgets can do.
 // But we also need to store their locations and stuff
