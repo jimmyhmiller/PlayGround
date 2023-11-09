@@ -3,7 +3,7 @@ use std::{
     error::Error,
     io::Write,
     path::Path,
-    sync::{mpsc, Arc},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -30,7 +30,7 @@ use wasmtime::{
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
 use crate::{
-    editor::Value, event::Event, keyboard::KeyboardInput, util::encode_base64, widget::Position,
+    keyboard::KeyboardInput, util::encode_base64, widget::Position,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -99,7 +99,6 @@ pub struct WasmMessenger {
     local_pool: futures::executor::LocalPool,
     local_spawner: LocalSpawner,
     last_wasm_id: u64,
-    wasm_draw_commands: HashMap<WasmId, Vec<DrawCommands>>,
     wasm_non_draw_commands: HashMap<WasmId, Vec<Commands>>,
     last_message_id: usize,
     // Not a huge fan of this solution,
@@ -109,12 +108,11 @@ pub struct WasmMessenger {
     pending_messages: HashMap<WasmId, HashMap<usize, Message>>,
     engine: Arc<Engine>,
     senders: HashMap<WasmId, Sender<Message>>,
-    external_sender: Option<mpsc::Sender<Event>>,
     dirty_wasm: HashSet<WasmId>,
 }
 
 impl WasmMessenger {
-    pub fn new(external_sender: Option<mpsc::Sender<Event>>) -> Self {
+    pub fn new() -> Self {
         let local_pool = LocalPool::new();
         let local_spawner = local_pool.spawner();
 
@@ -136,13 +134,11 @@ impl WasmMessenger {
             local_pool,
             local_spawner,
             last_wasm_id: 0,
-            wasm_draw_commands: HashMap::new(),
             wasm_non_draw_commands: HashMap::new(),
             last_message_id: 1,
             pending_messages: HashMap::new(),
             engine,
             senders: HashMap::new(),
-            external_sender,
             dirty_wasm: HashSet::new(),
         }
     }
@@ -151,10 +147,6 @@ impl WasmMessenger {
         let mut dirty_wasm = HashSet::new();
         std::mem::swap(&mut dirty_wasm, &mut self.dirty_wasm);
         dirty_wasm
-    }
-
-    pub fn set_external_sender(&mut self, external_sender: mpsc::Sender<Event>) {
-        self.external_sender = Some(external_sender);
     }
 
     pub fn number_of_pending_requests(&self) -> usize {
@@ -271,84 +263,7 @@ impl WasmMessenger {
         (id, out_receiver)
     }
 
-    pub fn process_non_draw_commands(&mut self, values: &mut HashMap<String, Value>) {
-        for (wasm_id, commands) in self.wasm_non_draw_commands.iter() {
-            for command in commands.iter() {
-                match command {
-                    Commands::StartProcess(process_id, process_command) => {
-                        self.external_sender
-                            .as_mut()
-                            .unwrap()
-                            .send(Event::StartProcess(
-                                *process_id as usize,
-                                // TODO: I probably actually want widget id?
-                                *wasm_id as usize,
-                                process_command.clone(),
-                            ))
-                            .unwrap();
-                    }
-                    Commands::SendProcessMessage(process_id, message) => {
-                        self.external_sender
-                            .as_mut()
-                            .unwrap()
-                            .send(Event::SendProcessMessage(
-                                *process_id as usize,
-                                message.clone(),
-                            ))
-                            .unwrap();
-                    }
-                    Commands::ReceiveLastProcessMessage(_) => println!("Unhandled"),
-                    Commands::ProvideF32(name, val) => {
-                        values.insert(name.to_string(), Value::F32(*val));
-                    }
-                    Commands::ProvideBytes(name, data) => {
-                        // TODO: Get rid of clone here
-                        values.insert(name.to_string(), Value::Bytes(data.clone()));
-                    }
-                    Commands::Event(kind, event) => {
-                        self.external_sender
-                            .as_mut()
-                            .unwrap()
-                            .send(Event::Event(kind.clone(), event.clone()))
-                            .unwrap();
-                    }
-                    Commands::Subscribe(kind) => {
-                        self.external_sender
-                            .as_mut()
-                            .unwrap()
-                            .send(Event::Subscribe(
-                                // TODO: I probably actually want widget id?
-                                *wasm_id as usize,
-                                kind.clone(),
-                            ))
-                            .unwrap();
-                    }
-                    Commands::Unsubscribe(kind) => {
-                        self.external_sender
-                            .as_mut()
-                            .unwrap()
-                            .send(Event::Unsubscribe(
-                                // TODO: I probably actually want widget id?
-                                *wasm_id as usize,
-                                kind.clone(),
-                            ))
-                            .unwrap();
-                    }
-                    Commands::SetCursor(cursor) => {
-                        self.external_sender
-                            .as_mut()
-                            .unwrap()
-                            .send(Event::SetCursor(*cursor))
-                            .unwrap();
-                    }
-                }
-            }
-        }
-        self.wasm_non_draw_commands.clear();
-    }
-
-    pub fn tick(&mut self, values: &mut HashMap<String, Value>) {
-        self.process_non_draw_commands(values);
+    pub fn tick(&mut self) {
         // TODO: What is the right option here?
         self.local_pool
             .run_until(Delay::new(Duration::from_millis(4)));
@@ -377,13 +292,6 @@ impl WasmMessenger {
                 println!("Can't find wasm instance for message {:?}", message);
             }
         }
-    }
-
-    pub fn has_draw_commands(&self, wasm_id: u64) -> bool {
-        self.wasm_draw_commands
-            .get(&wasm_id)
-            .map(|x| !x.is_empty())
-            .unwrap_or(false)
     }
 }
 
@@ -431,7 +339,10 @@ impl WasmManager {
             let out_message = self.process_message(message).await;
             match out_message {
                 Ok(out_message) => {
-                    self.sender.start_send(out_message).unwrap();
+                    let result = self.sender.start_send(out_message);
+                    if result.is_err() {
+                        println!("Error sending message");
+                    }
                 }
                 Err(err) => {
                     println!("Error processing message: {}", err);
@@ -440,7 +351,10 @@ impl WasmManager {
                         message_id,
                         payload: OutPayload::Error(err.to_string()),
                     };
-                    self.sender.start_send(out_message).unwrap();
+                    let result = self.sender.start_send(out_message);
+                    if result.is_err() {
+                        println!("Error sending message");
+                    }
                 }
             }
         }
@@ -629,6 +543,7 @@ pub enum Commands {
     Subscribe(String),
     Unsubscribe(String),
     SetCursor(CursorIcon),
+    Redraw(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]

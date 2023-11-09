@@ -32,8 +32,9 @@ impl Editor {
                         let (wasm_id, receiver) = self
                             .wasm_messenger
                             .new_instance(path.to_str().unwrap(), None);
+                        let next_id = self.widget_store.next_id();
                         self.widget_store.add_widget(Widget {
-                            id: 0,
+                            id: next_id,
                             position: Position { x, y },
                             size: Size {
                                 width: 800.0,
@@ -56,13 +57,17 @@ impl Editor {
                                         height: 800.0,
                                     },
                                     1.0,
+                                    next_id,
                                 ),
                                 save_state: SaveState::Unsaved,
+                                wasm_non_draw_commands: vec![],
+                                external_sender: None,
                             }),
                         });
                     } else {
+                        let next_id = self.widget_store.next_id();
                         self.widget_store.add_widget(Widget {
-                            id: 0,
+                            id: next_id,
                             position: Position { x, y },
                             scale: 1.0,
                             ephemeral: false,
@@ -81,6 +86,7 @@ impl Editor {
                                             height: 800.0,
                                         },
                                         1.0,
+                                        next_id,
                                     ),
                                 ),
                             },
@@ -94,6 +100,7 @@ impl Editor {
                                         height: 800.0,
                                     },
                                     1.0,
+                                    next_id,
                                 ),
                             )),
                         });
@@ -208,7 +215,7 @@ impl Editor {
                         }
                     }
                 }
-                Event::StartProcess(process_id, wasm_id, process_command) => {
+                Event::StartProcess(process_id, widget_id, process_command) => {
                     let mut process = std::process::Command::new(process_command)
                         .stdout(std::process::Stdio::piped())
                         .stdin(std::process::Stdio::piped())
@@ -224,8 +231,7 @@ impl Editor {
                     self.per_frame_actions
                         .push(PerFrame::ProcessOutput { process_id });
 
-                    let parent_widget_id =
-                        self.widget_store.get_widget_by_wasm_id(wasm_id).unwrap();
+                    let parent_widget_id = widget_id;
 
                     let parent = self.widget_store.get(parent_widget_id).unwrap();
                     let mut position = parent.position.offset(parent.size.width + 50.0, 0.0);
@@ -244,8 +250,9 @@ impl Editor {
                         }
                     }
 
+                    let next_id = self.widget_store.next_id();
                     let output_widget_id = self.widget_store.add_widget(Widget {
-                        id: 0,
+                        id: next_id,
                         position,
                         size: Size {
                             width: 800.0,
@@ -264,6 +271,7 @@ impl Editor {
                                         height: 800.0,
                                     },
                                     1.0,
+                                    next_id,
                                 ),
                             ),
                         },
@@ -277,6 +285,7 @@ impl Editor {
                                     height: 800.0,
                                 },
                                 1.0,
+                                next_id,
                             ),
                         )),
                     });
@@ -322,8 +331,7 @@ impl Editor {
                         }
                     }
                 }
-                Event::Subscribe(wasm_id, kind) => {
-                    let widget_id = self.widget_store.get_widget_by_wasm_id(wasm_id).unwrap();
+                Event::Subscribe(widget_id, kind) => {
                     if let Some(listening_widgets) = self.event_listeners.get_mut(&kind) {
                         listening_widgets.insert(widget_id);
                     } else {
@@ -331,8 +339,7 @@ impl Editor {
                             .insert(kind, HashSet::from_iter(vec![widget_id]));
                     }
                 }
-                Event::Unsubscribe(wasm_id, kind) => {
-                    let widget_id = self.widget_store.get_widget_by_wasm_id(wasm_id).unwrap();
+                Event::Unsubscribe(widget_id, kind) => {
                     if let Some(listening_widgets) = self.event_listeners.get_mut(&kind) {
                         listening_widgets.retain(|x| *x != widget_id);
                     }
@@ -362,8 +369,9 @@ impl Editor {
                             let (wasm_id, receiver) = self
                                 .wasm_messenger
                                 .new_instance(code_editor, Some(path_json));
+                            let next_id = self.widget_store.next_id();
                             let widget_id = self.widget_store.add_widget(Widget {
-                                id: 0,
+                                id: next_id,
                                 // TODO: Automatically find an open space
                                 // Or make it so you draw it?
                                 position: Position { x: 500.0, y: 500.0 },
@@ -387,8 +395,11 @@ impl Editor {
                                             height: 800.0,
                                         },
                                         1.0,
+                                        next_id,
                                     ),
                                     save_state: SaveState::Unsaved,
+                                    wasm_non_draw_commands: vec![],
+                                    external_sender: None,
                                 }),
                                 ephemeral: false,
                             });

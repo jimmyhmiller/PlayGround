@@ -16,7 +16,7 @@ use crate::{
     keyboard::Modifiers,
     wasm_messenger::WasmMessenger,
     widget::{Position, Size, Widget, WidgetData, WidgetId, WidgetStore},
-    widget2::TextPane,
+    widget2::{TextPane, WasmWidget},
 };
 
 use nonblock::NonBlockingReader;
@@ -195,7 +195,7 @@ impl Editor {
         });
         self.external_receiver = Some(receiver);
         self.external_sender = Some(sender_clone.clone());
-        self.wasm_messenger.set_external_sender(sender_clone);
+        // self.wasm_messenger.set_external_sender(sender_clone);
         self.debounce_watcher = Some(debouncer);
     }
 
@@ -230,6 +230,9 @@ impl Editor {
             self.widget_store.add_widget(widget);
         }
         for widget in self.widget_store.iter_mut() {
+            if let Some(widget) = widget.data2.as_any_mut().downcast_mut::<WasmWidget>() {
+                widget.external_sender = Some(self.external_sender.as_ref().unwrap().clone());
+            }
             if widget.position.x >= self.window.size.width
                 || widget.position.y >= self.window.size.height
             {
@@ -258,7 +261,7 @@ impl Editor {
         // Todo: Need to test that I am not missing any
         // events with my start and end
 
-        self.wasm_messenger.tick(&mut self.values);
+        self.wasm_messenger.tick();
 
         for wasm_id in self.wasm_messenger.get_and_drain_dirty_wasm() {
             if let Some(widget) = self.widget_store.get_mut(wasm_id as usize) {
@@ -391,7 +394,7 @@ impl Editor {
             debounce_watcher: None,
             event_loop_proxy: None,
             active_widget: None,
-            wasm_messenger: WasmMessenger::new(None),
+            wasm_messenger: WasmMessenger::new(),
             widget_config_path: widget_config_path.to_string(),
             values: HashMap::new(),
             per_frame_actions: Vec::new(),

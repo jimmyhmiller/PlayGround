@@ -51,6 +51,7 @@ impl From<Size> for Position {
     }
 }
 
+
 pub type WidgetId = usize;
 
 // use crate::widget2::{widget_serialize, widget_deserialize};
@@ -76,10 +77,20 @@ pub struct WidgetStore {
 }
 
 impl WidgetStore {
-    pub fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
-        let id = self.next_id;
+
+    pub fn next_id(&mut self) -> WidgetId {
+        let current = self.next_id;
         self.next_id += 1;
-        widget.id = id;
+        current
+    }
+    pub fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
+        if widget.id == 0 {
+            let id = self.next_id;
+            self.next_id += 1;
+            widget.id = id;
+            widget.data2.set_id(id);
+        }
+        let id = widget.id;
         self.widgets.push(widget);
         id
     }
@@ -167,17 +178,8 @@ impl WidgetStore {
     pub fn delete_widget(&mut self, widget_id: usize) {
         // TODO: Need a better way rather than tombstones
         self.widgets[widget_id].data = WidgetData::Deleted;
+        self.widgets[widget_id].data2 = Box::new(widget2::Deleted {});
         self.widget_images.remove(&widget_id);
-    }
-
-    pub fn get_widget_by_wasm_id(&self, expected_wasm_id: usize) -> Option<usize> {
-        self.widgets
-            .iter()
-            .find(|x| match &x.data {
-                WidgetData::Wasm { wasm: _, wasm_id } => *wasm_id as usize == expected_wasm_id,
-                _ => false,
-            })
-            .map(|x| x.id)
     }
 }
 
@@ -305,8 +307,10 @@ impl Widget {
                     draw_commands: vec![],
                     sender: Some(wasm_messenger.get_sender(new_wasm_id)),
                     receiver: Some(receiver),
-                    meta: WidgetMeta::new(self.position, self.size, self.scale),
+                    meta: WidgetMeta::new(self.position, self.size, self.scale, self.id),
                     save_state: SaveState::Unsaved,
+                    wasm_non_draw_commands: vec![],
+                    external_sender: None,
                 });
                 *wasm_id = new_wasm_id;
                 if let Some(state) = &wasm.state {
@@ -317,7 +321,7 @@ impl Widget {
                 self.data2 = Box::new(Text {
                     text: text.clone(),
                     text_options: text_options.clone(),
-                    meta: WidgetMeta::new(self.position, self.size, self.scale),
+                    meta: WidgetMeta::new(self.position, self.size, self.scale, self.id),
                 });
             }
             WidgetData::TextPane { text_pane } => {
@@ -327,7 +331,7 @@ impl Widget {
                 self.data2 = Box::new(widget2::Image {
                     path: data.path.clone(),
                     cache: RefCell::new(None),
-                    meta: WidgetMeta::new(self.position, self.size, self.scale),
+                    meta: WidgetMeta::new(self.position, self.size, self.scale, self.id),
                 });
             }
             _ => {}
@@ -343,7 +347,7 @@ impl Widget {
             match &mut self.data {
                 WidgetData::Wasm { wasm, .. } => {
                     self.data2.save().unwrap();
-                    wasm_messenger.tick(&mut HashMap::new());
+                    wasm_messenger.tick();
                     self.data2.update().unwrap();
                     let wasm_widget: &WasmWidget = self.data2.as_any().downcast_ref().unwrap();
                     match &wasm_widget.save_state {

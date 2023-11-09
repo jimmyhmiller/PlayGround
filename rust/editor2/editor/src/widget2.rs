@@ -1,5 +1,5 @@
 use std::{
-    any::Any, cell::RefCell, error::Error, fs::File, io::Read, path::PathBuf, str::from_utf8,
+    any::Any, cell::RefCell, error::Error, fs::File, io::Read, path::PathBuf, str::from_utf8, collections::HashMap,
 };
 
 use framework::KeyboardInput;
@@ -10,8 +10,8 @@ use skia_safe::{Canvas, Data, Font, FontStyle, Path, Point, RRect, Rect, Typefac
 use crate::{
     color::Color,
     util::{decode_base64, encode_base64},
-    wasm_messenger::{DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState},
-    widget::{Position, Size, TextOptions},
+    wasm_messenger::{DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState, Commands},
+    widget::{Position, Size, TextOptions}, editor::Value, event::Event,
 };
 
 #[allow(unused)]
@@ -84,6 +84,8 @@ pub trait Widget {
     fn scale(&self) -> f32;
     fn set_scale(&mut self, scale: f32);
     fn size(&self) -> Size;
+    fn id(&self) -> usize;
+    fn set_id(&mut self, id: usize);
 }
 
 #[allow(unused)]
@@ -132,6 +134,13 @@ impl Widget for () {
     fn get_state(&self) -> String {
         todo!()
     }
+    fn id(&self) -> usize {
+        todo!()
+    }
+
+    fn set_id(&mut self, id: usize) {
+        todo!()
+    }
 }
 
 fn wrap_payload(payload: Payload) -> Message {
@@ -158,6 +167,10 @@ pub struct WasmWidget {
     pub receiver: Option<futures::channel::mpsc::Receiver<OutMessage>>,
     pub meta: WidgetMeta,
     pub save_state: SaveState,
+    #[serde(skip)]
+    pub wasm_non_draw_commands: Vec<Commands>,
+    #[serde(skip)]
+    pub external_sender: Option<std::sync::mpsc::Sender<Event>>,
     // TODO:
     // Maybe we make a "mark dirty" sender
     // That way each widget can decide it is dirty
@@ -393,6 +406,9 @@ impl Widget for WasmWidget {
             .as_mut()
             .unwrap()
             .try_send(wrap_payload(Payload::Update))?;
+
+        // TODO: Figure out values
+        self.process_non_draw_commands(&mut HashMap::new());
         while let Ok(Some(message)) = self.receiver.as_mut().unwrap().try_next() {
             // Note: Right now if a message doesn't have a corresponding in-message
             // I am just setting the out message to id: 0.
@@ -417,21 +433,16 @@ impl Widget for WasmWidget {
                     // TODO: Is this a performance issue?
                     // I'm thinking not? It seems to actually work because
                     // we only do this every once in a while
-                    // if self.draw_commands.get(&message.wasm_id) == Some(&commands) {
-                    //     should_mark_dirty = false;
-                    // }
-                    // self.wasm_draw_commands.insert(message.wasm_id, commands);
+                    if self.draw_commands == commands {
+                        should_mark_dirty = false;
+                    }
                     self.draw_commands = commands;
                 }
                 OutPayload::Update(commands) => {
-                    // let current_commands = self
-                    //     .wasm_non_draw_commands
-                    //     .entry(message.wasm_id)
-                    //     .or_default();
-                    // if current_commands.is_empty() {
-                    //     should_mark_dirty = false;
-                    // }
-                    // current_commands.extend(commands);
+                    if self.wasm_non_draw_commands.is_empty() {
+                        should_mark_dirty = false;
+                    }
+                    self.wasm_non_draw_commands.extend(commands);
                 }
                 OutPayload::Saved(saved) => {
                     self.save_state = saved;
@@ -454,11 +465,7 @@ impl Widget for WasmWidget {
                     // TODO: Don't need widget id
                     // from message, but probably do need
                     // to know what widget we are.
-                    // let commands = self
-                    //     .wasm_non_draw_commands
-                    //     .entry(message.wasm_id)
-                    //     .or_default();
-                    // commands.push(Commands::Redraw(widget_id));
+                    self.wasm_non_draw_commands.push(Commands::Redraw(self.id()));
                 }
                 OutPayload::Complete => {
                     // should_mark_dirty = false;
@@ -494,7 +501,101 @@ impl Widget for WasmWidget {
             SaveState::Saved(s) => s.clone(),
         }
     }
+
+    fn id(&self) -> usize {
+        self.meta.id
+    }
+
+    fn set_id(&mut self, id: usize) {
+        self.meta.id = id;
+    }
 }
+
+impl WasmWidget {
+    pub fn process_non_draw_commands(&mut self, values: &mut HashMap<String, Value>) {
+        let id = self.id();
+        for command in self.wasm_non_draw_commands.iter() {
+            match command {
+                Commands::StartProcess(process_id, process_command) => {
+                    self.external_sender
+                        .as_mut()
+                        .unwrap()
+                        .send(Event::StartProcess(
+                            *process_id as usize,
+                            // TODO: I probably actually want widget id?
+                            id,
+                            process_command.clone(),
+                        ))
+                        .unwrap();
+                }
+                Commands::SendProcessMessage(process_id, message) => {
+                    self.external_sender
+                        .as_mut()
+                        .unwrap()
+                        .send(Event::SendProcessMessage(
+                            *process_id as usize,
+                            message.clone(),
+                        ))
+                        .unwrap();
+                }
+                Commands::ReceiveLastProcessMessage(_) => println!("Unhandled"),
+                Commands::ProvideF32(name, val) => {
+                    values.insert(name.to_string(), Value::F32(*val));
+                }
+                Commands::ProvideBytes(name, data) => {
+                    // TODO: Get rid of clone here
+                    values.insert(name.to_string(), Value::Bytes(data.clone()));
+                }
+                Commands::Event(kind, event) => {
+                    self.external_sender
+                        .as_mut()
+                        .unwrap()
+                        .send(Event::Event(kind.clone(), event.clone()))
+                        .unwrap();
+                }
+                Commands::Redraw(widget_id) => {
+                    self.external_sender
+                        .as_mut()
+                        .unwrap()
+                        .send(Event::Redraw(*widget_id))
+                        .unwrap();
+                }
+                Commands::Subscribe(kind) => {
+                    self.external_sender
+                        .as_mut()
+                        .unwrap()
+                        .send(Event::Subscribe(
+                            // TODO: I probably actually want widget id?
+                            id,
+                            kind.clone(),
+                        ))
+                        .unwrap();
+                }
+                Commands::Unsubscribe(kind) => {
+                    self.external_sender
+                        .as_mut()
+                        .unwrap()
+                        .send(Event::Unsubscribe(
+                            // TODO: I probably actually want widget id?
+                            id,
+                            kind.clone(),
+                        ))
+                        .unwrap();
+                }
+                Commands::SetCursor(cursor) => {
+                    self.external_sender
+                        .as_mut()
+                        .unwrap()
+                        .send(Event::SetCursor(*cursor))
+                        .unwrap();
+                }
+            }
+        }
+        self.wasm_non_draw_commands.clear();
+    }
+
+}
+
 
 fn serialize_text<S>(x: &[u8], s: S) -> Result<S::Ok, S::Error>
 where
@@ -522,14 +623,17 @@ pub struct WidgetMeta {
     position: Position,
     scale: f32,
     size: Size,
+    #[serde(skip)]
+    id: usize,
 }
 
 impl WidgetMeta {
-    pub fn new(position: Position, size: Size, scale: f32) -> Self {
+    pub fn new(position: Position, size: Size, scale: f32, id: usize) -> Self {
         Self {
             position,
             scale,
             size,
+            id,
         }
     }
 }
@@ -692,6 +796,14 @@ impl Widget for TextPane {
         self.meta.size
     }
 
+    fn id(&self) -> usize {
+        self.meta.id
+    }
+
+    fn set_id(&mut self, id: usize) {
+        self.meta.id = id;
+    }
+
     fn set_scale(&mut self, scale: f32) {
         self.meta.scale = scale;
     }
@@ -732,6 +844,14 @@ impl Widget for Text {
 
     fn size(&self) -> Size {
         self.meta.size
+    }
+
+    fn id(&self) -> usize {
+        self.meta.id
+    }
+
+    fn set_id(&mut self, id: usize) {
+        self.meta.id = id;
     }
 
     fn draw(&mut self, canvas: &Canvas, _bounds: Size) -> Result<(), Box<dyn Error>> {
@@ -806,6 +926,14 @@ impl Widget for Image {
         self.meta.size
     }
 
+    fn id(&self) -> usize {
+        self.meta.id
+    }
+
+    fn set_id(&mut self, id: usize) {
+        self.meta.id = id;
+    }
+
     fn get_state(&self) -> String {
         "".to_string()
     }
@@ -849,7 +977,7 @@ impl Image {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Deleted {}
+pub struct Deleted {}
 
 #[typetag::serde]
 impl Widget for Deleted {
@@ -868,6 +996,12 @@ impl Widget for Deleted {
     fn scale(&self) -> f32 {
         1.0
     }
+
+    fn id(&self) -> usize {
+        42
+    }
+
+    fn set_id(&mut self, _id: usize) {}
 
     fn set_scale(&mut self, _scale: f32) {
         
