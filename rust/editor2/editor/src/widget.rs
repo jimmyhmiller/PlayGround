@@ -1,10 +1,11 @@
-use std::{collections::{HashMap, HashSet}, ops::{Deref, DerefMut}};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::{Deref, DerefMut},
+};
 
 use framework::{Position, Size};
 use serde::{Deserialize, Serialize};
-use skia_safe::{
-    Canvas, Image,
-};
+use skia_safe::{Canvas, Image};
 
 use crate::{
     keyboard::KeyboardInput,
@@ -32,7 +33,6 @@ impl DerefMut for Widget {
     }
 }
 
-
 impl Widget {
     pub fn on_click(&mut self, position: &Position) {
         let widget_space = self.widget_space(position);
@@ -51,7 +51,9 @@ impl Widget {
 
     pub fn on_mouse_down(&mut self, position: &Position) {
         let widget_space = self.widget_space(position);
-        self.data.on_mouse_down(widget_space.x, widget_space.y).unwrap();
+        self.data
+            .on_mouse_down(widget_space.x, widget_space.y)
+            .unwrap();
     }
 
     pub fn on_mouse_up(&mut self, position: &Position) {
@@ -88,7 +90,7 @@ impl Widget {
                 SaveState::Empty => todo!(),
                 SaveState::Saved(state) => {
                     widget.set_state(state.clone()).unwrap();
-                },
+                }
             }
         }
     }
@@ -100,7 +102,6 @@ impl Widget {
         }
         // TODO: Clean up this mess
         loop {
-
             if let Some(widget) = self.data.as_any_mut().downcast_mut::<WasmWidget>() {
                 widget.save().unwrap();
                 wasm_messenger.tick();
@@ -119,7 +120,6 @@ impl Widget {
             } else {
                 break;
             }
-
         }
     }
 
@@ -177,7 +177,6 @@ pub struct WidgetStore {
 }
 
 impl WidgetStore {
-
     pub fn next_id(&mut self) -> WidgetId {
         let current = self.next_id;
         self.next_id += 1;
@@ -211,7 +210,7 @@ impl WidgetStore {
     }
 
     pub fn draw(&mut self, canvas: &Canvas, _dirty_widgets: &HashSet<usize>) {
-        let dirty_widgets : HashSet<usize> = self.widgets.iter().map(|x| x.id()).collect();
+        let dirty_widgets: HashSet<usize> = self.widgets.iter().map(|x| x.id()).collect();
         // let mut dirty_widgets = dirty_widgets.clone();
         // for widget in self.iter() {
         //     if !self.widget_images.contains_key(&widget.id) {
@@ -280,6 +279,3 @@ impl WidgetStore {
         self.widget_images.remove(&widget_id);
     }
 }
-
-
-
