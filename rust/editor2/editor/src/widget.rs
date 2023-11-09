@@ -51,17 +51,26 @@ impl From<Size> for Position {
 
 pub type WidgetId = usize;
 
-// use crate::widget2::{widget_serialize, widget_deserialize};
 #[derive(Serialize, Deserialize)]
 pub struct Widget {
-    #[serde(skip)]
-    pub id: WidgetId,
-    pub position: Position,
-    pub size: Size,
-    pub scale: f32,
     pub data: Box<dyn Widget2>,
-    #[serde(default)]
-    pub ephemeral: bool,
+}
+
+impl Widget {
+    pub fn scale(&self) -> f32 {
+        self.data.scale()
+    }
+    pub fn position(&self) -> Position {
+        self.data.position()
+    }
+
+    pub fn size(&self) -> Size {
+        self.data.size()
+    }
+
+    pub fn id(&self) -> WidgetId {
+        self.data.id()
+    }
 }
 
 pub struct WidgetStore {
@@ -78,13 +87,12 @@ impl WidgetStore {
         current
     }
     pub fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
-        if widget.id == 0 {
+        if widget.id() == 0 {
             let id = self.next_id;
             self.next_id += 1;
-            widget.id = id;
             widget.data.set_id(id);
         }
-        let id = widget.id;
+        let id = widget.id();
         self.widgets.push(widget);
         id
     }
@@ -106,7 +114,7 @@ impl WidgetStore {
     }
 
     pub fn draw(&mut self, canvas: &Canvas, _dirty_widgets: &HashSet<usize>) {
-        let dirty_widgets : HashSet<usize> = self.widgets.iter().map(|x| x.id).collect();
+        let dirty_widgets : HashSet<usize> = self.widgets.iter().map(|x| x.id()).collect();
         // let mut dirty_widgets = dirty_widgets.clone();
         // for widget in self.iter() {
         //     if !self.widget_images.contains_key(&widget.id) {
@@ -135,12 +143,12 @@ impl WidgetStore {
                     //     continue;
                     // }
 
-                    widget.draw(canvas, widget.size);
+                    widget.draw(canvas, widget.size());
                     canvas.restore_to_count(before_count);
                     canvas.restore();
 
                     let image = surface.image_snapshot();
-                    images_to_insert.push((widget.id, image));
+                    images_to_insert.push((widget.id(), image));
                 }
             } else {
                 println!("Widget not found for id: {}", widget_id);
@@ -223,8 +231,8 @@ impl Widget {
     }
 
     fn widget_space(&mut self, position: &Position) -> Position {
-        let widget_x = position.x - self.position.x;
-        let widget_y = position.y - self.position.y;
+        let widget_x = position.x - self.position().x;
+        let widget_y = position.y - self.position().y;
 
         Position {
             x: widget_x,
@@ -254,10 +262,10 @@ impl Widget {
     pub fn mouse_over(&self, position: &Position) -> bool {
         let x = position.x;
         let y = position.y;
-        let x_min = self.position.x;
-        let x_max = self.position.x + self.size.width * self.scale;
-        let y_min = self.position.y;
-        let y_max = self.position.y + self.size.height * self.scale;
+        let x_min = self.position().x;
+        let x_max = self.position().x + self.size().width * self.scale();
+        let y_min = self.position().y;
+        let y_max = self.position().y + self.size().height * self.scale();
         x >= x_min && x <= x_max && y >= y_min && y <= y_max
     }
 
@@ -277,7 +285,8 @@ impl Widget {
     }
 
     pub fn save(&mut self, wasm_messenger: &mut WasmMessenger) {
-        if self.ephemeral {
+        // TODO: Change this
+        if self.data.typetag_name() == "Ephemeral" {
             return;
         }
         // TODO: Clean up this mess
