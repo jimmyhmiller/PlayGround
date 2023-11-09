@@ -358,7 +358,6 @@ pub fn fetch_string(str_ptr: u32) -> String {
 
 pub fn merge_json(partial_state: Option<String>, state: String) -> String {
     if let Some(partial_state) = partial_state {
-        println!("partial state {:?}", partial_state);
         let mut partial_state: serde_json::Value = serde_json::from_str(&partial_state).unwrap();
         let mut state: serde_json::Value = serde_json::from_str(&state).unwrap();
 

@@ -15,8 +15,8 @@ use crate::{
     fps_counter::FpsCounter,
     keyboard::Modifiers,
     wasm_messenger::WasmMessenger,
-    widget::{Position, Size, Widget, WidgetData, WidgetId, WidgetStore},
-    widget2::{TextPane, WasmWidget},
+    widget::{Position, Size, Widget, WidgetId, WidgetStore},
+    widget2::{TextPane, WasmWidget, Deleted},
 };
 
 use nonblock::NonBlockingReader;
@@ -345,19 +345,12 @@ impl Editor {
                 self.dirty_widgets.insert(widget_id);
                 let widget = self.widget_store.get_mut(widget_id).unwrap();
                 let output = &process.output;
-                match &mut widget.data {
-                    WidgetData::TextPane { text_pane } => {
-                        text_pane.set_text(output);
-                        if let Some(text_pane) =
-                            widget.data2.as_any_mut().downcast_mut::<TextPane>()
-                        {
-                            text_pane.set_text(output);
-                        }
-                    }
-                    WidgetData::Deleted => {
-                        to_delete.insert(process.process_id);
-                    }
-                    _ => unreachable!("Shouldn't be here"),
+                
+                if let Some(widget) = widget.data2.as_any_mut().downcast_mut::<TextPane>() {
+                    widget.set_text(output);
+                }
+                if let Some(_) = widget.data2.as_any().downcast_ref::<Deleted>() {
+                    to_delete.insert(process.process_id);
                 }
             }
 
