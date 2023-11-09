@@ -176,9 +176,7 @@ impl TokenWindowKind {
     }
 }
 
-#[allow(unused)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-
 pub struct TokenWindow {
     pub kind: Option<TokenWindowKind>,
     pub index: usize,

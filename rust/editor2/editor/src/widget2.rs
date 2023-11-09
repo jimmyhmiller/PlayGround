@@ -26,6 +26,7 @@ use crate::{
     wasm_messenger::{Commands, DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState},
 };
 
+
 #[allow(unused)]
 #[typetag::serde(tag = "type")]
 pub trait Widget {
@@ -99,23 +100,6 @@ pub trait Widget {
     fn size(&self) -> Size;
     fn id(&self) -> usize;
     fn set_id(&mut self, id: usize);
-}
-
-#[allow(unused)]
-pub fn widget_serialize<S>(value: &Box<dyn Widget>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    serializer.serialize_str(todo!())
-}
-
-#[allow(unused)]
-pub fn widget_deserialize<'de, D>(deserializer: D) -> Result<Box<dyn Widget>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    todo!()
 }
 
 #[allow(unused)]
