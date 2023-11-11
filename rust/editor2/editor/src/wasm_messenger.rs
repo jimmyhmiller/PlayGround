@@ -135,57 +135,10 @@ impl WasmMessenger {
         dirty_wasm
     }
 
-    pub fn number_of_pending_requests(&self) -> usize {
-        // let non_draw_commands_count = self
-        //     .wasm_non_draw_commands
-        //     .values()
-        //     .map(|v| v.len())
-        //     .sum::<usize>();
-        // let pending_message_count = self
-        //     .pending_messages
-        //     .values()
-        //     .map(|v| v.len())
-        //     .sum::<usize>();
-        0
-    }
-
     pub fn get_sender(&self, id: WasmId) -> Sender<Message> {
         self.senders.get(&id).unwrap().clone()
     }
 
-    // pub fn pending_message_counts(&self) -> String {
-    //     let mut stats: Vec<&str> = vec![];
-    //     for messages_per in self.pending_messages.values() {
-    //         for message in messages_per.values() {
-    //             stats.push(match message.payload {
-    //                 Payload::OnClick(_) => "OnClick",
-    //                 Payload::Draw(_) => "Draw",
-    //                 Payload::OnScroll(_, _) => "OnScroll",
-    //                 Payload::OnKey(_) => "OnKey",
-    //                 Payload::Reload => "Reload",
-    //                 Payload::SaveState => "SaveState",
-    //                 Payload::ProcessMessage(_, _) => "ProcessMessage",
-    //                 Payload::Event(_, _) => "Event",
-    //                 Payload::OnSizeChange(_, _) => "OnSizeChange",
-    //                 Payload::OnMouseMove(_, _, _) => "OnMouseMove",
-    //                 Payload::PartialState(_) => "PartialState",
-    //                 Payload::OnMouseDown(_) => "OnMouseDown",
-    //                 Payload::OnMouseUp(_) => "OnMouseUp",
-    //                 Payload::Update => "Update",
-    //                 Payload::OnMove(_, _) => "OnMove",
-    //             });
-    //         }
-    //     }
-
-    //     let mut output = String::new();
-    //     let counts = stats.iter().counts();
-
-    //     for (category, count) in counts.iter().sorted() {
-    //         output.push_str(&format!("{} : {}\n", category, count));
-    //     }
-
-    //     output
-    // }
 
     fn next_message_id(&mut self) -> usize {
         self.last_message_id += 1;

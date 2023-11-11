@@ -20,6 +20,7 @@ use crate::{
 };
 
 use framework::{Position, Size};
+use itertools::Itertools;
 use nonblock::NonBlockingReader;
 use notify::{FsEventWatcher, RecursiveMode};
 
@@ -297,7 +298,8 @@ impl Editor {
             widget.data.update().unwrap();
         }
         self.fps_counter.add_time("update_widgets", time.elapsed());
-        !events_empty || self.wasm_messenger.number_of_pending_requests() > 0
+        // !events_empty || self.wasm_messenger.number_of_pending_requests() > 0
+        true
     }
 
     pub fn process_per_frame_actions(&mut self) {
@@ -413,6 +415,8 @@ impl Editor {
         }
     }
 
+
+    // IDEA: Draw on back with negative coordinates
     pub fn draw(&mut self, canvas: &Canvas) {
         self.fps_counter.tick();
         use skia_safe::{Point, Font, Typeface, FontStyle, Paint, Color4f};
@@ -458,15 +462,28 @@ impl Editor {
         }
         canvas.restore();
 
-        // let canvas_size = Size::from(canvas.base_layer_size());
-        // canvas.save();
-        // canvas.translate((canvas_size.width - 300.0, 60.0));
-        // let counts = self.wasm_messenger.pending_message_counts();
-        // for line in counts.lines() {
-        //     canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
-        //     canvas.translate((0.0, 30.0));
-        // }
-        // canvas.restore();
+        let mut combined_counts : HashMap<String, usize> = HashMap::new();
+        for widget in self.widget_store.iter() {
+            if let Some(widget) = widget.data.as_any().downcast_ref::<WasmWidget>() {
+                let counts = widget.pending_message_counts();
+                for (key, value) in counts.iter() {
+                    let count = combined_counts.entry(key.to_string()).or_insert(0);
+                    *count += value;
+                }
+            }
+        }
+
+        canvas.save();
+        canvas.translate((canvas_size.width - 300.0, 60.0));
+        let mut output = String::new();
+        for (category, count) in combined_counts.iter().sorted() {
+            output.push_str(&format!("{} : {}\n", category, count));
+        }
+        for line in output.lines() {
+            canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
+            canvas.translate((0.0, 30.0));
+        }
+        canvas.restore();
 
         self.widget_store.draw(canvas, &self.dirty_widgets);
         self.dirty_widgets.clear();

@@ -12,6 +12,7 @@ use std::{
 
 use framework::{KeyboardInput, Position, Size};
 use futures::channel::mpsc::Sender;
+use itertools::Itertools;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use skia_safe::{
     font_style::{Slant, Weight, Width},
@@ -36,7 +37,7 @@ pub trait Widget {
     fn start(&mut self) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Result<(), Box<dyn Error>> {
+    fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
     fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
@@ -182,7 +183,8 @@ impl Widget for WasmWidget {
         self
     }
 
-    fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Result<(), Box<dyn Error>> {
+    fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
+        let bounds = self.size();
         canvas.save();
         canvas.translate((self.position().x, self.position().y));
         canvas.scale((self.scale(), self.scale()));
@@ -256,7 +258,7 @@ impl Widget for WasmWidget {
     }
 
     fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
-        let message = self.get_message(Payload::OnClick(Position { x, y }));
+        let message = self.wrap_payload(Payload::OnClick(Position { x, y }));
         self.sender
             .as_mut()
             .unwrap()
@@ -265,7 +267,7 @@ impl Widget for WasmWidget {
     }
 
     fn on_key(&mut self, input: KeyboardInput) -> Result<(), Box<dyn Error>> {
-        let message = self.get_message(Payload::OnKey(
+        let message = self.wrap_payload(Payload::OnKey(
             crate::keyboard::KeyboardInput::from_framework(input),
         ));
         self.sender
@@ -276,7 +278,7 @@ impl Widget for WasmWidget {
     }
 
     fn on_scroll(&mut self, x: f64, y: f64) -> Result<(), Box<dyn Error>> {
-        let message = self.get_message(Payload::OnScroll(x, y));
+        let message = self.wrap_payload(Payload::OnScroll(x, y));
         self.sender
             .as_mut()
             .unwrap()
@@ -285,7 +287,8 @@ impl Widget for WasmWidget {
     }
 
     fn on_size_change(&mut self, width: f32, height: f32) -> Result<(), Box<dyn Error>> {
-        let message = self.get_message(Payload::OnSizeChange(width, height));
+        self.meta.size = Size { width, height };
+        let message = self.wrap_payload(Payload::OnSizeChange(width, height));
         self.sender
             .as_mut()
             .unwrap()
@@ -295,7 +298,7 @@ impl Widget for WasmWidget {
 
     fn on_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.meta.position = Position { x, y };
-        let message = self.get_message(Payload::OnMove(x, y));
+        let message = self.wrap_payload(Payload::OnMove(x, y));
         self.sender
             .as_mut()
             .unwrap()
@@ -304,7 +307,7 @@ impl Widget for WasmWidget {
     }
 
     fn save(&mut self) -> Result<(), Box<dyn Error>> {
-        let message = self.get_message(Payload::SaveState);
+        let message = self.wrap_payload(Payload::SaveState);
         self.sender
             .as_mut()
             .unwrap()
@@ -313,7 +316,7 @@ impl Widget for WasmWidget {
     }
 
     fn reload(&mut self) -> Result<(), Box<dyn Error>> {
-        let message = self.get_message(Payload::Reload);
+        let message = self.wrap_payload(Payload::Reload);
         self.sender
             .as_mut()
             .unwrap()
@@ -325,7 +328,7 @@ impl Widget for WasmWidget {
         
         let base64_decoded = decode_base64(&state.as_bytes().to_vec()).unwrap();
         let state = String::from_utf8(base64_decoded).unwrap();
-        let message = self.get_message(Payload::PartialState(Some(state)));
+        let message = self.wrap_payload(Payload::PartialState(Some(state)));
         self.sender
             .as_mut()
             .unwrap()
@@ -339,7 +342,7 @@ impl Widget for WasmWidget {
     }
 
     fn on_mouse_up(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
-        let message = self.get_message(Payload::OnMouseUp(Position { x, y }));
+        let message = self.wrap_payload(Payload::OnMouseUp(Position { x, y }));
         self.sender
             .as_mut()
             .unwrap()
@@ -348,7 +351,7 @@ impl Widget for WasmWidget {
     }
 
     fn on_mouse_down(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
-        let message = self.get_message(Payload::OnMouseDown(Position { x, y }));
+        let message = self.wrap_payload(Payload::OnMouseDown(Position { x, y }));
         self.sender
             .as_mut()
             .unwrap()
@@ -363,7 +366,7 @@ impl Widget for WasmWidget {
         x_diff: f32,
         y_diff: f32,
     ) -> Result<(), Box<dyn Error>> {
-        let message = self.get_message(Payload::OnMouseMove(
+        let message = self.wrap_payload(Payload::OnMouseMove(
             Position { x, y },
             x_diff,
             y_diff,
@@ -376,7 +379,7 @@ impl Widget for WasmWidget {
     }
 
     fn on_event(&mut self, kind: String, event: String) -> Result<(), Box<dyn Error>> {
-        let message = self.get_message(Payload::Event(kind, event));
+        let message = self.wrap_payload(Payload::Event(kind, event));
         self.sender
             .as_mut()
             .unwrap()
@@ -389,7 +392,7 @@ impl Widget for WasmWidget {
         process_id: i32,
         message: String,
     ) -> Result<(), Box<dyn Error>> {
-        let message = self.get_message(Payload::ProcessMessage(
+        let message = self.wrap_payload(Payload::ProcessMessage(
             process_id as usize,
             message,
         ));
@@ -402,12 +405,12 @@ impl Widget for WasmWidget {
 
     fn update(&mut self) -> Result<(), Box<dyn Error>> {
         // TODO: Change this
-        let message = self.get_message(Payload::Draw("draw".to_string()));
+        let message = self.wrap_payload(Payload::Draw("draw".to_string()));
         self.sender
             .as_mut()
             .unwrap()
             .try_send(message)?;
-        let message = self.get_message(Payload::Update);
+        let message = self.wrap_payload(Payload::Update);
         self.sender
             .as_mut()
             .unwrap()
@@ -516,13 +519,47 @@ impl Widget for WasmWidget {
 
 impl WasmWidget {
 
+    pub fn _number_of_pending_requests(&self) -> usize {
+        let non_draw_commands_count = self
+            .wasm_non_draw_commands.len();
+        let pending_message_count = self
+            .pending_messages.len();
+        non_draw_commands_count + pending_message_count
+    }
+
+    pub fn pending_message_counts(&self) -> HashMap<String, usize> {
+        let mut stats: Vec<&str> = vec![];
+        for message in self.pending_messages.values() {
+            stats.push(match message.payload {
+                Payload::OnClick(_) => "OnClick",
+                Payload::Draw(_) => "Draw",
+                Payload::OnScroll(_, _) => "OnScroll",
+                Payload::OnKey(_) => "OnKey",
+                Payload::Reload => "Reload",
+                Payload::SaveState => "SaveState",
+                Payload::ProcessMessage(_, _) => "ProcessMessage",
+                Payload::Event(_, _) => "Event",
+                Payload::OnSizeChange(_, _) => "OnSizeChange",
+                Payload::OnMouseMove(_, _, _) => "OnMouseMove",
+                Payload::PartialState(_) => "PartialState",
+                Payload::OnMouseDown(_) => "OnMouseDown",
+                Payload::OnMouseUp(_) => "OnMouseUp",
+                Payload::Update => "Update",
+                Payload::OnMove(_, _) => "OnMove",
+            });
+        }
+
+        let counts = stats.iter().counts().iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        counts
+    }
+
     pub fn next_message_id(&mut self) -> usize {
         let current = self.message_id;
         self.message_id += 1;
         current
     }
 
-    pub fn get_message(&mut self, payload: Payload) -> Message {
+    pub fn wrap_payload(&mut self, payload: Payload) -> Message {
         let message_id = self.next_message_id();
         Message {
             wasm_id: self.id() as u64,
@@ -749,7 +786,8 @@ impl Widget for TextPane {
         self
     }
 
-    fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Result<(), Box<dyn Error>> {
+    fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
+        let bounds = self.size();
         canvas.save();
         let text_pane = &self;
         let foreground = Color::parse_hex("#dc9941");
@@ -896,7 +934,7 @@ impl Widget for Text {
         self.meta.id = id;
     }
 
-    fn draw(&mut self, canvas: &Canvas, _bounds: Size) -> Result<(), Box<dyn Error>> {
+    fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
         canvas.save();
         canvas.scale((self.scale(), self.scale()));
         let font = Font::new(
@@ -980,7 +1018,7 @@ impl Widget for Image {
         "".to_string()
     }
 
-    fn draw(&mut self, canvas: &Canvas, _bounds: Size) -> Result<(), Box<dyn Error>> {
+    fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
         canvas.save();
         canvas.scale((self.scale(), self.scale()));
         // I tried to abstract this out and ran into the issue of returning a ref.
@@ -1126,8 +1164,8 @@ impl Widget for Ephemeral {
         self.widget.start()
     }
 
-    fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Result<(), Box<dyn Error>> {
-        self.widget.draw(canvas, bounds)
+    fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
+        self.widget.draw(canvas)
     }
 
     fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {

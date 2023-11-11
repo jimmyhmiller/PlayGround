@@ -118,9 +118,10 @@ impl Editor {
                         for widget_id in self.selected_widgets.iter() {
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
                                 dirty_widgets.insert(widget.id());
-                                widget.size().width += x_diff;
-                                widget.size().height += y_diff;
-                                widget.on_size_change(widget.size().width, widget.size().height);
+                                let mut size = widget.size();
+                                size.width += x_diff;
+                                size.height += y_diff;
+                                widget.on_size_change(size.width, size.height);
                             }
                         }
                     } else if self.context.modifiers.ctrl {
