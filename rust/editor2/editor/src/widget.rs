@@ -3,7 +3,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use framework::{Position, Size};
+use framework::Position;
 use serde::{Deserialize, Serialize};
 use skia_safe::{Canvas, Image};
 
@@ -63,9 +63,9 @@ impl Widget {
             .unwrap();
     }
 
-    pub fn draw(&mut self, canvas: &Canvas, bounds: Size) -> Vec<WidgetId> {
+    pub fn draw(&mut self, canvas: &Canvas) -> Vec<WidgetId> {
         canvas.save();
-        self.data.draw(canvas, bounds).unwrap();
+        self.data.draw(canvas).unwrap();
         canvas.restore();
         vec![]
     }
@@ -235,7 +235,7 @@ impl WidgetStore {
                         continue;
                     }
 
-                    widget.draw(canvas, widget.size());
+                    widget.draw(canvas);
                     canvas.restore_to_count(before_count);
                     canvas.restore();
 
