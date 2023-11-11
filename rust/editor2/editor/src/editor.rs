@@ -6,7 +6,7 @@ use std::{
     process::ChildStdout,
     sync::mpsc::{Receiver, Sender},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -26,8 +26,7 @@ use notify::{FsEventWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
-use skia_safe::{Canvas, Color4f, Paint, Point};
-use skia_safe::{Font, FontStyle, Typeface};
+use skia_safe::Canvas;
 use winit::{event_loop::EventLoopProxy, window::CursorIcon};
 
 pub struct Context {
@@ -264,7 +263,9 @@ impl Editor {
         // Todo: Need to test that I am not missing any
         // events with my start and end
 
+        let time = Instant::now();
         self.wasm_messenger.tick();
+        self.fps_counter.add_time("tick", time.elapsed());
 
         for wasm_id in self.wasm_messenger.get_and_drain_dirty_wasm() {
             if let Some(widget) = self.widget_store.get_mut(wasm_id as usize) {
@@ -287,11 +288,15 @@ impl Editor {
             self.should_redraw = true;
         }
 
+        let time = Instant::now();
         self.handle_events(events);
+        self.fps_counter.add_time("events", time.elapsed());
 
+        let time = Instant::now();
         for widget in self.widget_store.iter_mut() {
             widget.data.update().unwrap();
         }
+        self.fps_counter.add_time("update_widgets", time.elapsed());
         !events_empty || self.wasm_messenger.number_of_pending_requests() > 0
     }
 
@@ -410,7 +415,8 @@ impl Editor {
 
     pub fn draw(&mut self, canvas: &Canvas) {
         self.fps_counter.tick();
-        use skia_safe::Size;
+        use skia_safe::{Point, Font, Typeface, FontStyle, Paint, Color4f};
+        
 
         let background = Color::parse_hex("#39463e");
 
@@ -425,22 +431,42 @@ impl Editor {
         // Not drawing fps because it is wrong now that we don't
         // update every frame
 
-        // canvas.draw_str(
-        //     self.fps_counter.fps.to_string(),
-        //     Point::new(canvas_size.width - 60.0, 30.0),
-        //     &font,
-        //     white,
-        // );
+        let canvas_size = self.window.size;
 
-        let canvas_size = Size::from(canvas.base_layer_size());
+        canvas.draw_str(
+            self.fps_counter.fps.to_string(),
+            Point::new(canvas_size.width - 60.0, 30.0),
+            &font,
+            white,
+        );
         canvas.save();
-        canvas.translate((canvas_size.width - 300.0, 60.0));
-        let counts = self.wasm_messenger.pending_message_counts();
-        for line in counts.lines() {
-            canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
+        canvas.translate((canvas_size.width - 600.0, 60.0));
+        for (name, stats) in self.fps_counter.times.iter() {
+            canvas.draw_str(
+                format!(
+                    "{}: {} {} {}",
+                    name,
+                    stats.average.as_millis(),
+                    stats.min.as_millis(),
+                    stats.max.as_millis()
+                ),
+                Point::new(0.0, 0.0),
+                &font,
+                white,
+            );
             canvas.translate((0.0, 30.0));
         }
         canvas.restore();
+
+        // let canvas_size = Size::from(canvas.base_layer_size());
+        // canvas.save();
+        // canvas.translate((canvas_size.width - 300.0, 60.0));
+        // let counts = self.wasm_messenger.pending_message_counts();
+        // for line in counts.lines() {
+        //     canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
+        //     canvas.translate((0.0, 30.0));
+        // }
+        // canvas.restore();
 
         self.widget_store.draw(canvas, &self.dirty_widgets);
         self.dirty_widgets.clear();

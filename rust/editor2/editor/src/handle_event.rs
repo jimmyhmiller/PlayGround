@@ -1,4 +1,4 @@
-use std::{collections::HashSet, io::Write};
+use std::{collections::{HashSet, HashMap}, io::Write};
 
 use framework::{CursorIcon, Position, Size};
 use nonblock::NonBlockingReader;
@@ -51,6 +51,8 @@ impl Editor {
                                 wasm_non_draw_commands: vec![],
                                 external_sender: None,
                                 path: path.to_str().unwrap().to_string(),
+                                message_id: 0,
+                                pending_messages: HashMap::new(),
                             }),
                         });
                     } else {
@@ -331,6 +333,8 @@ impl Editor {
                                     wasm_non_draw_commands: vec![],
                                     external_sender: None,
                                     path: path.clone(),
+                                    message_id: 0,
+                                    pending_messages: HashMap::new(),
                                 }),
                             });
                             self.mark_widget_dirty(widget_id);

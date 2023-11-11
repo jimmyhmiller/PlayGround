@@ -144,13 +144,14 @@ pub fn setup_window(mut editor: editor::Editor) {
                     // This needs to happen unconditonally, because
                     // these are external things that can create events
                     editor.process_per_frame_actions();
+                    needs_update = true;
 
-                    if !editor.events.events_for_frame().is_empty() {
-                        needs_update = true;
-                    }
-                    if editor.wasm_messenger.number_of_pending_requests() > 0 {
-                        needs_update = true;
-                    }
+                    // if !editor.events.events_for_frame().is_empty() {
+                    //     needs_update = true;
+                    // }
+                    // if editor.wasm_messenger.number_of_pending_requests() > 0 {
+                    //     needs_update = true;
+                    // }
 
                     // TODO:
                     // if I want to have 0 cpu usage when I'm not actually
@@ -169,10 +170,12 @@ pub fn setup_window(mut editor: editor::Editor) {
                     if event_added {
                         event_added = false;
                     }
-
+                    
+                    let time = std::time::Instant::now();
                     if needs_update {
                         needs_update = editor.update();
                     }
+                    editor.fps_counter.add_time("update", time.elapsed());
                     window.set_cursor_icon(editor.cursor_icon);
 
                     // This messes up fps counter
@@ -180,9 +183,9 @@ pub fn setup_window(mut editor: editor::Editor) {
                     // I guess I could separate the editor
                     // from the fps counter?
                     // Really not sure
-                    if needs_update && editor.should_redraw() {
+                    // if needs_update && editor.should_redraw() {
                         window.request_redraw();
-                    }
+                    // }
                 }
                 Event::RedrawRequested(_) => {
                     // TODO: Determine if this is a good idea or not.
@@ -223,7 +226,9 @@ pub fn setup_window(mut editor: editor::Editor) {
                             .unwrap()
                         };
 
+                        let time = std::time::Instant::now();
                         editor.draw(surface.canvas());
+                        editor.fps_counter.add_time("draw", time.elapsed());
 
                         context.flush_and_submit();
                         drop(surface);
