@@ -21,8 +21,6 @@ use futures::{
     StreamExt,
 };
 use futures_timer::Delay;
-use itertools::Itertools;
-
 use wasmtime::{
     AsContextMut, Caller, Config, Engine, Instance, Linker, Memory, Module, Store, Val, WasmParams,
     WasmResults,
@@ -95,13 +93,7 @@ pub struct WasmMessenger {
     local_pool: futures::executor::LocalPool,
     local_spawner: LocalSpawner,
     last_wasm_id: u64,
-    wasm_non_draw_commands: HashMap<WasmId, Vec<Commands>>,
     last_message_id: usize,
-    // Not a huge fan of this solution,
-    // but couldn't find a better way to dedup draws
-    // Ideally, you can draw in the middle of click commands
-    // I have some ideas.
-    pending_messages: HashMap<WasmId, HashMap<usize, Message>>,
     engine: Arc<Engine>,
     senders: HashMap<WasmId, Sender<Message>>,
     dirty_wasm: HashSet<WasmId>,
@@ -130,9 +122,7 @@ impl WasmMessenger {
             local_pool,
             local_spawner,
             last_wasm_id: 0,
-            wasm_non_draw_commands: HashMap::new(),
             last_message_id: 1,
-            pending_messages: HashMap::new(),
             engine,
             senders: HashMap::new(),
             dirty_wasm: HashSet::new(),
@@ -146,56 +136,56 @@ impl WasmMessenger {
     }
 
     pub fn number_of_pending_requests(&self) -> usize {
-        let non_draw_commands_count = self
-            .wasm_non_draw_commands
-            .values()
-            .map(|v| v.len())
-            .sum::<usize>();
-        let pending_message_count = self
-            .pending_messages
-            .values()
-            .map(|v| v.len())
-            .sum::<usize>();
-        non_draw_commands_count + pending_message_count
+        // let non_draw_commands_count = self
+        //     .wasm_non_draw_commands
+        //     .values()
+        //     .map(|v| v.len())
+        //     .sum::<usize>();
+        // let pending_message_count = self
+        //     .pending_messages
+        //     .values()
+        //     .map(|v| v.len())
+        //     .sum::<usize>();
+        0
     }
 
     pub fn get_sender(&self, id: WasmId) -> Sender<Message> {
         self.senders.get(&id).unwrap().clone()
     }
 
-    pub fn pending_message_counts(&self) -> String {
-        let mut stats: Vec<&str> = vec![];
-        for messages_per in self.pending_messages.values() {
-            for message in messages_per.values() {
-                stats.push(match message.payload {
-                    Payload::OnClick(_) => "OnClick",
-                    Payload::Draw(_) => "Draw",
-                    Payload::OnScroll(_, _) => "OnScroll",
-                    Payload::OnKey(_) => "OnKey",
-                    Payload::Reload => "Reload",
-                    Payload::SaveState => "SaveState",
-                    Payload::ProcessMessage(_, _) => "ProcessMessage",
-                    Payload::Event(_, _) => "Event",
-                    Payload::OnSizeChange(_, _) => "OnSizeChange",
-                    Payload::OnMouseMove(_, _, _) => "OnMouseMove",
-                    Payload::PartialState(_) => "PartialState",
-                    Payload::OnMouseDown(_) => "OnMouseDown",
-                    Payload::OnMouseUp(_) => "OnMouseUp",
-                    Payload::Update => "Update",
-                    Payload::OnMove(_, _) => "OnMove",
-                });
-            }
-        }
+    // pub fn pending_message_counts(&self) -> String {
+    //     let mut stats: Vec<&str> = vec![];
+    //     for messages_per in self.pending_messages.values() {
+    //         for message in messages_per.values() {
+    //             stats.push(match message.payload {
+    //                 Payload::OnClick(_) => "OnClick",
+    //                 Payload::Draw(_) => "Draw",
+    //                 Payload::OnScroll(_, _) => "OnScroll",
+    //                 Payload::OnKey(_) => "OnKey",
+    //                 Payload::Reload => "Reload",
+    //                 Payload::SaveState => "SaveState",
+    //                 Payload::ProcessMessage(_, _) => "ProcessMessage",
+    //                 Payload::Event(_, _) => "Event",
+    //                 Payload::OnSizeChange(_, _) => "OnSizeChange",
+    //                 Payload::OnMouseMove(_, _, _) => "OnMouseMove",
+    //                 Payload::PartialState(_) => "PartialState",
+    //                 Payload::OnMouseDown(_) => "OnMouseDown",
+    //                 Payload::OnMouseUp(_) => "OnMouseUp",
+    //                 Payload::Update => "Update",
+    //                 Payload::OnMove(_, _) => "OnMove",
+    //             });
+    //         }
+    //     }
 
-        let mut output = String::new();
-        let counts = stats.iter().counts();
+    //     let mut output = String::new();
+    //     let counts = stats.iter().counts();
 
-        for (category, count) in counts.iter().sorted() {
-            output.push_str(&format!("{} : {}\n", category, count));
-        }
+    //     for (category, count) in counts.iter().sorted() {
+    //         output.push_str(&format!("{} : {}\n", category, count));
+    //     }
 
-        output
-    }
+    //     output
+    // }
 
     fn next_message_id(&mut self) -> usize {
         self.last_message_id += 1;
@@ -226,6 +216,7 @@ impl WasmMessenger {
             wasm_path: String,
             receiver: Receiver<Message>,
             sender: Sender<OutMessage>,
+            message: Message,
         ) {
             let mut instance = WasmManager::new(
                 engine.clone(),
@@ -236,7 +227,10 @@ impl WasmMessenger {
             )
             .await;
             instance.init().await;
+            instance.process_message(message).await.unwrap();
         }
+
+        let message_id = self.next_message_id();
 
         self.local_spawner
             .spawn_local(spawn_instance(
@@ -245,15 +239,14 @@ impl WasmMessenger {
                 wasm_path.to_string(),
                 receiver,
                 out_sender,
+                Message {
+                    message_id,
+                    wasm_id: id,
+                    payload: Payload::PartialState(partial_state),
+                },
             ))
             .unwrap();
 
-        let message_id = self.next_message_id();
-        self.send_message(Message {
-            message_id,
-            wasm_id: id,
-            payload: Payload::PartialState(partial_state),
-        });
 
         (id, out_receiver)
     }
@@ -261,30 +254,7 @@ impl WasmMessenger {
     pub fn tick(&mut self) {
         // TODO: What is the right option here?
         self.local_pool
-            .run_until(Delay::new(Duration::from_millis(4)));
-    }
-
-    fn send_message(&mut self, message: Message) {
-        let records = self.pending_messages.entry(message.wasm_id).or_default();
-
-        let mut already_drawing = false;
-        if matches!(message.payload, Payload::Draw(_)) {
-            for record in records.values() {
-                if matches!(record.payload, Payload::Draw(_)) {
-                    already_drawing = true;
-                    break;
-                }
-            }
-        }
-        if !already_drawing {
-            records.insert(message.message_id, message.clone());
-
-            if let Some(sender) = self.senders.get_mut(&message.wasm_id) {
-                sender.start_send(message).unwrap();
-            } else {
-                println!("Can't find wasm instance for message {:?}", message);
-            }
-        }
+            .run_until(Delay::new(Duration::from_millis(12)));
     }
 }
 

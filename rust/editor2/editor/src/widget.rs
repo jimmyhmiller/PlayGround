@@ -205,14 +205,14 @@ impl WidgetStore {
         }
     }
 
-    pub fn draw(&mut self, canvas: &Canvas, _dirty_widgets: &HashSet<usize>) {
-        let dirty_widgets: HashSet<usize> = self.widgets.iter().map(|x| x.id()).collect();
-        // let mut dirty_widgets = dirty_widgets.clone();
-        // for widget in self.iter() {
-        //     if !self.widget_images.contains_key(&widget.id) {
-        //         dirty_widgets.insert(widget.id);
-        //     }
-        // }
+    pub fn draw(&mut self, canvas: &Canvas, dirty_widgets: &HashSet<usize>) {
+        // let dirty_widgets: HashSet<usize> = self.widgets.iter().map(|x| x.id()).collect();
+        let mut dirty_widgets = dirty_widgets.clone();
+        for widget in self.iter() {
+            if !self.widget_images.contains_key(&widget.id()) {
+                dirty_widgets.insert(widget.id());
+            }
+        }
         let mut images_to_insert = vec![];
         for widget_id in dirty_widgets.iter() {
             if let Some(widget) = self.get_mut(*widget_id) {
@@ -224,16 +224,16 @@ impl WidgetStore {
                     // TODO: Still broken because of dirty checking
                     // but we are drawing
 
-                    // let can_draw = match widget.data {
-                    //     WidgetData::Wasm { wasm: _, wasm_id } => {
-                    //         widget.data2.has_draw_commands(wasm_id)
-                    //     }
-                    //     _ => true,
-                    // };
+                    let can_draw = if let Some(widget) = widget.data.as_any().downcast_ref::<WasmWidget>() {
+                        !widget.draw_commands.is_empty()
+                    } else {
+                        true
+                    };
 
-                    // if !can_draw {
-                    //     continue;
-                    // }
+
+                    if !can_draw {
+                        continue;
+                    }
 
                     widget.draw(canvas, widget.size());
                     canvas.restore_to_count(before_count);
