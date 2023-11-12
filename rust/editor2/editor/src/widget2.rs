@@ -7,7 +7,7 @@ use std::{
     io::Read,
     ops::{Deref, DerefMut},
     path::PathBuf,
-    str::from_utf8,
+    str::from_utf8, time::Instant,
 };
 
 use framework::{KeyboardInput, Position, Size};
@@ -165,7 +165,7 @@ pub struct WasmWidget {
     #[serde(default)]
     pub message_id: usize,
     #[serde(skip)]
-    pub pending_messages: HashMap<usize, Message>,
+    pub pending_messages: HashMap<usize, (Message, Instant)>,
     // TODO:
     // Maybe we make a "mark dirty" sender
     // That way each widget can decide it is dirty
@@ -259,10 +259,7 @@ impl Widget for WasmWidget {
 
     fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         let message = self.wrap_payload(Payload::OnClick(Position { x, y }));
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
@@ -270,57 +267,39 @@ impl Widget for WasmWidget {
         let message = self.wrap_payload(Payload::OnKey(
             crate::keyboard::KeyboardInput::from_framework(input),
         ));
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
     fn on_scroll(&mut self, x: f64, y: f64) -> Result<(), Box<dyn Error>> {
         let message = self.wrap_payload(Payload::OnScroll(x, y));
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
     fn on_size_change(&mut self, width: f32, height: f32) -> Result<(), Box<dyn Error>> {
         self.meta.size = Size { width, height };
         let message = self.wrap_payload(Payload::OnSizeChange(width, height));
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
     fn on_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.meta.position = Position { x, y };
         let message = self.wrap_payload(Payload::OnMove(x, y));
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
     fn save(&mut self) -> Result<(), Box<dyn Error>> {
         let message = self.wrap_payload(Payload::SaveState);
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
     fn reload(&mut self) -> Result<(), Box<dyn Error>> {
         let message = self.wrap_payload(Payload::Reload);
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
@@ -329,10 +308,7 @@ impl Widget for WasmWidget {
         let base64_decoded = decode_base64(&state.as_bytes().to_vec()).unwrap();
         let state = String::from_utf8(base64_decoded).unwrap();
         let message = self.wrap_payload(Payload::PartialState(Some(state)));
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
@@ -343,19 +319,13 @@ impl Widget for WasmWidget {
 
     fn on_mouse_up(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         let message = self.wrap_payload(Payload::OnMouseUp(Position { x, y }));
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
     fn on_mouse_down(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         let message = self.wrap_payload(Payload::OnMouseDown(Position { x, y }));
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
@@ -371,19 +341,13 @@ impl Widget for WasmWidget {
             x_diff,
             y_diff,
         ));
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
     fn on_event(&mut self, kind: String, event: String) -> Result<(), Box<dyn Error>> {
         let message = self.wrap_payload(Payload::Event(kind, event));
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
@@ -396,32 +360,30 @@ impl Widget for WasmWidget {
             process_id as usize,
             message,
         ));
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 
     fn update(&mut self) -> Result<(), Box<dyn Error>> {
         // TODO: Change this
         let message = self.wrap_payload(Payload::Draw("draw".to_string()));
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
+        
         let message = self.wrap_payload(Payload::Update);
-        self.sender
-            .as_mut()
-            .unwrap()
-            .try_send(message)?;
+        self.send_message(message)?;
 
         // TODO: Figure out values
         self.process_non_draw_commands(&mut HashMap::new());
         while let Ok(Some(message)) = self.receiver.as_mut().unwrap().try_next() {
             // Note: Right now if a message doesn't have a corresponding in-message
             // I am just setting the out message to id: 0.
-            self.pending_messages.remove(&message.message_id);
+
+
+            if let Some((_, instant)) = self.pending_messages.remove(&message.message_id) {
+                let duration = instant.elapsed();
+                // println!("Message {:?} took {:?}", message.message_id, duration);
+            }
+
 
             // TODO: This just means we update everything every frame
             // Because the draw content might not have changed
@@ -519,6 +481,12 @@ impl Widget for WasmWidget {
 
 impl WasmWidget {
 
+    pub fn send_message(&mut self, message: Message) -> Result<(), Box<dyn Error>>{
+        self.pending_messages.insert(message.message_id, (message.clone(), Instant::now()));
+        self.sender.as_mut().unwrap().try_send(message)?;
+        Ok(())
+    }
+
     pub fn _number_of_pending_requests(&self) -> usize {
         let non_draw_commands_count = self
             .wasm_non_draw_commands.len();
@@ -530,7 +498,7 @@ impl WasmWidget {
     pub fn pending_message_counts(&self) -> HashMap<String, usize> {
         let mut stats: Vec<&str> = vec![];
         for message in self.pending_messages.values() {
-            stats.push(match message.payload {
+            stats.push(match message.0.payload {
                 Payload::OnClick(_) => "OnClick",
                 Payload::Draw(_) => "Draw",
                 Payload::OnScroll(_, _) => "OnScroll",
