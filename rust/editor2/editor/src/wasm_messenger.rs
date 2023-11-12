@@ -5,7 +5,7 @@ use std::{
     path::Path,
     sync::Arc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bytesize::ByteSize;
@@ -160,8 +160,16 @@ impl WasmMessenger {
         let (sender, receiver) = channel::<Message>(100000);
         let (out_sender, out_receiver) = channel::<OutMessage>(100000);
 
+        let message_id = self.next_message_id();
+        let message = Message {
+            message_id,
+            wasm_id: id,
+            payload: Payload::PartialState(partial_state),
+        };
+        sender.clone().try_send(message).unwrap();
         // self.receivers.insert(id, out_receiver);
         self.senders.insert(id, sender);
+        
 
         async fn spawn_instance(
             engine: Arc<Engine>,
@@ -169,7 +177,7 @@ impl WasmMessenger {
             wasm_path: String,
             receiver: Receiver<Message>,
             sender: Sender<OutMessage>,
-            message: Message,
+            
         ) {
             let mut instance = WasmManager::new(
                 engine.clone(),
@@ -180,10 +188,7 @@ impl WasmMessenger {
             )
             .await;
             instance.init().await;
-            instance.process_message(message).await.unwrap();
         }
-
-        let message_id = self.next_message_id();
 
         self.local_spawner
             .spawn_local(spawn_instance(
@@ -192,11 +197,6 @@ impl WasmMessenger {
                 wasm_path.to_string(),
                 receiver,
                 out_sender,
-                Message {
-                    message_id,
-                    wasm_id: id,
-                    payload: Payload::PartialState(partial_state),
-                },
             ))
             .unwrap();
 
@@ -206,8 +206,19 @@ impl WasmMessenger {
 
     pub fn tick(&mut self) {
         // TODO: What is the right option here?
-        self.local_pool
-            .run_until(Delay::new(Duration::from_millis(12)));
+        // self.local_pool
+        //     .run_until(Delay::new(Duration::from_millis(4)));
+        let start_time = Instant::now();
+        loop {
+            if self.local_pool.try_run_one() {
+                if start_time.elapsed().as_millis() > 8 {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
     }
 }
 
@@ -318,6 +329,9 @@ impl WasmManager {
             }
             Payload::Update => {
                 let commands = self.instance.get_and_clear_commands();
+                if commands.is_empty() {
+                    return default_return;
+                }
                 Ok(OutMessage {
                     message_id: message.message_id,
                     wasm_id: id,

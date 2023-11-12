@@ -220,6 +220,8 @@ impl Editor {
                                 .unwrap();
                         }
                     }
+                    let id = self.widget_store.next_id();
+                    widget.set_id(id);
                     widget
                 } else {
                     println!("Failed to parse: {}", s);
@@ -257,9 +259,6 @@ impl Editor {
 
     pub fn update(&mut self) -> bool {
         // TODO: Put in better place
-        for widget in self.widget_store.iter_mut() {
-            widget.data.update().unwrap();
-        }
 
         // Todo: Need to test that I am not missing any
         // events with my start and end
@@ -267,6 +266,12 @@ impl Editor {
         let time = Instant::now();
         self.wasm_messenger.tick();
         self.fps_counter.add_time("tick", time.elapsed());
+
+        let time = Instant::now();
+        for widget in self.widget_store.iter_mut() {
+            widget.update().unwrap();
+        }
+        self.fps_counter.add_time("update_widgets", time.elapsed());
 
         for wasm_id in self.wasm_messenger.get_and_drain_dirty_wasm() {
             if let Some(widget) = self.widget_store.get_mut(wasm_id as usize) {
@@ -292,13 +297,8 @@ impl Editor {
         let time = Instant::now();
         self.handle_events(events);
         self.fps_counter.add_time("events", time.elapsed());
-
-        let time = Instant::now();
-        for widget in self.widget_store.iter_mut() {
-            widget.data.update().unwrap();
-        }
-        self.fps_counter.add_time("update_widgets", time.elapsed());
         // !events_empty || self.wasm_messenger.number_of_pending_requests() > 0
+
         true
     }
 
@@ -474,7 +474,7 @@ impl Editor {
         }
 
         canvas.save();
-        canvas.translate((canvas_size.width - 300.0, 60.0));
+        canvas.translate((canvas_size.width - 800.0, 60.0));
         let mut output = String::new();
         for (category, count) in combined_counts.iter().sorted() {
             output.push_str(&format!("{} : {}\n", category, count));

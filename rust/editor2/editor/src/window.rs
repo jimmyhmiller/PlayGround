@@ -174,20 +174,21 @@ pub fn setup_window(mut editor: editor::Editor) {
                     }
                     
                     let time = std::time::Instant::now();
-                    if needs_update {
+                    // if needs_update {
                         needs_update = editor.update();
-                    }
+                    // }
                     editor.fps_counter.add_time("update", time.elapsed());
                     window.set_cursor_icon(editor.cursor_icon);
 
+                    window.request_redraw();
                     // This messes up fps counter
                     // Not sure how I would fix that
                     // I guess I could separate the editor
                     // from the fps counter?
                     // Really not sure
-                    if needs_update && editor.should_redraw() {
-                        window.request_redraw();
-                    }
+                    // if needs_update && editor.should_redraw() {
+                    //     window.request_redraw();
+                    // }
                 }
                 Event::RedrawRequested(_) => {
                     // TODO: Determine if this is a good idea or not.

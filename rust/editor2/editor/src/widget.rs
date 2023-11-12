@@ -179,13 +179,11 @@ impl WidgetStore {
         current
     }
     pub fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
-        if widget.id() == 0 {
-            let id = self.next_id;
-            self.next_id += 1;
-            widget.data.set_id(id);
-        }
         let id = widget.id();
         self.widgets.push(widget);
+        if id + 1 != self.widgets.len() {
+            println!("not equal {} {}", id, self.widgets.len());
+        }
         id
     }
 
