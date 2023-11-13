@@ -93,7 +93,6 @@ pub struct Editor {
     pub event_listeners: HashMap<String, HashSet<WidgetId>>,
     pub window: Window,
     pub cursor_icon: CursorIcon,
-    pub dirty_widgets: HashSet<usize>,
     pub first_frame: bool,
 }
 
@@ -269,15 +268,12 @@ impl Editor {
 
         let time = Instant::now();
         for widget in self.widget_store.iter_mut() {
-            widget.update().unwrap();
+            if widget.dirty() {
+                widget.update().unwrap();
+            }
         }
         self.fps_counter.add_time("update_widgets", time.elapsed());
 
-        for wasm_id in self.wasm_messenger.get_and_drain_dirty_wasm() {
-            if let Some(widget) = self.widget_store.get_mut(wasm_id as usize) {
-                self.dirty_widgets.insert(widget.id());
-            }
-        }
 
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
@@ -297,9 +293,16 @@ impl Editor {
         let time = Instant::now();
         self.handle_events(events);
         self.fps_counter.add_time("events", time.elapsed());
-        // !events_empty || self.wasm_messenger.number_of_pending_requests() > 0
 
-        true
+        let pending_count : usize = self.widget_store
+            .iter()
+            .filter(|x| x.as_any().downcast_ref::<WasmWidget>().is_some())
+            .map(|x| x.as_any().downcast_ref::<WasmWidget>().unwrap())
+            .map(|x|x.number_of_pending_requests())
+            .sum();
+
+        !events_empty || pending_count> 0
+
     }
 
     pub fn process_per_frame_actions(&mut self) {
@@ -352,8 +355,9 @@ impl Editor {
 
             for process in self.processes.values() {
                 let widget_id = process.output_widget_id;
-                self.dirty_widgets.insert(widget_id);
+                // TODO: crash here on reload
                 let widget = self.widget_store.get_mut(widget_id).unwrap();
+                widget.mark_dirty();
                 let output = &process.output;
 
                 if let Some(widget) = widget.data.as_any_mut().downcast_mut::<TextPane>() {
@@ -410,7 +414,6 @@ impl Editor {
                 },
             },
             cursor_icon: CursorIcon::Default,
-            dirty_widgets: HashSet::new(),
             first_frame: true,
         }
     }
@@ -474,7 +477,7 @@ impl Editor {
         }
 
         canvas.save();
-        canvas.translate((canvas_size.width - 800.0, 60.0));
+        canvas.translate((canvas_size.width - 1000.0, 60.0));
         let mut output = String::new();
         for (category, count) in combined_counts.iter().sorted() {
             output.push_str(&format!("{} : {}\n", category, count));
@@ -485,8 +488,13 @@ impl Editor {
         }
         canvas.restore();
 
-        self.widget_store.draw(canvas, &self.dirty_widgets);
-        self.dirty_widgets.clear();
+        let dirty_widgets: HashSet<usize> = self
+            .widget_store
+            .iter()
+            .filter(|x| x.dirty())
+            .map(|x| x.id())
+            .collect();
+        self.widget_store.draw(canvas, &dirty_widgets);
     }
 
     pub fn add_event(&mut self, event: &winit::event::Event<'_, ()>) -> bool {
@@ -523,7 +531,7 @@ impl Editor {
     }
 
     pub fn should_redraw(&self) -> bool {
-        true
+        self.should_redraw
     }
 
     pub fn on_window_create(&mut self, event_loop_proxy: EventLoopProxy<()>, size: Size) {
@@ -567,7 +575,7 @@ impl Editor {
     }
 
     pub fn mark_widget_dirty(&mut self, id: usize) {
-        self.dirty_widgets.insert(id);
+        self.widget_store.get_mut(id).unwrap().mark_dirty();
     }
 }
 

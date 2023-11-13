@@ -441,7 +441,8 @@ impl App for TextWidget {
         serde_json::to_string(&self).unwrap()
     }
 
-    fn set_state<'a>(&mut self, state: String) {
+    fn set_state(&mut self, state: String) {
+        println!("Setting state to {}", state);
         let value : Self = serde_json::from_str(&state).unwrap();
         *self = value;
         if !self.file_path.is_empty() {
@@ -504,6 +505,14 @@ impl App for TextWidget {
 
     fn on_move(&mut self, x: f32, y: f32) {
         self.widget_data.position = Position { x, y };
+    }
+
+    fn get_position(&self) -> Position {
+        self.widget_data.position
+    }
+
+    fn get_size(&self) -> Size {
+        self.widget_data.size
     }
 }
 

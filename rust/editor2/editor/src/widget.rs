@@ -178,7 +178,7 @@ impl WidgetStore {
         self.next_id += 1;
         current
     }
-    pub fn add_widget(&mut self, mut widget: Widget) -> WidgetId {
+    pub fn add_widget(&mut self, widget: Widget) -> WidgetId {
         let id = widget.id();
         self.widgets.push(widget);
         if id + 1 != self.widgets.len() {
@@ -204,6 +204,11 @@ impl WidgetStore {
     }
 
     pub fn draw(&mut self, canvas: &Canvas, dirty_widgets: &HashSet<usize>) {
+
+        // TODO: Created Widgets don't draw right away
+
+        // TODO: Deleted widgets can end up here
+
         // let dirty_widgets: HashSet<usize> = self.widgets.iter().map(|x| x.id()).collect();
         let mut dirty_widgets = dirty_widgets.clone();
         for widget in self.iter() {

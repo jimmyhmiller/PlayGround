@@ -1,11 +1,11 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     error::Error,
     io::Write,
     path::Path,
     sync::Arc,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use bytesize::ByteSize;
@@ -20,7 +20,6 @@ use futures::{
     task::LocalSpawnExt,
     StreamExt,
 };
-use futures_timer::Delay;
 use wasmtime::{
     AsContextMut, Caller, Config, Engine, Instance, Linker, Memory, Module, Store, Val, WasmParams,
     WasmResults,
@@ -40,7 +39,7 @@ pub type WasmId = u64;
 #[derive(Debug, Clone)]
 pub enum Payload {
     OnClick(Position),
-    Draw(String),
+    RunDraw(String),
     OnScroll(f64, f64),
     OnKey(KeyboardInput),
     Reload,
@@ -52,14 +51,15 @@ pub enum Payload {
     PartialState(Option<String>),
     OnMouseDown(Position),
     OnMouseUp(Position),
-    Update,
+    GetCommands,
     OnMove(f32, f32),
+    NewSender(u32, Sender<OutMessage>),
 }
 
 #[derive(Clone, Debug)]
 pub struct Message {
     pub message_id: usize,
-    pub wasm_id: WasmId,
+    pub external_id: Option<u32>,
     pub payload: Payload,
 }
 
@@ -78,7 +78,6 @@ pub enum OutPayload {
 #[derive(Debug)]
 pub struct OutMessage {
     pub message_id: usize,
-    pub wasm_id: WasmId,
     pub payload: OutPayload,
 }
 
@@ -96,7 +95,6 @@ pub struct WasmMessenger {
     last_message_id: usize,
     engine: Arc<Engine>,
     senders: HashMap<WasmId, Sender<Message>>,
-    dirty_wasm: HashSet<WasmId>,
 }
 
 impl WasmMessenger {
@@ -125,20 +123,13 @@ impl WasmMessenger {
             last_message_id: 1,
             engine,
             senders: HashMap::new(),
-            dirty_wasm: HashSet::new(),
         }
     }
 
-    pub fn get_and_drain_dirty_wasm(&mut self) -> HashSet<WasmId> {
-        let mut dirty_wasm = HashSet::new();
-        std::mem::swap(&mut dirty_wasm, &mut self.dirty_wasm);
-        dirty_wasm
-    }
 
     pub fn get_sender(&self, id: WasmId) -> Sender<Message> {
         self.senders.get(&id).unwrap().clone()
     }
-
 
     fn next_message_id(&mut self) -> usize {
         self.last_message_id += 1;
@@ -163,7 +154,7 @@ impl WasmMessenger {
         let message_id = self.next_message_id();
         let message = Message {
             message_id,
-            wasm_id: id,
+            external_id: None,
             payload: Payload::PartialState(partial_state),
         };
         sender.clone().try_send(message).unwrap();
@@ -205,9 +196,15 @@ impl WasmMessenger {
     }
 
     pub fn tick(&mut self) {
-        // TODO: What is the right option here?
+        // TODO: I don't think run_until or try_run_one
+        // are the right options. I want run with max.
+        // I think run_until literally keeps
+        // trying to run even if there is on work.
+        // use futures_timer::Delay;
         // self.local_pool
         //     .run_until(Delay::new(Duration::from_millis(4)));
+
+        use std::time::Instant;
         let start_time = Instant::now();
         loop {
             if self.local_pool.try_run_one() {
@@ -220,6 +217,19 @@ impl WasmMessenger {
         }
 
     }
+
+    pub fn get_receiver(&mut self, wasm_id: u64, external_id: u32) -> Receiver<OutMessage> {
+        let (sender, receiver) = channel::<OutMessage>(100000);
+        let mut wasm_sender = self.get_sender(wasm_id);
+        let message_id = self.next_message_id();
+        wasm_sender.try_send(Message {
+            message_id,
+            external_id: Some(external_id),
+            payload: Payload::NewSender(external_id, sender)
+        }).unwrap();
+        receiver
+
+    }
 }
 
 // I think I need to:
@@ -227,10 +237,12 @@ impl WasmMessenger {
 // 2. Have senders and receivers per instance
 
 struct WasmManager {
+    #[allow(unused)]
     id: WasmId,
     instance: WasmInstance,
     receiver: Receiver<Message>,
     sender: Sender<OutMessage>,
+    other_senders: HashMap<u32, Sender<OutMessage>>,
 }
 
 impl WasmManager {
@@ -250,6 +262,7 @@ impl WasmManager {
             instance,
             receiver,
             sender,
+            other_senders: HashMap::new(),
         }
     }
 
@@ -257,12 +270,16 @@ impl WasmManager {
         loop {
             let message = self.receiver.select_next_some().await;
             let message_id = message.message_id;
-            let wasm_id = self.id;
+            let external_id = message.external_id.clone();
             // TODO: Can I wait for either this message or some reload message so I can kill infinite loops?
             let out_message = self.process_message(message).await;
             match out_message {
                 Ok(out_message) => {
-                    let result = self.sender.start_send(out_message);
+                    let result = if let Some(external_id) = external_id {
+                        self.other_senders.get_mut(&external_id).unwrap().start_send(out_message)
+                    } else {
+                        self.sender.start_send(out_message)
+                    };
                     if result.is_err() {
                         println!("Error sending message");
                     }
@@ -270,7 +287,6 @@ impl WasmManager {
                 Err(err) => {
                     println!("Error processing message: {}", err);
                     let out_message = OutMessage {
-                        wasm_id,
                         message_id,
                         payload: OutPayload::Error(err.to_string()),
                     };
@@ -287,14 +303,16 @@ impl WasmManager {
         &mut self,
         message: Message,
     ) -> Result<OutMessage, Box<dyn Error>> {
-        let id = self.id;
         let default_return = Ok(OutMessage {
-            wasm_id: self.id,
             message_id: message.message_id,
             payload: OutPayload::Complete,
         });
 
-        match message.payload {
+        if let Some(external_id) = message.external_id {
+            self.instance.set_widget_identifer(external_id).await?;
+        }
+
+        let result = match message.payload {
             Payload::OnClick(position) => {
                 self.instance.on_click(position.x, position.y).await?;
                 default_return
@@ -313,12 +331,11 @@ impl WasmManager {
                     .await?;
                 default_return
             }
-            Payload::Draw(fn_name) => {
+            Payload::RunDraw(fn_name) => {
                 let result = self.instance.draw(&fn_name).await;
                 match result {
                     Ok(result) => Ok(OutMessage {
                         message_id: message.message_id,
-                        wasm_id: id,
                         payload: OutPayload::DrawCommands(result),
                     }),
                     Err(error) => {
@@ -327,14 +344,13 @@ impl WasmManager {
                     }
                 }
             }
-            Payload::Update => {
+            Payload::GetCommands => {
                 let commands = self.instance.get_and_clear_commands();
                 if commands.is_empty() {
                     return default_return;
                 }
                 Ok(OutMessage {
                     message_id: message.message_id,
-                    wasm_id: id,
                     payload: OutPayload::Update(commands),
                 })
             }
@@ -354,7 +370,6 @@ impl WasmManager {
                 match result {
                     Ok(_) => default_return,
                     Err(err) => Ok(OutMessage {
-                        wasm_id: self.id,
                         message_id: message.message_id,
                         payload: OutPayload::ErrorPayload(err.to_string()),
                     }),
@@ -369,7 +384,6 @@ impl WasmManager {
                 }
                 Ok(OutMessage {
                     message_id: message.message_id,
-                    wasm_id: id,
                     payload: OutPayload::Reloaded,
                 })
             }
@@ -382,7 +396,6 @@ impl WasmManager {
                         }
                         Ok(OutMessage {
                             message_id: message.message_id,
-                            wasm_id: id,
                             payload: OutPayload::Saved(SaveState::Saved(state)),
                         })
                     }
@@ -390,7 +403,6 @@ impl WasmManager {
                         println!("Failed to get state");
                         Ok(OutMessage {
                             message_id: message.message_id,
-                            wasm_id: id,
                             payload: OutPayload::Saved(SaveState::Empty),
                         })
                     }
@@ -422,7 +434,18 @@ impl WasmManager {
                 self.instance.on_size_change(width, height).await?;
                 default_return
             }
+            Payload::NewSender(external_id, sender) => {
+                self.other_senders.insert(external_id, sender);
+                default_return
+            }
+        };
+
+        if let Some(_) = message.external_id {
+            self.instance.clear_widget_identifier().await?;
         }
+
+
+        result
     }
 }
 
@@ -467,6 +490,7 @@ pub enum Commands {
     Unsubscribe(String),
     SetCursor(CursorIcon),
     Redraw(usize),
+    CreateWidget(usize, u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -628,7 +652,6 @@ impl WasmInstance {
                     // Probably want a try_ version
                     state.sender.start_send(OutMessage {
                         message_id: 0,
-                        wasm_id: state.wasm_id,
                         payload: OutPayload::NeededValue(name, sender),
                     })?;
                     // The value is serialized and will need to be deserialized
@@ -662,7 +685,6 @@ impl WasmInstance {
                     // Probably want a try_ version
                     state.sender.start_send(OutMessage {
                         message_id: 0,
-                        wasm_id: state.wasm_id,
                         payload: OutPayload::NeededValue(name, sender),
                     })?;
 
@@ -902,6 +924,18 @@ impl WasmInstance {
 
                 let store = caller.as_context_mut();
                 memory.write(store, ptr as usize, &bytes).unwrap();
+            },
+        )?;
+
+        linker.func_wrap(
+            "host",
+            "create_widget",
+            |mut caller: Caller<'_, State>,
+            external_id: u32| {
+                let state = caller.data_mut();
+                state
+                    .commands
+                    .push(Commands::CreateWidget(state.wasm_id as usize, external_id));
             },
         )?;
 
@@ -1177,6 +1211,18 @@ impl WasmInstance {
 
     pub async fn on_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.call_typed_func::<(f32, f32), ()>("on_move", (x, y), 1)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_widget_identifer(&mut self, external_id: u32) -> Result<(), Box<dyn Error>>  {
+        self.call_typed_func::<u32, ()>("set_widget_identifier", external_id, 1)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn clear_widget_identifier(&mut self) -> Result<(), Box<dyn Error>>  {
+        self.call_typed_func::<(), ()>("clear_widget_identifier", (), 1)
             .await?;
         Ok(())
     }

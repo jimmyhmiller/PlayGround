@@ -4,7 +4,7 @@ use metal_rs::MetalLayerRef;
 use skia_safe::{gpu, scalar, ColorType, Size};
 use winit::platform::macos::WindowBuilderExtMacOS;
 
-use crate::editor;
+use crate::{editor, widget2::WasmWidget};
 
 pub fn setup_window(mut editor: editor::Editor) {
     use cocoa::{appkit::NSView, base::id as cocoa_id};
@@ -146,14 +146,18 @@ pub fn setup_window(mut editor: editor::Editor) {
                     editor.process_per_frame_actions();
                     
                     // TODO: Fix the pending messages
-                    needs_update = true;
-
                     if !editor.events.events_for_frame().is_empty() {
                         needs_update = true;
                     }
-                    // if editor.wasm_messenger.number_of_pending_requests() > 0 {
-                    //     needs_update = true;
-                    // }
+                    let pending_count : usize = editor.widget_store
+                        .iter()
+                        .filter(|x| x.as_any().downcast_ref::<WasmWidget>().is_some())
+                        .map(|x| x.as_any().downcast_ref::<WasmWidget>().unwrap())
+                        .map(|x|x.number_of_pending_requests())
+                        .sum();
+                    if pending_count > 0 {
+                        needs_update = true;
+                    }
 
                     // TODO:
                     // if I want to have 0 cpu usage when I'm not actually
@@ -173,22 +177,24 @@ pub fn setup_window(mut editor: editor::Editor) {
                         event_added = false;
                     }
                     
-                    let time = std::time::Instant::now();
-                    // if needs_update {
-                        needs_update = editor.update();
-                    // }
-                    editor.fps_counter.add_time("update", time.elapsed());
-                    window.set_cursor_icon(editor.cursor_icon);
 
-                    window.request_redraw();
+                    if needs_update {
+                        let time = std::time::Instant::now();
+                        needs_update = editor.update();
+                        editor.fps_counter.add_time("update", time.elapsed());
+                    }
+
+
+
                     // This messes up fps counter
                     // Not sure how I would fix that
                     // I guess I could separate the editor
                     // from the fps counter?
                     // Really not sure
-                    // if needs_update && editor.should_redraw() {
-                    //     window.request_redraw();
-                    // }
+                    if needs_update && editor.should_redraw() {
+                        window.set_cursor_icon(editor.cursor_icon);
+                        window.request_redraw();
+                    }
                 }
                 Event::RedrawRequested(_) => {
                     // TODO: Determine if this is a good idea or not.

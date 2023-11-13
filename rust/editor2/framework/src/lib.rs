@@ -1,5 +1,5 @@
 #![allow(unused)]
-use std::{collections::HashMap, fmt::Debug, ffi::CString};
+use std::{collections::HashMap, fmt::Debug, ffi::CString, ops::{Deref, DerefMut}};
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ extern "C" {
     fn save_file_low_level(path_ptr: i32, path_length: i32, text_ptr: i32, text_length: i32);
     fn send_message_low_level(process_id: i32, ptr: i32, len: i32);
     #[allow(improper_ctypes)]
-    fn recieve_last_message_low_level(process_id: i32) -> (i32, i32);
+    fn receive_last_message_low_level(process_id: i32) -> (i32, i32);
     #[link_name = "provide_f32"]
     fn provide_f32_low_level(ptr: i32, len: i32, val: f32);
     #[link_name = "provide_bytes"]
@@ -35,6 +35,7 @@ extern "C" {
     fn subscribe_low_level(ptr: i32, len: i32);
     #[link_name = "unsubscribe"]
     fn unsubscribe_low_level(ptr: i32, len: i32);
+    fn create_widget(identifer: u32);
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -419,6 +420,8 @@ pub trait App {
     fn on_event(&mut self, kind: String, event: String) {}
     fn on_size_change(&mut self, width: f32, height: f32);
     fn on_move(&mut self, x: f32, y: f32);
+    fn get_position(&self) -> Position;
+    fn get_size(&self) -> Size;
     fn get_initial_state(&self) -> String;
     fn get_state(&self) -> String;
     fn set_state(&mut self, state: String);
@@ -427,11 +430,46 @@ pub trait App {
 
 impl<T: App + ?Sized> AppExtensions for T {}
 
+
+#[derive(Serialize, Deserialize)]
+pub struct Widget {
+    #[serde(skip)]
+    app_index: usize,
+}
+
+impl Deref for Widget {
+    type Target = Box<dyn App>;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            APPS.get(self.app_index).unwrap()
+        }
+    }
+}
+
+impl DerefMut for Widget {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe {
+            APPS.get_mut(self.app_index).unwrap()
+        }
+    }
+}
+
+
 // I didn't really need to do this. But it is kind of interesting
 pub trait AppExtensions {
     fn start_process(&mut self, process: String) -> i32 {
         unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
     }
+    fn create_widget(&mut self, app: Box<dyn App>) -> Widget {
+        unsafe {
+            APPS.push(app);
+            let identifer = APPS.len() - 1;
+            create_widget(identifer as u32);
+            Widget { app_index:  identifer}
+        }
+    }
+
     // TODO: I need a standard way to send strings to host
     // I have a forget in send_message because I'm pretty sure I needed it
     // but I don't have it elsewhere. I should also probably look into WIT at some point
@@ -503,10 +541,10 @@ pub trait AppExtensions {
         }
     }
 
-    fn recieve_last_message(&mut self, process_id: i32) -> String {
+    fn receive_last_message(&mut self, process_id: i32) -> String {
         let buffer;
         unsafe {
-            let (ptr, len) = recieve_last_message_low_level(process_id);
+            let (ptr, len) = receive_last_message_low_level(process_id);
             buffer = String::from_raw_parts(ptr as *mut u8, len as usize, len as usize);
         }
         buffer
@@ -530,10 +568,26 @@ pub trait AppExtensions {
 
 pub static mut APPS: Lazy<Vec<Box<dyn App>>> = Lazy::new(Vec::new);
 
+pub static mut CURRENT_APP: usize = 0;
+
 
 pub fn register_app(app: Box<dyn App>) {
     unsafe {
         APPS.push(app);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn set_widget_identifier(identifier: u32) {
+    unsafe {
+        CURRENT_APP = identifier as usize;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn clear_widget_identifier() {
+    unsafe {
+        CURRENT_APP = 0;
     }
 }
 
@@ -718,7 +772,7 @@ pub mod macros {
     macro_rules! get_app {
         () => {
             unsafe {
-                if let Some(app) = APPS.get_mut(0) {
+                if let Some(app) = APPS.get_mut(CURRENT_APP) {
                     app
                 } else {
                     panic!("need to figure this out")
