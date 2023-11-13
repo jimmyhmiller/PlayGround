@@ -9,7 +9,7 @@ use std::{
 use framework::{
     app,
     serde_json::{self, json},
-    App, Canvas, Ui, WidgetData,
+    App, Canvas, Ui, WidgetData, Size,
 };
 use lsp_types::{
     notification::{DidChangeTextDocument, DidOpenTextDocument, Initialized, Notification, DidSaveTextDocument},
@@ -560,6 +560,14 @@ impl App for ProcessSpawner {
 
     fn on_move(&mut self, x: f32, y: f32) {
         self.state.widget_data.position = framework::Position { x, y };
+    }
+
+    fn get_position(&self) -> framework::Position {
+        self.state.widget_data.position
+    }
+
+    fn get_size(&self) -> Size {
+        self.state.widget_data.size
     }
 
     fn get_initial_state(&self) -> String {

@@ -1,4 +1,4 @@
-use framework::{app, App, Canvas, Position, Ui, WidgetData, serde_json};
+use framework::{app, App, Canvas, Position, Ui, WidgetData, serde_json, Size};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -77,6 +77,14 @@ impl App for EventViewer {
 
     fn on_move(&mut self, x: f32, y: f32) {
         self.widget_data.position = Position { x, y };
+    }
+
+    fn get_position(&self) -> Position {
+        self.widget_data.position
+    }
+
+    fn get_size(&self) -> Size {
+        self.widget_data.size
     }
 
     fn get_state(&self) -> String {

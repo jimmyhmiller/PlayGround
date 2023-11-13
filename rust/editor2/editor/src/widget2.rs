@@ -101,6 +101,14 @@ pub trait Widget {
     fn size(&self) -> Size;
     fn id(&self) -> usize;
     fn set_id(&mut self, id: usize);
+
+    fn dirty(&self) -> bool {
+        true
+    }
+
+    fn mark_dirty(&mut self) {}
+
+    fn reset_dirty(&mut self) {}
 }
 
 #[allow(unused)]
@@ -146,6 +154,10 @@ impl Default for Box<dyn Widget> {
         Box::new(())
     }
 }
+#[inline]
+pub fn bool_true() -> bool {
+    true
+}
 #[derive(Serialize, Deserialize)]
 pub struct WasmWidget {
     #[serde(skip)]
@@ -166,6 +178,9 @@ pub struct WasmWidget {
     pub message_id: usize,
     #[serde(skip)]
     pub pending_messages: HashMap<usize, (Message, Instant)>,
+    #[serde(default="bool_true")]
+    pub dirty: bool,
+    pub external_id: Option<u32>,
     // TODO:
     // Maybe we make a "mark dirty" sender
     // That way each widget can decide it is dirty
@@ -183,11 +198,16 @@ impl Widget for WasmWidget {
         self
     }
 
+    fn dirty(&self) -> bool {
+        self.dirty
+    }
+
     fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
         let bounds = self.size();
         canvas.save();
         canvas.translate((self.position().x, self.position().y));
         canvas.scale((self.scale(), self.scale()));
+        
 
         let mut current_width = 0.0;
         let mut current_height = 0.0;
@@ -365,14 +385,12 @@ impl Widget for WasmWidget {
     }
 
     fn update(&mut self) -> Result<(), Box<dyn Error>> {
-        // TODO: Change this
-        let message = self.wrap_payload(Payload::Draw("draw".to_string()));
-        self.send_message(message)?;
-        
-        let message = self.wrap_payload(Payload::Update);
+        // TODO: Need to figure out how to deal with updates and dirty in
+        // a way that doesn't suck
+
+        let message = self.wrap_payload(Payload::GetCommands);
         self.send_message(message)?;
 
-        // TODO: Figure out values
         self.process_non_draw_commands(&mut HashMap::new());
         while let Ok(Some(message)) = self.receiver.as_mut().unwrap().try_next() {
             // Note: Right now if a message doesn't have a corresponding in-message
@@ -384,14 +402,11 @@ impl Widget for WasmWidget {
                 // println!("Message {:?} took {:?}", message.message_id, duration);
             }
 
-
             // TODO: This just means we update everything every frame
             // Because the draw content might not have changed
             // but we still request it every frame. We should only request it
             // if things have actually changed
             // Or we should only consider it dirty if things changed.
-
-            let mut should_mark_dirty = true;
 
             // println!("Got message: {:?}", message.payload);
 
@@ -400,16 +415,17 @@ impl Widget for WasmWidget {
                     // TODO: Is this a performance issue?
                     // I'm thinking not? It seems to actually work because
                     // we only do this every once in a while
-                    if self.draw_commands == commands {
-                        should_mark_dirty = false;
+                    if self.draw_commands != commands {
+                        self.mark_dirty();
+                        self.draw_commands = commands;
                     }
-                    self.draw_commands = commands;
                 }
                 OutPayload::Update(commands) => {
-                    if self.wasm_non_draw_commands.is_empty() {
-                        should_mark_dirty = false;
+                    if !commands.is_empty() {
+                        self.mark_dirty();
+                        self.wasm_non_draw_commands.extend(commands);
                     }
-                    self.wasm_non_draw_commands.extend(commands);
+
                 }
                 OutPayload::Saved(saved) => {
                     self.save_state = saved;
@@ -426,7 +442,6 @@ impl Widget for WasmWidget {
                     // } else {
                     //     // println!("Can't find value {}", name);
                     // }
-                    // should_mark_dirty = false;
                 }
                 OutPayload::Reloaded => {
                     // TODO: Don't need widget id
@@ -434,15 +449,23 @@ impl Widget for WasmWidget {
                     // to know what widget we are.
                     self.wasm_non_draw_commands
                         .push(Commands::Redraw(self.id()));
+                    self.mark_dirty();
                 }
                 OutPayload::Complete => {
-                    // should_mark_dirty = false;
+                    self.mark_dirty();
                 }
                 OutPayload::Error(error) => {
                     println!("Error: {}", error);
                 }
             }
         }
+        if self.dirty() {
+            let message = self.wrap_payload(Payload::RunDraw("draw".to_string()));
+            self.send_message(message)?;
+        }
+
+
+
         Ok(())
     }
 
@@ -477,17 +500,28 @@ impl Widget for WasmWidget {
     fn set_id(&mut self, id: usize) {
         self.meta.id = id;
     }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn reset_dirty(&mut self) {
+        self.dirty = false;
+    }
+
 }
 
 impl WasmWidget {
 
-    pub fn send_message(&mut self, message: Message) -> Result<(), Box<dyn Error>>{
+
+    pub fn send_message(&mut self, message: Message) -> Result<(), Box<dyn Error>> {
+        self.dirty = true;
         self.pending_messages.insert(message.message_id, (message.clone(), Instant::now()));
         self.sender.as_mut().unwrap().try_send(message)?;
         Ok(())
     }
 
-    pub fn _number_of_pending_requests(&self) -> usize {
+    pub fn number_of_pending_requests(&self) -> usize {
         let non_draw_commands_count = self
             .wasm_non_draw_commands.len();
         let pending_message_count = self
@@ -500,7 +534,7 @@ impl WasmWidget {
         for message in self.pending_messages.values() {
             stats.push(match message.0.payload {
                 Payload::OnClick(_) => "OnClick",
-                Payload::Draw(_) => "Draw",
+                Payload::RunDraw(_) => "Draw",
                 Payload::OnScroll(_, _) => "OnScroll",
                 Payload::OnKey(_) => "OnKey",
                 Payload::Reload => "Reload",
@@ -512,8 +546,9 @@ impl WasmWidget {
                 Payload::PartialState(_) => "PartialState",
                 Payload::OnMouseDown(_) => "OnMouseDown",
                 Payload::OnMouseUp(_) => "OnMouseUp",
-                Payload::Update => "Update",
+                Payload::GetCommands => "Update",
                 Payload::OnMove(_, _) => "OnMove",
+                Payload::NewSender(_, _) => "NewSender",
             });
         }
 
@@ -530,14 +565,17 @@ impl WasmWidget {
     pub fn wrap_payload(&mut self, payload: Payload) -> Message {
         let message_id = self.next_message_id();
         Message {
-            wasm_id: self.id() as u64,
             message_id,
+            external_id: self.external_id,
             payload,
         }
     }
 
     pub fn process_non_draw_commands(&mut self, values: &mut HashMap<String, Value>) {
         let id = self.id();
+        if !self.wasm_non_draw_commands.is_empty() {
+            self.mark_dirty();
+        }
         for command in self.wasm_non_draw_commands.iter() {
             match command {
                 Commands::StartProcess(process_id, process_command) => {
@@ -612,6 +650,13 @@ impl WasmWidget {
                         .unwrap()
                         .send(Event::SetCursor(*cursor))
                         .unwrap();
+                }
+                Commands::CreateWidget(wasm_id, external_id) => {
+                    self.external_sender
+                    .as_mut()
+                    .unwrap()
+                    .send(Event::CreateWidget(*wasm_id, *external_id))
+                    .unwrap();
                 }
             }
         }

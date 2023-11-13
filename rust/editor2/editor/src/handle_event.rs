@@ -53,6 +53,8 @@ impl Editor {
                                 path: path.to_str().unwrap().to_string(),
                                 message_id: 0,
                                 pending_messages: HashMap::new(),
+                                dirty: true,
+                                external_id: None,
                             }),
                         });
                     } else {
@@ -259,6 +261,7 @@ impl Editor {
                     self.context.modifiers = modifiers;
                 }
                 Event::Event(kind, event) => {
+
                     // lookup what widgets are listening, call their on_event handler
                     let empty = &HashSet::new();
                     let specific = self.event_listeners.get(&kind).unwrap_or(empty);
@@ -333,9 +336,11 @@ impl Editor {
                                     save_state: SaveState::Unsaved,
                                     wasm_non_draw_commands: vec![],
                                     external_sender: Some(self.external_sender.as_ref().unwrap().clone()),
-                                    path: path.clone(),
+                                    path: code_editor.to_string(),
                                     message_id: 0,
                                     pending_messages: HashMap::new(),
+                                    dirty: true,
+                                    external_id: None,
                                 }),
                             });
                             self.mark_widget_dirty(widget_id);
@@ -357,6 +362,35 @@ impl Editor {
                     }
                 },
                 Event::Redraw(widget_id) => self.mark_widget_dirty(widget_id),
+                Event::CreateWidget(wasm_id, external_id) => {
+                    let next_id = self.widget_store.next_id();
+                    let receiver = self.wasm_messenger.get_receiver(wasm_id as u64, external_id);
+                    self.widget_store.add_widget(Widget {
+                        data: Box::new(WasmWidget {
+                            draw_commands: vec![],
+                            sender: Some(self.wasm_messenger.get_sender(wasm_id as u64)),
+                            receiver: Some(receiver),
+                            meta: WidgetMeta::new(
+                                Position { x: 100.0, y: 100.0 },
+                                Size {
+                                    width: 800.0,
+                                    height: 800.0,
+                                },
+                                1.0,
+                                next_id,
+                            ),
+                            save_state: SaveState::Unsaved,
+                            wasm_non_draw_commands: vec![],
+                            external_sender: Some(self.external_sender.as_ref().unwrap().clone()),
+                            path: "TODO".to_string(),
+                            message_id: 0,
+                            pending_messages: HashMap::new(),
+                            dirty: true,
+                            external_id: Some(external_id),
+                        }),
+                    });
+                }
+
                 _e => {
                     // println!("Unhandled event {:?}", e)
                 }
