@@ -101,7 +101,7 @@ impl Widget {
             return;
         }
         // TODO: Clean up this mess
-        while let Some(widget) = self.data.as_any_mut().downcast_mut::<WasmWidget>() { 
+        while let Some(widget) = self.data.as_any_mut().downcast_mut::<WasmWidget>() {
             widget.save().unwrap();
             wasm_messenger.tick();
             widget.update().unwrap();
@@ -116,7 +116,7 @@ impl Widget {
                     break;
                 }
             }
-         }
+        }
     }
 
     pub fn files_to_watch(&self) -> Vec<String> {
@@ -204,7 +204,6 @@ impl WidgetStore {
     }
 
     pub fn draw(&mut self, canvas: &Canvas, dirty_widgets: &HashSet<usize>) {
-
         // TODO: Created Widgets don't draw right away
 
         // TODO: Deleted widgets can end up here
@@ -227,12 +226,12 @@ impl WidgetStore {
                     // TODO: Still broken because of dirty checking
                     // but we are drawing
 
-                    let can_draw = if let Some(widget) = widget.data.as_any().downcast_ref::<WasmWidget>() {
-                        !widget.draw_commands.is_empty()
-                    } else {
-                        true
-                    };
-
+                    let can_draw =
+                        if let Some(widget) = widget.data.as_any().downcast_ref::<WasmWidget>() {
+                            !widget.draw_commands.is_empty()
+                        } else {
+                            true
+                        };
 
                     if !can_draw {
                         continue;

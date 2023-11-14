@@ -1,11 +1,5 @@
 use std::{
-    collections::HashMap,
-    error::Error,
-    io::Write,
-    path::Path,
-    sync::Arc,
-    thread,
-    time::Duration,
+    collections::HashMap, error::Error, io::Write, path::Path, sync::Arc, thread, time::Duration,
 };
 
 use bytesize::ByteSize;
@@ -126,7 +120,6 @@ impl WasmMessenger {
         }
     }
 
-
     pub fn get_sender(&self, id: WasmId) -> Sender<Message> {
         self.senders.get(&id).unwrap().clone()
     }
@@ -160,7 +153,6 @@ impl WasmMessenger {
         sender.clone().try_send(message).unwrap();
         // self.receivers.insert(id, out_receiver);
         self.senders.insert(id, sender);
-        
 
         async fn spawn_instance(
             engine: Arc<Engine>,
@@ -168,7 +160,6 @@ impl WasmMessenger {
             wasm_path: String,
             receiver: Receiver<Message>,
             sender: Sender<OutMessage>,
-            
         ) {
             let mut instance = WasmManager::new(
                 engine.clone(),
@@ -190,7 +181,6 @@ impl WasmMessenger {
                 out_sender,
             ))
             .unwrap();
-
 
         (id, out_receiver)
     }
@@ -215,20 +205,20 @@ impl WasmMessenger {
                 break;
             }
         }
-
     }
 
     pub fn get_receiver(&mut self, wasm_id: u64, external_id: u32) -> Receiver<OutMessage> {
         let (sender, receiver) = channel::<OutMessage>(100000);
         let mut wasm_sender = self.get_sender(wasm_id);
         let message_id = self.next_message_id();
-        wasm_sender.try_send(Message {
-            message_id,
-            external_id: Some(external_id),
-            payload: Payload::NewSender(external_id, sender)
-        }).unwrap();
+        wasm_sender
+            .try_send(Message {
+                message_id,
+                external_id: Some(external_id),
+                payload: Payload::NewSender(external_id, sender),
+            })
+            .unwrap();
         receiver
-
     }
 }
 
@@ -276,7 +266,10 @@ impl WasmManager {
             match out_message {
                 Ok(out_message) => {
                     let result = if let Some(external_id) = external_id {
-                        self.other_senders.get_mut(&external_id).unwrap().start_send(out_message)
+                        self.other_senders
+                            .get_mut(&external_id)
+                            .unwrap()
+                            .start_send(out_message)
                     } else {
                         self.sender.start_send(out_message)
                     };
@@ -443,7 +436,6 @@ impl WasmManager {
         if let Some(_) = message.external_id {
             self.instance.clear_widget_identifier().await?;
         }
-
 
         result
     }
@@ -930,8 +922,7 @@ impl WasmInstance {
         linker.func_wrap(
             "host",
             "create_widget",
-            |mut caller: Caller<'_, State>,
-            external_id: u32| {
+            |mut caller: Caller<'_, State>, external_id: u32| {
                 let state = caller.data_mut();
                 state
                     .commands
@@ -1215,13 +1206,13 @@ impl WasmInstance {
         Ok(())
     }
 
-    pub async fn set_widget_identifer(&mut self, external_id: u32) -> Result<(), Box<dyn Error>>  {
+    pub async fn set_widget_identifer(&mut self, external_id: u32) -> Result<(), Box<dyn Error>> {
         self.call_typed_func::<u32, ()>("set_widget_identifier", external_id, 1)
             .await?;
         Ok(())
     }
 
-    pub async fn clear_widget_identifier(&mut self) -> Result<(), Box<dyn Error>>  {
+    pub async fn clear_widget_identifier(&mut self) -> Result<(), Box<dyn Error>> {
         self.call_typed_func::<(), ()>("clear_widget_identifier", (), 1)
             .await?;
         Ok(())

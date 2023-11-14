@@ -1,4 +1,7 @@
-use std::{collections::{HashSet, HashMap}, io::Write};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Write,
+};
 
 use framework::{CursorIcon, Position, Size};
 use nonblock::NonBlockingReader;
@@ -49,7 +52,9 @@ impl Editor {
                                 ),
                                 save_state: SaveState::Unsaved,
                                 wasm_non_draw_commands: vec![],
-                                external_sender: Some(self.external_sender.as_ref().unwrap().clone()),
+                                external_sender: Some(
+                                    self.external_sender.as_ref().unwrap().clone(),
+                                ),
                                 path: path.to_str().unwrap().to_string(),
                                 message_id: 0,
                                 pending_messages: HashMap::new(),
@@ -261,7 +266,6 @@ impl Editor {
                     self.context.modifiers = modifiers;
                 }
                 Event::Event(kind, event) => {
-
                     // lookup what widgets are listening, call their on_event handler
                     let empty = &HashSet::new();
                     let specific = self.event_listeners.get(&kind).unwrap_or(empty);
@@ -335,7 +339,9 @@ impl Editor {
                                     ),
                                     save_state: SaveState::Unsaved,
                                     wasm_non_draw_commands: vec![],
-                                    external_sender: Some(self.external_sender.as_ref().unwrap().clone()),
+                                    external_sender: Some(
+                                        self.external_sender.as_ref().unwrap().clone(),
+                                    ),
                                     path: code_editor.to_string(),
                                     message_id: 0,
                                     pending_messages: HashMap::new(),
@@ -364,7 +370,9 @@ impl Editor {
                 Event::Redraw(widget_id) => self.mark_widget_dirty(widget_id),
                 Event::CreateWidget(wasm_id, external_id) => {
                     let next_id = self.widget_store.next_id();
-                    let receiver = self.wasm_messenger.get_receiver(wasm_id as u64, external_id);
+                    let receiver = self
+                        .wasm_messenger
+                        .get_receiver(wasm_id as u64, external_id);
                     self.widget_store.add_widget(Widget {
                         data: Box::new(WasmWidget {
                             draw_commands: vec![],
