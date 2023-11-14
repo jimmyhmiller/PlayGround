@@ -144,16 +144,17 @@ pub fn setup_window(mut editor: editor::Editor) {
                     // This needs to happen unconditonally, because
                     // these are external things that can create events
                     editor.process_per_frame_actions();
-                    
+
                     // TODO: Fix the pending messages
                     if !editor.events.events_for_frame().is_empty() {
                         needs_update = true;
                     }
-                    let pending_count : usize = editor.widget_store
+                    let pending_count: usize = editor
+                        .widget_store
                         .iter()
                         .filter(|x| x.as_any().downcast_ref::<WasmWidget>().is_some())
                         .map(|x| x.as_any().downcast_ref::<WasmWidget>().unwrap())
-                        .map(|x|x.number_of_pending_requests())
+                        .map(|x| x.number_of_pending_requests())
                         .sum();
                     if pending_count > 0 {
                         needs_update = true;
@@ -176,15 +177,12 @@ pub fn setup_window(mut editor: editor::Editor) {
                     if event_added {
                         event_added = false;
                     }
-                    
 
                     if needs_update {
                         let time = std::time::Instant::now();
                         needs_update = editor.update();
                         editor.fps_counter.add_time("update", time.elapsed());
                     }
-
-
 
                     // This messes up fps counter
                     // Not sure how I would fix that

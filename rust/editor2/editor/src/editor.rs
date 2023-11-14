@@ -274,7 +274,6 @@ impl Editor {
         }
         self.fps_counter.add_time("update_widgets", time.elapsed());
 
-
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
                 self.events.push_current_frame(event);
@@ -294,15 +293,15 @@ impl Editor {
         self.handle_events(events);
         self.fps_counter.add_time("events", time.elapsed());
 
-        let pending_count : usize = self.widget_store
+        let pending_count: usize = self
+            .widget_store
             .iter()
             .filter(|x| x.as_any().downcast_ref::<WasmWidget>().is_some())
             .map(|x| x.as_any().downcast_ref::<WasmWidget>().unwrap())
-            .map(|x|x.number_of_pending_requests())
+            .map(|x| x.number_of_pending_requests())
             .sum();
 
-        !events_empty || pending_count> 0
-
+        !events_empty || pending_count > 0
     }
 
     pub fn process_per_frame_actions(&mut self) {
@@ -418,12 +417,10 @@ impl Editor {
         }
     }
 
-
     // IDEA: Draw on back with negative coordinates
     pub fn draw(&mut self, canvas: &Canvas) {
         self.fps_counter.tick();
-        use skia_safe::{Point, Font, Typeface, FontStyle, Paint, Color4f};
-        
+        use skia_safe::{Color4f, Font, FontStyle, Paint, Point, Typeface};
 
         let background = Color::parse_hex("#39463e");
 
@@ -465,7 +462,7 @@ impl Editor {
         }
         canvas.restore();
 
-        let mut combined_counts : HashMap<String, usize> = HashMap::new();
+        let mut combined_counts: HashMap<String, usize> = HashMap::new();
         for widget in self.widget_store.iter() {
             if let Some(widget) = widget.data.as_any().downcast_ref::<WasmWidget>() {
                 let counts = widget.pending_message_counts();

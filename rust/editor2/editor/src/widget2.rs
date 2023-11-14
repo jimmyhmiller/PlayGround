@@ -7,7 +7,8 @@ use std::{
     io::Read,
     ops::{Deref, DerefMut},
     path::PathBuf,
-    str::from_utf8, time::Instant,
+    str::from_utf8,
+    time::Instant,
 };
 
 use framework::{KeyboardInput, Position, Size};
@@ -26,7 +27,6 @@ use crate::{
     util::{decode_base64, encode_base64},
     wasm_messenger::{Commands, DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState},
 };
-
 
 #[allow(unused)]
 #[typetag::serde(tag = "type")]
@@ -178,7 +178,7 @@ pub struct WasmWidget {
     pub message_id: usize,
     #[serde(skip)]
     pub pending_messages: HashMap<usize, (Message, Instant)>,
-    #[serde(default="bool_true")]
+    #[serde(default = "bool_true")]
     pub dirty: bool,
     pub external_id: Option<u32>,
     // TODO:
@@ -207,7 +207,6 @@ impl Widget for WasmWidget {
         canvas.save();
         canvas.translate((self.position().x, self.position().y));
         canvas.scale((self.scale(), self.scale()));
-        
 
         let mut current_width = 0.0;
         let mut current_height = 0.0;
@@ -324,7 +323,6 @@ impl Widget for WasmWidget {
     }
 
     fn set_state(&mut self, state: String) -> Result<(), Box<dyn Error>> {
-        
         let base64_decoded = decode_base64(&state.as_bytes().to_vec()).unwrap();
         let state = String::from_utf8(base64_decoded).unwrap();
         let message = self.wrap_payload(Payload::PartialState(Some(state)));
@@ -356,11 +354,7 @@ impl Widget for WasmWidget {
         x_diff: f32,
         y_diff: f32,
     ) -> Result<(), Box<dyn Error>> {
-        let message = self.wrap_payload(Payload::OnMouseMove(
-            Position { x, y },
-            x_diff,
-            y_diff,
-        ));
+        let message = self.wrap_payload(Payload::OnMouseMove(Position { x, y }, x_diff, y_diff));
         self.send_message(message)?;
         Ok(())
     }
@@ -376,10 +370,7 @@ impl Widget for WasmWidget {
         process_id: i32,
         message: String,
     ) -> Result<(), Box<dyn Error>> {
-        let message = self.wrap_payload(Payload::ProcessMessage(
-            process_id as usize,
-            message,
-        ));
+        let message = self.wrap_payload(Payload::ProcessMessage(process_id as usize, message));
         self.send_message(message)?;
         Ok(())
     }
@@ -395,7 +386,6 @@ impl Widget for WasmWidget {
         while let Ok(Some(message)) = self.receiver.as_mut().unwrap().try_next() {
             // Note: Right now if a message doesn't have a corresponding in-message
             // I am just setting the out message to id: 0.
-
 
             if let Some((_, instant)) = self.pending_messages.remove(&message.message_id) {
                 let duration = instant.elapsed();
@@ -425,7 +415,6 @@ impl Widget for WasmWidget {
                         self.mark_dirty();
                         self.wasm_non_draw_commands.extend(commands);
                     }
-
                 }
                 OutPayload::Saved(saved) => {
                     self.save_state = saved;
@@ -463,8 +452,6 @@ impl Widget for WasmWidget {
             let message = self.wrap_payload(Payload::RunDraw("draw".to_string()));
             self.send_message(message)?;
         }
-
-
 
         Ok(())
     }
@@ -508,24 +495,20 @@ impl Widget for WasmWidget {
     fn reset_dirty(&mut self) {
         self.dirty = false;
     }
-
 }
 
 impl WasmWidget {
-
-
     pub fn send_message(&mut self, message: Message) -> Result<(), Box<dyn Error>> {
         self.dirty = true;
-        self.pending_messages.insert(message.message_id, (message.clone(), Instant::now()));
+        self.pending_messages
+            .insert(message.message_id, (message.clone(), Instant::now()));
         self.sender.as_mut().unwrap().try_send(message)?;
         Ok(())
     }
 
     pub fn number_of_pending_requests(&self) -> usize {
-        let non_draw_commands_count = self
-            .wasm_non_draw_commands.len();
-        let pending_message_count = self
-            .pending_messages.len();
+        let non_draw_commands_count = self.wasm_non_draw_commands.len();
+        let pending_message_count = self.pending_messages.len();
         non_draw_commands_count + pending_message_count
     }
 
@@ -552,7 +535,12 @@ impl WasmWidget {
             });
         }
 
-        let counts = stats.iter().counts().iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        let counts = stats
+            .iter()
+            .counts()
+            .iter()
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect();
         counts
     }
 
@@ -653,10 +641,10 @@ impl WasmWidget {
                 }
                 Commands::CreateWidget(wasm_id, external_id) => {
                     self.external_sender
-                    .as_mut()
-                    .unwrap()
-                    .send(Event::CreateWidget(*wasm_id, *external_id))
-                    .unwrap();
+                        .as_mut()
+                        .unwrap()
+                        .send(Event::CreateWidget(*wasm_id, *external_id))
+                        .unwrap();
                 }
             }
         }

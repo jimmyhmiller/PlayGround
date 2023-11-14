@@ -1,4 +1,7 @@
-use std::{time::{Instant, Duration}, collections::HashMap};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 pub struct FpsCounter {
     pub start_time: Instant,
@@ -42,13 +45,16 @@ impl FpsCounter {
         if let Some(stats) = self.times.get_mut(name) {
             stats.update(time);
         } else {
-            self.times.insert(name.to_string(), Stats {
-                average: time,
-                times: [Duration::ZERO; 100],
-                min: time,
-                max: time,
-                count: 1,
-            });
+            self.times.insert(
+                name.to_string(),
+                Stats {
+                    average: time,
+                    times: [Duration::ZERO; 100],
+                    min: time,
+                    max: time,
+                    count: 1,
+                },
+            );
         }
     }
 
