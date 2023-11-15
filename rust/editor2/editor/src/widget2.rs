@@ -11,8 +11,8 @@ use std::{
     time::Instant,
 };
 
-use framework::{KeyboardInput, Position, Size};
-use futures::channel::mpsc::Sender;
+use framework::{KeyboardInput, Position, Size, WidgetMeta};
+use futures::channel::{mpsc::Sender, oneshot};
 use itertools::Itertools;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use skia_safe::{
@@ -109,6 +109,14 @@ pub trait Widget {
     fn mark_dirty(&mut self) {}
 
     fn reset_dirty(&mut self) {}
+
+    fn as_wasm_widget(&self) -> Option<&WasmWidget> {
+        self.as_any().downcast_ref::<WasmWidget>()
+    }
+
+    fn as_wasm_widget_mut(&mut self) -> Option<&mut WasmWidget> {
+        self.as_any_mut().downcast_mut::<WasmWidget>()
+    }
 }
 
 #[allow(unused)]
@@ -181,6 +189,8 @@ pub struct WasmWidget {
     #[serde(default = "bool_true")]
     pub dirty: bool,
     pub external_id: Option<u32>,
+    #[serde(skip)]
+    pub value_senders: HashMap<String, oneshot::Sender<String>>,
     // TODO:
     // Maybe we make a "mark dirty" sender
     // That way each widget can decide it is dirty
@@ -423,6 +433,12 @@ impl Widget for WasmWidget {
                     println!("Error: {}", error_message);
                 }
                 OutPayload::NeededValue(name, sender) => {
+                    let id = self.id();
+                    self.external_sender
+                        .as_mut()
+                        .unwrap()
+                        .send(Event::ValueNeeded(name.clone(), id));
+                    self.value_senders.insert(name, sender);
                     // If I don't have the value, what should I do?
                     // Should I save this message and re-enqueue or signal failure?
                     // if let Some(value) = values.get(&name) {
@@ -498,6 +514,13 @@ impl Widget for WasmWidget {
 }
 
 impl WasmWidget {
+
+    pub fn send_value(&mut self, name: String, value: String) {
+        if let Some(sender) = self.value_senders.remove(&name) {
+            sender.send(value).unwrap();
+        }
+    }
+
     pub fn send_message(&mut self, message: Message) -> Result<(), Box<dyn Error>> {
         self.dirty = true;
         self.pending_messages
@@ -673,25 +696,9 @@ where
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct WidgetMeta {
-    position: Position,
-    scale: f32,
-    size: Size,
-    #[serde(skip)]
-    id: usize,
-}
 
-impl WidgetMeta {
-    pub fn new(position: Position, size: Size, scale: f32, id: usize) -> Self {
-        Self {
-            position,
-            scale,
-            size,
-            id,
-        }
-    }
-}
+
+
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TextPane {

@@ -16,7 +16,7 @@ use crate::{
     keyboard::Modifiers,
     wasm_messenger::WasmMessenger,
     widget::{Widget, WidgetId, WidgetStore},
-    widget2::{Deleted, TextPane, WasmWidget},
+    widget2::{Deleted, TextPane},
 };
 
 use framework::{Position, Size};
@@ -219,8 +219,6 @@ impl Editor {
                                 .unwrap();
                         }
                     }
-                    let id = self.widget_store.next_id();
-                    widget.set_id(id);
                     widget
                 } else {
                     println!("Failed to parse: {}", s);
@@ -228,11 +226,13 @@ impl Editor {
                 }
             })
             .collect();
-        for widget in widgets {
+        for mut widget in widgets {
+            let id = self.widget_store.next_id();
+            widget.set_id(id);
             self.widget_store.add_widget(widget);
         }
         for widget in self.widget_store.iter_mut() {
-            if let Some(widget) = widget.data.as_any_mut().downcast_mut::<WasmWidget>() {
+            if let Some(widget) = widget.as_wasm_widget_mut() {
                 widget.external_sender = Some(self.external_sender.as_ref().unwrap().clone());
             }
             if widget.position().x >= self.window.size.width
@@ -296,8 +296,8 @@ impl Editor {
         let pending_count: usize = self
             .widget_store
             .iter()
-            .filter(|x| x.as_any().downcast_ref::<WasmWidget>().is_some())
-            .map(|x| x.as_any().downcast_ref::<WasmWidget>().unwrap())
+            .filter(|x| x.as_wasm_widget().is_some())
+            .map(|x| x.as_wasm_widget().unwrap())
             .map(|x| x.number_of_pending_requests())
             .sum();
 
@@ -464,7 +464,7 @@ impl Editor {
 
         let mut combined_counts: HashMap<String, usize> = HashMap::new();
         for widget in self.widget_store.iter() {
-            if let Some(widget) = widget.data.as_any().downcast_ref::<WasmWidget>() {
+            if let Some(widget) = widget.as_wasm_widget() {
                 let counts = widget.pending_message_counts();
                 for (key, value) in counts.iter() {
                     let count = combined_counts.entry(key.to_string()).or_insert(0);

@@ -442,7 +442,6 @@ impl App for TextWidget {
     }
 
     fn set_state(&mut self, state: String) {
-        println!("Setting state to {}", state);
         let value : Self = serde_json::from_str(&state).unwrap();
         *self = value;
         if !self.file_path.is_empty() {

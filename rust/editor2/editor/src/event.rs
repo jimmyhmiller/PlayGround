@@ -72,6 +72,7 @@ pub enum Event {
     SetCursor(CursorIcon),
     Redraw(usize),
     CreateWidget(usize, u32),
+    ValueNeeded(String, usize),
 }
 
 impl Event {

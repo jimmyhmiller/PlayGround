@@ -3,7 +3,7 @@ use std::{
     io::Write,
 };
 
-use framework::{CursorIcon, Position, Size};
+use framework::{CursorIcon, Position, Size, WidgetMeta};
 use nonblock::NonBlockingReader;
 use notify::RecursiveMode;
 use serde_json::json;
@@ -15,7 +15,7 @@ use crate::{
     native::open_file_dialog,
     wasm_messenger::SaveState,
     widget::Widget,
-    widget2::{Ephemeral, TextPane, WasmWidget, Widget as _, WidgetMeta},
+    widget2::{Ephemeral, TextPane, WasmWidget, Widget as _,},
 };
 
 fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
@@ -60,6 +60,7 @@ impl Editor {
                                 pending_messages: HashMap::new(),
                                 dirty: true,
                                 external_id: None,
+                                value_senders: HashMap::new(),
                             }),
                         });
                     } else {
@@ -181,8 +182,7 @@ impl Editor {
                 }
                 Event::ReloadWasm(path) => {
                     for widget in self.widget_store.iter_mut() {
-                        if let Some(widget) = widget.data.as_any_mut().downcast_mut::<WasmWidget>()
-                        {
+                        if let Some(widget) = widget.as_wasm_widget_mut() {
                             if path == widget.path {
                                 widget.reload().unwrap();
                             }
@@ -347,6 +347,7 @@ impl Editor {
                                     pending_messages: HashMap::new(),
                                     dirty: true,
                                     external_id: None,
+                                    value_senders: HashMap::new(),
                                 }),
                             });
                             self.mark_widget_dirty(widget_id);
@@ -395,9 +396,27 @@ impl Editor {
                             pending_messages: HashMap::new(),
                             dirty: true,
                             external_id: Some(external_id),
+                            value_senders: HashMap::new(),
                         }),
                     });
                 }
+
+                Event::ValueNeeded(name, widget_id) => match name.as_str() {
+                    "widgets" => {
+                        let widget_positions: Vec<WidgetMeta> = self
+                            .widget_store
+                            .iter()
+                            .map(|w| WidgetMeta::new(w.position(), w.size(), w.scale(), w.id()))
+                            .collect();
+                        let widget_positions = serde_json::to_string(&widget_positions).unwrap();
+                        if let Some(widget) = self.widget_store.get_mut(widget_id) {
+                            if let Some(widget) = widget.as_wasm_widget_mut() {
+                                widget.send_value(name, widget_positions);
+                            }
+                        }
+                    }
+                    _ => {}
+                },
 
                 _e => {
                     // println!("Unhandled event {:?}", e)
