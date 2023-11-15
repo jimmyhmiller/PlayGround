@@ -4,7 +4,7 @@ use metal_rs::MetalLayerRef;
 use skia_safe::{gpu, scalar, ColorType, Size};
 use winit::platform::macos::WindowBuilderExtMacOS;
 
-use crate::{editor, widget2::WasmWidget};
+use crate::editor;
 
 pub fn setup_window(mut editor: editor::Editor) {
     use cocoa::{appkit::NSView, base::id as cocoa_id};
@@ -152,8 +152,8 @@ pub fn setup_window(mut editor: editor::Editor) {
                     let pending_count: usize = editor
                         .widget_store
                         .iter()
-                        .filter(|x| x.as_any().downcast_ref::<WasmWidget>().is_some())
-                        .map(|x| x.as_any().downcast_ref::<WasmWidget>().unwrap())
+                        .filter(|x| x.as_wasm_widget().is_some())
+                        .map(|x| x.as_wasm_widget().unwrap())
                         .map(|x| x.number_of_pending_requests())
                         .sum();
                     if pending_count > 0 {

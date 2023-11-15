@@ -10,7 +10,7 @@ use skia_safe::{Canvas, Image};
 use crate::{
     keyboard::KeyboardInput,
     wasm_messenger::{self, SaveState, WasmMessenger},
-    widget2::{self, WasmWidget, Widget as Widget2},
+    widget2::{self, Widget as Widget2},
 };
 
 pub type WidgetId = usize;
@@ -81,7 +81,7 @@ impl Widget {
     }
 
     pub fn init(&mut self, wasm_messenger: &mut WasmMessenger) {
-        if let Some(widget) = self.data.as_any_mut().downcast_mut::<WasmWidget>() {
+        if let Some(widget) = self.as_wasm_widget_mut() {
             let (new_wasm_id, receiver) = wasm_messenger.new_instance(&widget.path, None);
             widget.sender = Some(wasm_messenger.get_sender(new_wasm_id));
             widget.receiver = Some(receiver);
@@ -101,7 +101,7 @@ impl Widget {
             return;
         }
         // TODO: Clean up this mess
-        while let Some(widget) = self.data.as_any_mut().downcast_mut::<WasmWidget>() {
+        while let Some(widget) = self.as_wasm_widget_mut() {
             widget.save().unwrap();
             wasm_messenger.tick();
             widget.update().unwrap();
@@ -120,7 +120,7 @@ impl Widget {
     }
 
     pub fn files_to_watch(&self) -> Vec<String> {
-        if let Some(widget) = self.data.as_any().downcast_ref::<WasmWidget>() {
+        if let Some(widget) = self.as_wasm_widget() {
             vec![widget.path.clone()]
         } else {
             vec![]
@@ -227,7 +227,7 @@ impl WidgetStore {
                     // but we are drawing
 
                     let can_draw =
-                        if let Some(widget) = widget.data.as_any().downcast_ref::<WasmWidget>() {
+                        if let Some(widget) = widget.as_wasm_widget() {
                             !widget.draw_commands.is_empty()
                         } else {
                             true

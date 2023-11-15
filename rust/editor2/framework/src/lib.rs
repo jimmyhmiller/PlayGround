@@ -314,6 +314,26 @@ impl Position {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WidgetMeta {
+    pub position: Position,
+    pub scale: f32,
+    pub size: Size,
+    #[serde(default)]
+    pub id: usize,
+}
+
+impl WidgetMeta {
+    pub fn new(position: Position, size: Size, scale: f32, id: usize) -> Self {
+        Self {
+            position,
+            scale,
+            size,
+            id,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct WidgetData {
     pub position: Position,
@@ -550,10 +570,10 @@ pub trait AppExtensions {
         buffer
     }
 
-    fn get_value(&self, name: &str) -> String {
+    fn get_value<T : for<'a> Deserialize<'a>>(&self, name: &str) -> Option<T> {
         let ptr = unsafe { get_value(name.as_ptr() as i32, name.len() as i32) };
 
-        fetch_string(ptr)
+        serde_json::from_str(&fetch_string(ptr)).ok()
     }
 
     fn try_get_value(&self, name: &str) -> Option<String> {

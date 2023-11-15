@@ -1,4 +1,4 @@
-use framework::{App, Canvas, KeyboardInput, serde_json::{json, self}, app, Color, WidgetData, Position, Size, KeyCode, KeyState, Widget};
+use framework::{App, Canvas, KeyboardInput, serde_json::{json, self}, app, Color, WidgetData, Position, Size, KeyCode, KeyState, Widget, WidgetMeta};
 use serde::{Serialize, Deserialize};
 
 
@@ -23,6 +23,10 @@ impl App for MultipleWidgets {
     }
 
     fn on_click(&mut self, x: f32, y: f32) {
+        let widget_positions: Option<Vec<WidgetMeta>> = self.get_value("widgets");
+        if let Some(widget_positions) = widget_positions {
+            println!("widget_positions {:?}", widget_positions);
+        }
         println!("index {}", self.index);
     }
 
