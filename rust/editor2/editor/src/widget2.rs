@@ -662,11 +662,11 @@ impl WasmWidget {
                         .send(Event::SetCursor(*cursor))
                         .unwrap();
                 }
-                Commands::CreateWidget(wasm_id, external_id) => {
+                Commands::CreateWidget(wasm_id, x, y, width, height, external_id) => {
                     self.external_sender
                         .as_mut()
                         .unwrap()
-                        .send(Event::CreateWidget(*wasm_id, *external_id))
+                        .send(Event::CreateWidget(*wasm_id, *x, *y, *width, *height, *external_id))
                         .unwrap();
                 }
             }

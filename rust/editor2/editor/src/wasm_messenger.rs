@@ -482,7 +482,7 @@ pub enum Commands {
     Unsubscribe(String),
     SetCursor(CursorIcon),
     Redraw(usize),
-    CreateWidget(usize, u32),
+    CreateWidget(usize, f32, f32, f32, f32, u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -922,11 +922,11 @@ impl WasmInstance {
         linker.func_wrap(
             "host",
             "create_widget",
-            |mut caller: Caller<'_, State>, external_id: u32| {
+            |mut caller: Caller<'_, State>, x: f32, y: f32, width: f32, height: f32, external_id: u32| {
                 let state = caller.data_mut();
                 state
                     .commands
-                    .push(Commands::CreateWidget(state.wasm_id as usize, external_id));
+                    .push(Commands::CreateWidget(state.wasm_id as usize, x, y, width, height, external_id));
             },
         )?;
 
