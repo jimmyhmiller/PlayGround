@@ -487,7 +487,7 @@ impl App for ProcessSpawner {
                                     );
                                 }
                                 if method == "workspace/symbol" {
-                                    self.send_event("workspace/symbols", message.to_string());
+                                    self.send_event("workspace/symbols", message.get("result").unwrap().to_string());
                                 }
                                 if method == "initialize" {
                                     let result = message.get("result").unwrap();
