@@ -71,7 +71,7 @@ pub enum Event {
     OpenFile(String),
     SetCursor(CursorIcon),
     Redraw(usize),
-    CreateWidget(usize, u32),
+    CreateWidget(usize, f32, f32, f32, f32, u32),
     ValueNeeded(String, usize),
 }
 

@@ -369,21 +369,21 @@ impl Editor {
                     }
                 },
                 Event::Redraw(widget_id) => self.mark_widget_dirty(widget_id),
-                Event::CreateWidget(wasm_id, external_id) => {
+                Event::CreateWidget(wasm_id, x, y, width, height, external_id) => {
                     let next_id = self.widget_store.next_id();
                     let receiver = self
                         .wasm_messenger
                         .get_receiver(wasm_id as u64, external_id);
                     self.widget_store.add_widget(Widget {
-                        data: Box::new(WasmWidget {
+                        data: Box::new(Ephemeral::wrap(Box::new(WasmWidget {
                             draw_commands: vec![],
                             sender: Some(self.wasm_messenger.get_sender(wasm_id as u64)),
                             receiver: Some(receiver),
                             meta: WidgetMeta::new(
-                                Position { x: 100.0, y: 100.0 },
+                                Position { x, y},
                                 Size {
-                                    width: 800.0,
-                                    height: 800.0,
+                                    width,
+                                    height,
                                 },
                                 1.0,
                                 next_id,
@@ -397,7 +397,7 @@ impl Editor {
                             dirty: true,
                             external_id: Some(external_id),
                             value_senders: HashMap::new(),
-                        }),
+                        }))),
                     });
                 }
 

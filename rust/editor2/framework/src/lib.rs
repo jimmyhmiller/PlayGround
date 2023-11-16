@@ -35,7 +35,7 @@ extern "C" {
     fn subscribe_low_level(ptr: i32, len: i32);
     #[link_name = "unsubscribe"]
     fn unsubscribe_low_level(ptr: i32, len: i32);
-    fn create_widget(identifer: u32);
+    fn create_widget(x: f32, y: f32, width: f32, height: f32, identifer: u32);
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -481,11 +481,11 @@ pub trait AppExtensions {
     fn start_process(&mut self, process: String) -> i32 {
         unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
     }
-    fn create_widget(&mut self, app: Box<dyn App>) -> Widget {
+    fn create_widget(&mut self, app: Box<dyn App>, data: WidgetData) -> Widget {
         unsafe {
             APPS.push(app);
             let identifer = APPS.len() - 1;
-            create_widget(identifer as u32);
+            create_widget(data.position.x, data.position.y, data.size.width, data.size.height, identifer as u32);
             Widget { app_index:  identifer}
         }
     }

@@ -215,11 +215,11 @@ impl WidgetStore {
                 dirty_widgets.insert(widget.id());
             }
         }
-        let mut images_to_insert = vec![];
-        for widget_id in dirty_widgets.iter() {
-            if let Some(widget) = self.get_mut(*widget_id) {
-                if let Some(mut surface) = canvas.new_surface(&canvas.image_info(), None) {
-                    let canvas = surface.canvas();
+        // let mut images_to_insert = vec![];
+        for widget in self.widgets.iter_mut() {
+            // if let Some(widget) = self.get_mut(*widget_id) {
+                // if let Some(mut surface) = canvas.new_surface(&canvas.image_info(), None) {
+                //     let canvas = surface.canvas();
 
                     let before_count = canvas.save();
 
@@ -241,21 +241,21 @@ impl WidgetStore {
                     canvas.restore_to_count(before_count);
                     canvas.restore();
 
-                    let image = surface.image_snapshot();
-                    images_to_insert.push((widget.id(), image));
-                }
-            } else {
-                println!("Widget not found for id: {}", widget_id);
-            }
+                    // let image = surface.image_snapshot();
+                    // images_to_insert.push((widget.id(), image));
+                // }
+            // } else {
+            //     println!("Widget not found for id: {}", widget_id);
+            // }
         }
 
-        for (id, image) in images_to_insert {
-            self.widget_images.insert(id, image);
-        }
+        // for (id, image) in images_to_insert {
+        //     self.widget_images.insert(id, image);
+        // }
 
-        for (_, image) in self.widget_images.iter() {
-            canvas.draw_image(image, (0.0, 0.0), None);
-        }
+        // for (_, image) in self.widget_images.iter() {
+        //     canvas.draw_image(image, (0.0, 0.0), None);
+        // }
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Widget> {
