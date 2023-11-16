@@ -1,4 +1,5 @@
 use framework::{App, Canvas, KeyboardInput, serde_json::{json, self}, app, Color, WidgetData, Position, Size, KeyCode, KeyState, Widget, WidgetMeta};
+use lsp_types::SymbolInformation;
 use serde::{Serialize, Deserialize};
 
 
@@ -11,6 +12,15 @@ struct MultipleWidgets {
 
 #[allow(unused)]
 impl App for MultipleWidgets {
+
+    fn start(&mut self) {
+        self.subscribe("workspace/symbols")
+    }
+    
+    fn on_event(&mut self, kind: String, event: String) {
+        let events : Vec<SymbolInformation> = serde_json::from_str(&event).unwrap();
+        println!("{:#?}", events);
+    }
     
     fn draw(&mut self) {
         let canvas = Canvas::new();
@@ -118,11 +128,11 @@ impl App for MultipleWidgets {
     }
 
     fn get_state(&self) -> String {
-        json!({}).to_string()
+        serde_json::to_string(self).unwrap()
     }
 
     fn set_state(&mut self, state: String) {
-        
+        *self = serde_json::from_str(&state).unwrap();
     }
 }
 
