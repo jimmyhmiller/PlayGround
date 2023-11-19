@@ -305,4 +305,8 @@ impl<Cursor: VirtualCursor> TransactingVirtualCursor<Cursor> {
     pub fn redo<T: TextBuffer<Item = u8>>(&mut self, text_buffer: &mut T) {
         self.transaction_manager.redo(&mut self.cursor, text_buffer);
     }
+
+    pub fn get_transactions(&self) -> &Vec<Transaction<Cursor>> {
+        &self.transaction_manager.transactions
+    }
 }

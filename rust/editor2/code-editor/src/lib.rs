@@ -5,7 +5,7 @@ use framework::{
     WidgetData,
 };
 use headless_editor::{
-    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, Token, TokenTextBuffer, VirtualCursor, transaction::TransactingVirtualCursor,
+    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor, transaction::TransactingVirtualCursor,
 };
 use serde::{Deserialize, Serialize, Deserializer, de};
 use serde_json::json;
@@ -108,7 +108,6 @@ struct TextWidget {
     edit_position: usize,
     #[serde(default)]
     file_path: String,
-    staged_tokens: Vec<Token>,
     x_margin: i32,
     y_margin: i32,
     selecting: bool,
@@ -474,7 +473,6 @@ impl App for TextWidget {
                 }
                 let tokens = parse_tokens(&tokens.tokens);
                 if !tokens.is_empty() {
-                    // self.staged_tokens = tokens.clone();
                     self.text_pane.text_buffer.set_tokens(tokens);
                 }
             } else {
@@ -531,7 +529,6 @@ impl TextWidget {
             y_margin: 87,
             file_path: "".to_string(),
             edit_position: 0,
-            staged_tokens: vec![],
             selecting: false,
             diagnostics: DiagnosticMessage {
                 uri: "".to_string(),
@@ -563,6 +560,30 @@ impl TextWidget {
         
         if input.modifiers.ctrl && matches!(input.key_code, KeyCode::A) {
             self.text_pane.cursor.start_of_line();
+            return;
+        }
+
+        if input.modifiers.ctrl && input.modifiers.cmd && input.modifiers.option && matches!(input.key_code, KeyCode::T) {
+
+            let mut data = self.widget_data.clone();
+            data.position.x += data.size.width + 50.0;
+            let contents = self.text_pane.cursor.get_transactions()
+                .iter()
+                .map(|x| format!("{:?}", x))
+                .fold(String::new(), |a, b| a + &b + "\n")
+                .into_bytes();
+
+            // TODO: Make it easy to update the widget data
+            self.create_widget(Box::new(Self {
+                text_pane: TextPane::new(contents, 30.0),
+                widget_data: data.clone(),
+                edit_position: 0,
+                file_path: "".to_string(),
+                x_margin: 30,
+                y_margin: 60,
+                selecting: false,
+                diagnostics: DiagnosticMessage { uri: "".to_string(), diagnostics: vec![], version: None }
+            }), data);
             return;
         }
 
