@@ -326,7 +326,7 @@ impl KeyboardInput {
     pub fn from_framework(input: framework::KeyboardInput) -> Self {
         Self {
             state: KeyState::from_u32(input.state as u32),
-            key_code: KeyCode::from_u32(input.key_code as u32).unwrap(),
+            key_code: KeyCode::from_u32(input.key_code as u32).expect(&format!("Invalid key code {:?}", input.key_code as u32)),
             modifiers: Modifiers::from_u32(input.modifiers.to_u32()),
         }
     }

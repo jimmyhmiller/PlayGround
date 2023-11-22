@@ -1,5 +1,5 @@
 #![allow(unused)]
-use std::{collections::HashMap, fmt::Debug, ffi::CString, ops::{Deref, DerefMut}};
+use std::{collections::HashMap, fmt::Debug, ffi::CString, ops::{Deref, DerefMut}, any::Any};
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -429,6 +429,9 @@ pub fn decode_base64(data: Vec<u8>) -> Result<Vec<u8>, Box<dyn std::error::Error
 }
 
 pub trait App {
+
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
     fn start(&mut self) {}
     fn draw(&mut self);
     fn on_click(&mut self, x: f32, y: f32);
@@ -451,11 +454,12 @@ pub trait App {
 impl<T: App + ?Sized> AppExtensions for T {}
 
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Widget {
     #[serde(skip)]
     app_index: usize,
 }
+
 
 impl Deref for Widget {
     type Target = Box<dyn App>;
@@ -795,7 +799,14 @@ pub mod macros {
                 if let Some(app) = APPS.get_mut(CURRENT_APP) {
                     app
                 } else {
-                    panic!("need to figure this out")
+                    if CURRENT_APP != 0 {
+                        // I need to actually delete this
+                        // But really I need to make reloading work properly
+                        CURRENT_APP = 0;
+                    } else {
+                        panic!("No app");
+                    }
+                    APPS.get_mut(CURRENT_APP).unwrap()
                 }
             }
         };
@@ -901,7 +912,7 @@ pub enum KeyCode {
     UpArrow,
     DownArrow,
     BackSpace,
-    Tab,
+    Tab = 146,
 }
 
 impl KeyCode {

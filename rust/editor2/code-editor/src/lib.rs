@@ -2,10 +2,13 @@ use std::{cmp, collections::{HashMap, HashSet}, str::from_utf8};
 
 use framework::{
     app, App, Canvas, Color, CursorIcon, KeyCode, KeyState, KeyboardInput, Position, Rect, Size,
-    WidgetData,
+    WidgetData, Widget,
 };
+
+
+
 use headless_editor::{
-    parse_tokens, Cursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor, transaction::TransactingVirtualCursor,
+    parse_tokens, SimpleCursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor, transaction::TransactingVirtualCursor,
 };
 use serde::{Deserialize, Serialize, Deserializer, de};
 use serde_json::json;
@@ -103,7 +106,7 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct TextWidget {
-    text_pane: TextPane<TransactingVirtualCursor<Cursor>>,
+    text_pane: TextPane<TransactingVirtualCursor<SimpleCursor>>,
     widget_data: WidgetData,
     edit_position: usize,
     #[serde(default)]
@@ -112,6 +115,8 @@ struct TextWidget {
     y_margin: i32,
     selecting: bool,
     diagnostics: DiagnosticMessage,
+    #[serde(skip)]
+    transaction_pane: Option<Widget>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -220,6 +225,13 @@ fn get_last_three_segments(path: &str) -> Option<String> {
 }
 
 impl App for TextWidget {
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
     fn start(&mut self) {
         self.subscribe("tokens_with_version");
         self.subscribe("color_mapping_changed");
@@ -230,8 +242,21 @@ impl App for TextWidget {
         let init_self = Self::init();
         serde_json::to_string(&init_self).unwrap()
     }
+    
 
     fn draw(&mut self) {
+        
+        // I need a proper update function
+        
+        if let Some(transaction_pane) = &mut self.transaction_pane {
+            if let Some(transaction_pane) = transaction_pane.as_any_mut().downcast_mut::<Self>() {
+                transaction_pane.text_pane.text_buffer.set_contents(
+                    format!("{:#?}", self.text_pane.cursor.get_transaction_manager()).as_bytes()
+                );
+            } else {
+                println!("No downcast!");
+            }
+        }
 
         let mut canvas = Canvas::new();
 
@@ -535,6 +560,7 @@ impl TextWidget {
                 diagnostics: vec![],
                 version: Some(0),
             },
+            transaction_pane: None,
         }
     }
 
@@ -574,7 +600,7 @@ impl TextWidget {
                 .into_bytes();
 
             // TODO: Make it easy to update the widget data
-            self.create_widget(Box::new(Self {
+            self.transaction_pane = Some(self.create_widget(Box::new(Self {
                 text_pane: TextPane::new(contents, 30.0),
                 widget_data: data.clone(),
                 edit_position: 0,
@@ -582,8 +608,9 @@ impl TextWidget {
                 x_margin: 30,
                 y_margin: 60,
                 selecting: false,
-                diagnostics: DiagnosticMessage { uri: "".to_string(), diagnostics: vec![], version: None }
-            }), data);
+                diagnostics: DiagnosticMessage { uri: "".to_string(), diagnostics: vec![], version: None },
+                transaction_pane: None,
+            }), data));
             return;
         }
 

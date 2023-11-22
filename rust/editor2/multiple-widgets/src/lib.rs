@@ -1,7 +1,7 @@
 use framework::{
     app,
-    serde_json::{self, json},
-    App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Position, Size, Widget, WidgetData,
+    serde_json::{self},
+    App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Position, Size, WidgetData,
     WidgetMeta,
 };
 use lsp_types::SymbolInformation;
@@ -21,6 +21,16 @@ struct SymbolWidget {
 }
 
 impl App for SymbolWidget {
+
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn draw(&mut self) {
         let canvas = Canvas::new();
         let background = Color::parse_hex("#003f38");
@@ -111,6 +121,15 @@ fn layout_elements(max_width: f32, elements: Vec<Size>) -> Vec<WidgetData> {
 
 #[allow(unused)]
 impl App for MultipleWidgets {
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn start(&mut self) {
         self.subscribe("workspace/symbols")
     }

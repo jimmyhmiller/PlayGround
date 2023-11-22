@@ -178,11 +178,11 @@ pub fn setup_window(mut editor: editor::Editor) {
                         event_added = false;
                     }
 
-                    if needs_update {
+                    // if needs_update {
                         let time = std::time::Instant::now();
                         needs_update = editor.update();
                         editor.fps_counter.add_time("update", time.elapsed());
-                    }
+                    // }
 
                     // This messes up fps counter
                     // Not sure how I would fix that
