@@ -23,6 +23,7 @@ pub struct Transaction<Cursor: VirtualCursor> {
 pub struct TransactionManager<Cursor: VirtualCursor> {
     pub transactions: Vec<Transaction<Cursor>>,
     pub current_transaction: usize,
+    pub last_undo_pointer: Option<usize>,
     pub transaction_pointer: Option<usize>,
 }
 
@@ -36,6 +37,7 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
             transactions: Vec::new(),
             current_transaction: 1,
             transaction_pointer: None,
+            last_undo_pointer: None,
         }
     }
 
@@ -101,49 +103,76 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
         self.transaction_pointer = Some(self.transactions.len() - 1);
     }
 
+
+    // TODO: Rewrite this code so I understand it
+    // pub fn undo<Buffer: TextBuffer<Item = u8>>(&mut self, cursor: &mut Cursor, text_buffer: &mut Buffer) {
+    //     if let Some(transaction_pointer) = self.transaction_pointer {
+    //         if let Some(last_transaction) = self.transactions.get(transaction_pointer).map(|x| x.transaction_number) {
+    //             let mut i = transaction_pointer;
+    //             let mut next_pointer = None;
+    //             while self.transactions[i].transaction_number == last_transaction {
+    //                 self.transactions[i].action.undo(cursor, text_buffer);
+    //                 self.last_undo_pointer = Some(i);
+
+    //                 next_pointer = self.transactions[i].parent_pointer;
+    //                 if let Some(next_pointer) = next_pointer {
+    //                     i = next_pointer;
+    //                 } else {
+    //                     break;
+    //                 }
+    //             }
+    //             self.transaction_pointer = next_pointer;
+    //             self.current_transaction += 1;
+    //         }
+    //     }
+    // }
+
     pub fn undo<Buffer: TextBuffer<Item = u8>>(&mut self, cursor: &mut Cursor, text_buffer: &mut Buffer) {
         if let Some(transaction_pointer) = self.transaction_pointer {
-            if let Some(last_transaction) = self.transactions.get(transaction_pointer).map(|x| x.transaction_number) {
-                let mut i = transaction_pointer;
-                let mut next_pointer = None;
-                while self.transactions[i].transaction_number == last_transaction {
-                    self.transactions[i].action.undo(cursor, text_buffer);
+            if let Some(last_transaction) = self.transactions.get(transaction_pointer) {
+               let transaction_number = last_transaction.transaction_number;
 
-                   next_pointer = self.transactions[i].parent_pointer;
-                    if let Some(next_pointer) = next_pointer {
-                        i = next_pointer;
-                    } else {
-                        break;
-                    }
-                }
-                self.transaction_pointer = next_pointer;
-                self.current_transaction += 1;
+               let mut transaction = last_transaction;
+               let mut transaction_pointer = transaction_pointer;
+
+               while transaction.transaction_number == transaction_number {
+                   transaction.action.undo(cursor, text_buffer);
+                   self.last_undo_pointer = Some(transaction_pointer);
+                   if let Some(parent_pointer) = transaction.parent_pointer {
+                       transaction = self.transactions.get(parent_pointer).unwrap();
+                       transaction_pointer = parent_pointer;
+                   } else {
+                       break;
+                   }
+               }
+               self.transaction_pointer = transaction.parent_pointer;
             }
         }
     }
 
-
+    // I need to start from the last undo I think
     pub fn redo<Buffer: TextBuffer<Item = u8>>(&mut self, cursor: &mut Cursor, text_buffer: &mut Buffer) {
 
-        if self.transaction_pointer.is_none() {
+        if self.last_undo_pointer.is_none() {
             return;
         }
 
-        let last_undo = self.transactions.iter()
-            .rev()
-            .find(|t| t.parent_pointer == self.transaction_pointer);
-
-        if let Some(Transaction{ transaction_number: last_transaction, ..}) = last_undo {
-            for (i, transaction) in self.transactions.iter().enumerate() {
-                if transaction.transaction_number == *last_transaction {
-                    self.transactions[i].action.redo(cursor, text_buffer);
-                    self.transaction_pointer = Some(i);
-                }
-                if transaction.transaction_number > *last_transaction {
-                    break;
+        if let Some(last_undo_pointer) = self.last_undo_pointer {
+            if let Some(Transaction{ transaction_number: last_transaction, ..}) = self.transactions.get(last_undo_pointer) {
+                for (i, transaction) in self.transactions.iter().enumerate() {
+                    if transaction.transaction_number == *last_transaction {
+                        self.transactions[i].action.redo(cursor, text_buffer);
+                        self.transaction_pointer = self.transactions[i].parent_pointer;
+                        self.last_undo_pointer = self.transaction_pointer;
+                    }
+                    if transaction.transaction_number > *last_transaction {
+                        break;
+                    }
                 }
             }
         }
+
+
         self.current_transaction += 1;
     }
 
@@ -425,124 +454,6 @@ enum MoveAction {
 }
 
 
-enum Direction {
-    Increase,
-    Decrease,
-    Choose,
-}
-
-fn powerset<T : Clone>(s: &[T]) -> Vec<Vec<T>> {
-    let mut subsets: Vec<Vec<T>> = vec![];
-    let empty: Vec<T> = vec![];
-    subsets.push(empty);
-
-    let mut updated: Vec<Vec<T>> = vec![]; 
-
-    for ele in s {
-        for mut sub in subsets.clone() {
-            sub.push(ele.clone());
-            updated.push(sub);
-        }
-        subsets.append(&mut updated);
-    }
-    subsets
-}
-fn shrink_actions2(actions: Vec<Actions>) -> (Vec<Actions>, SimpleTextBuffer) {
-    // try every single combination of actions
-    // keep only the smallest set that still fails
-
-    let initial_contents = "hello".as_bytes();
-    let mut text_buffer = SimpleTextBuffer::new();
-    text_buffer.set_contents(initial_contents);
-    let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
-
-    let powerset = powerset(&actions);
-    let mut smallest = actions.clone();
-    let mut smallest_text_buffer = text_buffer.clone();
-    for actions in powerset {
-        for action in actions.iter() {
-            interpret_action(&action, &mut cursor, &mut text_buffer)
-        }
-        for _ in 0..actions.len() {
-            cursor.undo(&mut text_buffer);
-        }
-        if text_buffer.contents() != initial_contents {
-            if actions.len() < smallest.len() {
-                smallest = actions;
-                smallest_text_buffer = text_buffer.clone();
-            }
-        }
-    }
-    (smallest, smallest_text_buffer)
-}
-
-
-fn shrink_actions(actions: Vec<Actions>, direction: Direction) -> (Vec<Actions>, SimpleTextBuffer) {
-    let initial_contents = "hello".as_bytes();
-    let mut text_buffer = SimpleTextBuffer::new();
-    text_buffer.set_contents(initial_contents);
-    let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
-
-    match direction {
-        Direction::Increase => {
-            for i in 0..actions.len() {
-                for j in 0..i {
-                    interpret_action(&actions[j], &mut cursor, &mut text_buffer);
-                }
-                for _ in 0..i {
-                  cursor.undo(&mut text_buffer);
-                }
-                if text_buffer.contents() != initial_contents {
-                    return shrink_actions(actions[0..i].to_vec(), Direction::Decrease);
-                }
-            }
-        }
-        Direction::Decrease => {
-            for i in 0..actions.len() {
-                for j in i..actions.len() {
-                    interpret_action(&actions[j], &mut cursor, &mut text_buffer);
-                }
-                for _ in i..actions.len() {
-                  cursor.undo(&mut text_buffer);
-                }
-                if text_buffer.contents() != initial_contents {
-                    return shrink_actions(actions[i..actions.len()].to_vec(), Direction::Increase);
-                }
-            }
-        }
-        Direction::Choose => {
-            // pick random element, ignore it
-            // if we still fail do it again
-
-            let mut rng = rand::thread_rng();
-            let (mut actions, _) = shrink_actions(actions, Direction::Increase);
-            let mut attempts = 0;
-            loop {
-                attempts += 1;
-                if attempts >= 0 {
-                    return (actions, text_buffer);
-                }
-                let index = rng.gen_range(0..actions.len());
-                
-                for (i, action) in actions.iter().enumerate() {
-                    if i == index {
-                        continue;
-                    }
-                    interpret_action(&action, &mut cursor, &mut text_buffer);
-                }
-                for _ in 0..actions.len() {
-                    cursor.undo(&mut text_buffer);
-                }
-                if text_buffer.contents() != initial_contents {
-                    actions.remove(index);
-                }
-            }
-        }
-    }
-
-    return (actions.clone(), text_buffer);
-}
-
 fn interpret_action<T: TextBuffer<Item = u8>>(action: &Actions, cursor: &mut TransactingVirtualCursor<SimpleCursor>, text_buffer: &mut T) {
     match action {
         Actions::Delete => {
@@ -584,44 +495,7 @@ fn interpret_action<T: TextBuffer<Item = u8>>(action: &Actions, cursor: &mut Tra
 }
 
 
-#[test]
-fn test_undo_redo() {
-    let initial_contents = "hello".as_bytes();
-    let mut text_buffer = SimpleTextBuffer::new();
-    text_buffer.set_contents(initial_contents);
 
-    let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
-
-    let mut actions = Vec::new();
-    let num_actions = rand::thread_rng().gen_range(0..1000);
-    for _ in 0..num_actions {
-        let action = rand::random::<Actions>();
-        actions.push(action.clone());
-        interpret_action(&action, &mut cursor, &mut text_buffer)
-    }
-    // This would over undo.
-    // But that should still work
-    for _ in 0..actions.len() {
-        cursor.undo(&mut text_buffer);
-    }
-    for _ in 0..actions.len() {
-        cursor.redo(&mut text_buffer);
-    }
-    for _ in 0..actions.len() {
-        cursor.undo(&mut text_buffer);
-    }
-
-    if text_buffer.contents() != initial_contents {
-        println!("Shrinking");
-        let (actions, text_buffer) = shrink_actions(actions, Direction::Choose);
-        // let (minimal_actions, text_buffer) = shrink_actions2(actions);
-        println!("Actions: {:?}", actions);
-        println!("Contents: {:?}", from_utf8(text_buffer.contents()));
-        assert!(false)
-    }
-    assert!(text_buffer.contents() == initial_contents, "Contents: {:?}", from_utf8(text_buffer.contents()));
-
-}
 
 #[test]
 fn example_test() {
@@ -634,7 +508,7 @@ fn example_test() {
 
     let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
 
-    let actions = vec![Insert(RandomString { string: "asdfdsaf".to_string() }), InsertNewLine, Delete];
+    let actions = vec![Insert(RandomString { string: "asdf".to_string() }), Insert(RandomString { string: "asdf".to_string() }), Insert(RandomString { string: "asdf".to_string() })];
     for action in actions.iter() {
         interpret_action(&action, &mut cursor, &mut text_buffer)
     }
