@@ -361,6 +361,14 @@ struct OpenFileInfo {
 
 impl App for ProcessSpawner {
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn start(&mut self) {
         self.subscribe("text_change_multi");
         self.subscribe("lith/open-file");

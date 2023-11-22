@@ -190,21 +190,21 @@ impl WasmMessenger {
         // are the right options. I want run with max.
         // I think run_until literally keeps
         // trying to run even if there is on work.
-        // use futures_timer::Delay;
-        // self.local_pool
-        //     .run_until(Delay::new(Duration::from_millis(4)));
+        use futures_timer::Delay;
+        self.local_pool
+            .run_until(Delay::new(Duration::from_millis(8)));
 
-        use std::time::Instant;
-        let start_time = Instant::now();
-        loop {
-            if self.local_pool.try_run_one() {
-                if start_time.elapsed().as_millis() > 8 {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
+        // use std::time::Instant;
+        // let start_time = Instant::now();
+        // loop {
+        //     if self.local_pool.try_run_one() {
+        //         if start_time.elapsed().as_millis() > 8 {
+        //             break;
+        //         }
+        //     } else {
+        //         break;
+        //     }
+        // }
     }
 
     pub fn get_receiver(&mut self, wasm_id: u64, external_id: u32) -> Receiver<OutMessage> {

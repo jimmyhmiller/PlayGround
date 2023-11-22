@@ -269,8 +269,8 @@ where
     fn update_tokens_delete(&mut self, line: usize, column: usize, text: &[u8]) {
         // We need to know where the cursor was,
         // not the character.
-        let mut cursor = Cursor::new(line, column);
-        cursor.move_right(self);
+        let mut cursor = SimpleCursor::new(line, column);
+        move_right(&mut cursor, self);
 
         let window: TokenWindow = self.find_token(cursor.line(), cursor.column());
         let actions = self.result_token_action_delete(window, line, column, text);
@@ -872,6 +872,10 @@ impl TextBuffer for SimpleTextBuffer {
 
     fn insert_bytes(&mut self, line: usize, column: usize, text: &[u8]) {
         let start = self.line_start(line) + column;
+        // check range
+        if start > self.bytes.len() {
+            return;
+        }
         self.bytes.splice(start..start, text.iter().cloned());
     }
 
@@ -881,6 +885,9 @@ impl TextBuffer for SimpleTextBuffer {
 
     fn delete_char(&mut self, line: usize, column: usize) {
         let start = self.line_start(line) + column;
+        if start >= self.bytes.len() {
+            return;
+        }
         self.bytes.remove(start);
     }
 
@@ -914,46 +921,83 @@ pub trait VirtualCursor: Clone + Debug {
     fn new(line: usize, column: usize) -> Self;
 
     fn set_selection_ordered(&mut self, selection: Option<((usize, usize), (usize, usize))>) {
-        if let Some(((line1, column1), (line2, column2))) = selection {
-            if line1 > line2 || (line1 == line2 && column1 > column2) {
-                self.set_selection(Some(((line2, column2), (line1, column1))));
-            } else {
-                self.set_selection(Some(((line1, column1), (line2, column2))));
-            }
-        } else {
-            self.set_selection(selection);
-        }
+        set_selection_ordered(self, selection)
     }
-
-    // TODO: This isn't quite right, my cursor should be at the start
-    // of the selection and I should base things on the end
     fn set_selection_movement(&mut self, new_location: (usize, usize)) {
-        let (start_line, start_column) = new_location;
-        let new_start_line = start_line.min(self.line());
-        let line = self.line().max(start_line);
-        let mut column = self.column();
-        let new_start_column =
-            if new_start_line != start_line || start_line == line && start_column > column {
-                std::mem::replace(&mut column, start_column)
-            } else {
-                start_column
-            };
-            
-         self.set_selection(Some(((new_start_line, new_start_column), (line, column))));
+            set_selection_movement(self, new_location)
     }
-    
     fn remove_empty_selection(&mut self) {
-        if let Some(((l1, c1), (l2, c2))) = self.selection() {
-            if l1 == l2 && c1 == c2 {
-                self.set_selection(None)
-            }
-        }
+            remove_empty_selection(self, )
+    }
+    fn move_to_bounded<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) {
+            move_to_bounded(self, line, column, buffer)
+    }
+    fn set_selection_bounded<T: TextBuffer>(&mut self, selection: Option<((usize, usize), (usize, usize))>, text_buffer: &T) {
+            set_selection_bounded(self, selection, text_buffer)
+    }
+    fn move_up<T: TextBuffer>(&mut self, buffer: &T) {
+            move_up(self, buffer)
+    }
+    fn move_down<T: TextBuffer>(&mut self, buffer: &T) {
+            move_down(self, buffer)
+    }
+    fn move_left<T: TextBuffer>(&mut self, buffer: &T) {
+            move_left(self, buffer)
+    }
+    fn move_right<T: TextBuffer>(&mut self, buffer: &T) {
+            move_right(self, buffer)
+    }
+    fn start_of_line(&mut self) {
+            start_of_line(self)
+    }
+    fn end_of_line<T: TextBuffer>(&mut self, buffer: &T) {
+            end_of_line(self, buffer)
+    }
+    fn move_in_buffer<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) {
+            move_in_buffer(self, line, column, buffer)
+    }
+    fn line_at<T: TextBuffer<Item = u8>>(&mut self, line: usize, buffer: &T) -> Option<String> {
+            line_at(self, line, buffer)
+    }
+    fn right_of<T: TextBuffer>(&self, buffer: &T) -> Self {
+            right_of(self, buffer)
+    }
+    fn left_of<T: TextBuffer>(&self, buffer: &T) -> Self {
+            left_of(self, buffer)
+    }
+    fn above<T: TextBuffer>(&self, buffer: &T) -> Self {
+            above(self, buffer)
+    }
+    fn below<T: TextBuffer>(&self, buffer: &T) -> Self {
+            below(self, buffer)
+    }
+    fn auto_bracket_insert<T: TextBuffer<Item = u8>>(&mut self, buffer: &mut T, to_insert: &[u8]) {
+            auto_bracket_insert(self, buffer, to_insert)
+    }
+    fn insert_normal_text<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
+            insert_normal_text(self, to_insert, buffer)
+    }
+    fn delete<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T) {
+            delete(self, buffer)
+    }
+    fn delete_chars<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T, start: (usize, usize), end: (usize, usize)) {
+            delete_chars(self, buffer, start, end)
+    }
+    fn delete_selection<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T) {
+            delete_selection(self, buffer)
+    }
+    fn delete_char<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T) {
+            delete_char(self, buffer)
     }
 
-    fn move_to_bounded<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) {
-        let line = min(buffer.last_line(), line);
-        let column = min(buffer.line_length(line), column);
-        self.move_to(line, column);
+    fn get_last_line<T: TextBuffer<Item = u8>>(&mut self, buffer: &mut T) -> Option<String> {
+            get_last_line(self, buffer)
+    }
+    fn auto_indent<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
+            auto_indent(self, to_insert, buffer)
+    }
+    fn handle_insert<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
+            handle_insert(self, to_insert, buffer)
     }
 
     fn nearest_text_position<T: TextBuffer>(
@@ -962,232 +1006,304 @@ pub trait VirtualCursor: Clone + Debug {
         column: usize,
         buffer: &T,
     ) -> Self {
-        let mut new_cursor = Self::new(line, column);
-        new_cursor.move_to_bounded(line, column, buffer);
-        new_cursor
+            nearest_text_position(self, line, column, buffer)
     }
+}
 
-    fn move_up<T: TextBuffer>(&mut self, buffer: &T) {
-        let previous_line = self.line().saturating_sub(1);
-        self.move_to(
-            previous_line,
-            min(self.column(), buffer.line_length(previous_line)),
-        );
-    }
 
-    fn move_down<T: TextBuffer>(&mut self, buffer: &T) {
-        let next_line = self.line().saturating_add(1);
-        let last_line = buffer.last_line();
-        if next_line > last_line {
-            return;
-        }
-        self.move_to(
-            min(next_line, last_line),
-            min(self.column(), buffer.line_length(next_line)),
-        );
-    }
-
-    fn move_left<T: TextBuffer>(&mut self, buffer: &T) {
-        if self.column() == 0 && self.line() != 0 {
-            let new_line = self.line().saturating_sub(1);
-            let length = buffer.line_length(new_line);
-            self.move_to(new_line, length);
+fn set_selection_ordered<Cursor: VirtualCursor>(cursor: &mut Cursor, selection: Option<((usize, usize), (usize, usize))>) {
+        
+    if let Some(((line1, column1), (line2, column2))) = selection {
+        if line1 > line2 || (line1 == line2 && column1 > column2) {
+            cursor.set_selection(Some(((line2, column2), (line1, column1))));
         } else {
-            self.move_to(self.line(), self.column().saturating_sub(1));
+            cursor.set_selection(Some(((line1, column1), (line2, column2))));
         }
+    } else {
+        cursor.set_selection(selection);
     }
+}
 
-    fn move_right<T: TextBuffer>(&mut self, buffer: &T) {
-        let length = buffer.line_length(self.line());
-        if self.column() >= length {
-            if self.line().saturating_add(1) < buffer.line_count() {
-                self.move_to(self.line().saturating_add(1), 0);
-            }
+// TODO: This isn't quite right, my cursor should be at the start
+// of the selection and I should base things on the end
+fn set_selection_movement<Cursor: VirtualCursor>(cursor: &mut Cursor, new_location: (usize, usize)) {
+    let (start_line, start_column) = new_location;
+    let new_start_line = start_line.min(cursor.line());
+    let line = cursor.line().max(start_line);
+    let mut column = cursor.column();
+    let new_start_column =
+        if new_start_line != start_line || start_line == line && start_column > column {
+            std::mem::replace(&mut column, start_column)
         } else {
-            self.move_to(self.line(), self.column().saturating_add(1));
-        }
-    }
-
-    fn start_of_line(&mut self) {
-        self.move_to(self.line(), 0);
-    }
-
-    fn end_of_line<T: TextBuffer>(&mut self, buffer: &T) {
-        self.move_to(self.line(), buffer.line_length(self.line()));
-    }
-
-    fn move_in_buffer<T: TextBuffer>(&mut self, line: usize, column: usize, buffer: &T) {
-        if line < buffer.line_count() {
-            self.move_to(line, min(column, buffer.line_length(line)));
-        }
-    }
-
-    fn line_at<T: TextBuffer<Item = u8>>(&mut self, line: usize, buffer: &T) -> Option<String> {
-        let found_line = buffer.lines().nth(line);
-        found_line
-            .and_then(|x| from_utf8(x).ok())
-            .map(|x| x.to_string())
-    }
-
-    fn right_of<T: TextBuffer>(&self, buffer: &T) -> Self {
-        let mut cursor = self.clone();
-        cursor.move_right(buffer);
-        cursor
-    }
-
-    fn left_of<T: TextBuffer>(&self, buffer: &T) -> Self {
-        let mut cursor = self.clone();
-        cursor.move_left(buffer);
-        cursor
-    }
-
-    fn above<T: TextBuffer>(&self, buffer: &T) -> Self {
-        let mut cursor = self.clone();
-        cursor.move_up(buffer);
-        cursor
-    }
-
-    fn below<T: TextBuffer>(&self, buffer: &T) -> Self {
-        let mut cursor = self.clone();
-        cursor.move_down(buffer);
-        cursor
-    }
-
-    fn auto_bracket_insert<T: TextBuffer<Item = u8>>(&mut self, buffer: &mut T, to_insert: &[u8]) {
-        let to_insert = match to_insert {
-            b"(" => b"()",
-            b"[" => b"[]",
-            b"{" => b"{}",
-            b"\"" => b"\"\"",
-            _ => to_insert,
+            start_column
         };
+        
+     cursor.set_selection(Some(((new_start_line, new_start_column), (line, column))));
+}
 
-        buffer.insert_bytes(self.line(), self.column(), to_insert);
-        self.move_right(buffer);
-    }
-
-    fn insert_normal_text<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
-        buffer.insert_bytes(self.line(), self.column(), to_insert);
-        if to_insert == b"\n" {
-            self.move_down(buffer);
-            self.move_to(self.line(), 0);
-        } else {
-            // TODO: Do this more efficiently
-            for _ in 0..(to_insert.len().saturating_sub(1)) {
-                self.move_right(buffer);
-            }
-            self.move_right(buffer)
-        };
-    }
-
-    fn delete<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T) {
-        if self.selection().is_some() {
-            self.delete_selection(buffer);
-        } else {
-            self.delete_char(buffer);
-        }
-    }
-
-    fn delete_chars<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T, start: (usize, usize), end: (usize, usize)) {
-        self.move_to(end.0, end.1);
-        while self.line() != start.0 || self.column() != start.1 {
-            self.delete_char(buffer);
-        }
-    }
-
-    fn delete_selection<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T) {
-        if let Some((start, end)) = self.selection() {
-            self.set_selection(None);
-            self.delete_chars(buffer, start, end);
-        }
-    }
-
-    fn delete_char<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T) {
-        self.move_left(buffer);
-        buffer.delete_char(self.line(), self.column());
-    }
-
-    fn is_open_bracket(byte: &[u8]) -> bool {
-        matches!(byte, b"(" | b"[" | b"{" | b"\"")
-    }
-
-    // TODO: I actually need to use an matching_close_bracket
-    // This logic makes it so I do the wrong thing if we have
-    // something like {(}
-    fn is_close_bracket(byte: &[u8]) -> bool {
-        matches!(byte, b")" | b"]" | b"}" | b"\"")
-    }
-
-    fn is_new_line(byte: &[u8]) -> bool {
-        matches!(byte, b"\n")
-    }
-
-    fn get_last_line<T: TextBuffer<Item = u8>>(&mut self, buffer: &mut T) -> Option<String> {
-        if self.line() == 0 {
-            return None;
-        }
-        let above = self.above(buffer);
-        self.line_at(above.line(), buffer)
-    }
-
-    /// Broken
-    fn auto_indent<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
-        let last_line: Option<String> = self.get_last_line(buffer);
-        let current_line: Option<String> = self.line_at(self.line(), buffer);
-        if let (Some(_last_line), Some(current_line)) = (last_line, current_line) {
-            let indent = get_indent(&current_line);
-            if let Some((last_character_index, last_character)) =
-                last_non_whitespace_character(&current_line)
-            {
-                if self.column() < last_character_index {
-                    self.insert_normal_text(to_insert, buffer);
-                    self.handle_insert(indent.as_bytes(), buffer);
-                } else {
-                    match last_character {
-                        b'{' => {
-                            self.insert_normal_text(to_insert, buffer);
-                            self.handle_insert(increase_indent(indent).as_bytes(), buffer);
-                        }
-                        b'}' => {
-                            self.insert_normal_text(to_insert, buffer);
-                            self.handle_insert(indent.as_bytes(), buffer);
-                        }
-                        _ => {
-                            self.insert_normal_text(to_insert, buffer);
-                            self.handle_insert(indent.as_bytes(), buffer);
-                        }
-                    };
-                }
-            } else {
-                self.insert_normal_text(to_insert, buffer);
-                self.handle_insert(indent.as_bytes(), buffer);
-            }
-        } else {
-            self.insert_normal_text(to_insert, buffer);
-        }
-    }
-
-    fn handle_insert<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
-        if to_insert.is_empty() {
-            return;
-        }
-        if Self::is_open_bracket(to_insert) {
-            // Would need to have a setting for this
-            self.auto_bracket_insert(buffer, to_insert);
-        } else if Self::is_close_bracket(to_insert) {
-            let right_of_cursor = buffer.byte_at_pos(self.line(), self.column());
-
-            match right_of_cursor {
-                Some(right) if Self::is_close_bracket(&[*right]) => self.move_right(buffer),
-                _ => self.insert_normal_text(to_insert, buffer),
-            }
-        } else if Self::is_new_line(to_insert) {
-            self.auto_indent(to_insert, buffer);
-        } else {
-            self.insert_normal_text(to_insert, buffer)
+fn remove_empty_selection<Cursor: VirtualCursor>(cursor: &mut Cursor) {
+    if let Some(((l1, c1), (l2, c2))) = cursor.selection() {
+        if l1 == l2 && c1 == c2 {
+            cursor.set_selection(None)
         }
     }
 }
+
+fn move_to_bounded<T: TextBuffer, Cursor: VirtualCursor>(cursor: &mut Cursor, line: usize, column: usize, buffer: &T) {
+    let line = min(buffer.last_line(), line);
+    let column = min(buffer.line_length(line), column);
+    cursor.move_to(line, column);
+}
+
+fn set_selection_bounded<T: TextBuffer, Cursor: VirtualCursor>(cursor: &mut Cursor, selection: Option<((usize, usize), (usize, usize))>, text_buffer: &T) {
+    set_selection_ordered(cursor, selection);
+    if let Some(selection) = cursor.selection() {
+        let line1 = selection.0.0.min(text_buffer.line_count());
+        let line2 = selection.1.0.min(text_buffer.line_count());
+        let column1 = selection.0.1.min(text_buffer.line_length(line1));
+        let column2 = selection.1.1.min(text_buffer.line_length(line2));
+        cursor.set_selection(Some(((line1, column1), (line2, column2))));
+        remove_empty_selection(cursor);
+    }
+}
+
+fn nearest_text_position<T: TextBuffer, Cursor: VirtualCursor>(
+    cursor: &mut Cursor,
+    line: usize,
+    column: usize,
+    buffer: &T,
+) -> Cursor {
+    let mut new_cursor = Cursor::new(line, column);
+    move_to_bounded(&mut new_cursor, line, column, buffer);
+    new_cursor
+}
+
+fn move_up<T: TextBuffer, Cursor: VirtualCursor>(cursor: &mut Cursor, buffer: &T) {
+    let previous_line = cursor.line().saturating_sub(1);
+    cursor.move_to(
+        previous_line,
+        min(cursor.column(), buffer.line_length(previous_line)),
+    );
+}
+
+fn move_down<T: TextBuffer, Cursor: VirtualCursor>(cursor: &mut Cursor, buffer: &T) {
+    let next_line = cursor.line().saturating_add(1);
+    let last_line = buffer.last_line();
+    if next_line > last_line {
+        return;
+    }
+    cursor.move_to(
+        min(next_line, last_line),
+        min(cursor.column(), buffer.line_length(next_line)),
+    );
+}
+
+fn move_left<T: TextBuffer, Cursor: VirtualCursor>(cursor: &mut Cursor, buffer: &T) {
+    if cursor.column() == 0 && cursor.line() != 0 {
+        let new_line = cursor.line().saturating_sub(1);
+        let length = buffer.line_length(new_line);
+        cursor.move_to(new_line, length);
+    } else {
+        cursor.move_to(cursor.line(), cursor.column().saturating_sub(1));
+    }
+}
+
+fn move_right<T: TextBuffer, Cursor: VirtualCursor>(cursor: &mut Cursor, buffer: &T) {
+    let length = buffer.line_length(cursor.line());
+    if cursor.column() >= length {
+        if cursor.line().saturating_add(1) < buffer.line_count() {
+            cursor.move_to(cursor.line().saturating_add(1), 0);
+        }
+    } else {
+        cursor.move_to(cursor.line(), cursor.column().saturating_add(1));
+    }
+}
+
+fn start_of_line<Cursor: VirtualCursor>(cursor: &mut Cursor) {
+    cursor.move_to(cursor.line(), 0);
+}
+
+fn end_of_line<T: TextBuffer, Cursor: VirtualCursor>(cursor: &mut Cursor, buffer: &T) {
+    cursor.move_to(cursor.line(), buffer.line_length(cursor.line()));
+}
+
+fn move_in_buffer<T: TextBuffer, Cursor: VirtualCursor>(cursor: &mut Cursor, line: usize, column: usize, buffer: &T) {
+    if line < buffer.line_count() {
+        cursor.move_to(line, min(column, buffer.line_length(line)));
+    }
+}
+
+fn line_at<T: TextBuffer<Item = u8>, Cursor: VirtualCursor>(cursor: &mut Cursor, line: usize, buffer: &T) -> Option<String> {
+    let found_line = buffer.lines().nth(line);
+    found_line
+        .and_then(|x| from_utf8(x).ok())
+        .map(|x| x.to_string())
+}
+
+fn right_of<T: TextBuffer, Cursor: VirtualCursor>(cursor: &Cursor, buffer: &T) -> Cursor {
+    let mut cursor = cursor.clone();
+    move_right(&mut cursor, buffer);
+    cursor
+}
+
+fn left_of<T: TextBuffer, Cursor: VirtualCursor>(cursor: &Cursor, buffer: &T) -> Cursor {
+    let mut cursor = cursor.clone();
+    move_left(&mut cursor, buffer);
+    cursor
+}
+
+fn above<T: TextBuffer, Cursor: VirtualCursor>(cursor: &Cursor, buffer: &T) -> Cursor {
+    let mut cursor = cursor.clone();
+    move_up(&mut cursor, buffer);
+    cursor
+}
+
+fn below<T: TextBuffer, Cursor: VirtualCursor>(cursor: &Cursor, buffer: &T) -> Cursor {
+    let mut cursor = cursor.clone();
+    move_down(&mut cursor, buffer);
+    cursor
+}
+
+fn auto_bracket_insert<T: TextBuffer<Item = u8>, Cursor: VirtualCursor>(cursor: &mut Cursor, buffer: &mut T, to_insert: &[u8]) {
+    let to_insert = match to_insert {
+        b"(" => b"()",
+        b"[" => b"[]",
+        b"{" => b"{}",
+        b"\"" => b"\"\"",
+        _ => to_insert,
+    };
+
+    buffer.insert_bytes(cursor.line(), cursor.column(), to_insert);
+    move_right(cursor, buffer);
+}
+
+fn insert_normal_text<T: TextBuffer<Item = u8>, Cursor: VirtualCursor>(cursor: &mut Cursor, to_insert: &[u8], buffer: &mut T) {
+    buffer.insert_bytes(cursor.line(), cursor.column(), to_insert);
+    if to_insert == b"\n" {
+        move_down(cursor, buffer);
+        cursor.move_to(cursor.line(), 0);
+    } else {
+        // TODO: Do this more efficiently
+        for _ in 0..(to_insert.len().saturating_sub(1)) {
+            move_right(cursor, buffer);
+        }
+        move_right(cursor, buffer)
+    };
+}
+
+fn delete<T: TextBuffer<Item=u8>, Cursor: VirtualCursor>(cursor: &mut Cursor, buffer: &mut T) {
+    if cursor.selection().is_some() {
+        delete_selection(cursor, buffer);
+    } else {
+        delete_char(cursor, buffer);
+    }
+}
+
+fn delete_chars<T: TextBuffer<Item=u8>, Cursor: VirtualCursor>(cursor: &mut Cursor, buffer: &mut T, start: (usize, usize), end: (usize, usize)) {
+    cursor.move_to(end.0, end.1);
+    while cursor.line() != start.0 || cursor.column() != start.1 {
+        delete_char(cursor, buffer);
+    }
+}
+
+fn delete_selection<T: TextBuffer<Item=u8>, Cursor: VirtualCursor>(cursor: &mut Cursor, buffer: &mut T) {
+    if let Some((start, end)) = cursor.selection() {
+        cursor.set_selection(None);
+        delete_chars(cursor, buffer, start, end);
+    }
+}
+
+fn delete_char<T: TextBuffer<Item=u8>, Cursor: VirtualCursor>(cursor: &mut Cursor, buffer: &mut T) {
+    move_left(cursor, buffer);
+    buffer.delete_char(cursor.line(), cursor.column());
+}
+
+fn is_open_bracket(byte: &[u8]) -> bool {
+    matches!(byte, b"(" | b"[" | b"{" | b"\"")
+}
+
+// TODO: I actually need to use an matching_close_bracket
+// This logic makes it so I do the wrong thing if we have
+// something like {(}
+fn is_close_bracket(byte: &[u8]) -> bool {
+    matches!(byte, b")" | b"]" | b"}" | b"\"")
+}
+
+fn is_new_line(byte: &[u8]) -> bool {
+    matches!(byte, b"\n")
+}
+
+fn get_last_line<T: TextBuffer<Item = u8>, Cursor: VirtualCursor>(cursor: &mut Cursor, buffer: &mut T) -> Option<String> {
+    if cursor.line() == 0 {
+        return None;
+    }
+    let above = above(cursor, buffer);
+    line_at(cursor, above.line(), buffer)
+}
+
+/// Broken
+fn auto_indent<T: TextBuffer<Item = u8>, Cursor: VirtualCursor>(cursor: &mut Cursor, to_insert: &[u8], buffer: &mut T) {
+    let last_line: Option<String> = get_last_line(cursor, buffer);
+    let current_line: Option<String> = line_at(cursor, cursor.line(), buffer);
+    if let (Some(_last_line), Some(current_line)) = (last_line, current_line) {
+        let indent = get_indent(&current_line);
+        if let Some((last_character_index, last_character)) =
+            last_non_whitespace_character(&current_line)
+        {
+            if cursor.column() < last_character_index {
+                insert_normal_text(cursor, to_insert, buffer);
+                handle_insert(cursor, indent.as_bytes(), buffer);
+            } else {
+                match last_character {
+                    b'{' => {
+                        insert_normal_text(cursor, to_insert, buffer);
+                        handle_insert(cursor, increase_indent(indent).as_bytes(), buffer);
+                    }
+                    b'}' => {
+                        insert_normal_text(cursor, to_insert, buffer);
+                        handle_insert(cursor, indent.as_bytes(), buffer);
+                    }
+                    _ => {
+                        insert_normal_text(cursor, to_insert, buffer);
+                        handle_insert(cursor, indent.as_bytes(), buffer);
+                    }
+                };
+            }
+        } else {
+            insert_normal_text(cursor, to_insert, buffer);
+            handle_insert(cursor, indent.as_bytes(), buffer);
+        }
+    } else {
+        insert_normal_text(cursor, to_insert, buffer);
+    }
+}
+
+fn handle_insert<T: TextBuffer<Item = u8>, Cursor: VirtualCursor>(cursor: &mut Cursor, to_insert: &[u8], buffer: &mut T) {
+    if to_insert.is_empty() {
+        return;
+    }
+    if is_open_bracket(to_insert) {
+        // Would need to have a setting for this
+        auto_bracket_insert(cursor, buffer, to_insert);
+    } else if is_close_bracket(to_insert) {
+        let right_of_cursor = buffer.byte_at_pos(cursor.line(), cursor.column());
+
+        match right_of_cursor {
+            Some(right) if is_close_bracket(&[*right]) => move_right(cursor, buffer),
+            _ => insert_normal_text(cursor, to_insert, buffer),
+        }
+    } else if is_new_line(to_insert) {
+        auto_indent(cursor, to_insert, buffer);
+    } else {
+        insert_normal_text(cursor, to_insert, buffer)
+    }
+}
+
+
+
+
+
+
 
 fn _decrease_indent(indent: String) -> String {
     if let Some(stripped) = indent.strip_prefix("    ") {
@@ -1224,13 +1340,13 @@ fn get_indent(last_line: &String) -> String {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct Cursor {
+pub struct SimpleCursor {
     line: usize,
     column: usize,
     selection: Option<((usize, usize), (usize, usize))>,
 }
 
-impl VirtualCursor for Cursor {
+impl VirtualCursor for SimpleCursor {
     fn new(line: usize, column: usize) -> Self {
         Self {
             line,
@@ -1265,14 +1381,14 @@ impl VirtualCursor for Cursor {
 // Probably want it to be a tree
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct CursorWithHistory {
-    cursor: Cursor,
-    history: Vec<Cursor>,
+    cursor: SimpleCursor,
+    history: Vec<SimpleCursor>,
 }
 
 impl VirtualCursor for CursorWithHistory {
     fn new(line: usize, column: usize) -> Self {
         Self {
-            cursor: Cursor::new(line, column),
+            cursor: SimpleCursor::new(line, column),
             history: Vec::new(),
         }
     }
@@ -1304,18 +1420,18 @@ pub struct MultiCursor<C: VirtualCursor> {
     cursors: Vec<C>,
 }
 
-impl Default for MultiCursor<Cursor> {
+impl Default for MultiCursor<SimpleCursor> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl MultiCursor<Cursor> {
+impl MultiCursor<SimpleCursor> {
     pub fn new() -> Self {
         Self { cursors: vec![] }
     }
 
-    pub fn add_cursor(&mut self, cursor: Cursor) {
+    pub fn add_cursor(&mut self, cursor: SimpleCursor) {
         self.cursors.push(cursor);
     }
 }
@@ -1353,7 +1469,7 @@ impl<C: VirtualCursor> VirtualCursor for MultiCursor<C> {
 
     fn handle_insert<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
         for cursor in &mut self.cursors {
-            cursor.handle_insert(to_insert, buffer);
+            handle_insert(cursor, to_insert, buffer);
         }
     }
 
@@ -1430,7 +1546,7 @@ impl<C: VirtualCursor> VirtualCursor for MultiCursor<C> {
 
     fn insert_normal_text<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
         for cursor in &mut self.cursors {
-            cursor.insert_normal_text(to_insert, buffer);
+            insert_normal_text(cursor, to_insert, buffer);
         }
     }
 
@@ -1533,7 +1649,7 @@ mod tests {
     use super::*;
     #[test]
     fn adding_and_remove_basic() {
-        let mut cursor = Cursor::new(0, 0);
+        let mut cursor = SimpleCursor::new(0, 0);
         let mut buffer = EventTextBuffer::new();
         let my_string = b"Hello World";
         cursor.handle_insert(my_string, &mut buffer);
@@ -1549,7 +1665,7 @@ mod tests {
 
     #[test]
     fn adding_and_remove_basic_multi() {
-        let cursor = Cursor::new(0, 0);
+        let cursor = SimpleCursor::new(0, 0);
         let mut buffer = EventTextBuffer::new();
         let cursor_below = cursor.below(&buffer);
         let my_string = b"Hello World";
@@ -1575,13 +1691,13 @@ mod tests {
 
     #[test]
     fn test_lines() {
-        let mut cursor = Cursor::new(0, 0);
+        let mut cursor = SimpleCursor::new(0, 0);
         let mut buffer = EventTextBuffer::new();
         let my_string = b"Hello World";
 
         cursor.handle_insert(my_string, &mut buffer);
-        cursor.handle_insert(b"\n", &mut buffer);
-        cursor.handle_insert(b"Hello World", &mut buffer);
+        cursor.handle_insert( b"\n", &mut buffer);
+        cursor.handle_insert( b"Hello World", &mut buffer);
         cursor.handle_insert(b"\n", &mut buffer);
 
         for line in buffer.lines() {
