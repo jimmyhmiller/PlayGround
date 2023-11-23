@@ -705,15 +705,15 @@ where
     }
 
     fn delete_char(&mut self, line: usize, column: usize) {
-        let byte = *self
+        if let Some(byte) = self
             .underlying_text_buffer
-            .byte_at_pos(line, column)
-            .unwrap();
-        self.update_tokens_delete(line, column, &[byte]);
-        self.underlying_text_buffer.delete_char(line, column);
-        self.add_edit_action(EditEvent {
-            edit: Edit::Delete(line, column),
-        });
+            .byte_at_pos(line, column) {
+                self.update_tokens_delete(line, column, &[*byte]);
+                self.underlying_text_buffer.delete_char(line, column);
+                self.add_edit_action(EditEvent {
+                    edit: Edit::Delete(line, column),
+                });
+            }
     }
 
     fn lines(&self) -> LineIter<Self::Item> {
@@ -1051,7 +1051,7 @@ fn remove_empty_selection<Cursor: VirtualCursor>(cursor: &mut Cursor) {
 
 fn move_to_bounded<T: TextBuffer, Cursor: VirtualCursor>(cursor: &mut Cursor, line: usize, column: usize, buffer: &T) {
     let line = min(buffer.last_line(), line);
-    let column = min(buffer.line_length(line), column);
+    let column = min(buffer.line_length(line).saturating_add(1), column);
     cursor.move_to(line, column);
 }
 

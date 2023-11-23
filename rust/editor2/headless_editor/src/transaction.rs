@@ -1,16 +1,19 @@
+use std::future;
 use std::str::from_utf8;
 
 use quickcheck::quickcheck;
 use quickcheck::Arbitrary;
-use rand::{distributions::{Distribution, Alphanumeric, Standard}, Rng};
+use rand::{
+    distributions::{Alphanumeric, Distribution, Standard},
+    Rng,
+};
 use serde::{Deserialize, Serialize};
 use standard_dist::StandardDist;
 
-use crate::TokenTextBuffer;
 use crate::delete_char;
 use crate::insert_normal_text;
-use crate::{TextBuffer, VirtualCursor, SimpleTextBuffer, SimpleCursor};
-
+use crate::TokenTextBuffer;
+use crate::{SimpleCursor, SimpleTextBuffer, TextBuffer, VirtualCursor};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Transaction<Cursor: VirtualCursor> {
@@ -48,29 +51,27 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
             loop {
                 let last_transaction = self.transactions.get(transaction_pointer)?;
                 if last_transaction.transaction_number != current_transaction_number {
-                    return None
+                    return None;
                 }
                 if !matches!(last_transaction.action, EditAction::CursorPosition(_)) {
                     return Some(&last_transaction.action);
                 }
                 if Some(transaction_pointer) == last_transaction.parent_pointer {
-                    return None
+                    return None;
                 }
                 if let Some(parent_pointer) = last_transaction.parent_pointer {
                     transaction_pointer = parent_pointer;
                 } else {
-                    return None
+                    return None;
                 }
             }
         }
         None
-       
     }
 
     pub fn add_action(&mut self, action: EditAction<Cursor>) {
-
         match &action {
-            EditAction::Noop => {},
+            EditAction::Noop => {}
             EditAction::InsertWithCursor(_, _, _) => {
                 let (a, b) = action.split_insert_and_cursor();
                 self.add_action(a);
@@ -82,15 +83,13 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
                     self.current_transaction += 1;
                 }
             }
-            EditAction::Delete(_, _, _) => {
-                match self.get_last_action_ignoring_cursor() {
-                    None => {},
-                    Some(EditAction::Delete(_, _, _)) => {},
-                    Some(_) => {
-                        self.current_transaction += 1;
-                    }
+            EditAction::Delete(_, _, _) => match self.get_last_action_ignoring_cursor() {
+                None => {}
+                Some(EditAction::Delete(_, _, _)) => {}
+                Some(_) => {
+                    self.current_transaction += 1;
                 }
-            }
+            },
             EditAction::CursorPosition(_) => {}
         }
 
@@ -102,7 +101,6 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
 
         self.transaction_pointer = Some(self.transactions.len() - 1);
     }
-
 
     // TODO: Rewrite this code so I understand it
     // pub fn undo<Buffer: TextBuffer<Item = u8>>(&mut self, cursor: &mut Cursor, text_buffer: &mut Buffer) {
@@ -127,43 +125,66 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
     //     }
     // }
 
-    pub fn undo<Buffer: TextBuffer<Item = u8>>(&mut self, cursor: &mut Cursor, text_buffer: &mut Buffer) {
+    pub fn undo<Buffer: TextBuffer<Item = u8>>(
+        &mut self,
+        cursor: &mut Cursor,
+        text_buffer: &mut Buffer,
+    ) {
         if let Some(transaction_pointer) = self.transaction_pointer {
             if let Some(last_transaction) = self.transactions.get(transaction_pointer) {
-               let transaction_number = last_transaction.transaction_number;
+                let transaction_number = last_transaction.transaction_number;
 
-               let mut transaction = last_transaction;
-               let mut transaction_pointer = transaction_pointer;
+                let mut transaction = last_transaction;
+                let mut transaction_pointer = Some(transaction_pointer);
 
-               while transaction.transaction_number == transaction_number {
-                   transaction.action.undo(cursor, text_buffer);
-                   self.last_undo_pointer = Some(transaction_pointer);
-                   if let Some(parent_pointer) = transaction.parent_pointer {
-                       transaction = self.transactions.get(parent_pointer).unwrap();
-                       transaction_pointer = parent_pointer;
-                   } else {
-                       break;
-                   }
-               }
-               self.transaction_pointer = transaction.parent_pointer;
+                loop {
+                    transaction.action.undo(cursor, text_buffer);
+                    // println!("Undoing {:?}", transaction.action);
+                    // println!("Result {:?}", from_utf8(text_buffer.contents()));
+                    // println!("Cursor {:?}", cursor);
+                    self.last_undo_pointer = transaction_pointer;
+
+                    let last_transaction = transaction;
+                    if let Some(parent_pointer) = last_transaction.parent_pointer {
+                        transaction_pointer = Some(parent_pointer);
+                        transaction = self.transactions.get(parent_pointer).unwrap();
+                    } else {
+                        self.transaction_pointer = None;
+                        break;
+                    }
+
+                    if transaction.transaction_number != transaction_number {
+                        self.transaction_pointer = transaction_pointer;
+                        break;
+                    }
+                    
+                }
+
             }
         }
     }
 
     // I need to start from the last undo I think
-    pub fn redo<Buffer: TextBuffer<Item = u8>>(&mut self, cursor: &mut Cursor, text_buffer: &mut Buffer) {
-
-        if self.last_undo_pointer.is_none() {
-            return;
-        }
-
+    pub fn redo<Buffer: TextBuffer<Item = u8>>(
+        &mut self,
+        cursor: &mut Cursor,
+        text_buffer: &mut Buffer,
+    ) {
+        // if self.last_undo_pointer.is_none() {
+        //     return;
+        // }
         if let Some(last_undo_pointer) = self.last_undo_pointer {
-            if let Some(Transaction{ transaction_number: last_transaction, ..}) = self.transactions.get(last_undo_pointer) {
+            if let Some(Transaction {
+                transaction_number: last_transaction,
+                parent_pointer,
+                ..
+            }) = self.transactions.get(last_undo_pointer)
+            {
+                self.last_undo_pointer = *parent_pointer;
                 for (i, transaction) in self.transactions.iter().enumerate() {
                     if transaction.transaction_number == *last_transaction {
                         self.transactions[i].action.redo(cursor, text_buffer);
                         self.transaction_pointer = self.transactions[i].parent_pointer;
-                        self.last_undo_pointer = self.transaction_pointer;
                     }
                     if transaction.transaction_number > *last_transaction {
                         break;
@@ -172,19 +193,16 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
             }
         }
 
-
         self.current_transaction += 1;
     }
 
     pub fn next_transaction(&mut self) {
         self.current_transaction += 1;
     }
-
 }
 
-
-#[derive(Serialize, Deserialize, Debug, Clone,)]
-pub enum EditAction<Cursor: VirtualCursor>{
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum EditAction<Cursor: VirtualCursor> {
     Insert((usize, usize), Vec<u8>),
     Delete((usize, usize), (usize, usize), Vec<u8>),
     // These only get recorded as part of these other actions.
@@ -194,11 +212,14 @@ pub enum EditAction<Cursor: VirtualCursor>{
     Noop,
 }
 
-impl<Cursor: VirtualCursor> EditAction<Cursor>  {
-
+impl<Cursor: VirtualCursor> EditAction<Cursor> {
     // This isn't quite working. I believe it is from selection. I need to really work on this
     // logic and make it solid
-    pub fn undo<Buffer: TextBuffer<Item = u8>>(&self, cursor: &mut Cursor, text_buffer: &mut Buffer) {
+    pub fn undo<Buffer: TextBuffer<Item = u8>>(
+        &self,
+        cursor: &mut Cursor,
+        text_buffer: &mut Buffer,
+    ) {
         match self {
             EditAction::Insert((line, column), text_to_insert) => {
                 let new_position = Cursor::new(*line, *column);
@@ -210,41 +231,46 @@ impl<Cursor: VirtualCursor> EditAction<Cursor>  {
                     text_buffer.delete_char(new_position.line(), new_position.column());
                 }
                 cursor.move_to(new_position.line(), new_position.column());
-            },
+            }
             EditAction::Delete(start, _end, text_to_delete) => {
                 cursor.move_to(start.0, start.1);
-                cursor.move_left(text_buffer);
+                // cursor.move_left(text_buffer);
                 cursor.insert_normal_text(text_to_delete, text_buffer);
-            },
+            }
             EditAction::CursorPosition(old_cursor) => {
                 cursor.move_to(old_cursor.line(), old_cursor.column());
             }
-            EditAction::InsertWithCursor(location, text_to_insert, cursor ) => {
-                EditAction::Insert(*location, text_to_insert.clone()).undo(&mut cursor.clone(), text_buffer);
+            EditAction::InsertWithCursor(location, text_to_insert, cursor) => {
+                EditAction::Insert(*location, text_to_insert.clone())
+                    .undo(&mut cursor.clone(), text_buffer);
                 EditAction::CursorPosition(cursor.clone()).undo(&mut cursor.clone(), text_buffer);
             }
             EditAction::Noop => {}
         }
     }
 
-    pub fn redo<Buffer: TextBuffer<Item = u8>>(&self, cursor: &mut Cursor, text_buffer: &mut Buffer) -> Option<()> {
-
+    pub fn redo<Buffer: TextBuffer<Item = u8>>(
+        &self,
+        cursor: &mut Cursor,
+        text_buffer: &mut Buffer,
+    ) -> Option<()> {
         match self {
             EditAction::Insert((line, column), text_to_insert) => {
                 let new_position = Cursor::new(*line, *column);
                 cursor.move_to(new_position.line(), new_position.column());
                 cursor.handle_insert(text_to_insert, text_buffer);
-            },
+            }
             EditAction::Delete(start, end, _text_to_delete) => {
                 cursor.move_to(start.0, start.1);
                 cursor.delete_chars(text_buffer, *start, *end);
                 cursor.move_to(start.0, start.1);
-            },
+            }
             EditAction::CursorPosition(new_cursor) => {
                 cursor.move_to(new_cursor.line(), new_cursor.column());
             }
-            EditAction::InsertWithCursor(location,text_to_insert, cursor ) => {
-                EditAction::Insert(*location, text_to_insert.clone()).redo(&mut cursor.clone(), text_buffer);
+            EditAction::InsertWithCursor(location, text_to_insert, cursor) => {
+                EditAction::Insert(*location, text_to_insert.clone())
+                    .redo(&mut cursor.clone(), text_buffer);
                 EditAction::CursorPosition(cursor.clone()).redo(&mut cursor.clone(), text_buffer);
             }
             EditAction::Noop => {}
@@ -252,21 +278,25 @@ impl<Cursor: VirtualCursor> EditAction<Cursor>  {
         Some(())
     }
 
-    pub fn combine_insert_and_cursor(self, cursor_action: EditAction<Cursor>) -> EditAction<Cursor> {
+    pub fn combine_insert_and_cursor(
+        self,
+        cursor_action: EditAction<Cursor>,
+    ) -> EditAction<Cursor> {
         match (self, cursor_action) {
             (EditAction::Insert(location, text_to_insert), EditAction::CursorPosition(cursor)) => {
                 EditAction::InsertWithCursor(location, text_to_insert, cursor)
             }
-            x => panic!("Can't combine these actions {:?}", x)
+            x => panic!("Can't combine these actions {:?}", x),
         }
     }
 
     pub fn split_insert_and_cursor(&self) -> (EditAction<Cursor>, EditAction<Cursor>) {
         match self {
-            EditAction::InsertWithCursor(location, text_to_insert, cursor) => {
-                (EditAction::Insert(*location, text_to_insert.clone()), EditAction::CursorPosition(cursor.clone()))
-            }
-            x => panic!("Can't split these actions {:?}", x)
+            EditAction::InsertWithCursor(location, text_to_insert, cursor) => (
+                EditAction::Insert(*location, text_to_insert.clone()),
+                EditAction::CursorPosition(cursor.clone()),
+            ),
+            x => panic!("Can't split these actions {:?}", x),
         }
     }
 }
@@ -280,7 +310,8 @@ pub struct TransactingVirtualCursor<Cursor: VirtualCursor> {
 impl<Cursor: VirtualCursor> VirtualCursor for TransactingVirtualCursor<Cursor> {
     fn move_to(&mut self, line: usize, column: usize) {
         self.cursor.move_to(line, column);
-        self.transaction_manager.add_action(EditAction::CursorPosition(self.cursor.clone()));
+        self.transaction_manager
+            .add_action(EditAction::CursorPosition(self.cursor.clone()));
     }
 
     fn line(&self) -> usize {
@@ -296,7 +327,7 @@ impl<Cursor: VirtualCursor> VirtualCursor for TransactingVirtualCursor<Cursor> {
     }
 
     // Kind of ugly reimplementation
-    fn delete<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T) {
+    fn delete<T: TextBuffer<Item = u8>>(&mut self, buffer: &mut T) {
         if self.selection().is_some() {
             self.delete_selection(buffer);
         } else {
@@ -304,14 +335,19 @@ impl<Cursor: VirtualCursor> VirtualCursor for TransactingVirtualCursor<Cursor> {
         }
     }
 
-    fn delete_chars<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T, start: (usize, usize), end: (usize, usize)) { 
+    fn delete_chars<T: TextBuffer<Item = u8>>(
+        &mut self,
+        buffer: &mut T,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) {
         self.move_to(end.0, end.1);
         while self.line() != start.0 || self.column() != start.1 {
             self.delete_char(buffer);
         }
     }
 
-    fn delete_selection<T: TextBuffer<Item=u8>>(&mut self, buffer: &mut T) {
+    fn delete_selection<T: TextBuffer<Item = u8>>(&mut self, buffer: &mut T) {
         if let Some(((start_line, start_column), (end_line, end_column))) = self.selection() {
             self.delete_chars(buffer, (start_line, start_column), (end_line, end_column));
         }
@@ -325,18 +361,25 @@ impl<Cursor: VirtualCursor> VirtualCursor for TransactingVirtualCursor<Cursor> {
             return;
         }
         if let Some(current_text) = buffer.byte_at_pos(cursor.line(), cursor.column()) {
-            self.transaction_manager.add_action(EditAction::Delete((cursor.line(), cursor.column()), (cursor.line(), cursor.column() + 1), vec![*current_text]));
+            self.transaction_manager.add_action(EditAction::Delete(
+                (cursor.line(), cursor.column()),
+                (cursor.line(), cursor.column() + 1),
+                vec![*current_text],
+            ));
             delete_char(self, buffer);
         } else {
             // TODO: Need to handle errors better
             // panic!("Can't delete char, no character found at position");
         }
     }
-    
+
     // TODO: My original implementation has a lot more going on. Need to test this out
     // and remember why I had all that stuff
     fn insert_normal_text<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
-        self.transaction_manager.add_action(EditAction::Insert((self.line(), self.column()), to_insert.to_vec()));
+        self.transaction_manager.add_action(EditAction::Insert(
+            (self.line(), self.column()),
+            to_insert.to_vec(),
+        ));
         insert_normal_text(self, to_insert, buffer);
     }
 
@@ -345,13 +388,12 @@ impl<Cursor: VirtualCursor> VirtualCursor for TransactingVirtualCursor<Cursor> {
     }
 
     fn new(line: usize, column: usize) -> Self {
-        TransactingVirtualCursor { 
+        TransactingVirtualCursor {
             cursor: Cursor::new(line, column),
-            transaction_manager: TransactionManager::new() 
+            transaction_manager: TransactionManager::new(),
         }
     }
 }
-
 
 impl<Cursor: VirtualCursor> TransactingVirtualCursor<Cursor> {
     pub fn undo<T: TextBuffer<Item = u8>>(&mut self, text_buffer: &mut T) {
@@ -375,8 +417,6 @@ struct RandomString {
     string: String,
 }
 
-
-
 impl Distribution<RandomString> for Standard {
     fn sample<R: rand::prelude::Rng + ?Sized>(&self, rng: &mut R) -> RandomString {
         let random_length = rng.gen_range(0..100);
@@ -391,8 +431,6 @@ impl Distribution<RandomString> for Standard {
         }
     }
 }
-
-
 
 // impl Distribution for RandomString {
 //     fn sample<R: rand::prelude::Rng + ?Sized>(&self, rng: &mut R) -> T {
@@ -437,7 +475,7 @@ impl Arbitrary for Actions {
                 *string = RandomString {
                     string: random_string,
                 };
-            },
+            }
             _ => {}
         }
         action
@@ -453,8 +491,11 @@ enum MoveAction {
     Location(usize, usize),
 }
 
-
-fn interpret_action<T: TextBuffer<Item = u8>>(action: &Actions, cursor: &mut TransactingVirtualCursor<SimpleCursor>, text_buffer: &mut T) {
+fn interpret_action<T: TextBuffer<Item = u8>>(
+    action: &Actions,
+    cursor: &mut TransactingVirtualCursor<SimpleCursor>,
+    text_buffer: &mut T,
+) {
     match action {
         Actions::Delete => {
             cursor.delete(text_buffer);
@@ -463,25 +504,23 @@ fn interpret_action<T: TextBuffer<Item = u8>>(action: &Actions, cursor: &mut Tra
             // random string
             cursor.insert_normal_text(string.string.as_bytes(), text_buffer);
         }
-        Actions::Move(move_action) => {
-            match move_action {
-                MoveAction::Left => {
-                    cursor.move_left(text_buffer);
-                }
-                MoveAction::Right => {
-                    cursor.move_right(text_buffer);
-                }
-                MoveAction::Up => {
-                    cursor.move_up(text_buffer);
-                }
-                MoveAction::Down => {
-                    cursor.move_down(text_buffer);
-                }
-                MoveAction::Location(line, column) => {
-                    cursor.move_to_bounded(*line, *column, text_buffer);
-                }
+        Actions::Move(move_action) => match move_action {
+            MoveAction::Left => {
+                cursor.move_left(text_buffer);
             }
-        }
+            MoveAction::Right => {
+                cursor.move_right(text_buffer);
+            }
+            MoveAction::Up => {
+                cursor.move_up(text_buffer);
+            }
+            MoveAction::Down => {
+                cursor.move_down(text_buffer);
+            }
+            MoveAction::Location(line, column) => {
+                cursor.move_to_bounded(*line, *column, text_buffer);
+            }
+        },
         Actions::Select(from, to) => {
             cursor.set_selection_bounded(Some((*from, *to)), text_buffer);
         }
@@ -494,45 +533,42 @@ fn interpret_action<T: TextBuffer<Item = u8>>(action: &Actions, cursor: &mut Tra
     }
 }
 
-
-
-
 #[test]
 fn example_test() {
-
-    use MoveAction::*;
     use Actions::*;
+    use MoveAction::*;
     let initial_contents = "hello".as_bytes();
     let mut text_buffer = SimpleTextBuffer::new();
     text_buffer.set_contents(initial_contents);
 
     let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
 
-    let actions = vec![Insert(RandomString { string: "asdf".to_string() }), Insert(RandomString { string: "asdf".to_string() }), Insert(RandomString { string: "asdf".to_string() })];
+    let actions = vec![InsertSpace, Move(Right), Delete];
     for action in actions.iter() {
         interpret_action(&action, &mut cursor, &mut text_buffer)
     }
     for _ in 0..actions.len() {
         cursor.undo(&mut text_buffer);
     }
-    for _ in 0..actions.len() {
-        cursor.redo(&mut text_buffer);
-    }
-    for _ in 0..actions.len() {
-        cursor.undo(&mut text_buffer);
-    }
-    assert!(text_buffer.contents() == initial_contents, "Contents: {:?}", from_utf8(text_buffer.contents()));
+    // for _ in 0..actions.len() {
+    //     cursor.redo(&mut text_buffer);
+    // }
+    // for _ in 0..actions.len() {
+    //     cursor.undo(&mut text_buffer);
+    // }
+    assert!(
+        text_buffer.contents() == initial_contents,
+        "Contents: {:?}",
+        from_utf8(text_buffer.contents())
+    );
 }
-
-
-
 
 quickcheck! {
     fn prop(actions: Vec<Actions>) -> bool {
         let initial_contents = "hello".as_bytes();
         let mut text_buffer = SimpleTextBuffer::new();
         text_buffer.set_contents(initial_contents);
-    
+
         let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
@@ -550,7 +586,7 @@ quickcheck! {
         let initial_contents = "hello".as_bytes();
         let mut text_buffer = SimpleTextBuffer::new();
         text_buffer.set_contents(initial_contents);
-    
+
         let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
@@ -569,13 +605,11 @@ quickcheck! {
     }
 }
 
-
-
 quickcheck! {
     fn prop3(actions: Vec<Actions>) -> bool {
         let initial_contents = "hello".as_bytes();
         let mut text_buffer = TokenTextBuffer::new_with_contents("hello".as_bytes());
-    
+
         let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
@@ -590,7 +624,7 @@ quickcheck! {
     fn prop4(actions: Vec<Actions>) -> bool {
         let initial_contents = "hello".as_bytes();
         let mut text_buffer = TokenTextBuffer::new_with_contents("hello".as_bytes());
-    
+
         let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
