@@ -20,6 +20,7 @@ struct SymbolWidget {
     symbol: SymbolInformation,
 }
 
+#[allow(unused)]
 impl App for SymbolWidget {
 
 

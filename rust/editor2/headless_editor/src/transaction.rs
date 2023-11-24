@@ -1,21 +1,10 @@
-use std::future;
-use std::str::from_utf8;
-
-use quickcheck::quickcheck;
-use quickcheck::Arbitrary;
-use rand::{
-    distributions::{Alphanumeric, Distribution, Standard},
-    Rng,
-};
-
 use serde::{Deserialize, Serialize};
-use standard_dist::StandardDist;
 
 use crate::delete_char;
 use crate::handle_insert;
 use crate::insert_normal_text;
-use crate::TokenTextBuffer;
-use crate::{SimpleCursor, SimpleTextBuffer, TextBuffer, VirtualCursor};
+
+use crate::{TextBuffer, VirtualCursor};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Transaction<Cursor: VirtualCursor> {
@@ -84,6 +73,13 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
                 if s.iter().all(|x| x.is_ascii_whitespace()) {
                     self.current_transaction += 1;
                 }
+                match self.get_last_action_ignoring_cursor() {
+                    None => {}
+                    Some(EditAction::Delete(_, _, _)) => {
+                        self.current_transaction += 1;
+                    }
+                    Some(_) => {}
+                }
             }
             EditAction::Delete(_, _, _) => match self.get_last_action_ignoring_cursor() {
                 None => {}
@@ -116,7 +112,7 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
 
                 let mut transaction = last_transaction;
                 let mut transaction_pointer = Some(transaction_pointer);
-                let mut last_undo_pointer = transaction_pointer;
+                let mut last_undo_pointer;
 
                 loop {
                     transaction.action.undo(cursor, text_buffer);
@@ -138,10 +134,8 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
                         self.transaction_pointer = transaction_pointer;
                         break;
                     }
-                    
                 }
                 self.undo_pointer_stack.push(last_undo_pointer.unwrap());
-
             }
         }
     }
@@ -158,11 +152,10 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
         if let Some(last_undo_pointer) = self.undo_pointer_stack.pop() {
             if let Some(Transaction {
                 transaction_number: last_transaction,
-                parent_pointer,
+                parent_pointer: _,
                 ..
             }) = self.transactions.get(last_undo_pointer)
             {
-
                 for (i, transaction) in self.transactions.iter().enumerate() {
                     if transaction.transaction_number == *last_transaction {
                         self.transactions[i].action.redo(cursor, text_buffer);
@@ -173,14 +166,11 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
                     }
                 }
             }
-            // even if this works, I think it is wrong for tree structures
-            let last_undo = self.transactions.iter()
-                .rev()
-                .enumerate()
-                .find(|(_, t)| t.parent_pointer == self.transaction_pointer)
-                .map(|(i, _)| i);
         }
 
+        // I could make not increment every single time
+        // if the transaction hasn't been used. But how exactly do I do that?
+        // I know if I get rid of this line things break.
         self.current_transaction += 1;
     }
 
@@ -246,7 +236,7 @@ impl<Cursor: VirtualCursor> EditAction<Cursor> {
             EditAction::Insert((line, column), text_to_insert) => {
                 let new_position = Cursor::new(*line, *column);
                 cursor.move_to(new_position.line(), new_position.column());
-                cursor.handle_insert(text_to_insert, text_buffer);
+                cursor.insert_normal_text(text_to_insert, text_buffer);
             }
             EditAction::Delete(start, end, _text_to_delete) => {
                 cursor.move_to(start.0, start.1);
@@ -316,6 +306,7 @@ impl<Cursor: VirtualCursor> VirtualCursor for TransactingVirtualCursor<Cursor> {
 
     // Kind of ugly reimplementation
     fn delete<T: TextBuffer<Item = u8>>(&mut self, buffer: &mut T) {
+        self.transaction_manager.undo_pointer_stack.clear();
         if self.selection().is_some() {
             self.delete_selection(buffer);
         } else {
@@ -373,7 +364,7 @@ impl<Cursor: VirtualCursor> VirtualCursor for TransactingVirtualCursor<Cursor> {
     }
 
     fn handle_insert<T: TextBuffer<Item = u8>>(&mut self, to_insert: &[u8], buffer: &mut T) {
-        println!("Calling handle insert");
+        self.transaction_manager.undo_pointer_stack.clear();
         handle_insert(self, to_insert, buffer)
     }
 
@@ -406,211 +397,198 @@ impl<Cursor: VirtualCursor> TransactingVirtualCursor<Cursor> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct RandomString {
-    string: String,
-}
+#[cfg(test)]
+mod test {
+    use std::{collections::HashSet, str::from_utf8};
 
-impl Distribution<RandomString> for Standard {
-    fn sample<R: rand::prelude::Rng + ?Sized>(&self, rng: &mut R) -> RandomString {
-        let random_length = rng.gen_range(0..100);
+    use quickcheck::Arbitrary;
+    use quickcheck_macros::quickcheck;
+    use rand::{
+        distributions::{Alphanumeric, Distribution, Standard},
+        Rng,
+    };
+    use standard_dist::StandardDist;
 
-        let random_string: String = (0..random_length)
-            .map(|_| rng.sample(Alphanumeric))
-            .map(char::from)
-            .collect();
+    use crate::{SimpleCursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor};
 
-        RandomString {
-            string: random_string,
+    use super::TransactingVirtualCursor;
+
+    #[derive(Debug, Clone)]
+    struct RandomString {
+        string: String,
+    }
+
+    impl Distribution<RandomString> for Standard {
+        fn sample<R: rand::prelude::Rng + ?Sized>(&self, rng: &mut R) -> RandomString {
+            let random_length = rng.gen_range(0..100);
+
+            let random_string: String = (0..random_length)
+                .map(|_| rng.sample(Alphanumeric))
+                .map(char::from)
+                .collect();
+
+            RandomString {
+                string: random_string,
+            }
         }
     }
-}
 
-// impl Distribution for RandomString {
-//     fn sample<R: rand::prelude::Rng + ?Sized>(&self, rng: &mut R) -> T {
-//         let random_length = rng.gen_range(0..100);
-//         let random_string: String = rng
-//             .sample_iter(&Alphanumeric)
-//             .take(random_length)
-//             .map(char::from)
-//             .collect();
-//         RandomString {
-//             length: random_length,
-//             string: random_string,
-//         }
-//     }
-// }
+    #[derive(StandardDist, Debug, Clone)]
+    enum Actions {
+        #[weight(10)]
+        Delete,
+        #[weight(10)]
+        Insert(RandomString),
+        #[weight(3)]
+        Move(MoveAction),
+        Select((usize, usize), (usize, usize)),
+        InsertSpace,
+        InsertNewLine,
+    }
 
-#[derive(StandardDist, Debug, Clone)]
-enum Actions {
-    #[weight(10)]
-    Delete,
-    #[weight(10)]
-    Insert(RandomString),
-    #[weight(3)]
-    Move(MoveAction),
-    Select((usize, usize), (usize, usize)),
-    InsertSpace,
-    InsertNewLine,
-}
+    impl Arbitrary for Actions {
+        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+            let mut action = rand::random::<Actions>();
+            match &mut action {
+                Actions::Insert(string) => {
+                    let mut rng = rand::thread_rng();
+                    let size = g.size();
+                    let random_string: String = (0..size)
+                        .map(|_| rng.sample(Alphanumeric))
+                        .map(char::from)
+                        .collect();
+                    *string = RandomString {
+                        string: random_string,
+                    };
+                }
+                _ => {}
+            }
+            action
+        }
+    }
 
-impl Arbitrary for Actions {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-        let mut action = rand::random::<Actions>();
-        match &mut action {
+    #[derive(StandardDist, Debug, Clone)]
+    enum MoveAction {
+        Left,
+        Right,
+        Up,
+        Down,
+        Location(usize, usize),
+    }
+
+    fn interpret_action<T: TextBuffer<Item = u8>>(
+        action: &Actions,
+        cursor: &mut TransactingVirtualCursor<SimpleCursor>,
+        text_buffer: &mut T,
+    ) {
+        match action {
+            Actions::Delete => {
+                cursor.delete(text_buffer);
+            }
             Actions::Insert(string) => {
-                let mut rng = rand::thread_rng();
-                let size = g.size();
-                let random_string: String = (0..size)
-                    .map(|_| rng.sample(Alphanumeric))
-                    .map(char::from)
-                    .collect();
-                *string = RandomString {
-                    string: random_string,
-                };
+                // random string
+                cursor.insert_normal_text(string.string.as_bytes(), text_buffer);
             }
-            _ => {}
-        }
-        action
-    }
-}
-
-#[derive(StandardDist, Debug, Clone)]
-enum MoveAction {
-    Left,
-    Right,
-    Up,
-    Down,
-    Location(usize, usize),
-}
-
-fn interpret_action<T: TextBuffer<Item = u8>>(
-    action: &Actions,
-    cursor: &mut TransactingVirtualCursor<SimpleCursor>,
-    text_buffer: &mut T,
-) -> bool {
-    match action {
-        Actions::Delete => {
-            cursor.delete(text_buffer);
-            !(cursor.line() == 0 && cursor.column() == 0)
-        }
-        Actions::Insert(string) => {
-            // random string
-            cursor.insert_normal_text(string.string.as_bytes(), text_buffer);
-            true
-        }
-        Actions::Move(move_action) => match move_action {
-            MoveAction::Left => {
-                cursor.move_left(text_buffer);
-                false
+            Actions::Move(move_action) => match move_action {
+                MoveAction::Left => {
+                    cursor.move_left(text_buffer);
+                }
+                MoveAction::Right => {
+                    cursor.move_right(text_buffer);
+                }
+                MoveAction::Up => {
+                    cursor.move_up(text_buffer);
+                }
+                MoveAction::Down => {
+                    cursor.move_down(text_buffer);
+                }
+                MoveAction::Location(line, column) => {
+                    cursor.move_to_bounded(*line, *column, text_buffer);
+                }
+            },
+            Actions::Select(from, to) => {
+                cursor.set_selection_bounded(Some((*from, *to)), text_buffer);
             }
-            MoveAction::Right => {
-                cursor.move_right(text_buffer);
-                false
+            Actions::InsertSpace => {
+                cursor.insert_normal_text(&[b' '], text_buffer);
             }
-            MoveAction::Up => {
-                cursor.move_up(text_buffer);
-                false
+            Actions::InsertNewLine => {
+                cursor.insert_normal_text(&[b'\n'], text_buffer);
             }
-            MoveAction::Down => {
-                cursor.move_down(text_buffer);
-                false
-            }
-            MoveAction::Location(line, column) => {
-                cursor.move_to_bounded(*line, *column, text_buffer);
-                false
-            }
-        },
-        Actions::Select(from, to) => {
-            cursor.set_selection_bounded(Some((*from, *to)), text_buffer);
-            false
-        }
-        Actions::InsertSpace => {
-            cursor.insert_normal_text(&[b' '], text_buffer);
-            true
-        }
-        Actions::InsertNewLine => {
-            cursor.insert_normal_text(&[b'\n'], text_buffer);
-            true
         }
     }
-}
 
-#[test]
-fn example_test() {
-    use Actions::*;
-    use MoveAction::*;
-    let initial_contents = "hello".as_bytes();
-    let mut text_buffer = SimpleTextBuffer::new();
-    text_buffer.set_contents(initial_contents);
+    #[test]
+    fn example_test() {
+        use Actions::*;
+        let initial_contents = "hello".as_bytes();
+        let mut text_buffer = SimpleTextBuffer::new();
+        text_buffer.set_contents(initial_contents);
 
-    let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
+        let mut cursor: TransactingVirtualCursor<SimpleCursor> =
+            TransactingVirtualCursor::new(0, 0);
 
-    let actions = vec![InsertNewLine, InsertSpace, InsertNewLine];
-    for action in actions.iter() {
-        let changed = interpret_action(&action, &mut cursor, &mut text_buffer);
+        let actions = vec![InsertNewLine, InsertSpace, InsertNewLine];
+        for action in actions.iter() {
+            interpret_action(&action, &mut cursor, &mut text_buffer);
+        }
+        for _ in 0..actions.len() {
+            cursor.undo(&mut text_buffer);
+        }
+        for _ in 0..actions.len() {
+            cursor.redo(&mut text_buffer);
+        }
+        for _ in 0..actions.len() {
+            cursor.undo(&mut text_buffer);
+        }
+        assert!(
+            text_buffer.contents() == initial_contents,
+            "Contents: {:?}",
+            from_utf8(text_buffer.contents())
+        );
     }
-    for _ in 0..actions.len() {
-        cursor.undo(&mut text_buffer);
-    }
-    for _ in 0..actions.len() {
-        cursor.redo(&mut text_buffer);
-    }
-    for _ in 0..actions.len() {
-        cursor.undo(&mut text_buffer);
-    }
-    assert!(
-        text_buffer.contents() == initial_contents,
-        "Contents: {:?}",
-        from_utf8(text_buffer.contents())
-    );
-}
 
-quickcheck! {
+    #[quickcheck]
     fn prop(actions: Vec<Actions>) -> bool {
         let initial_contents = "hello".as_bytes();
         let mut text_buffer = SimpleTextBuffer::new();
         text_buffer.set_contents(initial_contents);
 
-        let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
+        let mut cursor: TransactingVirtualCursor<SimpleCursor> =
+            TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
-            let changed = interpret_action(&action, &mut cursor, &mut text_buffer);
-            if changed {
-               if text_buffer.contents() == initial_contents {
-                   return false
-               }
-            }
+            interpret_action(&action, &mut cursor, &mut text_buffer);
         }
-        for _ in 0..actions.len() {
+        for _ in 0..=cursor.transaction_manager.transactions.len() {
             cursor.undo(&mut text_buffer);
         }
         text_buffer.contents() == initial_contents
     }
-}
 
-quickcheck! {
+    #[quickcheck]
     fn prop2(actions: Vec<Actions>) -> bool {
         let initial_contents = "hello".as_bytes();
         let mut text_buffer = SimpleTextBuffer::new();
         text_buffer.set_contents(initial_contents);
 
-        let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
+        let mut cursor: TransactingVirtualCursor<SimpleCursor> =
+            TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
             // println!("action {:?}", action);
             interpret_action(&action, &mut cursor, &mut text_buffer);
             // println!("Contents: {:?}", from_utf8(text_buffer.contents()));
         }
-        
-        for _ in 0..actions.len() {
+
+        for _ in 0..=cursor.transaction_manager.transactions.len() {
             cursor.undo(&mut text_buffer);
         }
 
-        for _ in 0..actions.len() {
+        for _ in 0..=cursor.transaction_manager.transactions.len() {
             cursor.redo(&mut text_buffer);
         }
-        for _ in 0..actions.len() {
+        for _ in 0..=cursor.transaction_manager.transactions.len() {
             cursor.undo(&mut text_buffer);
         }
         if text_buffer.contents() != initial_contents {
@@ -618,14 +596,14 @@ quickcheck! {
         }
         text_buffer.contents() == initial_contents
     }
-}
 
-quickcheck! {
+    #[quickcheck]
     fn prop3(actions: Vec<Actions>) -> bool {
         let initial_contents = "hello".as_bytes();
         let mut text_buffer = TokenTextBuffer::new_with_contents("hello".as_bytes());
 
-        let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
+        let mut cursor: TransactingVirtualCursor<SimpleCursor> =
+            TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
             interpret_action(&action, &mut cursor, &mut text_buffer);
@@ -636,14 +614,14 @@ quickcheck! {
         }
         text_buffer.contents() == initial_contents
     }
-}
 
-quickcheck! {
+    #[quickcheck]
     fn prop4(actions: Vec<Actions>) -> bool {
         let initial_contents = "hello".as_bytes();
         let mut text_buffer = TokenTextBuffer::new_with_contents("hello".as_bytes());
 
-        let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
+        let mut cursor: TransactingVirtualCursor<SimpleCursor> =
+            TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
             // println!("action {:?}", action);
@@ -654,4 +632,46 @@ quickcheck! {
         }
         text_buffer.contents() == initial_contents
     }
+
+    #[quickcheck]
+    fn prop5(actions: Vec<Actions>) -> bool {
+        let mut possible_states: HashSet<String> = HashSet::new();
+        let initial_contents = "hello".as_bytes();
+        let mut text_buffer = TokenTextBuffer::new_with_contents("hello".as_bytes());
+        possible_states.insert(from_utf8(text_buffer.contents()).unwrap().to_string());
+
+        let mut cursor: TransactingVirtualCursor<SimpleCursor> =
+            TransactingVirtualCursor::new(0, 0);
+
+        for action in actions.iter() {
+            interpret_action(&action, &mut cursor, &mut text_buffer);
+            possible_states.insert(from_utf8(text_buffer.contents()).unwrap().to_string());
+        }
+
+        for _ in 0..=cursor.transaction_manager.transactions.len() {
+            cursor.undo(&mut text_buffer);
+            if !possible_states.contains(from_utf8(text_buffer.contents()).unwrap()) {
+                println!("Contents: {:?}", from_utf8(text_buffer.contents()));
+                return false;
+            }
+        }
+
+        for _ in 0..=cursor.transaction_manager.transactions.len() {
+            cursor.redo(&mut text_buffer);
+            if !possible_states.contains(from_utf8(text_buffer.contents()).unwrap()) {
+                println!("Contents: {:?}", from_utf8(text_buffer.contents()));
+                return false;
+            }
+        }
+        for _ in 0..=cursor.transaction_manager.transactions.len() {
+            cursor.undo(&mut text_buffer);
+            if !possible_states.contains(from_utf8(text_buffer.contents()).unwrap()) {
+                println!("Contents: {:?}", from_utf8(text_buffer.contents()));
+                return false;
+            }
+        }
+        text_buffer.contents() == initial_contents
+    }
 }
+// TODO: I need a test where I randomly generate
+// undos and redos

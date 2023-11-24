@@ -1,17 +1,21 @@
-use std::{cmp, collections::{HashMap, HashSet}, str::from_utf8};
+use std::{
+    cmp,
+    collections::{HashMap, HashSet},
+    str::from_utf8,
+};
 
 use framework::{
     app, App, Canvas, Color, CursorIcon, KeyCode, KeyState, KeyboardInput, Position, Rect, Size,
-    WidgetData, Widget,
+    Widget, WidgetData,
 };
-
-
 
 use headless_editor::{
-    parse_tokens, SimpleCursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor, transaction::{TransactingVirtualCursor, TransactionManager, Transaction, self, EditAction},
+    parse_tokens,
+    transaction::{EditAction, TransactingVirtualCursor, Transaction, TransactionManager},
+    SimpleCursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor,
 };
 use itertools::Itertools;
-use serde::{Deserialize, Serialize, Deserializer, de};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::json;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -52,7 +56,6 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
     }
 
     pub fn on_scroll(&mut self, x: f64, y: f64, width: f32, height: f32, y_margin: i32) {
-
         if self.max_line_length.is_none() {
             self.max_line_length = Some(self.text_buffer.max_line_length());
         }
@@ -66,7 +69,7 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
                 self.offset.x = max_width as f32 - width;
             }
         }
-        
+
         if self.offset.x < 0.0 {
             self.offset.x = 0.0;
         }
@@ -149,7 +152,7 @@ struct Tokens {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct LineCharacter {
     line: usize,
-    character: usize
+    character: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -162,7 +165,6 @@ struct Range {
 struct Href {
     href: String,
 }
-
 
 // TODO: Make this work for serialize and deserialize
 #[derive(Serialize, Clone, Debug)]
@@ -195,7 +197,7 @@ struct Diagnostic {
     range: Range,
     severity: usize,
     code: String,
-    #[serde(rename="codeDescription")]
+    #[serde(rename = "codeDescription")]
     code_description: Option<Href>,
     source: String,
     message: String,
@@ -208,9 +210,7 @@ struct DiagnosticMessage {
     version: Option<usize>,
 }
 
-
 fn get_last_three_segments(path: &str) -> Option<String> {
-    
     use std::path::Path;
     let path = Path::new(path);
     let mut components = path.components().rev();
@@ -226,7 +226,6 @@ fn get_last_three_segments(path: &str) -> Option<String> {
 }
 
 impl App for TextWidget {
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -242,16 +241,16 @@ impl App for TextWidget {
     fn get_initial_state(&self) -> String {
         let init_self = Self::init();
         serde_json::to_string(&init_self).unwrap()
-    } 
+    }
 
     fn draw(&mut self) {
-        
         // I need a proper update function
-        
+
         if let Some(transaction_pane) = &mut self.transaction_pane {
             if let Some(transaction_pane) = transaction_pane.as_any_mut().downcast_mut::<Self>() {
                 transaction_pane.text_pane.text_buffer.set_contents(
-                    format!("{:#?}", self.text_pane.cursor.get_transaction_manager()).as_bytes()
+                    Self::format_transactions(&self.text_pane.cursor.get_transaction_manager())
+                        .as_bytes(),
                 );
             } else {
                 println!("No downcast!");
@@ -263,8 +262,8 @@ impl App for TextWidget {
         let foreground = Color::parse_hex("#dc9941");
         let background = Color::parse_hex("#353f38");
 
-        canvas.set_color(&foreground); 
-        
+        canvas.set_color(&foreground);
+
         // self.draw_debug(&mut canvas);
 
         let bounding_rect = Rect::new(
@@ -273,7 +272,6 @@ impl App for TextWidget {
             self.widget_data.size.width,
             self.widget_data.size.height,
         );
-        
 
         canvas.save();
         canvas.set_color(&background);
@@ -313,8 +311,13 @@ impl App for TextWidget {
             self.x_margin as f32 - self.text_pane.offset.x,
             self.text_pane.line_height - fractional_offset,
         );
-        
-        let diagnostic_lines = self.diagnostics.diagnostics.iter().map(|x| x.range.start.line).collect::<HashSet<usize>>();
+
+        let diagnostic_lines = self
+            .diagnostics
+            .diagnostics
+            .iter()
+            .map(|x| x.range.start.line)
+            .collect::<HashSet<usize>>();
 
         canvas.save();
         let number_lines = self.text_pane.number_of_lines();
@@ -329,7 +332,7 @@ impl App for TextWidget {
             canvas.set_color(&Color::parse_hex("#83CDA1"));
             if diagnostic_lines.contains(&(line)) {
                 canvas.set_color(&Color::parse_hex("#ff0000"));
-            }  
+            }
             let line_number = format!("{:width$}", line + 1, width = number_of_digits);
             canvas.draw_str(&line_number, 0.0, 0.0);
             canvas.translate(0.0, self.text_pane.line_height);
@@ -401,7 +404,6 @@ impl App for TextWidget {
             .move_to_bounded(line, column, &self.text_pane.text_buffer);
 
         self.text_pane.cursor.set_selection_ordered(None);
-
     }
 
     fn on_mouse_down(&mut self, x: f32, y: f32) {
@@ -466,7 +468,7 @@ impl App for TextWidget {
     }
 
     fn set_state(&mut self, state: String) {
-        let value : Self = serde_json::from_str(&state).unwrap();
+        let value: Self = serde_json::from_str(&state).unwrap();
         *self = value;
         if !self.file_path.is_empty() {
             let file = &self.file_path;
@@ -503,7 +505,6 @@ impl App for TextWidget {
             } else {
                 println!("Error parsing tokens: {}", event);
             }
-            
         } else if kind == "color_mapping_changed" {
             if let Ok(mapping) =
                 serde_json::from_str::<HashMap<usize, String>>(from_utf8(event.as_bytes()).unwrap())
@@ -512,7 +513,10 @@ impl App for TextWidget {
             }
         } else if kind == "diagnostics" {
             if let Ok(diagnostics) = serde_json::from_str::<DiagnosticMessage>(&event) {
-                if diagnostics.uri == format!("file://{}", self.file_path) && (diagnostics.version.is_none() || self.diagnostics.version <= diagnostics.version) {
+                if diagnostics.uri == format!("file://{}", self.file_path)
+                    && (diagnostics.version.is_none()
+                        || self.diagnostics.version <= diagnostics.version)
+                {
                     self.diagnostics = diagnostics;
                 }
             } else {
@@ -539,7 +543,6 @@ impl App for TextWidget {
 }
 
 impl TextWidget {
-
     fn init() -> Self {
         Self {
             text_pane: TextPane::new(vec![], 30.0),
@@ -580,37 +583,52 @@ impl TextWidget {
         }
 
         if input.modifiers.ctrl && matches!(input.key_code, KeyCode::E) {
-            self.text_pane.cursor.end_of_line(&self.text_pane.text_buffer);
+            self.text_pane
+                .cursor
+                .end_of_line(&self.text_pane.text_buffer);
             return;
         }
-        
+
         if input.modifiers.ctrl && matches!(input.key_code, KeyCode::A) {
             self.text_pane.cursor.start_of_line();
             return;
         }
 
-        if input.modifiers.ctrl && input.modifiers.cmd && input.modifiers.option && matches!(input.key_code, KeyCode::T) {
-
+        if input.modifiers.ctrl
+            && input.modifiers.cmd
+            && input.modifiers.option
+            && matches!(input.key_code, KeyCode::T)
+        {
             let mut data = self.widget_data.clone();
             data.position.x += data.size.width + 50.0;
-            let contents = self.text_pane.cursor.get_transactions()
+            let contents = self
+                .text_pane
+                .cursor
+                .get_transactions()
                 .iter()
                 .map(|x| format!("{:?}", x))
                 .fold(String::new(), |a, b| a + &b + "\n")
                 .into_bytes();
 
             // TODO: Make it easy to update the widget data
-            self.transaction_pane = Some(self.create_widget(Box::new(Self {
-                text_pane: TextPane::new(contents, 30.0),
-                widget_data: data.clone(),
-                edit_position: 0,
-                file_path: "".to_string(),
-                x_margin: 30,
-                y_margin: 60,
-                selecting: false,
-                diagnostics: DiagnosticMessage { uri: "".to_string(), diagnostics: vec![], version: None },
-                transaction_pane: None,
-            }), data));
+            self.transaction_pane = Some(self.create_widget(
+                Box::new(Self {
+                    text_pane: TextPane::new(contents, 30.0),
+                    widget_data: data.clone(),
+                    edit_position: 0,
+                    file_path: "".to_string(),
+                    x_margin: 30,
+                    y_margin: 60,
+                    selecting: false,
+                    diagnostics: DiagnosticMessage {
+                        uri: "".to_string(),
+                        diagnostics: vec![],
+                        version: None,
+                    },
+                    transaction_pane: None,
+                }),
+                data,
+            ));
             return;
         }
 
@@ -626,12 +644,10 @@ impl TextWidget {
                 .move_right(&self.text_pane.text_buffer),
             KeyCode::UpArrow => self.text_pane.cursor.move_up(&self.text_pane.text_buffer),
             KeyCode::DownArrow => self.text_pane.cursor.move_down(&self.text_pane.text_buffer),
-            KeyCode::BackSpace => {
-                self
-                    .text_pane
-                    .cursor
-                    .delete(&mut self.text_pane.text_buffer)
-            }
+            KeyCode::BackSpace => self
+                .text_pane
+                .cursor
+                .delete(&mut self.text_pane.text_buffer),
             KeyCode::S => {
                 if input.modifiers.cmd {
                     self.save_file(
@@ -708,7 +724,6 @@ impl TextWidget {
         }
     }
 
-    
     fn send_open_file(&mut self) {
         self.send_event(
             "lith/open-file",
@@ -828,38 +843,97 @@ impl TextWidget {
         canvas.restore();
     }
 
-    fn format_transaction<Cursor: VirtualCursor>(transactions: Vec<&Transaction<Cursor>>) -> String {
+    fn format_transaction<Cursor: VirtualCursor>(
+        transaction_pointer: Option<usize>,
+        undo_pointer: Option<&usize>,
+        start_index: usize,
+        transactions: Vec<&Transaction<Cursor>>,
+    ) -> String {
         let mut result = String::new();
-        // TODO: Deal with changing between delete and insert
+        let mut categories: HashSet<&str> = HashSet::new();
+        let mut range: ((usize, usize), (usize, usize)) = ((usize::MAX, usize::MAX), (0, 0));
+        let mut index = start_index;
+        let mut contains_undo_pointer = "";
+        let mut contains_transaction_pointer = "";
+        // TODO: Delete is backwards.
+        // But that might be the right thing to do?
+        // Need to think about it
         for transaction in transactions {
+
+            if Some(&index) == undo_pointer {
+                contains_undo_pointer = ">> ";
+            }
+
+            if Some(index) == transaction_pointer {
+                contains_transaction_pointer = "> ";
+            }
+
             match &transaction.action {
                 EditAction::Insert((line, column), text) => {
                     let text = from_utf8(text).unwrap();
-                    result += text
+                    result += text;
+                    categories.insert("insert");
+                    if (*line, *column) < range.0 {
+                        range.0 = (*line, *column);
+                    }
+                    if (*line, *column) > range.1 {
+                        range.1 = (*line, *column);
+                    }
                 }
-                EditAction::Delete(starts, end, text) => {
+                EditAction::Delete(start, end, text) => {
                     let text = from_utf8(text).unwrap();
-                    result += text
-                },
+                    result += text;
+                    categories.insert("delete");
+
+                    if start < &range.0 {
+                        range.0 = *start;
+                    }
+                    if end > &range.1 {
+                        range.1 = *end;
+                    }
+                }
                 _ => {}
             }
+            index += 1;
         }
-        result
+
+        format!(
+            "{}{}{}: {}, {:?} - {:?}",
+            contains_undo_pointer,
+            contains_transaction_pointer,
+            categories.iter().join(", "),
+            result.replace("\n", "\\n").replace(" ", "<space>"),
+            range.0,
+            range.1
+        )
     }
 
-    fn format_transactions<Cursor: VirtualCursor>(transaction_manager: &TransactionManager<Cursor>) -> String {
+    fn format_transactions<Cursor: VirtualCursor>(
+        transaction_manager: &TransactionManager<Cursor>,
+    ) -> String {
         let mut result = String::new();
-        let groups = transaction_manager.transactions.iter()
-            .group_by(|x| x.transaction_number);
+        let groups = transaction_manager
+            .transactions
+            .iter()
+            .enumerate()
+            .group_by(|(_index, x)| x.transaction_number);
 
         for (transaction_number, group) in &groups {
-            result += &Self::format_transaction(group.collect_vec());
-            result += "\n";
-
+            let group = group.collect_vec();
+            let start_index = group.first().unwrap().0;
+            result += &format!(
+                "{} {}\n",
+                transaction_number,
+                &Self::format_transaction(
+                    transaction_manager.transaction_pointer,
+                    transaction_manager.undo_pointer_stack.last(),
+                    start_index,
+                    group.iter().map(|x| x.1).collect_vec()
+                )
+            );
         }
-        
 
-        return String::new();
+        return result;
     }
 }
 
