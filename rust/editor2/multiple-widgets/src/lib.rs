@@ -168,34 +168,31 @@ impl App for MultipleWidgets {
         if input.state != KeyState::Pressed {
             return;
         }
-        match input.key_code {
-            KeyCode::C => {
-                let elements: Vec<Size> = self
-                    .symbols
-                    .iter()
-                    .map(|symbol| Size {
-                        width: 500.0,
-                        height:
-                            ((symbol.location.range.end.line - symbol.location.range.start.line)
-                                as f32
-                                * 3.0)
-                                .max(50.0),
-                    })
-                    .collect();
+        if input.key_code == KeyCode::C {
+            let elements: Vec<Size> = self
+                .symbols
+                .iter()
+                .map(|symbol| Size {
+                    width: 500.0,
+                    height:
+                        ((symbol.location.range.end.line - symbol.location.range.start.line)
+                            as f32
+                            * 3.0)
+                            .max(50.0),
+                })
+                .collect();
 
-                let layout = layout_elements(3000.0, elements);
+            let layout = layout_elements(3000.0, elements);
 
-                for (symbol, layout) in self.symbols.clone().iter().zip(layout.iter()) {
-                    self.create_widget(
-                        Box::new(SymbolWidget {
-                            widget_data: layout.clone(),
-                            symbol: symbol.clone(),
-                        }),
-                        layout.clone(),
-                    );
-                }
+            for (symbol, layout) in self.symbols.clone().iter().zip(layout.iter()) {
+                self.create_widget(
+                    Box::new(SymbolWidget {
+                        widget_data: layout.clone(),
+                        symbol: symbol.clone(),
+                    }),
+                    layout.clone(),
+                );
             }
-            _ => {}
         }
     }
 
