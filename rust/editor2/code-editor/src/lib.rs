@@ -8,8 +8,9 @@ use framework::{
 
 
 use headless_editor::{
-    parse_tokens, SimpleCursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor, transaction::TransactingVirtualCursor,
+    parse_tokens, SimpleCursor, SimpleTextBuffer, TextBuffer, TokenTextBuffer, VirtualCursor, transaction::{TransactingVirtualCursor, TransactionManager, Transaction, self, EditAction},
 };
+use itertools::Itertools;
 use serde::{Deserialize, Serialize, Deserializer, de};
 use serde_json::json;
 
@@ -241,8 +242,7 @@ impl App for TextWidget {
     fn get_initial_state(&self) -> String {
         let init_self = Self::init();
         serde_json::to_string(&init_self).unwrap()
-    }
-    
+    } 
 
     fn draw(&mut self) {
         
@@ -826,6 +826,40 @@ impl TextWidget {
             }
         }
         canvas.restore();
+    }
+
+    fn format_transaction<Cursor: VirtualCursor>(transactions: Vec<&Transaction<Cursor>>) -> String {
+        let mut result = String::new();
+        // TODO: Deal with changing between delete and insert
+        for transaction in transactions {
+            match &transaction.action {
+                EditAction::Insert((line, column), text) => {
+                    let text = from_utf8(text).unwrap();
+                    result += text
+                }
+                EditAction::Delete(starts, end, text) => {
+                    let text = from_utf8(text).unwrap();
+                    result += text
+                },
+                _ => {}
+            }
+        }
+        result
+    }
+
+    fn format_transactions<Cursor: VirtualCursor>(transaction_manager: &TransactionManager<Cursor>) -> String {
+        let mut result = String::new();
+        let groups = transaction_manager.transactions.iter()
+            .group_by(|x| x.transaction_number);
+
+        for (transaction_number, group) in &groups {
+            result += &Self::format_transaction(group.collect_vec());
+            result += "\n";
+
+        }
+        
+
+        return String::new();
     }
 }
 

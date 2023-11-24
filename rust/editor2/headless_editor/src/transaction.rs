@@ -7,6 +7,7 @@ use rand::{
     distributions::{Alphanumeric, Distribution, Standard},
     Rng,
 };
+
 use serde::{Deserialize, Serialize};
 use standard_dist::StandardDist;
 
@@ -27,7 +28,7 @@ pub struct Transaction<Cursor: VirtualCursor> {
 pub struct TransactionManager<Cursor: VirtualCursor> {
     pub transactions: Vec<Transaction<Cursor>>,
     pub current_transaction: usize,
-    pub last_undo_pointer: Option<usize>,
+    pub undo_pointer_stack: Vec<usize>,
     pub transaction_pointer: Option<usize>,
 }
 
@@ -41,7 +42,7 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
             transactions: Vec::new(),
             current_transaction: 1,
             transaction_pointer: None,
-            last_undo_pointer: None,
+            undo_pointer_stack: Vec::new(),
         }
     }
 
@@ -103,48 +104,26 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
         self.transaction_pointer = Some(self.transactions.len() - 1);
     }
 
-    // TODO: Rewrite this code so I understand it
-    // pub fn undo<Buffer: TextBuffer<Item = u8>>(&mut self, cursor: &mut Cursor, text_buffer: &mut Buffer) {
-    //     if let Some(transaction_pointer) = self.transaction_pointer {
-    //         if let Some(last_transaction) = self.transactions.get(transaction_pointer).map(|x| x.transaction_number) {
-    //             let mut i = transaction_pointer;
-    //             let mut next_pointer = None;
-    //             while self.transactions[i].transaction_number == last_transaction {
-    //                 self.transactions[i].action.undo(cursor, text_buffer);
-    //                 self.last_undo_pointer = Some(i);
-
-    //                 next_pointer = self.transactions[i].parent_pointer;
-    //                 if let Some(next_pointer) = next_pointer {
-    //                     i = next_pointer;
-    //                 } else {
-    //                     break;
-    //                 }
-    //             }
-    //             self.transaction_pointer = next_pointer;
-    //             self.current_transaction += 1;
-    //         }
-    //     }
-    // }
-
     pub fn undo<Buffer: TextBuffer<Item = u8>>(
         &mut self,
         cursor: &mut Cursor,
         text_buffer: &mut Buffer,
     ) {
-        println!("undo {:?}", self.transaction_pointer);
+        // println!("undo {:?}", self.transaction_pointer);
         if let Some(transaction_pointer) = self.transaction_pointer {
             if let Some(last_transaction) = self.transactions.get(transaction_pointer) {
                 let transaction_number = last_transaction.transaction_number;
 
                 let mut transaction = last_transaction;
                 let mut transaction_pointer = Some(transaction_pointer);
+                let mut last_undo_pointer = transaction_pointer;
 
                 loop {
                     transaction.action.undo(cursor, text_buffer);
-                    println!("Undoing {:?}", transaction.action);
-                    println!("Result {:?}", from_utf8(text_buffer.contents()));
-                    println!("Cursor {:?}", cursor);
-                    self.last_undo_pointer = transaction_pointer;
+                    // println!("Undoing {:?}", transaction.action);
+                    // println!("Result {:?}", from_utf8(text_buffer.contents()));
+                    // println!("Cursor {:?}", cursor);
+                    last_undo_pointer = transaction_pointer;
 
                     let last_transaction = transaction;
                     if let Some(parent_pointer) = last_transaction.parent_pointer {
@@ -161,6 +140,7 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
                     }
                     
                 }
+                self.undo_pointer_stack.push(last_undo_pointer.unwrap());
 
             }
         }
@@ -175,27 +155,30 @@ impl<Cursor: VirtualCursor> TransactionManager<Cursor> {
         // if self.last_undo_pointer.is_none() {
         //     return;
         // }
-        if let Some(last_undo_pointer) = self.last_undo_pointer {
+        if let Some(last_undo_pointer) = self.undo_pointer_stack.pop() {
             if let Some(Transaction {
                 transaction_number: last_transaction,
                 parent_pointer,
                 ..
             }) = self.transactions.get(last_undo_pointer)
             {
-                self.last_undo_pointer = *parent_pointer;
+
                 for (i, transaction) in self.transactions.iter().enumerate() {
                     if transaction.transaction_number == *last_transaction {
                         self.transactions[i].action.redo(cursor, text_buffer);
-                        println!("Redoing {:?}", self.transactions[i].action);
-                        println!("Result {:?}", from_utf8(text_buffer.contents()));
-                        println!("Cursor {:?}", cursor);
-                        self.transaction_pointer = self.transactions[i].parent_pointer;
+                        self.transaction_pointer = Some(i);
                     }
                     if transaction.transaction_number > *last_transaction {
                         break;
                     }
                 }
             }
+            // even if this works, I think it is wrong for tree structures
+            let last_undo = self.transactions.iter()
+                .rev()
+                .enumerate()
+                .find(|(_, t)| t.parent_pointer == self.transaction_pointer)
+                .map(|(i, _)| i);
         }
 
         self.current_transaction += 1;
@@ -315,8 +298,8 @@ pub struct TransactingVirtualCursor<Cursor: VirtualCursor> {
 impl<Cursor: VirtualCursor> VirtualCursor for TransactingVirtualCursor<Cursor> {
     fn move_to(&mut self, line: usize, column: usize) {
         self.cursor.move_to(line, column);
-        self.transaction_manager
-            .add_action(EditAction::CursorPosition(self.cursor.clone()));
+        // self.transaction_manager
+        //     .add_action(EditAction::CursorPosition(self.cursor.clone()));
     }
 
     fn line(&self) -> usize {
@@ -385,7 +368,7 @@ impl<Cursor: VirtualCursor> VirtualCursor for TransactingVirtualCursor<Cursor> {
             (self.line(), self.column()),
             to_insert.to_vec(),
         ));
-        println!("Inserting {:?}", from_utf8(to_insert));
+        // println!("Inserting {:?}", from_utf8(to_insert));
         insert_normal_text(self, to_insert, buffer);
     }
 
@@ -462,7 +445,7 @@ impl Distribution<RandomString> for Standard {
 enum Actions {
     #[weight(10)]
     Delete,
-    #[weight(1000)]
+    #[weight(10)]
     Insert(RandomString),
     #[weight(3)]
     Move(MoveAction),
@@ -563,19 +546,19 @@ fn example_test() {
 
     let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
 
-    let actions = vec![Move(Right), Delete];
+    let actions = vec![InsertNewLine, InsertSpace, InsertNewLine];
     for action in actions.iter() {
         let changed = interpret_action(&action, &mut cursor, &mut text_buffer);
     }
-    // for _ in 0..actions.len() {
-    //     cursor.undo(&mut text_buffer);
-    // }
-    // for _ in 0..actions.len() {
-    //     cursor.redo(&mut text_buffer);
-    // }
-    // for _ in 0..actions.len() {
-    //     cursor.undo(&mut text_buffer);
-    // }
+    for _ in 0..actions.len() {
+        cursor.undo(&mut text_buffer);
+    }
+    for _ in 0..actions.len() {
+        cursor.redo(&mut text_buffer);
+    }
+    for _ in 0..actions.len() {
+        cursor.undo(&mut text_buffer);
+    }
     assert!(
         text_buffer.contents() == initial_contents,
         "Contents: {:?}",
@@ -615,21 +598,24 @@ quickcheck! {
         let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
-            println!("action {:?}", action);
+            // println!("action {:?}", action);
             interpret_action(&action, &mut cursor, &mut text_buffer);
             // println!("Contents: {:?}", from_utf8(text_buffer.contents()));
         }
         
-        // for _ in 0..actions.len() {
-        //     cursor.undo(&mut text_buffer);
-        // }
+        for _ in 0..actions.len() {
+            cursor.undo(&mut text_buffer);
+        }
 
-        // for _ in 0..actions.len() {
-        //     cursor.redo(&mut text_buffer);
-        // }
-        // for _ in 0..actions.len() {
-        //     cursor.undo(&mut text_buffer);
-        // }
+        for _ in 0..actions.len() {
+            cursor.redo(&mut text_buffer);
+        }
+        for _ in 0..actions.len() {
+            cursor.undo(&mut text_buffer);
+        }
+        if text_buffer.contents() != initial_contents {
+            println!("Contents: {:?}", from_utf8(text_buffer.contents()));
+        }
         text_buffer.contents() == initial_contents
     }
 }
@@ -643,7 +629,7 @@ quickcheck! {
 
         for action in actions.iter() {
             interpret_action(&action, &mut cursor, &mut text_buffer);
-            println!("Contents: {:?}", from_utf8(text_buffer.contents()));
+            // println!("Contents: {:?}", from_utf8(text_buffer.contents()));
         }
         for _ in 0..actions.len() {
             cursor.undo(&mut text_buffer);
@@ -660,8 +646,10 @@ quickcheck! {
         let mut cursor: TransactingVirtualCursor<SimpleCursor> = TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
-            println!("action {:?}", action);
+            // println!("action {:?}", action);
             interpret_action(&action, &mut cursor, &mut text_buffer);
+            cursor.undo(&mut text_buffer);
+            cursor.redo(&mut text_buffer);
             cursor.undo(&mut text_buffer);
         }
         text_buffer.contents() == initial_contents
