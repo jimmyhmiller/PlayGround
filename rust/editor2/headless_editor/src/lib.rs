@@ -1088,7 +1088,7 @@ fn set_selection_bounded<T: TextBuffer, Cursor: VirtualCursor>(
 }
 
 fn nearest_text_position<T: TextBuffer, Cursor: VirtualCursor>(
-    cursor: &mut Cursor,
+    _cursor: &mut Cursor,
     line: usize,
     column: usize,
     buffer: &T,
@@ -1159,7 +1159,7 @@ fn move_in_buffer<T: TextBuffer, Cursor: VirtualCursor>(
 }
 
 fn line_at<T: TextBuffer<Item = u8>, Cursor: VirtualCursor>(
-    cursor: &mut Cursor,
+    _cursor: &mut Cursor,
     line: usize,
     buffer: &T,
 ) -> Option<String> {
@@ -1206,7 +1206,7 @@ fn auto_bracket_insert<T: TextBuffer<Item = u8>, Cursor: VirtualCursor>(
         _ => to_insert,
     };
 
-    buffer.insert_bytes(cursor.line(), cursor.column(), to_insert);
+    cursor.insert_normal_text(to_insert, buffer);
     cursor.move_right(buffer);
 }
 
@@ -1215,6 +1215,7 @@ fn insert_normal_text<T: TextBuffer<Item = u8>, Cursor: VirtualCursor>(
     to_insert: &[u8],
     buffer: &mut T,
 ) {
+    
     buffer.insert_bytes(cursor.line(), cursor.column(), to_insert);
     if to_insert == b"\n" {
         cursor.move_down(buffer);
