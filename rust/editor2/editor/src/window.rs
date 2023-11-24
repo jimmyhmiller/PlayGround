@@ -152,8 +152,7 @@ pub fn setup_window(mut editor: editor::Editor) {
                     let pending_count: usize = editor
                         .widget_store
                         .iter()
-                        .filter(|x| x.as_wasm_widget().is_some())
-                        .map(|x| x.as_wasm_widget().unwrap())
+                        .filter_map(|x| x.as_wasm_widget())
                         .map(|x| x.number_of_pending_requests())
                         .sum();
                     if pending_count > 0 {
