@@ -56,6 +56,7 @@ struct ProcessSpawner {
     state: Data,
     process_id: i32,
     root_path: String,
+    remaining_message: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -84,6 +85,11 @@ struct TokensWithVersion {
     path: String,
 }
 
+enum ParseError {
+    NoClosingBrace(String),
+    InvalidJson,
+}
+
 // TODO:
 // I need to properly handle versions of tokens and make sure I always use the latest.
 // I need to actually update my tokens myself and then get the refresh.
@@ -92,13 +98,13 @@ impl ProcessSpawner {
     fn parse_message(
         &self,
         message: &str,
-    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<serde_json::Value>, ParseError> {
         let mut results = vec![];
         if let Some(start_json_object) = message.find('{') {
             // TODO: This can crash
             // I need to investigate this closer
             // Probably need to hold onto the message until we get this?
-            let last_close_brace = message.rfind('}').unwrap();
+            let last_close_brace = message.rfind('}').ok_or(ParseError::NoClosingBrace(message.to_string()))?;
             let message = &message[start_json_object..last_close_brace + 1];
             let message = message.trim();
             let deserializer = serde_json::Deserializer::from_str(message);
@@ -108,7 +114,8 @@ impl ProcessSpawner {
                 serde_json::Value,
             > = deserializer.into_iter::<serde_json::Value>();
             for item in iterator {
-                results.push(item?);
+                let item = item.map_err(|x| ParseError::InvalidJson)?;
+                results.push(item);
             }
         }
 
@@ -471,6 +478,8 @@ impl App for ProcessSpawner {
     }
 
     fn on_process_message(&mut self, _process_id: i32, message: String) {
+        let message = format!("{}{}", self.remaining_message, message);
+        self.remaining_message = String::new();
         let messages = message.split("Content-Length");
         for message in messages {
             match self.parse_message(message) {
@@ -556,8 +565,14 @@ impl App for ProcessSpawner {
                     }
                 }
                 Err(err) => {
-                    println!("Error Parsing: {}", err);
-                    println!("Message: {}", message);
+                    match err {
+                        ParseError::NoClosingBrace(message) => {
+                            self.remaining_message = message.to_string();
+                        }
+                        ParseError::InvalidJson => {
+                            println!("Invalid json: {}", message);
+                        }
+                    }
                 }
             }
         }
@@ -609,6 +624,7 @@ impl ProcessSpawner {
             },
             process_id: 0,
             root_path: "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2".to_string(),
+            remaining_message: String::new(),
         }
     }
 }

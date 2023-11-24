@@ -571,7 +571,9 @@ impl Editor {
     }
 
     pub fn mark_widget_dirty(&mut self, id: usize) {
-        self.widget_store.get_mut(id).unwrap().mark_dirty();
+        if let Some(widget) = self.widget_store.get_mut(id) {
+            widget.mark_dirty();
+        }
     }
 }
 
