@@ -530,7 +530,7 @@ mod test {
 
         let actions = vec![InsertNewLine, InsertSpace, InsertNewLine];
         for action in actions.iter() {
-            interpret_action(&action, &mut cursor, &mut text_buffer);
+            interpret_action(action, &mut cursor, &mut text_buffer);
         }
         for _ in 0..actions.len() {
             cursor.undo(&mut text_buffer);
@@ -558,7 +558,7 @@ mod test {
             TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
-            interpret_action(&action, &mut cursor, &mut text_buffer);
+            interpret_action(action, &mut cursor, &mut text_buffer);
         }
         for _ in 0..=cursor.transaction_manager.transactions.len() {
             cursor.undo(&mut text_buffer);
@@ -577,7 +577,7 @@ mod test {
 
         for action in actions.iter() {
             // println!("action {:?}", action);
-            interpret_action(&action, &mut cursor, &mut text_buffer);
+            interpret_action(action, &mut cursor, &mut text_buffer);
             // println!("Contents: {:?}", from_utf8(text_buffer.contents()));
         }
 
@@ -606,7 +606,7 @@ mod test {
             TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
-            interpret_action(&action, &mut cursor, &mut text_buffer);
+            interpret_action(action, &mut cursor, &mut text_buffer);
             // println!("Contents: {:?}", from_utf8(text_buffer.contents()));
         }
         for _ in 0..actions.len() {
@@ -625,7 +625,7 @@ mod test {
 
         for action in actions.iter() {
             // println!("action {:?}", action);
-            interpret_action(&action, &mut cursor, &mut text_buffer);
+            interpret_action(action, &mut cursor, &mut text_buffer);
             cursor.undo(&mut text_buffer);
             cursor.redo(&mut text_buffer);
             cursor.undo(&mut text_buffer);
@@ -644,7 +644,7 @@ mod test {
             TransactingVirtualCursor::new(0, 0);
 
         for action in actions.iter() {
-            interpret_action(&action, &mut cursor, &mut text_buffer);
+            interpret_action(action, &mut cursor, &mut text_buffer);
             possible_states.insert(from_utf8(text_buffer.contents()).unwrap().to_string());
         }
 

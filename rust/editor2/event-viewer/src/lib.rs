@@ -1,4 +1,4 @@
-use framework::{app, App, Canvas, Position, Ui, WidgetData, serde_json, Size};
+use framework::{app, serde_json, App, Canvas, Position, Size, Ui, WidgetData};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -20,7 +20,6 @@ struct EventViewer {
 // Or is it because I closed that panel?
 
 impl App for EventViewer {
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -126,7 +125,6 @@ impl EventViewer {
             x_scroll_offset: 0.0,
         }
     }
-
 }
 
 app!(EventViewer);

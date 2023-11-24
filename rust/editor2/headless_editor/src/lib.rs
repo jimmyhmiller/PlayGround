@@ -1215,7 +1215,6 @@ fn insert_normal_text<T: TextBuffer<Item = u8>, Cursor: VirtualCursor>(
     to_insert: &[u8],
     buffer: &mut T,
 ) {
-    
     buffer.insert_bytes(cursor.line(), cursor.column(), to_insert);
     if to_insert == b"\n" {
         cursor.move_down(buffer);

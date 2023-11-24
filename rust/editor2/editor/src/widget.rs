@@ -218,32 +218,31 @@ impl WidgetStore {
         // let mut images_to_insert = vec![];
         for widget in self.widgets.iter_mut() {
             // if let Some(widget) = self.get_mut(*widget_id) {
-                // if let Some(mut surface) = canvas.new_surface(&canvas.image_info(), None) {
-                //     let canvas = surface.canvas();
+            // if let Some(mut surface) = canvas.new_surface(&canvas.image_info(), None) {
+            //     let canvas = surface.canvas();
 
-                    let before_count = canvas.save();
+            let before_count = canvas.save();
 
-                    // TODO: Still broken because of dirty checking
-                    // but we are drawing
+            // TODO: Still broken because of dirty checking
+            // but we are drawing
 
-                    let can_draw =
-                        if let Some(widget) = widget.as_wasm_widget() {
-                            !widget.draw_commands.is_empty()
-                        } else {
-                            true
-                        };
+            let can_draw = if let Some(widget) = widget.as_wasm_widget() {
+                !widget.draw_commands.is_empty()
+            } else {
+                true
+            };
 
-                    if !can_draw {
-                        continue;
-                    }
+            if !can_draw {
+                continue;
+            }
 
-                    widget.draw(canvas);
-                    canvas.restore_to_count(before_count);
-                    canvas.restore();
+            widget.draw(canvas);
+            canvas.restore_to_count(before_count);
+            canvas.restore();
 
-                    // let image = surface.image_snapshot();
-                    // images_to_insert.push((widget.id(), image));
-                // }
+            // let image = surface.image_snapshot();
+            // images_to_insert.push((widget.id(), image));
+            // }
             // } else {
             //     println!("Widget not found for id: {}", widget_id);
             // }

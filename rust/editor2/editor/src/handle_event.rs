@@ -15,7 +15,7 @@ use crate::{
     native::open_file_dialog,
     wasm_messenger::SaveState,
     widget::Widget,
-    widget2::{Ephemeral, TextPane, WasmWidget, Widget as _,},
+    widget2::{Ephemeral, TextPane, WasmWidget, Widget as _},
 };
 
 fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
@@ -380,11 +380,8 @@ impl Editor {
                             sender: Some(self.wasm_messenger.get_sender(wasm_id as u64)),
                             receiver: Some(receiver),
                             meta: WidgetMeta::new(
-                                Position { x, y},
-                                Size {
-                                    width,
-                                    height,
-                                },
+                                Position { x, y },
+                                Size { width, height },
                                 1.0,
                                 next_id,
                             ),

@@ -1,5 +1,11 @@
 #![allow(unused)]
-use std::{collections::HashMap, fmt::Debug, ffi::CString, ops::{Deref, DerefMut}, any::Any};
+use std::{
+    any::Any,
+    collections::HashMap,
+    ffi::CString,
+    fmt::Debug,
+    ops::{Deref, DerefMut},
+};
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -415,7 +421,6 @@ pub fn merge(state: &mut serde_json::Value, partial_state: &mut serde_json::Valu
     }
 }
 
-
 pub fn encode_base64(data: &[u8]) -> String {
     use base64::Engine;
 
@@ -429,7 +434,6 @@ pub fn decode_base64(data: Vec<u8>) -> Result<Vec<u8>, Box<dyn std::error::Error
 }
 
 pub trait App {
-
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn start(&mut self) {}
@@ -453,32 +457,25 @@ pub trait App {
 
 impl<T: App + ?Sized> AppExtensions for T {}
 
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Widget {
     #[serde(skip)]
     app_index: usize,
 }
 
-
 impl Deref for Widget {
     type Target = Box<dyn App>;
 
     fn deref(&self) -> &Self::Target {
-        unsafe {
-            APPS.get(self.app_index).unwrap()
-        }
+        unsafe { APPS.get(self.app_index).unwrap() }
     }
 }
 
 impl DerefMut for Widget {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            APPS.get_mut(self.app_index).unwrap()
-        }
+        unsafe { APPS.get_mut(self.app_index).unwrap() }
     }
 }
-
 
 // I didn't really need to do this. But it is kind of interesting
 pub trait AppExtensions {
@@ -489,8 +486,16 @@ pub trait AppExtensions {
         unsafe {
             APPS.push(app);
             let identifer = APPS.len() - 1;
-            create_widget(data.position.x, data.position.y, data.size.width, data.size.height, identifer as u32);
-            Widget { app_index:  identifer}
+            create_widget(
+                data.position.x,
+                data.position.y,
+                data.size.width,
+                data.size.height,
+                identifer as u32,
+            );
+            Widget {
+                app_index: identifer,
+            }
         }
     }
 
@@ -512,7 +517,7 @@ pub trait AppExtensions {
         let c_message = CString::new(message).unwrap();
         let ptr = c_message.as_ptr();
         let len = c_message.to_bytes().len();
-    
+
         unsafe {
             send_message_low_level(process_id, ptr as i32, len as i32);
         }
@@ -574,7 +579,7 @@ pub trait AppExtensions {
         buffer
     }
 
-    fn get_value<T : for<'a> Deserialize<'a>>(&self, name: &str) -> Option<T> {
+    fn get_value<T: for<'a> Deserialize<'a>>(&self, name: &str) -> Option<T> {
         let ptr = unsafe { get_value(name.as_ptr() as i32, name.len() as i32) };
 
         serde_json::from_str(&fetch_string(ptr)).ok()
@@ -593,7 +598,6 @@ pub trait AppExtensions {
 pub static mut APPS: Lazy<Vec<Box<dyn App>>> = Lazy::new(Vec::new);
 
 pub static mut CURRENT_APP: usize = 0;
-
 
 pub fn register_app(app: Box<dyn App>) {
     unsafe {
@@ -643,7 +647,7 @@ pub extern "C" fn on_process_message(process_id: i32, str_ptr: u32) {
 #[no_mangle]
 pub extern "C" fn draw_debug() {
     let debug = unsafe { &DEBUG };
-    if debug.is_empty(){
+    if debug.is_empty() {
         return;
     }
     let foreground = Color::parse_hex("#62b4a6");
@@ -702,7 +706,7 @@ pub extern "C" fn on_scroll(x: f64, y: f64) {
 #[no_mangle]
 pub extern "C" fn get_state() {
     let app = get_app!();
-    let s: String =  app.get_state();
+    let s: String = app.get_state();
     let s = encode_base64(&s.into_bytes());
     let mut s = s.into_bytes();
     let ptr = s.as_mut_ptr() as usize;
@@ -723,18 +727,15 @@ pub extern "C" fn finish_get_state(ptr: usize, len: usize) {
 #[no_mangle]
 pub extern "C" fn set_state(ptr: u32, size: u32) {
     let app = get_app!();
-    let data =
-        unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
+    let data = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
     let s = decode_base64(data).map(|v| String::from_utf8(v).unwrap());
     match s {
         Ok(s) => {
-
             // Not quite the same logic here
             // I need set_state to signal failure
             let initial_state = app.get_initial_state();
             let new_state = merge_json(Some(s), initial_state);
             app.set_state(new_state);
-
 
             // if let Ok(state) = serde_json::from_str(&s) {
             //     let current_state =
@@ -747,16 +748,16 @@ pub extern "C" fn set_state(ptr: u32, size: u32) {
             //     let new_state = serde_json::from_str(&new_state).unwrap();
             //     unsafe { app.set_state(new_state) }
             // } else {
-                // let init_state = serde_json::to_string(unsafe {
-                //     &$app::init().get_state()
-                // })
-                // .unwrap();
-                // let new_state = merge_json(Some(s), init_state);
-                // if let Ok(state) = serde_json::from_str(&new_state) {
-                    // unsafe { app.set_state(state) }
-                // } else {
-                //     println!("Failed to parse state even after merging");
-                // }
+            // let init_state = serde_json::to_string(unsafe {
+            //     &$app::init().get_state()
+            // })
+            // .unwrap();
+            // let new_state = merge_json(Some(s), init_state);
+            // if let Ok(state) = serde_json::from_str(&new_state) {
+            // unsafe { app.set_state(state) }
+            // } else {
+            //     println!("Failed to parse state even after merging");
+            // }
             // }
         }
         Err(err) => {
@@ -775,8 +776,6 @@ pub use serde_json;
 
 pub mod macros {
 
-
-
     #[macro_export]
     macro_rules! app {
         ($app:ident) => {
@@ -789,7 +788,7 @@ pub mod macros {
                     framework::APPS.push(Box::new(app));
                 }
             }
-        }
+        };
     }
 
     #[macro_export]

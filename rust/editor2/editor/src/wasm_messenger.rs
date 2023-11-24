@@ -260,7 +260,7 @@ impl WasmManager {
         loop {
             let message = self.receiver.select_next_some().await;
             let message_id = message.message_id;
-            let external_id = message.external_id.clone();
+            let external_id = message.external_id;
             // TODO: Can I wait for either this message or some reload message so I can kill infinite loops?
             let out_message = self.process_message(message).await;
             match out_message {
@@ -433,7 +433,7 @@ impl WasmManager {
             }
         };
 
-        if let Some(_) = message.external_id {
+        if message.external_id.is_some() {
             self.instance.clear_widget_identifier().await?;
         }
 
@@ -922,11 +922,21 @@ impl WasmInstance {
         linker.func_wrap(
             "host",
             "create_widget",
-            |mut caller: Caller<'_, State>, x: f32, y: f32, width: f32, height: f32, external_id: u32| {
+            |mut caller: Caller<'_, State>,
+             x: f32,
+             y: f32,
+             width: f32,
+             height: f32,
+             external_id: u32| {
                 let state = caller.data_mut();
-                state
-                    .commands
-                    .push(Commands::CreateWidget(state.wasm_id as usize, x, y, width, height, external_id));
+                state.commands.push(Commands::CreateWidget(
+                    state.wasm_id as usize,
+                    x,
+                    y,
+                    width,
+                    height,
+                    external_id,
+                ));
             },
         )?;
 

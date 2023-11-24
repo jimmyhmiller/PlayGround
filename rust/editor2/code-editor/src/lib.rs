@@ -249,7 +249,7 @@ impl App for TextWidget {
         if let Some(transaction_pane) = &mut self.transaction_pane {
             if let Some(transaction_pane) = transaction_pane.as_any_mut().downcast_mut::<Self>() {
                 transaction_pane.text_pane.text_buffer.set_contents(
-                    Self::format_transactions(&self.text_pane.cursor.get_transaction_manager())
+                    Self::format_transactions(self.text_pane.cursor.get_transaction_manager())
                         .as_bytes(),
                 );
             } else {
@@ -859,7 +859,6 @@ impl TextWidget {
         // But that might be the right thing to do?
         // Need to think about it
         for transaction in transactions {
-
             if Some(&index) == undo_pointer {
                 contains_undo_pointer = ">> ";
             }
@@ -902,7 +901,7 @@ impl TextWidget {
             contains_undo_pointer,
             contains_transaction_pointer,
             categories.iter().join(", "),
-            result.replace("\n", "\\n").replace(" ", "<space>"),
+            result.replace('\n', "\\n").replace(' ', "<space>"),
             range.0,
             range.1
         )
@@ -933,7 +932,7 @@ impl TextWidget {
             );
         }
 
-        return result;
+        result
     }
 }
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use framework::{
-    app, serde_json, App, Canvas, Color, CursorIcon, Position, Rect, WidgetData, Size,
+    app, serde_json, App, Canvas, Color, CursorIcon, Position, Rect, Size, WidgetData,
 };
 use lsp_types::SemanticTokensLegend;
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,6 @@ struct ColorScheme {
 }
 
 impl App for ColorScheme {
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -117,7 +116,7 @@ impl App for ColorScheme {
     fn on_move(&mut self, x: f32, y: f32) {
         self.widget_data.position = Position { x, y };
     }
-    
+
     fn get_position(&self) -> Position {
         self.widget_data.position
     }
@@ -148,7 +147,6 @@ impl App for ColorScheme {
 }
 
 impl ColorScheme {
-
     fn init() -> Self {
         let me = Self {
             widget_data: WidgetData::default(),
