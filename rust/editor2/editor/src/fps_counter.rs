@@ -25,7 +25,7 @@ impl Stats {
         self.count %= 100;
         self.count = self.count.max(1);
         self.times[self.count] = time;
-        self.average = self.times.iter().sum::<Duration>() / 100 as u32;
+        self.average = self.times.iter().sum::<Duration>() / 100_u32;
         self.min = self.min.min(time);
         self.max = self.max.max(time);
     }

@@ -1,8 +1,7 @@
 use framework::{
     app,
     serde_json::{self},
-    App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Position, Size, WidgetData,
-    WidgetMeta,
+    App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Position, Size, WidgetData, WidgetMeta,
 };
 use lsp_types::SymbolInformation;
 use serde::{Deserialize, Serialize};
@@ -22,8 +21,6 @@ struct SymbolWidget {
 
 #[allow(unused)]
 impl App for SymbolWidget {
-
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -87,8 +84,14 @@ impl App for SymbolWidget {
 fn layout_elements(max_width: f32, elements: Vec<Size>) -> Vec<WidgetData> {
     // We are trying to pack these elements in. They are going to have uniform width, but
     // variable height. We want to pack them in as tightly as possible, but we also want to
-    // keep them in order. 
-    let starting_data = WidgetData { position: Position { x: 60.0, y: 60.0 }, size: Size { width: 0.0, height: 0.0 } };
+    // keep them in order.
+    let starting_data = WidgetData {
+        position: Position { x: 60.0, y: 60.0 },
+        size: Size {
+            width: 0.0,
+            height: 0.0,
+        },
+    };
 
     let mut placed_elements: Vec<WidgetData> = Vec::new();
     let element_width = elements[0].width;
@@ -101,28 +104,26 @@ fn layout_elements(max_width: f32, elements: Vec<Size>) -> Vec<WidgetData> {
         }
         x += 10.0;
 
-        let y = placed_elements.iter()
+        let y = placed_elements
+            .iter()
             .filter(|w| w.position.x == x)
-            .map(|w| w.position.y as u32 + w.size.height as u32).max()
-            .unwrap_or(0) as f32 + 10.0;
+            .map(|w| w.position.y as u32 + w.size.height as u32)
+            .max()
+            .unwrap_or(0) as f32
+            + 10.0;
 
-        let widget_data = WidgetData { position: Position { x, y }, size: element.clone() };
+        let widget_data = WidgetData {
+            position: Position { x, y },
+            size: *element,
+        };
         placed_elements.push(widget_data);
-
     }
 
-
     placed_elements
-
-
-
 }
-
-
 
 #[allow(unused)]
 impl App for MultipleWidgets {
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -169,18 +170,21 @@ impl App for MultipleWidgets {
         }
         match input.key_code {
             KeyCode::C => {
-
-                let elements: Vec<Size> = self.symbols.iter().map(|symbol| {
-                    Size {
+                let elements: Vec<Size> = self
+                    .symbols
+                    .iter()
+                    .map(|symbol| Size {
                         width: 500.0,
-                        height: ((symbol.location.range.end.line - symbol.location.range.start.line)
-                            as f32
-                            * 3.0).max(50.0),
-                    }
-                }).collect();
+                        height:
+                            ((symbol.location.range.end.line - symbol.location.range.start.line)
+                                as f32
+                                * 3.0)
+                                .max(50.0),
+                    })
+                    .collect();
 
                 let layout = layout_elements(3000.0, elements);
-                
+
                 for (symbol, layout) in self.symbols.clone().iter().zip(layout.iter()) {
                     self.create_widget(
                         Box::new(SymbolWidget {

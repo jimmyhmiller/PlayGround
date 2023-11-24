@@ -514,7 +514,6 @@ impl Widget for WasmWidget {
 }
 
 impl WasmWidget {
-
     pub fn send_value(&mut self, name: String, value: String) {
         if let Some(sender) = self.value_senders.remove(&name) {
             sender.send(value).unwrap();
@@ -666,7 +665,14 @@ impl WasmWidget {
                     self.external_sender
                         .as_mut()
                         .unwrap()
-                        .send(Event::CreateWidget(*wasm_id, *x, *y, *width, *height, *external_id))
+                        .send(Event::CreateWidget(
+                            *wasm_id,
+                            *x,
+                            *y,
+                            *width,
+                            *height,
+                            *external_id,
+                        ))
                         .unwrap();
                 }
             }
@@ -695,10 +701,6 @@ where
         Ok(bytes)
     }
 }
-
-
-
-
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TextPane {

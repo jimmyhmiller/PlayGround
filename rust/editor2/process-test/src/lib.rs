@@ -5,22 +5,24 @@ use std::{
     str::{from_utf8, FromStr},
 };
 
-
 use framework::{
     app,
     serde_json::{self, json},
-    App, Canvas, Ui, WidgetData, Size,
+    App, Canvas, Size, Ui, WidgetData,
 };
 use lsp_types::{
-    notification::{DidChangeTextDocument, DidOpenTextDocument, Initialized, Notification, DidSaveTextDocument},
+    notification::{
+        DidChangeTextDocument, DidOpenTextDocument, DidSaveTextDocument, Initialized, Notification,
+    },
     request::{Initialize, Request, SemanticTokensFullRequest, WorkspaceSymbolRequest},
-    ClientCapabilities, DidChangeTextDocumentParams, DidOpenTextDocumentParams, InitializeParams,
-    InitializeResult, InitializedParams, MessageActionItemCapabilities, PartialResultParams,
-    Position, Range, SemanticTokensParams, ShowDocumentClientCapabilities,
-    ShowMessageRequestClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    ClientCapabilities, DidChangeTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, InitializeParams, InitializeResult, InitializedParams,
+    MessageActionItemCapabilities, PartialResultParams, Position,
+    PublishDiagnosticsClientCapabilities, Range, SemanticTokensParams,
+    ShowDocumentClientCapabilities, ShowMessageRequestClientCapabilities,
+    TextDocumentClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier,
     TextDocumentItem, Url, VersionedTextDocumentIdentifier, WindowClientCapabilities,
-    WorkDoneProgressParams, WorkspaceFolder, WorkspaceSymbolParams, PublishDiagnosticsClientCapabilities,
-    TextDocumentClientCapabilities, DidSaveTextDocumentParams,
+    WorkDoneProgressParams, WorkspaceFolder, WorkspaceSymbolParams,
 };
 use serde::{Deserialize, Serialize};
 
@@ -180,15 +182,15 @@ impl ProcessSpawner {
             }),
             show_document: Some(ShowDocumentClientCapabilities { support: true }),
         });
-        
+
         let text_document = TextDocumentClientCapabilities {
-            publish_diagnostics: Some(PublishDiagnosticsClientCapabilities { 
+            publish_diagnostics: Some(PublishDiagnosticsClientCapabilities {
                 version_support: Some(true),
                 ..PublishDiagnosticsClientCapabilities::default()
             }),
             ..TextDocumentClientCapabilities::default()
         };
-        
+
         initialize_params.capabilities.text_document = Some(text_document);
 
         self.send_request(
@@ -223,11 +225,10 @@ impl ProcessSpawner {
     // TODO: I should probably ask the editor what files are open
 
     fn open_file(&mut self, file_info: &OpenFileInfo) {
-        
         if !file_info.path.ends_with(".rs") {
             return;
         }
-        
+
         let mut file = File::open(file_info.path.clone()).unwrap();
         let mut contents = String::new();
         let file_results = file.read_to_string(&mut contents);
@@ -360,7 +361,6 @@ struct OpenFileInfo {
 }
 
 impl App for ProcessSpawner {
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -414,11 +414,11 @@ impl App for ProcessSpawner {
         match kind.as_str() {
             "text_change_multi" => {
                 let edits: MultiEditWithPath = serde_json::from_str(&event).unwrap();
-                
+
                 // TODO: I need a list of file types for which
                 // I have an lsp
                 if !edits.path.ends_with(".rs") {
-                    return
+                    return;
                 }
                 if !self.state.open_files.contains(&edits.path) {
                     self.open_file(&OpenFileInfo {
@@ -435,7 +435,7 @@ impl App for ProcessSpawner {
                     return;
                 }
                 if !info.path.ends_with(".rs") {
-                    return
+                    return;
                 }
                 self.state.files_to_open.insert(info.clone());
                 self.request_tokens(&info.path, info.version);
@@ -445,12 +445,15 @@ impl App for ProcessSpawner {
             }
             "lith/save_file" => {
                 let path = event;
-                let params: <DidSaveTextDocument as Notification>::Params = DidSaveTextDocumentParams {
-                    text_document: TextDocumentIdentifier { uri: Url::from_str(&format!("file://{}", path)).unwrap() },
-                    // TODO: Send the text to be safe
-                    text: None,
-                };
-        
+                let params: <DidSaveTextDocument as Notification>::Params =
+                    DidSaveTextDocumentParams {
+                        text_document: TextDocumentIdentifier {
+                            uri: Url::from_str(&format!("file://{}", path)).unwrap(),
+                        },
+                        // TODO: Send the text to be safe
+                        text: None,
+                    };
+
                 let notify = self.notification(
                     DidSaveTextDocument::METHOD,
                     &serde_json::to_string(&params).unwrap(),
@@ -477,10 +480,11 @@ impl App for ProcessSpawner {
                         // let method = message["method"].as_str();
                         if let Some(id) = message["id"].as_str() {
                             if let Some(method) = self.state.message_type.get(id) {
-
-                                self.state.messages_by_type
+                                self.state
+                                    .messages_by_type
                                     .entry(method.to_string())
-                                    .or_default().push(message.to_string());
+                                    .or_default()
+                                    .push(message.to_string());
 
                                 if method == "textDocument/semanticTokens/full" {
                                     let meta = self.state.token_request_metadata.get(id).unwrap();
@@ -495,7 +499,10 @@ impl App for ProcessSpawner {
                                     );
                                 }
                                 if method == "workspace/symbol" {
-                                    self.send_event("workspace/symbols", message.get("result").unwrap().to_string());
+                                    self.send_event(
+                                        "workspace/symbols",
+                                        message.get("result").unwrap().to_string(),
+                                    );
                                 }
                                 if method == "initialize" {
                                     let result = message.get("result").unwrap();
@@ -521,7 +528,6 @@ impl App for ProcessSpawner {
                             // This isn't in response to a message we sent
                             let method = message["method"].as_str();
                             if let Some(method) = method {
-                                
                                 match method {
                                     "$/progress" => {
                                         if let Some(100) = message
@@ -532,13 +538,15 @@ impl App for ProcessSpawner {
                                         {
                                             self.initialized();
                                         }
-                                    
                                     }
                                     "textDocument/publishDiagnostics" => {
-                                        let diagnostic = serde_json::to_string(&message.get("params")).unwrap();
-                                        self.state.messages_by_type
+                                        let diagnostic =
+                                            serde_json::to_string(&message.get("params")).unwrap();
+                                        self.state
+                                            .messages_by_type
                                             .entry("diagnostics".to_string())
-                                            .or_default().push(diagnostic.clone());
+                                            .or_default()
+                                            .push(diagnostic.clone());
                                         self.send_event("diagnostics", diagnostic);
                                     }
                                     _ => {}
@@ -646,7 +654,5 @@ fn find_rust_analyzer() -> String {
 
     format!("{}/server/rust-analyzer", folder.to_str().unwrap())
 }
-
-
 
 app!(ProcessSpawner);
