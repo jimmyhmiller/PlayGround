@@ -467,6 +467,7 @@ version = "0.1.0"
 dependencies = [
  "framework",
  "headless_editor",
+ "itertools 0.12.0",
  "once_cell",
  "serde",
  "serde_json",
@@ -695,7 +696,7 @@ dependencies = [
  "cranelift-codegen",
  "cranelift-entity",
  "cranelift-frontend",
- "itertools",
+ "itertools 0.10.5",
  "log",
  "smallvec",
  "wasmparser",
@@ -893,7 +894,7 @@ dependencies = [
  "framework",
  "futures",
  "futures-timer",
- "itertools",
+ "itertools 0.10.5",
  "jstream-ext",
  "metal",
  "nonblock",
@@ -1304,11 +1305,11 @@ checksum = "f93e7192158dbcda357bdec5fb5788eebf8bbac027f3f33e719d29135ae84156"
 name = "headless_editor"
 version = "0.1.0"
 dependencies = [
+ "itertools 0.12.0",
  "quickcheck",
  "rand",
  "serde",
  "standard-dist",
- "use",
 ]
 
 [[package]]
@@ -1471,6 +1472,15 @@ name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25db6b064527c5d482d0423354fcd07a89a2dfe07b67892e62411946db7f07b0"
 dependencies = [
  "either",
 ]
@@ -2589,7 +2599,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c5a16ac7427e6262e7b74f657c07dff1f60bb92f97c4356c3ea3ae0dab25b7c"
 dependencies = [
- "itertools",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 1.0.109",
@@ -2876,12 +2886,6 @@ dependencies = [
  "percent-encoding",
  "serde",
 ]
-
-[[package]]
-name = "use"
-version = "0.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89452352a9cec4cf2d44c40f96d3696e09866e922b1fa28bccfe77b803055e66"
 
 [[package]]
 name = "uuid"
