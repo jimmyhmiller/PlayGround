@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 
-use framework::{KeyboardInput, Position, Size, WidgetMeta};
+use framework::{KeyboardInput, Position, Size, WidgetMeta, Value};
 use futures::channel::{mpsc::Sender, oneshot};
 use itertools::Itertools;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -22,7 +22,6 @@ use skia_safe::{
 
 use crate::{
     color::Color,
-    editor::Value,
     event::Event,
     util::{decode_base64, encode_base64},
     wasm_messenger::{Commands, DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState},
@@ -190,7 +189,7 @@ pub struct WasmWidget {
     pub dirty: bool,
     pub external_id: Option<u32>,
     #[serde(skip)]
-    pub value_senders: HashMap<String, oneshot::Sender<String>>,
+    pub value_senders: HashMap<String, oneshot::Sender<Value>>,
     // TODO:
     // Maybe we make a "mark dirty" sender
     // That way each widget can decide it is dirty
@@ -209,7 +208,7 @@ impl Widget for WasmWidget {
     }
 
     fn dirty(&self) -> bool {
-        self.dirty
+        self.dirty || self.number_of_pending_requests() > 0 || self.wasm_non_draw_commands.len() > 0
     }
 
     fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
@@ -392,7 +391,18 @@ impl Widget for WasmWidget {
         let message = self.wrap_payload(Payload::GetCommands);
         self.send_message(message)?;
 
-        self.process_non_draw_commands(&mut HashMap::new());
+        let values = &mut HashMap::new();
+
+
+        self.process_non_draw_commands(values);
+
+        for (name, value) in values.drain() {
+            self.external_sender
+                .as_mut()
+                .unwrap()
+                .send(Event::ProvideValue(name, value));
+        }
+        
         while let Ok(Some(message)) = self.receiver.as_mut().unwrap().try_next() {
             // Note: Right now if a message doesn't have a corresponding in-message
             // I am just setting the out message to id: 0.
@@ -465,8 +475,17 @@ impl Widget for WasmWidget {
             }
         }
         if self.dirty() {
-            let message = self.wrap_payload(Payload::RunDraw("draw".to_string()));
-            self.send_message(message)?;
+            let has_pending_draw = self.pending_messages
+                .iter()
+                .any(|(_, (m, _))| matches!(m.payload, Payload::RunDraw(_)));
+
+            if !has_pending_draw {
+                let message = self.wrap_payload(Payload::RunDraw("draw".to_string()));
+                self.send_message(message)?;
+            } else {
+                println!("Already have pending draw for {}", self.id());
+            }
+            
         }
 
         Ok(())
@@ -514,7 +533,7 @@ impl Widget for WasmWidget {
 }
 
 impl WasmWidget {
-    pub fn send_value(&mut self, name: String, value: String) {
+    pub fn send_value(&mut self, name: String, value: Value) {
         if let Some(sender) = self.value_senders.remove(&name) {
             sender.send(value).unwrap();
         }
@@ -611,12 +630,9 @@ impl WasmWidget {
                         .unwrap();
                 }
                 Commands::ReceiveLastProcessMessage(_) => println!("Unhandled"),
-                Commands::ProvideF32(name, val) => {
-                    values.insert(name.to_string(), Value::F32(*val));
-                }
-                Commands::ProvideBytes(name, data) => {
+                Commands::ProvideValue(name, data) => {
                     // TODO: Get rid of clone here
-                    values.insert(name.to_string(), Value::Bytes(data.clone()));
+                    values.insert(name.to_string(), data.clone());
                 }
                 Commands::Event(kind, event) => {
                     self.external_sender

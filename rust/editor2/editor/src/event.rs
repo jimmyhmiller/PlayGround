@@ -5,7 +5,7 @@ use crate::{
     widget::WidgetId,
 };
 
-use framework::{CursorIcon, Position};
+use framework::{CursorIcon, Position, Value};
 use serde::{Deserialize, Serialize};
 use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
 
@@ -73,6 +73,7 @@ pub enum Event {
     Redraw(usize),
     CreateWidget(usize, f32, f32, f32, f32, u32),
     ValueNeeded(String, usize),
+    ProvideValue(String, Value),
 }
 
 impl Event {

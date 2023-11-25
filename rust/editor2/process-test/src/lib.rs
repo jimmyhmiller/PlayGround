@@ -114,7 +114,7 @@ impl ProcessSpawner {
                 serde_json::Value,
             > = deserializer.into_iter::<serde_json::Value>();
             for item in iterator {
-                let item = item.map_err(|x| ParseError::InvalidJson)?;
+                let item = item.map_err(|_| ParseError::InvalidJson)?;
                 results.push(item);
             }
         }

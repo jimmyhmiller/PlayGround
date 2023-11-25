@@ -282,6 +282,7 @@ impl<Cursor: VirtualCursor> EditAction<Cursor> {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TransactingVirtualCursor<Cursor: VirtualCursor> {
     cursor: Cursor,
+    #[serde(skip)]
     transaction_manager: TransactionManager<Cursor>,
 }
 

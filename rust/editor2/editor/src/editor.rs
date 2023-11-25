@@ -19,14 +19,13 @@ use crate::{
     widget2::{Deleted, TextPane},
 };
 
-use framework::{Position, Size};
+use framework::{Position, Size, Value};
 use itertools::Itertools;
 use nonblock::NonBlockingReader;
 use notify::{FsEventWatcher, RecursiveMode};
 
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 use ron::ser::PrettyConfig;
-use serde::{Deserialize, Serialize};
 use skia_safe::Canvas;
 use winit::{event_loop::EventLoopProxy, window::CursorIcon};
 
@@ -36,14 +35,6 @@ pub struct Context {
     pub right_mouse_down: bool,
     pub cancel_click: bool,
     pub modifiers: Modifiers,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Value {
-    USize(usize),
-    F32(f32),
-    String(String),
-    Bytes(Vec<u8>),
 }
 
 pub enum PerFrame {
@@ -556,7 +547,7 @@ impl Editor {
         let mut result = String::new();
         for widget in self.widget_store.iter() {
             // TODO: Change this
-            if widget.data.typetag_name() == "Ephemeral" {
+            if widget.data.typetag_name() == "Ephemeral" || widget.data.typetag_name() == "Deleted" {
                 continue;
             }
             let widget_serialized = &format!(

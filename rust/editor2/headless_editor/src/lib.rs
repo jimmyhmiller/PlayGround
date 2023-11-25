@@ -1207,7 +1207,7 @@ fn auto_bracket_insert<T: TextBuffer<Item = u8>, Cursor: VirtualCursor>(
     };
 
     cursor.insert_normal_text(to_insert, buffer);
-    cursor.move_right(buffer);
+    cursor.move_left(buffer);
 }
 
 fn insert_normal_text<T: TextBuffer<Item = u8>, Cursor: VirtualCursor>(
@@ -1392,7 +1392,7 @@ fn get_indent(last_line: &String) -> String {
     indent
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default)]
 pub struct SimpleCursor {
     line: usize,
     column: usize,
