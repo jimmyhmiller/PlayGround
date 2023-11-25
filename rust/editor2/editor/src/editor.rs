@@ -16,7 +16,7 @@ use crate::{
     keyboard::Modifiers,
     wasm_messenger::WasmMessenger,
     widget::{Widget, WidgetId, WidgetStore},
-    widget2::{Deleted, TextPane},
+    widget2::{Deleted, TextPane, Text, RandomText},
 };
 
 use framework::{Position, Size, Value};
@@ -194,12 +194,18 @@ impl Editor {
         let mut file = File::open(&self.widget_config_path).unwrap();
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
+
+
+       
         let widgets: Vec<Widget> = contents
             .split(';')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .map(|s| {
                 if let Ok(mut widget) = ron::de::from_str::<Widget>(s) {
+                    if let Some(text) = widget.data.as_any_mut().downcast_mut::<Text>() {
+                        widget = Widget {data: Box::new(RandomText { text: text.clone() }) }
+                    } 
                     widget.init(&mut self.wasm_messenger);
                     if let Some(watcher) = &mut self.debounce_watcher {
                         let watcher = watcher.watcher();

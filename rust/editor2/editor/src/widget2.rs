@@ -14,10 +14,11 @@ use std::{
 use framework::{KeyboardInput, Position, Size, WidgetMeta, Value};
 use futures::channel::{mpsc::Sender, oneshot};
 use itertools::Itertools;
+use rand::Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use skia_safe::{
     font_style::{Slant, Weight, Width},
-    Canvas, Data, Font, FontStyle, Path, Point, RRect, Rect, Typeface,
+    Canvas, Data, Font, FontStyle, Path, Point, RRect, Rect, Typeface, FontMgr,
 };
 
 use crate::{
@@ -919,12 +920,13 @@ pub struct TextOptions {
     pub color: Color,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Text {
     pub text: String,
     pub text_options: TextOptions,
     pub meta: WidgetMeta,
 }
+
 
 #[typetag::serde]
 impl Widget for Text {
@@ -991,6 +993,104 @@ impl Widget for Text {
         Ok(())
     }
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct RandomText {
+    pub text: Text,
+}
+
+impl Deref for RandomText {
+    type Target = Text;
+
+    fn deref(&self) -> &Self::Target {
+        &self.text
+    }
+}
+
+impl DerefMut for RandomText {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.text
+    }
+}
+
+#[typetag::serde]
+impl Widget for RandomText {
+    fn as_any(&self) ->  &dyn Any {
+       self
+    }
+
+    fn as_any_mut(&mut self) ->  &mut dyn Any {
+        self
+    }
+
+    fn get_state(&self) -> String {
+        self.text.get_state()
+    }
+
+    fn position(&self) -> Position {
+        self.text.position()
+    }
+
+    fn scale(&self) -> f32 {
+        self.text.scale()
+    }
+
+    fn set_scale(&mut self,scale:f32) {
+        self.text.set_scale(scale)
+    }
+
+    fn size(&self) -> Size {
+        self.text.size()
+    }
+
+    fn id(&self) -> usize {
+        self.text.id()
+    }
+
+    fn set_id(&mut self,id:usize) {
+        self.text.set_id(id)
+    }
+
+    // TODO: write font in text if mouse hover
+    fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.text_options = TextOptions {
+            font_family: Self::random_font_name(),
+            font_weight: FontWeight::Normal,
+            size: 120.0,
+            color:  Color::parse_hex("#ffffff")
+        };
+        self.text.on_click(x, y)
+    }
+    
+    fn start(&mut self) -> Result<(), Box<dyn Error>> {
+        self.text_options = TextOptions {
+            font_family: Self::random_font_name(),
+            font_weight: FontWeight::Normal,
+            size: 120.0,
+            color:  Color::parse_hex("#ffffff")
+        };
+        self.text.start()
+    }
+
+    fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
+        self.text.draw(canvas)
+    }
+}
+
+
+impl RandomText {
+    fn random_font_name() -> String {
+
+        let font_mgr = FontMgr::default();
+        let families_count = font_mgr.count_families();
+
+        let random_font = rand::thread_rng().gen_range(0..families_count);
+        let family_name = font_mgr.family_name(random_font);
+        family_name.to_string()
+    }
+}
+
+
 
 #[derive(Serialize, Deserialize)]
 pub struct Image {

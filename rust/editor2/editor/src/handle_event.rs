@@ -417,6 +417,7 @@ impl Editor {
                             if let Some(widget) = self.widget_store.get_mut(widget_id) {
                                 if let Some(widget) = widget.as_wasm_widget_mut() {
                                     widget.send_value(name.to_string(), value.clone());
+                                    println!("Providing value {}", name);
                                 }
                             }
                         }
@@ -424,6 +425,7 @@ impl Editor {
                 },
 
                 Event::ProvideValue(name, value) => {
+                    println!("got value {}", name);
                     self.values.insert(name, value);
                 }
 

@@ -81,6 +81,7 @@ impl Widget {
     }
 
     pub fn init(&mut self, wasm_messenger: &mut WasmMessenger) {
+
         if let Some(widget) = self.as_wasm_widget_mut() {
             let (new_wasm_id, receiver) = wasm_messenger.new_instance(&widget.path, None);
             widget.sender = Some(wasm_messenger.get_sender(new_wasm_id));
@@ -93,6 +94,7 @@ impl Widget {
                 }
             }
         }
+        self.start().unwrap();
     }
 
     pub fn save(&mut self, wasm_messenger: &mut WasmMessenger) {

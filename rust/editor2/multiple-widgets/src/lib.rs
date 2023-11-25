@@ -67,13 +67,14 @@ impl App for SymbolWidget {
         let canvas = Canvas::new();
         let background = Color::parse_hex("#003f38");
         canvas.set_color(&background);
-        // let colors: Option<HashMap<usize, String>> = self.try_get_value("color_mappings");
-        // if let Some(colors) = colors {
-        //     let color = colors.get(&symbol_kind_to_num(self.symbol.kind));
-        //     if let Some(color) = color {
-        //         canvas.set_color(&Color::parse_hex(color));
-        //     }
-        // }
+        let colors: Option<HashMap<usize, String>> = self.try_get_value("color_mappings");
+        // println!("got colors! {:?}", colors);
+        if let Some(colors) = colors {
+            let color = colors.get(&symbol_kind_to_num(self.symbol.kind));
+            if let Some(color) = color {
+                canvas.set_color(&Color::parse_hex(color));
+            }
+        }
 
         canvas.draw_rect(
             0.0,
