@@ -452,6 +452,8 @@ struct State {
     process_messages: HashMap<i32, String>,
     position: Position,
     sender: Sender<OutMessage>,
+    values: HashMap<String, Value>,
+    receivers: HashMap<String, oneshot::Receiver<Value>>,
     wasm_id: u64,
 }
 
@@ -466,6 +468,8 @@ impl State {
             position: Position { x: 0.0, y: 0.0 },
             sender,
             wasm_id,
+            values: HashMap::new(),
+            receivers: HashMap::new(),
         }
     }
 }
@@ -643,12 +647,15 @@ impl WasmInstance {
                     // Probably want a try_ version
                     state.sender.start_send(OutMessage {
                         message_id: 0,
-                        payload: OutPayload::NeededValue(name, sender),
+                        payload: OutPayload::NeededValue(name.clone(), sender),
                     })?;
+                    
                     // The value is serialized and will need to be deserialized
                     let result = receiver.await;
                     match result {
                         Ok(result) => {
+
+                            state.values.insert(name, result.clone());
                             let (ptr, _len) =
                                 WasmInstance::transfer_string_to_wasm(&mut caller,  serde_json::to_string(&result).unwrap())
                                     .await
@@ -670,34 +677,37 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, ptr: i32, len: i32| {
                 let name = get_string_from_caller(&mut caller, ptr, len);
                 Box::new(async move {
-                    let state = caller.data_mut();
-                    let (sender, mut receiver) = oneshot::channel();
-                    // This doesn't really work
                     
-                    state.sender.start_send(OutMessage {
-                        message_id: 0,
-                        payload: OutPayload::NeededValue(name, sender),
-                    })?;
+                    let state = caller.data_mut();
 
-                    // I need to keep trying
-
-                    // TODO: This will probably cause problems for the sender
-                    let result = receiver.try_recv();
-                    if result.is_err() {
-                        return Ok(0);
+                    let mut should_remove = false;
+                    if let Some(receiver) = state.receivers.get_mut(&name) {
+                        if let Ok(Some(result )) = receiver.try_recv() {
+                            state.values.insert(name.clone(), result);
+                            should_remove = true;
+                        }
                     }
-                    let result = result.unwrap();
-                    match result {
-                        Some(result) => {
-                            let (ptr, _len) =
-                                WasmInstance::transfer_string_to_wasm(&mut caller, from_utf8(&result).unwrap().to_string())
-                                    .await
-                                    .unwrap();
-                            Ok(ptr)
-                        }
-                        None => {
-                            Ok(0)
-                        }
+
+                    if should_remove {
+                        state.receivers.remove(&name);
+                    }
+                    // TODO: Unnecessary vec to string
+                    if let Some(value) = state.values.get(&name) {
+                        let value = value.clone();
+                        let (ptr, _len) =
+                            WasmInstance::transfer_string_to_wasm(&mut caller, from_utf8(&value).unwrap().to_string())
+                                .await
+                                .unwrap();
+                        Ok(ptr)
+                    } else {
+                        let (sender, mut receiver) = oneshot::channel();
+                        state.receivers.insert(name.clone(), receiver);
+                        state.sender.start_send(OutMessage {
+                            message_id: 0,
+                            payload: OutPayload::NeededValue(name, sender),
+                        })?;
+                        
+                        Ok(0)
                     }
                 })
             },

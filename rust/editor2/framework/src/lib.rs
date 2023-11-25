@@ -579,7 +579,9 @@ pub trait AppExtensions {
         if ptr == 0 {
             return None;
         }
-        serde_json::from_str(&fetch_string(ptr)).ok()
+        let str = &fetch_string(ptr);
+        // println!("try_get_value: {}", str);
+        serde_json::from_str(str).ok()
     }
 }
 
