@@ -31,8 +31,8 @@ extern "C" {
     fn receive_last_message_low_level(process_id: i32) -> (i32, i32);
     #[link_name = "provide_f32"]
     fn provide_f32_low_level(ptr: i32, len: i32, val: f32);
-    #[link_name = "provide_bytes"]
-    fn provide_bytes_low_level(name_ptr: i32, name_len: i32, ptr: i32, len: i32);
+    #[link_name = "provide_value"]
+    fn provide_value_low_level(name_ptr: i32, name_len: i32, ptr: i32, len: i32);
     fn get_value(ptr: i32, len: i32) -> u32;
     fn try_get_value(ptr: i32, len: i32) -> u32;
     #[link_name = "send_event"]
@@ -57,14 +57,7 @@ pub struct PointerLengthString {
     pub len: u32,
 }
 
-// Copied from editor
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Value {
-    USize(usize),
-    F32(f32),
-    String(String),
-    Bytes(Vec<u8>),
-}
+pub type Value = Vec<u8>;
 
 impl From<&String> for PointerLengthString {
     fn from(s: &String) -> Self {
@@ -525,15 +518,12 @@ pub trait AppExtensions {
     fn set_get_state(&mut self, ptr: u32, len: u32) {
         unsafe { set_get_state(ptr, len) };
     }
-    fn provide_f32(&self, s: &str, val: f32) {
-        unsafe {
-            provide_f32_low_level(s.as_ptr() as i32, s.len() as i32, val);
-        }
-    }
 
-    fn provide_bytes(&self, s: &str, val: &[u8]) {
+    fn provide_value(&self, s: &str, val: &[u8]) {
+        // TODO: I need to fix the lifetime of this thing
+        // most likely
         unsafe {
-            provide_bytes_low_level(
+            provide_value_low_level(
                 s.as_ptr() as i32,
                 s.len() as i32,
                 val.as_ptr() as i32,
@@ -581,17 +571,15 @@ pub trait AppExtensions {
 
     fn get_value<T: for<'a> Deserialize<'a>>(&self, name: &str) -> Option<T> {
         let ptr = unsafe { get_value(name.as_ptr() as i32, name.len() as i32) };
-
         serde_json::from_str(&fetch_string(ptr)).ok()
     }
 
-    fn try_get_value(&self, name: &str) -> Option<String> {
-        let ptr = unsafe { get_value(name.as_ptr() as i32, name.len() as i32) };
+    fn try_get_value<T: for<'a> Deserialize<'a>>(&self, name: &str) -> Option<T> {
+        let ptr = unsafe { try_get_value(name.as_ptr() as i32, name.len() as i32) };
         if ptr == 0 {
             return None;
         }
-        let result = fetch_string(ptr);
-        Some(result)
+        serde_json::from_str(&fetch_string(ptr)).ok()
     }
 }
 

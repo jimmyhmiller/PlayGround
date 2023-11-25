@@ -118,6 +118,7 @@ struct TextWidget {
     x_margin: i32,
     y_margin: i32,
     selecting: bool,
+    #[serde(skip)]
     diagnostics: DiagnosticMessage,
     #[serde(skip)]
     transaction_pane: Option<Widget>,
@@ -203,7 +204,7 @@ struct Diagnostic {
     message: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 struct DiagnosticMessage {
     uri: String,
     diagnostics: Vec<Diagnostic>,
@@ -487,6 +488,20 @@ impl App for TextWidget {
 
     fn on_event(&mut self, kind: String, event: String) {
         if kind == "tokens_with_version" {
+
+
+            // Serializing all here is very slow
+            let json_value = serde_json::from_str::<serde_json::Value>(&event).unwrap();
+            if json_value.get("path") != Some(&json!(self.file_path)) {
+                return;
+            }
+            if json_value.get("version").map(|x| x.as_u64().unwrap() as usize) != Some(self.text_pane.text_buffer.document_version) {
+                println!(
+                    "version mismatch tokens early: {:?}  pane: {}",
+                    json_value.get("version"), self.text_pane.text_buffer.document_version
+                );
+                return;
+            }
             if let Ok(tokens) = serde_json::from_str::<TokensWithVersion>(&event) {
                 if tokens.path != self.file_path {
                     return;

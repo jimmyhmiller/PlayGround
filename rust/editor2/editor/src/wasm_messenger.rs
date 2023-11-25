@@ -1,10 +1,10 @@
 use std::{
-    collections::HashMap, error::Error, io::Write, path::Path, sync::Arc, thread, time::Duration,
+    collections::HashMap, error::Error, io::Write, path::Path, sync::Arc, thread, time::Duration, str::from_utf8,
 };
 
 use bytesize::ByteSize;
 
-use framework::{CursorIcon, Position};
+use framework::{CursorIcon, Position, Value};
 use futures::{
     channel::{
         mpsc::{channel, Receiver, Sender},
@@ -63,7 +63,7 @@ pub enum OutPayload {
     Saved(SaveState),
     ErrorPayload(String),
     Complete,
-    NeededValue(String, oneshot::Sender<String>),
+    NeededValue(String, oneshot::Sender<Value>),
     Error(String),
     Reloaded,
     Update(Vec<Commands>),
@@ -190,21 +190,21 @@ impl WasmMessenger {
         // are the right options. I want run with max.
         // I think run_until literally keeps
         // trying to run even if there is on work.
-        use futures_timer::Delay;
-        self.local_pool
-            .run_until(Delay::new(Duration::from_millis(8)));
+        // use futures_timer::Delay;
+        // self.local_pool
+        //     .run_until(Delay::new(Duration::from_millis(8)));
 
-        // use std::time::Instant;
-        // let start_time = Instant::now();
-        // loop {
-        //     if self.local_pool.try_run_one() {
-        //         if start_time.elapsed().as_millis() > 8 {
-        //             break;
-        //         }
-        //     } else {
-        //         break;
-        //     }
-        // }
+        use std::time::Instant;
+        let start_time = Instant::now();
+        loop {
+            if self.local_pool.try_run_one() {
+                if start_time.elapsed().as_millis() > 8 {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
     }
 
     pub fn get_receiver(&mut self, wasm_id: u64, external_id: u32) -> Receiver<OutMessage> {
@@ -274,7 +274,7 @@ impl WasmManager {
                         self.sender.start_send(out_message)
                     };
                     if result.is_err() {
-                        println!("Error sending message");
+                        println!("Error sending message {:?}", result);
                     }
                 }
                 Err(err) => {
@@ -285,7 +285,7 @@ impl WasmManager {
                     };
                     let result = self.sender.start_send(out_message);
                     if result.is_err() {
-                        println!("Error sending message");
+                        println!("Error sending message {:?}", result);
                     }
                 }
             }
@@ -475,8 +475,7 @@ pub enum Commands {
     StartProcess(u32, String),
     SendProcessMessage(i32, String),
     ReceiveLastProcessMessage(i32),
-    ProvideF32(String, f32),
-    ProvideBytes(String, Vec<u8>),
+    ProvideValue(String, Vec<u8>),
     Event(String, String),
     Subscribe(String),
     Unsubscribe(String),
@@ -651,7 +650,7 @@ impl WasmInstance {
                     match result {
                         Ok(result) => {
                             let (ptr, _len) =
-                                WasmInstance::transfer_string_to_wasm(&mut caller, result)
+                                WasmInstance::transfer_string_to_wasm(&mut caller,  serde_json::to_string(&result).unwrap())
                                     .await
                                     .unwrap();
                             Ok(ptr)
@@ -673,12 +672,14 @@ impl WasmInstance {
                 Box::new(async move {
                     let state = caller.data_mut();
                     let (sender, mut receiver) = oneshot::channel();
-                    // Handle when it blocks and when it doesn't.
-                    // Probably want a try_ version
+                    // This doesn't really work
+                    
                     state.sender.start_send(OutMessage {
                         message_id: 0,
                         payload: OutPayload::NeededValue(name, sender),
                     })?;
+
+                    // I need to keep trying
 
                     // TODO: This will probably cause problems for the sender
                     let result = receiver.try_recv();
@@ -689,14 +690,12 @@ impl WasmInstance {
                     match result {
                         Some(result) => {
                             let (ptr, _len) =
-                                WasmInstance::transfer_string_to_wasm(&mut caller, result)
+                                WasmInstance::transfer_string_to_wasm(&mut caller, from_utf8(&result).unwrap().to_string())
                                     .await
                                     .unwrap();
                             Ok(ptr)
                         }
                         None => {
-                            // TODO: Actually handle
-                            println!("Cancelled");
                             Ok(0)
                         }
                     }
@@ -712,15 +711,6 @@ impl WasmInstance {
                 state
                     .draw_commands
                     .push(DrawCommands::DrawString(string, x, y));
-            },
-        )?;
-        linker.func_wrap(
-            "host",
-            "provide_f32",
-            |mut caller: Caller<'_, State>, ptr: i32, len: i32, val: f32| {
-                let string = get_string_from_caller(&mut caller, ptr, len);
-                let state = caller.data_mut();
-                state.commands.push(Commands::ProvideF32(string, val));
             },
         )?;
         linker.func_wrap(
@@ -760,12 +750,12 @@ impl WasmInstance {
 
         linker.func_wrap(
             "host",
-            "provide_bytes",
+            "provide_value",
             |mut caller: Caller<'_, State>, name_ptr: i32, name_len: i32, ptr: i32, len: i32| {
                 let string = get_string_from_caller(&mut caller, name_ptr, name_len);
                 let data = get_bytes_from_caller(&mut caller, ptr, len).to_vec();
                 let state = caller.data_mut();
-                state.commands.push(Commands::ProvideBytes(string, data));
+                state.commands.push(Commands::ProvideValue(string, data));
             },
         )?;
         linker.func_wrap("host", "get_x", |mut caller: Caller<'_, State>| {

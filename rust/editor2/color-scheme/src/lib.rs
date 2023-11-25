@@ -67,10 +67,12 @@ impl App for ColorScheme {
                     if self.mouse_in_bounds(&canvas, 20.0, 20.0) {
                         if self.clicked {
                             self.color_mapping.insert(index, color.to_string());
+                            let data = serde_json::to_string(&self.color_mapping).unwrap();
                             self.send_event(
                                 "color_mapping_changed",
-                                serde_json::to_string(&self.color_mapping).unwrap(),
+                                data.clone(),
                             );
+                            self.provide_value("color_mappings", data.as_bytes())
                         }
                         canvas.set_color(&Color::parse_hex("#ffffff"));
                         canvas.draw_rect(-1.0, -1.0, 22.0, 22.0);

@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+
 use framework::{
     app,
     serde_json::{self},
     App, Canvas, Color, KeyCode, KeyState, KeyboardInput, Position, Size, WidgetData, WidgetMeta,
 };
-use lsp_types::SymbolInformation;
+use lsp_types::{SymbolInformation, SymbolKind};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -17,6 +19,38 @@ struct MultipleWidgets {
 struct SymbolWidget {
     widget_data: WidgetData,
     symbol: SymbolInformation,
+}
+
+fn symbol_kind_to_num(symbol_kind: SymbolKind) -> usize {
+    match symbol_kind {
+        SymbolKind::FILE => 1,
+        SymbolKind::MODULE => 2,
+        SymbolKind::NAMESPACE => 3,
+        SymbolKind::PACKAGE => 4,
+        SymbolKind::CLASS => 5,
+        SymbolKind::METHOD => 6,
+        SymbolKind::PROPERTY => 7,
+        SymbolKind::FIELD => 8,
+        SymbolKind::CONSTRUCTOR => 9,
+        SymbolKind::ENUM => 10,
+        SymbolKind::INTERFACE => 11,
+        SymbolKind::FUNCTION => 12,
+        SymbolKind::VARIABLE => 13,
+        SymbolKind::CONSTANT => 14,
+        SymbolKind::STRING => 15,
+        SymbolKind::NUMBER => 16,
+        SymbolKind::BOOLEAN => 17,
+        SymbolKind::ARRAY => 18,
+        SymbolKind::OBJECT => 19,
+        SymbolKind::KEY => 20,
+        SymbolKind::NULL => 21,
+        SymbolKind::ENUM_MEMBER => 22,
+        SymbolKind::STRUCT => 23,
+        SymbolKind::EVENT => 24,
+        SymbolKind::OPERATOR => 25,
+        SymbolKind::TYPE_PARAMETER => 26,
+        _ => 0,
+    }
 }
 
 #[allow(unused)]
@@ -33,6 +67,14 @@ impl App for SymbolWidget {
         let canvas = Canvas::new();
         let background = Color::parse_hex("#003f38");
         canvas.set_color(&background);
+        // let colors: Option<HashMap<usize, String>> = self.try_get_value("color_mappings");
+        // if let Some(colors) = colors {
+        //     let color = colors.get(&symbol_kind_to_num(self.symbol.kind));
+        //     if let Some(color) = color {
+        //         canvas.set_color(&Color::parse_hex(color));
+        //     }
+        // }
+
         canvas.draw_rect(
             0.0,
             0.0,

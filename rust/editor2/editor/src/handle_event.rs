@@ -3,7 +3,7 @@ use std::{
     io::Write,
 };
 
-use framework::{CursorIcon, Position, Size, WidgetMeta};
+use framework::{CursorIcon, Position, Size, WidgetMeta, Value};
 use nonblock::NonBlockingReader;
 use notify::RecursiveMode;
 use serde_json::json;
@@ -408,12 +408,24 @@ impl Editor {
                         let widget_positions = serde_json::to_string(&widget_positions).unwrap();
                         if let Some(widget) = self.widget_store.get_mut(widget_id) {
                             if let Some(widget) = widget.as_wasm_widget_mut() {
-                                widget.send_value(name, widget_positions);
+                                widget.send_value(name,  widget_positions.as_bytes().to_vec());
                             }
                         }
                     }
-                    _ => {}
+                    name => {
+                        if let Some(value) = self.values.get(name) {
+                            if let Some(widget) = self.widget_store.get_mut(widget_id) {
+                                if let Some(widget) = widget.as_wasm_widget_mut() {
+                                    widget.send_value(name.to_string(), value.clone());
+                                }
+                            }
+                        }
+                    }
                 },
+
+                Event::ProvideValue(name, value) => {
+                    self.values.insert(name, value);
+                }
 
                 _e => {
                     // println!("Unhandled event {:?}", e)
