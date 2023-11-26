@@ -320,15 +320,17 @@ pub struct WidgetMeta {
     pub size: Size,
     #[serde(default)]
     pub id: usize,
+    pub kind: String,
 }
 
 impl WidgetMeta {
-    pub fn new(position: Position, size: Size, scale: f32, id: usize) -> Self {
+    pub fn new(position: Position, size: Size, scale: f32, id: usize, kind: String) -> Self {
         Self {
             position,
             scale,
             size,
             id,
+            kind,
         }
     }
 }
@@ -571,7 +573,8 @@ pub trait AppExtensions {
 
     fn get_value<T: for<'a> Deserialize<'a>>(&self, name: &str) -> Option<T> {
         let ptr = unsafe { get_value(name.as_ptr() as i32, name.len() as i32) };
-        serde_json::from_str(&fetch_string(ptr)).ok()
+        let string = &fetch_string(ptr);
+        serde_json::from_str(string).ok()
     }
 
     fn try_get_value<T: for<'a> Deserialize<'a>>(&self, name: &str) -> Option<T> {

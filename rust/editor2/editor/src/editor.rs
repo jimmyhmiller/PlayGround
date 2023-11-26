@@ -286,6 +286,8 @@ impl Editor {
             self.should_redraw = true;
         }
 
+        
+
         let time = Instant::now();
         self.handle_events(events);
         self.fps_counter.add_time("events", time.elapsed());
@@ -297,6 +299,14 @@ impl Editor {
             .map(|x| x.number_of_pending_requests())
             .sum();
 
+        if pending_count > 0 {
+            self.should_redraw = true;
+        }
+
+        if self.widget_store.iter().any(|x| x.dirty()) {
+            self.should_redraw = true;
+        }
+        
         !events_empty || pending_count > 0
     }
 

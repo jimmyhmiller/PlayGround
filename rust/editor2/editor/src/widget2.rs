@@ -1075,6 +1075,10 @@ impl Widget for RandomText {
     fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
         self.text.draw(canvas)
     }
+
+    fn on_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.text.on_move(x, y)
+    }
 }
 
 
@@ -1200,7 +1204,7 @@ impl Widget for Deleted {
     }
 
     fn scale(&self) -> f32 {
-        1.0
+        0.0
     }
 
     fn id(&self) -> usize {
