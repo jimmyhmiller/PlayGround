@@ -77,31 +77,31 @@ pub enum Event {
 }
 
 impl Event {
-    pub fn patch_mouse_event(&mut self, mouse_pos: &Position) {
+    pub fn patch_mouse_event(&mut self, mouse_pos: &Position, canvas_offset: &Position) {
         match self {
             Event::LeftMouseDown { x, y } => {
-                *x = mouse_pos.x;
-                *y = mouse_pos.y;
+                *x = mouse_pos.x - canvas_offset.x;
+                *y = mouse_pos.y - canvas_offset.y;
             }
             Event::LeftMouseUp { x, y } => {
-                *x = mouse_pos.x;
-                *y = mouse_pos.y;
+                *x = mouse_pos.x - canvas_offset.x;
+                *y = mouse_pos.y - canvas_offset.y;
             }
             Event::RightMouseDown { x, y } => {
-                *x = mouse_pos.x;
-                *y = mouse_pos.y;
+                *x = mouse_pos.x - canvas_offset.x;
+                *y = mouse_pos.y - canvas_offset.y;
             }
             Event::RightMouseUp { x, y } => {
-                *x = mouse_pos.x;
-                *y = mouse_pos.y;
+                *x = mouse_pos.x - canvas_offset.x;
+                *y = mouse_pos.y - canvas_offset.y;
             }
             Event::HoveredFile { x, y, .. } => {
-                *x = mouse_pos.x;
-                *y = mouse_pos.y;
+                *x = mouse_pos.x - canvas_offset.x;
+                *y = mouse_pos.y - canvas_offset.y;
             }
             Event::DroppedFile { x, y, .. } => {
-                *x = mouse_pos.x;
-                *y = mouse_pos.y;
+                *x = mouse_pos.x - canvas_offset.x;
+                *y = mouse_pos.y - canvas_offset.y;
             }
             _ => {}
         }

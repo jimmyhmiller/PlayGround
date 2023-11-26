@@ -85,6 +85,7 @@ pub struct Editor {
     pub window: Window,
     pub cursor_icon: CursorIcon,
     pub first_frame: bool,
+    pub canvas_scroll_offset: Position,
 }
 
 pub struct Events {
@@ -420,6 +421,7 @@ impl Editor {
             },
             cursor_icon: CursorIcon::Default,
             first_frame: true,
+            canvas_scroll_offset: Position { x: 0.0, y: 0.0 },
         }
     }
 
@@ -491,6 +493,8 @@ impl Editor {
         }
         canvas.restore();
 
+        canvas.translate((self.canvas_scroll_offset.x, self.canvas_scroll_offset.y));
+
         let dirty_widgets: HashSet<usize> = self
             .widget_store
             .iter()
@@ -510,13 +514,15 @@ impl Editor {
 
     // TODO: Do I need this indirection?
     pub fn respond_to_event(&mut self, mut event: Event) {
-        event.patch_mouse_event(&self.context.mouse_position);
+        event.patch_mouse_event(&self.context.mouse_position, &self.canvas_scroll_offset);
         match event {
             Event::Noop => {}
             Event::MouseMove { x, y, .. } => {
                 // I want to be able to respond to mouse move events
                 // I just might not want to save them?
                 // I'm not sure...
+                let x = x - self.canvas_scroll_offset.x;
+                let y = y - self.canvas_scroll_offset.y;
                 let x_diff = x - self.context.mouse_position.x;
                 let y_diff = y - self.context.mouse_position.y;
                 self.events.push(Event::MouseMove {
