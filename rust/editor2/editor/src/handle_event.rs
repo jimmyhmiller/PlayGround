@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::Write,
+    io::Write, str::from_utf8,
 };
 
 use framework::{CursorIcon, Position, Size, WidgetMeta, Value};
@@ -49,6 +49,7 @@ impl Editor {
                                     },
                                     1.0,
                                     next_id,
+                                    "WasmWidget".to_string(),
                                 ),
                                 save_state: SaveState::Unsaved,
                                 wasm_non_draw_commands: vec![],
@@ -77,6 +78,7 @@ impl Editor {
                                     },
                                     1.0,
                                     next_id,
+                                    "TextPane".to_string(),
                                 ),
                             )),
                         });
@@ -236,6 +238,7 @@ impl Editor {
                             },
                             1.0,
                             next_id,
+                            "TextPane".to_string(),
                         ),
                     ))));
 
@@ -336,6 +339,7 @@ impl Editor {
                                         },
                                         1.0,
                                         next_id,
+                                        "WasmWidget".to_string(),
                                     ),
                                     save_state: SaveState::Unsaved,
                                     wasm_non_draw_commands: vec![],
@@ -384,6 +388,7 @@ impl Editor {
                                 Size { width, height },
                                 1.0,
                                 next_id,
+                                "WasmWidget".to_string(),
                             ),
                             save_state: SaveState::Unsaved,
                             wasm_non_draw_commands: vec![],
@@ -398,17 +403,19 @@ impl Editor {
                     });
                 }
 
+                // This works. But I might want to do an event on widgets changed instead
                 Event::ValueNeeded(name, widget_id) => match name.as_str() {
                     "widgets" => {
                         let widget_positions: Vec<WidgetMeta> = self
                             .widget_store
                             .iter()
-                            .map(|w| WidgetMeta::new(w.position(), w.size(), w.scale(), w.id()))
+                            .map(|w| WidgetMeta::new(w.position(), w.size(), w.scale(), w.id(), w.typetag_name().to_string()))
                             .collect();
                         let widget_positions = serde_json::to_string(&widget_positions).unwrap();
                         if let Some(widget) = self.widget_store.get_mut(widget_id) {
                             if let Some(widget) = widget.as_wasm_widget_mut() {
                                 widget.send_value(name,  widget_positions.as_bytes().to_vec());
+                                dirty_widgets.insert(widget.id());
                             }
                         }
                     }
@@ -418,6 +425,7 @@ impl Editor {
                                 if let Some(widget) = widget.as_wasm_widget_mut() {
                                     widget.send_value(name.to_string(), value.clone());
                                     println!("Providing value {}", name);
+                                    dirty_widgets.insert(widget.id());
                                 }
                             }
                         }
@@ -425,8 +433,23 @@ impl Editor {
                 },
 
                 Event::ProvideValue(name, value) => {
-                    println!("got value {}", name);
-                    self.values.insert(name, value);
+                    match name.as_str() {
+                        "widgets" => {
+                            let widget_positions : Vec<WidgetMeta> = serde_json::from_str(from_utf8(&value).unwrap()).unwrap();
+                            for meta in widget_positions {
+                                if let Some(widget) = self.widget_store.get_mut(meta.id) {
+                                    widget.on_move(meta.position.x, meta.position.y);
+                                    widget.on_size_change(meta.size.width, meta.size.height);
+                                    widget.set_scale(meta.scale);
+                                    dirty_widgets.insert(widget.id());
+                                }
+                            }
+                        }
+                        _ => {
+                            self.values.insert(name, value);
+                        }
+                    }
+
                 }
 
                 _e => {

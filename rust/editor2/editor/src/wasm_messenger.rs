@@ -657,7 +657,7 @@ impl WasmInstance {
 
                             state.values.insert(name, result.clone());
                             let (ptr, _len) =
-                                WasmInstance::transfer_string_to_wasm(&mut caller,  serde_json::to_string(&result).unwrap())
+                                WasmInstance::transfer_string_to_wasm(&mut caller,  from_utf8(&result).unwrap().to_string())
                                     .await
                                     .unwrap();
                             Ok(ptr)
