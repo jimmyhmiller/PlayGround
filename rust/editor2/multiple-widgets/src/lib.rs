@@ -169,7 +169,6 @@ fn layout_elements(max_width: f32, elements: Vec<Size>) -> Vec<WidgetData> {
 
 fn layout_elements2(max_width: f32, elements: &Vec<&WidgetMeta>) -> Vec<WidgetMeta> {
 
-    println!("layout_elements2: {:?}", elements);
     if elements.len() == 0 {
         return Vec::new();
     }

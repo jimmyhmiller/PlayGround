@@ -92,12 +92,17 @@ impl Editor {
                 }
 
                 Event::Scroll { x, y } => {
-                    let mouse = self.context.mouse_position;
-                    for widget in self.widget_store.iter_mut() {
-                        if widget.mouse_over(&mouse) {
-                            let modified = widget.on_scroll(x, y);
-                            if modified {
-                                dirty_widgets.insert(widget.id());
+                    if self.context.modifiers.ctrl {
+                        self.canvas_scroll_offset.x -= x as f32;
+                        self.canvas_scroll_offset.y += y as f32;
+                    } else {
+                        let mouse = self.context.mouse_position;
+                        for widget in self.widget_store.iter_mut() {
+                            if widget.mouse_over(&mouse) {
+                                let modified = widget.on_scroll(x, y);
+                                if modified {
+                                    dirty_widgets.insert(widget.id());
+                                }
                             }
                         }
                     }
