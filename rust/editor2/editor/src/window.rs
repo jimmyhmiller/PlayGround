@@ -1,8 +1,10 @@
 // use cacao::{webview::{WebView, WebViewConfig, WebViewDelegate}, layer::Layer, layout::LayoutAnchorX, view::View};
 
+use cacao::view;
 use metal_rs::MetalLayerRef;
 use skia_safe::{gpu, scalar, ColorType, Size};
 use winit::platform::macos::WindowBuilderExtMacOS;
+use raw_window_handle::{AppKitWindowHandle, HasWindowHandle, WindowHandle};
 
 use crate::editor;
 
@@ -27,7 +29,7 @@ pub fn setup_window(mut editor: editor::Editor) {
 
     let mut size = LogicalSize::new(1600_i32, 1600_i32);
 
-    let events_loop = EventLoop::new();
+    let events_loop = EventLoop::new().unwrap();
 
     let event_loop_proxy = events_loop.create_proxy();
 
@@ -61,11 +63,21 @@ pub fn setup_window(mut editor: editor::Editor) {
         // change some stuff to make resizing nice
         // https://thume.ca/2019/06/19/glitchless-metal-window-resizing/
 
+        let raw = 
+            window.window_handle()
+            .unwrap()
+            .as_raw();
         unsafe {
-            let view = window.ns_view() as cocoa_id;
-            view.setWantsLayer(YES);
-            view.setLayer(layer.as_ref() as *const MetalLayerRef as *mut objc::runtime::Object);
+            match raw {
+                raw_window_handle::RawWindowHandle::AppKit(handle) => {
+                    let view = handle.ns_view.as_ptr() as cocoa_id;
+                    view.setWantsLayer(YES);
+                    view.setLayer(layer.as_ref() as *const MetalLayerRef as *mut objc::runtime::Object);
+                },
+                _ => todo!(),
+            }
         }
+
         layer.set_drawable_size(CGSize::new(draw_size.width as f64, draw_size.height as f64));
         layer
     };
@@ -106,9 +118,10 @@ pub fn setup_window(mut editor: editor::Editor) {
     let mut needs_update = true;
     let mut event_added = false;
 
-    events_loop.run(move |event, _, control_flow| {
+    events_loop.run(move |event,  event_window| {
         autoreleasepool(|| {
-            *control_flow = ControlFlow::Wait;
+            // TODO! NEEd to deal with control_flow
+            // *control_flow = ControlFlow::Wait;
             let was_added = editor.add_event(&event);
             if was_added {
                 event_added = true;
@@ -117,7 +130,7 @@ pub fn setup_window(mut editor: editor::Editor) {
                 Event::WindowEvent { event, .. } => match event {
                     WindowEvent::CloseRequested => {
                         editor.exit();
-                        *control_flow = ControlFlow::Exit
+                        // *control_flow = ControlFlow::Exit
                     }
                     WindowEvent::Resized(current_size) => {
                         metal_layer.set_drawable_size(CGSize::new(
@@ -130,10 +143,61 @@ pub fn setup_window(mut editor: editor::Editor) {
                         editor.window.size.width = size.width as f32;
                         editor.window.size.height = size.height as f32;
                         window.request_redraw();
+                    },
+                    WindowEvent::RedrawRequested => {
+                        // TODO: Determine if this is a good idea or not.
+                        // I am also setting this with move. Maybe I shouldn't?
+                        // This lets me drop things in the correct spot
+                        // unsafe {
+                        //     let size = window.inner_size();
+                        //     let point = NSWindow::mouseLocationOutsideOfEventStream(window.ns_window() as cocoa_id);
+                        //     let logical_height = size.to_logical::<i32>(window.scale_factor()).height;
+                        //     let logical_point = LogicalPosition::new(point.x as i32, logical_height - point.y as i32);
+                        //     let physical_point = logical_point.to_physical::<i32>(window.scale_factor());
+    
+                        //     editor.set_mouse_position(physical_point.x as f32, physical_point.y as f32);
+                        // }
+                        if let Some(drawable) = metal_layer.next_drawable() {
+                            let drawable_size = {
+                                let size = metal_layer.drawable_size();
+                                Size::new(size.width as scalar, size.height as scalar)
+                            };
+    
+                            let mut surface = unsafe {
+                                let texture_info =
+                                    mtl::TextureInfo::new(drawable.texture().as_ptr() as mtl::Handle);
+    
+                                let backend_render_target = BackendRenderTarget::new_metal(
+                                    (drawable_size.width as i32, drawable_size.height as i32),
+                                    &texture_info,
+                                );
+    
+                                gpu::surfaces::wrap_backend_render_target(
+                                    &mut context,
+                                    &backend_render_target,
+                                    SurfaceOrigin::TopLeft,
+                                    ColorType::BGRA8888,
+                                    None,
+                                    None,
+                                )
+                                .unwrap()
+                            };
+    
+                            let time = std::time::Instant::now();
+                            editor.draw(surface.canvas());
+                            editor.fps_counter.add_time("draw", time.elapsed());
+    
+                            context.flush_and_submit();
+                            drop(surface);
+    
+                            let command_buffer = command_queue.new_command_buffer();
+                            command_buffer.present_drawable(drawable);
+                            command_buffer.commit();
+                        }
                     }
                     _ => (),
                 },
-                Event::MainEventsCleared => {
+                Event::AboutToWait => {
                     // TODO: I would need to signal if there is any waiting
                     // work left to do from our wasm modules.
                     // If there is no work left, we don't need to do anything
@@ -193,59 +257,9 @@ pub fn setup_window(mut editor: editor::Editor) {
                         window.request_redraw();
                     }
                 }
-                Event::RedrawRequested(_) => {
-                    // TODO: Determine if this is a good idea or not.
-                    // I am also setting this with move. Maybe I shouldn't?
-                    // This lets me drop things in the correct spot
-                    // unsafe {
-                    //     let size = window.inner_size();
-                    //     let point = NSWindow::mouseLocationOutsideOfEventStream(window.ns_window() as cocoa_id);
-                    //     let logical_height = size.to_logical::<i32>(window.scale_factor()).height;
-                    //     let logical_point = LogicalPosition::new(point.x as i32, logical_height - point.y as i32);
-                    //     let physical_point = logical_point.to_physical::<i32>(window.scale_factor());
 
-                    //     editor.set_mouse_position(physical_point.x as f32, physical_point.y as f32);
-                    // }
-                    if let Some(drawable) = metal_layer.next_drawable() {
-                        let drawable_size = {
-                            let size = metal_layer.drawable_size();
-                            Size::new(size.width as scalar, size.height as scalar)
-                        };
-
-                        let mut surface = unsafe {
-                            let texture_info =
-                                mtl::TextureInfo::new(drawable.texture().as_ptr() as mtl::Handle);
-
-                            let backend_render_target = BackendRenderTarget::new_metal(
-                                (drawable_size.width as i32, drawable_size.height as i32),
-                                &texture_info,
-                            );
-
-                            gpu::surfaces::wrap_backend_render_target(
-                                &mut context,
-                                &backend_render_target,
-                                SurfaceOrigin::TopLeft,
-                                ColorType::BGRA8888,
-                                None,
-                                None,
-                            )
-                            .unwrap()
-                        };
-
-                        let time = std::time::Instant::now();
-                        editor.draw(surface.canvas());
-                        editor.fps_counter.add_time("draw", time.elapsed());
-
-                        context.flush_and_submit();
-                        drop(surface);
-
-                        let command_buffer = command_queue.new_command_buffer();
-                        command_buffer.present_drawable(drawable);
-                        command_buffer.commit();
-                    }
-                }
                 _ => {}
             }
         });
-    });
+    }).unwrap();
 }

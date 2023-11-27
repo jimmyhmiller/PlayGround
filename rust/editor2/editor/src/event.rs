@@ -7,7 +7,30 @@ use crate::{
 
 use framework::{CursorIcon, Position, Value};
 use serde::{Deserialize, Serialize};
-use winit::event::{Event as WinitEvent, WindowEvent as WinitWindowEvent};
+use winit::{
+    event::{Event as WinitEvent, WindowEvent as WinitWindowEvent},
+    keyboard::{ModifiersKeyState, PhysicalKey},
+};
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum TouchPhase {
+    Started,
+    Moved,
+    Ended,
+    Cancelled,
+}
+
+impl From<&winit::event::TouchPhase> for TouchPhase {
+    fn from(phase: &winit::event::TouchPhase) -> Self {
+        match phase {
+            winit::event::TouchPhase::Started => TouchPhase::Started,
+            winit::event::TouchPhase::Moved => TouchPhase::Moved,
+            winit::event::TouchPhase::Ended => TouchPhase::Ended,
+            winit::event::TouchPhase::Cancelled => TouchPhase::Cancelled,
+        }
+    }
+}
+
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Event {
@@ -74,40 +97,41 @@ pub enum Event {
     CreateWidget(usize, f32, f32, f32, f32, u32),
     ValueNeeded(String, usize),
     ProvideValue(String, Value),
+    PinchZoom { delta: f64, phase: TouchPhase},
 }
 
 impl Event {
-    pub fn patch_mouse_event(&mut self, mouse_pos: &Position, canvas_offset: &Position) {
+    pub fn patch_mouse_event(&mut self, mouse_pos: &Position, canvas_offset: &Position, canvas_scale: f32) {
         match self {
             Event::LeftMouseDown { x, y } => {
-                *x = mouse_pos.x - canvas_offset.x;
-                *y = mouse_pos.y - canvas_offset.y;
+                *x = mouse_pos.x + canvas_offset.x * canvas_scale;
+                *y = mouse_pos.y - canvas_offset.y * canvas_scale;
             }
             Event::LeftMouseUp { x, y } => {
-                *x = mouse_pos.x - canvas_offset.x;
+                *x = mouse_pos.x + canvas_offset.x;
                 *y = mouse_pos.y - canvas_offset.y;
             }
             Event::RightMouseDown { x, y } => {
-                *x = mouse_pos.x - canvas_offset.x;
-                *y = mouse_pos.y - canvas_offset.y;
+                *x = mouse_pos.x + canvas_offset.x * canvas_scale;
+                *y = mouse_pos.y - canvas_offset.y * canvas_scale;
             }
             Event::RightMouseUp { x, y } => {
-                *x = mouse_pos.x - canvas_offset.x;
-                *y = mouse_pos.y - canvas_offset.y;
+                *x = mouse_pos.x + canvas_offset.x * canvas_scale;
+                *y = mouse_pos.y - canvas_offset.y * canvas_scale;
             }
             Event::HoveredFile { x, y, .. } => {
-                *x = mouse_pos.x - canvas_offset.x;
-                *y = mouse_pos.y - canvas_offset.y;
+                *x = mouse_pos.x + canvas_offset.x * canvas_scale;
+                *y = mouse_pos.y - canvas_offset.y * canvas_scale;
             }
             Event::DroppedFile { x, y, .. } => {
-                *x = mouse_pos.x - canvas_offset.x;
-                *y = mouse_pos.y - canvas_offset.y;
+                *x = mouse_pos.x + canvas_offset.x * canvas_scale;
+                *y = mouse_pos.y - canvas_offset.y * canvas_scale;
             }
             _ => {}
         }
     }
 
-    pub fn from_winit_event(event: &WinitEvent<'_, ()>, modifiers: Modifiers) -> Option<Self> {
+    pub fn from_winit_event(event: &WinitEvent<()>, modifiers: Modifiers) -> Option<Self> {
         match event {
             WinitEvent::WindowEvent { event, .. } => {
                 use WinitWindowEvent::*;
@@ -123,7 +147,7 @@ impl Event {
                             panic!("What is line delta?")
                         }
                         winit::event::MouseScrollDelta::PixelDelta(delta) => Some(Event::Scroll {
-                            x: delta.x,
+                            x: -delta.x,
                             y: delta.y,
                         }),
                     },
@@ -145,6 +169,9 @@ impl Event {
                         x_diff: 0.0,
                         y_diff: 0.0,
                     }),
+                    TouchpadMagnify { device_id: _, delta, phase } => {
+                        Some(Event::PinchZoom { delta: *delta, phase: phase.into() })
+                    }
                     HoveredFile(path) => Some(Event::HoveredFile {
                         path: path.to_path_buf(),
                         x: -0.0,
@@ -157,11 +184,15 @@ impl Event {
                     }),
                     HoveredFileCancelled => Some(Event::HoveredFileCancelled),
 
-                    ModifiersChanged(state) => {
-                        let ctrl = state.ctrl();
-                        let option = state.alt();
-                        let shift = state.shift();
-                        let cmd = state.logo();
+                    ModifiersChanged(modifiers) => {
+                        let ctrl = matches!(modifiers.lcontrol_state(), ModifiersKeyState::Pressed)
+                            || matches!(modifiers.rcontrol_state(), ModifiersKeyState::Pressed);
+                        let option = matches!(modifiers.lalt_state(), ModifiersKeyState::Pressed)
+                            || matches!(modifiers.ralt_state(), ModifiersKeyState::Pressed);
+                        let shift = matches!(modifiers.lshift_state(), ModifiersKeyState::Pressed)
+                            || matches!(modifiers.rshift_state(), ModifiersKeyState::Pressed);
+                        let cmd = matches!(modifiers.lsuper_state(), ModifiersKeyState::Pressed)
+                            || matches!(modifiers.rsuper_state(), ModifiersKeyState::Pressed);
                         Some(Event::ModifiersChanged(Modifiers {
                             shift,
                             ctrl,
@@ -170,23 +201,29 @@ impl Event {
                         }))
                     }
 
-                    KeyboardInput { input, .. } => {
-                        let key_code = input
-                            .virtual_keycode
-                            .and_then(KeyCode::map_winit_vk_to_keycode)?;
+                    KeyboardInput { event, .. } => {
+                        match event.physical_key {
+                            PhysicalKey::Code(key_code) => {
+                                let state = match event.state {
+                                    winit::event::ElementState::Pressed => KeyState::Pressed,
+                                    winit::event::ElementState::Released => KeyState::Released,
+                                };
 
-                        let state = match input.state {
-                            winit::event::ElementState::Pressed => KeyState::Pressed,
-                            winit::event::ElementState::Released => KeyState::Released,
-                        };
+                                let key_code = KeyCode::map_winit_vk_to_keycode(key_code)?;
 
-                        Some(Event::KeyEvent {
-                            input: crate::keyboard::KeyboardInput {
-                                state,
-                                key_code,
-                                modifiers,
-                            },
-                        })
+                                Some(Event::KeyEvent {
+                                    input: crate::keyboard::KeyboardInput {
+                                        state,
+                                        key_code,
+                                        modifiers,
+                                    },
+                                })
+                            }
+                            PhysicalKey::Unidentified(_) => {
+                                println!("Unidentified key: {:?}", event);
+                                None
+                            }
+                        }
                     }
                     _ => None,
                 }

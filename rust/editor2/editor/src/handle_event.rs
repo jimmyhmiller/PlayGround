@@ -98,7 +98,7 @@ impl Editor {
                     } else {
                         let mouse = self.context.mouse_position;
                         for widget in self.widget_store.iter_mut() {
-                            if widget.mouse_over(&mouse) {
+                            if widget.mouse_over(&mouse, self.canvas_scale) {
                                 let modified = widget.on_scroll(x, y);
                                 if modified {
                                     dirty_widgets.insert(widget.id());
@@ -106,6 +106,35 @@ impl Editor {
                             }
                         }
                     }
+                }
+                Event::RightMouseUp { x, y } => {
+                    self.canvas_scale = 1.0;
+                    self.canvas_scroll_offset = Position { x: 0.0, y: 0.0 };
+                },
+                Event::PinchZoom { delta, phase } => {
+
+                    let screen_x = self.context.mouse_position.x * self.canvas_scale - self.canvas_scroll_offset.x;
+                    let screen_y = self.context.mouse_position.y * self.canvas_scale + self.canvas_scroll_offset.y;
+                
+                    let new_scale = self.canvas_scale + delta as f32;
+
+                    let x_with_new_scale = self.context.mouse_position.x * new_scale - self.canvas_scroll_offset.x;
+                    let y_with_new_scale = self.context.mouse_position.x * new_scale + self.canvas_scroll_offset.y;
+
+                    let x_diff = screen_x - x_with_new_scale;
+                    let y_diff = screen_y - y_with_new_scale;
+
+                    
+                    // I want to move the offset so that my mouse is centered
+                    // We should basically be zooming where the mouse is pointing
+
+                    // scalechange = newscale - oldscale;
+                    // offsetX = -(zoomPointX * scalechange);
+                    // offsetY = -(zoomPointY * scalechange);
+                    self.canvas_scroll_offset.x += x_diff;
+                    // self.canvas_scroll_offset.y += y_diff;
+
+                    self.canvas_scale += delta as f32;
                 }
                 Event::LeftMouseDown { .. } => {
                     self.context.left_mouse_down = true;
@@ -164,7 +193,7 @@ impl Editor {
                                 y: widget_y,
                             };
                             // TODO: I should probably only send this for the top most widget
-                            if widget.mouse_over(&position) {
+                            if widget.mouse_over(&position, self.canvas_scale) {
                                 was_over = true;
                                 let modified = widget.on_mouse_move(&widget_space, x_diff, y_diff);
                                 if modified {
@@ -478,7 +507,7 @@ impl Editor {
         // Not sure
         let mut found_a_widget = false;
         for widget in self.widget_store.iter_mut() {
-            if widget.mouse_over(&self.context.mouse_position) {
+            if widget.mouse_over(&self.context.mouse_position, self.canvas_scale) {
                 found_a_widget = true;
                 mouse_over.push(widget.id());
                 // We are only selecting the widget for the purposes
@@ -514,7 +543,7 @@ impl Editor {
         let mut mouse_over = vec![];
         // TODO: Probably only top widget
         for widget in self.widget_store.iter_mut() {
-            if widget.mouse_over(&self.context.mouse_position) {
+            if widget.mouse_over(&self.context.mouse_position, self.canvas_scale) {
                 mouse_over.push(widget.id());
 
                 let modifiers = self.context.modifiers;
