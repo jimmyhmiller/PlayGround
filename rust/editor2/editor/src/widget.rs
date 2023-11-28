@@ -70,13 +70,13 @@ impl Widget {
         vec![]
     }
 
-    pub fn mouse_over(&self, position: &Position, canvas_scale: f32) -> bool {
+    pub fn mouse_over(&self, position: &Position) -> bool {
         let x = position.x;
         let y = position.y;
-        let x_min = self.position().x * canvas_scale;
-        let x_max = x_min + (self.size().width * self.scale()) * canvas_scale;
-        let y_min = self.position().y * canvas_scale;
-        let y_max = y_min + (self.size().height * self.scale()) * canvas_scale;
+        let x_min = self.position().x;
+        let x_max = x_min + (self.size().width * self.scale());
+        let y_min = self.position().y;
+        let y_max = y_min + (self.size().height * self.scale());
         x >= x_min && x <= x_max && y >= y_min && y <= y_max
     }
 

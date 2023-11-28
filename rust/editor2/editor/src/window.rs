@@ -1,10 +1,9 @@
 // use cacao::{webview::{WebView, WebViewConfig, WebViewDelegate}, layer::Layer, layout::LayoutAnchorX, view::View};
 
-use cacao::view;
 use metal_rs::MetalLayerRef;
 use skia_safe::{gpu, scalar, ColorType, Size};
 use winit::platform::macos::WindowBuilderExtMacOS;
-use raw_window_handle::{AppKitWindowHandle, HasWindowHandle, WindowHandle};
+use raw_window_handle::HasWindowHandle;
 
 use crate::editor;
 
@@ -23,7 +22,6 @@ pub fn setup_window(mut editor: editor::Editor) {
         dpi::LogicalSize,
         event::{Event, WindowEvent},
         event_loop::{ControlFlow, EventLoop},
-        platform::macos::WindowExtMacOS,
         window::WindowBuilder,
     };
 
@@ -115,13 +113,13 @@ pub fn setup_window(mut editor: editor::Editor) {
     };
 
     let mut context = DirectContext::new_metal(&backend, None).unwrap();
-    let mut needs_update = true;
+    let mut needs_update = false;
     let mut event_added = false;
 
     events_loop.run(move |event,  event_window| {
         autoreleasepool(|| {
             // TODO! NEEd to deal with control_flow
-            // *control_flow = ControlFlow::Wait;
+            event_window.set_control_flow(ControlFlow::Wait);
             let was_added = editor.add_event(&event);
             if was_added {
                 event_added = true;
@@ -130,7 +128,7 @@ pub fn setup_window(mut editor: editor::Editor) {
                 Event::WindowEvent { event, .. } => match event {
                     WindowEvent::CloseRequested => {
                         editor.exit();
-                        // *control_flow = ControlFlow::Exit
+                        event_window.exit();
                     }
                     WindowEvent::Resized(current_size) => {
                         metal_layer.set_drawable_size(CGSize::new(
@@ -213,15 +211,15 @@ pub fn setup_window(mut editor: editor::Editor) {
                     if !editor.events.events_for_frame().is_empty() {
                         needs_update = true;
                     }
-                    let pending_count: usize = editor
-                        .widget_store
-                        .iter()
-                        .filter_map(|x| x.as_wasm_widget())
-                        .map(|x| x.number_of_pending_requests())
-                        .sum();
-                    if pending_count > 0 {
-                        needs_update = true;
-                    }
+                    // let pending_count: usize = editor
+                    //     .widget_store
+                    //     .iter()
+                    //     .filter_map(|x| x.as_wasm_widget())
+                    //     .map(|x| x.number_of_pending_requests())
+                    //     .sum();
+                    // if pending_count > 0 {
+                    //     needs_update = true;
+                    // }
 
                     // TODO:
                     // if I want to have 0 cpu usage when I'm not actually
