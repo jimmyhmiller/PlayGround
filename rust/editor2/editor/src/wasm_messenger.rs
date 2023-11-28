@@ -515,7 +515,6 @@ fn get_bytes_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> Vec<
 }
 
 fn get_string_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> String {
-    use core::str::from_utf8;
     // I allocate a vector here I didn't need to for code reuse sake.
     // There is probably a better way to do this.
     let data = get_bytes_from_caller(caller, ptr, len);
@@ -529,7 +528,6 @@ fn get_string_from_memory(
     ptr: i32,
     len: i32,
 ) -> Option<String> {
-    use core::str::from_utf8;
     let ptr = ptr as u32 as usize;
     let len = len as u32 as usize;
     let data = memory.data(store).get(ptr..(ptr + len));
@@ -700,7 +698,7 @@ impl WasmInstance {
                                 .unwrap();
                         Ok(ptr)
                     } else {
-                        let (sender, mut receiver) = oneshot::channel();
+                        let (sender, receiver) = oneshot::channel();
                         state.receivers.insert(name.clone(), receiver);
                         state.sender.start_send(OutMessage {
                             message_id: 0,

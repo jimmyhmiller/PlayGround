@@ -16,7 +16,7 @@ use crate::{
     keyboard::Modifiers,
     wasm_messenger::WasmMessenger,
     widget::{Widget, WidgetId, WidgetStore},
-    widget2::{Deleted, TextPane, Text, RandomText},
+    widget2::{Deleted, TextPane},
 };
 
 use framework::{Position, Size, Value};
@@ -30,6 +30,7 @@ use skia_safe::Canvas;
 use winit::{event_loop::EventLoopProxy, window::CursorIcon};
 
 pub struct Context {
+    pub raw_mouse_position: Position,
     pub mouse_position: Position,
     pub left_mouse_down: bool,
     pub right_mouse_down: bool,
@@ -205,9 +206,6 @@ impl Editor {
             .filter(|s| !s.is_empty())
             .map(|s| {
                 if let Ok(mut widget) = ron::de::from_str::<Widget>(s) {
-                    if let Some(text) = widget.data.as_any_mut().downcast_mut::<Text>() {
-                        widget = Widget {data: Box::new(RandomText { text: text.clone() }) }
-                    } 
                     widget.init(&mut self.wasm_messenger);
                     if let Some(watcher) = &mut self.debounce_watcher {
                         let watcher = watcher.watcher();
@@ -234,24 +232,24 @@ impl Editor {
             if let Some(widget) = widget.as_wasm_widget_mut() {
                 widget.external_sender = Some(self.external_sender.as_ref().unwrap().clone());
             }
-            if widget.position().x >= self.window.size.width
-                || widget.position().y >= self.window.size.height
-            {
-                println!(
-                    "Widget out of bounds, moving to edge of screen {}",
-                    widget.id()
-                );
-                let x = widget
-                    .position()
-                    .x
-                    .min(self.window.size.width - widget.size().width * widget.scale());
-                let y = widget
-                    .position()
-                    .y
-                    .min(self.window.size.height - widget.size().height * widget.scale());
+            // if widget.position().x >= self.window.size.width
+            //     || widget.position().y >= self.window.size.height
+            // {
+            //     println!(
+            //         "Widget out of bounds, moving to edge of screen {}",
+            //         widget.id()
+            //     );
+            //     let x = widget
+            //         .position()
+            //         .x
+            //         .min(self.window.size.width - widget.size().width * widget.scale());
+            //     let y = widget
+            //         .position()
+            //         .y
+            //         .min(self.window.size.height - widget.size().height * widget.scale());
 
-                widget.data.on_move(x, y).unwrap();
-            }
+            //     widget.data.on_move(x, y).unwrap();
+            // }
         }
     }
 
@@ -301,9 +299,9 @@ impl Editor {
             .map(|x| x.number_of_pending_requests())
             .sum();
 
-        if pending_count > 0 {
-            self.should_redraw = true;
-        }
+        // if pending_count > 0 {
+        //     self.should_redraw = true;
+        // }
 
         if self.widget_store.iter().any(|x| x.dirty()) {
             self.should_redraw = true;
@@ -394,6 +392,7 @@ impl Editor {
             events: Events::new(),
             fps_counter: FpsCounter::new(),
             context: Context {
+                raw_mouse_position: Position { x: 0.0, y: 0.0 },
                 mouse_position: Position { x: 0.0, y: 0.0 },
                 left_mouse_down: false,
                 right_mouse_down: false,
@@ -524,10 +523,12 @@ impl Editor {
                 // I want to be able to respond to mouse move events
                 // I just might not want to save them?
                 // I'm not sure...
-                let x_diff = (x - self.context.mouse_position.x) / self.canvas_scale;
-                let y_diff = (y - self.context.mouse_position.y) / self.canvas_scale;
-                let x = x - self.canvas_scroll_offset.x;
-                let y = y - self.canvas_scroll_offset.y;
+                self.context.raw_mouse_position = Position { x, y };
+                let x = (x - self.canvas_scroll_offset.x) / self.canvas_scale;
+                let y = (y - self.canvas_scroll_offset.y) / self.canvas_scale;
+                let x_diff = x - self.context.mouse_position.x;
+                let y_diff = y - self.context.mouse_position.y;
+
                 self.events.push(Event::MouseMove {
                     x_diff,
                     y_diff,

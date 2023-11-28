@@ -550,7 +550,11 @@ impl WasmWidget {
 
     pub fn number_of_pending_requests(&self) -> usize {
         let non_draw_commands_count = self.wasm_non_draw_commands.len();
-        let pending_message_count = self.pending_messages.len();
+        let pending_message_count = self.pending_messages.iter()
+            .filter(|(_, (message, _))| {
+                !matches!(message, Message { payload: Payload::RunDraw(_), ..})
+                && !matches!(message, Message { payload: Payload::GetCommands, ..})
+            }).collect::<Vec<_>>().len();
         non_draw_commands_count + pending_message_count
     }
 
@@ -997,6 +1001,8 @@ impl Widget for Text {
 #[derive(Serialize, Deserialize)]
 pub struct RandomText {
     pub text: Text,
+    #[serde(default)]
+    pub show_font: bool,
 }
 
 impl Deref for RandomText {
@@ -1073,11 +1079,25 @@ impl Widget for RandomText {
     }
 
     fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
-        self.text.draw(canvas)
+        self.text.draw(canvas)?;
+        if self.show_font {
+            canvas.translate((0.0, 50.0));
+            let font = Font::new(
+                Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
+                16.0,
+            );
+            canvas.draw_str(self.text_options.font_family.clone(), (0.0, 0.0), &font, &Color::parse_hex("#ffffff").as_paint());
+        }
+        Ok(())
     }
 
     fn on_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.text.on_move(x, y)
+    }
+
+    fn on_key(&mut self, _input: KeyboardInput) -> Result<(), Box<dyn Error>> {
+        self.show_font = !self.show_font;
+        Ok(())
     }
 }
 
