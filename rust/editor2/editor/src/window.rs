@@ -113,7 +113,7 @@ pub fn setup_window(mut editor: editor::Editor) {
     };
 
     let mut context = DirectContext::new_metal(&backend, None).unwrap();
-    let mut needs_update = false;
+    let mut needs_update = true;
     let mut event_added = false;
 
     events_loop.run(move |event,  event_window| {
@@ -211,15 +211,14 @@ pub fn setup_window(mut editor: editor::Editor) {
                     if !editor.events.events_for_frame().is_empty() {
                         needs_update = true;
                     }
-                    // let pending_count: usize = editor
-                    //     .widget_store
-                    //     .iter()
-                    //     .filter_map(|x| x.as_wasm_widget())
-                    //     .map(|x| x.number_of_pending_requests())
-                    //     .sum();
-                    // if pending_count > 0 {
-                    //     needs_update = true;
-                    // }
+                    let empty_widgets: bool = editor
+                        .widget_store
+                        .iter()
+                        .filter_map(|x| x.as_wasm_widget())
+                        .any(|x| x.draw_commands.is_empty());
+                    if empty_widgets {
+                        needs_update = true;
+                    }
 
                     // TODO:
                     // if I want to have 0 cpu usage when I'm not actually
@@ -232,7 +231,7 @@ pub fn setup_window(mut editor: editor::Editor) {
                     // But I also think I can make that part more event driven
                     // rather than per thread.
 
-                    if !event_added && !needs_update {
+                    if !event_added && !needs_update && !editor.should_redraw() {
                         return;
                     }
                     if event_added {
