@@ -27,7 +27,7 @@ fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
 
 impl Editor {
     pub fn handle_events(&mut self, events: Vec<Event>) {
-        let mut dirty_widgets = HashSet::new();
+        let mut dirty_widgets: HashSet<(usize, String)> = HashSet::new();
         for event in events {
             match event {
                 Event::DroppedFile { path, x, y } => {
@@ -101,7 +101,7 @@ impl Editor {
                             if widget.mouse_over(&mouse) {
                                 let modified = widget.on_scroll(x, y);
                                 if modified {
-                                    dirty_widgets.insert(widget.id());
+                                    dirty_widgets.insert((widget.id(), "scroll".to_string()));
                                 }
                             }
                         }
@@ -155,7 +155,7 @@ impl Editor {
                     if self.context.modifiers.ctrl && self.context.modifiers.option {
                         for widget_id in self.selected_widgets.iter() {
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                                dirty_widgets.insert(widget.id());
+                                dirty_widgets.insert((widget.id(), "resize".to_string()));
                                 let mut size = widget.size();
                                 size.width += x_diff;
                                 size.height += y_diff;
@@ -165,15 +165,15 @@ impl Editor {
                     } else if self.context.modifiers.ctrl {
                         for widget_id in self.selected_widgets.iter() {
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                                dirty_widgets.insert(widget.id());
+                                dirty_widgets.insert((widget.id(), "move".to_string()));
                                 let x = widget.position().x + x_diff;
                                 let y = widget.position().y + y_diff;
                                 widget.on_move(x, y);
-                                if x > self.window.size.width - 300.0 {
-                                    widget.data.set_scale(0.1);
-                                } else {
-                                    widget.data.set_scale(1.0);
-                                }
+                                // if x > self.window.size.width - 300.0 {
+                                //     widget.data.set_scale(0.1);
+                                // } else {
+                                //     widget.data.set_scale(1.0);
+                                // }
                             }
                         }
                     } else {
@@ -191,7 +191,7 @@ impl Editor {
                                 was_over = true;
                                 let modified = widget.on_mouse_move(&widget_space, x_diff, y_diff);
                                 if modified {
-                                    dirty_widgets.insert(widget.id());
+                                    dirty_widgets.insert((widget.id(), "mouse_move".to_string()));
                                 }
                             }
                         }
@@ -308,7 +308,7 @@ impl Editor {
                         if let Some(widget) = self.widget_store.get_mut(*widget_id) {
                             let modified = widget.on_event(&kind, &event);
                             if modified {
-                                dirty_widgets.insert(widget.id());
+                                dirty_widgets.insert((widget.id(), "event".to_string()));
                             }
                         }
                     }
@@ -388,11 +388,11 @@ impl Editor {
                                     value_senders: HashMap::new(),
                                 }),
                             });
-                            self.mark_widget_dirty(widget_id);
+                            self.mark_widget_dirty(widget_id, "open");
                             self.events.push(Event::OpenFile(path));
                         }
                     } else if let Some(widget_id) = self.active_widget {
-                        self.mark_widget_dirty(widget_id);
+                        self.mark_widget_dirty(widget_id, "key");
                         if let Some(widget) = self.widget_store.get_mut(widget_id) {
                             widget.on_key(input);
                         }
@@ -406,7 +406,7 @@ impl Editor {
                         self.cursor_icon = winit::window::CursorIcon::Text;
                     }
                 },
-                Event::Redraw(widget_id) => self.mark_widget_dirty(widget_id),
+                Event::Redraw(widget_id) => self.mark_widget_dirty(widget_id, "redraw"),
                 Event::CreateWidget(wasm_id, x, y, width, height, external_id) => {
                     let next_id = self.widget_store.next_id();
                     let receiver = self
@@ -449,7 +449,7 @@ impl Editor {
                         if let Some(widget) = self.widget_store.get_mut(widget_id) {
                             if let Some(widget) = widget.as_wasm_widget_mut() {
                                 widget.send_value(name,  widget_positions.as_bytes().to_vec());
-                                dirty_widgets.insert(widget.id());
+                                dirty_widgets.insert((widget.id(), "value needed".to_string()));
                             }
                         }
                     }
@@ -458,8 +458,7 @@ impl Editor {
                             if let Some(widget) = self.widget_store.get_mut(widget_id) {
                                 if let Some(widget) = widget.as_wasm_widget_mut() {
                                     widget.send_value(name.to_string(), value.clone());
-                                    println!("Providing value {}", name);
-                                    dirty_widgets.insert(widget.id());
+                                    dirty_widgets.insert((widget.id(), "value needed".to_string()));
                                 }
                             }
                         }
@@ -475,7 +474,7 @@ impl Editor {
                                     widget.on_move(meta.position.x, meta.position.y);
                                     widget.on_size_change(meta.size.width, meta.size.height);
                                     widget.set_scale(meta.scale);
-                                    dirty_widgets.insert(widget.id());
+                                    dirty_widgets.insert((widget.id(), "provide value".to_string()));
                                 }
                             }
                         }
@@ -483,7 +482,16 @@ impl Editor {
                             self.values.insert(name, value);
                         }
                     }
+                }
 
+                Event::SmartMagnify { x: _, y: _ } => {
+                    for widget in self.widget_store.iter_mut() {
+                        if widget.mouse_over(&self.context.mouse_position) {
+                           self.canvas_scroll_offset.x = -widget.position().x;
+                            self.canvas_scroll_offset.y = -widget.position().y;
+                            // TODO: Need to set the scale
+                        }
+                    }
                 }
 
                 _e => {
@@ -491,8 +499,8 @@ impl Editor {
                 }
             }
         }
-        for widget_id in dirty_widgets {
-            self.mark_widget_dirty(widget_id)
+        for (widget_id, reason) in dirty_widgets {
+            self.mark_widget_dirty(widget_id, &reason);
         }
     }
 
