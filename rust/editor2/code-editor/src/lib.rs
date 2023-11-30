@@ -587,6 +587,11 @@ impl TextWidget {
             return;
         }
 
+        if input.modifiers.cmd && input.modifiers.option && matches!(input.key_code, KeyCode::C) {
+            self.create_widget(Box::new(self.clone()), self.widget_data.clone());
+            return;
+        }
+
         // Order matters here
         if input.modifiers.cmd && input.modifiers.shift && matches!(input.key_code, KeyCode::Z) {
             self.text_pane.cursor.redo(&mut self.text_pane.text_buffer);

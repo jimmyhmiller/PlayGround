@@ -280,7 +280,7 @@ impl App for MultipleWidgets {
             self.widget_positions = widget_positions;
         }
         let new_layout = layout_elements2(
-            3200.0,
+            9000.0,
             &(self
                 .widget_positions
                 .iter()

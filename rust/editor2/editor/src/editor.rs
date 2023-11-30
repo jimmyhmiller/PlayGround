@@ -16,7 +16,7 @@ use crate::{
     keyboard::Modifiers,
     wasm_messenger::WasmMessenger,
     widget::{Widget, WidgetId, WidgetStore},
-    widget2::{Deleted, TextPane},
+    widget2::{Deleted, TextPane, Widget as Widget2},
 };
 
 use framework::{Position, Size, Value};
@@ -267,6 +267,13 @@ impl Editor {
         for widget in self.widget_store.iter_mut() {
             if widget.dirty() {
                 widget.update().unwrap();
+            } else {
+                if let Some(widget) = widget.as_wasm_widget_mut() {
+                    if widget.draw_commands.is_empty() {
+                        widget.update().unwrap();
+                    }
+
+                }
             }
         }
         self.fps_counter.add_time("update_widgets", time.elapsed());
@@ -362,7 +369,7 @@ impl Editor {
                 let widget_id = process.output_widget_id;
                 // TODO: crash here on reload
                 let widget = self.widget_store.get_mut(widget_id).unwrap();
-                widget.mark_dirty();
+                widget.mark_dirty("process_output");
                 let output = &process.output;
 
                 if let Some(widget) = widget.data.as_any_mut().downcast_mut::<TextPane>() {
@@ -504,6 +511,10 @@ impl Editor {
             .map(|x| x.id())
             .collect();
         self.widget_store.draw(canvas, &dirty_widgets);
+
+        for widget in self.widget_store.iter_mut() {
+            widget.reset_dirty();
+        }
     }
 
     pub fn add_event(&mut self, event: &winit::event::Event<()>) -> bool {
@@ -587,9 +598,9 @@ impl Editor {
         file.write_all(result.as_bytes()).unwrap();
     }
 
-    pub fn mark_widget_dirty(&mut self, id: usize) {
+    pub fn mark_widget_dirty(&mut self, id: usize, reason: &str) {
         if let Some(widget) = self.widget_store.get_mut(id) {
-            widget.mark_dirty();
+            widget.mark_dirty(reason);
         }
     }
 }

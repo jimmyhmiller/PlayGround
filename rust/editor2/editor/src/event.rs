@@ -98,6 +98,8 @@ pub enum Event {
     ValueNeeded(String, usize),
     ProvideValue(String, Value),
     PinchZoom { delta: f64, phase: TouchPhase},
+    TouchPadPressure { pressure: f32, stage: i64 },
+    SmartMagnify { x: f32, y: f32 },
 }
 
 impl Event {
@@ -108,7 +110,8 @@ impl Event {
             Event::RightMouseDown { x, y } |
             Event::RightMouseUp { x, y } |
             Event::HoveredFile { x, y, .. } |
-            Event::DroppedFile { x, y, .. }
+            Event::DroppedFile { x, y, .. } |
+            Event::SmartMagnify { x, y} 
              => {
                 *x = (mouse_pos.x + canvas_offset.x) * canvas_scale;
                 *y = (mouse_pos.y - canvas_offset.y) * canvas_scale;
@@ -125,9 +128,9 @@ impl Event {
                     CloseRequested => Some(Event::Noop),
                     TouchpadPressure {
                         device_id: _,
-                        pressure: _,
-                        stage: _,
-                    } => Some(Event::Noop),
+                        pressure,
+                        stage,
+                    } => Some(Event::TouchPadPressure { pressure: *pressure, stage: *stage }),
                     MouseWheel { delta, .. } => match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, _) => {
                             panic!("What is line delta?")
@@ -157,6 +160,9 @@ impl Event {
                     }),
                     TouchpadMagnify { device_id: _, delta, phase } => {
                         Some(Event::PinchZoom { delta: *delta, phase: phase.into() })
+                    }
+                    SmartMagnify { device_id: _ } => {
+                        Some(Event::SmartMagnify { x: 0.0, y: 0.0})
                     }
                     HoveredFile(path) => Some(Event::HoveredFile {
                         path: path.to_path_buf(),

@@ -106,7 +106,7 @@ pub trait Widget {
         true
     }
 
-    fn mark_dirty(&mut self) {}
+    fn mark_dirty(&mut self, reason: &str) {}
 
     fn reset_dirty(&mut self) {}
 
@@ -215,7 +215,7 @@ impl Widget for WasmWidget {
     fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
         let bounds = self.size();
         canvas.save();
-        canvas.translate((self.position().x, self.position().y));
+        // canvas.translate((self.position().x, self.position().y));
         canvas.scale((self.scale(), self.scale()));
 
         let mut current_width = 0.0;
@@ -408,9 +408,9 @@ impl Widget for WasmWidget {
             // Note: Right now if a message doesn't have a corresponding in-message
             // I am just setting the out message to id: 0.
 
-            if let Some((_, instant)) = self.pending_messages.remove(&message.message_id) {
+            if let Some((message, instant)) = self.pending_messages.remove(&message.message_id) {
                 let duration = instant.elapsed();
-                // println!("Message {:?} took {:?}", message.message_id, duration);
+                // println!("Message {:?} took {:?}", message.payload, duration);
             }
 
             // TODO: This just means we update everything every frame
@@ -427,13 +427,13 @@ impl Widget for WasmWidget {
                     // I'm thinking not? It seems to actually work because
                     // we only do this every once in a while
                     if self.draw_commands != commands {
-                        self.mark_dirty();
+                        self.mark_dirty("draw_commands changed");
                         self.draw_commands = commands;
                     }
                 }
                 OutPayload::Update(commands) => {
                     if !commands.is_empty() {
-                        self.mark_dirty();
+                        self.mark_dirty("Got update");
                         self.wasm_non_draw_commands.extend(commands);
                     }
                 }
@@ -465,10 +465,10 @@ impl Widget for WasmWidget {
                     // to know what widget we are.
                     self.wasm_non_draw_commands
                         .push(Commands::Redraw(self.id()));
-                    self.mark_dirty();
+                    self.mark_dirty("Reload");
                 }
                 OutPayload::Complete => {
-                    self.mark_dirty();
+                    self.mark_dirty("complete");
                 }
                 OutPayload::Error(error) => {
                     println!("Error: {}", error);
@@ -524,7 +524,8 @@ impl Widget for WasmWidget {
         self.meta.id = id;
     }
 
-    fn mark_dirty(&mut self) {
+    fn mark_dirty(&mut self, reason: &str) {
+        // println!("Marking dirty: {}", reason);
         self.dirty = true;
     }
 
@@ -608,7 +609,7 @@ impl WasmWidget {
     pub fn process_non_draw_commands(&mut self, values: &mut HashMap<String, Value>) {
         let id = self.id();
         if !self.wasm_non_draw_commands.is_empty() {
-            self.mark_dirty();
+            self.mark_dirty("non_draw_commands exist");
         }
         for command in self.wasm_non_draw_commands.iter() {
             match command {
@@ -826,7 +827,7 @@ impl Widget for TextPane {
 
         let paint = background.as_paint();
         canvas.save();
-        canvas.translate((self.position().x, self.position().y));
+        // canvas.translate((self.position().x, self.position().y));
         canvas.clip_rect(Rect::from_wh(bounds.width, bounds.height), None, false);
         canvas.scale((self.scale(), self.scale()));
 
@@ -980,7 +981,7 @@ impl Widget for Text {
         let paint = self.text_options.color.as_paint();
         canvas.draw_str(
             self.text.clone(),
-            (self.position().x, self.position().y + self.size().height),
+            (0.0, self.size().height),
             &font,
             &paint,
         );
@@ -1382,6 +1383,18 @@ impl Widget for Ephemeral {
 
     fn update(&mut self) -> Result<(), Box<dyn Error>> {
         self.widget.update()
+    }
+
+    fn dirty(&self) -> bool {
+        self.widget.dirty()
+    }
+
+    fn mark_dirty(&mut self, reason: &str) {
+        self.widget.mark_dirty(reason)
+    }
+
+    fn reset_dirty(&mut self) {
+        self.widget.reset_dirty()
     }
 }
 
