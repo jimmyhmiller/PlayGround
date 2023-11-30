@@ -127,6 +127,7 @@ impl Editor {
                     self.canvas_scroll_offset.y -= offset_y;
 
                     self.canvas_scale += delta as f32;
+                    self.canvas_scale = self.canvas_scale.max(0.1).min(3.0);
                     self.context.mouse_position = Position { x: x_with_new_scale, y: y_with_new_scale };
 
                 }

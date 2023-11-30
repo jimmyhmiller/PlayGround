@@ -271,7 +271,7 @@ impl App for MultipleWidgets {
         );
         let foreground = Color::parse_hex("#ffffff");
         canvas.set_color(&foreground);
-        canvas.draw_str(&format!("index: {}", self.index), 20.0, 40.0);
+        canvas.draw_str(&format!("Rearrange windows"), 20.0, 40.0);
     }
 
     fn on_click(&mut self, x: f32, y: f32) {

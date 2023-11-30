@@ -209,7 +209,7 @@ impl Widget for WasmWidget {
     }
 
     fn dirty(&self) -> bool {
-        self.dirty || self.number_of_pending_requests() > 0 || self.wasm_non_draw_commands.len() > 0
+        self.dirty || self.number_of_pending_requests() > 0 || self.wasm_non_draw_commands.len() > 0 || self.draw_commands.is_empty()
     }
 
     fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {

@@ -122,6 +122,7 @@ struct TextWidget {
     diagnostics: DiagnosticMessage,
     #[serde(skip)]
     transaction_pane: Option<Widget>,
+    visible_range: (usize, usize),
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -323,11 +324,19 @@ impl App for TextWidget {
         canvas.save();
         let number_lines = self.text_pane.number_of_lines();
         let number_of_digits = number_lines.to_string().len();
-        let current_line = self.text_pane.lines_above_scroll();
-        let max_line = current_line
-            + self
+        let current_line = if self.visible_range != (0,0) {
+            self.visible_range.0
+        }  else {
+            self.text_pane.lines_above_scroll()
+        };
+        let max_line = if self.visible_range != (0,0) {
+            self.visible_range.1
+        } else {
+            current_line + self
                 .text_pane
-                .number_of_visible_lines(self.widget_data.size.height);
+                .number_of_visible_lines(self.widget_data.size.height)
+        };
+       
         let max_line = max_line.min(number_lines);
         for line in current_line..max_line {
             canvas.set_color(&Color::parse_hex("#83CDA1"));
@@ -345,14 +354,13 @@ impl App for TextWidget {
         self.x_margin += line_number_margin as i32;
         canvas.translate(line_number_margin, 0.0);
 
-        let lines_above = self.text_pane.lines_above_scroll();
         let num_lines = self
             .text_pane
             .number_of_visible_lines(self.widget_data.size.height);
-        let shown_lines = lines_above..lines_above + num_lines;
+        let shown_lines = current_line..(current_line + num_lines).min(max_line);
 
         if shown_lines.contains(&cursor.line()) {
-            let nth_line = cursor.line() - lines_above;
+            let nth_line = cursor.line() - current_line;
             let cursor_position_pane_x = cursor.column() as f32 * 16.0;
             let cursor_position_pane_y = (nth_line as f32 - 1.0) * self.text_pane.line_height + 6.0;
 
@@ -365,11 +373,10 @@ impl App for TextWidget {
             );
         }
 
-        let mut current_line = self.text_pane.lines_above_scroll();
+        let mut current_line = current_line;
         for line in self.text_pane.text_buffer.decorated_lines(
             current_line,
-            self.text_pane
-                .number_of_visible_lines(self.widget_data.size.height),
+            shown_lines.len(),
         ) {
             self.draw_selection(current_line, &mut canvas);
             let mut x = 0.0;
@@ -579,6 +586,7 @@ impl TextWidget {
                 version: Some(0),
             },
             transaction_pane: None,
+            visible_range: (0, 0),
         }
     }
 
@@ -588,7 +596,9 @@ impl TextWidget {
         }
 
         if input.modifiers.cmd && input.modifiers.option && matches!(input.key_code, KeyCode::C) {
-            self.create_widget(Box::new(self.clone()), self.widget_data.clone());
+            let mut new_pane = self.clone();
+            new_pane.visible_range = (10, 20);
+            self.create_widget(Box::new(new_pane), self.widget_data.clone());
             return;
         }
 
@@ -646,6 +656,7 @@ impl TextWidget {
                         version: None,
                     },
                     transaction_pane: None,
+                    visible_range: (0, 0),
                 }),
                 data,
             ));
