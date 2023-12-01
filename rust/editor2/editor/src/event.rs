@@ -100,6 +100,7 @@ pub enum Event {
     PinchZoom { delta: f64, phase: TouchPhase},
     TouchPadPressure { pressure: f32, stage: i64 },
     SmartMagnify { x: f32, y: f32 },
+    MarkDirty(u32),
 }
 
 impl Event {

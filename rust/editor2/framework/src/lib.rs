@@ -25,6 +25,7 @@ extern "C" {
     #[link_name = "set_cursor_icon"]
     fn set_cursor_icon_low_level(cursor_icon: u32);
     fn start_process_low_level(ptr: i32, len: i32) -> i32;
+    fn mark_dirty(external_id: u32);
     fn save_file_low_level(path_ptr: i32, path_length: i32, text_ptr: i32, text_length: i32);
     fn send_message_low_level(process_id: i32, ptr: i32, len: i32);
     #[allow(improper_ctypes)]
@@ -448,6 +449,11 @@ pub trait App {
     fn get_state(&self) -> String;
     fn set_state(&mut self, state: String);
     fn on_process_message(&mut self, _process_id: i32, _message: String) {}
+    fn mark_dirty(&self, id: u32) {
+        unsafe {
+            mark_dirty(id);
+        }
+    }
 }
 
 impl<T: App + ?Sized> AppExtensions for T {}
@@ -455,8 +461,9 @@ impl<T: App + ?Sized> AppExtensions for T {}
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Widget {
     #[serde(skip)]
-    app_index: usize,
+    pub app_index: usize,
 }
+
 
 impl Deref for Widget {
     type Target = Box<dyn App>;
@@ -477,6 +484,7 @@ pub trait AppExtensions {
     fn start_process(&mut self, process: String) -> i32 {
         unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
     }
+
     fn create_widget(&mut self, app: Box<dyn App>, data: WidgetData) -> Widget {
         unsafe {
             APPS.push(app);

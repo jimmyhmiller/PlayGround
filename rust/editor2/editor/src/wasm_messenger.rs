@@ -47,7 +47,7 @@ pub enum Payload {
     OnMouseUp(Position),
     GetCommands,
     OnMove(f32, f32),
-    NewSender(u32, Sender<OutMessage>),
+    NewSender(u32, u32, Sender<OutMessage>),
 }
 
 #[derive(Clone, Debug)]
@@ -207,18 +207,16 @@ impl WasmMessenger {
         }
     }
 
-    pub fn get_receiver(&mut self, wasm_id: u64, external_id: u32) -> Receiver<OutMessage> {
-        let (sender, receiver) = channel::<OutMessage>(100000);
-        let mut wasm_sender = self.get_sender(wasm_id);
+    pub fn notify_external_sender(&mut self, wasm_id: usize, external_id: u32, widget_id: usize, sender: Sender<OutMessage>) {
+        let mut wasm_sender = self.get_sender(wasm_id as u64);
         let message_id = self.next_message_id();
         wasm_sender
             .try_send(Message {
                 message_id,
                 external_id: Some(external_id),
-                payload: Payload::NewSender(external_id, sender),
+                payload: Payload::NewSender(external_id, widget_id as u32, sender),
             })
             .unwrap();
-        receiver
     }
 }
 
@@ -232,7 +230,7 @@ struct WasmManager {
     instance: WasmInstance,
     receiver: Receiver<Message>,
     sender: Sender<OutMessage>,
-    other_senders: HashMap<u32, Sender<OutMessage>>,
+    other_senders: HashMap<u32, (u32, Sender<OutMessage>)>,
 }
 
 impl WasmManager {
@@ -269,6 +267,7 @@ impl WasmManager {
                         self.other_senders
                             .get_mut(&external_id)
                             .unwrap()
+                            .1
                             .start_send(out_message)
                     } else {
                         self.sender.start_send(out_message)
@@ -338,9 +337,24 @@ impl WasmManager {
                 }
             }
             Payload::GetCommands => {
-                let commands = self.instance.get_and_clear_commands();
+                let mut commands = self.instance.get_and_clear_commands();
                 if commands.is_empty() {
                     return default_return;
+                }
+
+                for command in commands.iter_mut() {
+                    match command {
+                        Commands::MarkDirty(external_id) => {
+                            if let Some((id, _)) = self.other_senders.get(external_id) {
+                                println!("Swapping id {} for {}", external_id, id);
+                                *external_id = *id;
+                            } else {
+                                println!("No external sender, delaying command");
+                                self.instance.add_command(Commands::MarkDirty(*external_id));
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 Ok(OutMessage {
                     message_id: message.message_id,
@@ -427,8 +441,8 @@ impl WasmManager {
                 self.instance.on_size_change(width, height).await?;
                 default_return
             }
-            Payload::NewSender(external_id, sender) => {
-                self.other_senders.insert(external_id, sender);
+            Payload::NewSender(external_id, widget_id, sender) => {
+                self.other_senders.insert(external_id, (widget_id, sender));
                 default_return
             }
         };
@@ -455,6 +469,7 @@ struct State {
     values: HashMap<String, Value>,
     receivers: HashMap<String, oneshot::Receiver<Value>>,
     wasm_id: u64,
+    external_id: u32,
 }
 
 impl State {
@@ -470,6 +485,7 @@ impl State {
             wasm_id,
             values: HashMap::new(),
             receivers: HashMap::new(),
+            external_id: 0,
         }
     }
 }
@@ -486,6 +502,7 @@ pub enum Commands {
     SetCursor(CursorIcon),
     Redraw(usize),
     CreateWidget(usize, f32, f32, f32, f32, u32),
+    MarkDirty(u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -850,6 +867,17 @@ impl WasmInstance {
 
         linker.func_wrap(
             "host",
+            "mark_dirty",
+            |mut caller: Caller<'_, State>, id: u32| {
+                let state = caller.data_mut();
+                state
+                    .commands
+                    .push(Commands::MarkDirty(id));
+            },
+        )?;
+
+        linker.func_wrap(
+            "host",
             "set_get_state",
             |mut caller: Caller<'_, State>, ptr: u32, len: u32| {
                 let state = caller.data_mut();
@@ -958,10 +986,15 @@ impl WasmInstance {
     }
 
     pub fn get_and_clear_commands(&mut self) -> Vec<Commands> {
-        let state = &mut self.store.data_mut();
+        let state = self.store.data_mut();
         let commands = state.commands.clone();
         state.commands.clear();
         commands
+    }
+
+    pub fn add_command(&mut self, command: Commands) {
+        let state = self.store.data_mut();
+        state.commands.push(command);
     }
 
     pub async fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
@@ -1215,12 +1248,16 @@ impl WasmInstance {
     }
 
     pub async fn set_widget_identifer(&mut self, external_id: u32) -> Result<(), Box<dyn Error>> {
+        let state = self.store.data_mut();
+        state.external_id = external_id;
         self.call_typed_func::<u32, ()>("set_widget_identifier", external_id, 1)
             .await?;
         Ok(())
     }
 
     pub async fn clear_widget_identifier(&mut self) -> Result<(), Box<dyn Error>> {
+        let state = self.store.data_mut();
+        state.external_id = 0;
         self.call_typed_func::<(), ()>("clear_widget_identifier", (), 1)
             .await?;
         Ok(())
