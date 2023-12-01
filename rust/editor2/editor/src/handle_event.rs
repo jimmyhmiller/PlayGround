@@ -4,6 +4,7 @@ use std::{
 };
 
 use framework::{CursorIcon, Position, Size, WidgetMeta};
+use futures::channel::mpsc::channel;
 use nonblock::NonBlockingReader;
 use notify::RecursiveMode;
 use serde_json::json;
@@ -13,7 +14,7 @@ use crate::{
     event::Event,
     keyboard::{KeyCode, KeyboardInput},
     native::open_file_dialog,
-    wasm_messenger::SaveState,
+    wasm_messenger::{SaveState, OutMessage},
     widget::Widget,
     widget2::{Ephemeral, TextPane, WasmWidget, Widget as _},
 };
@@ -410,10 +411,11 @@ impl Editor {
                 Event::Redraw(widget_id) => self.mark_widget_dirty(widget_id, "redraw"),
                 Event::CreateWidget(wasm_id, x, y, width, height, external_id) => {
                     let next_id = self.widget_store.next_id();
-                    let receiver = self
-                        .wasm_messenger
-                        .get_receiver(wasm_id as u64, external_id);
-                    self.widget_store.add_widget(Widget {
+
+                    let (sender, receiver) = channel::<OutMessage>(100000);
+
+
+                    let widget_id = self.widget_store.add_widget(Widget {
                         data: Box::new(Ephemeral::wrap(Box::new(WasmWidget {
                             draw_commands: vec![],
                             sender: Some(self.wasm_messenger.get_sender(wasm_id as u64)),
@@ -436,7 +438,10 @@ impl Editor {
                             value_senders: HashMap::new(),
                         }))),
                     });
+                    self.wasm_messenger.notify_external_sender(wasm_id, external_id, widget_id, sender)
                 }
+
+               
 
                 // This works. But I might want to do an event on widgets changed instead
                 Event::ValueNeeded(name, widget_id) => match name.as_str() {
@@ -493,6 +498,11 @@ impl Editor {
                             // TODO: Need to set the scale
                         }
                     }
+                }
+
+                Event::MarkDirty(widget_id) => {
+                    println!("Marking dirty {}", widget_id);
+                    self.mark_widget_dirty(widget_id as usize, "mark dirty");
                 }
 
                 _e => {

@@ -263,20 +263,6 @@ impl Editor {
         self.wasm_messenger.tick();
         self.fps_counter.add_time("tick", time.elapsed());
 
-        let time = Instant::now();
-        for widget in self.widget_store.iter_mut() {
-            if widget.dirty() {
-                widget.update().unwrap();
-            } else {
-                if let Some(widget) = widget.as_wasm_widget_mut() {
-                    if widget.draw_commands.is_empty() {
-                        widget.update().unwrap();
-                    }
-
-                }
-            }
-        }
-        self.fps_counter.add_time("update_widgets", time.elapsed());
 
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
@@ -298,6 +284,24 @@ impl Editor {
         let time = Instant::now();
         self.handle_events(events);
         self.fps_counter.add_time("events", time.elapsed());
+
+        let time = Instant::now();
+        for widget in self.widget_store.iter_mut() {
+            if widget.dirty() {
+                if widget.id() == 13 {
+                    println!("widget 13 is dirty");
+                }
+                widget.update().unwrap();
+            } else {
+                if let Some(widget) = widget.as_wasm_widget_mut() {
+                    if widget.draw_commands.is_empty() {
+                        widget.update().unwrap();
+                    }
+
+                }
+            }
+        }
+        self.fps_counter.add_time("update_widgets", time.elapsed());
 
         let pending_count: usize = self
             .widget_store

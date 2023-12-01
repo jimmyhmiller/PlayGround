@@ -437,6 +437,9 @@ impl Widget for WasmWidget {
                         self.wasm_non_draw_commands.extend(commands);
                     }
                 }
+                // OutPayload::MarkDirty => {
+                //     self.mark_dirty("Mark dirty");
+                // }
                 OutPayload::Saved(saved) => {
                     self.save_state = saved;
                 }
@@ -578,7 +581,7 @@ impl WasmWidget {
                 Payload::OnMouseUp(_) => "OnMouseUp",
                 Payload::GetCommands => "Update",
                 Payload::OnMove(_, _) => "OnMove",
-                Payload::NewSender(_, _) => "NewSender",
+                Payload::NewSender(_, _,  _) => "NewSender",
             });
         }
 
@@ -613,6 +616,14 @@ impl WasmWidget {
         }
         for command in self.wasm_non_draw_commands.iter() {
             match command {
+                // This is probably routed incorrectly
+                Commands::MarkDirty(widget_id) => {
+                    self.external_sender
+                        .as_mut()
+                        .unwrap()
+                        .send(Event::MarkDirty(*widget_id))
+                        .unwrap();
+                },
                 Commands::StartProcess(process_id, process_command) => {
                     self.external_sender
                         .as_mut()
