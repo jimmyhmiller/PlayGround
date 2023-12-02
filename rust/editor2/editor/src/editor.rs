@@ -284,11 +284,9 @@ impl Editor {
         for widget in self.widget_store.iter_mut() {
             if widget.dirty() {
                 widget.update().unwrap();
-            } else {
-                if let Some(widget) = widget.as_wasm_widget_mut() {
-                    if widget.draw_commands.is_empty() {
-                        widget.update().unwrap();
-                    }
+            } else if let Some(widget) = widget.as_wasm_widget_mut() {
+                if widget.draw_commands.is_empty() {
+                    widget.update().unwrap();
                 }
             }
         }
