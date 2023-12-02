@@ -211,7 +211,7 @@ impl Widget for WasmWidget {
     fn dirty(&self) -> bool {
         self.dirty
             || self.number_of_pending_requests() > 0
-            || self.wasm_non_draw_commands.len() > 0
+            || !self.wasm_non_draw_commands.is_empty()
             || self.draw_commands.is_empty()
     }
 

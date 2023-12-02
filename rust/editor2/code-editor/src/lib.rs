@@ -715,10 +715,8 @@ impl TextWidget {
                     .cursor
                     .delete(&mut self.text_pane.text_buffer);
 
-                if number_of_lines_before != self.text_pane.text_buffer.line_count() {
-                    if self.visible_range != (0, 0) {
-                        self.visible_range.1 -= 1;
-                    }
+                if number_of_lines_before != self.text_pane.text_buffer.line_count() && self.visible_range != (0, 0) {
+                    self.visible_range.1 -= 1;
                 }
             }
             KeyCode::S => {
@@ -739,10 +737,8 @@ impl TextWidget {
                 .cursor
                 .handle_insert(&[char as u8], &mut self.text_pane.text_buffer);
 
-            if char == '\n' {
-                if self.visible_range != (0, 0) {
-                    self.visible_range.1 += 1;
-                }
+            if char == '\n' && self.visible_range != (0, 0) {
+                self.visible_range.1 += 1;
             }
         }
 
