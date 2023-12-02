@@ -288,9 +288,6 @@ impl Editor {
         let time = Instant::now();
         for widget in self.widget_store.iter_mut() {
             if widget.dirty() {
-                if widget.id() == 13 {
-                    println!("widget 13 is dirty");
-                }
                 widget.update().unwrap();
             } else {
                 if let Some(widget) = widget.as_wasm_widget_mut() {
