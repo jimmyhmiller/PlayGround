@@ -55,7 +55,15 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
         self.text_buffer.line_count()
     }
 
-    pub fn on_scroll(&mut self, x: f64, y: f64, width: f32, height: f32, y_margin: i32, visible_range: (usize, usize)) {
+    pub fn on_scroll(
+        &mut self,
+        x: f64,
+        y: f64,
+        width: f32,
+        height: f32,
+        y_margin: i32,
+        visible_range: (usize, usize),
+    ) {
         // TODO: I need to look at max line_length in
         // visible range
         if self.max_line_length.is_none() {
@@ -80,18 +88,15 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
             self.offset.x = 0.0;
         }
 
-        let number_of_lines = if visible_range != (0,0) {
+        let number_of_lines = if visible_range != (0, 0) {
             visible_range.1 - visible_range.0
         } else {
             self.number_of_lines()
         };
         let number_of_visble_lines = self.number_of_visible_lines(height);
 
-
         let scroll_with_last_line_visible =
-            number_of_lines
-                .saturating_sub(number_of_visble_lines) as f32
-                * self.line_height
+            number_of_lines.saturating_sub(number_of_visble_lines) as f32 * self.line_height
                 + y_margin as f32;
 
         if height - y_margin as f32 > number_of_lines as f32 * self.line_height {
@@ -140,7 +145,7 @@ struct TextWidget {
     #[serde(default)]
     excerpt_panes: Vec<Widget>,
     #[serde(default)]
-    alive: bool
+    alive: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -308,7 +313,7 @@ impl App for TextWidget {
 
         canvas.set_color(&foreground);
 
-        if self.visible_range == (0,0) {
+        if self.visible_range == (0, 0) {
             if let Some(file_and_folder) = get_last_three_segments(&self.file_path) {
                 canvas.draw_str(&file_and_folder, 20.0, 48.0);
             }
@@ -338,14 +343,15 @@ impl App for TextWidget {
         let number_lines = self.text_pane.number_of_lines();
         let number_of_digits = number_lines.to_string().len();
         let current_line = self.text_pane.lines_above_scroll() + self.visible_range.0;
-        let max_line = if self.visible_range != (0,0) {
+        let max_line = if self.visible_range != (0, 0) {
             self.visible_range.1
         } else {
-            current_line + self
-                .text_pane
-                .number_of_visible_lines(self.widget_data.size.height)
+            current_line
+                + self
+                    .text_pane
+                    .number_of_visible_lines(self.widget_data.size.height)
         };
-       
+
         let max_line = max_line.min(number_lines);
         for line in current_line..max_line {
             canvas.set_color(&Color::parse_hex("#83CDA1"));
@@ -383,10 +389,11 @@ impl App for TextWidget {
         }
 
         let mut current_line = current_line;
-        for line in self.text_pane.text_buffer.decorated_lines(
-            current_line,
-            shown_lines.len(),
-        ) {
+        for line in self
+            .text_pane
+            .text_buffer
+            .decorated_lines(current_line, shown_lines.len())
+        {
             self.draw_selection(current_line, &mut canvas);
             let mut x = 0.0;
             for (text, token) in line {
@@ -510,10 +517,15 @@ impl App for TextWidget {
             if json_value.get("path") != Some(&json!(self.file_path)) {
                 return;
             }
-            if json_value.get("version").map(|x| x.as_u64().unwrap() as usize) != Some(self.text_pane.text_buffer.document_version) {
+            if json_value
+                .get("version")
+                .map(|x| x.as_u64().unwrap() as usize)
+                != Some(self.text_pane.text_buffer.document_version)
+            {
                 println!(
                     "version mismatch tokens early: {:?}  pane: {}",
-                    json_value.get("version"), self.text_pane.text_buffer.document_version
+                    json_value.get("version"),
+                    self.text_pane.text_buffer.document_version
                 );
                 return;
             }
@@ -606,7 +618,6 @@ impl TextWidget {
         }
 
         if input.modifiers.cmd && input.modifiers.option && matches!(input.key_code, KeyCode::C) {
-
             if let Some(((line_start, _), (line_end, _))) = self.text_pane.cursor.selection() {
                 let mut data = self.widget_data.clone();
                 data.position.x += data.size.width + 50.0;
@@ -619,7 +630,7 @@ impl TextWidget {
                 let widget = self.create_widget(Box::new(new_excerpt), data);
                 self.excerpt_panes.push(widget);
             }
-           
+
             return;
         }
 
@@ -700,17 +711,16 @@ impl TextWidget {
             KeyCode::DownArrow => self.text_pane.cursor.move_down(&self.text_pane.text_buffer),
             KeyCode::BackSpace => {
                 let number_of_lines_before = self.text_pane.text_buffer.line_count();
-                self
-                    .text_pane
+                self.text_pane
                     .cursor
                     .delete(&mut self.text_pane.text_buffer);
 
                 if number_of_lines_before != self.text_pane.text_buffer.line_count() {
-                    if self.visible_range != (0,0) {
+                    if self.visible_range != (0, 0) {
                         self.visible_range.1 -= 1;
                     }
                 }
-            },
+            }
             KeyCode::S => {
                 if input.modifiers.cmd {
                     self.save_file(
@@ -730,7 +740,7 @@ impl TextWidget {
                 .handle_insert(&[char as u8], &mut self.text_pane.text_buffer);
 
             if char == '\n' {
-                if self.visible_range != (0,0) {
+                if self.visible_range != (0, 0) {
                     self.visible_range.1 += 1;
                 }
             }
@@ -756,8 +766,11 @@ impl TextWidget {
             }
             KeyCode::DownArrow => {
                 let drawable_area_height = self.widget_data.size.height - 40.0;
-                let logical_line =
-                    self.text_pane.cursor.line().saturating_sub(self.text_pane.lines_above_scroll());
+                let logical_line = self
+                    .text_pane
+                    .cursor
+                    .line()
+                    .saturating_sub(self.text_pane.lines_above_scroll());
                 let line_top = logical_line as f32 * self.text_pane.line_height
                     - self.text_pane.fractional_line_offset();
                 let diff = drawable_area_height - line_top;

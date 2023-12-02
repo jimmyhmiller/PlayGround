@@ -11,14 +11,14 @@ use std::{
     time::Instant,
 };
 
-use framework::{KeyboardInput, Position, Size, WidgetMeta, Value};
+use framework::{KeyboardInput, Position, Size, Value, WidgetMeta};
 use futures::channel::{mpsc::Sender, oneshot};
 use itertools::Itertools;
 use rand::Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use skia_safe::{
     font_style::{Slant, Weight, Width},
-    Canvas, Data, Font, FontStyle, Path, Point, RRect, Rect, Typeface, FontMgr,
+    Canvas, Data, Font, FontMgr, FontStyle, Path, Point, RRect, Rect, Typeface,
 };
 
 use crate::{
@@ -209,7 +209,10 @@ impl Widget for WasmWidget {
     }
 
     fn dirty(&self) -> bool {
-        self.dirty || self.number_of_pending_requests() > 0 || self.wasm_non_draw_commands.len() > 0 || self.draw_commands.is_empty()
+        self.dirty
+            || self.number_of_pending_requests() > 0
+            || self.wasm_non_draw_commands.len() > 0
+            || self.draw_commands.is_empty()
     }
 
     fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
@@ -394,7 +397,6 @@ impl Widget for WasmWidget {
 
         let values = &mut HashMap::new();
 
-
         self.process_non_draw_commands(values);
 
         for (name, value) in values.drain() {
@@ -403,7 +405,7 @@ impl Widget for WasmWidget {
                 .unwrap()
                 .send(Event::ProvideValue(name, value));
         }
-        
+
         while let Ok(Some(message)) = self.receiver.as_mut().unwrap().try_next() {
             // Note: Right now if a message doesn't have a corresponding in-message
             // I am just setting the out message to id: 0.
@@ -479,7 +481,8 @@ impl Widget for WasmWidget {
             }
         }
         if self.dirty() {
-            let has_pending_draw = self.pending_messages
+            let has_pending_draw = self
+                .pending_messages
                 .iter()
                 .any(|(_, (m, _))| matches!(m.payload, Payload::RunDraw(_)));
 
@@ -489,7 +492,6 @@ impl Widget for WasmWidget {
             } else {
                 println!("Already have pending draw for {}", self.id());
             }
-            
         }
 
         Ok(())
@@ -554,11 +556,26 @@ impl WasmWidget {
 
     pub fn number_of_pending_requests(&self) -> usize {
         let non_draw_commands_count = self.wasm_non_draw_commands.len();
-        let pending_message_count = self.pending_messages.iter()
+        let pending_message_count = self
+            .pending_messages
+            .iter()
             .filter(|(_, (message, _))| {
-                !matches!(message, Message { payload: Payload::RunDraw(_), ..})
-                && !matches!(message, Message { payload: Payload::GetCommands, ..})
-            }).collect::<Vec<_>>().len();
+                !matches!(
+                    message,
+                    Message {
+                        payload: Payload::RunDraw(_),
+                        ..
+                    }
+                ) && !matches!(
+                    message,
+                    Message {
+                        payload: Payload::GetCommands,
+                        ..
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .len();
         non_draw_commands_count + pending_message_count
     }
 
@@ -581,7 +598,7 @@ impl WasmWidget {
                 Payload::OnMouseUp(_) => "OnMouseUp",
                 Payload::GetCommands => "Update",
                 Payload::OnMove(_, _) => "OnMove",
-                Payload::NewSender(_, _,  _) => "NewSender",
+                Payload::NewSender(_, _, _) => "NewSender",
             });
         }
 
@@ -623,7 +640,7 @@ impl WasmWidget {
                         .unwrap()
                         .send(Event::MarkDirty(*widget_id))
                         .unwrap();
-                },
+                }
                 Commands::StartProcess(process_id, process_command) => {
                     self.external_sender
                         .as_mut()
@@ -943,7 +960,6 @@ pub struct Text {
     pub meta: WidgetMeta,
 }
 
-
 #[typetag::serde]
 impl Widget for Text {
     fn as_any(&self) -> &dyn Any {
@@ -990,12 +1006,7 @@ impl Widget for Text {
             self.text_options.size,
         );
         let paint = self.text_options.color.as_paint();
-        canvas.draw_str(
-            self.text.clone(),
-            (0.0, self.size().height),
-            &font,
-            &paint,
-        );
+        canvas.draw_str(self.text.clone(), (0.0, self.size().height), &font, &paint);
         canvas.restore();
         Ok(())
     }
@@ -1033,11 +1044,11 @@ impl DerefMut for RandomText {
 
 #[typetag::serde]
 impl Widget for RandomText {
-    fn as_any(&self) ->  &dyn Any {
-       self
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
-    fn as_any_mut(&mut self) ->  &mut dyn Any {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 
@@ -1053,7 +1064,7 @@ impl Widget for RandomText {
         self.text.scale()
     }
 
-    fn set_scale(&mut self,scale:f32) {
+    fn set_scale(&mut self, scale: f32) {
         self.text.set_scale(scale)
     }
 
@@ -1065,7 +1076,7 @@ impl Widget for RandomText {
         self.text.id()
     }
 
-    fn set_id(&mut self,id:usize) {
+    fn set_id(&mut self, id: usize) {
         self.text.set_id(id)
     }
 
@@ -1075,17 +1086,17 @@ impl Widget for RandomText {
             font_family: Self::random_font_name(),
             font_weight: FontWeight::Normal,
             size: 120.0,
-            color:  Color::parse_hex("#ffffff")
+            color: Color::parse_hex("#ffffff"),
         };
         self.text.on_click(x, y)
     }
-    
+
     fn start(&mut self) -> Result<(), Box<dyn Error>> {
         self.text_options = TextOptions {
             font_family: Self::random_font_name(),
             font_weight: FontWeight::Normal,
             size: 120.0,
-            color:  Color::parse_hex("#ffffff")
+            color: Color::parse_hex("#ffffff"),
         };
         self.text.start()
     }
@@ -1098,7 +1109,12 @@ impl Widget for RandomText {
                 Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
                 16.0,
             );
-            canvas.draw_str(self.text_options.font_family.clone(), (0.0, 0.0), &font, &Color::parse_hex("#ffffff").as_paint());
+            canvas.draw_str(
+                self.text_options.font_family.clone(),
+                (0.0, 0.0),
+                &font,
+                &Color::parse_hex("#ffffff").as_paint(),
+            );
         }
         Ok(())
     }
@@ -1113,10 +1129,8 @@ impl Widget for RandomText {
     }
 }
 
-
 impl RandomText {
     fn random_font_name() -> String {
-
         let font_mgr = FontMgr::default();
         let families_count = font_mgr.count_families();
 
@@ -1125,8 +1139,6 @@ impl RandomText {
         family_name.to_string()
     }
 }
-
-
 
 #[derive(Serialize, Deserialize)]
 pub struct Image {

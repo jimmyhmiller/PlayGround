@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap, error::Error, io::Write, path::Path, sync::Arc, thread, time::Duration, str::from_utf8,
+    collections::HashMap, error::Error, io::Write, path::Path, str::from_utf8, sync::Arc, thread,
+    time::Duration,
 };
 
 use bytesize::ByteSize;
@@ -207,7 +208,13 @@ impl WasmMessenger {
         }
     }
 
-    pub fn notify_external_sender(&mut self, wasm_id: usize, external_id: u32, widget_id: usize, sender: Sender<OutMessage>) {
+    pub fn notify_external_sender(
+        &mut self,
+        wasm_id: usize,
+        external_id: u32,
+        widget_id: usize,
+        sender: Sender<OutMessage>,
+    ) {
         let mut wasm_sender = self.get_sender(wasm_id as u64);
         let message_id = self.next_message_id();
         wasm_sender
@@ -664,17 +671,18 @@ impl WasmInstance {
                         message_id: 0,
                         payload: OutPayload::NeededValue(name.clone(), sender),
                     })?;
-                    
+
                     // The value is serialized and will need to be deserialized
                     let result = receiver.await;
                     match result {
                         Ok(result) => {
-
                             state.values.insert(name, result.clone());
-                            let (ptr, _len) =
-                                WasmInstance::transfer_string_to_wasm(&mut caller,  from_utf8(&result).unwrap().to_string())
-                                    .await
-                                    .unwrap();
+                            let (ptr, _len) = WasmInstance::transfer_string_to_wasm(
+                                &mut caller,
+                                from_utf8(&result).unwrap().to_string(),
+                            )
+                            .await
+                            .unwrap();
                             Ok(ptr)
                         }
                         Err(_e) => {
@@ -692,12 +700,11 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, ptr: i32, len: i32| {
                 let name = get_string_from_caller(&mut caller, ptr, len);
                 Box::new(async move {
-                    
                     let state = caller.data_mut();
 
                     let mut should_remove = false;
                     if let Some(receiver) = state.receivers.get_mut(&name) {
-                        if let Ok(Some(result )) = receiver.try_recv() {
+                        if let Ok(Some(result)) = receiver.try_recv() {
                             state.values.insert(name.clone(), result);
                             should_remove = true;
                         }
@@ -709,10 +716,12 @@ impl WasmInstance {
                     // TODO: Unnecessary vec to string
                     if let Some(value) = state.values.get(&name) {
                         let value = value.clone();
-                        let (ptr, _len) =
-                            WasmInstance::transfer_string_to_wasm(&mut caller, from_utf8(&value).unwrap().to_string())
-                                .await
-                                .unwrap();
+                        let (ptr, _len) = WasmInstance::transfer_string_to_wasm(
+                            &mut caller,
+                            from_utf8(&value).unwrap().to_string(),
+                        )
+                        .await
+                        .unwrap();
                         Ok(ptr)
                     } else {
                         let (sender, receiver) = oneshot::channel();
@@ -721,7 +730,7 @@ impl WasmInstance {
                             message_id: 0,
                             payload: OutPayload::NeededValue(name, sender),
                         })?;
-                        
+
                         Ok(0)
                     }
                 })
@@ -870,9 +879,7 @@ impl WasmInstance {
             "mark_dirty",
             |mut caller: Caller<'_, State>, id: u32| {
                 let state = caller.data_mut();
-                state
-                    .commands
-                    .push(Commands::MarkDirty(id));
+                state.commands.push(Commands::MarkDirty(id));
             },
         )?;
 

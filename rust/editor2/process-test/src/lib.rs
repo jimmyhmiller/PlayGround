@@ -95,16 +95,15 @@ enum ParseError {
 // I need to actually update my tokens myself and then get the refresh.
 
 impl ProcessSpawner {
-    fn parse_message(
-        &self,
-        message: &str,
-    ) -> Result<Vec<serde_json::Value>, ParseError> {
+    fn parse_message(&self, message: &str) -> Result<Vec<serde_json::Value>, ParseError> {
         let mut results = vec![];
         if let Some(start_json_object) = message.find('{') {
             // TODO: This can crash
             // I need to investigate this closer
             // Probably need to hold onto the message until we get this?
-            let last_close_brace = message.rfind('}').ok_or(ParseError::NoClosingBrace(message.to_string()))?;
+            let last_close_brace = message
+                .rfind('}')
+                .ok_or(ParseError::NoClosingBrace(message.to_string()))?;
             let message = &message[start_json_object..last_close_brace + 1];
             let message = message.trim();
             let deserializer = serde_json::Deserializer::from_str(message);
@@ -564,16 +563,14 @@ impl App for ProcessSpawner {
                         }
                     }
                 }
-                Err(err) => {
-                    match err {
-                        ParseError::NoClosingBrace(message) => {
-                            self.remaining_message = message.to_string();
-                        }
-                        ParseError::InvalidJson => {
-                            println!("Invalid json: {}", message);
-                        }
+                Err(err) => match err {
+                    ParseError::NoClosingBrace(message) => {
+                        self.remaining_message = message.to_string();
                     }
-                }
+                    ParseError::InvalidJson => {
+                        println!("Invalid json: {}", message);
+                    }
+                },
             }
         }
         // println!("Process {} sent message {}", process_id, message);

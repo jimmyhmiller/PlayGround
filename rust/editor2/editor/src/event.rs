@@ -31,7 +31,6 @@ impl From<&winit::event::TouchPhase> for TouchPhase {
     }
 }
 
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Event {
     Noop,
@@ -97,23 +96,36 @@ pub enum Event {
     CreateWidget(usize, f32, f32, f32, f32, u32),
     ValueNeeded(String, usize),
     ProvideValue(String, Value),
-    PinchZoom { delta: f64, phase: TouchPhase},
-    TouchPadPressure { pressure: f32, stage: i64 },
-    SmartMagnify { x: f32, y: f32 },
+    PinchZoom {
+        delta: f64,
+        phase: TouchPhase,
+    },
+    TouchPadPressure {
+        pressure: f32,
+        stage: i64,
+    },
+    SmartMagnify {
+        x: f32,
+        y: f32,
+    },
     MarkDirty(u32),
 }
 
 impl Event {
-    pub fn patch_mouse_event(&mut self, mouse_pos: &Position, canvas_offset: &Position, canvas_scale: f32) {
+    pub fn patch_mouse_event(
+        &mut self,
+        mouse_pos: &Position,
+        canvas_offset: &Position,
+        canvas_scale: f32,
+    ) {
         match self {
-            Event::LeftMouseDown { x, y } |
-            Event::LeftMouseUp { x, y } |
-            Event::RightMouseDown { x, y } |
-            Event::RightMouseUp { x, y } |
-            Event::HoveredFile { x, y, .. } |
-            Event::DroppedFile { x, y, .. } |
-            Event::SmartMagnify { x, y} 
-             => {
+            Event::LeftMouseDown { x, y }
+            | Event::LeftMouseUp { x, y }
+            | Event::RightMouseDown { x, y }
+            | Event::RightMouseUp { x, y }
+            | Event::HoveredFile { x, y, .. }
+            | Event::DroppedFile { x, y, .. }
+            | Event::SmartMagnify { x, y } => {
                 *x = (mouse_pos.x + canvas_offset.x) * canvas_scale;
                 *y = (mouse_pos.y - canvas_offset.y) * canvas_scale;
             }
@@ -131,7 +143,10 @@ impl Event {
                         device_id: _,
                         pressure,
                         stage,
-                    } => Some(Event::TouchPadPressure { pressure: *pressure, stage: *stage }),
+                    } => Some(Event::TouchPadPressure {
+                        pressure: *pressure,
+                        stage: *stage,
+                    }),
                     MouseWheel { delta, .. } => match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, _) => {
                             panic!("What is line delta?")
@@ -159,12 +174,15 @@ impl Event {
                         x_diff: 0.0,
                         y_diff: 0.0,
                     }),
-                    TouchpadMagnify { device_id: _, delta, phase } => {
-                        Some(Event::PinchZoom { delta: *delta, phase: phase.into() })
-                    }
-                    SmartMagnify { device_id: _ } => {
-                        Some(Event::SmartMagnify { x: 0.0, y: 0.0})
-                    }
+                    TouchpadMagnify {
+                        device_id: _,
+                        delta,
+                        phase,
+                    } => Some(Event::PinchZoom {
+                        delta: *delta,
+                        phase: phase.into(),
+                    }),
+                    SmartMagnify { device_id: _ } => Some(Event::SmartMagnify { x: 0.0, y: 0.0 }),
                     HoveredFile(path) => Some(Event::HoveredFile {
                         path: path.to_path_buf(),
                         x: -0.0,
@@ -194,30 +212,28 @@ impl Event {
                         }))
                     }
 
-                    KeyboardInput { event, .. } => {
-                        match event.physical_key {
-                            PhysicalKey::Code(key_code) => {
-                                let state = match event.state {
-                                    winit::event::ElementState::Pressed => KeyState::Pressed,
-                                    winit::event::ElementState::Released => KeyState::Released,
-                                };
+                    KeyboardInput { event, .. } => match event.physical_key {
+                        PhysicalKey::Code(key_code) => {
+                            let state = match event.state {
+                                winit::event::ElementState::Pressed => KeyState::Pressed,
+                                winit::event::ElementState::Released => KeyState::Released,
+                            };
 
-                                let key_code = KeyCode::map_winit_vk_to_keycode(key_code)?;
+                            let key_code = KeyCode::map_winit_vk_to_keycode(key_code)?;
 
-                                Some(Event::KeyEvent {
-                                    input: crate::keyboard::KeyboardInput {
-                                        state,
-                                        key_code,
-                                        modifiers,
-                                    },
-                                })
-                            }
-                            PhysicalKey::Unidentified(_) => {
-                                println!("Unidentified key: {:?}", event);
-                                None
-                            }
+                            Some(Event::KeyEvent {
+                                input: crate::keyboard::KeyboardInput {
+                                    state,
+                                    key_code,
+                                    modifiers,
+                                },
+                            })
                         }
-                    }
+                        PhysicalKey::Unidentified(_) => {
+                            println!("Unidentified key: {:?}", event);
+                            None
+                        }
+                    },
                     _ => None,
                 }
             }

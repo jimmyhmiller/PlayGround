@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::Write, str::from_utf8,
+    io::Write,
+    str::from_utf8,
 };
 
 use framework::{CursorIcon, Position, Size, WidgetMeta};
@@ -14,7 +15,7 @@ use crate::{
     event::Event,
     keyboard::{KeyCode, KeyboardInput},
     native::open_file_dialog,
-    wasm_messenger::{SaveState, OutMessage},
+    wasm_messenger::{OutMessage, SaveState},
     widget::Widget,
     widget2::{Ephemeral, TextPane, WasmWidget, Widget as _},
 };
@@ -109,7 +110,6 @@ impl Editor {
                     }
                 }
                 Event::PinchZoom { delta, phase: _ } => {
-
                     // TODO: This isn't perfect, but it is passable
 
                     let screen_x = self.context.mouse_position.x;
@@ -120,17 +120,22 @@ impl Editor {
                     let offset_y = -(screen_y * scale_change);
 
                     let new_scale = self.canvas_scale + delta as f32;
-                    let x_with_new_scale = (self.context.raw_mouse_position.x - self.canvas_scroll_offset.x) / new_scale;
-                    let y_with_new_scale = (self.context.raw_mouse_position.y - self.canvas_scroll_offset.y) / new_scale;
-
+                    let x_with_new_scale = (self.context.raw_mouse_position.x
+                        - self.canvas_scroll_offset.x)
+                        / new_scale;
+                    let y_with_new_scale = (self.context.raw_mouse_position.y
+                        - self.canvas_scroll_offset.y)
+                        / new_scale;
 
                     self.canvas_scroll_offset.x -= offset_x;
                     self.canvas_scroll_offset.y -= offset_y;
 
                     self.canvas_scale += delta as f32;
                     self.canvas_scale = self.canvas_scale.max(0.1).min(3.0);
-                    self.context.mouse_position = Position { x: x_with_new_scale, y: y_with_new_scale };
-
+                    self.context.mouse_position = Position {
+                        x: x_with_new_scale,
+                        y: y_with_new_scale,
+                    };
                 }
                 Event::LeftMouseDown { .. } => {
                     self.context.left_mouse_down = true;
@@ -344,7 +349,6 @@ impl Editor {
                             modifiers,
                         },
                 } => {
-
                     if modifiers.cmd && key_code == KeyCode::Key0 {
                         self.canvas_scale = 1.0;
                         self.canvas_scroll_offset = Position { x: 0.0, y: 0.0 };
@@ -414,7 +418,6 @@ impl Editor {
 
                     let (sender, receiver) = channel::<OutMessage>(100000);
 
-
                     let widget_id = self.widget_store.add_widget(Widget {
                         data: Box::new(Ephemeral::wrap(Box::new(WasmWidget {
                             draw_commands: vec![],
@@ -438,10 +441,13 @@ impl Editor {
                             value_senders: HashMap::new(),
                         }))),
                     });
-                    self.wasm_messenger.notify_external_sender(wasm_id, external_id, widget_id, sender)
+                    self.wasm_messenger.notify_external_sender(
+                        wasm_id,
+                        external_id,
+                        widget_id,
+                        sender,
+                    )
                 }
-
-               
 
                 // This works. But I might want to do an event on widgets changed instead
                 Event::ValueNeeded(name, widget_id) => match name.as_str() {
@@ -449,12 +455,20 @@ impl Editor {
                         let widget_positions: Vec<WidgetMeta> = self
                             .widget_store
                             .iter()
-                            .map(|w| WidgetMeta::new(w.position(), w.size(), w.scale(), w.id(), w.typetag_name().to_string()))
+                            .map(|w| {
+                                WidgetMeta::new(
+                                    w.position(),
+                                    w.size(),
+                                    w.scale(),
+                                    w.id(),
+                                    w.typetag_name().to_string(),
+                                )
+                            })
                             .collect();
                         let widget_positions = serde_json::to_string(&widget_positions).unwrap();
                         if let Some(widget) = self.widget_store.get_mut(widget_id) {
                             if let Some(widget) = widget.as_wasm_widget_mut() {
-                                widget.send_value(name,  widget_positions.as_bytes().to_vec());
+                                widget.send_value(name, widget_positions.as_bytes().to_vec());
                                 dirty_widgets.insert((widget.id(), "value needed".to_string()));
                             }
                         }
@@ -471,29 +485,28 @@ impl Editor {
                     }
                 },
 
-                Event::ProvideValue(name, value) => {
-                    match name.as_str() {
-                        "widgets" => {
-                            let widget_positions : Vec<WidgetMeta> = serde_json::from_str(from_utf8(&value).unwrap()).unwrap();
-                            for meta in widget_positions {
-                                if let Some(widget) = self.widget_store.get_mut(meta.id) {
-                                    widget.on_move(meta.position.x, meta.position.y);
-                                    widget.on_size_change(meta.size.width, meta.size.height);
-                                    widget.set_scale(meta.scale);
-                                    dirty_widgets.insert((widget.id(), "provide value".to_string()));
-                                }
+                Event::ProvideValue(name, value) => match name.as_str() {
+                    "widgets" => {
+                        let widget_positions: Vec<WidgetMeta> =
+                            serde_json::from_str(from_utf8(&value).unwrap()).unwrap();
+                        for meta in widget_positions {
+                            if let Some(widget) = self.widget_store.get_mut(meta.id) {
+                                widget.on_move(meta.position.x, meta.position.y);
+                                widget.on_size_change(meta.size.width, meta.size.height);
+                                widget.set_scale(meta.scale);
+                                dirty_widgets.insert((widget.id(), "provide value".to_string()));
                             }
                         }
-                        _ => {
-                            self.values.insert(name, value);
-                        }
                     }
-                }
+                    _ => {
+                        self.values.insert(name, value);
+                    }
+                },
 
                 Event::SmartMagnify { x: _, y: _ } => {
                     for widget in self.widget_store.iter_mut() {
                         if widget.mouse_over(&self.context.mouse_position) {
-                           self.canvas_scroll_offset.x = -widget.position().x;
+                            self.canvas_scroll_offset.x = -widget.position().x;
                             self.canvas_scroll_offset.y = -widget.position().y;
                             // TODO: Need to set the scale
                         }
