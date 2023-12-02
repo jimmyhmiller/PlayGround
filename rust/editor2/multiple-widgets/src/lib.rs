@@ -1,4 +1,7 @@
-use std::{collections::HashMap, cmp::{max, min}};
+use std::{
+    cmp::{max, min},
+    collections::HashMap,
+};
 
 use framework::{
     app,
@@ -168,7 +171,6 @@ fn layout_elements(max_width: f32, elements: Vec<Size>) -> Vec<WidgetData> {
 }
 
 fn layout_elements2(max_width: f32, elements: &Vec<&WidgetMeta>) -> Vec<WidgetMeta> {
-
     if elements.len() == 0 {
         return Vec::new();
     }
@@ -202,8 +204,6 @@ fn layout_elements2(max_width: f32, elements: &Vec<&WidgetMeta>) -> Vec<WidgetMe
 
         x += x_margin;
 
-
-
         let mut y = placed_elements
             .iter()
             .filter(|w| {
@@ -216,7 +216,7 @@ fn layout_elements2(max_width: f32, elements: &Vec<&WidgetMeta>) -> Vec<WidgetMe
                 let a2 = a2 as i32;
                 let b1 = b1 as i32;
                 let b2 = b2 as i32;
-        
+
                 max(a2, b2) - min(a1, b1) < (a2 - a1) + (b2 - b1)
             })
             .map(|w| w.position.y as u32 + w.size.height as u32)
@@ -225,7 +225,6 @@ fn layout_elements2(max_width: f32, elements: &Vec<&WidgetMeta>) -> Vec<WidgetMe
             + y_margin;
 
         y = y.max(starting_data.position.y);
-
 
         let widget_data = WidgetMeta {
             position: Position { x, y },

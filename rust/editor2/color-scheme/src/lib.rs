@@ -68,10 +68,7 @@ impl App for ColorScheme {
                         if self.clicked {
                             self.color_mapping.insert(index, color.to_string());
                             let data = serde_json::to_string(&self.color_mapping).unwrap();
-                            self.send_event(
-                                "color_mapping_changed",
-                                data.clone(),
-                            );
+                            self.send_event("color_mapping_changed", data.clone());
                             self.provide_value("color_mappings", data.as_bytes())
                         }
                         canvas.set_color(&Color::parse_hex("#ffffff"));

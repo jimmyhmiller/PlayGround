@@ -81,7 +81,6 @@ impl Widget {
     }
 
     pub fn init(&mut self, wasm_messenger: &mut WasmMessenger) {
-
         if let Some(widget) = self.as_wasm_widget_mut() {
             let (new_wasm_id, receiver) = wasm_messenger.new_instance(&widget.path, None);
             widget.sender = Some(wasm_messenger.get_sender(new_wasm_id));
@@ -217,19 +216,20 @@ impl WidgetStore {
                 dirty_widgets.insert(widget.id());
             }
         }
-        let mut images_to_insert: Vec<(usize, Image)>  = vec![];
+        let mut images_to_insert: Vec<(usize, Image)> = vec![];
         for widget in self.widgets.iter_mut() {
             if !dirty_widgets.contains(&widget.id()) {
                 continue;
             }
             let image_info = canvas.image_info();
-            let image_info = image_info.with_dimensions((widget.size().width as i32, widget.size().height as i32));
+            let image_info = image_info
+                .with_dimensions((widget.size().width as i32, widget.size().height as i32));
 
             if let Some(mut surface) = canvas.new_surface(&image_info, None) {
                 let canvas = surface.canvas();
 
                 let before_count = canvas.save();
-                canvas.translate((0,0));
+                canvas.translate((0, 0));
 
                 // TODO: Still broken because of dirty checking
                 // but we are drawing
@@ -260,7 +260,6 @@ impl WidgetStore {
             if let Some(widget) = self.get(*id) {
                 canvas.draw_image(image, (widget.position().x, widget.position().y), None);
             }
-
         }
     }
 

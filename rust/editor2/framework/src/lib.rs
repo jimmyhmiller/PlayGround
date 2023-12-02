@@ -464,7 +464,6 @@ pub struct Widget {
     pub app_index: usize,
 }
 
-
 impl Deref for Widget {
     type Target = Box<dyn App>;
 

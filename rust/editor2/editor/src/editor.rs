@@ -198,8 +198,6 @@ impl Editor {
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
 
-
-       
         let widgets: Vec<Widget> = contents
             .split(';')
             .map(|s| s.trim())
@@ -263,7 +261,6 @@ impl Editor {
         self.wasm_messenger.tick();
         self.fps_counter.add_time("tick", time.elapsed());
 
-
         if let Some(receiver) = &self.external_receiver {
             for event in receiver.try_iter() {
                 self.events.push_current_frame(event);
@@ -279,8 +276,6 @@ impl Editor {
             self.should_redraw = true;
         }
 
-        
-
         let time = Instant::now();
         self.handle_events(events);
         self.fps_counter.add_time("events", time.elapsed());
@@ -294,7 +289,6 @@ impl Editor {
                     if widget.draw_commands.is_empty() {
                         widget.update().unwrap();
                     }
-
                 }
             }
         }
@@ -314,7 +308,7 @@ impl Editor {
         if self.widget_store.iter().any(|x| x.dirty()) {
             self.should_redraw = true;
         }
-        
+
         !events_empty || pending_count > 0
     }
 
@@ -528,7 +522,11 @@ impl Editor {
 
     // TODO: Do I need this indirection?
     pub fn respond_to_event(&mut self, mut event: Event) {
-        event.patch_mouse_event(&self.context.mouse_position, &self.canvas_scroll_offset, self.canvas_scale);
+        event.patch_mouse_event(
+            &self.context.mouse_position,
+            &self.canvas_scroll_offset,
+            self.canvas_scale,
+        );
         match event {
             Event::Noop => {}
             Event::MouseMove { x, y, .. } => {
@@ -585,7 +583,8 @@ impl Editor {
         let mut result = String::new();
         for widget in self.widget_store.iter() {
             // TODO: Change this
-            if widget.data.typetag_name() == "Ephemeral" || widget.data.typetag_name() == "Deleted" {
+            if widget.data.typetag_name() == "Ephemeral" || widget.data.typetag_name() == "Deleted"
+            {
                 continue;
             }
             let widget_serialized = &format!(

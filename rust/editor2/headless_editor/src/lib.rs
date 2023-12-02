@@ -1392,7 +1392,9 @@ fn get_indent(last_line: &String) -> String {
     indent
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub struct SimpleCursor {
     line: usize,
     column: usize,
