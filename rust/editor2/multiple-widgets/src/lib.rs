@@ -293,7 +293,6 @@ impl App for MultipleWidgets {
             "widgets",
             serde_json::to_string(&new_layout).unwrap().as_bytes(),
         );
-        println!("index {}", self.index);
     }
 
     fn on_key(&mut self, input: KeyboardInput) {

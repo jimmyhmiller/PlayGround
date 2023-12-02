@@ -105,7 +105,6 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
         // TODO: Deal with margin properly
 
         if self.offset.y > scroll_with_last_line_visible {
-            println!("{} {} {}", self.offset.y, scroll_with_last_line_visible, y);
             self.offset.y = scroll_with_last_line_visible;
         }
 
@@ -138,6 +137,10 @@ struct TextWidget {
     #[serde(skip)]
     transaction_pane: Option<Widget>,
     visible_range: (usize, usize),
+    #[serde(default)]
+    excerpt_panes: Vec<Widget>,
+    #[serde(default)]
+    alive: bool
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -249,10 +252,13 @@ impl App for TextWidget {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
+
     fn start(&mut self) {
-        self.subscribe("tokens_with_version");
-        self.subscribe("color_mapping_changed");
-        self.subscribe("diagnostics");
+        if self.alive {
+            self.subscribe("tokens_with_version");
+            self.subscribe("color_mapping_changed");
+            self.subscribe("diagnostics");
+        }
     }
 
     fn get_initial_state(&self) -> String {
@@ -299,23 +305,8 @@ impl App for TextWidget {
         canvas.clip_rect(bounding_rect.with_inset((20.0, 20.0)));
 
         let cursor = &self.text_pane.cursor;
-        // let text_buffer = &self.text_pane.text_buffer;
 
         canvas.set_color(&foreground);
-        // let length_output = &format!(
-        //     "({}, {}) length: {}",
-        //     cursor.line(),
-        //     cursor.column(),
-        //     text_buffer.line_length(cursor.line())
-        // );
-
-        // // canvas.draw_str(&format!("{:?}", self.text_pane.cursor.selection()), 700.0, 700.0);
-
-        // canvas.draw_str(
-        //     length_output,
-        //     self.widget_data.size.width - length_output.len() as f32 * 18.0,
-        //     self.widget_data.size.height - 40.0,
-        // );
 
         if self.visible_range == (0,0) {
             if let Some(file_and_folder) = get_last_three_segments(&self.file_path) {
@@ -514,8 +505,6 @@ impl App for TextWidget {
 
     fn on_event(&mut self, kind: String, event: String) {
         if kind == "tokens_with_version" {
-
-
             // Serializing all here is very slow
             let json_value = serde_json::from_str::<serde_json::Value>(&event).unwrap();
             if json_value.get("path") != Some(&json!(self.file_path)) {
@@ -606,6 +595,8 @@ impl TextWidget {
             },
             transaction_pane: None,
             visible_range: (0, 0),
+            alive: true,
+            excerpt_panes: vec![],
         }
     }
 
@@ -615,11 +606,20 @@ impl TextWidget {
         }
 
         if input.modifiers.cmd && input.modifiers.option && matches!(input.key_code, KeyCode::C) {
-            if self.visible_range == (0,0) {
-                self.visible_range = (9, 18);
-            } else {
-                self.visible_range = (0, 0);
+
+            if let Some(((line_start, _), (line_end, _))) = self.text_pane.cursor.selection() {
+                let mut data = self.widget_data.clone();
+                data.position.x += data.size.width + 50.0;
+                let mut new_excerpt = self.clone();
+                new_excerpt.alive = false;
+                new_excerpt.visible_range = (line_start, line_end + 1);
+                new_excerpt.widget_data = data.clone();
+                new_excerpt.text_pane.offset = Position { x: 0.0, y: 0.0 };
+                new_excerpt.text_pane.cursor.set_selection(None);
+                let widget = self.create_widget(Box::new(new_excerpt), data);
+                self.excerpt_panes.push(widget);
             }
+           
             return;
         }
 
@@ -678,6 +678,8 @@ impl TextWidget {
                     },
                     transaction_pane: None,
                     visible_range: (0, 0),
+                    alive: false,
+                    excerpt_panes: vec![],
                 }),
                 data,
             ));
