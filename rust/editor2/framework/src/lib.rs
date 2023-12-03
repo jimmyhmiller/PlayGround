@@ -483,11 +483,34 @@ pub trait AppExtensions {
     fn start_process(&mut self, process: String) -> i32 {
         unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
     }
+    
+    fn get_external_id(&self) -> usize {
+        unsafe {
+            CURRENT_EXTERNAL_ID
+        }
+    }
+
+    fn create_widget_ref(&mut self, external_id: u32, data: WidgetData) -> Widget {
+        unsafe {
+            EXTERNAL_ID_TO_APP.insert(external_id, CURRENT_APP);
+            create_widget(
+                data.position.x,
+                data.position.y,
+                data.size.width,
+                data.size.height,
+                external_id,
+            );
+            Widget {
+                app_index: external_id as usize,
+            }
+        }
+    }
 
     fn create_widget(&mut self, app: Box<dyn App>, data: WidgetData) -> Widget {
         unsafe {
             APPS.push(app);
             let identifer = APPS.len() - 1;
+            EXTERNAL_ID_TO_APP.insert(identifer as u32, identifer);
             create_widget(
                 data.position.x,
                 data.position.y,
@@ -595,20 +618,20 @@ pub trait AppExtensions {
     }
 }
 
+pub static mut EXTERNAL_ID_TO_APP: Lazy<HashMap<u32, usize>> = Lazy::new(HashMap::new);
+
 pub static mut APPS: Lazy<Vec<Box<dyn App>>> = Lazy::new(Vec::new);
 
 pub static mut CURRENT_APP: usize = 0;
+pub static mut CURRENT_EXTERNAL_ID: usize = 0;
 
-pub fn register_app(app: Box<dyn App>) {
-    unsafe {
-        APPS.push(app);
-    }
-}
 
 #[no_mangle]
 pub extern "C" fn set_widget_identifier(identifier: u32) {
     unsafe {
-        CURRENT_APP = identifier as usize;
+        let app = EXTERNAL_ID_TO_APP.get(&identifier).unwrap();
+        CURRENT_APP = *app;
+        CURRENT_EXTERNAL_ID = identifier as usize;
     }
 }
 
@@ -616,6 +639,7 @@ pub extern "C" fn set_widget_identifier(identifier: u32) {
 pub extern "C" fn clear_widget_identifier() {
     unsafe {
         CURRENT_APP = 0;
+        CURRENT_EXTERNAL_ID = 0;
     }
 }
 
@@ -781,6 +805,7 @@ pub mod macros {
         ($app:ident) => {
             use framework::AppExtensions;
             #[no_mangle]
+            #[cfg(feature="main")]
             fn main() {
                 let mut app = $app::init();
                 app.start();

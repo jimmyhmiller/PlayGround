@@ -71,7 +71,7 @@ impl App for EventViewer {
         if self.y_scroll_offset > 0.0 {
             self.y_scroll_offset = 0.0;
         }
-        self.x_scroll_offset += x as f32;
+        self.x_scroll_offset -= x as f32;
         if self.x_scroll_offset > 0.0 {
             self.x_scroll_offset = 0.0;
         }

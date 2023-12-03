@@ -894,6 +894,11 @@ impl Widget for TextPane {
         Ok(())
     }
 
+    fn on_size_change(&mut self, width: f32, height: f32) -> Result<(), Box<dyn Error>> {
+        self.meta.size = Size { width, height };
+        Ok(())
+    }
+
     fn on_scroll(&mut self, x: f64, y: f64) -> Result<(), Box<dyn Error>> {
         self.on_scroll(x, y, self.size().height);
         Ok(())

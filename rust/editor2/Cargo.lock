@@ -583,7 +583,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "code-editor"
+name = "code_editor"
 version = "0.1.0"
 dependencies = [
  "framework",
@@ -2796,6 +2796,16 @@ name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
+
+[[package]]
+name = "symbol-editor"
+version = "0.1.0"
+dependencies = [
+ "code_editor",
+ "framework",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "syn"
