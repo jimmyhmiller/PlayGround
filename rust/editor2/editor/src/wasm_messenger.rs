@@ -428,14 +428,6 @@ impl WasmManager {
             }
             Payload::PartialState(partial_state) => {
                 self.instance.set_state(partial_state.unwrap_or("{}".to_string()).as_bytes()).await?;
-                // let state = self.instance.get_state().await;
-                // if let Some(state) = state {
-                //     let base64_decoded = decode_base64(&state.as_bytes().to_vec())?;
-                //     let state = String::from_utf8(base64_decoded)?;
-                //     let merged_state = merge_json(partial_state, state);
-                //     let encoded_state = encode_base64(&merged_state);
-                //     self.instance.set_state(encoded_state.as_bytes()).await?;
-                // }
                 default_return
             }
             Payload::OnMove(x, y) => {

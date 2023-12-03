@@ -7,7 +7,6 @@ use std::{
     io::Read,
     ops::{Deref, DerefMut},
     path::PathBuf,
-    str::from_utf8,
     time::Instant,
 };
 
@@ -15,7 +14,7 @@ use framework::{KeyboardInput, Position, Size, Value, WidgetMeta};
 use futures::channel::{mpsc::Sender, oneshot};
 use itertools::Itertools;
 use rand::Rng;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use skia_safe::{
     font_style::{Slant, Weight, Width},
     Canvas, Data, Font, FontMgr, FontStyle, Path, Point, RRect, Rect, Typeface,
@@ -335,6 +334,7 @@ impl Widget for WasmWidget {
     }
 
     fn set_state(&mut self, state: String) -> Result<(), Box<dyn Error>> {
+
         let message = self.wrap_payload(Payload::PartialState(Some(state)));
         self.send_message(message)?;
         Ok(())
