@@ -24,7 +24,6 @@ use skia_safe::{
 use crate::{
     color::Color,
     event::Event,
-    util::{decode_base64, encode_base64},
     wasm_messenger::{Commands, DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState},
 };
 
@@ -336,8 +335,6 @@ impl Widget for WasmWidget {
     }
 
     fn set_state(&mut self, state: String) -> Result<(), Box<dyn Error>> {
-        let base64_decoded = decode_base64(&state.as_bytes().to_vec()).unwrap();
-        let state = String::from_utf8(base64_decoded).unwrap();
         let message = self.wrap_payload(Payload::PartialState(Some(state)));
         self.send_message(message)?;
         Ok(())
@@ -517,7 +514,7 @@ impl Widget for WasmWidget {
         match &self.save_state {
             SaveState::Unsaved => "".to_string(),
             SaveState::Empty => "".to_string(),
-            SaveState::Saved(s) => s.clone(),
+            SaveState::Saved(s) => serde_json::to_string(s).unwrap(),
         }
     }
 
@@ -731,31 +728,9 @@ impl WasmWidget {
     }
 }
 
-fn serialize_text<S>(x: &[u8], s: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    s.serialize_str(&encode_base64(from_utf8(x).unwrap()))
-}
-
-fn deserialize_text<'de, D>(d: D) -> Result<Vec<u8>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s = String::deserialize(d)?;
-    let bytes = s.into_bytes();
-    if let Ok(s) = decode_base64(&bytes) {
-        Ok(s)
-    } else {
-        // TODO: Fail?
-        Ok(bytes)
-    }
-}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TextPane {
-    #[serde(serialize_with = "serialize_text")]
-    #[serde(deserialize_with = "deserialize_text")]
     contents: Vec<u8>,
     pub line_height: f32,
     pub offset: Position,

@@ -7,7 +7,6 @@ mod color;
 mod handle_event;
 mod keyboard;
 mod native;
-mod util;
 mod wasm_messenger;
 mod widget;
 mod widget2;

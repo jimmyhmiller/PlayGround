@@ -417,17 +417,6 @@ pub fn merge(state: &mut serde_json::Value, partial_state: &mut serde_json::Valu
     }
 }
 
-pub fn encode_base64(data: &[u8]) -> String {
-    use base64::Engine;
-
-    base64::engine::general_purpose::STANDARD.encode(data)
-}
-
-pub fn decode_base64(data: Vec<u8>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    use base64::Engine;
-    let data = base64::engine::general_purpose::STANDARD.decode(data)?;
-    Ok(data)
-}
 
 pub trait App {
     fn as_any(&self) -> &dyn Any;
@@ -613,7 +602,6 @@ pub trait AppExtensions {
             return None;
         }
         let str = &fetch_string(ptr);
-        // println!("try_get_value: {}", str);
         serde_json::from_str(str).ok()
     }
 }
@@ -731,7 +719,6 @@ pub extern "C" fn on_scroll(x: f64, y: f64) {
 pub extern "C" fn get_state() {
     let app = get_app!();
     let s: String = app.get_state();
-    let s = encode_base64(&s.into_bytes());
     let mut s = s.into_bytes();
     let ptr = s.as_mut_ptr() as usize;
     let len = s.len();
@@ -752,7 +739,7 @@ pub extern "C" fn finish_get_state(ptr: usize, len: usize) {
 pub extern "C" fn set_state(ptr: u32, size: u32) {
     let app = get_app!();
     let data = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
-    let s = decode_base64(data).map(|v| String::from_utf8(v).unwrap());
+    let s = String::from_utf8(data);
     match s {
         Ok(s) => {
             // Not quite the same logic here

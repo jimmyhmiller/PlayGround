@@ -21,7 +21,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
-use crate::{keyboard::KeyboardInput, util::encode_base64};
+use crate::keyboard::KeyboardInput;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct PointerLengthString {
@@ -76,12 +76,14 @@ pub struct OutMessage {
     pub payload: OutPayload,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SaveState {
     Unsaved,
     Empty,
-    Saved(String),
+    Saved(serde_json::Value),
 }
+
+
 
 pub struct WasmMessenger {
     local_pool: futures::executor::LocalPool,
@@ -410,7 +412,9 @@ impl WasmManager {
                         }
                         Ok(OutMessage {
                             message_id: message.message_id,
-                            payload: OutPayload::Saved(SaveState::Saved(state)),
+                            payload: OutPayload::Saved(SaveState::Saved(
+                                serde_json::from_str(&state)?
+                            )),
                         })
                     }
                     None => {
@@ -423,8 +427,7 @@ impl WasmManager {
                 }
             }
             Payload::PartialState(partial_state) => {
-                let encoded_state = encode_base64(&partial_state.unwrap_or("{}".to_string()));
-                self.instance.set_state(encoded_state.as_bytes()).await?;
+                self.instance.set_state(partial_state.unwrap_or("{}".to_string()).as_bytes()).await?;
                 // let state = self.instance.get_state().await;
                 // if let Some(state) = state {
                 //     let base64_decoded = decode_base64(&state.as_bytes().to_vec())?;
