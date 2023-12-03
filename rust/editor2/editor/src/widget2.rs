@@ -334,7 +334,6 @@ impl Widget for WasmWidget {
     }
 
     fn set_state(&mut self, state: String) -> Result<(), Box<dyn Error>> {
-
         let message = self.wrap_payload(Payload::PartialState(Some(state)));
         self.send_message(message)?;
         Ok(())
@@ -727,7 +726,6 @@ impl WasmWidget {
         self.wasm_non_draw_commands.clear();
     }
 }
-
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TextPane {
