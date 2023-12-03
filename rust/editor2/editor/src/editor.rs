@@ -25,7 +25,8 @@ use nonblock::NonBlockingReader;
 use notify::{FsEventWatcher, RecursiveMode};
 
 use notify_debouncer_mini::{new_debouncer, Debouncer};
-use ron::ser::PrettyConfig;
+
+use serde::{Serialize, Deserialize};
 use skia_safe::Canvas;
 use winit::{event_loop::EventLoopProxy, window::CursorIcon};
 
@@ -40,6 +41,13 @@ pub struct Context {
 
 pub enum PerFrame {
     ProcessOutput { process_id: usize },
+}
+
+
+#[derive(Serialize, Deserialize)]
+struct SavedOutput {
+    widgets: serde_json::Value,
+    values: HashMap<String, Value>,
 }
 
 pub struct Process {
@@ -198,13 +206,10 @@ impl Editor {
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
 
-        let widgets: Vec<Widget> = contents
-            .split(';')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                if let Ok(mut widget) = ron::de::from_str::<Widget>(s) {
-                    widget.init(&mut self.wasm_messenger);
+        let widgets : Vec<Widget> = serde_json::from_str(&contents).unwrap();
+
+        let widgets : Vec<Widget> = widgets.into_iter().map(|mut widget| {
+            widget.init(&mut self.wasm_messenger);
                     if let Some(watcher) = &mut self.debounce_watcher {
                         let watcher = watcher.watcher();
                         let files_to_watch = widget.files_to_watch();
@@ -214,13 +219,9 @@ impl Editor {
                                 .unwrap();
                         }
                     }
-                    widget
-                } else {
-                    println!("Failed to parse: {}", s);
-                    panic!("Failed to parse");
-                }
-            })
-            .collect();
+            widget
+        }).collect();
+
         for mut widget in widgets {
             let id = self.widget_store.next_id();
             widget.set_id(id);
@@ -385,7 +386,7 @@ impl Editor {
 
     pub fn new() -> Self {
         let mut widget_config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        widget_config_path.push("widgets.ron");
+        widget_config_path.push("widgets.json");
         let widget_config_path = widget_config_path.to_str().unwrap();
 
         Self {
@@ -578,21 +579,12 @@ impl Editor {
         for widget in self.widget_store.iter_mut() {
             widget.save(&mut self.wasm_messenger);
         }
-        let mut result = String::new();
-        for widget in self.widget_store.iter() {
-            // TODO: Change this
-            if widget.data.typetag_name() == "Ephemeral" || widget.data.typetag_name() == "Deleted"
-            {
-                continue;
-            }
-            let widget_serialized = &format!(
-                "{};\n",
-                ron::ser::to_string_pretty(widget, PrettyConfig::default()).unwrap()
-            );
-            // println!("widget_serialized: {}", widget_serialized);
-            result.push_str(widget_serialized);
-        }
-        let mut file = File::create(&self.widget_config_path).unwrap();
+        let saved : SavedOutput = SavedOutput {
+            widgets: serde_json::to_value(&self.widget_store.iter().collect_vec()).unwrap(),
+            values: self.values.clone(),
+        };
+        let result = serde_json::ser::to_string_pretty(&saved).unwrap();
+        let mut file = File::create("widgets.json").unwrap();
         file.write_all(result.as_bytes()).unwrap();
     }
 
