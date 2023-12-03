@@ -3,7 +3,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use framework::Position;
+use framework::{Position, Value};
 use serde::{Deserialize, Serialize};
 use skia_safe::{Canvas, Image};
 
@@ -80,14 +80,14 @@ impl Widget {
         x >= x_min && x <= x_max && y >= y_min && y <= y_max
     }
 
-    pub fn init(&mut self, wasm_messenger: &mut WasmMessenger) {
+    pub fn init(&mut self, wasm_messenger: &mut WasmMessenger, values: HashMap<String, Value>) {
         if let Some(widget) = self.as_wasm_widget_mut() {
-            let (new_wasm_id, receiver) = wasm_messenger.new_instance(&widget.path, None);
+            let (new_wasm_id, receiver) = wasm_messenger.new_instance(&widget.path, None, values);
             widget.sender = Some(wasm_messenger.get_sender(new_wasm_id));
             widget.receiver = Some(receiver);
             match &widget.save_state {
-                SaveState::Unsaved => todo!(),
-                SaveState::Empty => todo!(),
+                SaveState::Unsaved => println!("Unsaved!!!"),
+                SaveState::Empty => println!("Empty"),
                 SaveState::Saved(state) => {
                     widget
                         .set_state(serde_json::to_string(state).unwrap())

@@ -218,7 +218,7 @@ impl Editor {
         let widgets: Vec<Widget> = widgets
             .into_iter()
             .map(|mut widget| {
-                widget.init(&mut self.wasm_messenger);
+                widget.init(&mut self.wasm_messenger, self.values.clone());
                 if let Some(watcher) = &mut self.debounce_watcher {
                     let watcher = watcher.watcher();
                     let files_to_watch = widget.files_to_watch();
@@ -590,7 +590,13 @@ impl Editor {
             widget.save(&mut self.wasm_messenger);
         }
         let saved: SavedOutput = SavedOutput {
-            widgets: serde_json::to_value(self.widget_store.iter().collect_vec()).unwrap(),
+            widgets: serde_json::to_value(
+                self.widget_store
+                    .iter()
+                    .filter(|x| x.typetag_name() != "Ephemeral" && x.typetag_name() != "Deleted")
+                    .collect_vec(),
+            )
+            .unwrap(),
             values: self.values.clone(),
         };
         let result = serde_json::ser::to_string_pretty(&saved).unwrap();

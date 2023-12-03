@@ -139,6 +139,7 @@ impl WasmMessenger {
         &mut self,
         wasm_path: &str,
         partial_state: Option<String>,
+        values: HashMap<String, Value>,
     ) -> (WasmId, Receiver<OutMessage>) {
         let id = self.next_wasm_id();
 
@@ -161,6 +162,7 @@ impl WasmMessenger {
             wasm_path: String,
             receiver: Receiver<Message>,
             sender: Sender<OutMessage>,
+            values: HashMap<String, Value>,
         ) {
             let mut instance = WasmManager::new(
                 engine.clone(),
@@ -168,6 +170,7 @@ impl WasmMessenger {
                 wasm_path.to_string(),
                 receiver,
                 sender,
+                values,
             )
             .await;
             instance.init().await;
@@ -180,6 +183,7 @@ impl WasmMessenger {
                 wasm_path.to_string(),
                 receiver,
                 out_sender,
+                values,
             ))
             .unwrap();
 
@@ -247,10 +251,12 @@ impl WasmManager {
         wasm_path: String,
         receiver: Receiver<Message>,
         sender: Sender<OutMessage>,
+        values: HashMap<String, Value>,
     ) -> Self {
-        let instance = WasmInstance::new(engine.clone(), &wasm_path, sender.clone(), wasm_id)
-            .await
-            .unwrap();
+        let instance =
+            WasmInstance::new(engine.clone(), &wasm_path, sender.clone(), wasm_id, values)
+                .await
+                .unwrap();
 
         Self {
             id: wasm_id,
@@ -475,7 +481,12 @@ struct State {
 }
 
 impl State {
-    fn new(wasi: wasmtime_wasi::WasiCtx, sender: Sender<OutMessage>, wasm_id: u64) -> Self {
+    fn new(
+        wasi: wasmtime_wasi::WasiCtx,
+        sender: Sender<OutMessage>,
+        wasm_id: u64,
+        values: HashMap<String, Value>,
+    ) -> Self {
         Self {
             wasi,
             draw_commands: Vec::new(),
@@ -485,7 +496,7 @@ impl State {
             position: Position { x: 0.0, y: 0.0 },
             sender,
             wasm_id,
-            values: HashMap::new(),
+            values,
             receivers: HashMap::new(),
             external_id: 0,
         }
@@ -574,6 +585,7 @@ impl WasmInstance {
         wasm_path: &str,
         sender: Sender<OutMessage>,
         wasm_id: u64,
+        values: HashMap<String, Value>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = Dir::from_std_file(
             std::fs::File::open(Path::new(wasm_path).parent().unwrap()).unwrap(),
@@ -607,7 +619,7 @@ impl WasmInstance {
         wasmtime_wasi::add_to_linker(&mut linker, |s| &mut s.wasi)?;
         Self::setup_host_functions(&mut linker)?;
 
-        let mut store = Store::new(&engine, State::new(wasi, sender, wasm_id));
+        let mut store = Store::new(&engine, State::new(wasi, sender, wasm_id, values));
         let module = Module::from_file(&engine, wasm_path)?;
 
         let instance = linker.instantiate_async(&mut store, &module).await?;

@@ -264,6 +264,10 @@ impl App for CodeEditor {
             self.subscribe("color_mapping_changed");
             self.subscribe("diagnostics");
         }
+
+        if let Some(color_mappings) = self.try_get_value::<HashMap<usize, String>>("color_mappings") {
+            self.text_pane.color_mapping = color_mappings;
+        }
     }
 
     fn get_initial_state(&self) -> String {
@@ -400,7 +404,7 @@ impl App for CodeEditor {
                 let foreground = Color::parse_hex(
                     token
                         .and_then(|token| self.text_pane.color_mapping.get(&token.kind))
-                        .unwrap_or(&"#aa9941".to_string()),
+                        .unwrap_or(&"#ffffff".to_string()),
                 );
                 canvas.set_color(&foreground);
                 let text = from_utf8(text).unwrap().to_string();

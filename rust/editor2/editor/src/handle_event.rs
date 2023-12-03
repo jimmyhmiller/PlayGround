@@ -34,9 +34,11 @@ impl Editor {
             match event {
                 Event::DroppedFile { path, x, y } => {
                     if path.extension().unwrap() == "wasm" {
-                        let (wasm_id, receiver) = self
-                            .wasm_messenger
-                            .new_instance(path.to_str().unwrap(), None);
+                        let (wasm_id, receiver) = self.wasm_messenger.new_instance(
+                            path.to_str().unwrap(),
+                            None,
+                            self.values.clone(),
+                        );
                         let next_id = self.widget_store.next_id();
                         self.widget_store.add_widget(Widget {
                             data: Box::new(WasmWidget {
@@ -112,6 +114,17 @@ impl Editor {
                 Event::PinchZoom { delta, phase: _ } => {
                     // TODO: This isn't perfect, but it is passable
 
+                    let min_scale = 0.1;
+                    let max_scale = 3.0;
+
+                    if self.canvas_scale == max_scale && delta > 0.0 {
+                        continue;
+                    }
+
+                    if self.canvas_scale == min_scale && delta < 0.0 {
+                        continue;
+                    }
+
                     let screen_x = self.context.mouse_position.x;
                     let screen_y = self.context.mouse_position.y;
 
@@ -131,7 +144,7 @@ impl Editor {
                     self.canvas_scroll_offset.y -= offset_y;
 
                     self.canvas_scale += delta as f32;
-                    self.canvas_scale = self.canvas_scale.max(0.1).min(3.0);
+                    self.canvas_scale = self.canvas_scale.max(min_scale).min(max_scale);
                     self.context.mouse_position = Position {
                         x: x_with_new_scale,
                         y: y_with_new_scale,
@@ -360,9 +373,11 @@ impl Editor {
                             let path = path.replace("file://", "");
                             let code_editor = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/target/wasm32-wasi/debug/code_editor.wasm";
                             let path_json = json!({ "file_path": path }).to_string();
-                            let (wasm_id, receiver) = self
-                                .wasm_messenger
-                                .new_instance(code_editor, Some(path_json));
+                            let (wasm_id, receiver) = self.wasm_messenger.new_instance(
+                                code_editor,
+                                Some(path_json),
+                                self.values.clone(),
+                            );
                             let next_id = self.widget_store.next_id();
                             let widget_id = self.widget_store.add_widget(Widget {
                                 // TODO: Automatically find an open space

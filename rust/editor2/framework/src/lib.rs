@@ -473,7 +473,7 @@ pub trait AppExtensions {
         unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
     }
     
-    fn get_external_id(&self) -> usize {
+    fn get_external_id(&self) -> Option<usize> {
         unsafe {
             CURRENT_EXTERNAL_ID
         }
@@ -611,7 +611,7 @@ pub static mut EXTERNAL_ID_TO_APP: Lazy<HashMap<u32, usize>> = Lazy::new(HashMap
 pub static mut APPS: Lazy<Vec<Box<dyn App>>> = Lazy::new(Vec::new);
 
 pub static mut CURRENT_APP: usize = 0;
-pub static mut CURRENT_EXTERNAL_ID: usize = 0;
+pub static mut CURRENT_EXTERNAL_ID: Option<usize> = None;
 
 
 #[no_mangle]
@@ -619,7 +619,7 @@ pub extern "C" fn set_widget_identifier(identifier: u32) {
     unsafe {
         let app = EXTERNAL_ID_TO_APP.get(&identifier).unwrap();
         CURRENT_APP = *app;
-        CURRENT_EXTERNAL_ID = identifier as usize;
+        CURRENT_EXTERNAL_ID = Some(identifier as usize);
     }
 }
 
@@ -627,7 +627,7 @@ pub extern "C" fn set_widget_identifier(identifier: u32) {
 pub extern "C" fn clear_widget_identifier() {
     unsafe {
         CURRENT_APP = 0;
-        CURRENT_EXTERNAL_ID = 0;
+        CURRENT_EXTERNAL_ID = None;
     }
 }
 
