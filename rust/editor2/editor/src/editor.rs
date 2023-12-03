@@ -590,7 +590,7 @@ impl Editor {
             widget.save(&mut self.wasm_messenger);
         }
         let saved: SavedOutput = SavedOutput {
-            widgets: serde_json::to_value(&self.widget_store.iter().collect_vec()).unwrap(),
+            widgets: serde_json::to_value(self.widget_store.iter().collect_vec()).unwrap(),
             values: self.values.clone(),
         };
         let result = serde_json::ser::to_string_pretty(&saved).unwrap();
