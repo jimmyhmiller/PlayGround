@@ -83,8 +83,6 @@ pub enum SaveState {
     Saved(serde_json::Value),
 }
 
-
-
 pub struct WasmMessenger {
     local_pool: futures::executor::LocalPool,
     local_spawner: LocalSpawner,
@@ -412,9 +410,9 @@ impl WasmManager {
                         }
                         Ok(OutMessage {
                             message_id: message.message_id,
-                            payload: OutPayload::Saved(SaveState::Saved(
-                                serde_json::from_str(&state)?
-                            )),
+                            payload: OutPayload::Saved(SaveState::Saved(serde_json::from_str(
+                                &state,
+                            )?)),
                         })
                     }
                     None => {
@@ -427,7 +425,9 @@ impl WasmManager {
                 }
             }
             Payload::PartialState(partial_state) => {
-                self.instance.set_state(partial_state.unwrap_or("{}".to_string()).as_bytes()).await?;
+                self.instance
+                    .set_state(partial_state.unwrap_or("{}".to_string()).as_bytes())
+                    .await?;
                 default_return
             }
             Payload::OnMove(x, y) => {

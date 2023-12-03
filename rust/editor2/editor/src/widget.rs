@@ -89,7 +89,9 @@ impl Widget {
                 SaveState::Unsaved => todo!(),
                 SaveState::Empty => todo!(),
                 SaveState::Saved(state) => {
-                    widget.set_state(serde_json::to_string(state).unwrap()).unwrap();
+                    widget
+                        .set_state(serde_json::to_string(state).unwrap())
+                        .unwrap();
                 }
             }
         }

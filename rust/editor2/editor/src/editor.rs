@@ -26,7 +26,7 @@ use notify::{FsEventWatcher, RecursiveMode};
 
 use notify_debouncer_mini::{new_debouncer, Debouncer};
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use skia_safe::Canvas;
 use winit::{event_loop::EventLoopProxy, window::CursorIcon};
 
@@ -42,7 +42,6 @@ pub struct Context {
 pub enum PerFrame {
     ProcessOutput { process_id: usize },
 }
-
 
 #[derive(Serialize, Deserialize)]
 struct SavedOutput {
@@ -212,23 +211,26 @@ impl Editor {
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
 
-        let input : SavedInput = serde_json::from_str(&contents).unwrap();
+        let input: SavedInput = serde_json::from_str(&contents).unwrap();
         let widgets = input.widgets;
         self.values = input.values;
 
-        let widgets : Vec<Widget> = widgets.into_iter().map(|mut widget| {
-            widget.init(&mut self.wasm_messenger);
-                    if let Some(watcher) = &mut self.debounce_watcher {
-                        let watcher = watcher.watcher();
-                        let files_to_watch = widget.files_to_watch();
-                        for path in files_to_watch.iter() {
-                            watcher
-                                .watch(Path::new(path), RecursiveMode::NonRecursive)
-                                .unwrap();
-                        }
+        let widgets: Vec<Widget> = widgets
+            .into_iter()
+            .map(|mut widget| {
+                widget.init(&mut self.wasm_messenger);
+                if let Some(watcher) = &mut self.debounce_watcher {
+                    let watcher = watcher.watcher();
+                    let files_to_watch = widget.files_to_watch();
+                    for path in files_to_watch.iter() {
+                        watcher
+                            .watch(Path::new(path), RecursiveMode::NonRecursive)
+                            .unwrap();
                     }
-            widget
-        }).collect();
+                }
+                widget
+            })
+            .collect();
 
         for mut widget in widgets {
             let id = self.widget_store.next_id();
@@ -587,7 +589,7 @@ impl Editor {
         for widget in self.widget_store.iter_mut() {
             widget.save(&mut self.wasm_messenger);
         }
-        let saved : SavedOutput = SavedOutput {
+        let saved: SavedOutput = SavedOutput {
             widgets: serde_json::to_value(&self.widget_store.iter().collect_vec()).unwrap(),
             values: self.values.clone(),
         };
