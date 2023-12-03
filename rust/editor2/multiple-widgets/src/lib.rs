@@ -363,6 +363,7 @@ impl App for MultipleWidgets {
 }
 
 impl MultipleWidgets {
+    #[allow(dead_code)]
     pub fn init() -> Self {
         Self {
             index: 0,

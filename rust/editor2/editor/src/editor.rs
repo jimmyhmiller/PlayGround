@@ -50,6 +50,12 @@ struct SavedOutput {
     values: HashMap<String, Value>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct SavedInput {
+    widgets: Vec<Widget>,
+    values: HashMap<String, Value>,
+}
+
 pub struct Process {
     pub process_id: usize,
     pub stdout: NonBlockingReader<ChildStdout>,
@@ -206,7 +212,9 @@ impl Editor {
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
 
-        let widgets : Vec<Widget> = serde_json::from_str(&contents).unwrap();
+        let input : SavedInput = serde_json::from_str(&contents).unwrap();
+        let widgets = input.widgets;
+        self.values = input.values;
 
         let widgets : Vec<Widget> = widgets.into_iter().map(|mut widget| {
             widget.init(&mut self.wasm_messenger);

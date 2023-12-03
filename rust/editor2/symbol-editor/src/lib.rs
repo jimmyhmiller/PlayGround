@@ -23,7 +23,6 @@ impl App for SymbolEditor {
         let external_id = self.get_external_id();
         if external_id == 0 {
             let canvas = Canvas::new();
-            let foreground = Color::parse_hex("#dc9941");
             let background = Color::parse_hex("#dc9941");
             canvas.set_color(&background);
             canvas.draw_rect(0.0, 0.0, self.data.size.width, self.data.size.height);
@@ -143,6 +142,7 @@ impl App for SymbolEditor {
 }
 
 impl SymbolEditor {
+    #[allow(dead_code)]
     fn init() -> Self {
         Self {
             data: Default::default(),
