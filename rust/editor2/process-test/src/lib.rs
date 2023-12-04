@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File},
+    fs::File,
     io::Read,
     str::{from_utf8, FromStr},
 };
@@ -706,23 +706,24 @@ fn get_token_data(message: serde_json::Value) -> Vec<u64> {
 }
 
 fn find_rust_analyzer() -> String {
-    let root = "/Users/jimmyhmiller/.vscode/extensions/";
-    let folder = fs::read_dir(root)
-        .unwrap()
-        .map(|res| res.map(|e| e.path()))
-        .find(|path| {
-            path.as_ref()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .starts_with("rust-lang.rust-analyzer")
-        })
-        .unwrap()
-        .unwrap();
+    // let root = "/Users/jimmyhmiller/.vscode/extensions/";
+    // let folder = fs::read_dir(root)
+    //     .unwrap()
+    //     .map(|res| res.map(|e| e.path()))
+    //     .find(|path| {
+    //         path.as_ref()
+    //             .unwrap()
+    //             .file_name()
+    //             .unwrap()
+    //             .to_str()
+    //             .unwrap()
+    //             .starts_with("rust-lang.rust-analyzer")
+    //     })
+    //     .unwrap()
+    //     .unwrap();
 
-    format!("{}/server/rust-analyzer", folder.to_str().unwrap())
+    // format!("{}/server/rust-analyzer", folder.to_str().unwrap())
+    "/Users/jimmyhmiller/Documents/Code/open-source/rust-analyzer/target/release/rust-analyzer".to_string()
 }
 
 app!(ProcessSpawner);

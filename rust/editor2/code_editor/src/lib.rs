@@ -991,6 +991,7 @@ impl CodeEditor {
             .iter()
             .enumerate()
             .group_by(|(_index, x)| x.transaction_number);
+        
 
         for (transaction_number, group) in &groups {
             let group = group.collect_vec();
