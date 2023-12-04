@@ -1,6 +1,8 @@
+
 use code_editor::CodeEditor;
 use framework::{WidgetData, App, KeyboardInput, Position, Size, app, Canvas, Color, Rect};
-use lsp_types::SymbolInformation;
+use itertools::Itertools;
+use lsp_types::{SymbolInformation, WorkspaceSymbol};
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize)]
@@ -10,7 +12,7 @@ struct SymbolEditor {
     // but right now I don't save those widgets
     #[serde(skip)]
     editors: Vec<CodeEditor>,
-    symbols: Vec<SymbolInformation>,
+    symbols: Vec<WorkspaceSymbol>,
     clicked: bool,
     mouse_location: Option<(f32, f32)>,
 }
@@ -44,31 +46,56 @@ impl App for SymbolEditor {
             canvas.set_color(&foreground);
             canvas.save();
             canvas.translate(20.0, 30.0);
-            for symbol in self.symbols.clone().iter() {
-                canvas.draw_str(&symbol.name, 0.0, 0.0);
-                canvas.save();
-                canvas.translate(0.0, -30.0);
-                if self.mouse_in_bounds(&canvas, 200.0, 30.0) {
-                    println!("bounds: {}", symbol.name);
-                    if self.clicked {
-                        println!("clicked!: {}", symbol.name);
-                        let mut editor = CodeEditor::init();
-                        editor.alive = true;
-                        editor.file_path = symbol.location.uri.path().to_string();
-                        let start_line = symbol.location.range.start.line;
-                        let end_line = symbol.location.range.end.line + 1;
-                        editor.visible_range = (start_line as usize, end_line as usize);
-                        editor.open_file();
-                        editor.start();
-                        let mut data = self.data.clone();
-                        data.position.x = data.position.x + data.size.width + 50.0;
-                        let external_id = self.editors.len() as u32;
-                        self.create_widget_ref(external_id, data);
-                        self.editors.push(editor);
-                    }
-                }
-                canvas.restore();
+            let mut symbols = self.symbols.clone();
+            // symbols.dedup_by(|x, y| y.name == x.name);
+            symbols.sort_by(|x, y| Ord::cmp(&x.container_name,  &y.container_name));
+            let groups = symbols.iter().group_by(|x| &x.container_name);
+
+
+            for (group, symbols) in &groups {
+
                 canvas.translate(0.0, 30.0);
+                if let Some(group) = group {
+    
+                    canvas.draw_str(group, 0.0, 0.0);
+                    canvas.translate(30.0, 30.0);
+                    for symbol in symbols {
+                        canvas.draw_str(&symbol.name, 0.0, 0.0);
+                        canvas.translate(0.0, 30.0);
+                    }
+                    canvas.translate(-30.0, 30.0);
+                } else {
+                    canvas.draw_str("Global", 0.0, 0.0);
+                    // canvas.translate(30.0, 30.0);
+                    // for symbol in symbols {
+                    //     canvas.draw_str(&symbol.name, 0.0, 0.0);
+                    //     canvas.translate(0.0, 30.0);
+                    // }
+                    // canvas.translate(0.0, -30.0);
+                }
+                
+                // canvas.draw_str(&symbol.name, 0.0, 0.0);
+                // canvas.save();
+                // canvas.translate(0.0, -30.0);
+                // if self.mouse_in_bounds(&canvas, 200.0, 30.0) {
+                //     if self.clicked {
+                //         let mut editor = CodeEditor::init();
+                //         editor.alive = true;
+                //         editor.file_path = symbol.location.uri.path().to_string();
+                //         let start_line = symbol.location.range.start.line;
+                //         let end_line = symbol.location.range.end.line + 1;
+                //         editor.visible_range = (start_line as usize, end_line as usize);
+                //         editor.open_file();
+                //         editor.start();
+                //         let mut data = self.data.clone();
+                //         data.position.x = data.position.x + data.size.width + 50.0;
+                //         let external_id = self.editors.len() as u32;
+                //         self.create_widget_ref(external_id, data);
+                //         self.editors.push(editor);
+                //     }
+                // }
+                // canvas.restore();
+                // canvas.translate(0.0, 30.0);
             }
             canvas.restore();
 
@@ -100,7 +127,7 @@ impl App for SymbolEditor {
         }
 
         if kind == "workspace/symbols" {
-            let symbols: Vec<SymbolInformation> = serde_json::from_str(&event).unwrap();
+            let symbols: Vec<WorkspaceSymbol> = serde_json::from_str(&event).unwrap();
             self.symbols = symbols;
         }
     }

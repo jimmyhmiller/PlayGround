@@ -19,10 +19,12 @@ use lsp_types::{
     DidSaveTextDocumentParams, InitializeParams, InitializeResult, InitializedParams,
     MessageActionItemCapabilities, PartialResultParams, Position,
     PublishDiagnosticsClientCapabilities, Range, SemanticTokensParams,
-    ShowDocumentClientCapabilities, ShowMessageRequestClientCapabilities,
-    TextDocumentClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier,
-    TextDocumentItem, Url, VersionedTextDocumentIdentifier, WindowClientCapabilities,
-    WorkDoneProgressParams, WorkspaceFolder, WorkspaceSymbolParams,
+    ShowDocumentClientCapabilities, ShowMessageRequestClientCapabilities, SymbolKind,
+    SymbolKindCapability, TagSupport, TextDocumentClientCapabilities,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem, Url,
+    VersionedTextDocumentIdentifier, WindowClientCapabilities, WorkDoneProgressParams,
+    WorkspaceClientCapabilities, WorkspaceFolder, WorkspaceSymbolClientCapabilities,
+    WorkspaceSymbolParams, WorkspaceSymbolResolveSupportCapability, SymbolTag,
 };
 use serde::{Deserialize, Serialize};
 
@@ -169,7 +171,15 @@ impl ProcessSpawner {
             process_id: Some(self.process_id as u32),
             root_path: Some(self.root_path.to_string()),
             root_uri: Some(Url::from_str(&format!("file://{}", self.root_path)).unwrap()),
-            initialization_options: None,
+            initialization_options: Some(json!({
+                "workspace":{
+                    "symbol": {
+                        "search": {
+                            "limit": 10000,
+                        }
+                    }
+                }
+            })),
             capabilities: ClientCapabilities::default(),
             trace: None,
             workspace_folders: Some(vec![WorkspaceFolder {
@@ -188,6 +198,49 @@ impl ProcessSpawner {
             }),
             show_document: Some(ShowDocumentClientCapabilities { support: true }),
         });
+
+        let mut workspace_capabilities = WorkspaceClientCapabilities::default();
+        workspace_capabilities.symbol = Some(WorkspaceSymbolClientCapabilities {
+            dynamic_registration: None,
+            symbol_kind: Some(SymbolKindCapability {
+                value_set: Some(vec![
+                    SymbolKind::FILE,
+                    SymbolKind::MODULE,
+                    SymbolKind::NAMESPACE,
+                    SymbolKind::PACKAGE,
+                    SymbolKind::CLASS,
+                    SymbolKind::METHOD,
+                    SymbolKind::PROPERTY,
+                    SymbolKind::FIELD,
+                    SymbolKind::CONSTRUCTOR,
+                    SymbolKind::ENUM,
+                    SymbolKind::INTERFACE,
+                    SymbolKind::FUNCTION,
+                    SymbolKind::VARIABLE,
+                    SymbolKind::CONSTANT,
+                    SymbolKind::STRING,
+                    SymbolKind::NUMBER,
+                    SymbolKind::BOOLEAN,
+                    SymbolKind::ARRAY,
+                    SymbolKind::OBJECT,
+                    SymbolKind::KEY,
+                    SymbolKind::NULL,
+                    SymbolKind::ENUM_MEMBER,
+                    SymbolKind::STRUCT,
+                    SymbolKind::EVENT,
+                    SymbolKind::OPERATOR,
+                    SymbolKind::TYPE_PARAMETER,
+                ]),
+            }),
+            tag_support: Some(TagSupport { value_set: vec![
+                SymbolTag::DEPRECATED,
+            ] }),
+            resolve_support: Some(WorkspaceSymbolResolveSupportCapability{
+                properties: vec!["location.range".to_string()]
+            }),
+        });
+
+        initialize_params.capabilities.workspace = Some(workspace_capabilities);
 
         let text_document = TextDocumentClientCapabilities {
             publish_diagnostics: Some(PublishDiagnosticsClientCapabilities {
@@ -220,7 +273,7 @@ impl ProcessSpawner {
             work_done_progress_params: WorkDoneProgressParams {
                 work_done_token: None,
             },
-            query: "".to_string(),
+            query: "#".to_string(),
         };
         self.send_request(
             WorkspaceSymbolRequest::METHOD,
