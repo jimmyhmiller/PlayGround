@@ -199,6 +199,10 @@ impl ProcessSpawner {
             show_document: Some(ShowDocumentClientCapabilities { support: true }),
         });
 
+        // TODO: Workspace symbols don't give me enough hierarchy
+        // I need to get the hierarchy from textDocument.documentSymbol.
+        // Hopefully that will give me enough information to show the kinds
+        // of things I'm looking for.
         let mut workspace_capabilities = WorkspaceClientCapabilities::default();
         workspace_capabilities.symbol = Some(WorkspaceSymbolClientCapabilities {
             dynamic_registration: None,

@@ -2,7 +2,7 @@
 use code_editor::CodeEditor;
 use framework::{WidgetData, App, KeyboardInput, Position, Size, app, Canvas, Color, Rect};
 use itertools::Itertools;
-use lsp_types::{SymbolInformation, WorkspaceSymbol};
+use lsp_types::WorkspaceSymbol;
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize)]
