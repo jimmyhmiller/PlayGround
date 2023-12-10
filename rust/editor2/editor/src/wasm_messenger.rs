@@ -21,7 +21,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
-use crate::keyboard::KeyboardInput;
+use crate::{keyboard::KeyboardInput, event::Event};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct PointerLengthString {
@@ -140,6 +140,8 @@ impl WasmMessenger {
         wasm_path: &str,
         partial_state: Option<String>,
         values: HashMap<String, Value>,
+        external_sender: std::sync::mpsc::Sender<Event>,
+        widget_id: usize,
     ) -> (WasmId, Receiver<OutMessage>) {
         let id = self.next_wasm_id();
 
@@ -163,6 +165,8 @@ impl WasmMessenger {
             receiver: Receiver<Message>,
             sender: Sender<OutMessage>,
             values: HashMap<String, Value>,
+            external_sender: std::sync::mpsc::Sender<Event>,
+            widget_id: usize,
         ) {
             let mut instance = WasmManager::new(
                 engine.clone(),
@@ -171,6 +175,8 @@ impl WasmMessenger {
                 receiver,
                 sender,
                 values,
+                external_sender,
+                widget_id,
             )
             .await;
             instance.init().await;
@@ -184,6 +190,8 @@ impl WasmMessenger {
                 receiver,
                 out_sender,
                 values,
+                external_sender,
+                widget_id,
             ))
             .unwrap();
 
@@ -252,9 +260,11 @@ impl WasmManager {
         receiver: Receiver<Message>,
         sender: Sender<OutMessage>,
         values: HashMap<String, Value>,
+        external_sender: std::sync::mpsc::Sender<Event>,
+        widget_id: usize,
     ) -> Self {
         let instance =
-            WasmInstance::new(engine.clone(), &wasm_path, sender.clone(), wasm_id, values)
+            WasmInstance::new(engine.clone(), &wasm_path, sender.clone(), wasm_id, values, external_sender, widget_id)
                 .await
                 .unwrap();
 
@@ -478,6 +488,7 @@ struct State {
     receivers: HashMap<String, oneshot::Receiver<Value>>,
     wasm_id: u64,
     external_id: u32,
+    external_sender: std::sync::mpsc::Sender<Event>,
 }
 
 impl State {
@@ -486,6 +497,7 @@ impl State {
         sender: Sender<OutMessage>,
         wasm_id: u64,
         values: HashMap<String, Value>,
+        external_sender: std::sync::mpsc::Sender<Event>,
     ) -> Self {
         Self {
             wasi,
@@ -499,6 +511,7 @@ impl State {
             values,
             receivers: HashMap::new(),
             external_id: 0,
+            external_sender,
         }
     }
 }
@@ -577,15 +590,25 @@ struct WasmInstance {
     engine: Arc<Engine>,
     linker: Linker<State>,
     path: String,
+    widget_id: usize,
 }
 
 impl WasmInstance {
+
+    async fn call_main(&mut self) -> anyhow::Result<()> {
+        self.call_typed_func("main", self.widget_id as u32, 1).await?;
+        Ok(())
+    }
+
+
     async fn new(
         engine: Arc<Engine>,
         wasm_path: &str,
         sender: Sender<OutMessage>,
         wasm_id: u64,
         values: HashMap<String, Value>,
+        external_sender: std::sync::mpsc::Sender<Event>,
+        widget_id: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = Dir::from_std_file(
             std::fs::File::open(Path::new(wasm_path).parent().unwrap()).unwrap(),
@@ -619,7 +642,7 @@ impl WasmInstance {
         wasmtime_wasi::add_to_linker(&mut linker, |s| &mut s.wasi)?;
         Self::setup_host_functions(&mut linker)?;
 
-        let mut store = Store::new(&engine, State::new(wasi, sender, wasm_id, values));
+        let mut store = Store::new(&engine, State::new(wasi, sender, wasm_id, values, external_sender));
         let module = Module::from_file(&engine, wasm_path)?;
 
         let instance = linker.instantiate_async(&mut store, &module).await?;
@@ -629,8 +652,9 @@ impl WasmInstance {
             engine,
             linker,
             path: wasm_path.to_string(),
+            widget_id,
         };
-        me.call_typed_func("main", (), 1).await?;
+        me.call_main().await?;
         Ok(me)
     }
 
@@ -671,18 +695,15 @@ impl WasmInstance {
                 let name = get_string_from_caller(&mut caller, ptr, len);
                 Box::new(async move {
                     let state = caller.data_mut();
-                    let (sender, receiver) = oneshot::channel();
+                    let (sender, receiver) = channel::<Vec<u8>>(1);
                     // Handle when it blocks and when it doesn't.
                     // Probably want a try_ version
-                    state.sender.start_send(OutMessage {
-                        message_id: 0,
-                        payload: OutPayload::NeededValue(name.clone(), sender),
-                    })?;
-
+                    
+                    state.external_sender.send(Event::ValueNeeded2(name.clone(), sender))?;
                     // The value is serialized and will need to be deserialized
-                    let result = receiver.await;
+                    let (result, _) = receiver.into_future().await;
                     match result {
-                        Ok(result) => {
+                        Some(result) => {
                             state.values.insert(name, result.clone());
                             let (ptr, _len) = WasmInstance::transfer_string_to_wasm(
                                 &mut caller,
@@ -692,9 +713,7 @@ impl WasmInstance {
                             .unwrap();
                             Ok(ptr)
                         }
-                        Err(_e) => {
-                            // TODO: Actually handle
-                            // println!("Cancelled");
+                        _ => {
                             Ok(0)
                         }
                     }
@@ -1084,7 +1103,7 @@ impl WasmInstance {
                 .instantiate_async(&mut self.store, &module)
                 .await?;
             self.instance = instance;
-            self.call_typed_func("main", (), 1).await?;
+            self.call_main().await?;
             self.set_state(data).await?;
         } else {
             let module = Module::from_file(&self.engine, &self.path)?;
@@ -1093,7 +1112,7 @@ impl WasmInstance {
                 .instantiate_async(&mut self.store, &module)
                 .await?;
             self.instance = instance;
-            self.call_typed_func("main", (), 1).await?;
+            self.call_main().await?;
         }
 
         Ok(())

@@ -445,6 +445,7 @@ impl Widget for WasmWidget {
                     println!("Error: {}", error_message);
                 }
                 OutPayload::NeededValue(name, sender) => {
+                    println!("Got needed value {}", name);
                     let id = self.id();
                     self.external_sender
                         .as_mut()

@@ -34,12 +34,14 @@ impl Editor {
             match event {
                 Event::DroppedFile { path, x, y } => {
                     if path.extension().unwrap() == "wasm" {
+                        let next_id = self.widget_store.next_id();
                         let (wasm_id, receiver) = self.wasm_messenger.new_instance(
                             path.to_str().unwrap(),
                             None,
                             self.values.clone(),
+                            self.external_sender.as_ref().unwrap().clone(),
+                            next_id,
                         );
-                        let next_id = self.widget_store.next_id();
                         self.widget_store.add_widget(Widget {
                             data: Box::new(WasmWidget {
                                 draw_commands: vec![],
@@ -216,29 +218,28 @@ impl Editor {
                                 // }
                             }
                         }
-                    } else {
-                        let mut was_over = false;
-                        for widget in self.widget_store.iter_mut() {
-                            let position = Position { x, y };
-                            let widget_x = position.x - widget.position().x;
-                            let widget_y = position.y - widget.position().y;
-                            let widget_space = Position {
-                                x: widget_x,
-                                y: widget_y,
-                            };
-                            // TODO: I should probably only send this for the top most widget
-                            if widget.mouse_over(&position) {
-                                self.active_widget = Some(widget.id());
-                                was_over = true;
-                                let modified = widget.on_mouse_move(&widget_space, x_diff, y_diff);
-                                if modified {
-                                    dirty_widgets.insert((widget.id(), "mouse_move".to_string()));
-                                }
+                    }
+                    let mut was_over = false;
+                    for widget in self.widget_store.iter_mut() {
+                        let position = Position { x, y };
+                        let widget_x = position.x - widget.position().x;
+                        let widget_y = position.y - widget.position().y;
+                        let widget_space = Position {
+                            x: widget_x,
+                            y: widget_y,
+                        };
+                        // TODO: I should probably only send this for the top most widget
+                        if widget.mouse_over(&position) {
+                            self.active_widget = Some(widget.id());
+                            was_over = true;
+                            let modified = widget.on_mouse_move(&widget_space, x_diff, y_diff);
+                            if modified {
+                                dirty_widgets.insert((widget.id(), "mouse_move".to_string()));
                             }
                         }
-                        if !was_over {
-                            self.cursor_icon = into_wini_cursor_icon(CursorIcon::Default);
-                        }
+                    }
+                    if !was_over {
+                        self.cursor_icon = into_wini_cursor_icon(CursorIcon::Default);
                     }
                 }
                 Event::ReloadWidgets => {
@@ -394,12 +395,14 @@ impl Editor {
                             let path = path.replace("file://", "");
                             let code_editor = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/target/wasm32-wasi/debug/code_editor.wasm";
                             let path_json = json!({ "file_path": path }).to_string();
+                            let next_id = self.widget_store.next_id();
                             let (wasm_id, receiver) = self.wasm_messenger.new_instance(
                                 code_editor,
                                 Some(path_json),
                                 self.values.clone(),
+                                self.external_sender.as_ref().unwrap().clone(),
+                                next_id,
                             );
-                            let next_id = self.widget_store.next_id();
                             let widget_id = self.widget_store.add_widget(Widget {
                                 // TODO: Automatically find an open space
                                 // Or make it so you draw it?
@@ -521,16 +524,77 @@ impl Editor {
                     }
                 },
 
+                Event::ValueNeeded2(name, mut sender) => match name.as_str() {
+                    "widgets" => {
+                        let widget_positions: Vec<WidgetMeta> = self
+                            .widget_store
+                            .iter()
+                            .map(|w| {
+                                WidgetMeta::new(
+                                    w.position(),
+                                    w.size(),
+                                    w.scale(),
+                                    w.id(),
+                                    w.typetag_name().to_string(),
+                                )
+                            })
+                            .collect();
+                        // TODO: Need sending widget to be marked dirty
+                        // Do wasm instances know what widget they are?
+                        // I think not
+                        let widget_positions = serde_json::to_string(&widget_positions).unwrap();
+                        match sender.try_send(widget_positions.as_bytes().to_vec()) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                println!("Failed to send {:?}", e);
+                            }
+                        }
+                        
+                        // if let Some(widget) = self.widget_store.get_mut(widget_id) {
+                        //     if let Some(widget) = widget.as_wasm_widget_mut() {
+                        //         widget.send_value(name, widget_positions.as_bytes().to_vec());
+                        //         dirty_widgets.insert((widget.id(), "value needed".to_string()));
+                        //     }
+                        // }
+                    }
+                    name => {
+                        if let Some(value) = self.values.get(name) {
+                            match sender.try_send(value.to_vec()) {
+                                Ok(_) => {}
+                                Err(_) => {
+                                    println!("Failed to send");
+                                }
+                            }
+                            // if let Some(widget) = self.widget_store.get_mut(widget_id) {
+                            //     if let Some(widget) = widget.as_wasm_widget_mut() {
+                            //         widget.send_value(name.to_string(), value.clone());
+                            //         dirty_widgets.insert((widget.id(), "value needed".to_string()));
+                            //     }
+                            // }
+                        }
+                    }
+                },
+
                 Event::ProvideValue(name, value) => match name.as_str() {
                     "widgets" => {
                         let widget_positions: Vec<WidgetMeta> =
                             serde_json::from_str(from_utf8(&value).unwrap()).unwrap();
                         for meta in widget_positions {
                             if let Some(widget) = self.widget_store.get_mut(meta.id) {
-                                widget.on_move(meta.position.x, meta.position.y);
-                                widget.on_size_change(meta.size.width, meta.size.height);
-                                widget.set_scale(meta.scale);
-                                dirty_widgets.insert((widget.id(), "provide value".to_string()));
+                                if widget.position() != meta.position {
+                                    widget.on_move(meta.position.x, meta.position.y);
+                                    dirty_widgets.insert((widget.id(), "provide value".to_string()));
+                                }
+                                
+                                if widget.size() != meta.size {
+                                    widget.on_size_change(meta.size.width, meta.size.height);
+                                    dirty_widgets.insert((widget.id(), "provide value".to_string()));
+                                }
+
+                                if widget.scale() != meta.scale {
+                                    widget.set_scale(meta.scale);
+                                    dirty_widgets.insert((widget.id(), "provide value".to_string()));
+                                }
                             }
                         }
                     }

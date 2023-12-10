@@ -479,6 +479,30 @@ pub trait AppExtensions {
         }
     }
 
+    fn get_position2(&self) -> Position {
+        unsafe {
+            CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.position
+        }
+    }
+
+    fn get_size2(&self) -> Size {
+        unsafe {
+            CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.size
+        }
+    }
+
+    fn get_scale(&self) -> f32 {
+        unsafe {
+            CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.scale
+        }
+    }
+
+    fn get_id(&self) -> usize {
+        unsafe {
+            CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.id
+        }
+    }
+
     fn create_widget_ref(&mut self, external_id: u32, data: WidgetData) -> Widget {
         unsafe {
             EXTERNAL_ID_TO_APP.insert(external_id, CURRENT_APP);
@@ -614,6 +638,16 @@ pub static mut CURRENT_APP: usize = 0;
 pub static mut CURRENT_EXTERNAL_ID: Option<usize> = None;
 
 
+
+pub struct Context {
+    pub external_id: Option<usize>,
+    pub meta: WidgetMeta,
+    pub app_index: usize,
+}
+
+pub static mut CONTEXT: Lazy<HashMap<Option<usize>, Context>> = Lazy::new(|| HashMap::new());
+
+
 #[no_mangle]
 pub extern "C" fn set_widget_identifier(identifier: u32) {
     unsafe {
@@ -700,12 +734,18 @@ pub extern "C" fn on_event(kind_ptr: u32, event_ptr: u32) {
 #[no_mangle]
 pub extern "C" fn on_size_change(width: f32, height: f32) {
     let app = get_app!();
+    let context = unsafe { CONTEXT.get_mut(&CURRENT_EXTERNAL_ID) }.unwrap();
+    context.meta.size.width = width;
+    context.meta.size.height = height;
     unsafe { app.on_size_change(width, height) }
 }
 
 #[no_mangle]
 pub extern "C" fn on_move(x: f32, y: f32) {
     let app = get_app!();
+    let context = unsafe { CONTEXT.get_mut(&CURRENT_EXTERNAL_ID) }.unwrap();
+    context.meta.position.x = x;
+    context.meta.position.y = y;
     unsafe { app.on_move(x, y) }
 }
 
@@ -793,11 +833,22 @@ pub mod macros {
             use framework::AppExtensions;
             #[no_mangle]
             #[cfg(feature="main")]
-            fn main() {
+            fn main(widget_id: usize) {
                 let mut app = $app::init();
                 app.start();
                 unsafe {
                     framework::APPS.push(Box::new(app));
+                    framework::CONTEXT.insert(None, framework::Context {
+                        external_id: None,
+                        meta: framework::WidgetMeta::new(
+                            framework::Position { x: 0.0, y: 0.0 },
+                            framework::Size { width: 0.0, height: 0.0 },
+                            1.0,
+                            widget_id,
+                            "wasm".to_string(),
+                        ),
+                        app_index: 0,
+                    });
                 }
             }
         };

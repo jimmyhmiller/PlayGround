@@ -270,7 +270,7 @@ impl App for MultipleWidgets {
         );
         let foreground = Color::parse_hex("#ffffff");
         canvas.set_color(&foreground);
-        canvas.draw_str("Rearrange windows", 20.0, 40.0);
+        canvas.draw_str(&format!("Rearrange windows {:?} {:?} {:?} {:?}", self.get_position2(), self.get_size2(), self.get_scale(), self.get_id()), 20.0, 40.0);
     }
     
 
@@ -306,7 +306,6 @@ impl App for MultipleWidgets {
                 self.widget_positions = widget_positions;
             }
 
-            println!("widget_positions: {:?}", self.widget_positions.iter().map(|x| x.scale));
             let positions : Vec<WidgetMeta> = self
                 .widget_positions
                 .clone()
@@ -327,6 +326,7 @@ impl App for MultipleWidgets {
                 "widgets",
                 serde_json::to_string(&positions).unwrap().as_bytes(),
             );
+            
         }
     }
 
@@ -338,6 +338,49 @@ impl App for MultipleWidgets {
 
     fn on_move(&mut self, x: f32, y: f32) {
         self.widget_data.position = Position { x, y };
+    }
+
+    fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) {
+        // This doesn't work because we don't give mouse_move on the drag
+        // Maybe we can fix this
+
+        self.widget_data.position = Position {
+            x,
+            y,
+        };
+
+        let widget_positions: Option<Vec<WidgetMeta>> = self.get_value("widgets");
+        if let Some(widget_positions) = widget_positions {
+            self.widget_positions = widget_positions;
+        }
+
+        let overlapping_panes: Vec<WidgetMeta> = self
+            .widget_positions
+            .clone()
+            .iter_mut()
+            .filter(|x| x.id != self.get_id())
+            .filter(|x| {
+                // A pane that is over top us
+                x.position.x < self.get_position2().x + self.get_size().width
+                    && x.position.x + x.size.width > self.get_position2().x
+
+                    && x.position.y < self.get_position2().y + self.get_size().height
+                    && x.position.y + x.size.height > self.get_position2().y
+            })
+            .map(|x| { x.scale = 0.1; x.clone()})
+            .collect();
+
+        if !overlapping_panes.is_empty() {
+            self.provide_value(
+                "widgets",
+                serde_json::to_string(&overlapping_panes).unwrap().as_bytes(),
+            );
+    
+        }
+
+       
+
+
     }
 
     fn get_position(&self) -> Position {

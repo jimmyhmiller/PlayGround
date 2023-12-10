@@ -133,6 +133,10 @@ impl Events {
         &self.events[self.frame_start_index..self.frame_end_index]
     }
 
+    pub fn newly_added_events(&self) -> &[Event] {
+        &self.events[self.frame_end_index..]
+    }
+
     fn next_frame(&mut self) {
         self.frame_start_index = self.frame_end_index;
     }
@@ -218,7 +222,7 @@ impl Editor {
         let widgets: Vec<Widget> = widgets
             .into_iter()
             .map(|mut widget| {
-                widget.init(&mut self.wasm_messenger, self.values.clone());
+                widget.init(&mut self.wasm_messenger, self.values.clone(), self.external_sender.as_ref().unwrap().clone());
                 if let Some(watcher) = &mut self.debounce_watcher {
                     let watcher = watcher.watcher();
                     let files_to_watch = widget.files_to_watch();
@@ -279,7 +283,6 @@ impl Editor {
         }
 
         let events = self.events.events_for_frame().to_vec();
-        self.next_frame();
 
         let events_empty = events.is_empty();
 
@@ -289,7 +292,18 @@ impl Editor {
 
         let time = Instant::now();
         self.handle_events(events);
+        self.wasm_messenger.tick();
+        if let Some(receiver) = &self.external_receiver {
+            for event in receiver.try_iter() {
+                self.events.push(event);
+            }
+        }
+        let newly_added_events = self.events.newly_added_events().to_vec();
+        self.handle_events(newly_added_events);
+        self.events.end_frame();
+        self.events.next_frame();
         self.fps_counter.add_time("events", time.elapsed());
+        
 
         let time = Instant::now();
         for widget in self.widget_store.iter_mut() {
