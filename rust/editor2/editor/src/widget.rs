@@ -4,13 +4,14 @@ use std::{
 };
 
 use framework::{Position, Value};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use skia_safe::{Canvas, Image};
 
 use crate::{
     keyboard::KeyboardInput,
     wasm_messenger::{self, SaveState, WasmMessenger},
-    widget2::{self, Widget as Widget2}, event::Event,
+    widget2::{self, Widget as Widget2}, event::Event, editor::Window,
 };
 
 pub type WidgetId = usize;
@@ -173,6 +174,7 @@ pub struct WidgetStore {
     widgets: Vec<Widget>,
     widget_images: HashMap<WidgetId, Image>,
     next_id: WidgetId,
+    z_indexes: Vec<usize>,
 }
 
 impl WidgetStore {
@@ -187,6 +189,7 @@ impl WidgetStore {
         if id + 1 != self.widgets.len() {
             println!("not equal {} {}", id, self.widgets.len());
         }
+        self.z_indexes.push(id);
         id
     }
 
@@ -203,8 +206,10 @@ impl WidgetStore {
             widgets: Vec::new(),
             widget_images: HashMap::new(),
             next_id: 0,
+            z_indexes: Vec::new(),
         }
     }
+
 
     pub fn draw(&mut self, canvas: &Canvas, dirty_widgets: &HashSet<usize>) {
         // TODO: Created Widgets don't draw right away
@@ -258,11 +263,14 @@ impl WidgetStore {
             self.widget_images.insert(id, image);
         }
 
-        for (id, image) in self.widget_images.iter() {
-            if let Some(widget) = self.get(*id) {
-                canvas.draw_image(image, (widget.position().x, widget.position().y), None);
+        for id in self.z_indexes.iter() {
+            if let Some(image) = self.widget_images.get(id) {
+                if let Some(widget) = self.get(*id) {
+                    canvas.draw_image(image, (widget.position().x, widget.position().y), None);
+                }
             }
         }
+
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Widget> {
@@ -282,5 +290,14 @@ impl WidgetStore {
         // TODO: Need a better way rather than tombstones
         self.widgets[widget_id].data = Box::new(widget2::Deleted {});
         self.widget_images.remove(&widget_id);
+    }
+
+    pub fn on_move(&mut self, widget_id: usize) {
+        let len = self.z_indexes.len() - 1;
+        if let Some((position, element)) = self.z_indexes.iter().find_position(|x| **x == widget_id) {
+            self.z_indexes.swap(position, len);
+        }
+
+
     }
 }

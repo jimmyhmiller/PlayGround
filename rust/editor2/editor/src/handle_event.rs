@@ -206,17 +206,23 @@ impl Editor {
                         }
                     } else if self.context.modifiers.ctrl {
                         for widget_id in self.selected_widgets.iter() {
+                            let mut moved = vec![];
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
                                 dirty_widgets.insert((widget.id(), "move".to_string()));
                                 let x = widget.position().x + x_diff;
                                 let y = widget.position().y + y_diff;
                                 widget.on_move(x, y);
+                                moved.push(widget.id());
                                 // if x > self.window.size.width - 300.0 {
                                 //     widget.data.set_scale(0.1);
                                 // } else {
                                 //     widget.data.set_scale(1.0);
                                 // }
                             }
+                            for moved in moved.iter() {
+                                self.widget_store.on_move(*moved);
+                            }
+
                         }
                     }
                     let mut was_over = false;
