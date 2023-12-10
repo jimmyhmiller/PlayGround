@@ -1130,6 +1130,8 @@ pub struct Image {
     #[serde(skip)]
     pub cache: RefCell<Option<skia_safe::Image>>,
     pub meta: WidgetMeta,
+    #[serde(default)]
+    pub aspect_ratio: f32,
 }
 
 #[typetag::serde]
@@ -1170,6 +1172,10 @@ impl Widget for Image {
         "".to_string()
     }
 
+    fn dirty(&self) -> bool {
+        true
+    }
+
     fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
         canvas.save();
         canvas.scale((self.scale(), self.scale()));
@@ -1184,14 +1190,29 @@ impl Widget for Image {
         }
         let image = self.cache.borrow();
         let image = image.as_ref().unwrap();
-        canvas.draw_image(image, self.position().as_tuple(), None);
+        canvas.draw_image(image, (0.0, 0.0), None);
         canvas.restore();
+        Ok(())
+    }
+
+    fn on_size_change(&mut self, width: f32, height: f32) -> Result<(), Box<dyn Error>> {
+        // TODO: This is wrong
+        let width_diff = width / self.meta.size.width;
+        self.meta.scale = width_diff * self.meta.scale;
+        self.meta.size.width = width;
+        self.meta.size.height = width / self.aspect_ratio;
+        Ok(())
+    }
+
+    fn on_move(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
+        self.meta.position.x = x;
+        self.meta.position.y = y;
         Ok(())
     }
 }
 
 impl Image {
-    fn load_image(&self) {
+    fn load_image(&mut self) {
         // TODO: Get rid of clone
         let path = if self.path.starts_with("./") {
             let mut base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -1204,6 +1225,11 @@ impl Image {
         let mut image_data = vec![];
         file.read_to_end(&mut image_data).unwrap();
         let image = skia_safe::Image::from_encoded(Data::new_copy(image_data.as_ref())).unwrap();
+        self.meta.size = Size {
+            width: image.bounds().width() as f32,
+            height: image.bounds().height() as f32,
+        };
+        self.aspect_ratio = self.meta.size.width / self.meta.size.height;
         self.cache.replace(Some(image));
     }
 }
