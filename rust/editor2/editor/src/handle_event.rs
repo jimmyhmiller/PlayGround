@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
-    str::from_utf8,
+    str::from_utf8, cell::RefCell,
 };
 
 use framework::{CursorIcon, Position, Size, WidgetMeta};
@@ -17,7 +17,7 @@ use crate::{
     native::open_file_dialog,
     wasm_messenger::{OutMessage, SaveState},
     widget::Widget,
-    widget2::{Ephemeral, TextPane, WasmWidget, Widget as _},
+    widget2::{Ephemeral, TextPane, WasmWidget, Widget as _, Image},
 };
 
 fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
@@ -66,6 +66,26 @@ impl Editor {
                                 dirty: true,
                                 external_id: None,
                                 value_senders: HashMap::new(),
+                            }),
+                        });
+                    } else if path.extension().unwrap() == "png" {
+                        println!("Got image!");
+                        let next_id = self.widget_store.next_id();
+                        self.widget_store.add_widget(Widget {
+                            data: Box::new(Image {
+                                path: path.to_str().unwrap().to_string(),
+                                cache: RefCell::new(None),
+                                aspect_ratio: 1.0,
+                                meta: WidgetMeta::new(
+                                    Position { x, y },
+                                    Size {
+                                        width: 800.0,
+                                        height: 800.0,
+                                    },
+                                    1.0,
+                                    next_id,
+                                    "Image".to_string(),
+                                ),
                             }),
                         });
                     } else {
@@ -208,6 +228,7 @@ impl Editor {
                             };
                             // TODO: I should probably only send this for the top most widget
                             if widget.mouse_over(&position) {
+                                self.active_widget = Some(widget.id());
                                 was_over = true;
                                 let modified = widget.on_mouse_move(&widget_space, x_diff, y_diff);
                                 if modified {

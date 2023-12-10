@@ -272,6 +272,7 @@ impl App for MultipleWidgets {
         canvas.set_color(&foreground);
         canvas.draw_str("Rearrange windows", 20.0, 40.0);
     }
+    
 
     fn on_click(&mut self, x: f32, y: f32) {
         let widget_positions: Option<Vec<WidgetMeta>> = self.get_value("widgets");
@@ -284,6 +285,7 @@ impl App for MultipleWidgets {
                 .widget_positions
                 .iter()
                 .filter(|x| x.scale == 1.0)
+                .filter (|x| x.position.x > 0.0)
                 .filter(|x| x.position != self.widget_data.position)
                 .filter(|x| !x.kind.contains("Text"))
                 .collect()),
@@ -299,29 +301,32 @@ impl App for MultipleWidgets {
             return;
         }
         if input.key_code == KeyCode::C {
-            let elements: Vec<Size> = self
-                .symbols
-                .iter()
-                .map(|symbol| Size {
-                    width: 500.0,
-                    height: ((symbol.location.range.end.line - symbol.location.range.start.line)
-                        as f32
-                        * 3.0)
-                        .max(50.0),
+            let widget_positions: Option<Vec<WidgetMeta>> = self.get_value("widgets");
+            if let Some(widget_positions) = widget_positions {
+                self.widget_positions = widget_positions;
+            }
+
+            println!("widget_positions: {:?}", self.widget_positions.iter().map(|x| x.scale));
+            let positions : Vec<WidgetMeta> = self
+                .widget_positions
+                .clone()
+                .iter_mut()
+                .filter(|x| x.position != self.widget_data.position)
+                .filter (|x| x.position.x > 0.0)
+                .filter(|x| !x.kind.contains("Text"))
+                .map(|x| { 
+                    if x.scale < 1.0 {
+                        x.scale = 1.0;
+                    } else {
+                        x.scale = 0.0;
+                    }
+                    x.clone()
                 })
                 .collect();
-
-            let layout = layout_elements(3000.0, elements);
-
-            for (symbol, layout) in self.symbols.clone().iter().zip(layout.iter()) {
-                self.create_widget(
-                    Box::new(SymbolWidget {
-                        widget_data: layout.clone(),
-                        symbol: symbol.clone(),
-                    }),
-                    layout.clone(),
-                );
-            }
+            self.provide_value(
+                "widgets",
+                serde_json::to_string(&positions).unwrap().as_bytes(),
+            );
         }
     }
 
