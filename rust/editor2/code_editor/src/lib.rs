@@ -624,7 +624,7 @@ impl CodeEditor {
                 new_excerpt.widget_data = data.clone();
                 new_excerpt.text_pane.offset = Position { x: 0.0, y: 0.0 };
                 new_excerpt.text_pane.cursor.set_selection(None);
-                let widget = self.create_widget_ref(42, data);
+                let widget = self.create_widget(Box::new(new_excerpt),  data);
                 self.excerpt_panes.push(widget);
             }
 

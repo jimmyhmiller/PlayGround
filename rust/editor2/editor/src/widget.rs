@@ -10,7 +10,7 @@ use skia_safe::{Canvas, Image};
 use crate::{
     keyboard::KeyboardInput,
     wasm_messenger::{self, SaveState, WasmMessenger},
-    widget2::{self, Widget as Widget2},
+    widget2::{self, Widget as Widget2}, event::Event,
 };
 
 pub type WidgetId = usize;
@@ -80,9 +80,9 @@ impl Widget {
         x >= x_min && x <= x_max && y >= y_min && y <= y_max
     }
 
-    pub fn init(&mut self, wasm_messenger: &mut WasmMessenger, values: HashMap<String, Value>) {
+    pub fn init(&mut self, wasm_messenger: &mut WasmMessenger, values: HashMap<String, Value>, external_sender: std::sync::mpsc::Sender<Event>) {
         if let Some(widget) = self.as_wasm_widget_mut() {
-            let (new_wasm_id, receiver) = wasm_messenger.new_instance(&widget.path, None, values);
+            let (new_wasm_id, receiver) = wasm_messenger.new_instance(&widget.path, None, values, external_sender, widget.id());
             widget.sender = Some(wasm_messenger.get_sender(new_wasm_id));
             widget.receiver = Some(receiver);
             match &widget.save_state {

@@ -6,6 +6,7 @@ use crate::{
 };
 
 use framework::{CursorIcon, Position, Value};
+
 use serde::{Deserialize, Serialize};
 use winit::{
     event::{Event as WinitEvent, WindowEvent as WinitWindowEvent},
@@ -31,7 +32,8 @@ impl From<&winit::event::TouchPhase> for TouchPhase {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+
+#[derive(Clone, Debug)]
 pub enum Event {
     Noop,
     KeyEvent {
@@ -109,6 +111,7 @@ pub enum Event {
         y: f32,
     },
     MarkDirty(u32),
+    ValueNeeded2(String, futures::channel::mpsc::Sender<Vec<u8>>),
 }
 
 impl Event {
