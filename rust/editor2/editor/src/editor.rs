@@ -301,7 +301,7 @@ impl Editor {
         let newly_added_events = self.events.newly_added_events().to_vec();
         self.handle_events(newly_added_events);
         self.events.end_frame();
-        self.events.next_frame();
+        self.next_frame();
         self.fps_counter.add_time("events", time.elapsed());
         
 

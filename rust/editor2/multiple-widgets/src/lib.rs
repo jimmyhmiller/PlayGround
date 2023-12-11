@@ -129,47 +129,6 @@ impl App for SymbolWidget {
     }
 }
 
-fn layout_elements(max_width: f32, elements: Vec<Size>) -> Vec<WidgetData> {
-    // We are trying to pack these elements in. They are going to have uniform width, but
-    // variable height. We want to pack them in as tightly as possible, but we also want to
-    // keep them in order.
-    let starting_data = WidgetData {
-        position: Position { x: 60.0, y: 60.0 },
-        size: Size {
-            width: 0.0,
-            height: 0.0,
-        },
-    };
-
-    let mut placed_elements: Vec<WidgetData> = Vec::new();
-    let element_width = elements[0].width;
-    for element in elements.iter() {
-        let last_element = placed_elements.last().unwrap_or(&starting_data);
-        let mut x = last_element.position.x + last_element.size.width;
-        if x + element_width > max_width {
-            // We need to wrap to the next line
-            x = starting_data.position.x;
-        }
-        x += 10.0;
-
-        let y = placed_elements
-            .iter()
-            .filter(|w| w.position.x == x)
-            .map(|w| w.position.y as u32 + w.size.height as u32)
-            .max()
-            .unwrap_or(0) as f32
-            + 10.0;
-
-        let widget_data = WidgetData {
-            position: Position { x, y },
-            size: *element,
-        };
-        placed_elements.push(widget_data);
-    }
-
-    placed_elements
-}
-
 fn layout_elements2(max_width: f32, elements: &Vec<&WidgetMeta>) -> Vec<WidgetMeta> {
     if elements.is_empty() {
         return Vec::new();
@@ -369,6 +328,19 @@ impl App for MultipleWidgets {
             })
             .map(|x| { x.scale = 0.1; x.clone()})
             .collect();
+
+        // TODO: I am setting the position of these panes
+        // but one of them is moving over this pane.
+        // Where it was lags a frame behind, so
+        // we are trying to move it back to where it was.
+
+        // Instead of providing a value, I should be able 
+        // to just update an attribute on the widget
+        // that way we aren't trying to move the whole thing.
+        // Or we send a diff or something.
+
+        // I should also definitely make it so provide_value
+        // does the serialziation so we don't have to think about it.
 
         if !overlapping_panes.is_empty() {
             self.provide_value(
