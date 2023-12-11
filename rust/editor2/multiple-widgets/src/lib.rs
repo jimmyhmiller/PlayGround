@@ -297,6 +297,7 @@ impl App for MultipleWidgets {
 
     fn on_move(&mut self, x: f32, y: f32) {
         self.widget_data.position = Position { x, y };
+        
     }
 
     fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) {
@@ -326,6 +327,7 @@ impl App for MultipleWidgets {
                     && x.position.y < self.get_position2().y + self.get_size().height
                     && x.position.y + x.size.height > self.get_position2().y
             })
+            .filter(|x| x.scale != 0.1)
             .map(|x| { x.scale = 0.1; x.clone()})
             .collect();
 
