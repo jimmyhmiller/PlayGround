@@ -11,7 +11,7 @@ use skia_safe::{Canvas, Image};
 use crate::{
     keyboard::KeyboardInput,
     wasm_messenger::{self, SaveState, WasmMessenger},
-    widget2::{self, Widget as Widget2}, event::Event, editor::Window,
+    widget2::{self, Widget as Widget2}, event::Event,
 };
 
 pub type WidgetId = usize;
@@ -294,7 +294,7 @@ impl WidgetStore {
 
     pub fn on_move(&mut self, widget_id: usize) {
         let len = self.z_indexes.len() - 1;
-        if let Some((position, element)) = self.z_indexes.iter().find_position(|x| **x == widget_id) {
+        if let Some((position, _)) = self.z_indexes.iter().find_position(|x| **x == widget_id) {
             self.z_indexes.swap(position, len);
         }
 

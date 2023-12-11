@@ -1196,7 +1196,7 @@ impl Widget for Image {
         Ok(())
     }
 
-    fn on_size_change(&mut self, width: f32, height: f32) -> Result<(), Box<dyn Error>> {
+    fn on_size_change(&mut self, width: f32, _height: f32) -> Result<(), Box<dyn Error>> {
         // TODO: This is wrong
         let width_diff = width / self.meta.size.width;
         self.meta.scale = width_diff * self.meta.scale;
