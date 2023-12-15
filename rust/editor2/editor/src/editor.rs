@@ -522,6 +522,9 @@ impl Editor {
         canvas.translate((self.canvas_scroll_offset.x, self.canvas_scroll_offset.y));
         canvas.scale((self.canvas_scale, self.canvas_scale));
 
+
+        self.widget_store.fix_zindexes();
+
         let dirty_widgets: HashSet<usize> = self
             .widget_store
             .iter()

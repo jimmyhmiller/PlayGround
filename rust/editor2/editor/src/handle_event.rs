@@ -179,6 +179,10 @@ impl Editor {
                 }
                 Event::LeftMouseUp { .. } => {
                     self.context.left_mouse_down = false;
+
+                    if self.context.modifiers.ctrl || self.context.modifiers.option || self.context.modifiers.shift || self.context.modifiers.cmd {
+                        self.context.cancel_click = true;
+                    }
                     self.add_mouse_up();
                 }
                 Event::MouseMove {
@@ -208,10 +212,7 @@ impl Editor {
                         for widget_id in self.selected_widgets.iter() {
                             let mut moved = vec![];
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                                dirty_widgets.insert((widget.id(), "move".to_string()));
-                                let x = widget.position().x + x_diff;
-                                let y = widget.position().y + y_diff;
-                                widget.on_move(x, y);
+                                // dirty_widgets.insert((widget.id(), "move".to_string()));
                                 moved.push(widget.id());
                                 // if x > self.window.size.width - 300.0 {
                                 //     widget.data.set_scale(0.1);
@@ -219,7 +220,20 @@ impl Editor {
                                 //     widget.data.set_scale(1.0);
                                 // }
                             }
+                            for widget in self.widget_store.iter() {
+                                if let Some(parent_id) = widget.parent_id() {
+                                    if moved.contains(&parent_id) {
+                                        // dirty_widgets.insert((widget.id(), "move".to_string()));
+                                        moved.push(widget.id());
+                                    }
+                                }
+                            }
+
                             for moved in moved.iter() {
+                                let widget = self.widget_store.get_mut(*moved).unwrap();
+                                let x = widget.position().x + x_diff;
+                                let y = widget.position().y + y_diff;
+                                widget.on_move(x, y);
                                 self.widget_store.on_move(*moved);
                             }
 
@@ -601,6 +615,11 @@ impl Editor {
                                     widget.set_scale(meta.scale);
                                     dirty_widgets.insert((widget.id(), "provide value".to_string()));
                                 }
+                                
+                                if widget.parent_id() != meta.parent_id {
+                                    widget.set_parent_id(meta.parent_id);
+                                    dirty_widgets.insert((widget.id(), "provide value".to_string()));
+                                }
                             }
                         }
                     }
@@ -691,7 +710,6 @@ impl Editor {
                 }
 
                 if self.context.cancel_click {
-                    self.context.cancel_click = false;
                     widget.on_mouse_up(&self.context.mouse_position);
                 } else {
                     widget.on_click(&self.context.mouse_position);
@@ -704,5 +722,9 @@ impl Editor {
         for widget_id in to_delete {
             self.widget_store.delete_widget(widget_id);
         }
+        if self.context.cancel_click {
+            self.context.cancel_click = false;
+        }
+
     }
 }

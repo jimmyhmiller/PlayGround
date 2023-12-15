@@ -300,4 +300,20 @@ impl WidgetStore {
 
 
     }
+
+    pub fn fix_zindexes(&mut self) {
+        // A widget should always have a greater z-index than its parent
+
+        for widget in self.widgets.iter() {
+            if let Some(parent_id) = widget.parent_id() {
+                if let Some(z_index_parent) = self.z_indexes.iter().position(|x| *x == parent_id) {
+                    if let Some(z_index_child) = self.z_indexes.iter().position(|x| *x == widget.id()) {
+                        if z_index_parent > z_index_child {
+                            self.z_indexes.swap(z_index_parent, z_index_child);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

@@ -56,8 +56,7 @@ enum State {
 
 struct ProcessSpawner {
     state: Data,
-    process_id: i32,
-    root_path: String,
+    processes: HashMap<String, u32>,
     remaining_message: String,
 }
 
@@ -87,6 +86,7 @@ struct TokensWithVersion {
     path: String,
 }
 
+#[derive(Debug)]
 enum ParseError {
     NoClosingBrace(String),
     InvalidJson,
@@ -97,6 +97,9 @@ enum ParseError {
 // I need to actually update my tokens myself and then get the refresh.
 
 impl ProcessSpawner {
+
+    // TODO: I need to properly parse messages
+
     fn parse_message(&self, message: &str) -> Result<Vec<serde_json::Value>, ParseError> {
         let mut results = vec![];
         if let Some(start_json_object) = message.find('{') {
@@ -104,7 +107,7 @@ impl ProcessSpawner {
             // I need to investigate this closer
             // Probably need to hold onto the message until we get this?
             let last_close_brace = message
-                .rfind('}')
+                .rfind("}")
                 .ok_or(ParseError::NoClosingBrace(message.to_string()))?;
             let message = &message[start_json_object..last_close_brace + 1];
             let message = message.trim();
@@ -123,6 +126,10 @@ impl ProcessSpawner {
         Ok(results)
     }
 
+
+
+        
+
     fn next_request_id(&mut self) -> String {
         self.state.last_request_id += 1;
         format!("client/{}", self.state.last_request_id)
@@ -139,13 +146,13 @@ impl ProcessSpawner {
         format!("{}{}", headers, body)
     }
 
-    fn send_request(&mut self, method: &str, params: &str) -> String {
+    fn send_request(&mut self, process_id: u32, method: &str, params: &str) -> String {
         let id = self.next_request_id();
         let request = self.request(id.clone(), method, params);
         self.state
             .message_type
             .insert(id.clone(), method.to_string());
-        self.send_message(self.process_id, request);
+        self.send_message(process_id, request);
         id
     }
 
@@ -159,18 +166,18 @@ impl ProcessSpawner {
         format!("{}{}", headers, body)
     }
 
-    fn initialize_rust_analyzer(&mut self) {
+    fn initialize_rust_analyzer(&mut self, root_path: String) {
         // println!("Initializing rust analyzer");
         let process_id = self.start_process(find_rust_analyzer());
-        self.process_id = process_id;
+        self.processes.insert(root_path.clone(), process_id);
 
         #[allow(deprecated)]
         // Root path is deprecated, but I also need to specify it
         // TODO: set initialization options like rust-analyzer.semanticHighlighting.punctuation.enable
         let mut initialize_params = InitializeParams {
-            process_id: Some(self.process_id as u32),
-            root_path: Some(self.root_path.to_string()),
-            root_uri: Some(Url::from_str(&format!("file://{}", self.root_path)).unwrap()),
+            process_id: Some(process_id),
+            root_path: Some(root_path.clone()),
+            root_uri: Some(Url::from_str(&format!("file://{}", root_path)).unwrap()),
             initialization_options: Some(json!({
                 "workspace":{
                     "symbol": {
@@ -183,7 +190,7 @@ impl ProcessSpawner {
             capabilities: ClientCapabilities::default(),
             trace: None,
             workspace_folders: Some(vec![WorkspaceFolder {
-                uri: Url::from_str(&format!("file://{}", self.root_path)).unwrap(),
+                uri: Url::from_str(&format!("file://{}", root_path.clone())).unwrap(),
                 name: "editor2".to_string(),
             }]),
             client_info: None,
@@ -257,6 +264,7 @@ impl ProcessSpawner {
         initialize_params.capabilities.text_document = Some(text_document);
 
         self.send_request(
+            process_id,
             Initialize::METHOD,
             &serde_json::to_string(&initialize_params).unwrap(),
         );
@@ -266,10 +274,10 @@ impl ProcessSpawner {
             Initialized::METHOD,
             &serde_json::to_string(&params).unwrap(),
         );
-        self.send_message(self.process_id, request);
+        self.send_message(process_id, request);
     }
 
-    fn resolve_workspace_symbols(&mut self) {
+    fn resolve_workspace_symbols(&mut self, process_id: u32) {
         let params: <WorkspaceSymbolRequest as Request>::Params = WorkspaceSymbolParams {
             partial_result_params: PartialResultParams {
                 partial_result_token: None,
@@ -280,6 +288,7 @@ impl ProcessSpawner {
             query: "#".to_string(),
         };
         self.send_request(
+            process_id,
             WorkspaceSymbolRequest::METHOD,
             &serde_json::to_string(&params).unwrap(),
         );
@@ -313,7 +322,10 @@ impl ProcessSpawner {
             DidOpenTextDocument::METHOD,
             &serde_json::to_string(&params).unwrap(),
         );
-        self.send_message(self.process_id, notify);
+        if let Some(process_id) = self.find_process_id(&file_info.path) {
+            self.send_message(process_id, notify);
+        }
+
         self.state.open_files.insert(file_info.path.clone());
         self.state.files_to_open.remove(file_info);
     }
@@ -333,18 +345,23 @@ impl ProcessSpawner {
             work_done_progress_params: WorkDoneProgressParams::default(),
         };
 
-        let token_request = self.send_request(
-            SemanticTokensFullRequest::METHOD,
-            &serde_json::to_string(&params).unwrap(),
-        );
+        if let Some(process_id) = self.find_process_id(path) {
+            let token_request = self.send_request(
+                process_id,
+                SemanticTokensFullRequest::METHOD,
+                &serde_json::to_string(&params).unwrap(),
+            );
+    
+            self.state.token_request_metadata.insert(
+                token_request,
+                TokenRequestMeta {
+                    path: path.to_string(),
+                    document_version,
+                },
+            );
+        }
 
-        self.state.token_request_metadata.insert(
-            token_request,
-            TokenRequestMeta {
-                path: path.to_string(),
-                document_version,
-            },
-        );
+      
     }
 
     fn update_document(&mut self, edits: &MultiEditWithPath) {
@@ -402,13 +419,15 @@ impl ProcessSpawner {
             DidChangeTextDocument::METHOD,
             &serde_json::to_string(&params).unwrap(),
         );
-        self.send_message(self.process_id, request);
+        if let Some(process_id) = self.find_process_id(&path) {
+            self.send_message(process_id, request);
+        }
     }
 
-    fn initialized(&mut self) {
+    fn initialized(&mut self, process_id: u32) {
         // TODO: Get list of initial open files
         self.state.state = State::Initialized;
-        self.resolve_workspace_symbols();
+        self.resolve_workspace_symbols(process_id);
         // println!("Opening files: {:?}", self.state.files_to_open);
         for info in self.state.files_to_open.clone().iter() {
             self.open_file(info);
@@ -436,7 +455,6 @@ impl App for ProcessSpawner {
         self.subscribe("text_change_multi");
         self.subscribe("lith/open-file");
         self.subscribe("lith/save_file");
-        self.initialize_rust_analyzer();
     }
 
     fn draw(&mut self) {
@@ -461,7 +479,10 @@ impl App for ProcessSpawner {
     }
 
     fn on_click(&mut self, _x: f32, _y: f32) {
-        self.resolve_workspace_symbols();
+        let process_ids = self.processes.values().copied().collect::<Vec<_>>();
+        for process_id in process_ids {
+            self.resolve_workspace_symbols(process_id);
+        }
     }
 
     fn on_key(&mut self, _input: framework::KeyboardInput) {}
@@ -500,6 +521,16 @@ impl App for ProcessSpawner {
                 if !info.path.ends_with(".rs") {
                     return;
                 }
+
+                if self.find_process_id(&info.path).is_none() {
+                    if let Some(root_path) = Self::find_dir_with_cargo_toml(&info.path) {
+                        self.initialize_rust_analyzer(root_path);
+                    } else {
+                        println!("Couldn't find root path for {}", info.path);
+                        return;
+                    }
+                }
+
                 self.state.files_to_open.insert(info.clone());
                 self.request_tokens(&info.path, info.version);
                 if self.state.state == State::Initialized {
@@ -521,7 +552,9 @@ impl App for ProcessSpawner {
                     DidSaveTextDocument::METHOD,
                     &serde_json::to_string(&params).unwrap(),
                 );
-                self.send_message(self.process_id, notify);
+                if let Some(process_id) = self.find_process_id(&path) {
+                    self.send_message(process_id, notify);
+                }
             }
             _ => {
                 println!("Unknown event: {}", kind);
@@ -533,104 +566,27 @@ impl App for ProcessSpawner {
         serde_json::to_string(&self.state).unwrap()
     }
 
-    fn on_process_message(&mut self, _process_id: i32, message: String) {
-        let message = format!("{}{}", self.remaining_message, message);
-        self.remaining_message = String::new();
-        let messages = message.split("Content-Length");
-        for message in messages {
-            match self.parse_message(message) {
-                Ok(messages) => {
-                    for message in messages {
-                        // println!("parsed message: {:?}", message);
-                        // let method = message["method"].as_str();
-                        if let Some(id) = message["id"].as_str() {
-                            if let Some(method) = self.state.message_type.get(id) {
-                                self.state
-                                    .messages_by_type
-                                    .entry(method.to_string())
-                                    .or_default()
-                                    .push(message.to_string());
+    fn on_process_message(&mut self, process_id: u32, message: String) {
+        let mut message = format!("{}{}", self.remaining_message, message);
+        loop {
 
-                                if method == "textDocument/semanticTokens/full" {
-                                    let meta = self.state.token_request_metadata.get(id).unwrap();
-                                    self.send_event(
-                                        "tokens_with_version",
-                                        serde_json::to_string(&TokensWithVersion {
-                                            tokens: get_token_data(message.clone()),
-                                            version: meta.document_version,
-                                            path: meta.path.clone(),
-                                        })
-                                        .unwrap(),
-                                    );
-                                }
-                                if method == "workspace/symbol" {
-                                    self.send_event(
-                                        "workspace/symbols",
-                                        message.get("result").unwrap().to_string(),
-                                    );
-                                }
-                                if method == "initialize" {
-                                    let result = message.get("result").unwrap();
-                                    let parsed_message =
-                                        serde_json::from_value::<InitializeResult>(result.clone())
-                                            .unwrap();
-
-                                    if let Some(token_provider) =
-                                        parsed_message.capabilities.semantic_tokens_provider
-                                    {
-                                        match token_provider {
-                                            lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(options) => {
-                                                self.send_event("token_options", serde_json::to_string(&options.legend).unwrap());
-                                            }
-                                            lsp_types::SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(options) => {
-                                                self.send_event("token_options", serde_json::to_string(&options.semantic_tokens_options.legend).unwrap());
-                                            },
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            // This isn't in response to a message we sent
-                            let method = message["method"].as_str();
-                            if let Some(method) = method {
-                                match method {
-                                    "$/progress" => {
-                                        if let Some(100) = message
-                                            .get("params")
-                                            .and_then(|x| x.get("value"))
-                                            .and_then(|x| x.get("percentage"))
-                                            .and_then(|x| x.as_u64())
-                                        {
-                                            self.initialized();
-                                        }
-                                    }
-                                    "textDocument/publishDiagnostics" => {
-                                        let diagnostic =
-                                            serde_json::to_string(&message.get("params")).unwrap();
-                                        self.state
-                                            .messages_by_type
-                                            .entry("diagnostics".to_string())
-                                            .or_default()
-                                            .push(diagnostic.clone());
-                                        self.send_event("diagnostics", diagnostic);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
+            match properly_parse_json_rpc_message(&message) {
+                Ok((Some(value), rest)) => {
+                    self.process_message(process_id, &value);
+                    message = rest;
                 }
-                Err(err) => match err {
-                    ParseError::NoClosingBrace(message) => {
-                        self.remaining_message = message.to_string();
-                    }
-                    ParseError::InvalidJson => {
-                        println!("Invalid json: {}", message);
-                    }
-                },
+                Ok((None, rest)) => {
+                    self.remaining_message = rest;
+                    break;
+                }
+                Err(e) => {
+                    println!("Error parsing message: {:?}", e);
+                    println!("Message: {}", message);
+                    break;
+                }
             }
+           
         }
-        // println!("Process {} sent message {}", process_id, message);
     }
 
     fn set_state(&mut self, state: String) {
@@ -676,9 +632,119 @@ impl ProcessSpawner {
                 widget_data: WidgetData::default(),
                 y_scroll_offset: 0.0,
             },
-            process_id: 0,
-            root_path: "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2".to_string(),
+            processes: HashMap::new(),
             remaining_message: String::new(),
+        }
+    }
+
+    fn process_message(&mut self, process_id: u32, message: &serde_json::Value) {
+        if let Some(id) = message["id"].as_str() {
+            if let Some(method) = self.state.message_type.get(id) {
+                self.state
+                    .messages_by_type
+                    .entry(method.to_string())
+                    .or_default()
+                    .push(message.to_string());
+
+                if method == "textDocument/semanticTokens/full" {
+                    let meta = self.state.token_request_metadata.get(id).unwrap();
+                    self.send_event(
+                        "tokens_with_version",
+                        serde_json::to_string(&TokensWithVersion {
+                            tokens: get_token_data(message.clone()),
+                            version: meta.document_version,
+                            path: meta.path.clone(),
+                        })
+                        .unwrap(),
+                    );
+                }
+                if method == "workspace/symbol" {
+                    self.send_event(
+                        "workspace/symbols",
+                        message.get("result").unwrap().to_string(),
+                    );
+                }
+                if method == "initialize" {
+                    let result = message.get("result").unwrap();
+                    let parsed_message =
+                        serde_json::from_value::<InitializeResult>(result.clone())
+                            .unwrap();
+
+                    if let Some(token_provider) =
+                        parsed_message.capabilities.semantic_tokens_provider
+                    {
+                        match token_provider {
+                            lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(options) => {
+                                self.send_event("token_options", serde_json::to_string(&options.legend).unwrap());
+                            }
+                            lsp_types::SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(options) => {
+                                self.send_event("token_options", serde_json::to_string(&options.semantic_tokens_options.legend).unwrap());
+                            },
+                        }
+                    }
+                }
+            }
+        } else {
+            // This isn't in response to a message we sent
+            let method = message["method"].as_str();
+            if let Some(method) = method {
+                match method {
+                    "$/progress" => {
+                        if let Some(100) = message
+                            .get("params")
+                            .and_then(|x| x.get("value"))
+                            .and_then(|x| x.get("percentage"))
+                            .and_then(|x| x.as_u64())
+                        {
+                            self.initialized(process_id);
+                        }
+                    }
+                    "textDocument/publishDiagnostics" => {
+                        let diagnostic =
+                            serde_json::to_string(&message.get("params")).unwrap();
+                        self.state
+                            .messages_by_type
+                            .entry("diagnostics".to_string())
+                            .or_default()
+                            .push(diagnostic.clone());
+                        self.send_event("diagnostics", diagnostic);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn find_dir_with_cargo_toml(path: &str) -> Option<String> {
+        let mut path = path.to_string();
+        loop {
+            let mut cargo_toml = path.clone();
+            cargo_toml.push_str("/Cargo.toml");
+            if std::path::Path::new(&cargo_toml).exists() {
+                return Some(path);
+            }
+            if let Some(index) = path.rfind('/') {
+                path = path[0..index].to_string();
+            } else {
+                return None
+            }
+        }
+    }
+
+    fn find_existing_root(&self, path: &str) -> Option<String> {
+        for root in self.processes.keys() {
+            if path.starts_with(root) {
+                return Some(root.clone());
+            }
+        }
+        None
+    }
+
+    fn find_process_id(&self, path: &str) -> Option<u32> {
+        if let Some(root) = self.find_existing_root(path) {
+            self.processes.get(&root).copied()
+        } else {
+            None
         }
     }
 }
@@ -726,4 +792,59 @@ fn find_rust_analyzer() -> String {
     "/Users/jimmyhmiller/Documents/Code/open-source/rust-analyzer/target/release/rust-analyzer".to_string()
 }
 
+fn get_slice(s: &str, range: std::ops::Range<usize>) -> Option<&str> {
+    if s.len() > range.start && s.len() >= range.end {
+        Some(&s[range])
+    } else {
+        None
+    }
+}
+
+fn properly_parse_json_rpc_message(message: &str) -> Result<(Option<serde_json::Value>, String), ParseError> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Ok((None, message.to_string()));
+    }
+    let content_length_start = message.find("Content-Length").ok_or(ParseError::NoClosingBrace(message.to_string()))?;
+    // println!("content_length_start: {}", content_length_start);
+    let content_length_end = message[content_length_start..].find("\r\n").ok_or(ParseError::NoClosingBrace(message.to_string()))?;
+    let content_length: usize = message[content_length_start + 16..content_length_start + content_length_end].trim().parse().unwrap();
+    // println!("content_length: {}", content_length);
+    let end_header = message[content_length_start..].find("\r\n\r\n").ok_or(ParseError::NoClosingBrace(message.to_string()))?;
+    // println!("end_header: {}", end_header);
+    let content_start = end_header + 4;
+    // println!("content_start: {}", content_start);
+    if let Some(content) = get_slice(message, content_start..content_start + content_length) {
+        // println!("content: {}", content);
+        let rest = &message[content_start + content_length..];
+        // println!("rest: {}", rest);
+        let value = serde_json::from_str(content).map_err(|_| ParseError::InvalidJson)?;
+        // println!("value: {:?}", value);
+        Ok((value, rest.to_string()))
+    } else {
+        let rest = message;
+        // println!("rest: {}", rest);
+        Ok((None, rest.to_string()))
+    }
+   
+}
+
 app!(ProcessSpawner);
+
+
+
+
+#[test]
+fn parse_rpc() {
+    assert!(properly_parse_json_rpc_message("Content-Length: 2\r\n\r\n{}").is_ok());
+    assert!(properly_parse_json_rpc_message("Content-Length: 2\r\n\r\n{").is_ok());
+    assert!(properly_parse_json_rpc_message("Content-Length: 3\r\n\r\n{a}").is_err());
+    assert!(properly_parse_json_rpc_message("Content-Length: 8\r\n\r\n{\"a\": 1}").is_ok());
+    assert!(properly_parse_json_rpc_message("Content-Length: 8\r\n\r\n{\"a\": 1}\r\n\r\n").is_ok());
+    if let Ok((first, rest)) = properly_parse_json_rpc_message("Content-Length: 8\r\n\r\n{\"a\": 1}\r\n\r\nContent-Length: 8\r\n\r\n{\"a\": 1}"){
+        assert!(first.is_some());
+        assert!(properly_parse_json_rpc_message(&rest).is_ok());
+    } else {
+        assert!(false);
+    }
+}

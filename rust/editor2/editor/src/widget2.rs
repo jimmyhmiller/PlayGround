@@ -98,6 +98,8 @@ pub trait Widget {
     fn set_scale(&mut self, scale: f32);
     fn size(&self) -> Size;
     fn id(&self) -> usize;
+    fn parent_id(&self) -> Option<usize>;
+    fn set_parent_id(&mut self, id: Option<usize>);
     fn set_id(&mut self, id: usize);
 
     fn dirty(&self) -> bool {
@@ -151,6 +153,13 @@ impl Widget for () {
     }
 
     fn set_id(&mut self, id: usize) {
+        todo!()
+    }
+    fn parent_id(&self) -> Option<usize> {
+        todo!()
+    }
+
+    fn set_parent_id(&mut self, id: Option<usize>) {
         todo!()
     }
 }
@@ -526,6 +535,14 @@ impl Widget for WasmWidget {
         self.meta.id = id;
     }
 
+    fn parent_id(&self) -> Option<usize> {
+        self.meta.parent_id
+    }
+
+    fn set_parent_id(&mut self, id: Option<usize>) {
+        self.meta.parent_id = id;
+    }
+
     fn mark_dirty(&mut self, reason: &str) {
         // println!("Marking dirty: {}", reason);
         self.dirty = true;
@@ -898,6 +915,14 @@ impl Widget for TextPane {
         self.meta.id = id;
     }
 
+    fn parent_id(&self) -> Option<usize> {
+        self.meta.parent_id
+    }
+
+    fn set_parent_id(&mut self, id: Option<usize>) {
+        self.meta.parent_id = id;
+    }
+
     fn set_scale(&mut self, scale: f32) {
         self.meta.scale = scale;
     }
@@ -971,6 +996,14 @@ impl Widget for Text {
 
     fn set_id(&mut self, id: usize) {
         self.meta.id = id;
+    }
+
+    fn parent_id(&self) -> Option<usize> {
+        self.meta.parent_id
+    }
+
+    fn set_parent_id(&mut self, id: Option<usize>) {
+        self.meta.parent_id = id;
     }
 
     fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
@@ -1057,6 +1090,14 @@ impl Widget for RandomText {
 
     fn set_id(&mut self, id: usize) {
         self.text.set_id(id)
+    }
+
+    fn parent_id(&self) -> Option<usize> {
+        self.meta.parent_id
+    }
+
+    fn set_parent_id(&mut self, id: Option<usize>) {
+        self.meta.parent_id = id;
     }
 
     // TODO: write font in text if mouse hover
@@ -1169,6 +1210,14 @@ impl Widget for Image {
         self.meta.id = id;
     }
 
+    fn parent_id(&self) -> Option<usize> {
+        self.meta.parent_id
+    }
+
+    fn set_parent_id(&mut self, id: Option<usize>) {
+        self.meta.parent_id = id;
+    }
+
     fn get_state(&self) -> String {
         "".to_string()
     }
@@ -1262,6 +1311,14 @@ impl Widget for Deleted {
 
     fn set_id(&mut self, _id: usize) {}
 
+    fn parent_id(&self) -> Option<usize> {
+        None
+    }
+
+    fn set_parent_id(&mut self, _id: Option<usize>) {
+        
+    }
+
     fn set_scale(&mut self, _scale: f32) {}
 
     fn size(&self) -> Size {
@@ -1337,6 +1394,14 @@ impl Widget for Ephemeral {
 
     fn set_id(&mut self, id: usize) {
         self.widget.set_id(id)
+    }
+
+    fn parent_id(&self) -> Option<usize> {
+        self.widget.parent_id()
+    }
+
+    fn set_parent_id(&mut self, id: Option<usize>) {
+        self.widget.set_parent_id(id);
     }
 
     fn start(&mut self) -> Result<(), Box<dyn Error>> {
