@@ -390,7 +390,7 @@ impl WasmManager {
             }
             Payload::ProcessMessage(process_id, message) => {
                 self.instance
-                    .on_process_message(process_id as i32, message)
+                    .on_process_message(process_id as u32, message)
                     .await?;
                 default_return
             }
@@ -489,6 +489,7 @@ struct State {
     wasm_id: u64,
     external_id: u32,
     external_sender: std::sync::mpsc::Sender<Event>,
+    process_id: u32,
 }
 
 impl State {
@@ -512,6 +513,7 @@ impl State {
             receivers: HashMap::new(),
             external_id: 0,
             external_sender,
+            process_id: 0,
         }
     }
 }
@@ -892,7 +894,8 @@ impl WasmInstance {
                 let process = get_string_from_caller(&mut caller, ptr, len);
                 let state = caller.data_mut();
                 // TODO: Real process id
-                let process_id = 0;
+                let process_id = state.process_id;
+                state.process_id += 1;
                 state
                     .commands
                     .push(Commands::StartProcess(process_id, process));
@@ -1084,12 +1087,12 @@ impl WasmInstance {
 
     pub async fn on_process_message(
         &mut self,
-        process_id: i32,
+        process_id: u32,
         message: String,
     ) -> Result<(), Box<dyn Error>> {
         let (ptr, _len) = self.transfer_string_to_wasm2(message).await?;
 
-        self.call_typed_func::<(i32, u32), ()>("on_process_message", (process_id, ptr), 1)
+        self.call_typed_func::<(u32, u32), ()>("on_process_message", (process_id, ptr), 1)
             .await?;
         Ok(())
     }

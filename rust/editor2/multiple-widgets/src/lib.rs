@@ -149,6 +149,7 @@ fn layout_elements2(max_width: f32, elements: &Vec<&WidgetMeta>) -> Vec<WidgetMe
         id: 0,
         scale: 1.0,
         kind: "example".to_string(),
+        parent_id: None,
     };
 
     let mut placed_elements: Vec<WidgetMeta> = Vec::new();
@@ -191,6 +192,7 @@ fn layout_elements2(max_width: f32, elements: &Vec<&WidgetMeta>) -> Vec<WidgetMe
             id: element.id,
             scale: element.scale,
             kind: element.kind.clone(),
+            parent_id: None,
         };
         placed_elements.push(widget_data);
     }
@@ -328,7 +330,11 @@ impl App for MultipleWidgets {
                     && x.position.y + x.size.height > self.get_position2().y
             })
             .filter(|x| x.scale != 0.1)
-            .map(|x| { x.scale = 0.1; x.clone()})
+            .map(|x| {
+                x.parent_id = Some(self.get_id());
+                x.scale = 0.1;
+                x.clone()
+            })
             .collect();
 
         // TODO: I am setting the position of these panes

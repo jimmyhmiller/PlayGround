@@ -24,10 +24,10 @@ extern "C" {
     fn restore();
     #[link_name = "set_cursor_icon"]
     fn set_cursor_icon_low_level(cursor_icon: u32);
-    fn start_process_low_level(ptr: i32, len: i32) -> i32;
+    fn start_process_low_level(ptr: i32, len: i32) -> u32;
     fn mark_dirty(external_id: u32);
     fn save_file_low_level(path_ptr: i32, path_length: i32, text_ptr: i32, text_length: i32);
-    fn send_message_low_level(process_id: i32, ptr: i32, len: i32);
+    fn send_message_low_level(process_id: u32, ptr: i32, len: i32);
     #[allow(improper_ctypes)]
     fn receive_last_message_low_level(process_id: i32) -> (i32, i32);
     #[link_name = "provide_f32"]
@@ -321,6 +321,7 @@ pub struct WidgetMeta {
     pub size: Size,
     #[serde(default)]
     pub id: usize,
+    pub parent_id: Option<usize>,
     pub kind: String,
 }
 
@@ -332,6 +333,7 @@ impl WidgetMeta {
             size,
             id,
             kind,
+            parent_id: None,
         }
     }
 }
@@ -437,7 +439,7 @@ pub trait App {
     fn get_initial_state(&self) -> String;
     fn get_state(&self) -> String;
     fn set_state(&mut self, state: String);
-    fn on_process_message(&mut self, _process_id: i32, _message: String) {}
+    fn on_process_message(&mut self, process_id: u32, _message: String) {}
     fn mark_dirty(&self, id: u32) {
         unsafe {
             mark_dirty(id);
@@ -469,7 +471,7 @@ impl DerefMut for Widget {
 
 // I didn't really need to do this. But it is kind of interesting
 pub trait AppExtensions {
-    fn start_process(&mut self, process: String) -> i32 {
+    fn start_process(&mut self, process: String) -> u32 {
         unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
     }
     
@@ -551,7 +553,7 @@ pub trait AppExtensions {
         }
         self.send_event("lith/save_file", path);
     }
-    fn send_message(&mut self, process_id: i32, message: String) {
+    fn send_message(&mut self, process_id: u32, message: String) {
         let c_message = CString::new(message).unwrap();
         let ptr = c_message.as_ptr();
         let len = c_message.to_bytes().len();
@@ -684,7 +686,7 @@ pub extern "C" fn on_mouse_up(x: f32, y: f32) {
 }
 
 #[no_mangle]
-pub extern "C" fn on_process_message(process_id: i32, str_ptr: u32) {
+pub extern "C" fn on_process_message(process_id: u32, str_ptr: u32) {
     let app = get_app!();
     let message = fetch_string(str_ptr);
     unsafe { app.on_process_message(process_id, message) }
