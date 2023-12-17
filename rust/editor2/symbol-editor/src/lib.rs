@@ -111,10 +111,7 @@ impl App for SymbolEditor {
                     continue;
                 }
                 for (group, symbols) in groups.into_iter() {
-                    if group.is_none() {
-                        continue;
-                    }
-                    let group = group.clone().unwrap();
+                    let group = group.clone().unwrap_or("Top Level".to_string());
                     if self.mouse_in_bounds(&canvas, -30.0, 200.0, 30.0) {
                         if self.clicked {
                             if self.opened.contains(&group) {

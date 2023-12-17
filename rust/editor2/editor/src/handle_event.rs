@@ -13,7 +13,7 @@ use serde_json::json;
 use crate::{
     editor::{self, Editor, PerFrame},
     event::Event,
-    keyboard::{KeyCode, KeyboardInput},
+    keyboard::{KeyCode, KeyboardInput, KeyState},
     native::open_file_dialog,
     wasm_messenger::{OutMessage, SaveState},
     widget::Widget,
@@ -402,18 +402,23 @@ impl Editor {
                 Event::KeyEvent {
                     input:
                         input @ KeyboardInput {
-                            state: _,
+                            state,
                             key_code,
                             modifiers,
                         },
                 } => {
-                    if modifiers.cmd && key_code == KeyCode::Key0 {
+                    if state == KeyState::Pressed && modifiers.cmd && key_code == KeyCode::Key0 {
                         self.canvas_scale = 1.0;
                         self.canvas_scroll_offset = Position { x: 0.0, y: 0.0 };
                         continue;
                     }
 
-                    if modifiers.cmd && key_code == KeyCode::O {
+                    if state == KeyState::Pressed &&  modifiers.option && modifiers.ctrl && key_code == KeyCode::D {
+                        self.show_debug = !self.show_debug;
+                        continue;
+                    }
+
+                    if state == KeyState::Pressed && modifiers.cmd && key_code == KeyCode::O {
                         let path = open_file_dialog();
                         if let Some(path) = path {
                             let path = path.replace("file://", "");
@@ -673,7 +678,7 @@ impl Editor {
         // Maybe I should do the first? Or the last?
         // Not sure
         let mut found_a_widget = false;
-        for widget in self.widget_store.iter_mut() {
+        for widget in self.widget_store.iter_by_z_index_mut() {
             if widget.mouse_over(&self.context.mouse_position) {
                 found_a_widget = true;
                 mouse_over.push(widget.id());
@@ -690,9 +695,12 @@ impl Editor {
                 // Should do better
                 self.active_widget = Some(widget.id());
             }
-            if !found_a_widget {
-                self.active_widget = None;
+            if found_a_widget {
+                break;
             }
+        }
+        if !found_a_widget {
+            self.active_widget = None;
         }
         for id in mouse_over {
             self.respond_to_event(Event::WidgetMouseDown { widget_id: id });
