@@ -26,6 +26,15 @@ impl App for ColorScheme {
         self
     }
 
+    fn start(&mut self) {
+        let mappings: Option<HashMap<usize, String>> = self.try_get_value("color_mappings");
+        let token_legend: Option<SemanticTokensLegend> = self.try_get_value("token_legend");
+        if let Some(mappings) = mappings {
+            self.color_mapping = mappings;
+        }
+        self.token_legend = token_legend;
+    }
+
     fn draw(&mut self) {
         let mut canvas = Canvas::new();
         let background = Color::parse_hex("#353f38");
@@ -69,7 +78,7 @@ impl App for ColorScheme {
                             self.color_mapping.insert(index, color.to_string());
                             let data = serde_json::to_string(&self.color_mapping).unwrap();
                             self.send_event("color_mapping_changed", data.clone());
-                            self.provide_value("color_mappings", data.as_bytes())
+                            self.provide_value("color_mappings", self.color_mapping.clone())
                         }
                         canvas.set_color(&Color::parse_hex("#ffffff"));
                         canvas.draw_rect(-1.0, -1.0, 22.0, 22.0);
@@ -113,6 +122,7 @@ impl App for ColorScheme {
     }
 
     fn on_move(&mut self, x: f32, y: f32) {
+        self.start();
         self.widget_data.position = Position { x, y };
     }
 
@@ -125,6 +135,10 @@ impl App for ColorScheme {
     }
 
     fn get_state(&self) -> String {
+        if let Some(token_legend) = &self.token_legend {
+            self.provide_value("token_legend", token_legend);
+        }
+
         serde_json::to_string(&self).unwrap()
     }
 
@@ -135,7 +149,9 @@ impl App for ColorScheme {
 
     fn on_event(&mut self, kind: String, event: String) {
         if kind == "token_options" {
-            self.token_legend = Some(serde_json::from_str(&event).unwrap());
+            let tokens : SemanticTokensLegend = serde_json::from_str(&event).unwrap();
+            self.token_legend = Some(tokens.clone());
+            self.provide_value("token_legend", tokens);
         }
     }
 
