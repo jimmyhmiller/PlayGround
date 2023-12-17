@@ -10,7 +10,6 @@ use std::{
     time::Instant,
 };
 
-use cacao::input;
 use framework::{KeyboardInput, Position, Size, Value, WidgetMeta};
 use futures::channel::{mpsc::Sender, oneshot};
 use itertools::Itertools;
@@ -18,13 +17,13 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use skia_safe::{
     font_style::{Slant, Weight, Width},
-    Canvas, Data, Font, FontMgr, FontStyle, Path, Point, RRect, Rect, Typeface, Paint, Surface, surfaces::raster_n32_premul, canvas::SrcRectConstraint,
+    Canvas, Data, Font, FontMgr, FontStyle, Path, Point, RRect, Rect, Typeface, Paint, surfaces::raster_n32_premul, canvas::SrcRectConstraint,
 };
 
 use crate::{
     color::Color,
     event::Event,
-    wasm_messenger::{Commands, DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState}, keyboard::{KeyState, KeyCode},
+    wasm_messenger::{Commands, DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState},
 };
 
 #[allow(unused)]
@@ -643,7 +642,7 @@ impl WasmWidget {
         }
     }
 
-    pub fn copy(&self, source: &Rect, canvas: &Canvas, (x, y): (f32, f32)) {
+    pub fn copy(&self, source: &Rect, canvas: &Canvas, (_x, _y): (f32, f32)) {
         let dst = Rect::from_xywh(0.0, 0.0, source.width(), source.height());
         let image = self.atlas.as_ref().unwrap();
         canvas.draw_image_rect(

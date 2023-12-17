@@ -253,7 +253,7 @@ impl App for MultipleWidgets {
         );
         self.provide_value(
             "widgets",
-            serde_json::to_string(&new_layout).unwrap().as_bytes(),
+            new_layout.clone(),
         );
     }
 
@@ -285,7 +285,7 @@ impl App for MultipleWidgets {
                 .collect();
             self.provide_value(
                 "widgets",
-                serde_json::to_string(&positions).unwrap().as_bytes(),
+                positions.clone(),
             );
             
         }

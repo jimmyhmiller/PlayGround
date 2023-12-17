@@ -588,7 +588,10 @@ pub trait AppExtensions {
         unsafe { set_get_state(ptr, len) };
     }
 
-    fn provide_value(&self, s: &str, val: &[u8]) {
+    fn provide_value<T: Serialize>(&self, s: &str, val: T) {
+
+        let val = serde_json::to_string(&val).unwrap();
+        let val = val.as_bytes();
         // TODO: I need to fix the lifetime of this thing
         // most likely
         unsafe {
