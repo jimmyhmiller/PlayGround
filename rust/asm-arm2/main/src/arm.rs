@@ -1,6 +1,6 @@
 use asm::arm::{
     ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector,
-    SP, X0, X19, X20, X21, X22, X29, X30, ZERO_REGISTER, X3,
+    SP, X0, X19, X20, X21, X22, X29, X3, X30, ZERO_REGISTER,
 };
 
 use std::collections::HashMap;
@@ -268,7 +268,8 @@ impl LowLevelArm {
         self.instructions.push(mov_imm(destination, input));
     }
     pub fn mov_64(&mut self, destination: Register, input: isize) {
-        self.instructions.extend(Self::mov_64_bit_num(destination, input));
+        self.instructions
+            .extend(Self::mov_64_bit_num(destination, input));
     }
 
     pub fn store_pair(
@@ -382,7 +383,10 @@ impl LowLevelArm {
 
     pub fn compile_to_bytes(&mut self) -> Vec<u8> {
         let instructions = self.compile();
-        let bytes = instructions.iter().flat_map(|x| x.encode().to_le_bytes()).collect();
+        let bytes = instructions
+            .iter()
+            .flat_map(|x| x.encode().to_le_bytes())
+            .collect();
         bytes
     }
 
@@ -505,7 +509,7 @@ impl LowLevelArm {
         // TODO: This is not optimal, but it works
         let mut num = num;
         let mut result = vec![];
-    
+
         result.push(ArmAsm::Movz {
             sf: register.sf(),
             hw: 0,
@@ -533,13 +537,10 @@ impl LowLevelArm {
             imm16: num as i32 & 0xffff,
             rd: register,
         });
-    
+
         result
     }
-    
 }
-
-
 
 #[allow(dead_code)]
 fn fib() -> LowLevelArm {
@@ -592,14 +593,11 @@ fn fib() -> LowLevelArm {
     lang
 }
 
-
-
 #[no_mangle]
 extern "C" fn print_it(num: u64) -> u64 {
     println!("{}", num);
     num
 }
-
 
 #[allow(dead_code)]
 fn countdown_codegen() -> LowLevelArm {

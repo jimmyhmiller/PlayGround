@@ -78,11 +78,11 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
             }
             if width as usize > max_width {
                 self.offset.x = 0.0;
-                return;
+            } else {
+                self.offset.x += x as f32;
             }
         }
 
-        self.offset.x += x as f32;
 
         if self.offset.x < 0.0 {
             self.offset.x = 0.0;
@@ -507,6 +507,12 @@ impl App for CodeEditor {
     fn on_event(&mut self, kind: String, event: String) {
 
         if kind == "tokens_with_version" {
+            if self.text_pane.color_mapping.is_empty() {
+                if let Some(color_mappings) = self.try_get_value::<HashMap<usize, String>>("color_mappings") {
+                    self.text_pane.color_mapping = color_mappings;
+                }
+            }
+
             // Serializing all here is very slow
             let json_value = serde_json::from_str::<serde_json::Value>(&event).unwrap();
             if json_value.get("path") != Some(&json!(self.file_path)) {

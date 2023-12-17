@@ -256,6 +256,13 @@ impl WidgetStore {
 
                 let image = surface.image_snapshot();
                 images_to_insert.push((widget.id(), image));
+            } else {
+                // I could chunk up this canvas and draw each chunk
+                canvas.save();
+                canvas.translate((widget.position().x, widget.position().y));
+                widget.draw(canvas);
+                canvas.restore();
+                self.widget_images.remove(&widget.id());
             }
         }
 

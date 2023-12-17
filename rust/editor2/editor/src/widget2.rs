@@ -10,6 +10,7 @@ use std::{
     time::Instant,
 };
 
+use cacao::input;
 use framework::{KeyboardInput, Position, Size, Value, WidgetMeta};
 use futures::channel::{mpsc::Sender, oneshot};
 use itertools::Itertools;
@@ -17,13 +18,13 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use skia_safe::{
     font_style::{Slant, Weight, Width},
-    Canvas, Data, Font, FontMgr, FontStyle, Path, Point, RRect, Rect, Typeface,
+    Canvas, Data, Font, FontMgr, FontStyle, Path, Point, RRect, Rect, Typeface, Paint, Surface, surfaces::raster_n32_premul, canvas::SrcRectConstraint,
 };
 
 use crate::{
     color::Color,
     event::Event,
-    wasm_messenger::{Commands, DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState},
+    wasm_messenger::{Commands, DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState}, keyboard::{KeyState, KeyCode},
 };
 
 #[allow(unused)]
@@ -198,10 +199,38 @@ pub struct WasmWidget {
     pub external_id: Option<u32>,
     #[serde(skip)]
     pub value_senders: HashMap<String, oneshot::Sender<Value>>,
+    #[serde(skip)]
+    pub atlas: Option<skia_safe::Image>,
+    #[serde(default)]
+    pub offset: Position,
+    #[serde(default)]
+    pub size_offset: Size,
     // TODO:
     // Maybe we make a "mark dirty" sender
     // That way each widget can decide it is dirty
     // and needs to be drawn just by sending a message
+}
+
+pub fn draw_font_texture() -> Result<(skia_safe::Image, usize, usize), String> {
+    let font = Font::new(
+        Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
+        32.0,
+    );
+    let mut text = String::new();
+    for i in 33..127 {
+        text.push(i as u8 as char);
+    }
+    let paint = Paint::new(Color::parse_hex("#ffffff").as_color4f(), None);
+    let mut surface = raster_n32_premul(((text.len() * 90) as i32, 900 as i32)).unwrap();
+    let canvas = surface.canvas();
+    canvas.translate((0.0, 0.0));
+
+    canvas.draw_str(text.clone(), (0.0, 30.0), &font, &paint);
+
+    let image = surface.image_snapshot();
+    let size = image.dimensions();
+    let width = (size.width / text.len() as i32).try_into().unwrap();
+    Ok((image, width, size.height.try_into().unwrap()))
 }
 
 #[allow(unused)]
@@ -223,6 +252,19 @@ impl Widget for WasmWidget {
     }
 
     fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
+
+        let font = Font::new(
+            Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
+            32.0,
+        );
+
+        if self.atlas.is_none() {
+            let (image, width, height) = draw_font_texture().unwrap();
+
+            self.atlas = Some(image);
+        }
+        // TODO: Make not dumb
+        
         let bounds = self.size();
         canvas.save();
         // canvas.translate((self.position().x, self.position().y));
@@ -231,6 +273,7 @@ impl Widget for WasmWidget {
         let mut current_width = 0.0;
         let mut current_height = 0.0;
         let mut current_height_stack = vec![];
+
 
         let mut paint = skia_safe::Paint::default();
         for command in self.draw_commands.iter() {
@@ -251,12 +294,15 @@ impl Widget for WasmWidget {
                     if current_height < 0.0 {
                         continue;
                     }
-                    let font = Font::new(
-                        Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
-                        32.0,
-                    );
 
-                    // No good way right now to find bounds. Need to think about this properly
+                    // The font atlas isn't quite right
+                    // But also, it was no faster than skia
+                    // Can I make it faster? Should I spend that time?
+                    // Can I be smarter about what I render?
+                    // Is text the thing slowing down code editor?
+                    // Or maybe it is this whole draw_commands biz
+                    // Maybe I need to profile
+                    // self.draw_string(str, (*x, *y), &canvas);
                     canvas.draw_str(str, (*x, *y), &font, &paint);
                 }
 
@@ -303,10 +349,47 @@ impl Widget for WasmWidget {
     }
 
     fn on_key(&mut self, input: KeyboardInput) -> Result<(), Box<dyn Error>> {
-        let message = self.wrap_payload(Payload::OnKey(
-            crate::keyboard::KeyboardInput::from_framework(input),
-        ));
-        self.send_message(message)?;
+        let input = crate::keyboard::KeyboardInput::from_framework(input);
+        let message = self.wrap_payload(Payload::OnKey(input));
+        
+        // if input.state == KeyState::Pressed {
+            // if input.modifiers.ctrl {
+            //     match input.key_code {
+            //         KeyCode::LeftArrow => {
+            //             self.size_offset.width -= 1.0;
+            //         }
+            //         KeyCode::RightArrow => {
+            //             self.size_offset.width += 1.0;
+            //         }
+            //         KeyCode::UpArrow => {
+            //             self.size_offset.height -= 1.0;
+            //         }
+            //         KeyCode::DownArrow => {
+            //             self.size_offset.height += 1.0;
+            //         }
+            //         _ => {}
+            //     }
+            // } else {
+            //     match input.key_code {
+            //         KeyCode::LeftArrow => {
+            //             self.offset.x -= 1.0;
+            //         }
+            //         KeyCode::RightArrow => {
+            //             self.offset.x += 1.0;
+            //         }
+            //         KeyCode::UpArrow => {
+            //             self.offset.y -= 1.0;
+            //         }
+            //         KeyCode::DownArrow => {
+            //             self.offset.y += 1.0;
+            //         }
+            //         _ => {}
+            //     }
+            // }
+            
+        // }
+       
+        // self.send_message(message)?;
         Ok(())
     }
 
@@ -559,6 +642,42 @@ impl WasmWidget {
             sender.send(value).unwrap();
         }
     }
+
+    pub fn copy(&self, source: &Rect, canvas: &Canvas, (x, y): (f32, f32)) {
+        let dst = Rect::from_xywh(0.0, 0.0, source.width(), source.height());
+        let image = self.atlas.as_ref().unwrap();
+        canvas.draw_image_rect(
+            image,
+            Some((source, SrcRectConstraint::Fast)),
+            dst,
+            &Paint::default(),
+        );
+    }
+
+
+    pub fn move_right_one_char(&self, canvas: &Canvas) {
+        canvas.translate((16.0, 0.0));
+    }
+
+
+    pub fn char_position_in_atlas(&self, c: char) -> Rect {
+        let letter_width = 16.0;
+        let letter_height = 30.0;
+        // Rect::from_xywh((letter_width as i32 * (c as i32 - 33)) as f32, 0.0, letter_width as f32 + self.size_offset.width, letter_height as f32 + self.size_offset.height)
+        Rect::from_xywh((letter_width as i32 * (c as i32 - 33)) as f32, 0.0, letter_width, letter_height)
+        // Rect::from_xywh(0.0, 0.0, 300.0, 300.0)
+    }
+
+     pub fn draw_string(&self, text: &str, (x, y): (f32, f32), canvas: &Canvas) -> Result<(), String> {
+        canvas.save();
+        for char in text.chars() {
+            self.move_right_one_char(canvas);
+            self.copy(&self.char_position_in_atlas(char), canvas, (x, y));
+        }
+        canvas.restore();
+        Ok(())
+    }
+
 
     pub fn send_message(&mut self, message: Message) -> Result<(), Box<dyn Error>> {
         self.dirty = true;

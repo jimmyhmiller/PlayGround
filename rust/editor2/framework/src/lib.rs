@@ -507,7 +507,18 @@ pub trait AppExtensions {
 
     fn create_widget_ref(&mut self, external_id: u32, data: WidgetData) -> Widget {
         unsafe {
-            EXTERNAL_ID_TO_APP.insert(external_id, CURRENT_APP);
+            CONTEXT.insert(Some(external_id as usize), Context {
+                external_id: Some(external_id as usize),
+                meta: WidgetMeta::new(
+                    data.position,
+                    data.size,
+                    1.0,
+                    external_id as usize,
+                    "widget".to_string(),
+                ),
+                app_index: self.get_id(),
+            });
+            
             create_widget(
                 data.position.x,
                 data.position.y,
@@ -525,7 +536,18 @@ pub trait AppExtensions {
         unsafe {
             APPS.push(app);
             let identifer = APPS.len() - 1;
-            EXTERNAL_ID_TO_APP.insert(identifer as u32, identifer);
+            CONTEXT.insert(Some(identifer as usize), Context {
+                external_id: Some(identifer as usize),
+                meta: WidgetMeta::new(
+                    data.position,
+                    data.size,
+                    1.0,
+                    identifer as usize,
+                    "widget".to_string(),
+                ),
+                app_index: self.get_id(),
+            });
+            
             create_widget(
                 data.position.x,
                 data.position.y,
@@ -632,7 +654,6 @@ pub trait AppExtensions {
     }
 }
 
-pub static mut EXTERNAL_ID_TO_APP: Lazy<HashMap<u32, usize>> = Lazy::new(HashMap::new);
 
 pub static mut APPS: Lazy<Vec<Box<dyn App>>> = Lazy::new(Vec::new);
 
@@ -641,6 +662,7 @@ pub static mut CURRENT_EXTERNAL_ID: Option<usize> = None;
 
 
 
+#[derive(Debug, Clone)]
 pub struct Context {
     pub external_id: Option<usize>,
     pub meta: WidgetMeta,
@@ -653,8 +675,8 @@ pub static mut CONTEXT: Lazy<HashMap<Option<usize>, Context>> = Lazy::new(|| Has
 #[no_mangle]
 pub extern "C" fn set_widget_identifier(identifier: u32) {
     unsafe {
-        let app = EXTERNAL_ID_TO_APP.get(&identifier).unwrap();
-        CURRENT_APP = *app;
+        let app_index = CONTEXT.get(&Some(identifier as usize)).unwrap().app_index;
+        CURRENT_APP = app_index;
         CURRENT_EXTERNAL_ID = Some(identifier as usize);
     }
 }

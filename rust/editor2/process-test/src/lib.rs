@@ -98,38 +98,6 @@ enum ParseError {
 
 impl ProcessSpawner {
 
-    // TODO: I need to properly parse messages
-
-    fn parse_message(&self, message: &str) -> Result<Vec<serde_json::Value>, ParseError> {
-        let mut results = vec![];
-        if let Some(start_json_object) = message.find('{') {
-            // TODO: This can crash
-            // I need to investigate this closer
-            // Probably need to hold onto the message until we get this?
-            let last_close_brace = message
-                .rfind("}")
-                .ok_or(ParseError::NoClosingBrace(message.to_string()))?;
-            let message = &message[start_json_object..last_close_brace + 1];
-            let message = message.trim();
-            let deserializer = serde_json::Deserializer::from_str(message);
-            let iterator: serde_json::StreamDeserializer<
-                '_,
-                serde_json::de::StrRead<'_>,
-                serde_json::Value,
-            > = deserializer.into_iter::<serde_json::Value>();
-            for item in iterator {
-                let item = item.map_err(|_| ParseError::InvalidJson)?;
-                results.push(item);
-            }
-        }
-
-        Ok(results)
-    }
-
-
-
-        
-
     fn next_request_id(&mut self) -> String {
         self.state.last_request_id += 1;
         format!("client/{}", self.state.last_request_id)

@@ -47,8 +47,6 @@ impl From<usize> for Value {
     }
 }
 
-
-
 // Probably don't want to just use rust strings
 // could be confusing with lifetimes and such
 #[derive(Debug, Clone)]
@@ -534,8 +532,9 @@ impl Ir {
                     // TODO:
                     // I am not actually checking any tags here
                     // or unmasking or anything. Just straight up calling it
-                    
-                    let function = alloc.allocate_register(index, function.try_into().unwrap(), &mut lang);
+
+                    let function =
+                        alloc.allocate_register(index, function.try_into().unwrap(), &mut lang);
                     lang.call(function);
 
                     let dest = dest.try_into().unwrap();
@@ -544,7 +543,6 @@ impl Ir {
                     for (index, register) in allocated_registers.iter().enumerate() {
                         lang.load_from_stack(*register, index as i32 + 2)
                     }
-
                 }
                 Instruction::JumpIf(label, condition, a, b) => {
                     let a = a.try_into().unwrap();
@@ -592,7 +590,7 @@ impl Ir {
                         lang.mov_64(lang.ret_reg(), *id as isize);
                         lang.jump(exit);
                     }
-                }
+                },
             }
         }
 
@@ -616,9 +614,7 @@ impl Ir {
     pub fn string_constant(&mut self, arg: String) -> Value {
         // TODO: Make this correct
         // We need to forget the string so we never clean it up
-        let string_value = StringValue {
-            str: arg,
-        };
+        let string_value = StringValue { str: arg };
         self.string_constants.push(string_value);
         let index = self.string_constants.len() - 1;
         Value::StringConstantId(index)
@@ -627,7 +623,10 @@ impl Ir {
     pub fn load_string_constant(&mut self, string_constant: Value) -> Value {
         let string_constant = self.assign_new(string_constant);
         let register = self.volatile_register();
-        self.instructions.push(Instruction::LoadConstant(register.into(), string_constant.into()));
+        self.instructions.push(Instruction::LoadConstant(
+            register.into(),
+            string_constant.into(),
+        ));
         register.into()
     }
 
@@ -639,7 +638,8 @@ impl Ir {
 
     pub fn call(&mut self, function: Value, vec: Vec<Value>) -> Value {
         let dest = self.volatile_register().into();
-        self.instructions.push(Instruction::Call(dest, function, vec));
+        self.instructions
+            .push(Instruction::Call(dest, function, vec));
         dest
     }
 
@@ -650,8 +650,6 @@ impl Ir {
         index
     }
 }
-
-
 
 #[allow(unused)]
 pub fn fib() -> Ir {
@@ -684,7 +682,6 @@ pub fn fib() -> Ir {
     ir
 }
 
-
 pub fn hello_world() -> Ir {
     let mut ir = Ir::new();
     let print = ir.add_function("print", print_value as *const u8);
@@ -698,11 +695,10 @@ pub fn hello_world() -> Ir {
 pub fn print_value(value: usize) {
     assert!(value & 0b111 == 0b010);
     let value = value & !0b111;
-    let string_value : &StringValue = unsafe { std::mem::transmute(value) };
+    let string_value: &StringValue = unsafe { std::mem::transmute(value) };
     let string = &string_value.str;
     println!("{}", string);
 }
-
 
 // TODO:
 // I need to properly tag every value
