@@ -19,6 +19,7 @@ struct SymbolEditor {
     mouse_location: Option<(f32, f32)>,
 }
 
+// TODO: If I want projects, I need to look at cargo.toml files
 fn get_project(symbol: &WorkspaceSymbol) -> Option<String> {
     let uri = match &symbol.location {
         lsp_types::OneOf::Left(l) => l.uri.clone(),
@@ -26,8 +27,8 @@ fn get_project(symbol: &WorkspaceSymbol) -> Option<String> {
     };
     let path = uri.path();
     let segments = path.split("/").collect::<Vec<&str>>();
-    let root = segments.iter().position(|x| *x == "editor2")?;
-    let project = segments.get(root + 1)?;
+    let root = segments.iter().position(|x| *x == "src")?;
+    let project = segments.get(root - 1)?;
 
     return Some(project.to_string());
 }
@@ -53,23 +54,37 @@ impl App for SymbolEditor {
             let background = Color::parse_hex("#353f38");
             canvas.set_color(&background);
 
-            canvas.draw_rect(0.0, 0.0, self.data.size.width, self.data.size.height);
-            canvas.clip_rect(Rect::new(
+            let size = self.data.size;
+            let bounding_rect = Rect::new(
                 0.0,
                 0.0,
-                self.data.size.width,
-                self.data.size.height,
-            ));
+                size.width,
+                size.height,
+            );
+            canvas.set_color(&background);
+            canvas.clip_rect(bounding_rect);
+            canvas.draw_rrect(bounding_rect, 20.0);
+    
+            canvas.clip_rect(bounding_rect.with_inset((20.0, 20.0)));
 
             canvas.set_color(&foreground);
             canvas.save();
-            canvas.translate(20.0, 30.0);
+            canvas.translate(40.0, 60.0);
 
+
+            if self.symbols.is_empty() {
+                canvas.draw_str("Loading...", 30.0, 30.0);
+                canvas.restore();
+                return;
+            }
+
+            let symbols = self.symbols.clone();
             // TODO: I need to think about how I want the UI for code base exploration
             // to work. We need to be able to see the structure of the code base,
             // but also jump into bits we care about
-            let projects = self.symbols
+            let projects = symbols
                 .iter()
+                .sorted_by(|x, y| Ord::cmp(&get_project(x), &get_project(y)))
                 .group_by(|x| get_project(x));
             
             for (project, symbols) in projects.into_iter() {
@@ -80,10 +95,7 @@ impl App for SymbolEditor {
                 let groups = symbols.iter().group_by(|x| &x.container_name);
                 let project = project.unwrap();
 
-                // TODO: Fix the bounds issue
-                canvas.save();
-                canvas.translate(0.0, -30.0);
-                if self.mouse_in_bounds(&canvas, 200.0, 30.0) {
+                if self.mouse_in_bounds(&canvas, -30.0, 200.0, 30.0) {
                     if self.clicked {
                         if self.opened.contains(&project) {
                             self.opened.remove(&project);
@@ -92,7 +104,6 @@ impl App for SymbolEditor {
                         }
                     }
                 }
-                canvas.restore();
                 canvas.draw_str(&project, 0.0, 0.0);
                 canvas.translate(30.0, 30.0);
                 if !self.opened.contains(&project) {
@@ -104,9 +115,7 @@ impl App for SymbolEditor {
                         continue;
                     }
                     let group = group.clone().unwrap();
-                    canvas.save();
-                    canvas.translate(0.0, -30.0);
-                    if self.mouse_in_bounds(&canvas, 200.0, 30.0) {
+                    if self.mouse_in_bounds(&canvas, -30.0, 200.0, 30.0) {
                         if self.clicked {
                             if self.opened.contains(&group) {
                                 self.opened.remove(&group);
@@ -115,7 +124,6 @@ impl App for SymbolEditor {
                             }
                         }
                     }
-                    canvas.restore();
 
                     canvas.draw_str(&group, 0.0, 0.0);
                     canvas.translate(30.0, 30.0);
@@ -125,6 +133,28 @@ impl App for SymbolEditor {
                     }
                     for symbol in symbols.into_iter() {
                         canvas.draw_str(&symbol.name, 0.0, 0.0);
+                        if self.mouse_in_bounds(&canvas, -30.0, 200.0, 30.0) {
+                            canvas.draw_rect(0.0, -20.0, 200.0, 30.0);
+                            if self.clicked {
+                                let mut editor = CodeEditor::init();
+                                editor.alive = true;
+                                let location = match &symbol.location {
+                                    lsp_types::OneOf::Left(l) => l.clone(),
+                                    lsp_types::OneOf::Right(_) => panic!("Not supported")
+                                };
+                                editor.file_path = location.uri.path().to_string();
+                                let start_line = location.range.start.line;
+                                let end_line = location.range.end.line + 1;
+                                editor.visible_range = (start_line as usize, end_line as usize);
+                                editor.open_file();
+                                editor.start();
+                                let mut data = self.data.clone();
+                                data.position.x = data.position.x + data.size.width + 50.0;
+                                let external_id = self.editors.len() as u32;
+                                self.create_widget_ref(external_id, data);
+                                self.editors.push(editor);
+                            }
+                        }
                         canvas.translate(0.0, 30.0);
                     }
                     canvas.translate(-30.0, 30.0);
@@ -356,13 +386,14 @@ impl SymbolEditor {
         }
     }
 
-    fn mouse_in_bounds(&self, canvas: &Canvas, width: f32, height: f32) -> bool {
+    fn mouse_in_bounds(&self, canvas: &Canvas, offset: f32, width: f32, height: f32) -> bool {
         if let Some((x, y)) = self.mouse_location {
             let canvas_position = canvas.get_current_position();
-            if x > canvas_position.0
-                && x < canvas_position.0 + width
-                && y > canvas_position.1
-                && y < canvas_position.1 + height
+            let canvas_position = Position{ x: canvas_position.0 , y: canvas_position.1 + offset };
+            if x > canvas_position.x
+                && x < canvas_position.x + width
+                && y > canvas_position.y
+                && y < canvas_position.y + height
             {
                 return true;
             }

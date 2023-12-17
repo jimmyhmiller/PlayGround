@@ -68,6 +68,9 @@ impl Editor {
                                 dirty: true,
                                 external_id: None,
                                 value_senders: HashMap::new(),
+                                atlas: None,
+                                offset: Position { x: 0.0, y: 0.0 },
+                                size_offset: Size { width: 0.0, height: 0.0 },
                             }),
                         });
                     } else if path.extension().unwrap() == "png" {
@@ -407,6 +410,7 @@ impl Editor {
                     if modifiers.cmd && key_code == KeyCode::Key0 {
                         self.canvas_scale = 1.0;
                         self.canvas_scroll_offset = Position { x: 0.0, y: 0.0 };
+                        continue;
                     }
 
                     if modifiers.cmd && key_code == KeyCode::O {
@@ -451,6 +455,9 @@ impl Editor {
                                     dirty: true,
                                     external_id: None,
                                     value_senders: HashMap::new(),
+                                    atlas: None,
+                                    offset: Position { x: 0.0, y: 0.0 },
+                                    size_offset: Size { width: 0.0, height: 0.0 },
                                 }),
                             });
                             self.mark_widget_dirty(widget_id, "open");
@@ -498,6 +505,9 @@ impl Editor {
                             dirty: true,
                             external_id: Some(external_id),
                             value_senders: HashMap::new(),
+                            atlas: None,
+                            offset: Position { x: 0.0, y: 0.0 },
+                            size_offset: Size { width: 0.0, height: 0.0 },
                         }))),
                     });
                     self.wasm_messenger.notify_external_sender(

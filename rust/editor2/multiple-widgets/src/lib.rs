@@ -306,36 +306,36 @@ impl App for MultipleWidgets {
         // This doesn't work because we don't give mouse_move on the drag
         // Maybe we can fix this
 
-        self.widget_data.position = Position {
-            x,
-            y,
-        };
+        // self.widget_data.position = Position {
+        //     x,
+        //     y,
+        // };
 
-        let widget_positions: Option<Vec<WidgetMeta>> = self.get_value("widgets");
-        if let Some(widget_positions) = widget_positions {
-            self.widget_positions = widget_positions;
-        }
+        // let widget_positions: Option<Vec<WidgetMeta>> = self.get_value("widgets");
+        // if let Some(widget_positions) = widget_positions {
+        //     self.widget_positions = widget_positions;
+        // }
 
-        let overlapping_panes: Vec<WidgetMeta> = self
-            .widget_positions
-            .clone()
-            .iter_mut()
-            .filter(|x| x.id != self.get_id())
-            .filter(|x| {
-                // A pane that is over top us
-                x.position.x < self.get_position2().x + self.get_size().width
-                    && x.position.x + x.size.width > self.get_position2().x
+        // let overlapping_panes: Vec<WidgetMeta> = self
+        //     .widget_positions
+        //     .clone()
+        //     .iter_mut()
+        //     .filter(|x| x.id != self.get_id())
+        //     .filter(|x| {
+        //         // A pane that is over top us
+        //         x.position.x < self.get_position2().x + self.get_size().width
+        //             && x.position.x + x.size.width > self.get_position2().x
 
-                    && x.position.y < self.get_position2().y + self.get_size().height
-                    && x.position.y + x.size.height > self.get_position2().y
-            })
-            .filter(|x| x.scale != 0.1)
-            .map(|x| {
-                x.parent_id = Some(self.get_id());
-                x.scale = 0.1;
-                x.clone()
-            })
-            .collect();
+        //             && x.position.y < self.get_position2().y + self.get_size().height
+        //             && x.position.y + x.size.height > self.get_position2().y
+        //     })
+        //     .filter(|x| x.scale != 0.1)
+        //     .map(|x| {
+        //         x.parent_id = Some(self.get_id());
+        //         x.scale = 0.1;
+        //         x.clone()
+        //     })
+        //     .collect();
 
         // TODO: I am setting the position of these panes
         // but one of them is moving over this pane.
@@ -350,13 +350,13 @@ impl App for MultipleWidgets {
         // I should also definitely make it so provide_value
         // does the serialziation so we don't have to think about it.
 
-        if !overlapping_panes.is_empty() {
-            self.provide_value(
-                "widgets",
-                serde_json::to_string(&overlapping_panes).unwrap().as_bytes(),
-            );
+        // if !overlapping_panes.is_empty() {
+        //     self.provide_value(
+        //         "widgets",
+        //         serde_json::to_string(&overlapping_panes).unwrap().as_bytes(),
+        //     );
     
-        }
+        // }
 
        
 

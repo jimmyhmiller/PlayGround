@@ -41,7 +41,10 @@ pub enum Ast {
 }
 
 impl Ast {
-    pub fn compile<F>(&self, init: F) -> Ir where F: Fn(&mut Ir) -> () {
+    pub fn compile<F>(&self, init: F) -> Ir
+    where
+        F: Fn(&mut Ir) -> (),
+    {
         let mut compiler = AstCompiler {
             ast: self.clone(),
             variables: HashMap::new(),
@@ -70,11 +73,7 @@ impl AstCompiler {
 
     pub fn compile_to_ir(&mut self, ast: &Ast) -> Value {
         match ast.clone() {
-            Ast::Function {
-                name,
-                args,
-                body,
-            } => {
+            Ast::Function { name, args, body } => {
                 assert!(self.name.is_empty());
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
@@ -151,7 +150,10 @@ impl AstCompiler {
                     .iter()
                     .map(|arg| self.compile_to_ir(&Box::new(arg.clone())))
                     .collect();
-                let function = self.ir.get_function_by_name(&name).expect(format!("Function {} not found", name).as_str());
+                let function = self
+                    .ir
+                    .get_function_by_name(&name)
+                    .expect(format!("Function {} not found", name).as_str());
                 let function = self.ir.function(function);
                 self.ir.call(function, args)
             }
@@ -291,7 +293,6 @@ macro_rules! ast {
     }
 }
 
-
 pub fn fib() -> Ast {
     ast! {
         (fn fib [n]
@@ -300,9 +301,6 @@ pub fn fib() -> Ast {
                 (+ (fib (- n 1)) (fib (- n 2)))))
     }
 }
-
-
-
 
 pub fn fib2() -> Ast {
     ast! {
@@ -321,4 +319,3 @@ pub fn hello_world() -> Ast {
             (print "Hello World!"))
     }
 }
-
