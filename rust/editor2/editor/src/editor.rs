@@ -101,6 +101,7 @@ pub struct Editor {
     pub first_frame: bool,
     pub canvas_scroll_offset: Position,
     pub canvas_scale: f32,
+    pub show_debug: bool,
 }
 
 pub struct Events {
@@ -276,12 +277,6 @@ impl Editor {
         self.wasm_messenger.tick();
         self.fps_counter.add_time("tick", time.elapsed());
 
-        if let Some(receiver) = &self.external_receiver {
-            for event in receiver.try_iter() {
-                self.events.push_current_frame(event);
-            }
-        }
-
         let events = self.events.events_for_frame().to_vec();
 
         let events_empty = events.is_empty();
@@ -324,9 +319,9 @@ impl Editor {
             .map(|x| x.number_of_pending_requests())
             .sum();
 
-        // if pending_count > 0 {
-        //     self.should_redraw = true;
-        // }
+        if pending_count > 0 {
+            self.should_redraw = true;
+        }
 
         if self.widget_store.iter().any(|x| x.dirty()) {
             self.should_redraw = true;
@@ -336,6 +331,12 @@ impl Editor {
     }
 
     pub fn process_per_frame_actions(&mut self) {
+        if let Some(receiver) = &self.external_receiver {
+            for event in receiver.try_iter() {
+                self.events.push_current_frame(event);
+            }
+        }
+
         let mut to_delete = HashSet::new();
         for action in self.per_frame_actions.iter() {
             match action {
@@ -448,6 +449,7 @@ impl Editor {
             first_frame: true,
             canvas_scroll_offset: Position { x: 0.0, y: 0.0 },
             canvas_scale: 1.0,
+            show_debug: false,
         }
     }
 
@@ -466,58 +468,59 @@ impl Editor {
         );
         let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
 
-        // Not drawing fps because it is wrong now that we don't
-        // update every frame
 
         let canvas_size = self.window.size;
 
-        canvas.draw_str(
-            self.fps_counter.fps.to_string(),
-            Point::new(canvas_size.width - 60.0, 30.0),
-            &font,
-            white,
-        );
-        canvas.save();
-        canvas.translate((canvas_size.width - 600.0, 60.0));
-        for (name, stats) in self.fps_counter.times.iter() {
+        if self.show_debug {
+
             canvas.draw_str(
-                format!(
-                    "{}: {} {} {}",
-                    name,
-                    stats.average.as_millis(),
-                    stats.min.as_millis(),
-                    stats.max.as_millis()
-                ),
-                Point::new(0.0, 0.0),
+                self.fps_counter.fps.to_string(),
+                Point::new(canvas_size.width - 60.0, 30.0),
                 &font,
                 white,
             );
-            canvas.translate((0.0, 30.0));
-        }
-        canvas.restore();
+            canvas.save();
+            canvas.translate((canvas_size.width - 600.0, 60.0));
+            for (name, stats) in self.fps_counter.times.iter() {
+                canvas.draw_str(
+                    format!(
+                        "{}: {} {} {}",
+                        name,
+                        stats.average.as_millis(),
+                        stats.min.as_millis(),
+                        stats.max.as_millis()
+                    ),
+                    Point::new(0.0, 0.0),
+                    &font,
+                    white,
+                );
+                canvas.translate((0.0, 30.0));
+            }
+            canvas.restore();
 
-        let mut combined_counts: HashMap<String, usize> = HashMap::new();
-        for widget in self.widget_store.iter() {
-            if let Some(widget) = widget.as_wasm_widget() {
-                let counts = widget.pending_message_counts();
-                for (key, value) in counts.iter() {
-                    let count = combined_counts.entry(key.to_string()).or_insert(0);
-                    *count += value;
+            let mut combined_counts: HashMap<String, usize> = HashMap::new();
+            for widget in self.widget_store.iter() {
+                if let Some(widget) = widget.as_wasm_widget() {
+                    let counts = widget.pending_message_counts();
+                    for (key, value) in counts.iter() {
+                        let count = combined_counts.entry(key.to_string()).or_insert(0);
+                        *count += value;
+                    }
                 }
             }
-        }
 
-        canvas.save();
-        canvas.translate((canvas_size.width - 1000.0, 60.0));
-        let mut output = String::new();
-        for (category, count) in combined_counts.iter().sorted() {
-            output.push_str(&format!("{} : {}\n", category, count));
+            canvas.save();
+            canvas.translate((canvas_size.width - 1000.0, 60.0));
+            let mut output = String::new();
+            for (category, count) in combined_counts.iter().sorted() {
+                output.push_str(&format!("{} : {}\n", category, count));
+            }
+            for line in output.lines() {
+                canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
+                canvas.translate((0.0, 30.0));
+            }
+            canvas.restore();
         }
-        for line in output.lines() {
-            canvas.draw_str(line, Point::new(0.0, 0.0), &font, white);
-            canvas.translate((0.0, 30.0));
-        }
-        canvas.restore();
 
         canvas.translate((self.canvas_scroll_offset.x, self.canvas_scroll_offset.y));
         canvas.scale((self.canvas_scale, self.canvas_scale));

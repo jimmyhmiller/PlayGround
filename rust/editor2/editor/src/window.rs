@@ -221,6 +221,17 @@ pub fn setup_window(mut editor: editor::Editor) {
                             needs_update = true;
                         }
 
+                        let pending_count: usize = editor
+                            .widget_store
+                            .iter()
+                            .filter_map(|x| x.as_wasm_widget())
+                            .map(|x| x.number_of_pending_requests())
+                            .sum();
+
+                        if pending_count > 0 {
+                            needs_update = true;
+                        }
+
                         // TODO:
                         // if I want to have 0 cpu usage when I'm not actually
                         // doing anything I need to signal to winit when I am
@@ -250,7 +261,7 @@ pub fn setup_window(mut editor: editor::Editor) {
                         // I guess I could separate the editor
                         // from the fps counter?
                         // Really not sure
-                        if needs_update && editor.should_redraw() {
+                        if editor.should_redraw() {
                             window.set_cursor_icon(editor.cursor_icon);
                             window.request_redraw();
                         }

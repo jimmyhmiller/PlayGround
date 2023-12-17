@@ -35,6 +35,13 @@ struct TokenRequestMeta {
 }
 
 #[derive(Clone, Deserialize, Serialize, Debug)]
+struct Tokens {
+    path: String,
+    document_version: usize,
+    tokens: Vec<u64>,
+}
+
+#[derive(Clone, Deserialize, Serialize, Debug)]
 struct Data {
     state: State,
     pending_tokens: Vec<(String, usize)>,
@@ -46,6 +53,7 @@ struct Data {
     files_to_open: HashSet<OpenFileInfo>,
     widget_data: WidgetData,
     y_scroll_offset: f32,
+    token_cache: HashMap<String, Tokens>,
 }
 
 #[derive(Copy, Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
@@ -423,6 +431,7 @@ impl App for ProcessSpawner {
         self.subscribe("text_change_multi");
         self.subscribe("lith/open-file");
         self.subscribe("lith/save_file");
+        self.subscribe("lith/token_request");
     }
 
     fn draw(&mut self) {
@@ -524,6 +533,22 @@ impl App for ProcessSpawner {
                     self.send_message(process_id, notify);
                 }
             }
+            "lith/token_request" => {
+                let meta : TokenRequestMeta = serde_json::from_str(&event).unwrap();
+                // TODO: Check version?
+                if let Some(tokens) = self.state.token_cache.get(&meta.path) {
+                    self.send_event(
+                        "tokens_with_version",
+                        serde_json::to_string(&TokensWithVersion {
+                            tokens: tokens.tokens.clone(),
+                            version: meta.document_version,
+                            path: meta.path.clone(),
+                        })
+                        .unwrap(),
+                    );
+                }
+               
+            }
             _ => {
                 println!("Unknown event: {}", kind);
             }
@@ -599,6 +624,7 @@ impl ProcessSpawner {
                 messages_by_type: HashMap::new(),
                 widget_data: WidgetData::default(),
                 y_scroll_offset: 0.0,
+                token_cache: HashMap::new(),
             },
             processes: HashMap::new(),
             remaining_message: String::new(),
@@ -616,10 +642,19 @@ impl ProcessSpawner {
 
                 if method == "textDocument/semanticTokens/full" {
                     let meta = self.state.token_request_metadata.get(id).unwrap();
+                    let tokens = get_token_data(message.clone());
+                    self.state.token_cache.insert(
+                        meta.path.clone(),
+                        Tokens {
+                            path: meta.path.clone(),
+                            document_version: meta.document_version,
+                            tokens: tokens.clone(),
+                        },
+                    );
                     self.send_event(
                         "tokens_with_version",
                         serde_json::to_string(&TokensWithVersion {
-                            tokens: get_token_data(message.clone()),
+                            tokens,
                             version: meta.document_version,
                             path: meta.path.clone(),
                         })

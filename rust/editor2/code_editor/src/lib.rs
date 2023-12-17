@@ -250,6 +250,7 @@ fn get_last_three_segments(path: &str) -> Option<String> {
     ))
 }
 
+
 impl App for CodeEditor {
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -268,6 +269,11 @@ impl App for CodeEditor {
         if let Some(color_mappings) = self.try_get_value::<HashMap<usize, String>>("color_mappings") {
             self.text_pane.color_mapping = color_mappings;
         }
+
+        self.send_event("lith/token_request", json!({
+            "path": self.file_path,
+            "document_version": 0,
+        }).to_string());
     }
 
     fn get_initial_state(&self) -> String {

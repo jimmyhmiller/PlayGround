@@ -350,45 +350,7 @@ impl Widget for WasmWidget {
     fn on_key(&mut self, input: KeyboardInput) -> Result<(), Box<dyn Error>> {
         let input = crate::keyboard::KeyboardInput::from_framework(input);
         let message = self.wrap_payload(Payload::OnKey(input));
-        
-        // if input.state == KeyState::Pressed {
-            // if input.modifiers.ctrl {
-            //     match input.key_code {
-            //         KeyCode::LeftArrow => {
-            //             self.size_offset.width -= 1.0;
-            //         }
-            //         KeyCode::RightArrow => {
-            //             self.size_offset.width += 1.0;
-            //         }
-            //         KeyCode::UpArrow => {
-            //             self.size_offset.height -= 1.0;
-            //         }
-            //         KeyCode::DownArrow => {
-            //             self.size_offset.height += 1.0;
-            //         }
-            //         _ => {}
-            //     }
-            // } else {
-            //     match input.key_code {
-            //         KeyCode::LeftArrow => {
-            //             self.offset.x -= 1.0;
-            //         }
-            //         KeyCode::RightArrow => {
-            //             self.offset.x += 1.0;
-            //         }
-            //         KeyCode::UpArrow => {
-            //             self.offset.y -= 1.0;
-            //         }
-            //         KeyCode::DownArrow => {
-            //             self.offset.y += 1.0;
-            //         }
-            //         _ => {}
-            //     }
-            // }
-            
-        // }
-       
-        // self.send_message(message)?;
+        self.send_message(message)?;
         Ok(())
     }
 

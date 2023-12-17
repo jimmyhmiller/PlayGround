@@ -288,6 +288,43 @@ impl WidgetStore {
         self.widgets.iter()
     }
 
+    #[allow(unused)]
+    pub fn iter_by_z_index(&self) -> impl Iterator<Item = &Widget> {
+        self.z_indexes.iter().rev().map(move |x| self.widgets.get(*x).unwrap())
+    }
+
+    pub fn iter_by_z_index_mut(&mut self) -> impl Iterator<Item = &mut Widget> {
+        pub struct WidgetIterMut<'a> {
+            widgets: *mut [Widget],
+            indexes: std::vec::IntoIter<usize>,
+            _marker: std::marker::PhantomData<&'a mut [Widget]>,
+        }
+        
+        impl<'a> WidgetIterMut<'a> {
+            fn new(widgets: &'a mut [Widget], indexes: Vec<usize>) -> Self {
+                Self {
+                    widgets: widgets as *mut _,
+                    indexes: indexes.into_iter(),
+                    _marker: std::marker::PhantomData,
+                }
+            }
+        }
+        
+        impl<'a> Iterator for WidgetIterMut<'a> {
+            type Item = &'a mut Widget;
+        
+            fn next(&mut self) -> Option<Self::Item> {
+                let index = self.indexes.next()?;
+                unsafe {
+                    Some(&mut (*self.widgets)[index])
+                }
+            }
+        }
+        let mut reverse_indexes = self.z_indexes.clone();
+        reverse_indexes.reverse();
+        WidgetIterMut::new(&mut self.widgets, reverse_indexes)
+    }
+
     pub fn clear(&mut self) {
         self.next_id = 0;
         self.widgets.clear();
@@ -300,9 +337,11 @@ impl WidgetStore {
     }
 
     pub fn on_move(&mut self, widget_id: usize) {
-        let len = self.z_indexes.len() - 1;
         if let Some((position, _)) = self.z_indexes.iter().find_position(|x| **x == widget_id) {
-            self.z_indexes.swap(position, len);
+            // TODO: Swapping is wrong. It moves things in a way that
+            // is wrong. We probably need to delete and insert
+            self.z_indexes.remove(position);
+            self.z_indexes.push(widget_id);
         }
 
 

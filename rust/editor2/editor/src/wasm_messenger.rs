@@ -786,7 +786,8 @@ impl WasmInstance {
                 let kind = get_string_from_caller(&mut caller, kind_ptr, kind_len);
                 let event = get_string_from_caller(&mut caller, event_ptr, event_len);
                 let state = caller.data_mut();
-                state.commands.push(Commands::Event(kind, event));
+                // state.commands.push(Commands::Event(kind, event));
+                state.external_sender.send(Event::Event(kind, event)).unwrap();
             },
         )?;
 
@@ -908,7 +909,9 @@ impl WasmInstance {
             "mark_dirty",
             |mut caller: Caller<'_, State>, id: u32| {
                 let state = caller.data_mut();
-                state.commands.push(Commands::MarkDirty(id));
+
+                state.external_sender.send(Event::MarkDirty(id)).unwrap();
+                // state.commands.push(Commands::MarkDirty(id));
             },
         )?;
 
