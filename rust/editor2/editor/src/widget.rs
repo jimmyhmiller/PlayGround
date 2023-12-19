@@ -40,6 +40,11 @@ impl Widget {
         self.data.on_click(widget_space.x, widget_space.y).unwrap();
     }
 
+    pub fn on_delete(&mut self) {
+        println!("Deleting 2");
+        self.data.on_delete().unwrap();
+    }
+
     fn widget_space(&mut self, position: &Position) -> Position {
         let widget_x = position.x - self.position().x;
         let widget_y = position.y - self.position().y;

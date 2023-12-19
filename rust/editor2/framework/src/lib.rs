@@ -434,6 +434,7 @@ pub trait App {
     fn on_event(&mut self, kind: String, event: String) {}
     fn on_size_change(&mut self, width: f32, height: f32);
     fn on_move(&mut self, x: f32, y: f32);
+    fn on_delete(&mut self) {}
     fn get_position(&self) -> Position;
     fn get_size(&self) -> Size;
     fn get_initial_state(&self) -> String;
@@ -698,6 +699,12 @@ pub extern "C" fn on_click(x: f32, y: f32) {
     unsafe { app.on_click(x, y) }
 }
 
+#[no_mangle]
+pub extern "C" fn on_delete() {
+    println!("Deleting 6");
+    let app = get_app!();
+    unsafe { app.on_delete() }
+}
 #[no_mangle]
 pub extern "C" fn on_mouse_down(x: f32, y: f32) {
     let app = get_app!();

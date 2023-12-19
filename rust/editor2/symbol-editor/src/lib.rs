@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 
 use code_editor::CodeEditor;
 use framework::{app, App, Canvas, Color, KeyboardInput, Position, Rect, Size, WidgetData};
@@ -9,10 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 struct SymbolEditor {
     data: WidgetData,
-    // TODO: I need these to stick around
-    // but right now I don't save those widgets
-    #[serde(skip)]
-    editors: Vec<CodeEditor>,
+    editors: HashMap<usize, CodeEditor>,
     symbols: Vec<WorkspaceSymbol>,
     opened: HashSet<String>,
     clicked: bool,
@@ -44,6 +41,8 @@ impl App for SymbolEditor {
 
     fn start(&mut self) {
         self.subscribe("workspace/symbols");
+
+       
     }
 
     fn draw(&mut self) {
@@ -147,9 +146,9 @@ impl App for SymbolEditor {
                                 editor.start();
                                 let mut data = self.data.clone();
                                 data.position.x = data.position.x + data.size.width + 50.0;
-                                let external_id = self.editors.len() as u32;
-                                self.create_widget_ref(external_id, data);
-                                self.editors.push(editor);
+                                let external_id = self.editors.len();
+                                self.create_widget_ref(external_id as u32, data);
+                                self.editors.insert(external_id,editor);
                             }
                         }
                         canvas.translate(0.0, 30.0);
@@ -158,83 +157,6 @@ impl App for SymbolEditor {
                 }
                 canvas.translate(-30.0, 30.0);
             }
-
-
-            // symbols.dedup_by(|x, y| y.name == x.name);
-            // symbols.sort_by(|x, y| Ord::cmp(&x.container_name, &y.container_name));
-            // let groups = symbols.iter().group_by(|x| &x.container_name);
-
-            // for (group, symbols) in &groups {
-            //     let projects = symbols
-            //         .sorted_by(|x, y| Ord::cmp(&get_project(x), &get_project(y)))
-            //         .group_by(|x| {
-            //             let uri = match &x.location {
-            //                 lsp_types::OneOf::Left(l) => l.uri.clone(),
-            //                 lsp_types::OneOf::Right(l) => l.uri.clone(),
-            //             };
-            //             let path = uri.path();
-            //             let segments = path.split("/").collect::<Vec<&str>>();
-            //             let root = segments.iter().position(|x| *x == "editor2")?;
-            //             let project = segments.get(root + 1)?;
-
-            //             return Some(project.to_string());
-            //         });
-
-            //     for (project, groups) in projects.into_iter() {
-            //         if project.is_none() {
-            //             continue;
-            //         }
-            //         let project = project.unwrap();
-            //         canvas.draw_str(&project, 0.0, 0.0);
-            //         canvas.translate(0.0, 30.0);
-            //         // canvas.translate(0.0, 30.0);
-            //         // for group in groups.into_iter() {
-            //         //     // if let Some(group) = group {
-            //         //         canvas.draw_str(group, 0.0, 0.0);
-            //         //         // canvas.translate(30.0, 30.0);
-            //         //         // for symbol in symbols {
-            //         //         //     canvas.draw_str(&symbol.name, 0.0, 0.0);
-            //         //         //     canvas.translate(0.0, 30.0);
-            //         //         // }
-            //         //         // canvas.translate(-30.0, 30.0);
-            //         //     // } else {
-            //         //         // canvas.draw_str("Global", 0.0, 0.0);
-            //         //         // canvas.translate(30.0, 30.0);
-            //         //         // for symbol in symbols {
-            //         //         //     if !symbol.name.contains("draw") {
-            //         //         //         continue;
-            //         //         //     }
-            //         //         //     canvas.draw_str(&format!("{:?}", symbol), 0.0, 0.0);
-            //         //         //     canvas.translate(0.0, 30.0);
-            //         //         // }
-            //         //         // canvas.translate(-30.0, 30.0);
-            //         //     // }
-            //         // }
-            //     }
-
-            //     // canvas.draw_str(&symbol.name, 0.0, 0.0);
-            //     // canvas.save();
-            //     // canvas.translate(0.0, -30.0);
-            //     // if self.mouse_in_bounds(&canvas, 200.0, 30.0) {
-            //     //     if self.clicked {
-            //     //         let mut editor = CodeEditor::init();
-            //     //         editor.alive = true;
-            //     //         editor.file_path = symbol.location.uri.path().to_string();
-            //     //         let start_line = symbol.location.range.start.line;
-            //     //         let end_line = symbol.location.range.end.line + 1;
-            //     //         editor.visible_range = (start_line as usize, end_line as usize);
-            //     //         editor.open_file();
-            //     //         editor.start();
-            //     //         let mut data = self.data.clone();
-            //     //         data.position.x = data.position.x + data.size.width + 50.0;
-            //     //         let external_id = self.editors.len() as u32;
-            //     //         self.create_widget_ref(external_id, data);
-            //     //         self.editors.push(editor);
-            //     //     }
-            //     // }
-            //     // canvas.restore();
-            //     // canvas.translate(0.0, 30.0);
-            // }
             canvas.restore();
 
             if self.symbols.is_empty() {
@@ -242,7 +164,7 @@ impl App for SymbolEditor {
             }
         } else {
             let external_id = self.get_external_id().unwrap();
-            self.editors.get_mut(external_id).unwrap().draw()
+            self.editors.get_mut(&external_id).unwrap().draw()
         }
         self.clicked = false;
     }
@@ -252,13 +174,23 @@ impl App for SymbolEditor {
 
         let external_id = self.get_external_id();
         if let Some(external_id) = external_id {
-            self.editors.get_mut(external_id).unwrap().on_click(x, y);
+            self.editors.get_mut(&external_id).unwrap().on_click(x, y);
             return;
         }
     }
 
+    fn on_delete(&mut self) {
+        println!("Got Delete!");
+        let external_id = self.get_external_id();
+        if let Some(external_id) = external_id {
+            println!("Deleting {}", external_id);
+            self.editors.remove(&external_id);
+        }
+    }
+
+
     fn on_event(&mut self, kind: String, event: String) {
-        for editor in self.editors.iter_mut() {
+        for (_ , editor) in self.editors.iter_mut() {
             editor.on_event(kind.clone(), event.clone());
         }
 
@@ -272,7 +204,7 @@ impl App for SymbolEditor {
     fn on_key(&mut self, input: KeyboardInput) {
         let external_id = self.get_external_id();
         if let Some(external_id) = external_id {
-            self.editors.get_mut(external_id).unwrap().on_key(input);
+            self.editors.get_mut(&external_id).unwrap().on_key(input);
             return;
         }
     }
@@ -280,7 +212,7 @@ impl App for SymbolEditor {
     fn on_scroll(&mut self, x: f64, y: f64) {
         let external_id = self.get_external_id();
         if let Some(external_id) = external_id {
-            self.editors.get_mut(external_id).unwrap().on_scroll(x, y);
+            self.editors.get_mut(&external_id).unwrap().on_scroll(x, y);
             return;
         }
     }
@@ -289,7 +221,7 @@ impl App for SymbolEditor {
         let external_id = self.get_external_id();
         if let Some(external_id) = external_id {
             self.editors
-                .get_mut(external_id)
+                .get_mut(&external_id)
                 .unwrap()
                 .on_size_change(width, height);
             return;
@@ -301,7 +233,7 @@ impl App for SymbolEditor {
         let external_id = self.get_external_id();
         if let Some(external_id) = external_id {
             self.editors
-                .get_mut(external_id)
+                .get_mut(&external_id)
                 .unwrap()
                 .on_mouse_move(x, y, x_diff, y_diff);
             return;
@@ -313,7 +245,7 @@ impl App for SymbolEditor {
     fn on_move(&mut self, x: f32, y: f32) {
         let external_id = self.get_external_id();
         if let Some(external_id) = external_id {
-            self.editors.get_mut(external_id).unwrap().on_move(x, y);
+            self.editors.get_mut(&external_id).unwrap().on_move(x, y);
             return;
         }
         self.data.position = Position { x, y }
@@ -322,7 +254,7 @@ impl App for SymbolEditor {
     fn get_position(&self) -> Position {
         let external_id = self.get_external_id();
         if let Some(external_id) = external_id {
-            return self.editors.get(external_id).unwrap().get_position();
+            return self.editors.get(&external_id).unwrap().get_position();
         }
         self.data.position
     }
@@ -330,7 +262,7 @@ impl App for SymbolEditor {
     fn get_size(&self) -> Size {
         let external_id = self.get_external_id();
         if let Some(external_id) = external_id {
-            return self.editors.get(external_id).unwrap().get_size();
+            return self.editors.get(&external_id).unwrap().get_size();
         }
         self.data.size
     }
@@ -338,11 +270,11 @@ impl App for SymbolEditor {
     fn get_initial_state(&self) -> String {
         let external_id = self.get_external_id();
         if let Some(external_id) = external_id {
-            return self.editors.get(external_id).unwrap().get_initial_state();
+            return self.editors.get(&external_id).unwrap().get_initial_state();
         }
         serde_json::to_string(&Self {
             data: Default::default(),
-            editors: vec![],
+            editors: HashMap::new(),
             symbols: vec![],
             opened: HashSet::new(),
             clicked: false,
@@ -354,7 +286,7 @@ impl App for SymbolEditor {
     fn get_state(&self) -> String {
         let external_id = self.get_external_id();
         if let Some(external_id) = external_id {
-            return self.editors.get(external_id).unwrap().get_state();
+            return self.editors.get(&external_id).unwrap().get_state();
         }
 
         serde_json::to_string(self).unwrap()
@@ -363,10 +295,23 @@ impl App for SymbolEditor {
     fn set_state(&mut self, state: String) {
         let external_id = self.get_external_id();
         if let Some(external_id) = external_id {
-            self.editors.get_mut(external_id).unwrap().set_state(state);
+            self.editors.get_mut(&external_id).unwrap().set_state(state);
             return;
         }
         *self = serde_json::from_str(&state).unwrap();
+
+        // TODO: Move to start when it happens after set_state;
+
+        let mut to_add = Vec::with_capacity(self.editors.len());
+        for (external_id, editor) in self.editors.iter_mut(){
+            editor.open_file();
+            editor.start();
+            let data = editor.widget_data.clone();
+            to_add.push((*external_id as u32, data));
+        }
+        for (external_id, data) in to_add.into_iter() {
+            self.create_widget_ref(external_id, data);
+        }
     }
 }
 
@@ -375,7 +320,7 @@ impl SymbolEditor {
     fn init() -> Self {
         Self {
             data: Default::default(),
-            editors: vec![],
+            editors: HashMap::new(),
             symbols: vec![],
             opened: HashSet::new(),
             clicked: false,

@@ -41,6 +41,10 @@ pub trait Widget {
     fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+    fn on_delete(&mut self) -> Result<(), Box<dyn Error>> {
+        println!("Called default!");
+        Ok(())
+    }
     fn on_mouse_up(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
@@ -346,6 +350,14 @@ impl Widget for WasmWidget {
         self.send_message(message)?;
         Ok(())
     }
+
+    fn on_delete(&mut self) -> Result<(), Box<dyn Error>> {
+        println!("Deleting 3");
+        let message = self.wrap_payload(Payload::OnDelete);
+        self.send_message(message)?;
+        Ok(())
+    }
+
 
     fn on_key(&mut self, input: KeyboardInput) -> Result<(), Box<dyn Error>> {
         let input = crate::keyboard::KeyboardInput::from_framework(input);
@@ -678,6 +690,7 @@ impl WasmWidget {
         for message in self.pending_messages.values() {
             stats.push(match message.0.payload {
                 Payload::OnClick(_) => "OnClick",
+                Payload::OnDelete => "OnDelete",
                 Payload::RunDraw(_) => "Draw",
                 Payload::OnScroll(_, _) => "OnScroll",
                 Payload::OnKey(_) => "OnKey",
@@ -1496,6 +1509,11 @@ impl Widget for Ephemeral {
         self.widget.on_click(x, y)
     }
 
+
+    fn on_delete(&mut self) -> Result<(), Box<dyn Error>> {
+        self.widget.on_delete()
+    }
+
     fn on_mouse_up(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.widget.on_mouse_up(x, y)
     }
@@ -1569,6 +1587,7 @@ impl Widget for Ephemeral {
     fn reset_dirty(&mut self) {
         self.widget.reset_dirty()
     }
+
 }
 
 // These are things widgets can do.
