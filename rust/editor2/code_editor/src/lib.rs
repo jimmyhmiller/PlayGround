@@ -130,7 +130,7 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CodeEditor {
     text_pane: TextPane<TransactingVirtualCursor<SimpleCursor>>,
-    widget_data: WidgetData,
+    pub widget_data: WidgetData,
     edit_position: usize,
     #[serde(default)]
     pub file_path: String,

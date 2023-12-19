@@ -49,6 +49,7 @@ pub enum Payload {
     GetCommands,
     OnMove(f32, f32),
     NewSender(u32, u32, Sender<OutMessage>),
+    OnDelete,
 }
 
 #[derive(Clone, Debug)]
@@ -330,6 +331,11 @@ impl WasmManager {
         let result = match message.payload {
             Payload::OnClick(position) => {
                 self.instance.on_click(position.x, position.y).await?;
+                default_return
+            }
+            Payload::OnDelete => {
+                println!("Deleting 4");
+                self.instance.on_delete().await?;
                 default_return
             }
             Payload::OnMouseDown(position) => {
@@ -1038,6 +1044,13 @@ impl WasmInstance {
 
     pub async fn on_click(&mut self, x: f32, y: f32) -> Result<(), Box<dyn Error>> {
         self.call_typed_func::<(f32, f32), ()>("on_click", (x, y), 1)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn on_delete(&mut self) -> Result<(), Box<dyn Error>> {
+        println!("Deleting 5");
+        self.call_typed_func::<(), ()>("on_delete", (), 1)
             .await?;
         Ok(())
     }
