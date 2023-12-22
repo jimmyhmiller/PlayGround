@@ -68,6 +68,13 @@ pub trait TextBuffer {
         }
         max
     }
+    fn max_line_length_range(&self, start: usize, end: usize) -> usize {
+        let mut max = 0;
+        for i in start..end {
+            max = max.max(self.line_length(i));
+        }
+        max
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

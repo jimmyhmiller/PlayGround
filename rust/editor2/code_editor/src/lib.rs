@@ -18,6 +18,28 @@ use itertools::Itertools;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::json;
 
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct VisibleRange {
+    start: usize,
+    end: usize,
+}
+
+impl VisibleRange {
+    fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
+    fn empty() -> Self {
+        Self { start: 0, end: 0 }
+    }
+
+    fn len(&self) -> usize {
+        self.end - self.start
+    } 
+}
+
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TextPane<Cursor: VirtualCursor> {
     line_height: f32,
@@ -26,6 +48,8 @@ pub struct TextPane<Cursor: VirtualCursor> {
     text_buffer: TokenTextBuffer<SimpleTextBuffer>,
     color_mapping: HashMap<usize, String>,
     max_line_length: Option<usize>,
+    #[serde(default)]
+    visible_range: VisibleRange,
 }
 
 // TODO: Got some weird token missing that refreshing state fixes
@@ -39,11 +63,12 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
             text_buffer: TokenTextBuffer::new_with_contents(&contents),
             color_mapping: HashMap::new(),
             max_line_length: None,
+            visible_range: VisibleRange::empty(),
         }
     }
 
     fn lines_above_scroll(&self) -> usize {
-        (self.offset.y / self.line_height).floor() as usize
+        ((self.offset.y / self.line_height).floor() as usize).saturating_sub(self.visible_range.start)
     }
 
     // TODO: Deal with margin!
@@ -52,9 +77,12 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
     }
 
     fn number_of_lines(&self) -> usize {
-        self.text_buffer.line_count()
+        if !self.visible_range.is_empty() {
+            self.visible_range.len()
+        } else {
+            self.text_buffer.line_count()
+        }
     }
-
     pub fn on_scroll(
         &mut self,
         x: f64,
@@ -62,37 +90,29 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
         width: f32,
         height: f32,
         y_margin: i32,
-        visible_range: (usize, usize),
     ) {
-        // TODO: I need to look at max line_length in
-        // visible range
-        if self.max_line_length.is_none() {
-            self.max_line_length = Some(self.text_buffer.max_line_length());
-        }
 
         let character_width = 18;
-        if let Some(max_line) = self.max_line_length {
-            let max_width = character_width * max_line;
-            if self.offset.x + width > max_width as f32 {
-                self.offset.x = max_width as f32 - width;
-            }
-            if width as usize > max_width {
-                self.offset.x = 0.0;
-            } else {
-                self.offset.x += x as f32;
-            }
+        let max_line =  self.max_line_length();
+        let max_width = character_width * max_line;
+        if self.offset.x + width > max_width as f32 {
+            self.offset.x = max_width as f32 - width;
         }
+        if width as usize > max_width {
+            self.offset.x = 0.0;
+        } else {
+            self.offset.x += x as f32;
+        }
+
 
 
         if self.offset.x < 0.0 {
             self.offset.x = 0.0;
         }
 
-        let number_of_lines = if visible_range != (0, 0) {
-            visible_range.1 - visible_range.0
-        } else {
-            self.number_of_lines()
-        };
+
+        // TODO: Just fix number_of_lines
+        let number_of_lines = self.number_of_lines();
         let number_of_visble_lines = self.number_of_visible_lines(height);
 
         let scroll_with_last_line_visible =
@@ -118,6 +138,17 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
         }
     }
 
+    fn max_line_length(&mut self,) -> usize {
+        if self.max_line_length.is_none() {
+            if self.visible_range.is_empty() {
+                self.max_line_length = Some(self.text_buffer.max_line_length());
+            } else {
+                self.max_line_length = Some(self.text_buffer.max_line_length_range(self.visible_range.start, self.visible_range.end));
+            }
+        }
+        self.max_line_length.unwrap()
+    }
+
     fn fractional_line_offset(&self) -> f32 {
         self.offset.y % self.line_height
     }
@@ -141,7 +172,6 @@ pub struct CodeEditor {
     diagnostics: DiagnosticMessage,
     #[serde(skip)]
     transaction_pane: Option<Widget>,
-    pub visible_range: (usize, usize),
     #[serde(default)]
     excerpt_panes: Vec<Widget>,
     #[serde(default)]
@@ -323,7 +353,7 @@ impl App for CodeEditor {
 
         canvas.set_color(&foreground);
 
-        if self.visible_range == (0, 0) {
+        if self.text_pane.visible_range.is_empty() {
             if let Some(file_and_folder) = get_last_three_segments(&self.file_path) {
                 canvas.draw_str(&file_and_folder, 20.0, 48.0);
             }
@@ -352,17 +382,18 @@ impl App for CodeEditor {
         canvas.save();
         let number_lines = self.text_pane.number_of_lines();
         let number_of_digits = number_lines.to_string().len();
-        let current_line = self.text_pane.lines_above_scroll() + self.visible_range.0;
-        let max_line = if self.visible_range != (0, 0) {
-            self.visible_range.1
+        let current_line = self.text_pane.lines_above_scroll() + self.text_pane.visible_range.start;
+        let max_line = if !self.text_pane.visible_range.is_empty() {
+            self.text_pane.visible_range.end
         } else {
-            current_line
+            (current_line
                 + self
                     .text_pane
-                    .number_of_visible_lines(self.widget_data.size.height)
+                    .number_of_visible_lines(self.widget_data.size.height)).min(self.text_pane.number_of_lines())
         };
 
-        let max_line = max_line.min(number_lines);
+
+        let max_line = max_line;
         for line in current_line..max_line {
             canvas.set_color(&Color::parse_hex("#83CDA1"));
             if diagnostic_lines.contains(&(line)) {
@@ -494,7 +525,6 @@ impl App for CodeEditor {
             self.widget_data.size.width,
             self.widget_data.size.height,
             self.y_margin,
-            self.visible_range,
         );
     }
 
@@ -615,7 +645,6 @@ impl CodeEditor {
                 version: Some(0),
             },
             transaction_pane: None,
-            visible_range: (0, 0),
             alive: true,
             excerpt_panes: vec![],
         }
@@ -632,7 +661,7 @@ impl CodeEditor {
                 data.position.x += data.size.width + 50.0;
                 let mut new_excerpt = self.clone();
                 new_excerpt.alive = false;
-                new_excerpt.visible_range = (line_start, line_end + 1);
+                new_excerpt.text_pane.visible_range = VisibleRange { start: line_start, end: line_end};
                 new_excerpt.widget_data = data.clone();
                 new_excerpt.text_pane.offset = Position { x: 0.0, y: 0.0 };
                 new_excerpt.text_pane.cursor.set_selection(None);
@@ -697,7 +726,6 @@ impl CodeEditor {
                         version: None,
                     },
                     transaction_pane: None,
-                    visible_range: (0, 0),
                     alive: false,
                     excerpt_panes: vec![],
                 }),
@@ -711,21 +739,52 @@ impl CodeEditor {
                 .text_pane
                 .cursor
                 .handle_insert("    ".as_bytes(), &mut self.text_pane.text_buffer),
-            KeyCode::LeftArrow => self.text_pane.cursor.move_left(&self.text_pane.text_buffer),
-            KeyCode::RightArrow => self
-                .text_pane
-                .cursor
-                .move_right(&self.text_pane.text_buffer),
-            KeyCode::UpArrow => self.text_pane.cursor.move_up(&self.text_pane.text_buffer),
-            KeyCode::DownArrow => self.text_pane.cursor.move_down(&self.text_pane.text_buffer),
+            // TODO: These are ugly, I need cursor to know about excerpts
+            // One answer is just to fix the buffer content.
+            KeyCode::LeftArrow => {
+                if self.text_pane.visible_range.is_empty() {
+                    self.text_pane.cursor.move_down(&self.text_pane.text_buffer)
+                } else if self.text_pane.cursor.line() != self.text_pane.visible_range.start
+                        || self.text_pane.cursor.column() != 0 {
+                    self.text_pane
+                        .cursor
+                        .move_left(&self.text_pane.text_buffer)
+                }
+            },
+            KeyCode::RightArrow => {
+                if self.text_pane.visible_range.is_empty() {
+                    self.text_pane.cursor.move_down(&self.text_pane.text_buffer)
+                } else if self.text_pane.cursor.line() != self.text_pane.visible_range.end - 1
+                        || self.text_pane.cursor.column() != self.text_pane.text_buffer.line_length(self.text_pane.cursor.line()) {
+                    self.text_pane
+                        .cursor
+                        .move_right(&self.text_pane.text_buffer)
+                }
+            
+            },
+            KeyCode::UpArrow => {
+                if self.text_pane.visible_range.is_empty() {
+                    self.text_pane.cursor.move_up(&self.text_pane.text_buffer)
+                } else if self.text_pane.cursor.line() > self.text_pane.visible_range.start {
+                    self.text_pane.cursor.move_up(&self.text_pane.text_buffer)
+                }
+            },
+            KeyCode::DownArrow => {
+                if self.text_pane.visible_range.is_empty() {
+                    self.text_pane.cursor.move_down(&self.text_pane.text_buffer)
+                } else if self.text_pane.cursor.line() < self.text_pane.visible_range.end - 1 {
+                    self.text_pane.cursor.move_down(&self.text_pane.text_buffer)
+                }
+
+            },
             KeyCode::BackSpace => {
                 let number_of_lines_before = self.text_pane.text_buffer.line_count();
                 self.text_pane
                     .cursor
                     .delete(&mut self.text_pane.text_buffer);
 
-                if number_of_lines_before != self.text_pane.text_buffer.line_count() && self.visible_range != (0, 0) {
-                    self.visible_range.1 -= 1;
+                if number_of_lines_before != self.text_pane.text_buffer.line_count() && !self.text_pane.visible_range.is_empty() {
+                    self.text_pane.visible_range.end -= 1;
                 }
             }
             KeyCode::S => {
@@ -746,8 +805,8 @@ impl CodeEditor {
                 .cursor
                 .handle_insert(&[char as u8], &mut self.text_pane.text_buffer);
 
-            if char == '\n' && self.visible_range != (0, 0) {
-                self.visible_range.1 += 1;
+            if char == '\n' && !self.text_pane.visible_range.is_empty() {
+                self.text_pane.visible_range.end += 1;
             }
         }
 
@@ -823,9 +882,13 @@ impl CodeEditor {
     }
 
     fn find_cursor_text_position(&mut self, x: f32, y: f32) -> (usize, usize) {
-        // TODO: Need to handle margin here.
+        // TODO: Need to handle margin properly here.
         let x_margin = self.x_margin;
-        let y_margin = 80.0;
+        let y_margin = if self.text_pane.visible_range.is_empty() {
+            80.0
+        } else {
+            30.0
+        };
         let lines_above = self.text_pane.lines_above_scroll();
         let line = (((y - y_margin as f32) / self.text_pane.line_height).ceil() as usize
             + lines_above)
@@ -834,7 +897,7 @@ impl CodeEditor {
         let column = (((x + self.text_pane.offset.x - x_margin as f32) / char_width).ceil()
             as usize)
             .saturating_sub(1);
-        (line + self.visible_range.0, column)
+        (line + self.text_pane.visible_range.start, column)
     }
 
     #[allow(unused)]
@@ -1035,6 +1098,22 @@ impl CodeEditor {
                 println!("Error reading file: {}\n\n{}", file, e);
             }
         }
+    }
+
+    pub fn set_visible_range(&mut self, usize: (usize, usize)) {
+        self.text_pane.visible_range = VisibleRange { start: usize.0, end: usize.1 };
+        // Reset because the visible range has changed
+        self.text_pane.max_line_length = None;
+    }
+
+    pub fn complete_bounds(&mut self) -> Size {
+        let mut size = Size {
+            width: 0.0,
+            height: 0.0,
+        };
+        size.height = self.text_pane.number_of_lines() as f32 * self.text_pane.line_height + 60.0;
+        size.width = self.text_pane.max_line_length() as f32 * 18.0 + self.x_margin as f32 + 60.0;
+        size
     }
 }
 

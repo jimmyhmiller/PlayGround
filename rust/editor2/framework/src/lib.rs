@@ -546,7 +546,7 @@ pub trait AppExtensions {
                     identifer as usize,
                     "widget".to_string(),
                 ),
-                app_index: self.get_id(),
+                app_index: identifer,
             });
             
             create_widget(

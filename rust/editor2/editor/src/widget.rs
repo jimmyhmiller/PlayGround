@@ -41,7 +41,6 @@ impl Widget {
     }
 
     pub fn on_delete(&mut self) {
-        println!("Deleting 2");
         self.data.on_delete().unwrap();
     }
 
@@ -180,6 +179,7 @@ pub struct WidgetStore {
     widget_images: HashMap<WidgetId, Image>,
     next_id: WidgetId,
     z_indexes: Vec<usize>,
+    should_cache_draw: bool,
 }
 
 impl WidgetStore {
@@ -212,6 +212,7 @@ impl WidgetStore {
             widget_images: HashMap::new(),
             next_id: 0,
             z_indexes: Vec::new(),
+            should_cache_draw: false,
         }
     }
 
@@ -229,10 +230,24 @@ impl WidgetStore {
             }
         }
         let mut images_to_insert: Vec<(usize, Image)> = vec![];
+
+        if !self.should_cache_draw {
+            for id in self.z_indexes.clone().iter() {
+                if let Some(widget) = self.widgets.get_mut(*id) {
+                    let before_count = canvas.save();
+                    canvas.translate((widget.position().x, widget.position().y));
+                    widget.draw(canvas);
+                    canvas.restore_to_count(before_count);
+                    canvas.restore();
+                }
+            }
+            return
+        }
         for widget in self.widgets.iter_mut() {
             if !dirty_widgets.contains(&widget.id()) {
                 continue;
             }
+
             let image_info = canvas.image_info();
             let image_info = image_info
                 .with_dimensions((widget.size().width as i32, widget.size().height as i32));
@@ -262,6 +277,7 @@ impl WidgetStore {
                 let image = surface.image_snapshot();
                 images_to_insert.push((widget.id(), image));
             } else {
+                // TODO: This is wrong for z-indexing
                 // I could chunk up this canvas and draw each chunk
                 canvas.save();
                 canvas.translate((widget.position().x, widget.position().y));
