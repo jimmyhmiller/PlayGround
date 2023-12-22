@@ -21,7 +21,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
-use crate::{keyboard::KeyboardInput, event::Event};
+use crate::{keyboard::KeyboardInput, event::Event, widget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct PointerLengthString {
@@ -493,6 +493,7 @@ struct State {
     values: HashMap<String, Value>,
     receivers: HashMap<String, oneshot::Receiver<Value>>,
     wasm_id: u64,
+    widget_id: usize,
     external_id: u32,
     external_sender: std::sync::mpsc::Sender<Event>,
     process_id: u32,
@@ -505,6 +506,7 @@ impl State {
         wasm_id: u64,
         values: HashMap<String, Value>,
         external_sender: std::sync::mpsc::Sender<Event>,
+        widget_id: usize,
     ) -> Self {
         Self {
             wasi,
@@ -520,6 +522,7 @@ impl State {
             external_id: 0,
             external_sender,
             process_id: 0,
+            widget_id,
         }
     }
 }
@@ -650,7 +653,7 @@ impl WasmInstance {
         wasmtime_wasi::add_to_linker(&mut linker, |s| &mut s.wasi)?;
         Self::setup_host_functions(&mut linker)?;
 
-        let mut store = Store::new(&engine, State::new(wasi, sender, wasm_id, values, external_sender));
+        let mut store = Store::new(&engine, State::new(wasi, sender, wasm_id, values, external_sender, widget_id));
         let module = Module::from_file(&engine, wasm_path)?;
 
         let instance = linker.instantiate_async(&mut store, &module).await?;
@@ -792,7 +795,6 @@ impl WasmInstance {
                 let kind = get_string_from_caller(&mut caller, kind_ptr, kind_len);
                 let event = get_string_from_caller(&mut caller, event_ptr, event_len);
                 let state = caller.data_mut();
-                // state.commands.push(Commands::Event(kind, event));
                 state.external_sender.send(Event::Event(kind, event)).unwrap();
             },
         )?;
@@ -803,7 +805,7 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, kind_ptr: i32, kind_len: i32| {
                 let kind = get_string_from_caller(&mut caller, kind_ptr, kind_len);
                 let state = caller.data_mut();
-                state.commands.push(Commands::Subscribe(kind));
+                state.external_sender.send(Event::Subscribe(state.widget_id, kind)).unwrap();
             },
         )?;
 
@@ -813,7 +815,7 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, kind_ptr: i32, kind_len: i32| {
                 let kind = get_string_from_caller(&mut caller, kind_ptr, kind_len);
                 let state = caller.data_mut();
-                state.commands.push(Commands::Unsubscribe(kind));
+                state.external_sender.send(Event::Unsubscribe(state.widget_id, kind)).unwrap();
             },
         )?;
 
@@ -824,7 +826,7 @@ impl WasmInstance {
                 let string = get_string_from_caller(&mut caller, name_ptr, name_len);
                 let data = get_bytes_from_caller(&mut caller, ptr, len).to_vec();
                 let state = caller.data_mut();
-                state.commands.push(Commands::ProvideValue(string, data));
+                state.external_sender.send(Event::ProvideValue(string, data)).unwrap();
             },
         )?;
         linker.func_wrap("host", "get_x", |mut caller: Caller<'_, State>| {
@@ -890,7 +892,7 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, cursor: u32| {
                 let cursor_icon = CursorIcon::from(cursor);
                 let state = caller.data_mut();
-                state.commands.push(Commands::SetCursor(cursor_icon));
+                state.external_sender.send(Event::SetCursor(cursor_icon)).unwrap();
             },
         )?;
 
@@ -903,9 +905,7 @@ impl WasmInstance {
                 // TODO: Real process id
                 let process_id = state.process_id;
                 state.process_id += 1;
-                state
-                    .commands
-                    .push(Commands::StartProcess(process_id, process));
+                state.external_sender.send(Event::StartProcess(process_id as usize, state.widget_id, process)).unwrap();
                 process_id
             },
         )?;
@@ -917,7 +917,6 @@ impl WasmInstance {
                 let state = caller.data_mut();
 
                 state.external_sender.send(Event::MarkDirty(id)).unwrap();
-                // state.commands.push(Commands::MarkDirty(id));
             },
         )?;
 
@@ -1000,14 +999,7 @@ impl WasmInstance {
              height: f32,
              external_id: u32| {
                 let state = caller.data_mut();
-                state.commands.push(Commands::CreateWidget(
-                    state.wasm_id as usize,
-                    x,
-                    y,
-                    width,
-                    height,
-                    external_id,
-                ));
+                state.external_sender.send(Event::CreateWidget(state.widget_id, x, y, width, height, external_id)).unwrap();
             },
         )?;
 

@@ -723,7 +723,7 @@ impl Editor {
 
                 let modifiers = self.context.modifiers;
                 if modifiers.cmd && modifiers.ctrl && modifiers.option {
-                    println!("Deleting");
+                    println!("Deleting 1");
                     widget.on_delete();
                     to_delete.push(widget.id());
                     continue;

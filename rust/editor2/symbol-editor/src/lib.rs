@@ -141,11 +141,13 @@ impl App for SymbolEditor {
                                 editor.file_path = location.uri.path().to_string();
                                 let start_line = location.range.start.line;
                                 let end_line = location.range.end.line + 1;
-                                editor.visible_range = (start_line as usize, end_line as usize);
+                                editor.set_visible_range((start_line as usize, end_line as usize));
                                 editor.open_file();
                                 editor.start();
                                 let mut data = self.data.clone();
                                 data.position.x = data.position.x + data.size.width + 50.0;
+                                data.size = editor.complete_bounds();
+                                editor.widget_data = data.clone();
                                 let external_id = self.editors.len();
                                 self.create_widget_ref(external_id as u32, data);
                                 self.editors.insert(external_id,editor);
@@ -180,10 +182,8 @@ impl App for SymbolEditor {
     }
 
     fn on_delete(&mut self) {
-        println!("Got Delete!");
         let external_id = self.get_external_id();
         if let Some(external_id) = external_id {
-            println!("Deleting {}", external_id);
             self.editors.remove(&external_id);
         }
     }

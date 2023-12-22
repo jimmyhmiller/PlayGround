@@ -805,14 +805,12 @@ fn get_slice(s: &str, range: std::ops::Range<usize>) -> Option<&str> {
 
 fn properly_parse_json_rpc_message(message: &str) -> Result<(Option<serde_json::Value>, String), ParseError> {
     let message = message.trim();
-    if message.is_empty() {
+    if message.len() < 16 || !message.contains("\r\n\r\n") {
         return Ok((None, message.to_string()));
     }
     let content_length_start = message.find("Content-Length").ok_or(ParseError::NoClosingBrace(message.to_string()))?;
-    // println!("content_length_start: {}", content_length_start);
     let content_length_end = message[content_length_start..].find("\r\n").ok_or(ParseError::NoClosingBrace(message.to_string()))?;
     let content_length: usize = message[content_length_start + 16..content_length_start + content_length_end].trim().parse().unwrap();
-    // println!("content_length: {}", content_length);
     let end_header = message[content_length_start..].find("\r\n\r\n").ok_or(ParseError::NoClosingBrace(message.to_string()))?;
     // println!("end_header: {}", end_header);
     let content_start = end_header + 4;
