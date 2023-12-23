@@ -21,7 +21,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
-use crate::{keyboard::KeyboardInput, event::Event, widget};
+use crate::{keyboard::KeyboardInput, event::Event};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct PointerLengthString {
@@ -334,7 +334,6 @@ impl WasmManager {
                 default_return
             }
             Payload::OnDelete => {
-                println!("Deleting 4");
                 self.instance.on_delete().await?;
                 default_return
             }
@@ -999,7 +998,7 @@ impl WasmInstance {
              height: f32,
              external_id: u32| {
                 let state = caller.data_mut();
-                state.external_sender.send(Event::CreateWidget(state.widget_id, x, y, width, height, external_id)).unwrap();
+                state.external_sender.send(Event::CreateWidget(state.wasm_id as usize, x, y, width, height, external_id)).unwrap();
             },
         )?;
 
@@ -1108,12 +1107,16 @@ impl WasmInstance {
     pub async fn reload(&mut self) -> Result<(), Box<dyn Error>> {
         if let Ok(json_string) = self.get_state().await.ok_or("no get state function") {
             let data = json_string.as_bytes();
+
+            let context = self.get_context().await.ok_or("no get context function")?;
+
             let module = Module::from_file(&self.engine, &self.path)?;
             let instance = self
                 .linker
                 .instantiate_async(&mut self.store, &module)
                 .await?;
             self.instance = instance;
+            self.set_context(context.as_bytes()).await?;
             self.call_main().await?;
             self.set_state(data).await?;
         } else {
@@ -1249,6 +1252,45 @@ impl WasmInstance {
         Ok(())
     }
 
+    pub async fn set_context(&mut self, data: &[u8]) -> Result<(), Box<dyn Error>> {
+        let memory = self
+            .instance
+            .get_export(&mut self.store, "memory")
+            .unwrap()
+            .into_memory()
+            .unwrap();
+
+        let memory_size = (memory.data_size(&mut self.store) as f32
+            / ByteSize::kb(64).as_u64() as f32)
+            .ceil() as usize;
+
+        let data_length_in_64k_multiples =
+            (data.len() as f32 / ByteSize::kb(64).as_u64() as f32).ceil() as usize;
+        if data_length_in_64k_multiples > memory_size {
+            let delta = data_length_in_64k_multiples;
+            println!("Growing memory by {}", delta);
+            memory.grow(&mut self.store, delta as u64 + 10).unwrap();
+        }
+
+        let ptr = self
+            .call_typed_func::<u32, u32>("alloc_string", data.len() as u32, 1)
+            .await?;
+        let memory = self
+            .instance
+            .get_export(&mut self.store, "memory")
+            .unwrap()
+            .into_memory()
+            .unwrap();
+        // let memory_size = memory.data_size(&mut self.store);
+
+        memory.write(&mut self.store, ptr as usize, data).unwrap();
+
+        self.call_typed_func::<(u32, u32), ()>("set_context", (ptr, data.len() as u32), 1)
+            .await
+            .unwrap();
+        Ok(())
+    }
+
     pub async fn get_state(&mut self) -> Option<String> {
         self.call_typed_func::<(), ()>("get_state", (), 1)
             .await
@@ -1268,6 +1310,28 @@ impl WasmInstance {
         self.call_typed_func::<(u32, u32), ()>("finish_get_state", (ptr, len), 1)
             .await
             .ok()?;
+        json_string
+    }
+
+    pub async fn get_context(&mut self) -> Option<String> {
+        self.call_typed_func::<(), ()>("save_context", (), 1)
+            .await
+            .unwrap();
+        let (ptr, len) = self.store.data().get_state_info;
+        let memory = self
+            .instance
+            .get_export(&mut self.store, "memory")
+            .unwrap()
+            .into_memory()
+            .unwrap();
+
+        let json_string = get_string_from_memory(&memory, &mut self.store, ptr as i32, len as i32);
+        if json_string.is_none() {
+            println!("No json string {:?}", self.path);
+        }
+        self.call_typed_func::<(u32, u32), ()>("finish_get_state", (ptr, len), 1)
+            .await
+            .unwrap();
         json_string
     }
 

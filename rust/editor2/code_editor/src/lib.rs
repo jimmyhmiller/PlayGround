@@ -68,7 +68,7 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
     }
 
     fn lines_above_scroll(&self) -> usize {
-        ((self.offset.y / self.line_height).floor() as usize).saturating_sub(self.visible_range.start)
+        (self.offset.y / self.line_height).floor() as usize
     }
 
     // TODO: Deal with margin!
@@ -91,6 +91,7 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
         height: f32,
         y_margin: i32,
     ) {
+        
 
         let character_width = 18;
         let max_line =  self.max_line_length();
@@ -104,14 +105,10 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
             self.offset.x += x as f32;
         }
 
-
-
         if self.offset.x < 0.0 {
             self.offset.x = 0.0;
         }
 
-
-        // TODO: Just fix number_of_lines
         let number_of_lines = self.number_of_lines();
         let number_of_visble_lines = self.number_of_visible_lines(height);
 
@@ -743,7 +740,7 @@ impl CodeEditor {
             // One answer is just to fix the buffer content.
             KeyCode::LeftArrow => {
                 if self.text_pane.visible_range.is_empty() {
-                    self.text_pane.cursor.move_down(&self.text_pane.text_buffer)
+                    self.text_pane.cursor.move_left(&self.text_pane.text_buffer)
                 } else if self.text_pane.cursor.line() != self.text_pane.visible_range.start
                         || self.text_pane.cursor.column() != 0 {
                     self.text_pane
@@ -753,7 +750,7 @@ impl CodeEditor {
             },
             KeyCode::RightArrow => {
                 if self.text_pane.visible_range.is_empty() {
-                    self.text_pane.cursor.move_down(&self.text_pane.text_buffer)
+                    self.text_pane.cursor.move_right(&self.text_pane.text_buffer)
                 } else if self.text_pane.cursor.line() != self.text_pane.visible_range.end - 1
                         || self.text_pane.cursor.column() != self.text_pane.text_buffer.line_length(self.text_pane.cursor.line()) {
                     self.text_pane

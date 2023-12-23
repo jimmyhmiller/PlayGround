@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
-    str::from_utf8, cell::RefCell,
+    str::from_utf8, cell::RefCell, path::Path,
 };
 
 use framework::{CursorIcon, Position, Size, WidgetMeta};
@@ -120,7 +120,8 @@ impl Editor {
                     }
                 }
 
-                Event::Scroll { x, y } => {
+                Event::Scroll { x, y, phase: _ } => {
+                    // TODO: Need to cancel scroll I got from non-ctrl to ctrl
                     if self.context.modifiers.ctrl {
                         self.canvas_scroll_offset.x -= x as f32;
                         self.canvas_scroll_offset.y += y as f32;
@@ -423,6 +424,13 @@ impl Editor {
                         if let Some(path) = path {
                             let path = path.replace("file://", "");
                             let code_editor = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/target/wasm32-wasi/debug/code_editor.wasm";
+
+                            if let Some(watcher) = &mut self.debounce_watcher {
+                                let watcher = watcher.watcher();
+                                watcher
+                                    .watch(Path::new(code_editor), RecursiveMode::NonRecursive)
+                                    .unwrap();
+                            }
                             let path_json = json!({ "file_path": path }).to_string();
                             let next_id = self.widget_store.next_id();
                             let (wasm_id, receiver) = self.wasm_messenger.new_instance(

@@ -33,6 +33,7 @@ impl From<&winit::event::TouchPhase> for TouchPhase {
 }
 
 
+
 #[derive(Clone, Debug)]
 pub enum Event {
     Noop,
@@ -66,6 +67,7 @@ pub enum Event {
     Scroll {
         x: f64,
         y: f64,
+        phase: TouchPhase,
     },
     HoveredFile {
         path: PathBuf,
@@ -150,13 +152,14 @@ impl Event {
                         pressure: *pressure,
                         stage: *stage,
                     }),
-                    MouseWheel { delta, .. } => match delta {
+                    MouseWheel { delta, device_id: _, phase  } => match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, _) => {
                             panic!("What is line delta?")
                         }
                         winit::event::MouseScrollDelta::PixelDelta(delta) => Some(Event::Scroll {
                             x: -delta.x,
                             y: delta.y,
+                            phase: phase.into(),
                         }),
                     },
                     MouseInput { state, button, .. } => {
