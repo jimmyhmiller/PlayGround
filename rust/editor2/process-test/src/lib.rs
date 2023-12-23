@@ -804,6 +804,7 @@ fn get_slice(s: &str, range: std::ops::Range<usize>) -> Option<&str> {
 }
 
 fn properly_parse_json_rpc_message(message: &str) -> Result<(Option<serde_json::Value>, String), ParseError> {
+    // TODO: Still have a bug here
     let message = message.trim();
     if message.len() < 16 || !message.contains("\r\n\r\n") {
         return Ok((None, message.to_string()));

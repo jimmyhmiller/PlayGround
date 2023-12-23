@@ -482,6 +482,14 @@ pub trait AppExtensions {
         }
     }
 
+    fn get_external_ids(&self) -> Vec<usize> {
+        unsafe {
+            CONTEXT.iter().filter_map(|(key, value)| {
+               value.external_id
+            }).collect()
+        }
+    }
+
     fn get_position2(&self) -> Position {
         unsafe {
             CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.position
@@ -659,20 +667,19 @@ pub trait AppExtensions {
 }
 
 
-pub static mut APPS: Lazy<Vec<Box<dyn App>>> = Lazy::new(Vec::new);
-
-pub static mut CURRENT_APP: usize = 0;
-pub static mut CURRENT_EXTERNAL_ID: Option<usize> = None;
 
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
     pub external_id: Option<usize>,
     pub meta: WidgetMeta,
     pub app_index: usize,
 }
 
+pub static mut APPS: Lazy<Vec<Box<dyn App>>> = Lazy::new(Vec::new);
+pub static mut CURRENT_APP: usize = 0;
+pub static mut CURRENT_EXTERNAL_ID: Option<usize> = None;
 pub static mut CONTEXT: Lazy<HashMap<Option<usize>, Context>> = Lazy::new(|| HashMap::new());
 
 
@@ -701,7 +708,6 @@ pub extern "C" fn on_click(x: f32, y: f32) {
 
 #[no_mangle]
 pub extern "C" fn on_delete() {
-    println!("Deleting 6");
     let app = get_app!();
     unsafe { app.on_delete() }
 }
@@ -801,6 +807,55 @@ pub extern "C" fn get_state() {
     unsafe { app.set_get_state(ptr as u32, len as u32) };
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedContext {
+    context: Vec<(Option<usize>, Context)>,
+    current_app: usize,
+    current_external_id: Option<usize>,
+}
+
+#[no_mangle]
+pub extern "C" fn save_context() {
+    unsafe {
+        let context = CONTEXT.clone();
+        let current_app = CURRENT_APP;
+        let current_external_id = CURRENT_EXTERNAL_ID;
+        let state = serde_json::to_string(&SavedContext {
+            context: context.into_iter().collect(),
+            current_app,
+            current_external_id,
+        }).unwrap();
+        let mut state = state.into_bytes();
+        let ptr = state.as_mut_ptr() as usize;
+        let len = state.len();
+        std::mem::forget(state);
+        set_get_state(ptr as u32, len as u32);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn set_context(ptr: u32, size: u32) {
+    let data = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
+    let saved_context: Result<SavedContext, serde_json::Error> = serde_json::from_slice(&data);
+    match saved_context {
+        Ok(saved_context) => {
+            unsafe {
+                CONTEXT.clear();
+                for (key, value) in saved_context.context {
+                    CONTEXT.insert(key, value);
+                }
+                CURRENT_APP = saved_context.current_app;
+                CURRENT_EXTERNAL_ID = None;
+            }
+        }
+        Err(err) => {
+            panic!("Error loading context {:?}", err)
+        }
+        
+    }
+}
+
+
 #[no_mangle]
 pub extern "C" fn finish_get_state(ptr: usize, len: usize) {
     // Deallocates get_state string
@@ -816,34 +871,11 @@ pub extern "C" fn set_state(ptr: u32, size: u32) {
     let s = String::from_utf8(data);
     match s {
         Ok(s) => {
-            // Not quite the same logic here
+            // Not quite the same logic here as before
             // I need set_state to signal failure
             let initial_state = app.get_initial_state();
             let new_state = merge_json(Some(s), initial_state);
             app.set_state(new_state);
-
-            // if let Ok(state) = serde_json::from_str(&s) {
-            //     let current_state =
-            //         serde_json::to_string(unsafe { &app.get_state() })
-            //             .ok();
-            //     let new_state = merge_json(
-            //         Some(s),
-            //         current_state.unwrap_or("{}".to_string()),
-            //     );
-            //     let new_state = serde_json::from_str(&new_state).unwrap();
-            //     unsafe { app.set_state(new_state) }
-            // } else {
-            // let init_state = serde_json::to_string(unsafe {
-            //     &$app::init().get_state()
-            // })
-            // .unwrap();
-            // let new_state = merge_json(Some(s), init_state);
-            // if let Ok(state) = serde_json::from_str(&new_state) {
-            // unsafe { app.set_state(state) }
-            // } else {
-            //     println!("Failed to parse state even after merging");
-            // }
-            // }
         }
         Err(err) => {
             println!("error getting state {:?}", err);
@@ -858,6 +890,7 @@ pub extern "C" fn draw() {
 }
 // TODO: get rid of this
 pub use serde_json;
+use serde_json::json;
 
 pub mod macros {
 

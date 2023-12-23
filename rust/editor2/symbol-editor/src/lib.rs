@@ -301,9 +301,9 @@ impl App for SymbolEditor {
         *self = serde_json::from_str(&state).unwrap();
 
         // TODO: Move to start when it happens after set_state;
-
-        let mut to_add = Vec::with_capacity(self.editors.len());
-        for (external_id, editor) in self.editors.iter_mut(){
+        if self.get_external_ids().is_empty() {
+            let mut to_add = Vec::with_capacity(self.editors.len());
+        for (external_id, editor) in self.editors.iter_mut() {
             editor.open_file();
             editor.start();
             let data = editor.widget_data.clone();
@@ -312,6 +312,8 @@ impl App for SymbolEditor {
         for (external_id, data) in to_add.into_iter() {
             self.create_widget_ref(external_id, data);
         }
+        }
+       
     }
 }
 
