@@ -3,7 +3,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use framework::{Position, Value};
+use framework::{Position, Value, WidgetMeta};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use skia_safe::{Canvas, Image};
@@ -171,6 +171,16 @@ impl Widget {
             .on_mouse_move(widget_space.x, widget_space.y, x_diff, y_diff)
             .unwrap();
         true
+    }
+
+    pub fn meta(&self) -> WidgetMeta {
+        WidgetMeta::new(
+            self.position(),
+            self.size(),
+            self.scale(),
+            self.id(),
+            self.typetag_name().to_string(),
+        )
     }
 }
 

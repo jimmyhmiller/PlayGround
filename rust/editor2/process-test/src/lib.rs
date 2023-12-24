@@ -96,7 +96,7 @@ struct TokensWithVersion {
 
 #[derive(Debug)]
 enum ParseError {
-    NoClosingBrace(String),
+    UseRemainingString(String),
     InvalidJson,
 }
 
@@ -572,6 +572,10 @@ impl App for ProcessSpawner {
                     self.remaining_message = rest;
                     break;
                 }
+                Err(ParseError::UseRemainingString(rest)) => {
+                    self.remaining_message = rest;
+                    break;
+                }
                 Err(e) => {
                     println!("Error parsing message: {:?}", e);
                     println!("Message: {}", message);
@@ -809,10 +813,10 @@ fn properly_parse_json_rpc_message(message: &str) -> Result<(Option<serde_json::
     if message.len() < 16 || !message.contains("\r\n\r\n") {
         return Ok((None, message.to_string()));
     }
-    let content_length_start = message.find("Content-Length").ok_or(ParseError::NoClosingBrace(message.to_string()))?;
-    let content_length_end = message[content_length_start..].find("\r\n").ok_or(ParseError::NoClosingBrace(message.to_string()))?;
+    let content_length_start = message.find("Content-Length").ok_or(ParseError::UseRemainingString(message.to_string()))?;
+    let content_length_end = message[content_length_start..].find("\r\n").ok_or(ParseError::UseRemainingString(message.to_string()))?;
     let content_length: usize = message[content_length_start + 16..content_length_start + content_length_end].trim().parse().unwrap();
-    let end_header = message[content_length_start..].find("\r\n\r\n").ok_or(ParseError::NoClosingBrace(message.to_string()))?;
+    let end_header = message[content_length_start..].find("\r\n\r\n").ok_or(ParseError::UseRemainingString(message.to_string()))?;
     // println!("end_header: {}", end_header);
     let content_start = end_header + 4;
     // println!("content_start: {}", content_start);

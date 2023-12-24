@@ -14,7 +14,7 @@ use crate::{
     editor::{self, Editor, PerFrame},
     event::Event,
     keyboard::{KeyCode, KeyboardInput, KeyState},
-    native::open_file_dialog,
+    native::{open_file_dialog, feedback},
     wasm_messenger::{OutMessage, SaveState},
     widget::Widget,
     widget2::{Ephemeral, TextPane, WasmWidget, Widget as _, Image},
@@ -74,7 +74,6 @@ impl Editor {
                             }),
                         });
                     } else if path.extension().unwrap() == "png" {
-                        println!("Got image!");
                         let next_id = self.widget_store.next_id();
                         self.widget_store.add_widget(Widget {
                             data: Box::new(Image {
@@ -122,7 +121,9 @@ impl Editor {
 
                 Event::Scroll { x, y, phase: _ } => {
                     // TODO: Need to cancel scroll I got from non-ctrl to ctrl
-                    if self.context.modifiers.ctrl {
+                    if self.context.modifiers.ctrl && self.context.modifiers.option {
+                        self.canvas_scroll_offset.y += y as f32;
+                    } else if self.context.modifiers.ctrl {
                         self.canvas_scroll_offset.x -= x as f32;
                         self.canvas_scroll_offset.y += y as f32;
                     } else {
@@ -187,6 +188,15 @@ impl Editor {
                     if self.context.modifiers.ctrl || self.context.modifiers.option || self.context.modifiers.shift || self.context.modifiers.cmd {
                         self.context.cancel_click = true;
                     }
+
+                    for moved in self.context.moved.iter() {
+                        let widget = self.widget_store.get_mut(*moved).unwrap();
+                        self.events.push(Event::Event("widget/moved".to_string(), serde_json::to_string(&widget.meta()).unwrap()));
+                    }
+                    if !self.context.moved.is_empty() {
+                        feedback();
+                    }
+                    self.context.moved.clear();
                     self.add_mouse_up();
                 }
                 Event::MouseMove {
@@ -216,22 +226,16 @@ impl Editor {
                         for widget_id in self.selected_widgets.iter() {
                             let mut moved = vec![];
                             if let Some(widget) = self.widget_store.get_mut(*widget_id) {
-                                // dirty_widgets.insert((widget.id(), "move".to_string()));
                                 moved.push(widget.id());
-                                // if x > self.window.size.width - 300.0 {
-                                //     widget.data.set_scale(0.1);
-                                // } else {
-                                //     widget.data.set_scale(1.0);
-                                // }
                             }
                             for widget in self.widget_store.iter() {
                                 if let Some(parent_id) = widget.parent_id() {
                                     if moved.contains(&parent_id) {
-                                        // dirty_widgets.insert((widget.id(), "move".to_string()));
                                         moved.push(widget.id());
                                     }
                                 }
                             }
+                            self.context.moved.extend(moved.clone());
 
                             for moved in moved.iter() {
                                 let widget = self.widget_store.get_mut(*moved).unwrap();

@@ -81,6 +81,8 @@ impl App for SymbolEditor {
             // TODO: I need to think about how I want the UI for code base exploration
             // to work. We need to be able to see the structure of the code base,
             // but also jump into bits we care about
+            
+            // TODO: This is slow
             let projects = symbols
                 .iter()
                 .sorted_by(|x, y| Ord::cmp(&get_project(x), &get_project(y)))
@@ -195,9 +197,11 @@ impl App for SymbolEditor {
         }
 
         if kind == "workspace/symbols" {
-            let mut symbols: Vec<WorkspaceSymbol> = serde_json::from_str(&event).unwrap();
-            symbols.sort_by_key(|x| (get_project(x), x.container_name.clone()));
+            // TODO: Handle multiple workspaces
+            // Probably need to send project root
+            let symbols: Vec<WorkspaceSymbol> = serde_json::from_str(&event).unwrap();
             self.symbols = symbols;
+            self.symbols.sort_by_key(|x| (get_project(x), x.container_name.clone()));
         }
     }
 
