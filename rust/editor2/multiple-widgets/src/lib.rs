@@ -211,12 +211,32 @@ impl App for MultipleWidgets {
     }
 
     fn start(&mut self) {
-        self.subscribe("workspace/symbols")
+        self.subscribe("workspace/symbols");
+        self.subscribe("widget/moved");
     }
 
     fn on_event(&mut self, kind: String, event: String) {
-        let symbols: Vec<SymbolInformation> = serde_json::from_str(&event).unwrap();
-        self.symbols = symbols;
+        if kind == "workspace/symbols" {
+            let symbols: Vec<SymbolInformation> = serde_json::from_str(&event).unwrap();
+            self.symbols = symbols;
+        } else if kind == "widget/moved" {
+            let mut meta : WidgetMeta = serde_json::from_str(&event).unwrap();
+            let x = meta.position.x - 50.0;
+            let y = meta.position.y - 50.0;
+            let mut changed = false;
+            if x % 100.0 != 0.0 {
+                changed = true;
+                meta.position.x = (x / 100.0).round() * 100.0 + 50.0;
+            }
+            if y % 100.0 != 0.0 {
+                changed = true;
+                meta.position.y = (y / 100.0).round() * 100.0 + 50.0;
+            }
+            if changed {
+                self.provide_value::<Vec<WidgetMeta>>("widgets", vec![meta]);
+            }
+        }
+
     }
 
     fn draw(&mut self) {

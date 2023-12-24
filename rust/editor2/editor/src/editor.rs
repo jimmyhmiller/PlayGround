@@ -37,6 +37,7 @@ pub struct Context {
     pub right_mouse_down: bool,
     pub cancel_click: bool,
     pub modifiers: Modifiers,
+    pub moved: HashSet<usize>,
 }
 
 pub enum PerFrame {
@@ -125,7 +126,7 @@ impl Events {
         self.events.push(event);
     }
 
-    fn push_current_frame(&mut self, event: Event) {
+    pub fn push_current_frame(&mut self, event: Event) {
         self.events.push(event);
         self.frame_end_index = self.events.len();
     }
@@ -356,19 +357,20 @@ impl Editor {
                             }
                             i += 1;
                         }
-                        let stderr = &mut process.stderr;
-                        let max_attempts = 100;
-                        let mut i = 0;
-                        while !stderr.is_eof() {
-                            if i > max_attempts {
-                                break;
-                            }
-                            let length = stderr.read_available_to_string(&mut buf).unwrap();
-                            if length == 0 {
-                                break;
-                            }
-                            i += 1;
-                        }
+                        // TODO: need to send stderr separately
+                        // let stderr = &mut process.stderr;
+                        // let max_attempts = 100;
+                        // let mut i = 0;
+                        // while !stderr.is_eof() {
+                        //     if i > max_attempts {
+                        //         break;
+                        //     }
+                        //     let length = stderr.read_available_to_string(&mut buf).unwrap();
+                        //     if length == 0 {
+                        //         break;
+                        //     }
+                        //     i += 1;
+                        // }
                         if !buf.is_empty() {
                             process.output.push('\n');
                             process.output.push_str(&buf);
@@ -424,6 +426,7 @@ impl Editor {
                 right_mouse_down: false,
                 cancel_click: false,
                 modifiers: Modifiers::default(),
+                moved: HashSet::new(),
             },
             widget_store: WidgetStore::new(),
             should_redraw: true,

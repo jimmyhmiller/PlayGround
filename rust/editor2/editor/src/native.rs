@@ -1,8 +1,13 @@
+
 use cacao::foundation::NSURL;
 use cocoa::{
     appkit::{NSModalResponse, NSOpenPanel, NSSavePanel},
     base::nil,
 };
+
+use cocoa::base::id;
+use objc::{runtime::Class, msg_send, sel, sel_impl};
+
 
 pub fn open_file_dialog() -> Option<String> {
     // make an NsOpenPanel
@@ -23,3 +28,12 @@ pub fn open_file_dialog() -> Option<String> {
         }
     }
 }
+
+pub fn feedback() {
+    unsafe {
+        let cls = Class::get("NSHapticFeedbackManager").unwrap();
+        let performer:id = msg_send![cls, defaultPerformer];
+        let _: () = msg_send![performer, performFeedbackPattern:1 performanceTime:0];
+    }
+}
+
