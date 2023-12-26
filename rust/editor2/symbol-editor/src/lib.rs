@@ -41,8 +41,6 @@ impl App for SymbolEditor {
 
     fn start(&mut self) {
         self.subscribe("workspace/symbols");
-
-       
     }
 
     fn draw(&mut self) {

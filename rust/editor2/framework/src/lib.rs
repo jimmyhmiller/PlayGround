@@ -16,6 +16,8 @@ extern "C" {
     fn draw_str_low_level(ptr: i32, len: i32, x: f32, y: f32);
     fn draw_rect(x: f32, y: f32, width: f32, height: f32);
     fn set_color(r: f32, g: f32, b: f32, a: f32);
+    fn change_widget(widget_id: u32);
+    fn default_widget();
     fn save();
     fn set_get_state(ptr: u32, len: u32);
     fn clip_rect(x: f32, y: f32, width: f32, height: f32);
@@ -275,6 +277,19 @@ impl Canvas {
             set_color(color.r, color.g, color.b, color.a);
         }
     }
+
+    pub fn change_widget(&self, widget_id: u32) {
+        unsafe {
+            change_widget(widget_id);
+        }
+    }
+
+    pub fn default_widget(&self) {
+        unsafe {
+            default_widget();
+        }
+    }
+
 }
 
 pub static mut DEBUG: Vec<String> = Vec::new();
