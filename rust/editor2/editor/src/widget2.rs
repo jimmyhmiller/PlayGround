@@ -337,6 +337,12 @@ impl Widget for WasmWidget {
                     canvas.restore();
                     current_height = current_height_stack.pop().unwrap();
                 }
+                DrawCommands::DefaultWidget => {
+                    println!("Default widget");
+                }
+                DrawCommands::ChangeWidget(id) => {
+                    println!("Change widget {}", id);
+                }
             }
         }
         canvas.translate((self.size().width, 0.0));
@@ -489,7 +495,7 @@ impl Widget for WasmWidget {
                     // TODO: Is this a performance issue?
                     // I'm thinking not? It seems to actually work because
                     // we only do this every once in a while
-                    if self.draw_commands != commands {
+                    if !commands.is_empty() && self.draw_commands != commands {
                         self.mark_dirty("draw_commands changed");
                         self.draw_commands = commands;
                     }

@@ -75,6 +75,7 @@ pub enum OutPayload {
 pub struct OutMessage {
     pub message_id: usize,
     pub payload: OutPayload,
+    pub external_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -286,18 +287,20 @@ impl WasmManager {
             // TODO: Can I wait for either this message or some reload message so I can kill infinite loops?
             let out_message = self.process_message(message).await;
             match out_message {
-                Ok(out_message) => {
-                    let result = if let Some(external_id) = external_id {
-                        self.other_senders
-                            .get_mut(&external_id)
-                            .unwrap()
-                            .1
-                            .start_send(out_message)
-                    } else {
-                        self.sender.start_send(out_message)
-                    };
-                    if result.is_err() {
-                        println!("Error sending message {:?}", result);
+                Ok(out_messages) => {
+                    for out_message in out_messages {
+                        let result = if let Some(external_id) = out_message.external_id {
+                            self.other_senders
+                                .get_mut(&external_id)
+                                .unwrap()
+                                .1
+                                .start_send(out_message)
+                        } else {
+                            self.sender.start_send(out_message)
+                        };
+                        if result.is_err() {
+                            println!("Error sending message {:?}", result);
+                        }
                     }
                 }
                 Err(err) => {
@@ -305,6 +308,7 @@ impl WasmManager {
                     let out_message = OutMessage {
                         message_id,
                         payload: OutPayload::Error(err.to_string()),
+                        external_id,
                     };
                     let result = self.sender.start_send(out_message);
                     if result.is_err() {
@@ -318,11 +322,12 @@ impl WasmManager {
     pub async fn process_message(
         &mut self,
         message: Message,
-    ) -> Result<OutMessage, Box<dyn Error>> {
-        let default_return = Ok(OutMessage {
+    ) -> Result<Vec<OutMessage>, Box<dyn Error>> {
+        let default_return = Ok(vec![OutMessage {
             message_id: message.message_id,
             payload: OutPayload::Complete,
-        });
+            external_id: message.external_id,
+        }]);
 
         if let Some(external_id) = message.external_id {
             self.instance.set_widget_identifer(external_id).await?;
@@ -353,11 +358,39 @@ impl WasmManager {
             }
             Payload::RunDraw(fn_name) => {
                 let result = self.instance.draw(&fn_name).await;
+                let mut commands_by_widget: HashMap<Option<u32>, Vec<DrawCommands>> = HashMap::new();
                 match result {
-                    Ok(result) => Ok(OutMessage {
-                        message_id: message.message_id,
-                        payload: OutPayload::DrawCommands(result),
-                    }),
+                    Ok(result) => {
+                        let mut current_widget = message.external_id;
+                        for command in result {
+                            match command {
+                                DrawCommands::ChangeWidget(widget_id) => {
+                                    current_widget = Some(widget_id);
+                                }
+                                DrawCommands::DefaultWidget => {
+                                    current_widget = None;
+                                }
+                                _ => {
+                                    commands_by_widget
+                                        .entry(current_widget)
+                                        .or_insert_with(Vec::new)
+                                        .push(command);
+                                }
+                            }
+                        }
+                        let mut out_messages = Vec::new();
+                        for (widget_id, commands) in commands_by_widget {
+                            out_messages.push(OutMessage {
+                                message_id: message.message_id,
+                                payload: OutPayload::DrawCommands(commands),
+                                external_id: widget_id,
+                            });
+                        }
+                        if out_messages.is_empty() {
+                            return default_return;
+                        }
+                        Ok(out_messages)
+                    },
                     Err(error) => {
                         println!("Error drawing {:?}", error);
                         default_return
@@ -384,10 +417,11 @@ impl WasmManager {
                         _ => {}
                     }
                 }
-                Ok(OutMessage {
+                Ok(vec![OutMessage {
                     message_id: message.message_id,
                     payload: OutPayload::Update(commands),
-                })
+                    external_id: message.external_id,
+                }])
             }
             Payload::OnScroll(x, y) => {
                 self.instance.on_scroll(x, y).await?;
@@ -404,10 +438,11 @@ impl WasmManager {
                 let result = self.instance.on_key(key_code, state, modifiers).await;
                 match result {
                     Ok(_) => default_return,
-                    Err(err) => Ok(OutMessage {
+                    Err(err) => Ok(vec![OutMessage {
                         message_id: message.message_id,
                         payload: OutPayload::ErrorPayload(err.to_string()),
-                    }),
+                        external_id: message.external_id,
+                    }]),
                 }
             }
             Payload::Reload => {
@@ -417,10 +452,11 @@ impl WasmManager {
                         println!("Error reloading {}", e);
                     }
                 }
-                Ok(OutMessage {
+                Ok(vec![OutMessage {
                     message_id: message.message_id,
                     payload: OutPayload::Reloaded,
-                })
+                    external_id: message.external_id,
+                }])
             }
             Payload::SaveState => {
                 let state = self.instance.get_state().await;
@@ -429,19 +465,21 @@ impl WasmManager {
                         if state.starts_with('\"') {
                             assert!(state.ends_with('\"'), "State is corrupt: {}", state);
                         }
-                        Ok(OutMessage {
+                        Ok(vec![OutMessage {
                             message_id: message.message_id,
                             payload: OutPayload::Saved(SaveState::Saved(serde_json::from_str(
                                 &state,
                             )?)),
-                        })
+                            external_id: message.external_id,
+                        }])
                     }
                     None => {
                         println!("Failed to get state");
-                        Ok(OutMessage {
+                        Ok(vec![OutMessage {
                             message_id: message.message_id,
                             payload: OutPayload::Saved(SaveState::Empty),
-                        })
+                            external_id: message.external_id,
+                        }])
                     }
                 }
             }
@@ -493,7 +531,7 @@ struct State {
     receivers: HashMap<String, oneshot::Receiver<Value>>,
     wasm_id: u64,
     widget_id: usize,
-    external_id: u32,
+    external_id: Option<u32>,
     external_sender: std::sync::mpsc::Sender<Event>,
     process_id: u32,
 }
@@ -518,7 +556,7 @@ impl State {
             wasm_id,
             values,
             receivers: HashMap::new(),
-            external_id: 0,
+            external_id: None,
             external_sender,
             process_id: 0,
             widget_id,
@@ -551,6 +589,8 @@ pub enum DrawCommands {
     SetColor(f32, f32, f32, f32),
     Restore,
     Save,
+    ChangeWidget(u32),
+    DefaultWidget,
 }
 
 fn get_bytes_from_caller(caller: &mut Caller<State>, ptr: i32, len: i32) -> Vec<u8> {
@@ -765,6 +805,7 @@ impl WasmInstance {
                         state.sender.start_send(OutMessage {
                             message_id: 0,
                             payload: OutPayload::NeededValue(name, sender),
+                            external_id: state.external_id,
                         })?;
 
                         Ok(0)
@@ -883,6 +924,22 @@ impl WasmInstance {
             |mut caller: Caller<'_, State>, r: f32, g: f32, b: f32, a: f32| {
                 let state = caller.data_mut();
                 state.draw_commands.push(DrawCommands::SetColor(r, g, b, a));
+            },
+        )?;
+        linker.func_wrap(
+            "host",
+            "change_widget",
+            |mut caller: Caller<'_, State>, id: u32| {
+                let state = caller.data_mut();
+                state.draw_commands.push(DrawCommands::ChangeWidget(id));
+            },
+        )?;
+        linker.func_wrap(
+            "host",
+            "default_widget",
+            |mut caller: Caller<'_, State>| {
+                let state = caller.data_mut();
+                state.draw_commands.push(DrawCommands::DefaultWidget);
             },
         )?;
         linker.func_wrap(
@@ -1040,7 +1097,6 @@ impl WasmInstance {
     }
 
     pub async fn on_delete(&mut self) -> Result<(), Box<dyn Error>> {
-        println!("Deleting 5");
         self.call_typed_func::<(), ()>("on_delete", (), 1)
             .await?;
         Ok(())
@@ -1357,7 +1413,7 @@ impl WasmInstance {
 
     pub async fn set_widget_identifer(&mut self, external_id: u32) -> Result<(), Box<dyn Error>> {
         let state = self.store.data_mut();
-        state.external_id = external_id;
+        state.external_id = Some(external_id);
         self.call_typed_func::<u32, ()>("set_widget_identifier", external_id, 1)
             .await?;
         Ok(())
@@ -1365,7 +1421,7 @@ impl WasmInstance {
 
     pub async fn clear_widget_identifier(&mut self) -> Result<(), Box<dyn Error>> {
         let state = self.store.data_mut();
-        state.external_id = 0;
+        state.external_id = None;
         self.call_typed_func::<(), ()>("clear_widget_identifier", (), 1)
             .await?;
         Ok(())

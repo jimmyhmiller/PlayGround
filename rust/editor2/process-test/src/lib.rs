@@ -815,21 +815,15 @@ fn properly_parse_json_rpc_message(message: &str) -> Result<(Option<serde_json::
     }
     let content_length_start = message.find("Content-Length").ok_or(ParseError::UseRemainingString(message.to_string()))?;
     let content_length_end = message[content_length_start..].find("\r\n").ok_or(ParseError::UseRemainingString(message.to_string()))?;
-    let content_length: usize = message[content_length_start + 16..content_length_start + content_length_end].trim().parse().unwrap();
+    let content_length: usize = message[content_length_start + 16..content_length_start + content_length_end].trim().parse().map_err(|_| ParseError::UseRemainingString(message.to_string()))?;
     let end_header = message[content_length_start..].find("\r\n\r\n").ok_or(ParseError::UseRemainingString(message.to_string()))?;
-    // println!("end_header: {}", end_header);
     let content_start = end_header + 4;
-    // println!("content_start: {}", content_start);
     if let Some(content) = get_slice(message, content_start..content_start + content_length) {
-        // println!("content: {}", content);
         let rest = &message[content_start + content_length..];
-        // println!("rest: {}", rest);
         let value = serde_json::from_str(content).map_err(|_| ParseError::InvalidJson)?;
-        // println!("value: {:?}", value);
         Ok((value, rest.to_string()))
     } else {
         let rest = message;
-        // println!("rest: {}", rest);
         Ok((None, rest.to_string()))
     }
    
