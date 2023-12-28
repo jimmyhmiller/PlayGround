@@ -223,7 +223,6 @@ impl Ir {
         }
     }
 
-
     fn next_register(&mut self, argument: Option<usize>, volatile: bool) -> VirtualRegister {
         let register = VirtualRegister {
             argument,
@@ -632,7 +631,6 @@ impl Ir {
             .push(Instruction::Call(dest, function, vec));
         dest
     }
-
 }
 
 #[allow(unused)]

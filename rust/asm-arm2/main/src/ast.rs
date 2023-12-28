@@ -1,7 +1,10 @@
 use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
-use crate::{ir::{self, Condition}, compiler::Compiler};
+use crate::{
+    compiler::Compiler,
+    ir::{self, Condition},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ast {
@@ -41,8 +44,7 @@ pub enum Ast {
 }
 
 impl Ast {
-    pub fn compile(&self, compiler: &mut Compiler) -> Ir
-    {
+    pub fn compile(&self, compiler: &mut Compiler) -> Ir {
         let mut compiler = AstCompiler {
             ast: self.clone(),
             variables: HashMap::new(),
@@ -60,7 +62,6 @@ pub struct AstCompiler<'a> {
     pub ir: Ir,
     pub name: String,
     pub compiler: &'a mut Compiler,
-
 }
 
 impl<'a> AstCompiler<'a> {

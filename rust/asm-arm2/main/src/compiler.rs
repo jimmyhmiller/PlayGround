@@ -21,15 +21,29 @@ pub struct Compiler {
 impl Compiler {
     pub fn new() -> Self {
         Self {
-            code_memory: Some(MmapOptions::new(MmapOptions::page_size()).unwrap().map().unwrap()),
+            code_memory: Some(
+                MmapOptions::new(MmapOptions::page_size())
+                    .unwrap()
+                    .map()
+                    .unwrap(),
+            ),
             code_offset: 0,
-            jump_table: Some(MmapOptions::new(MmapOptions::page_size()).unwrap().map().unwrap()),
+            jump_table: Some(
+                MmapOptions::new(MmapOptions::page_size())
+                    .unwrap()
+                    .map()
+                    .unwrap(),
+            ),
             jump_table_offset: 0,
             functions: Vec::new(),
         }
     }
 
-    pub fn add_foreign_function(&mut self, name: &str, function: *const u8) -> Result<usize, Box<dyn Error>> {
+    pub fn add_foreign_function(
+        &mut self,
+        name: &str,
+        function: *const u8,
+    ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         let offset = function as usize;
         self.functions.push(Function {
@@ -99,10 +113,14 @@ impl Compiler {
         }
     }
 
-    pub fn add_jump_table_entry(&mut self, index: usize, offset: usize) -> Result<(), Box<dyn Error>> {
+    pub fn add_jump_table_entry(
+        &mut self,
+        index: usize,
+        offset: usize,
+    ) -> Result<(), Box<dyn Error>> {
         let memory = self.jump_table.take();
         let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
-        let buffer = &mut memory[index*8..];
+        let buffer = &mut memory[index * 8..];
         // Write full usize to buffer
         for (index, byte) in offset.to_le_bytes().iter().enumerate() {
             buffer[index] = *byte;
@@ -124,11 +142,11 @@ impl Compiler {
         for (index, byte) in code.iter().enumerate() {
             buffer[index] = *byte;
         }
-    
+
         let size: usize = memory.size();
         memory.flush(0..size)?;
         self.code_offset += code.len();
-    
+
         let exec = memory.make_exec().unwrap_or_else(|(_map, e)| {
             panic!("Failed to make mmap executable: {}", e);
         });
@@ -137,13 +155,12 @@ impl Compiler {
 
         Ok(start)
     }
-    
-    
 
     // TODO: Make this good
     pub fn run(&self, jump_table_offset: usize) -> Result<u64, Box<dyn Error>> {
         // get offset stored in jump table as a usize
-        let offset = &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
+        let offset =
+            &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
         let start = usize::from_le_bytes(bytes);
@@ -152,9 +169,10 @@ impl Compiler {
         Ok(f())
     }
 
-    pub fn run1(&self,  jump_table_offset: usize, arg: u64) -> Result<u64, Box<dyn Error>> {
+    pub fn run1(&self, jump_table_offset: usize, arg: u64) -> Result<u64, Box<dyn Error>> {
         // get offset stored in jump table as a usize
-        let offset = &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
+        let offset =
+            &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
         let start = usize::from_le_bytes(bytes);
@@ -162,6 +180,4 @@ impl Compiler {
         let f: fn(u64) -> u64 = unsafe { std::mem::transmute(memory.as_ref().as_ptr()) };
         Ok(f(arg))
     }
-
-    
 }
