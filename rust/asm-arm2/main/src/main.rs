@@ -6,9 +6,9 @@ pub mod common;
 pub mod ir;
 pub mod compiler;
 
-use crate::{arm::LowLevelArm, compiler::Compiler};
+use crate::compiler::Compiler;
 
-use mmap_rs::{Mmap, MmapOptions};
+
 
 
 fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
