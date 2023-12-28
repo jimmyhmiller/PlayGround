@@ -3,13 +3,10 @@ use std::{error::Error, mem, time::Instant};
 mod arm;
 pub mod ast;
 pub mod common;
-pub mod ir;
 pub mod compiler;
+pub mod ir;
 
 use crate::compiler::Compiler;
-
-
-
 
 fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
     let fib: ast::Ast = ast::fib();
@@ -40,18 +37,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut compiler = Compiler::new();
     compiler.add_foreign_function("print", ir::print_value as *const u8)?;
 
-
     let hello_ast = ast::hello_world();
     let mut hello_ir = hello_ast.compile(&mut compiler);
     let mut hello = hello_ir.compile();
-
 
     let hello2_ast = ast::hello_world2();
     let mut hello2_ir = hello2_ast.compile(&mut compiler);
     let mut hello2 = hello2_ir.compile();
 
-
-    let hello = compiler.add_function( "hello", &hello.compile_to_bytes())?;
+    let hello = compiler.add_function("hello", &hello.compile_to_bytes())?;
 
     println!("{}", compiler.run(hello)?);
 
