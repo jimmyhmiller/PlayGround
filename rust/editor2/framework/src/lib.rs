@@ -289,7 +289,6 @@ impl Canvas {
             default_widget();
         }
     }
-
 }
 
 pub static mut DEBUG: Vec<String> = Vec::new();
@@ -434,7 +433,6 @@ pub fn merge(state: &mut serde_json::Value, partial_state: &mut serde_json::Valu
     }
 }
 
-
 pub trait App {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -490,59 +488,53 @@ pub trait AppExtensions {
     fn start_process(&mut self, process: String) -> u32 {
         unsafe { start_process_low_level(process.as_ptr() as i32, process.len() as i32) }
     }
-    
+
     fn get_external_id(&self) -> Option<usize> {
-        unsafe {
-            CURRENT_EXTERNAL_ID
-        }
+        unsafe { CURRENT_EXTERNAL_ID }
     }
 
     fn get_external_ids(&self) -> Vec<usize> {
         unsafe {
-            CONTEXT.iter().filter_map(|(key, value)| {
-               value.external_id
-            }).collect()
+            CONTEXT
+                .iter()
+                .filter_map(|(key, value)| value.external_id)
+                .collect()
         }
     }
 
     fn get_position2(&self) -> Position {
-        unsafe {
-            CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.position
-        }
+        unsafe { CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.position }
     }
 
     fn get_size2(&self) -> Size {
-        unsafe {
-            CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.size
-        }
+        unsafe { CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.size }
     }
 
     fn get_scale(&self) -> f32 {
-        unsafe {
-            CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.scale
-        }
+        unsafe { CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.scale }
     }
 
     fn get_id(&self) -> usize {
-        unsafe {
-            CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.id
-        }
+        unsafe { CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.id }
     }
 
     fn create_widget_ref(&mut self, external_id: u32, data: WidgetData) -> Widget {
         unsafe {
-            CONTEXT.insert(Some(external_id as usize), Context {
-                external_id: Some(external_id as usize),
-                meta: WidgetMeta::new(
-                    data.position,
-                    data.size,
-                    1.0,
-                    external_id as usize,
-                    "widget".to_string(),
-                ),
-                app_index: self.get_id(),
-            });
-            
+            CONTEXT.insert(
+                Some(external_id as usize),
+                Context {
+                    external_id: Some(external_id as usize),
+                    meta: WidgetMeta::new(
+                        data.position,
+                        data.size,
+                        1.0,
+                        external_id as usize,
+                        "widget".to_string(),
+                    ),
+                    app_index: self.get_id(),
+                },
+            );
+
             create_widget(
                 data.position.x,
                 data.position.y,
@@ -560,18 +552,21 @@ pub trait AppExtensions {
         unsafe {
             APPS.push(app);
             let identifer = APPS.len() - 1;
-            CONTEXT.insert(Some(identifer as usize), Context {
-                external_id: Some(identifer as usize),
-                meta: WidgetMeta::new(
-                    data.position,
-                    data.size,
-                    1.0,
-                    identifer as usize,
-                    "widget".to_string(),
-                ),
-                app_index: identifer,
-            });
-            
+            CONTEXT.insert(
+                Some(identifer as usize),
+                Context {
+                    external_id: Some(identifer as usize),
+                    meta: WidgetMeta::new(
+                        data.position,
+                        data.size,
+                        1.0,
+                        identifer as usize,
+                        "widget".to_string(),
+                    ),
+                    app_index: identifer,
+                },
+            );
+
             create_widget(
                 data.position.x,
                 data.position.y,
@@ -613,7 +608,6 @@ pub trait AppExtensions {
     }
 
     fn provide_value<T: Serialize>(&self, s: &str, val: T) {
-
         let val = serde_json::to_string(&val).unwrap();
         let val = val.as_bytes();
         // TODO: I need to fix the lifetime of this thing
@@ -681,10 +675,6 @@ pub trait AppExtensions {
     }
 }
 
-
-
-
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
     pub external_id: Option<usize>,
@@ -696,7 +686,6 @@ pub static mut APPS: Lazy<Vec<Box<dyn App>>> = Lazy::new(Vec::new);
 pub static mut CURRENT_APP: usize = 0;
 pub static mut CURRENT_EXTERNAL_ID: Option<usize> = None;
 pub static mut CONTEXT: Lazy<HashMap<Option<usize>, Context>> = Lazy::new(|| HashMap::new());
-
 
 #[no_mangle]
 pub extern "C" fn set_widget_identifier(identifier: u32) {
@@ -839,7 +828,8 @@ pub extern "C" fn save_context() {
             context: context.into_iter().collect(),
             current_app,
             current_external_id,
-        }).unwrap();
+        })
+        .unwrap();
         let mut state = state.into_bytes();
         let ptr = state.as_mut_ptr() as usize;
         let len = state.len();
@@ -853,23 +843,19 @@ pub extern "C" fn set_context(ptr: u32, size: u32) {
     let data = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
     let saved_context: Result<SavedContext, serde_json::Error> = serde_json::from_slice(&data);
     match saved_context {
-        Ok(saved_context) => {
-            unsafe {
-                CONTEXT.clear();
-                for (key, value) in saved_context.context {
-                    CONTEXT.insert(key, value);
-                }
-                CURRENT_APP = saved_context.current_app;
-                CURRENT_EXTERNAL_ID = None;
+        Ok(saved_context) => unsafe {
+            CONTEXT.clear();
+            for (key, value) in saved_context.context {
+                CONTEXT.insert(key, value);
             }
-        }
+            CURRENT_APP = saved_context.current_app;
+            CURRENT_EXTERNAL_ID = None;
+        },
         Err(err) => {
             panic!("Error loading context {:?}", err)
         }
-        
     }
 }
-
 
 #[no_mangle]
 pub extern "C" fn finish_get_state(ptr: usize, len: usize) {
@@ -914,23 +900,29 @@ pub mod macros {
         ($app:ident) => {
             use framework::AppExtensions;
             #[no_mangle]
-            #[cfg(feature="main")]
+            #[cfg(feature = "main")]
             fn main(widget_id: usize) {
                 let mut app = $app::init();
                 app.start();
                 unsafe {
                     framework::APPS.push(Box::new(app));
-                    framework::CONTEXT.insert(None, framework::Context {
-                        external_id: None,
-                        meta: framework::WidgetMeta::new(
-                            framework::Position { x: 0.0, y: 0.0 },
-                            framework::Size { width: 0.0, height: 0.0 },
-                            1.0,
-                            widget_id,
-                            "wasm".to_string(),
-                        ),
-                        app_index: 0,
-                    });
+                    framework::CONTEXT.insert(
+                        None,
+                        framework::Context {
+                            external_id: None,
+                            meta: framework::WidgetMeta::new(
+                                framework::Position { x: 0.0, y: 0.0 },
+                                framework::Size {
+                                    width: 0.0,
+                                    height: 0.0,
+                                },
+                                1.0,
+                                widget_id,
+                                "wasm".to_string(),
+                            ),
+                            app_index: 0,
+                        },
+                    );
                 }
             }
         };

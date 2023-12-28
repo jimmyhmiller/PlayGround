@@ -224,7 +224,11 @@ impl Editor {
         let widgets: Vec<Widget> = widgets
             .into_iter()
             .map(|mut widget| {
-                widget.init(&mut self.wasm_messenger, self.values.clone(), self.external_sender.as_ref().unwrap().clone());
+                widget.init(
+                    &mut self.wasm_messenger,
+                    self.values.clone(),
+                    self.external_sender.as_ref().unwrap().clone(),
+                );
                 if let Some(watcher) = &mut self.debounce_watcher {
                     let watcher = watcher.watcher();
                     let files_to_watch = widget.files_to_watch();
@@ -299,7 +303,6 @@ impl Editor {
         self.events.end_frame();
         self.next_frame();
         self.fps_counter.add_time("events", time.elapsed());
-        
 
         let time = Instant::now();
         for widget in self.widget_store.iter_mut() {
@@ -471,11 +474,9 @@ impl Editor {
         );
         let white = &Paint::new(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
 
-
         let canvas_size = self.window.size;
 
         if self.show_debug {
-
             canvas.draw_str(
                 self.fps_counter.fps.to_string(),
                 Point::new(canvas_size.width - 60.0, 30.0),
@@ -527,7 +528,6 @@ impl Editor {
 
         canvas.translate((self.canvas_scroll_offset.x, self.canvas_scroll_offset.y));
         canvas.scale((self.canvas_scale, self.canvas_scale));
-
 
         self.widget_store.fix_zindexes();
 

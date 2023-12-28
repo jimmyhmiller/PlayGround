@@ -149,7 +149,7 @@ impl App for ColorScheme {
 
     fn on_event(&mut self, kind: String, event: String) {
         if kind == "token_options" {
-            let tokens : SemanticTokensLegend = serde_json::from_str(&event).unwrap();
+            let tokens: SemanticTokensLegend = serde_json::from_str(&event).unwrap();
             self.token_legend = Some(tokens.clone());
             self.provide_value("token_legend", tokens);
         }

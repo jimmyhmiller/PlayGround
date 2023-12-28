@@ -32,8 +32,6 @@ impl From<&winit::event::TouchPhase> for TouchPhase {
     }
 }
 
-
-
 #[derive(Clone, Debug)]
 pub enum Event {
     Noop,
@@ -152,7 +150,11 @@ impl Event {
                         pressure: *pressure,
                         stage: *stage,
                     }),
-                    MouseWheel { delta, device_id: _, phase  } => match delta {
+                    MouseWheel {
+                        delta,
+                        device_id: _,
+                        phase,
+                    } => match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, _) => {
                             panic!("What is line delta?")
                         }

@@ -16,8 +16,10 @@ use itertools::Itertools;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use skia_safe::{
+    canvas::SrcRectConstraint,
     font_style::{Slant, Weight, Width},
-    Canvas, Data, Font, FontMgr, FontStyle, Path, Point, RRect, Rect, Typeface, Paint, surfaces::raster_n32_premul, canvas::SrcRectConstraint,
+    surfaces::raster_n32_premul,
+    Canvas, Data, Font, FontMgr, FontStyle, Paint, Path, Point, RRect, Rect, Typeface,
 };
 
 use crate::{
@@ -255,7 +257,6 @@ impl Widget for WasmWidget {
     }
 
     fn draw(&mut self, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
-
         let font = Font::new(
             Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
             32.0,
@@ -267,7 +268,7 @@ impl Widget for WasmWidget {
             self.atlas = Some(image);
         }
         // TODO: Make not dumb
-        
+
         let bounds = self.size();
         canvas.save();
         // canvas.translate((self.position().x, self.position().y));
@@ -276,7 +277,6 @@ impl Widget for WasmWidget {
         let mut current_width = 0.0;
         let mut current_height = 0.0;
         let mut current_height_stack = vec![];
-
 
         let mut paint = skia_safe::Paint::default();
         for command in self.draw_commands.iter() {
@@ -363,7 +363,6 @@ impl Widget for WasmWidget {
         self.send_message(message)?;
         Ok(())
     }
-
 
     fn on_key(&mut self, input: KeyboardInput) -> Result<(), Box<dyn Error>> {
         let input = crate::keyboard::KeyboardInput::from_framework(input);
@@ -633,21 +632,29 @@ impl WasmWidget {
         );
     }
 
-
     pub fn move_right_one_char(&self, canvas: &Canvas) {
         canvas.translate((16.0, 0.0));
     }
-
 
     pub fn char_position_in_atlas(&self, c: char) -> Rect {
         let letter_width = 16.0;
         let letter_height = 30.0;
         // Rect::from_xywh((letter_width as i32 * (c as i32 - 33)) as f32, 0.0, letter_width as f32 + self.size_offset.width, letter_height as f32 + self.size_offset.height)
-        Rect::from_xywh((letter_width as i32 * (c as i32 - 33)) as f32, 0.0, letter_width, letter_height)
+        Rect::from_xywh(
+            (letter_width as i32 * (c as i32 - 33)) as f32,
+            0.0,
+            letter_width,
+            letter_height,
+        )
         // Rect::from_xywh(0.0, 0.0, 300.0, 300.0)
     }
 
-     pub fn draw_string(&self, text: &str, (x, y): (f32, f32), canvas: &Canvas) -> Result<(), String> {
+    pub fn draw_string(
+        &self,
+        text: &str,
+        (x, y): (f32, f32),
+        canvas: &Canvas,
+    ) -> Result<(), String> {
         canvas.save();
         for char in text.chars() {
             self.move_right_one_char(canvas);
@@ -656,7 +663,6 @@ impl WasmWidget {
         canvas.restore();
         Ok(())
     }
-
 
     pub fn send_message(&mut self, message: Message) -> Result<(), Box<dyn Error>> {
         self.dirty = true;
@@ -1414,9 +1420,7 @@ impl Widget for Deleted {
         None
     }
 
-    fn set_parent_id(&mut self, _id: Option<usize>) {
-        
-    }
+    fn set_parent_id(&mut self, _id: Option<usize>) {}
 
     fn set_scale(&mut self, _scale: f32) {}
 
@@ -1515,7 +1519,6 @@ impl Widget for Ephemeral {
         self.widget.on_click(x, y)
     }
 
-
     fn on_delete(&mut self) -> Result<(), Box<dyn Error>> {
         self.widget.on_delete()
     }
@@ -1593,7 +1596,6 @@ impl Widget for Ephemeral {
     fn reset_dirty(&mut self) {
         self.widget.reset_dirty()
     }
-
 }
 
 // These are things widgets can do.

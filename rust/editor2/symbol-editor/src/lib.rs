@@ -1,4 +1,4 @@
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 
 use code_editor::CodeEditor;
 use framework::{app, App, Canvas, Color, KeyboardInput, Position, Rect, Size, WidgetData};
@@ -52,22 +52,16 @@ impl App for SymbolEditor {
             canvas.set_color(&background);
 
             let size = self.data.size;
-            let bounding_rect = Rect::new(
-                0.0,
-                0.0,
-                size.width,
-                size.height,
-            );
+            let bounding_rect = Rect::new(0.0, 0.0, size.width, size.height);
             canvas.set_color(&background);
             canvas.clip_rect(bounding_rect);
             canvas.draw_rrect(bounding_rect, 20.0);
-    
+
             canvas.clip_rect(bounding_rect.with_inset((20.0, 20.0)));
 
             canvas.set_color(&foreground);
             canvas.save();
             canvas.translate(40.0, 60.0);
-
 
             if self.symbols.is_empty() {
                 canvas.draw_str("Loading...", 30.0, 30.0);
@@ -79,13 +73,13 @@ impl App for SymbolEditor {
             // TODO: I need to think about how I want the UI for code base exploration
             // to work. We need to be able to see the structure of the code base,
             // but also jump into bits we care about
-            
+
             // TODO: This is slow
             let projects = symbols
                 .iter()
                 .sorted_by(|x, y| Ord::cmp(&get_project(x), &get_project(y)))
                 .group_by(|x| get_project(x));
-            
+
             for (project, symbols) in projects.into_iter() {
                 if project.is_none() {
                     continue;
@@ -136,7 +130,7 @@ impl App for SymbolEditor {
                                 editor.alive = true;
                                 let location = match &symbol.location {
                                     lsp_types::OneOf::Left(l) => l.clone(),
-                                    lsp_types::OneOf::Right(_) => panic!("Not supported")
+                                    lsp_types::OneOf::Right(_) => panic!("Not supported"),
                                 };
                                 editor.file_path = location.uri.path().to_string();
                                 let start_line = location.range.start.line;
@@ -150,7 +144,7 @@ impl App for SymbolEditor {
                                 editor.widget_data = data.clone();
                                 let external_id = self.editors.len();
                                 self.create_widget_ref(external_id as u32, data);
-                                self.editors.insert(external_id,editor);
+                                self.editors.insert(external_id, editor);
                             }
                         }
                         canvas.translate(0.0, 30.0);
@@ -188,9 +182,8 @@ impl App for SymbolEditor {
         }
     }
 
-
     fn on_event(&mut self, kind: String, event: String) {
-        for (_ , editor) in self.editors.iter_mut() {
+        for (_, editor) in self.editors.iter_mut() {
             editor.on_event(kind.clone(), event.clone());
         }
 
@@ -199,7 +192,8 @@ impl App for SymbolEditor {
             // Probably need to send project root
             let symbols: Vec<WorkspaceSymbol> = serde_json::from_str(&event).unwrap();
             self.symbols = symbols;
-            self.symbols.sort_by_key(|x| (get_project(x), x.container_name.clone()));
+            self.symbols
+                .sort_by_key(|x| (get_project(x), x.container_name.clone()));
         }
     }
 
@@ -305,17 +299,16 @@ impl App for SymbolEditor {
         // TODO: Move to start when it happens after set_state;
         if self.get_external_ids().is_empty() {
             let mut to_add = Vec::with_capacity(self.editors.len());
-        for (external_id, editor) in self.editors.iter_mut() {
-            editor.open_file();
-            editor.start();
-            let data = editor.widget_data.clone();
-            to_add.push((*external_id as u32, data));
+            for (external_id, editor) in self.editors.iter_mut() {
+                editor.open_file();
+                editor.start();
+                let data = editor.widget_data.clone();
+                to_add.push((*external_id as u32, data));
+            }
+            for (external_id, data) in to_add.into_iter() {
+                self.create_widget_ref(external_id, data);
+            }
         }
-        for (external_id, data) in to_add.into_iter() {
-            self.create_widget_ref(external_id, data);
-        }
-        }
-       
     }
 }
 
@@ -335,7 +328,10 @@ impl SymbolEditor {
     fn mouse_in_bounds(&self, canvas: &Canvas, offset: f32, width: f32, height: f32) -> bool {
         if let Some((x, y)) = self.mouse_location {
             let canvas_position = canvas.get_current_position();
-            let canvas_position = Position{ x: canvas_position.0 , y: canvas_position.1 + offset };
+            let canvas_position = Position {
+                x: canvas_position.0,
+                y: canvas_position.1 + offset,
+            };
             if x > canvas_position.x
                 && x < canvas_position.x + width
                 && y > canvas_position.y
