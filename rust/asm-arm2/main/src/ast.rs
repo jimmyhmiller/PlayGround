@@ -1,7 +1,7 @@
 use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
-use crate::ir::{self, Condition};
+use crate::{ir::{self, Condition}, compiler::Compiler};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ast {
@@ -41,29 +41,29 @@ pub enum Ast {
 }
 
 impl Ast {
-    pub fn compile<F>(&self, init: F) -> Ir
-    where
-        F: Fn(&mut Ir) -> (),
+    pub fn compile(&self, compiler: &mut Compiler) -> Ir
     {
         let mut compiler = AstCompiler {
             ast: self.clone(),
             variables: HashMap::new(),
             ir: Ir::new(),
             name: "".to_string(),
+            compiler,
         };
-        init(&mut compiler.ir);
         compiler.compile()
     }
 }
 
-pub struct AstCompiler {
+pub struct AstCompiler<'a> {
     pub ast: Ast,
     pub variables: HashMap<String, VirtualRegister>,
     pub ir: Ir,
     pub name: String,
+    pub compiler: &'a mut Compiler,
+
 }
 
-impl AstCompiler {
+impl<'a> AstCompiler<'a> {
     pub fn compile(&mut self) -> Ir {
         self.compile_to_ir(&Box::new(self.ast.clone()));
         let mut ir = Ir::new();
@@ -150,11 +150,11 @@ impl AstCompiler {
                     .iter()
                     .map(|arg| self.compile_to_ir(&Box::new(arg.clone())))
                     .collect();
-                let function = self
-                    .ir
-                    .get_function_by_name(&name)
-                    .expect(format!("Function {} not found", name).as_str());
-                let function = self.ir.function(function);
+                let function = self.compiler.reserve_function(name.as_str()).unwrap();
+                // TODO: Do an indirect call via jump table
+                let function_pointer = self.compiler.get_function_pointer(function).unwrap();
+
+                let function = self.ir.function(function_pointer);
                 self.ir.call(function, args)
             }
             Ast::Constant(n) => Value::SignedConstant(n as isize),
@@ -317,5 +317,12 @@ pub fn hello_world() -> Ast {
     ast! {
         (fn hello []
             (print "Hello World!"))
+    }
+}
+
+pub fn hello_world2() -> Ast {
+    ast! {
+        (fn hello []
+            (print "Hello World!!!!"))
     }
 }

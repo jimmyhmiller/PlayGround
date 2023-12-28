@@ -20,11 +20,11 @@ use lsp_types::{
     MessageActionItemCapabilities, PartialResultParams, Position,
     PublishDiagnosticsClientCapabilities, Range, SemanticTokensParams,
     ShowDocumentClientCapabilities, ShowMessageRequestClientCapabilities, SymbolKind,
-    SymbolKindCapability, TagSupport, TextDocumentClientCapabilities,
+    SymbolKindCapability, SymbolTag, TagSupport, TextDocumentClientCapabilities,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem, Url,
     VersionedTextDocumentIdentifier, WindowClientCapabilities, WorkDoneProgressParams,
     WorkspaceClientCapabilities, WorkspaceFolder, WorkspaceSymbolClientCapabilities,
-    WorkspaceSymbolParams, WorkspaceSymbolResolveSupportCapability, SymbolTag,
+    WorkspaceSymbolParams, WorkspaceSymbolResolveSupportCapability,
 };
 use serde::{Deserialize, Serialize};
 
@@ -105,7 +105,6 @@ enum ParseError {
 // I need to actually update my tokens myself and then get the refresh.
 
 impl ProcessSpawner {
-
     fn next_request_id(&mut self) -> String {
         self.state.last_request_id += 1;
         format!("client/{}", self.state.last_request_id)
@@ -219,11 +218,11 @@ impl ProcessSpawner {
                     SymbolKind::TYPE_PARAMETER,
                 ]),
             }),
-            tag_support: Some(TagSupport { value_set: vec![
-                SymbolTag::DEPRECATED,
-            ] }),
-            resolve_support: Some(WorkspaceSymbolResolveSupportCapability{
-                properties: vec!["location.range".to_string()]
+            tag_support: Some(TagSupport {
+                value_set: vec![SymbolTag::DEPRECATED],
+            }),
+            resolve_support: Some(WorkspaceSymbolResolveSupportCapability {
+                properties: vec!["location.range".to_string()],
             }),
         });
 
@@ -327,7 +326,7 @@ impl ProcessSpawner {
                 SemanticTokensFullRequest::METHOD,
                 &serde_json::to_string(&params).unwrap(),
             );
-    
+
             self.state.token_request_metadata.insert(
                 token_request,
                 TokenRequestMeta {
@@ -336,8 +335,6 @@ impl ProcessSpawner {
                 },
             );
         }
-
-      
     }
 
     fn update_document(&mut self, edits: &MultiEditWithPath) {
@@ -534,7 +531,7 @@ impl App for ProcessSpawner {
                 }
             }
             "lith/token_request" => {
-                let meta : TokenRequestMeta = serde_json::from_str(&event).unwrap();
+                let meta: TokenRequestMeta = serde_json::from_str(&event).unwrap();
                 // TODO: Check version?
                 if let Some(tokens) = self.state.token_cache.get(&meta.path) {
                     self.send_event(
@@ -547,7 +544,6 @@ impl App for ProcessSpawner {
                         .unwrap(),
                     );
                 }
-               
             }
             _ => {
                 println!("Unknown event: {}", kind);
@@ -562,7 +558,6 @@ impl App for ProcessSpawner {
     fn on_process_message(&mut self, process_id: u32, message: String) {
         let mut message = format!("{}{}", self.remaining_message, message);
         loop {
-
             match properly_parse_json_rpc_message(&message) {
                 Ok((Some(value), rest)) => {
                     self.process_message(process_id, &value);
@@ -582,7 +577,6 @@ impl App for ProcessSpawner {
                     break;
                 }
             }
-           
         }
     }
 
@@ -674,8 +668,7 @@ impl ProcessSpawner {
                 if method == "initialize" {
                     let result = message.get("result").unwrap();
                     let parsed_message =
-                        serde_json::from_value::<InitializeResult>(result.clone())
-                            .unwrap();
+                        serde_json::from_value::<InitializeResult>(result.clone()).unwrap();
 
                     if let Some(token_provider) =
                         parsed_message.capabilities.semantic_tokens_provider
@@ -707,8 +700,7 @@ impl ProcessSpawner {
                         }
                     }
                     "textDocument/publishDiagnostics" => {
-                        let diagnostic =
-                            serde_json::to_string(&message.get("params")).unwrap();
+                        let diagnostic = serde_json::to_string(&message.get("params")).unwrap();
                         self.state
                             .messages_by_type
                             .entry("diagnostics".to_string())
@@ -733,7 +725,7 @@ impl ProcessSpawner {
             if let Some(index) = path.rfind('/') {
                 path = path[0..index].to_string();
             } else {
-                return None
+                return None;
             }
         }
     }
@@ -796,7 +788,8 @@ fn find_rust_analyzer() -> String {
     //     .unwrap();
 
     // format!("{}/server/rust-analyzer", folder.to_str().unwrap())
-    "/Users/jimmyhmiller/Documents/Code/open-source/rust-analyzer/target/release/rust-analyzer".to_string()
+    "/Users/jimmyhmiller/Documents/Code/open-source/rust-analyzer/target/release/rust-analyzer"
+        .to_string()
 }
 
 fn get_slice(s: &str, range: std::ops::Range<usize>) -> Option<&str> {
@@ -807,16 +800,28 @@ fn get_slice(s: &str, range: std::ops::Range<usize>) -> Option<&str> {
     }
 }
 
-fn properly_parse_json_rpc_message(message: &str) -> Result<(Option<serde_json::Value>, String), ParseError> {
+fn properly_parse_json_rpc_message(
+    message: &str,
+) -> Result<(Option<serde_json::Value>, String), ParseError> {
     // TODO: Still have a bug here
     let message = message.trim();
     if message.len() < 16 || !message.contains("\r\n\r\n") {
         return Ok((None, message.to_string()));
     }
-    let content_length_start = message.find("Content-Length").ok_or(ParseError::UseRemainingString(message.to_string()))?;
-    let content_length_end = message[content_length_start..].find("\r\n").ok_or(ParseError::UseRemainingString(message.to_string()))?;
-    let content_length: usize = message[content_length_start + 16..content_length_start + content_length_end].trim().parse().map_err(|_| ParseError::UseRemainingString(message.to_string()))?;
-    let end_header = message[content_length_start..].find("\r\n\r\n").ok_or(ParseError::UseRemainingString(message.to_string()))?;
+    let content_length_start = message
+        .find("Content-Length")
+        .ok_or(ParseError::UseRemainingString(message.to_string()))?;
+    let content_length_end = message[content_length_start..]
+        .find("\r\n")
+        .ok_or(ParseError::UseRemainingString(message.to_string()))?;
+    let content_length: usize = message
+        [content_length_start + 16..content_length_start + content_length_end]
+        .trim()
+        .parse()
+        .map_err(|_| ParseError::UseRemainingString(message.to_string()))?;
+    let end_header = message[content_length_start..]
+        .find("\r\n\r\n")
+        .ok_or(ParseError::UseRemainingString(message.to_string()))?;
     let content_start = end_header + 4;
     if let Some(content) = get_slice(message, content_start..content_start + content_length) {
         let rest = &message[content_start + content_length..];
@@ -826,13 +831,9 @@ fn properly_parse_json_rpc_message(message: &str) -> Result<(Option<serde_json::
         let rest = message;
         Ok((None, rest.to_string()))
     }
-   
 }
 
 app!(ProcessSpawner);
-
-
-
 
 #[test]
 fn parse_rpc() {
@@ -841,7 +842,9 @@ fn parse_rpc() {
     assert!(properly_parse_json_rpc_message("Content-Length: 3\r\n\r\n{a}").is_err());
     assert!(properly_parse_json_rpc_message("Content-Length: 8\r\n\r\n{\"a\": 1}").is_ok());
     assert!(properly_parse_json_rpc_message("Content-Length: 8\r\n\r\n{\"a\": 1}\r\n\r\n").is_ok());
-    if let Ok((first, rest)) = properly_parse_json_rpc_message("Content-Length: 8\r\n\r\n{\"a\": 1}\r\n\r\nContent-Length: 8\r\n\r\n{\"a\": 1}"){
+    if let Ok((first, rest)) = properly_parse_json_rpc_message(
+        "Content-Length: 8\r\n\r\n{\"a\": 1}\r\n\r\nContent-Length: 8\r\n\r\n{\"a\": 1}",
+    ) {
         assert!(first.is_some());
         assert!(properly_parse_json_rpc_message(&rest).is_ok());
     } else {

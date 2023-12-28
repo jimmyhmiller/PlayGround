@@ -1,4 +1,4 @@
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 
 use code_editor::CodeEditor;
 use framework::{app, App, Canvas, Color, KeyboardInput, Position, Rect, Size, WidgetData};
@@ -35,17 +35,12 @@ impl App for PaneEditor {
         if self.get_external_id().is_some() {
             return;
         }
-        
+
         let foreground = Color::parse_hex("#dc9941");
         let background = Color::parse_hex("#353f38");
 
         let size = self.data.size;
-        let bounding_rect = Rect::new(
-            0.0,
-            0.0,
-            size.width,
-            size.height,
-        );
+        let bounding_rect = Rect::new(0.0, 0.0, size.width, size.height);
         canvas.set_color(&background);
         canvas.clip_rect(bounding_rect);
         canvas.draw_rrect(bounding_rect, 20.0);
@@ -58,7 +53,7 @@ impl App for PaneEditor {
             canvas.set_color(&background);
             canvas.clip_rect(bounding_rect);
             canvas.draw_rrect(bounding_rect, 20.0);
-    
+
             canvas.clip_rect(bounding_rect.with_inset((20.0, 20.0)));
             canvas.set_color(&foreground);
             canvas.draw_str(&format!("Hello World! {}", widget), 100.0, 100.0);
@@ -78,34 +73,21 @@ impl App for PaneEditor {
         self.widget_ref += 1;
     }
 
-    fn on_delete(&mut self) {
+    fn on_delete(&mut self) {}
 
-    }
+    fn on_event(&mut self, kind: String, event: String) {}
 
+    fn on_key(&mut self, input: KeyboardInput) {}
 
-    fn on_event(&mut self, kind: String, event: String) {
-       
-    }
-
-    fn on_key(&mut self, input: KeyboardInput) {
-        
-    }
-
-    fn on_scroll(&mut self, x: f64, y: f64) {
-       
-    }
+    fn on_scroll(&mut self, x: f64, y: f64) {}
 
     fn on_size_change(&mut self, width: f32, height: f32) {
         self.data.size = Size { width, height };
     }
 
-    fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) {
-       
-    }
+    fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) {}
 
-    fn on_move(&mut self, x: f32, y: f32) {
-        
-    }
+    fn on_move(&mut self, x: f32, y: f32) {}
 
     fn get_position(&self) -> Position {
         self.data.position
@@ -152,7 +134,10 @@ impl PaneEditor {
     fn mouse_in_bounds(&self, canvas: &Canvas, offset: f32, width: f32, height: f32) -> bool {
         if let Some((x, y)) = self.mouse_location {
             let canvas_position = canvas.get_current_position();
-            let canvas_position = Position{ x: canvas_position.0 , y: canvas_position.1 + offset };
+            let canvas_position = Position {
+                x: canvas_position.0,
+                y: canvas_position.1 + offset,
+            };
             if x > canvas_position.x
                 && x < canvas_position.x + width
                 && y > canvas_position.y

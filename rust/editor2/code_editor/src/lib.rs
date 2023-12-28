@@ -18,7 +18,6 @@ use itertools::Itertools;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::json;
 
-
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 struct VisibleRange {
     start: usize,
@@ -36,9 +35,8 @@ impl VisibleRange {
 
     fn len(&self) -> usize {
         self.end - self.start
-    } 
+    }
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TextPane<Cursor: VirtualCursor> {
@@ -83,18 +81,9 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
             self.text_buffer.line_count()
         }
     }
-    pub fn on_scroll(
-        &mut self,
-        x: f64,
-        y: f64,
-        width: f32,
-        height: f32,
-        y_margin: i32,
-    ) {
-        
-
+    pub fn on_scroll(&mut self, x: f64, y: f64, width: f32, height: f32, y_margin: i32) {
         let character_width = 18;
-        let max_line =  self.max_line_length();
+        let max_line = self.max_line_length();
         let max_width = character_width * max_line;
         if self.offset.x + width > max_width as f32 {
             self.offset.x = max_width as f32 - width;
@@ -135,12 +124,15 @@ impl<Cursor: VirtualCursor> TextPane<Cursor> {
         }
     }
 
-    fn max_line_length(&mut self,) -> usize {
+    fn max_line_length(&mut self) -> usize {
         if self.max_line_length.is_none() {
             if self.visible_range.is_empty() {
                 self.max_line_length = Some(self.text_buffer.max_line_length());
             } else {
-                self.max_line_length = Some(self.text_buffer.max_line_length_range(self.visible_range.start, self.visible_range.end));
+                self.max_line_length = Some(
+                    self.text_buffer
+                        .max_line_length_range(self.visible_range.start, self.visible_range.end),
+                );
             }
         }
         self.max_line_length.unwrap()
@@ -277,7 +269,6 @@ fn get_last_three_segments(path: &str) -> Option<String> {
     ))
 }
 
-
 impl App for CodeEditor {
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -293,14 +284,19 @@ impl App for CodeEditor {
             self.subscribe("diagnostics");
         }
 
-        if let Some(color_mappings) = self.try_get_value::<HashMap<usize, String>>("color_mappings") {
+        if let Some(color_mappings) = self.try_get_value::<HashMap<usize, String>>("color_mappings")
+        {
             self.text_pane.color_mapping = color_mappings;
         }
 
-        self.send_event("lith/token_request", json!({
-            "path": self.file_path,
-            "document_version": 0,
-        }).to_string());
+        self.send_event(
+            "lith/token_request",
+            json!({
+                "path": self.file_path,
+                "document_version": 0,
+            })
+            .to_string(),
+        );
     }
 
     fn get_initial_state(&self) -> String {
@@ -386,9 +382,9 @@ impl App for CodeEditor {
             (current_line
                 + self
                     .text_pane
-                    .number_of_visible_lines(self.widget_data.size.height)).min(self.text_pane.number_of_lines())
+                    .number_of_visible_lines(self.widget_data.size.height))
+            .min(self.text_pane.number_of_lines())
         };
-
 
         let max_line = max_line;
         for line in current_line..max_line {
@@ -533,15 +529,16 @@ impl App for CodeEditor {
         let value: Self = serde_json::from_str(&state).unwrap();
         *self = value;
         if !self.file_path.is_empty() {
-           self.open_file();
+            self.open_file();
         }
     }
 
     fn on_event(&mut self, kind: String, event: String) {
-
         if kind == "tokens_with_version" {
             if self.text_pane.color_mapping.is_empty() {
-                if let Some(color_mappings) = self.try_get_value::<HashMap<usize, String>>("color_mappings") {
+                if let Some(color_mappings) =
+                    self.try_get_value::<HashMap<usize, String>>("color_mappings")
+                {
                     self.text_pane.color_mapping = color_mappings;
                 }
             }
@@ -565,7 +562,10 @@ impl App for CodeEditor {
             }
             if let Ok(tokens) = serde_json::from_str::<TokensWithVersion>(&event) {
                 if tokens.path != self.file_path {
-                    println!("path mismatch tokens: {}  pane: {}", tokens.path, self.file_path);
+                    println!(
+                        "path mismatch tokens: {}  pane: {}",
+                        tokens.path, self.file_path
+                    );
                     return;
                 }
                 if tokens.version != self.text_pane.text_buffer.document_version {
@@ -658,11 +658,14 @@ impl CodeEditor {
                 data.position.x += data.size.width + 50.0;
                 let mut new_excerpt = self.clone();
                 new_excerpt.alive = false;
-                new_excerpt.text_pane.visible_range = VisibleRange { start: line_start, end: line_end};
+                new_excerpt.text_pane.visible_range = VisibleRange {
+                    start: line_start,
+                    end: line_end,
+                };
                 new_excerpt.widget_data = data.clone();
                 new_excerpt.text_pane.offset = Position { x: 0.0, y: 0.0 };
                 new_excerpt.text_pane.cursor.set_selection(None);
-                let widget = self.create_widget(Box::new(new_excerpt),  data);
+                let widget = self.create_widget(Box::new(new_excerpt), data);
                 self.excerpt_panes.push(widget);
             }
 
@@ -742,45 +745,51 @@ impl CodeEditor {
                 if self.text_pane.visible_range.is_empty() {
                     self.text_pane.cursor.move_left(&self.text_pane.text_buffer)
                 } else if self.text_pane.cursor.line() != self.text_pane.visible_range.start
-                        || self.text_pane.cursor.column() != 0 {
-                    self.text_pane
-                        .cursor
-                        .move_left(&self.text_pane.text_buffer)
+                    || self.text_pane.cursor.column() != 0
+                {
+                    self.text_pane.cursor.move_left(&self.text_pane.text_buffer)
                 }
-            },
+            }
             KeyCode::RightArrow => {
                 if self.text_pane.visible_range.is_empty() {
-                    self.text_pane.cursor.move_right(&self.text_pane.text_buffer)
+                    self.text_pane
+                        .cursor
+                        .move_right(&self.text_pane.text_buffer)
                 } else if self.text_pane.cursor.line() != self.text_pane.visible_range.end - 1
-                        || self.text_pane.cursor.column() != self.text_pane.text_buffer.line_length(self.text_pane.cursor.line()) {
+                    || self.text_pane.cursor.column()
+                        != self
+                            .text_pane
+                            .text_buffer
+                            .line_length(self.text_pane.cursor.line())
+                {
                     self.text_pane
                         .cursor
                         .move_right(&self.text_pane.text_buffer)
                 }
-            
-            },
+            }
             KeyCode::UpArrow => {
                 if self.text_pane.visible_range.is_empty() {
                     self.text_pane.cursor.move_up(&self.text_pane.text_buffer)
                 } else if self.text_pane.cursor.line() > self.text_pane.visible_range.start {
                     self.text_pane.cursor.move_up(&self.text_pane.text_buffer)
                 }
-            },
+            }
             KeyCode::DownArrow => {
                 if self.text_pane.visible_range.is_empty() {
                     self.text_pane.cursor.move_down(&self.text_pane.text_buffer)
                 } else if self.text_pane.cursor.line() < self.text_pane.visible_range.end - 1 {
                     self.text_pane.cursor.move_down(&self.text_pane.text_buffer)
                 }
-
-            },
+            }
             KeyCode::BackSpace => {
                 let number_of_lines_before = self.text_pane.text_buffer.line_count();
                 self.text_pane
                     .cursor
                     .delete(&mut self.text_pane.text_buffer);
 
-                if number_of_lines_before != self.text_pane.text_buffer.line_count() && !self.text_pane.visible_range.is_empty() {
+                if number_of_lines_before != self.text_pane.text_buffer.line_count()
+                    && !self.text_pane.visible_range.is_empty()
+                {
                     self.text_pane.visible_range.end -= 1;
                 }
             }
@@ -1063,7 +1072,6 @@ impl CodeEditor {
             .iter()
             .enumerate()
             .group_by(|(_index, x)| x.transaction_number);
-        
 
         for (transaction_number, group) in &groups {
             let group = group.collect_vec();
@@ -1083,7 +1091,7 @@ impl CodeEditor {
         result
     }
 
-    pub fn open_file(&mut self)  {
+    pub fn open_file(&mut self) {
         let file = &self.file_path;
         let contents = std::fs::read(file);
         match contents {
@@ -1098,7 +1106,10 @@ impl CodeEditor {
     }
 
     pub fn set_visible_range(&mut self, usize: (usize, usize)) {
-        self.text_pane.visible_range = VisibleRange { start: usize.0, end: usize.1 };
+        self.text_pane.visible_range = VisibleRange {
+            start: usize.0,
+            end: usize.1,
+        };
         // Reset because the visible range has changed
         self.text_pane.max_line_length = None;
     }
@@ -1113,6 +1124,5 @@ impl CodeEditor {
         size
     }
 }
-
 
 app!(CodeEditor);

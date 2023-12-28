@@ -220,7 +220,7 @@ impl App for MultipleWidgets {
             let symbols: Vec<SymbolInformation> = serde_json::from_str(&event).unwrap();
             self.symbols = symbols;
         } else if kind == "widget/moved" {
-            let mut meta : WidgetMeta = serde_json::from_str(&event).unwrap();
+            let mut meta: WidgetMeta = serde_json::from_str(&event).unwrap();
             let x = meta.position.x - 50.0;
             let y = meta.position.y - 50.0;
             let mut changed = false;
@@ -236,7 +236,6 @@ impl App for MultipleWidgets {
                 self.provide_value::<Vec<WidgetMeta>>("widgets", vec![meta]);
             }
         }
-
     }
 
     fn draw(&mut self) {
@@ -251,9 +250,18 @@ impl App for MultipleWidgets {
         );
         let foreground = Color::parse_hex("#ffffff");
         canvas.set_color(&foreground);
-        canvas.draw_str(&format!("Rearrange windows {:?} {:?} {:?} {:?}", self.get_position2(), self.get_size2(), self.get_scale(), self.get_id()), 20.0, 40.0);
+        canvas.draw_str(
+            &format!(
+                "Rearrange windows {:?} {:?} {:?} {:?}",
+                self.get_position2(),
+                self.get_size2(),
+                self.get_scale(),
+                self.get_id()
+            ),
+            20.0,
+            40.0,
+        );
     }
-    
 
     fn on_click(&mut self, x: f32, y: f32) {
         let widget_positions: Option<Vec<WidgetMeta>> = self.get_value("widgets");
@@ -266,15 +274,12 @@ impl App for MultipleWidgets {
                 .widget_positions
                 .iter()
                 .filter(|x| x.scale == 1.0)
-                .filter (|x| x.position.x > 0.0)
+                .filter(|x| x.position.x > 0.0)
                 .filter(|x| x.position != self.widget_data.position)
                 .filter(|x| !x.kind.contains("Text"))
                 .collect()),
         );
-        self.provide_value(
-            "widgets",
-            new_layout.clone(),
-        );
+        self.provide_value("widgets", new_layout.clone());
     }
 
     fn on_key(&mut self, input: KeyboardInput) {
@@ -287,14 +292,14 @@ impl App for MultipleWidgets {
                 self.widget_positions = widget_positions;
             }
 
-            let positions : Vec<WidgetMeta> = self
+            let positions: Vec<WidgetMeta> = self
                 .widget_positions
                 .clone()
                 .iter_mut()
                 .filter(|x| x.position != self.widget_data.position)
-                .filter (|x| x.position.x > 0.0)
+                .filter(|x| x.position.x > 0.0)
                 .filter(|x| !x.kind.contains("Text"))
-                .map(|x| { 
+                .map(|x| {
                     if x.scale < 1.0 {
                         x.scale = 1.0;
                     } else {
@@ -303,11 +308,7 @@ impl App for MultipleWidgets {
                     x.clone()
                 })
                 .collect();
-            self.provide_value(
-                "widgets",
-                positions.clone(),
-            );
-            
+            self.provide_value("widgets", positions.clone());
         }
     }
 
@@ -319,7 +320,6 @@ impl App for MultipleWidgets {
 
     fn on_move(&mut self, x: f32, y: f32) {
         self.widget_data.position = Position { x, y };
-        
     }
 
     fn on_mouse_move(&mut self, x: f32, y: f32, x_diff: f32, y_diff: f32) {
@@ -362,7 +362,7 @@ impl App for MultipleWidgets {
         // Where it was lags a frame behind, so
         // we are trying to move it back to where it was.
 
-        // Instead of providing a value, I should be able 
+        // Instead of providing a value, I should be able
         // to just update an attribute on the widget
         // that way we aren't trying to move the whole thing.
         // Or we send a diff or something.
@@ -375,12 +375,8 @@ impl App for MultipleWidgets {
         //         "widgets",
         //         serde_json::to_string(&overlapping_panes).unwrap().as_bytes(),
         //     );
-    
+
         // }
-
-       
-
-
     }
 
     fn get_position(&self) -> Position {

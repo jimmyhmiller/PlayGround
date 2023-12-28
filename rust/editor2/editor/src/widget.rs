@@ -9,9 +9,10 @@ use serde::{Deserialize, Serialize};
 use skia_safe::{Canvas, Image};
 
 use crate::{
+    event::Event,
     keyboard::KeyboardInput,
     wasm_messenger::{self, SaveState, WasmMessenger},
-    widget2::{self, Widget as Widget2}, event::Event,
+    widget2::{self, Widget as Widget2},
 };
 
 pub type WidgetId = usize;
@@ -85,9 +86,20 @@ impl Widget {
         x >= x_min && x <= x_max && y >= y_min && y <= y_max
     }
 
-    pub fn init(&mut self, wasm_messenger: &mut WasmMessenger, values: HashMap<String, Value>, external_sender: std::sync::mpsc::Sender<Event>) {
+    pub fn init(
+        &mut self,
+        wasm_messenger: &mut WasmMessenger,
+        values: HashMap<String, Value>,
+        external_sender: std::sync::mpsc::Sender<Event>,
+    ) {
         if let Some(widget) = self.as_wasm_widget_mut() {
-            let (new_wasm_id, receiver) = wasm_messenger.new_instance(&widget.path, None, values, external_sender, widget.id());
+            let (new_wasm_id, receiver) = wasm_messenger.new_instance(
+                &widget.path,
+                None,
+                values,
+                external_sender,
+                widget.id(),
+            );
             widget.sender = Some(wasm_messenger.get_sender(new_wasm_id));
             widget.receiver = Some(receiver);
             match &widget.save_state {
@@ -226,7 +238,6 @@ impl WidgetStore {
         }
     }
 
-
     pub fn draw(&mut self, canvas: &Canvas, dirty_widgets: &HashSet<usize>) {
         // TODO: Created Widgets don't draw right away
 
@@ -251,7 +262,7 @@ impl WidgetStore {
                     canvas.restore();
                 }
             }
-            return
+            return;
         }
         for widget in self.widgets.iter_mut() {
             if !dirty_widgets.contains(&widget.id()) {
@@ -308,7 +319,6 @@ impl WidgetStore {
                 }
             }
         }
-
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Widget> {
@@ -321,7 +331,10 @@ impl WidgetStore {
 
     #[allow(unused)]
     pub fn iter_by_z_index(&self) -> impl Iterator<Item = &Widget> {
-        self.z_indexes.iter().rev().map(move |x| self.widgets.get(*x).unwrap())
+        self.z_indexes
+            .iter()
+            .rev()
+            .map(move |x| self.widgets.get(*x).unwrap())
     }
 
     pub fn iter_by_z_index_mut(&mut self) -> impl Iterator<Item = &mut Widget> {
@@ -330,7 +343,7 @@ impl WidgetStore {
             indexes: std::vec::IntoIter<usize>,
             _marker: std::marker::PhantomData<&'a mut [Widget]>,
         }
-        
+
         impl<'a> WidgetIterMut<'a> {
             fn new(widgets: &'a mut [Widget], indexes: Vec<usize>) -> Self {
                 Self {
@@ -340,15 +353,13 @@ impl WidgetStore {
                 }
             }
         }
-        
+
         impl<'a> Iterator for WidgetIterMut<'a> {
             type Item = &'a mut Widget;
-        
+
             fn next(&mut self) -> Option<Self::Item> {
                 let index = self.indexes.next()?;
-                unsafe {
-                    Some(&mut (*self.widgets)[index])
-                }
+                unsafe { Some(&mut (*self.widgets)[index]) }
             }
         }
         let mut reverse_indexes = self.z_indexes.clone();
@@ -374,8 +385,6 @@ impl WidgetStore {
             self.z_indexes.remove(position);
             self.z_indexes.push(widget_id);
         }
-
-
     }
 
     pub fn fix_zindexes(&mut self) {
@@ -384,7 +393,9 @@ impl WidgetStore {
         for widget in self.widgets.iter() {
             if let Some(parent_id) = widget.parent_id() {
                 if let Some(z_index_parent) = self.z_indexes.iter().position(|x| *x == parent_id) {
-                    if let Some(z_index_child) = self.z_indexes.iter().position(|x| *x == widget.id()) {
+                    if let Some(z_index_child) =
+                        self.z_indexes.iter().position(|x| *x == widget.id())
+                    {
                         if z_index_parent > z_index_child {
                             self.z_indexes.swap(z_index_parent, z_index_child);
                         }

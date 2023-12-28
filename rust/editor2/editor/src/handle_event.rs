@@ -1,7 +1,9 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     io::Write,
-    str::from_utf8, cell::RefCell, path::Path,
+    path::Path,
+    str::from_utf8,
 };
 
 use framework::{CursorIcon, Position, Size, WidgetMeta};
@@ -13,11 +15,11 @@ use serde_json::json;
 use crate::{
     editor::{self, Editor, PerFrame},
     event::Event,
-    keyboard::{KeyCode, KeyboardInput, KeyState},
-    native::{open_file_dialog, feedback},
+    keyboard::{KeyCode, KeyState, KeyboardInput},
+    native::{feedback, open_file_dialog},
     wasm_messenger::{OutMessage, SaveState},
     widget::Widget,
-    widget2::{Ephemeral, TextPane, WasmWidget, Widget as _, Image},
+    widget2::{Ephemeral, Image, TextPane, WasmWidget, Widget as _},
 };
 
 fn into_wini_cursor_icon(cursor_icon: CursorIcon) -> winit::window::CursorIcon {
@@ -70,7 +72,10 @@ impl Editor {
                                 value_senders: HashMap::new(),
                                 atlas: None,
                                 offset: Position { x: 0.0, y: 0.0 },
-                                size_offset: Size { width: 0.0, height: 0.0 },
+                                size_offset: Size {
+                                    width: 0.0,
+                                    height: 0.0,
+                                },
                             }),
                         });
                     } else if path.extension().unwrap() == "png" {
@@ -185,13 +190,20 @@ impl Editor {
                 Event::LeftMouseUp { .. } => {
                     self.context.left_mouse_down = false;
 
-                    if self.context.modifiers.ctrl || self.context.modifiers.option || self.context.modifiers.shift || self.context.modifiers.cmd {
+                    if self.context.modifiers.ctrl
+                        || self.context.modifiers.option
+                        || self.context.modifiers.shift
+                        || self.context.modifiers.cmd
+                    {
                         self.context.cancel_click = true;
                     }
 
                     for moved in self.context.moved.iter() {
                         let widget = self.widget_store.get_mut(*moved).unwrap();
-                        self.events.push(Event::Event("widget/moved".to_string(), serde_json::to_string(&widget.meta()).unwrap()));
+                        self.events.push(Event::Event(
+                            "widget/moved".to_string(),
+                            serde_json::to_string(&widget.meta()).unwrap(),
+                        ));
                     }
                     if !self.context.moved.is_empty() {
                         feedback();
@@ -244,7 +256,6 @@ impl Editor {
                                 widget.on_move(x, y);
                                 self.widget_store.on_move(*moved);
                             }
-
                         }
                     }
                     let mut was_over = false;
@@ -418,7 +429,11 @@ impl Editor {
                         continue;
                     }
 
-                    if state == KeyState::Pressed &&  modifiers.option && modifiers.ctrl && key_code == KeyCode::D {
+                    if state == KeyState::Pressed
+                        && modifiers.option
+                        && modifiers.ctrl
+                        && key_code == KeyCode::D
+                    {
                         self.show_debug = !self.show_debug;
                         continue;
                     }
@@ -474,7 +489,10 @@ impl Editor {
                                     value_senders: HashMap::new(),
                                     atlas: None,
                                     offset: Position { x: 0.0, y: 0.0 },
-                                    size_offset: Size { width: 0.0, height: 0.0 },
+                                    size_offset: Size {
+                                        width: 0.0,
+                                        height: 0.0,
+                                    },
                                 }),
                             });
                             self.mark_widget_dirty(widget_id, "open");
@@ -524,7 +542,10 @@ impl Editor {
                             value_senders: HashMap::new(),
                             atlas: None,
                             offset: Position { x: 0.0, y: 0.0 },
-                            size_offset: Size { width: 0.0, height: 0.0 },
+                            size_offset: Size {
+                                width: 0.0,
+                                height: 0.0,
+                            },
                         }))),
                     });
                     self.wasm_messenger.notify_external_sender(
@@ -596,7 +617,7 @@ impl Editor {
                                 println!("Failed to send {:?}", e);
                             }
                         }
-                        
+
                         // if let Some(widget) = self.widget_store.get_mut(widget_id) {
                         //     if let Some(widget) = widget.as_wasm_widget_mut() {
                         //         widget.send_value(name, widget_positions.as_bytes().to_vec());
@@ -630,22 +651,26 @@ impl Editor {
                             if let Some(widget) = self.widget_store.get_mut(meta.id) {
                                 if widget.position() != meta.position {
                                     widget.on_move(meta.position.x, meta.position.y);
-                                    dirty_widgets.insert((widget.id(), "provide value".to_string()));
+                                    dirty_widgets
+                                        .insert((widget.id(), "provide value".to_string()));
                                 }
-                                
+
                                 if widget.size() != meta.size {
                                     widget.on_size_change(meta.size.width, meta.size.height);
-                                    dirty_widgets.insert((widget.id(), "provide value".to_string()));
+                                    dirty_widgets
+                                        .insert((widget.id(), "provide value".to_string()));
                                 }
 
                                 if widget.scale() != meta.scale {
                                     widget.set_scale(meta.scale);
-                                    dirty_widgets.insert((widget.id(), "provide value".to_string()));
+                                    dirty_widgets
+                                        .insert((widget.id(), "provide value".to_string()));
                                 }
-                                
+
                                 if widget.parent_id() != meta.parent_id {
                                     widget.set_parent_id(meta.parent_id);
-                                    dirty_widgets.insert((widget.id(), "provide value".to_string()));
+                                    dirty_widgets
+                                        .insert((widget.id(), "provide value".to_string()));
                                 }
                             }
                         }
@@ -757,6 +782,5 @@ impl Editor {
         if self.context.cancel_click {
             self.context.cancel_click = false;
         }
-
     }
 }

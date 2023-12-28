@@ -1,4 +1,4 @@
-use std::{collections::HashMap, mem};
+use std::collections::HashMap;
 
 use asm::arm::Register;
 
@@ -209,10 +209,6 @@ pub struct Ir {
     label_names: Vec<String>,
     label_locations: HashMap<usize, usize>,
     string_constants: Vec<StringValue>,
-    // A bit of a weird way of representing this right?
-    function_names: Vec<String>,
-    // TODO: usize is defintely not the right type here
-    functions: HashMap<usize, usize>,
 }
 
 impl Ir {
@@ -224,14 +220,9 @@ impl Ir {
             label_names: vec![],
             label_locations: HashMap::new(),
             string_constants: vec![],
-            function_names: vec![],
-            functions: HashMap::new(),
         }
     }
 
-    pub fn get_function_by_name(&self, name: &str) -> Option<usize> {
-        self.function_names.iter().position(|n| n == name)
-    }
 
     fn next_register(&mut self, argument: Option<usize>, volatile: bool) -> VirtualRegister {
         let register = VirtualRegister {
@@ -482,7 +473,7 @@ impl Ir {
                     }
                     Value::Function(id) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
-                        let function = self.functions.get(id).unwrap();
+                        let function = id;
                         lang.mov_64(register, *function as isize);
                     }
                 },
@@ -631,7 +622,6 @@ impl Ir {
     }
 
     pub fn function(&mut self, function_index: usize) -> Value {
-        assert!(self.functions.contains_key(&function_index));
         let function = self.assign_new(Value::Function(function_index));
         function.into()
     }
@@ -643,12 +633,6 @@ impl Ir {
         dest
     }
 
-    pub fn add_function(&mut self, name: &str, function: *const u8) -> usize {
-        self.function_names.push(name.to_string());
-        let index = self.function_names.len() - 1;
-        self.functions.insert(index, function as usize);
-        index
-    }
 }
 
 #[allow(unused)]
@@ -682,15 +666,15 @@ pub fn fib() -> Ir {
     ir
 }
 
-pub fn hello_world() -> Ir {
-    let mut ir = Ir::new();
-    let print = ir.add_function("print", print_value as *const u8);
-    let string_constant = ir.string_constant("Hello World!".to_string());
-    let string_constant = ir.load_string_constant(string_constant);
-    let print = ir.function(print);
-    ir.call(print, vec![string_constant]);
-    ir
-}
+// pub fn hello_world() -> Ir {
+//     let mut ir = Ir::new();
+//     let print = ir.add_function("print", print_value as *const u8);
+//     let string_constant = ir.string_constant("Hello World!".to_string());
+//     let string_constant = ir.load_string_constant(string_constant);
+//     let print = ir.function(print);
+//     ir.call(print, vec![string_constant]);
+//     ir
+// }
 
 pub fn print_value(value: usize) {
     assert!(value & 0b111 == 0b010);
