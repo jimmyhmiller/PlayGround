@@ -33,6 +33,7 @@ fn fib_rust(n: usize) -> usize {
     fib_rust(n - 1) + fib_rust(n - 2)
 }
 
+// Do these need to be extern "C"?
 fn test_builtin(compiler: *const Compiler) -> usize {
     let compiler = unsafe { &*compiler };
     println!("{:?}", compiler);
