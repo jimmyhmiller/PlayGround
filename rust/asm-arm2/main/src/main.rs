@@ -5,8 +5,9 @@ pub mod ast;
 pub mod common;
 pub mod compiler;
 pub mod ir;
+pub mod parser;
 
-use crate::compiler::Compiler;
+use crate::{compiler::Compiler, parser::Parser};
 
 fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
     let fib: ast::Ast = ast::fib();
@@ -46,7 +47,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_foreign_function("print", ir::print_value as *const u8)?;
     compiler.add_builtin_function("test", test_builtin as *const u8)?;
 
-    let hello_ast = ast::hello_world();
+    let mut parser = Parser::new(String::from("
+    fn hello() {
+        print(\"Hello World!\")
+    }"));
+
+    let hello_ast = parser.parse();
+
+    // let hello_ast = ast::hello_world();
     let mut hello_ir = hello_ast.compile(&mut compiler);
     let mut hello = hello_ir.compile();
 

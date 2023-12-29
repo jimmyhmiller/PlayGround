@@ -8,8 +8,12 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ast {
+    Program {
+        elements: Vec<Ast>,
+    },
     Function {
         name: String,
+        // TODO: Change this to a Vec<Ast>
         args: Vec<String>,
         body: Vec<Ast>,
     },
@@ -74,9 +78,15 @@ impl<'a> AstCompiler<'a> {
 
     pub fn compile_to_ir(&mut self, ast: &Ast) -> Value {
         match ast.clone() {
+            Ast::Program { elements } => {
+                let mut last = Value::SignedConstant(0);
+                for ast in elements.iter() {
+                    last = self.compile_to_ir(&ast);
+                }
+                last
+            }
             Ast::Function { name, args, body } => {
                 assert!(self.name.is_empty());
-                // self.ir.breakpoint();
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);
@@ -158,8 +168,8 @@ impl<'a> AstCompiler<'a> {
                     .collect();
                 let function = self.compiler.reserve_function(name.as_str()).unwrap();
                 
-                let pointer_reg = self.ir.volatile_register();
                 if function.is_builtin {
+                    let pointer_reg = self.ir.volatile_register();
                     let pointer: Value = self.compiler.get_compiler_ptr().into();
                     self.ir.assign(pointer_reg, pointer);
                     args.insert(0, pointer_reg.into());
