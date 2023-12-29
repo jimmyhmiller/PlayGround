@@ -38,7 +38,7 @@ pub enum Ast {
         name: String,
         args: Vec<Ast>,
     },
-    Constant(i64),
+    NumberLiteral(i64),
     Variable(String),
     String(String),
 }
@@ -76,6 +76,7 @@ impl<'a> AstCompiler<'a> {
         match ast.clone() {
             Ast::Function { name, args, body } => {
                 assert!(self.name.is_empty());
+                // self.ir.breakpoint();
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);
@@ -143,22 +144,33 @@ impl<'a> AstCompiler<'a> {
                     .collect();
                 self.ir.recurse(args)
             }
+            // TODO: Have an idea of built in functions to call
+            // These functions should be passed as the first argument context
+            // (maybe the compiler struct), so they can do things with the system
+            // like heap allocate and such
             Ast::Call { name, args } => {
                 if name == self.name {
                     return self.compile_to_ir(&Ast::Recurse { args });
                 }
-                let args = args
+                let mut args: Vec<Value> = args 
                     .iter()
                     .map(|arg| self.compile_to_ir(&Box::new(arg.clone())))
                     .collect();
                 let function = self.compiler.reserve_function(name.as_str()).unwrap();
+                
+                let pointer_reg = self.ir.volatile_register();
+                if function.is_builtin {
+                    let pointer: Value = self.compiler.get_compiler_ptr().into();
+                    self.ir.assign(pointer_reg, pointer);
+                    args.insert(0, pointer_reg.into());
+                }
                 // TODO: Do an indirect call via jump table
                 let function_pointer = self.compiler.get_function_pointer(function).unwrap();
 
                 let function = self.ir.function(function_pointer);
                 self.ir.call(function, args)
             }
-            Ast::Constant(n) => Value::SignedConstant(n as isize),
+            Ast::NumberLiteral(n) => Value::SignedConstant(n as isize),
             Ast::Variable(name) => {
                 let reg = self.variables.get(&name).unwrap();
                 Value::Register(*reg)
@@ -176,7 +188,7 @@ impl<'a> AstCompiler<'a> {
 
 impl Into<Ast> for i64 {
     fn into(self) -> Ast {
-        Ast::Constant(self)
+        Ast::NumberLiteral(self)
     }
 }
 
@@ -268,6 +280,12 @@ macro_rules! ast {
     ((return $arg:tt)) => {
         Ast::Return(Box::new(ast!($arg)))
     };
+    (($f:ident)) => {
+        Ast::Call {
+            name: stringify!($f).to_string(),
+            args: vec![]
+        }
+    };
     (($f:ident $arg:tt)) => {
         Ast::Call {
             name: stringify!($f).to_string(),
@@ -324,6 +342,6 @@ pub fn hello_world() -> Ast {
 pub fn hello_world2() -> Ast {
     ast! {
         (fn hello []
-            (print "Hello World!!!!"))
+            (test))
     }
 }

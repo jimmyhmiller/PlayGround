@@ -201,6 +201,7 @@ pub fn breakpoint() -> ArmAsm {
     ArmAsm::Brk { imm16: 30 }
 }
 
+#[derive(Debug)]
 pub struct LowLevelArm {
     pub instructions: Vec<ArmAsm>,
     pub label_index: usize,
@@ -360,6 +361,28 @@ impl LowLevelArm {
             rt: destination,
             imm12: offset,
             class_selector: LdrImmGenSelector::UnsignedOffset,
+        });
+    }
+
+    pub fn load_from_heap(&mut self, source: Register, destination: Register, offset: i32) {
+        self.instructions.push(ArmAsm::LdrImmGen {
+            size: 0b11,
+            imm9: 0, // not used
+            rn: source,
+            rt: destination,
+            imm12: offset,
+            class_selector: LdrImmGenSelector::UnsignedOffset,
+        });
+    }
+
+    pub fn store_on_heap(&mut self, source: Register, destination: Register, offset: i32) {
+        self.instructions.push(ArmAsm::StrImmGen {
+            size: 0b11,
+            imm9: 0, // not used
+            rn: destination,
+            rt: source,
+            imm12: offset,
+            class_selector: StrImmGenSelector::UnsignedOffset,
         });
     }
 

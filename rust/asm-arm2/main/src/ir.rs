@@ -26,7 +26,81 @@ pub enum Value {
     // TODO: Think of a better representation
     StringConstantId(usize),
     Function(usize),
+    Pointer(usize),
 }
+
+// I don't know if this is actually the setup I want
+// But I want get some stuff down there
+pub enum BuiltInTypes {
+    Int,
+    Float,
+    String,
+    Bool,
+    Function,
+    Struct,
+    Array,
+}
+
+impl BuiltInTypes {
+    pub fn tag(&self, pointer: isize) -> isize {
+        let pointer = pointer >> 3;
+        match self {
+            BuiltInTypes::Int => pointer | 0b000,
+            BuiltInTypes::Float => pointer | 0b001,
+            BuiltInTypes::String => pointer | 0b010,
+            BuiltInTypes::Bool => pointer | 0b011,
+            BuiltInTypes::Function => pointer | 0b100,
+            BuiltInTypes::Struct => pointer | 0b101,
+            BuiltInTypes::Array => pointer | 0b110,
+        }
+    }
+
+    pub fn untag(&self, pointer: usize) -> usize {
+        pointer & !0b111
+    }
+
+    pub fn get_tag(pointer: usize) -> Self {
+        match pointer & 0b111 {
+            0b000 => BuiltInTypes::Int,
+            0b001 => BuiltInTypes::Float,
+            0b010 => BuiltInTypes::String,
+            0b011 => BuiltInTypes::Bool,
+            0b100 => BuiltInTypes::Function,
+            0b101 => BuiltInTypes::Struct,
+            0b110 => BuiltInTypes::Array,
+            _ => panic!("Invalid tag"),
+        }
+    }
+
+    pub fn is_embedded(&self) -> bool {
+        match self {
+            BuiltInTypes::Int => true,
+            BuiltInTypes::Float => true,
+            BuiltInTypes::String => false,
+            BuiltInTypes::Bool => true,
+            BuiltInTypes::Function => false,
+            BuiltInTypes::Struct => false,
+            BuiltInTypes::Array => false,
+        }
+    }
+
+    pub fn construct_int(value: isize) -> isize {
+        if value > 0b1111111 {
+            panic!("Integer overflow")
+        }
+        BuiltInTypes::Int.tag(value)
+    }
+
+    pub fn construct_boolean(value: bool) -> isize {
+        let bool = BuiltInTypes::Bool;
+        if value {
+            bool.tag(1)
+        } else {
+            bool.tag(0)
+        }
+    }
+}
+
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct VirtualRegister {
@@ -70,6 +144,8 @@ enum Instruction {
     Breakpoint,
     LoadConstant(Value, Value),
     Call(Value, Value, Vec<Value>),
+    HeapLoad(Value, Value),
+    HeapStore(Value, Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -87,6 +163,12 @@ impl TryInto<VirtualRegister> for &VirtualRegister {
 
     fn try_into(self) -> Result<VirtualRegister, Self::Error> {
         Ok(*self)
+    }
+}
+
+impl<T> Into<Value> for *const T {
+    fn into(self) -> Value {
+        Value::Pointer(self as usize)
     }
 }
 
@@ -159,6 +241,12 @@ impl Instruction {
             Instruction::Jump(_) => {
                 vec![]
             }
+            Instruction::HeapLoad(a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::HeapStore(a, b) => {
+                get_registers!(a, b)
+            }
         }
     }
 }
@@ -184,6 +272,7 @@ impl RegisterAllocator {
     ) -> Register {
         let (start, _end) = self.lifetimes.get(&register).unwrap();
         if index == *start {
+            assert!(!self.allocated_registers.contains_key(&register));
             if let Some(arg) = register.argument {
                 let reg = lang.arg(arg as u8);
                 self.allocated_registers.insert(register, reg);
@@ -475,6 +564,10 @@ impl Ir {
                         let function = id;
                         lang.mov_64(register, *function as isize);
                     }
+                    Value::Pointer(ptr) => {
+                        let register = alloc.allocate_register(index, *dest, &mut lang);
+                        lang.mov_64(register, *ptr as isize);
+                    }
                 },
                 Instruction::LoadConstant(dest, val) => {
                     let val = val.try_into().unwrap();
@@ -514,10 +607,10 @@ impl Ir {
                         // we will need to fix that.
                         lang.store_on_stack(*register, index as i32 + 2)
                     }
-                    for (index, arg) in args.iter().enumerate() {
+                    for (arg_index, arg) in args.iter().enumerate() {
                         let arg = arg.try_into().unwrap();
                         let arg = alloc.allocate_register(index, arg, &mut lang);
-                        lang.mov_reg(lang.arg(index as u8), arg);
+                        lang.mov_reg(lang.arg(arg_index as u8), arg);
                     }
                     // TODO:
                     // I am not actually checking any tags here
@@ -580,7 +673,25 @@ impl Ir {
                         lang.mov_64(lang.ret_reg(), *id as isize);
                         lang.jump(exit);
                     }
+                    Value::Pointer(ptr) => {
+                        lang.mov_64(lang.ret_reg(), *ptr as isize);
+                        lang.jump(exit);
+                    }
                 },
+                Instruction::HeapLoad(dest, ptr) => {
+                    let ptr = ptr.try_into().unwrap();
+                    let ptr = alloc.allocate_register(index, ptr, &mut lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.load_from_heap( ptr, dest, 0);
+                }
+                Instruction::HeapStore(ptr, val) => {
+                    let ptr = ptr.try_into().unwrap();
+                    let ptr = alloc.allocate_register(index, ptr, &mut lang);
+                    let val = val.try_into().unwrap();
+                    let val = alloc.allocate_register(index, val, &mut lang);
+                    lang.store_on_heap(ptr, val, 0);
+                }
             }
         }
 
@@ -593,7 +704,7 @@ impl Ir {
     }
 
     #[allow(dead_code)]
-    fn breakpoint(&mut self) {
+    pub fn breakpoint(&mut self) {
         self.instructions.push(Instruction::Breakpoint);
     }
 
@@ -618,6 +729,21 @@ impl Ir {
             string_constant.into(),
         ));
         register.into()
+    }
+
+    pub fn heap_store(&mut self, source: Value, dest: Value) {
+        let source = self.assign_new(source);
+        let dest = self.assign_new(dest);
+        self.instructions
+            .push(Instruction::HeapStore(source.into(), dest.into()));
+    }
+
+    pub fn heap_load(&mut self, dest: Value, source: Value) -> Value {
+        let source = self.assign_new(source);
+        let dest = self.assign_new(dest);
+        self.instructions
+            .push(Instruction::HeapLoad(dest.into(), source.into()));
+        dest.into()
     }
 
     pub fn function(&mut self, function_index: usize) -> Value {
@@ -661,6 +787,22 @@ pub fn fib() -> Ir {
 
     ir.ret(result_reg);
 
+    ir
+}
+
+
+#[allow(unused)]
+pub fn heap_test() -> Ir {
+    let mut ir = Ir::new();
+    ir.breakpoint();
+    let n = ir.arg(0);
+    let location = ir.arg(1);
+    ir.heap_store(n.into(), location.into());
+    let temp_reg = ir.volatile_register();
+    let result = ir.heap_load(temp_reg.into(), location.into());
+    let result_reg = ir.volatile_register();
+    ir.assign(result_reg, result);
+    ir.ret(result_reg);
     ir
 }
 
