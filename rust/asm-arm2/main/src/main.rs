@@ -1,4 +1,4 @@
-use std::{error::Error, mem, time::Instant};
+use std::{error::Error, time::Instant};
 
 mod arm;
 pub mod ast;
@@ -33,9 +33,17 @@ fn fib_rust(n: usize) -> usize {
     fib_rust(n - 1) + fib_rust(n - 2)
 }
 
+fn test_builtin(compiler: *const Compiler) -> usize {
+    let compiler = unsafe { &*compiler };
+    println!("{:?}", compiler);
+    42
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+
     let mut compiler = Compiler::new();
     compiler.add_foreign_function("print", ir::print_value as *const u8)?;
+    compiler.add_builtin_function("test", test_builtin as *const u8)?;
 
     let hello_ast = ast::hello_world();
     let mut hello_ir = hello_ast.compile(&mut compiler);
