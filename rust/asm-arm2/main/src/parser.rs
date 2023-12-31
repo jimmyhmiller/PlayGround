@@ -16,6 +16,15 @@ pub enum Token {
     Colon,
     Comma,
     NewLine,
+    If,
+    Fn,
+    Else,
+    LessThanOrEqual,
+    LessThan,
+    Equal,
+    NotEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
     Comment((usize, usize)),
     Spaces((usize, usize)),
     String((usize, usize)),
@@ -171,7 +180,18 @@ impl<'a> Tokenizer {
                 && !self.is_quote(input_bytes) {
             self.consume();
         }
-        Token::Atom((start, self.position))
+        match &input_bytes[start..self.position] {
+            b"fn" => Token::Fn,
+            b"if" => Token::If,
+            b"else" => Token::Else,
+            b"<=" => Token::LessThanOrEqual,
+            b"<" => Token::LessThan,
+            b"==" => Token::Equal,
+            b"!=" => Token::NotEqual,
+            b">" => Token::GreaterThan,
+            b">=" => Token::GreaterThanOrEqual,
+            _ => Token::Atom((start, self.position)),
+        }
     }
 
     pub fn parse_single(&mut self, input_bytes: &[u8]) -> Option<Token> {
@@ -319,7 +339,7 @@ impl Parser {
     fn parse_elements(&mut self) -> Vec<Ast> {
         let mut result = Vec::new();
         while !self.at_end() {
-            if let Some(elem) = self.parse_element() {
+            if let Some(elem) = self.parse_expression() {
                 result.push(elem);
             } else {
                 break;
@@ -333,31 +353,35 @@ impl Parser {
         self.position >= self.tokens.len()
     }
 
-    fn parse_element(&mut self) -> Option<Ast> {
+    // TODO: I need to deal with precedence and parsing
+    // binary operators
+    // Probably use this:
+    // https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing
+    fn parse_expression(&mut self) -> Option<Ast> {
         match self.tokens[self.position] {
+            Token::Fn => {
+                self.to_next_atom();
+                Some(self.parse_function())
+            }
+            Token::If => {
+                self.to_next_non_whitespace();
+                Some(self.parse_if())
+            }
             Token::Atom((start, end)) => {
                 // Gross
                 let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
-                if name == "fn" {
-                    self.to_next_atom();
-                    Some(self.parse_function())
-                } else {
-                    if self.peek() == Token::OpenParen {
-                        Some(self.parse_call(name))
-                    } else {
-                        panic!("Unknown element {:?}", self.tokens[self.position])
-                    }
-                }
+                self.consume();
+                Some(self.parse_call(name))
             }
             Token::String((start, end)) => {
                 // Gross
-                let name = String::from_utf8(self.source[start+1..end-1].as_bytes().to_vec()).unwrap();
+                let value = String::from_utf8(self.source[start+1..end-1].as_bytes().to_vec()).unwrap();
                 self.consume();
-                Some(Ast::String(name))
+                Some(Ast::String(value))
             }
             Token::NewLine | Token::Spaces(_) | Token::Comment(_) => {
                 self.consume();
-                self.parse_element()
+                self.parse_expression()
             }
             _ => None
         }
@@ -450,7 +474,7 @@ impl Parser {
         self.expect_open_curly();
         let mut result = Vec::new();
         while !self.at_end() && !self.is_close_curly() {
-            if let Some(elem) = self.parse_element() {
+            if let Some(elem) = self.parse_expression() {
                 result.push(elem);
             } else {
                 break;
@@ -501,7 +525,7 @@ impl Parser {
         self.expect_open_paren();
         let mut args = Vec::new();
         while !self.at_end() && !self.is_close_paren() {
-            if let Some(arg) = self.parse_element() {
+            if let Some(arg) = self.parse_expression() {
                 args.push(arg);
             } else {
                 break;
@@ -526,6 +550,48 @@ impl Parser {
     fn is_whitespace(&self) -> bool {
         match self.tokens[self.position] {
             Token::Spaces(_) | Token::NewLine | Token::Comment(_) => true,
+            _ => false,
+        }
+    }
+
+    // TODO: If I'm not going to have null
+    // how do I have an empty else?
+    // or do I require an else block?
+    // If the if were a statement, then it would be fine
+    // but it's an expression
+
+    fn parse_if(&mut self) -> Ast {
+        let condition = Box::new(self.parse_expression().unwrap());
+        self.to_next_non_whitespace();
+        self.expect_open_curly();
+        let then = self.parse_block();
+        self.to_next_non_whitespace();
+        self.expect_close_curly();
+        self.to_next_non_whitespace();
+        if self.is_else() {
+            self.consume();
+            self.expect_open_curly();
+            let else_ = self.parse_block();
+            self.expect_close_curly();
+            Ast::If {
+                condition,
+                then,
+                else_,
+            }
+        } else {
+            Ast::If {
+                condition,
+                then,
+                else_: Vec::new(),
+            }
+        }
+
+    }
+
+
+    fn is_else(&self) -> bool {
+        match self.tokens[self.position] {
+            Token::Else => true,
             _ => false,
         }
     }

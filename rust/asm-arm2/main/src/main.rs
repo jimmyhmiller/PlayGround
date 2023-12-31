@@ -82,3 +82,5 @@ fn main() -> Result<(), Box<dyn Error>> {
 //     Heap
 // Parser
 // Debugging
+// Think about variables
+// Should we allow reassignment?

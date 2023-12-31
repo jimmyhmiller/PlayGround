@@ -19,8 +19,8 @@ pub enum Ast {
     },
     If {
         condition: Box<Ast>,
-        then: Box<Ast>,
-        else_: Box<Ast>,
+        then: Vec<Ast>,
+        else_: Vec<Ast>,
     },
     Condition {
         operator: Condition,
@@ -122,12 +122,19 @@ impl<'a> AstCompiler<'a> {
                     let then_label = self.ir.label("then");
                     self.ir.jump_if(then_label, *operator, a, b);
 
-                    let else_result = self.compile_to_ir(&else_);
+                    let mut else_result = Value::SignedConstant(0);
+                    for ast in else_.iter() {
+                        else_result = self.compile_to_ir(&Box::new(ast));
+                    }
                     self.ir.assign(result_reg, else_result);
                     self.ir.jump(end_if_label);
 
                     self.ir.write_label(then_label);
-                    let then_result = self.compile_to_ir(&then);
+
+                    let mut then_result = Value::SignedConstant(0);
+                    for ast in then.iter() {
+                        then_result = self.compile_to_ir(&Box::new(ast));
+                    }
                     self.ir.assign(result_reg, then_result);
 
                     self.ir.write_label(end_if_label);
@@ -263,8 +270,8 @@ macro_rules! ast {
                 left: Box::new(ast!($arg)),
                 right: Box::new(ast!($val))
             }),
-            then: Box::new(ast!($result1)),
-            else_: Box::new(ast!($result2))
+            then: vec![ast!($result1)],
+            else_: vec![ast!($result2)]
         }
     };
     ((+ $arg1:tt $arg2:tt)) => {
