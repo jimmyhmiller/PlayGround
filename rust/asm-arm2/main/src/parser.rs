@@ -746,7 +746,7 @@ fn test_parse() {
 fn test_parse2() {
     let mut parser = Parser::new(String::from("
     fn hello(x) {
-        if x < 2 {
+        if x > 2 {
             print(\"Hello World!\")
         } else {
             print(\"Hello World!!!!\")
