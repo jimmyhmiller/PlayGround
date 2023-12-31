@@ -34,6 +34,24 @@ pub enum Token {
     // like fn and stuff
     Atom((usize, usize)),
 }
+impl Token {
+    fn is_binary_operator(&self) -> bool {
+        match self {
+            Token::LessThanOrEqual
+            | Token::LessThan
+            | Token::Equal
+            | Token::NotEqual
+            | Token::GreaterThan
+            | Token::GreaterThanOrEqual => true,
+            _ => false,
+        }
+    }
+}
+
+enum Associativity {
+    Left,
+    Right,
+}
 
 static ZERO: u8 = b'0';
 static NINE: u8 = b'9';
@@ -339,7 +357,7 @@ impl Parser {
     fn parse_elements(&mut self) -> Vec<Ast> {
         let mut result = Vec::new();
         while !self.at_end() {
-            if let Some(elem) = self.parse_expression() {
+            if let Some(elem) = self.parse_expression(0) {
                 result.push(elem);
             } else {
                 break;
@@ -353,11 +371,52 @@ impl Parser {
         self.position >= self.tokens.len()
     }
 
+    fn get_precedence(&self) -> (usize, Associativity) {
+        match self.current_token() {
+              Token::LessThanOrEqual 
+            | Token::LessThan
+            | Token::Equal
+            | Token::NotEqual
+            | Token::GreaterThan
+            | Token::GreaterThanOrEqual
+            => (10, Associativity::Left),
+            _ => (0, Associativity::Left),
+        }
+    }
+
+
+    fn parse_expression(&mut self, mut next_min_precedence: usize) -> Option<Ast> {
+        let mut lhs = self.parse_atom()?;
+        loop {
+            if self.at_end() || !self.current_token().is_binary_operator() || self.get_precedence().0 < next_min_precedence {
+                break;
+            }
+
+            let current_token = self.current_token();
+
+            let (precedence, associativity) = self.get_precedence();
+            next_min_precedence = if matches!(associativity, Associativity::Left) {
+                precedence + 1
+            } else {
+                precedence
+            };
+
+            self.to_next_non_whitespace();
+            println!("parsing rhs");
+            let rhs = self.parse_expression(next_min_precedence)?;
+
+            lhs = self.compose_binary_op(lhs.clone(), current_token, rhs);
+        }
+
+        Some(lhs)
+
+    }
+
     // TODO: I need to deal with precedence and parsing
     // binary operators
     // Probably use this:
     // https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing
-    fn parse_expression(&mut self) -> Option<Ast> {
+    fn parse_atom(&mut self) -> Option<Ast> {
         match self.tokens[self.position] {
             Token::Fn => {
                 self.to_next_atom();
@@ -370,8 +429,13 @@ impl Parser {
             Token::Atom((start, end)) => {
                 // Gross
                 let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
-                self.consume();
-                Some(self.parse_call(name))
+                // TODO: Make better
+                self.to_next_non_whitespace();
+                if self.is_open_paren() {
+                    Some(self.parse_call(name))
+                } else {
+                    Some(Ast::Variable(name))
+                }
             }
             Token::String((start, end)) => {
                 // Gross
@@ -379,11 +443,17 @@ impl Parser {
                 self.consume();
                 Some(Ast::String(value))
             }
+            Token::Integer((start, end)) => {
+                // Gross
+                let value = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
+                self.consume();
+                Some(Ast::NumberLiteral(value.parse::<i64>().unwrap()))
+            }
             Token::NewLine | Token::Spaces(_) | Token::Comment(_) => {
                 self.consume();
-                self.parse_expression()
+                self.parse_atom()
             }
-            _ => None
+            _ => panic!("Expected atom {}", self.get_token_repr()),
         }
     }
 
@@ -425,7 +495,14 @@ impl Parser {
         }
     }
 
+    fn skip_whitespace(&mut self) {
+        while !self.at_end() && self.is_whitespace() {
+            self.consume();
+        }
+    }
+
     fn expect_open_paren(&mut self) {
+        self.skip_whitespace();
         if self.is_open_paren() {
             self.consume();
         } else {
@@ -458,6 +535,7 @@ impl Parser {
     }
 
     fn expect_close_paren(&mut self) {
+        self.skip_whitespace();
         if self.is_close_paren() {
             self.consume();
         } else {
@@ -470,25 +548,26 @@ impl Parser {
     }
 
     fn parse_block(&mut self) -> Vec<Ast> {
-        self.to_next_non_whitespace();
         self.expect_open_curly();
         let mut result = Vec::new();
         while !self.at_end() && !self.is_close_curly() {
-            if let Some(elem) = self.parse_expression() {
+            if let Some(elem) = self.parse_atom() {
                 result.push(elem);
             } else {
                 break;
             }
+            self.skip_whitespace();
         }
         self.expect_close_curly();
         result
     }
 
     fn expect_open_curly(&mut self) {
+        self.skip_whitespace();
         if self.is_open_curly() {
             self.consume();
         } else {
-            panic!("Expected open curly");
+            panic!("Expected open curly {}", self.get_token_repr());
         }
     }
 
@@ -501,6 +580,7 @@ impl Parser {
     }
 
     fn expect_close_curly(&mut self) {
+        self.skip_whitespace();
         if self.is_close_curly() {
             self.consume();
         } else {
@@ -515,17 +595,20 @@ impl Parser {
         }
     }
 
+    fn current_token(&self) -> Token {
+        self.tokens[self.position]
+    }
+
     fn peek(&self) -> Token {
         // TODO: Handle end
         self.tokens[self.position + 1]
     }
 
     fn parse_call(&mut self, name: String) -> Ast {
-        self.to_next_non_whitespace();
         self.expect_open_paren();
         let mut args = Vec::new();
         while !self.at_end() && !self.is_close_paren() {
-            if let Some(arg) = self.parse_expression() {
+            if let Some(arg) = self.parse_atom() {
                 args.push(arg);
             } else {
                 break;
@@ -561,18 +644,13 @@ impl Parser {
     // but it's an expression
 
     fn parse_if(&mut self) -> Ast {
-        let condition = Box::new(self.parse_expression().unwrap());
-        self.to_next_non_whitespace();
-        self.expect_open_curly();
+        let condition = Box::new(self.parse_expression(0).unwrap());
         let then = self.parse_block();
-        self.to_next_non_whitespace();
-        self.expect_close_curly();
         self.to_next_non_whitespace();
         if self.is_else() {
             self.consume();
-            self.expect_open_curly();
+            self.skip_whitespace();
             let else_ = self.parse_block();
-            self.expect_close_curly();
             Ast::If {
                 condition,
                 then,
@@ -593,6 +671,48 @@ impl Parser {
         match self.tokens[self.position] {
             Token::Else => true,
             _ => false,
+        }
+    }
+
+    fn compose_binary_op(&self, lhs: Ast, current_token: Token, rhs: Ast) -> Ast {
+        match current_token {
+            Token::LessThanOrEqual => {
+                Ast::Condition { operator: crate::ir::Condition::LessThanOrEqual,
+                    left: Box::new(lhs),
+                    right: Box::new(rhs),
+                }
+            },
+            Token::LessThan => {
+                Ast::Condition { operator: crate::ir::Condition::LessThan,
+                    left: Box::new(lhs),
+                    right: Box::new(rhs),
+                }
+            },
+            Token::Equal => {
+                Ast::Condition { operator: crate::ir::Condition::Equal,
+                    left: Box::new(lhs),
+                    right: Box::new(rhs),
+                }
+            },
+            Token::NotEqual => {
+                Ast::Condition { operator: crate::ir::Condition::NotEqual,
+                    left: Box::new(lhs),
+                    right: Box::new(rhs),
+                }
+            },
+            Token::GreaterThan => {
+                Ast::Condition { operator: crate::ir::Condition::GreaterThan,
+                    left: Box::new(lhs),
+                    right: Box::new(rhs),
+                }
+            },
+            Token::GreaterThanOrEqual => {
+                Ast::Condition { operator: crate::ir::Condition::GreaterThanOrEqual,
+                    left: Box::new(lhs),
+                    right: Box::new(rhs),
+                }
+            },
+            _ => panic!("Not a binary operator"),
         }
     }
 }
@@ -621,4 +741,18 @@ fn test_parse() {
     let ast = parser.parse();
     println!("{:#?}", ast);
 }
-   
+
+#[test]
+fn test_parse2() {
+    let mut parser = Parser::new(String::from("
+    fn hello(x) {
+        if x < 2 {
+            print(\"Hello World!\")
+        } else {
+            print(\"Hello World!!!!\")
+        }
+    }"));
+
+    let ast = parser.parse();
+    println!("{:#?}", ast);
+}
