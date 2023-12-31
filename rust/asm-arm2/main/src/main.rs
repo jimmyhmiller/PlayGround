@@ -48,8 +48,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("test", test_builtin as *const u8)?;
 
     let mut parser = Parser::new(String::from("
-    fn hello() {
-        print(\"Hello World!\")
+    fn hello(x) {
+        if x > 2 {
+            print(\"Hello World!\")
+        } else {
+            print(\"Hello World!!!!\")
+        }
     }"));
 
     let hello_ast = parser.parse();
@@ -58,19 +62,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut hello_ir = hello_ast.compile(&mut compiler);
     let mut hello = hello_ir.compile();
 
-    let hello2_ast = ast::hello_world2();
-    let mut hello2_ir = hello2_ast.compile(&mut compiler);
-    let mut hello2 = hello2_ir.compile();
+    // let hello2_ast = ast::hello_world2();
+    // let mut hello2_ir = hello2_ast.compile(&mut compiler);
+    // let mut hello2 = hello2_ir.compile();
 
     let hello = compiler.add_function("hello", &hello.compile_to_bytes())?;
 
-    println!("{}", compiler.run(hello)?);
+    println!("{}", compiler.run1(hello, 3).unwrap());
 
-    compiler.overwrite_function(hello, &hello2.compile_to_bytes())?;
+    // compiler.overwrite_function(hello, &hello2.compile_to_bytes())?;
 
-    println!("{}", compiler.run(hello)?);
+    // println!("{}", compiler.run(hello)?);
 
-    test_fib(&mut compiler, 32)?;
+    // test_fib(&mut compiler, 32)?;
     Ok(())
 }
 

@@ -402,7 +402,6 @@ impl Parser {
             };
 
             self.to_next_non_whitespace();
-            println!("parsing rhs");
             let rhs = self.parse_expression(next_min_precedence)?;
 
             lhs = self.compose_binary_op(lhs.clone(), current_token, rhs);
