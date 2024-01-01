@@ -211,6 +211,7 @@ pub struct LowLevelArm {
     pub allocated_volatile_registers: Vec<Register>,
     pub stack_size: i32,
     pub max_stack_size: i32,
+    pub canonical_volatile_registers: Vec<Register>,
 }
 
 // We don't know the address of the recursive call
@@ -227,12 +228,14 @@ pub const RECURSE_PLACEHOLDER_REGISTER: Register = Register {
 #[allow(unused)]
 impl LowLevelArm {
     pub fn new() -> Self {
+        let canonical_volatile_registers = vec![X22, X21, X20, X19];
         LowLevelArm {
             instructions: vec![],
             label_locations: HashMap::new(),
             label_index: 0,
             labels: vec![],
-            free_volatile_registers: vec![X22, X21, X20, X19],
+            canonical_volatile_registers: canonical_volatile_registers.clone(),
+            free_volatile_registers: canonical_volatile_registers,
             allocated_volatile_registers: vec![],
             stack_size: 0,
             max_stack_size: 0,
@@ -455,6 +458,11 @@ impl LowLevelArm {
         next_register
     }
     pub fn free_register(&mut self, reg: Register) {
+        // TODO: Properly fix the fact that the zero
+        // register is being put in the volatile list
+        if !self.canonical_volatile_registers.contains(&reg) {
+            return;
+        }
         self.free_volatile_registers.push(reg);
         self.allocated_volatile_registers
             .retain(|&allocated| allocated != reg);

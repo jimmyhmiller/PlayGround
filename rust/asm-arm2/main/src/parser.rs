@@ -25,6 +25,8 @@ pub enum Token {
     NotEqual,
     GreaterThan,
     GreaterThanOrEqual,
+    Plus,
+    Minus,
     Comment((usize, usize)),
     Spaces((usize, usize)),
     String((usize, usize)),
@@ -33,6 +35,7 @@ pub enum Token {
     // I should replace this with builtins
     // like fn and stuff
     Atom((usize, usize)),
+    Never,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -42,7 +45,9 @@ impl Token {
             | Token::Equal
             | Token::NotEqual
             | Token::GreaterThan
-            | Token::GreaterThanOrEqual => true,
+            | Token::GreaterThanOrEqual
+            | Token::Plus
+            | Token::Minus => true,
             _ => false,
         }
     }
@@ -69,9 +74,7 @@ pub struct Tokenizer {
 
 impl<'a> Tokenizer {
     pub fn new() -> Tokenizer {
-        Tokenizer {
-            position: 0,
-        }
+        Tokenizer { position: 0 }
     }
 
     fn peek(&self, input_bytes: &[u8]) -> Option<u8> {
@@ -167,7 +170,9 @@ impl<'a> Tokenizer {
     pub fn parse_number(&mut self, input_bytes: &[u8]) -> Token {
         let mut is_float = false;
         let start = self.position;
-        while !self.at_end(input_bytes) && (self.is_valid_number_char(input_bytes) || self.current_byte(input_bytes) == PERIOD) {
+        while !self.at_end(input_bytes)
+            && (self.is_valid_number_char(input_bytes) || self.current_byte(input_bytes) == PERIOD)
+        {
             // Need to handle making sure there is only one "."
             if self.current_byte(input_bytes) == PERIOD {
                 is_float = true;
@@ -175,7 +180,7 @@ impl<'a> Tokenizer {
             self.consume();
         }
         if is_float {
-            Token::Float((start,self.position))
+            Token::Float((start, self.position))
         } else {
             Token::Integer((start, self.position))
         }
@@ -184,18 +189,19 @@ impl<'a> Tokenizer {
     pub fn parse_identifier(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
         while !self.at_end(input_bytes)
-                && !self.is_space(input_bytes)
-                && !self.is_open_paren(input_bytes)
-                && !self.is_close_paren(input_bytes)
-                && !self.is_open_curly(input_bytes)
-                && !self.is_close_curly(input_bytes)
-                && !self.is_open_bracket(input_bytes)
-                && !self.is_close_bracket(input_bytes)
-                && !self.is_semi_colon(input_bytes)
-                && !self.is_colon(input_bytes)
-                && !self.is_comma(input_bytes)
-                && !self.is_newline(input_bytes)
-                && !self.is_quote(input_bytes) {
+            && !self.is_space(input_bytes)
+            && !self.is_open_paren(input_bytes)
+            && !self.is_close_paren(input_bytes)
+            && !self.is_open_curly(input_bytes)
+            && !self.is_close_curly(input_bytes)
+            && !self.is_open_bracket(input_bytes)
+            && !self.is_close_bracket(input_bytes)
+            && !self.is_semi_colon(input_bytes)
+            && !self.is_colon(input_bytes)
+            && !self.is_comma(input_bytes)
+            && !self.is_newline(input_bytes)
+            && !self.is_quote(input_bytes)
+        {
             self.consume();
         }
         match &input_bytes[start..self.position] {
@@ -208,14 +214,15 @@ impl<'a> Tokenizer {
             b"!=" => Token::NotEqual,
             b">" => Token::GreaterThan,
             b">=" => Token::GreaterThanOrEqual,
+            b"+" => Token::Plus,
+            b"-" => Token::Minus,
             _ => Token::Atom((start, self.position)),
         }
     }
 
     pub fn parse_single(&mut self, input_bytes: &[u8]) -> Option<Token> {
-
         if self.at_end(input_bytes) {
-            return None
+            return None;
         }
         let result = if self.is_space(input_bytes) {
             self.parse_spaces(input_bytes)
@@ -326,7 +333,6 @@ fn test_tokenizer1() {
     assert_eq!(result[2], Token::Atom((6, 11)));
 }
 
-
 pub struct Parser {
     source: String,
     tokenizer: Tokenizer,
@@ -362,7 +368,6 @@ impl Parser {
             } else {
                 break;
             }
-            
         }
         result
     }
@@ -373,29 +378,32 @@ impl Parser {
 
     fn get_precedence(&self) -> (usize, Associativity) {
         match self.current_token() {
-              Token::LessThanOrEqual 
+            Token::LessThanOrEqual
             | Token::LessThan
             | Token::Equal
             | Token::NotEqual
             | Token::GreaterThan
-            | Token::GreaterThanOrEqual
-            => (10, Associativity::Left),
+            | Token::GreaterThanOrEqual => (10, Associativity::Left),
+            | Token::Plus | Token::Minus => (20, Associativity::Left),
             _ => (0, Associativity::Left),
         }
     }
 
-
-    fn parse_expression(&mut self, mut next_min_precedence: usize) -> Option<Ast> {
+    fn parse_expression(&mut self, min_precedence: usize) -> Option<Ast> {
+        self.skip_whitespace();
         let mut lhs = self.parse_atom()?;
         loop {
-            if self.at_end() || !self.current_token().is_binary_operator() || self.get_precedence().0 < next_min_precedence {
+            if self.at_end()
+                || !self.current_token().is_binary_operator()
+                || self.get_precedence().0 < min_precedence
+            {
                 break;
             }
 
             let current_token = self.current_token();
 
             let (precedence, associativity) = self.get_precedence();
-            next_min_precedence = if matches!(associativity, Associativity::Left) {
+            let next_min_precedence = if matches!(associativity, Associativity::Left) {
                 precedence + 1
             } else {
                 precedence
@@ -403,12 +411,13 @@ impl Parser {
 
             self.to_next_non_whitespace();
             let rhs = self.parse_expression(next_min_precedence)?;
+            // println!("rhs {:?}", rhs);
 
             lhs = self.compose_binary_op(lhs.clone(), current_token, rhs);
+            self.skip_whitespace();
         }
 
         Some(lhs)
-
     }
 
     // TODO: I need to deal with precedence and parsing
@@ -438,7 +447,8 @@ impl Parser {
             }
             Token::String((start, end)) => {
                 // Gross
-                let value = String::from_utf8(self.source[start+1..end-1].as_bytes().to_vec()).unwrap();
+                let value =
+                    String::from_utf8(self.source[start + 1..end - 1].as_bytes().to_vec()).unwrap();
                 self.consume();
                 Some(Ast::String(value))
             }
@@ -469,11 +479,7 @@ impl Parser {
         let args = self.parse_args();
         self.expect_close_paren();
         let body = self.parse_block();
-        Ast::Function {
-            name,
-            args,
-            body,
-        }
+        Ast::Function { name, args, body }
     }
 
     fn consume(&mut self) {
@@ -595,7 +601,12 @@ impl Parser {
     }
 
     fn current_token(&self) -> Token {
-        self.tokens[self.position]
+        if self.position >= self.tokens.len() {
+            // TODO: Maybe bad idea
+            Token::Never
+        } else {
+            self.tokens[self.position]
+        }
     }
 
     fn peek(&self) -> Token {
@@ -614,15 +625,15 @@ impl Parser {
             }
         }
         self.expect_close_paren();
-        Ast::Call {
-            name,
-            args,
-        }
+        Ast::Call { name, args }
     }
 
     fn get_token_repr(&self) -> String {
         match self.tokens[self.position] {
             Token::Atom((start, end)) => {
+                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+            }
+            Token::Integer((start, end)) => {
                 String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
             }
             _ => format!("{:?}", self.tokens[self.position]),
@@ -662,9 +673,7 @@ impl Parser {
                 else_: Vec::new(),
             }
         }
-
     }
-
 
     fn is_else(&self) -> bool {
         match self.tokens[self.position] {
@@ -675,41 +684,43 @@ impl Parser {
 
     fn compose_binary_op(&self, lhs: Ast, current_token: Token, rhs: Ast) -> Ast {
         match current_token {
-            Token::LessThanOrEqual => {
-                Ast::Condition { operator: crate::ir::Condition::LessThanOrEqual,
-                    left: Box::new(lhs),
-                    right: Box::new(rhs),
-                }
+            Token::LessThanOrEqual => Ast::Condition {
+                operator: crate::ir::Condition::LessThanOrEqual,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
             },
-            Token::LessThan => {
-                Ast::Condition { operator: crate::ir::Condition::LessThan,
-                    left: Box::new(lhs),
-                    right: Box::new(rhs),
-                }
+            Token::LessThan => Ast::Condition {
+                operator: crate::ir::Condition::LessThan,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
             },
-            Token::Equal => {
-                Ast::Condition { operator: crate::ir::Condition::Equal,
-                    left: Box::new(lhs),
-                    right: Box::new(rhs),
-                }
+            Token::Equal => Ast::Condition {
+                operator: crate::ir::Condition::Equal,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
             },
-            Token::NotEqual => {
-                Ast::Condition { operator: crate::ir::Condition::NotEqual,
-                    left: Box::new(lhs),
-                    right: Box::new(rhs),
-                }
+            Token::NotEqual => Ast::Condition {
+                operator: crate::ir::Condition::NotEqual,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
             },
-            Token::GreaterThan => {
-                Ast::Condition { operator: crate::ir::Condition::GreaterThan,
-                    left: Box::new(lhs),
-                    right: Box::new(rhs),
-                }
+            Token::GreaterThan => Ast::Condition {
+                operator: crate::ir::Condition::GreaterThan,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
             },
-            Token::GreaterThanOrEqual => {
-                Ast::Condition { operator: crate::ir::Condition::GreaterThanOrEqual,
-                    left: Box::new(lhs),
-                    right: Box::new(rhs),
-                }
+            Token::GreaterThanOrEqual => Ast::Condition {
+                operator: crate::ir::Condition::GreaterThanOrEqual,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            },
+            Token::Plus => Ast::Add {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            },
+            Token::Minus => Ast::Sub {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
             },
             _ => panic!("Not a binary operator"),
         }
@@ -729,13 +740,14 @@ fn test_tokenizer2() {
     println!("{:#?}", result);
 }
 
-
 #[test]
 fn test_parse() {
-    let mut parser = Parser::new(String::from("
+    let mut parser = Parser::new(String::from(
+        "
     fn hello() {
         print(\"Hello World!\")
-    }"));
+    }",
+    ));
 
     let ast = parser.parse();
     println!("{:#?}", ast);
@@ -743,14 +755,16 @@ fn test_parse() {
 
 #[test]
 fn test_parse2() {
-    let mut parser = Parser::new(String::from("
+    let mut parser = Parser::new(String::from(
+        "
     fn hello(x) {
-        if x > 2 {
+        if x + 1 > 2 {
             print(\"Hello World!\")
         } else {
             print(\"Hello World!!!!\")
         }
-    }"));
+    }",
+    ));
 
     let ast = parser.parse();
     println!("{:#?}", ast);

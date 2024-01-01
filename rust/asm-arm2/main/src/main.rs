@@ -7,7 +7,7 @@ pub mod compiler;
 pub mod ir;
 pub mod parser;
 
-use crate::{compiler::Compiler, parser::Parser};
+use crate::{compiler::Compiler, parser::Parser, ir::{print_value, Value}};
 
 fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
     let fib: ast::Ast = ast::fib();
@@ -47,14 +47,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_foreign_function("print", ir::print_value as *const u8)?;
     compiler.add_builtin_function("test", test_builtin as *const u8)?;
 
-    let mut parser = Parser::new(String::from("
+
+    let mut parser = Parser::new(String::from(
+        "
     fn hello(x) {
-        if x > 2 {
+        if x + 1 > 2 {
             print(\"Hello World!\")
         } else {
             print(\"Hello World!!!!\")
         }
-    }"));
+        42
+    }",
+    ));
 
     let hello_ast = parser.parse();
 
@@ -68,13 +72,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let hello = compiler.add_function("hello", &hello.compile_to_bytes())?;
 
-    println!("{}", compiler.run1(hello, 3).unwrap());
+    compiler.run1(hello, 1).unwrap();
+    println!("Got here");
+
 
     // compiler.overwrite_function(hello, &hello2.compile_to_bytes())?;
 
     // println!("{}", compiler.run(hello)?);
 
-    // test_fib(&mut compiler, 32)?;
+    test_fib(&mut compiler, 32)?;
     Ok(())
 }
 

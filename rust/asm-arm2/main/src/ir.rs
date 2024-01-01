@@ -484,6 +484,7 @@ impl Ir {
             ir_label_to_lang_label.insert(*label, new_label);
         }
         let lifetimes = self.get_register_lifetime();
+        // Self::draw_lifetimes(&lifetimes);
         let mut alloc = RegisterAllocator::new(lifetimes);
         for (index, instruction) in self.instructions.iter().enumerate() {
             for (register, (_start, end)) in alloc.lifetimes.iter() {
@@ -816,7 +817,7 @@ pub fn heap_test() -> Ir {
 //     ir
 // }
 
-pub fn print_value(value: usize) {
+pub extern "C" fn print_value(value: usize) {
     assert!(value & 0b111 == 0b010);
     let value = value & !0b111;
     let string_value: &StringValue = unsafe { std::mem::transmute(value) };
