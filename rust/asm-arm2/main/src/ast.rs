@@ -35,6 +35,14 @@ pub enum Ast {
         left: Box<Ast>,
         right: Box<Ast>,
     },
+    Mul {
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
+    Div {
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
     Recurse {
         args: Vec<Ast>,
     },
@@ -153,6 +161,16 @@ impl<'a> AstCompiler<'a> {
                 let left = self.compile_to_ir(&left);
                 let right = self.compile_to_ir(&right);
                 self.ir.sub(left, right)
+            }
+            Ast::Mul { left, right } => {
+                let left = self.compile_to_ir(&left);
+                let right = self.compile_to_ir(&right);
+                self.ir.mul(left, right)
+            }
+            Ast::Div { left, right } => {
+                let left = self.compile_to_ir(&left);
+                let right = self.compile_to_ir(&right);
+                self.ir.div(left, right)
             }
             Ast::Recurse { args } => {
                 let args = args

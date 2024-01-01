@@ -224,7 +224,8 @@ impl Compiler {
         let memory = &self.code_memory.as_ref().unwrap()[start..];
         let f: fn(u64) -> u64 = unsafe { std::mem::transmute(memory.as_ref().as_ptr()) };
         let result = f(arg);
-        println!("Result: {}", result);
+        // TODO: When running in release mode, this fails here.
+        // I'm guessing I'm not setting up the stack correctly
         Ok(result)
     }
 

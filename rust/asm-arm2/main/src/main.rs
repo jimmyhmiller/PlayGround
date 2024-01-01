@@ -51,12 +51,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut parser = Parser::new(String::from(
         "
     fn hello(x) {
-        if x + 1 > 2 {
+        if x * 2 + 1 > 5 {
             print(\"Hello World!\")
         } else {
             print(\"Hello World!!!!\")
         }
-        42
+        2 * 2 + 1
     }",
     ));
 
@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let hello = compiler.add_function("hello", &hello.compile_to_bytes())?;
 
-    compiler.run1(hello, 1).unwrap();
+    println!("{}", compiler.run1(hello, 2).unwrap());
     println!("Got here");
 
 
