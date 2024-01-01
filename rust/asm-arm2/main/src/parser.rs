@@ -27,6 +27,8 @@ pub enum Token {
     GreaterThanOrEqual,
     Plus,
     Minus,
+    Mul,
+    Div,
     Comment((usize, usize)),
     Spaces((usize, usize)),
     String((usize, usize)),
@@ -47,7 +49,9 @@ impl Token {
             | Token::GreaterThan
             | Token::GreaterThanOrEqual
             | Token::Plus
-            | Token::Minus => true,
+            | Token::Minus
+            | Token::Mul
+            | Token::Div => true,
             _ => false,
         }
     }
@@ -216,6 +220,8 @@ impl<'a> Tokenizer {
             b">=" => Token::GreaterThanOrEqual,
             b"+" => Token::Plus,
             b"-" => Token::Minus,
+            b"*" => Token::Mul,
+            b"/" => Token::Div,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -385,6 +391,7 @@ impl Parser {
             | Token::GreaterThan
             | Token::GreaterThanOrEqual => (10, Associativity::Left),
             | Token::Plus | Token::Minus => (20, Associativity::Left),
+            | Token::Mul | Token::Div => (30, Associativity::Left),
             _ => (0, Associativity::Left),
         }
     }
@@ -392,6 +399,9 @@ impl Parser {
     fn parse_expression(&mut self, min_precedence: usize) -> Option<Ast> {
         self.skip_whitespace();
         let mut lhs = self.parse_atom()?;
+        self.skip_whitespace();
+        // println!("lhs {:?}", lhs);
+        // println!("current_token {:?}", self.get_token_repr());
         loop {
             if self.at_end()
                 || !self.current_token().is_binary_operator()
@@ -425,7 +435,7 @@ impl Parser {
     // Probably use this:
     // https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing
     fn parse_atom(&mut self) -> Option<Ast> {
-        match self.tokens[self.position] {
+        match self.current_token() {
             Token::Fn => {
                 self.to_next_atom();
                 Some(self.parse_function())
@@ -467,7 +477,7 @@ impl Parser {
     }
 
     fn parse_function(&mut self) -> Ast {
-        let name = match self.tokens[self.position] {
+        let name = match self.current_token() {
             Token::Atom((start, end)) => {
                 // Gross
                 String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
@@ -516,7 +526,7 @@ impl Parser {
     }
 
     fn is_open_paren(&self) -> bool {
-        self.tokens[self.position] == Token::OpenParen
+        self.current_token() == Token::OpenParen
     }
 
     fn parse_args(&mut self) -> Vec<String> {
@@ -528,7 +538,7 @@ impl Parser {
     }
 
     fn parse_arg(&mut self) -> String {
-        match self.tokens[self.position] {
+        match self.current_token() {
             Token::Atom((start, end)) => {
                 // Gross
                 let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
@@ -549,14 +559,14 @@ impl Parser {
     }
 
     fn is_close_paren(&self) -> bool {
-        self.tokens[self.position] == Token::CloseParen
+        self.current_token() == Token::CloseParen
     }
 
     fn parse_block(&mut self) -> Vec<Ast> {
         self.expect_open_curly();
         let mut result = Vec::new();
         while !self.at_end() && !self.is_close_curly() {
-            if let Some(elem) = self.parse_atom() {
+            if let Some(elem) = self.parse_expression(0) {
                 result.push(elem);
             } else {
                 break;
@@ -577,11 +587,11 @@ impl Parser {
     }
 
     fn is_open_curly(&self) -> bool {
-        self.tokens[self.position] == Token::OpenCurly
+        self.current_token() == Token::OpenCurly
     }
 
     fn is_close_curly(&self) -> bool {
-        self.tokens[self.position] == Token::CloseCurly
+        self.current_token() == Token::CloseCurly
     }
 
     fn expect_close_curly(&mut self) {
@@ -594,7 +604,7 @@ impl Parser {
     }
 
     fn is_atom(&self) -> bool {
-        match self.tokens[self.position] {
+        match self.current_token() {
             Token::Atom(_) => true,
             _ => false,
         }
@@ -629,19 +639,19 @@ impl Parser {
     }
 
     fn get_token_repr(&self) -> String {
-        match self.tokens[self.position] {
+        match self.current_token() {
             Token::Atom((start, end)) => {
                 String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
             }
             Token::Integer((start, end)) => {
                 String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
             }
-            _ => format!("{:?}", self.tokens[self.position]),
+            _ => format!("{:?}", self.current_token()),
         }
     }
 
     fn is_whitespace(&self) -> bool {
-        match self.tokens[self.position] {
+        match self.current_token() {
             Token::Spaces(_) | Token::NewLine | Token::Comment(_) => true,
             _ => false,
         }
@@ -676,7 +686,7 @@ impl Parser {
     }
 
     fn is_else(&self) -> bool {
-        match self.tokens[self.position] {
+        match self.current_token() {
             Token::Else => true,
             _ => false,
         }
@@ -719,6 +729,14 @@ impl Parser {
                 right: Box::new(rhs),
             },
             Token::Minus => Ast::Sub {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            },
+            Token::Mul => Ast::Mul {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            },
+            Token::Div => Ast::Div {
                 left: Box::new(lhs),
                 right: Box::new(rhs),
             },

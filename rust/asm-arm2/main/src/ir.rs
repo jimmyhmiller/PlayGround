@@ -372,6 +372,32 @@ impl Ir {
         Value::Register(register)
     }
 
+    pub fn mul<A, B>(&mut self, a: A, b: B) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        let register = self.volatile_register();
+        let a = self.assign_new(a.into());
+        let b = self.assign_new(b.into());
+        self.instructions
+            .push(Instruction::Mul(register.into(), a.into(), b.into()));
+        Value::Register(register)
+    }
+
+    pub fn div<A, B>(&mut self, a: A, b: B) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        let register = self.volatile_register();
+        let a = self.assign_new(a.into());
+        let b = self.assign_new(b.into());
+        self.instructions
+            .push(Instruction::Div(register.into(), a.into(), b.into()));
+        Value::Register(register)
+    }
+
     pub fn jump_if<A, B>(&mut self, label: Label, condition: Condition, a: A, b: B)
     where
         A: Into<Value>,
@@ -382,6 +408,7 @@ impl Ir {
         self.instructions
             .push(Instruction::JumpIf(label, condition, a.into(), b.into()));
     }
+    
 
     pub fn assign<A>(&mut self, dest: VirtualRegister, val: A)
     where
