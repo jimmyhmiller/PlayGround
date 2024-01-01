@@ -223,7 +223,9 @@ impl Compiler {
         let start = usize::from_le_bytes(bytes);
         let memory = &self.code_memory.as_ref().unwrap()[start..];
         let f: fn(u64) -> u64 = unsafe { std::mem::transmute(memory.as_ref().as_ptr()) };
-        Ok(f(arg))
+        let result = f(arg);
+        println!("Result: {}", result);
+        Ok(result)
     }
 
     pub fn run2(
