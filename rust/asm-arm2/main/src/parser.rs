@@ -29,6 +29,8 @@ pub enum Token {
     Minus,
     Mul,
     Div,
+    True,
+    False,
     Comment((usize, usize)),
     Spaces((usize, usize)),
     String((usize, usize)),
@@ -222,6 +224,8 @@ impl<'a> Tokenizer {
             b"-" => Token::Minus,
             b"*" => Token::Mul,
             b"/" => Token::Div,
+            b"true" => Token::True,
+            b"false" => Token::False,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -396,6 +400,8 @@ impl Parser {
         }
     }
 
+    // Based on
+    // https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing
     fn parse_expression(&mut self, min_precedence: usize) -> Option<Ast> {
         self.skip_whitespace();
         let mut lhs = self.parse_atom()?;
@@ -424,16 +430,13 @@ impl Parser {
             // println!("rhs {:?}", rhs);
 
             lhs = self.compose_binary_op(lhs.clone(), current_token, rhs);
+            // println!("lhs composed {:?}", lhs);
             self.skip_whitespace();
         }
 
         Some(lhs)
     }
 
-    // TODO: I need to deal with precedence and parsing
-    // binary operators
-    // Probably use this:
-    // https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing
     fn parse_atom(&mut self) -> Option<Ast> {
         match self.current_token() {
             Token::Fn => {
@@ -467,6 +470,14 @@ impl Parser {
                 let value = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
                 self.consume();
                 Some(Ast::NumberLiteral(value.parse::<i64>().unwrap()))
+            }
+            Token::True => {
+                self.consume();
+                Some(Ast::True)
+            }
+            Token::False => {
+                self.consume();
+                Some(Ast::False)
             }
             Token::NewLine | Token::Spaces(_) | Token::Comment(_) => {
                 self.consume();
@@ -628,7 +639,7 @@ impl Parser {
         self.expect_open_paren();
         let mut args = Vec::new();
         while !self.at_end() && !self.is_close_paren() {
-            if let Some(arg) = self.parse_atom() {
+            if let Some(arg) = self.parse_expression(0) {
                 args.push(arg);
             } else {
                 break;
@@ -786,4 +797,24 @@ fn test_parse2() {
 
     let ast = parser.parse();
     println!("{:#?}", ast);
+}
+
+
+#[macro_export]
+macro_rules! parse {
+    ($($t:tt)*) => { 
+        Parser::new(stringify!($($t)*).to_string()).parse()
+     };
+}
+
+pub fn  fib() -> Ast {
+    parse! {
+        fn fib(n) {
+            if n <= 1 {
+                n
+            } else {
+                fib(n - 1) + fib(n - 2)
+            }
+        }
+    }
 }

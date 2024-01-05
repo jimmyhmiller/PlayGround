@@ -7,22 +7,22 @@ pub mod compiler;
 pub mod ir;
 pub mod parser;
 
-use crate::{compiler::Compiler, parser::Parser, ir::{print_value, Value}};
+use crate::{compiler::Compiler, parser::Parser, ir::{print_value, Value, BuiltInTypes}};
 
 fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
-    let fib: ast::Ast = ast::fib();
+    let fib: ast::Ast = parser::fib();
     let mut fib: ir::Ir = fib.compile(compiler);
     let mut fib = fib.compile();
     let fib = compiler.add_function("fib", &fib.compile_to_bytes())?;
 
     let time = Instant::now();
 
-    let result1 = compiler.run1(fib, n)?;
+    let result1 = compiler.run1(fib, n as u64)?;
     println!("Our time {:?}", time.elapsed());
     let time = Instant::now();
     let result2 = fib_rust(n as usize);
     println!("Rust time {:?}", time.elapsed());
-    println!("{} {}", result1, result2);
+    println!("{} {}", BuiltInTypes::untag(result1 as usize), result2);
 
     Ok(())
 }
@@ -48,32 +48,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("test", test_builtin as *const u8)?;
 
 
-    let mut parser = Parser::new(String::from(
-        "
-    fn hello(x) {
-        if x * 2 + 1 > 5 {
-            print(\"Hello World!\")
-        } else {
-            print(\"Hello World!!!!\")
+    let hello_ast = parse! {
+        fn hello(x) {
+            x == 1
         }
-        2 * 2 + 1
-    }",
-    ));
+    };
 
-    let hello_ast = parser.parse();
-
-    // let hello_ast = ast::hello_world();
     let mut hello_ir = hello_ast.compile(&mut compiler);
     let mut hello = hello_ir.compile();
 
     // let hello2_ast = ast::hello_world2();
     // let mut hello2_ir = hello2_ast.compile(&mut compiler);
     // let mut hello2 = hello2_ir.compile();
-
+// 
     let hello = compiler.add_function("hello", &hello.compile_to_bytes())?;
 
-    println!("{}", compiler.run1(hello, 2).unwrap());
-    println!("Got here");
+    BuiltInTypes::print(compiler.run1(hello, 1).unwrap() as usize);
+    // println!("Got here");
 
 
     // compiler.overwrite_function(hello, &hello2.compile_to_bytes())?;
@@ -92,5 +83,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 //     Heap
 // Parser
 // Debugging
-// Think about variables
+
+// TODO: Make variables
 // Should we allow reassignment?

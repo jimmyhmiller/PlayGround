@@ -53,6 +53,8 @@ pub enum Ast {
     NumberLiteral(i64),
     Variable(String),
     String(String),
+    True,
+    False,
 }
 
 impl Ast {
@@ -94,7 +96,9 @@ impl<'a> AstCompiler<'a> {
                 last
             }
             Ast::Function { name, args, body } => {
+                // self.ir.breakpoint();
                 assert!(self.name.is_empty());
+                // self.ir.breakpoint()
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);
@@ -210,12 +214,20 @@ impl<'a> AstCompiler<'a> {
                 let reg = self.variables.get(&name).unwrap();
                 Value::Register(*reg)
             }
-            Ast::Condition { .. } => {
-                panic!("Condition should be handled by if")
+            Ast::Condition { operator, left, right } => {
+                let a = self.compile_to_ir(&left);
+                let b = self.compile_to_ir(&right);
+                self.ir.compare(a, b, operator)
             }
             Ast::String(str) => {
                 let constant = self.ir.string_constant(str);
                 self.ir.load_string_constant(constant)
+            }
+            Ast::True => {
+                Value::True
+            },
+            Ast::False => {
+                Value::False
             }
         }
     }

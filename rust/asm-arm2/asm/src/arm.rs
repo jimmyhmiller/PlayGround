@@ -599,6 +599,7 @@ pub enum ArmAsm {
         n: i32,
         immr: i32,
         imms: i32,
+        rn: Register,
         rd: Register,
     },
     /// BFM -- A64
@@ -908,14 +909,26 @@ pub enum ArmAsm {
     /// CSINC <Wd>, <Wn>, <Wn>, invert(<cond>)
     /// CINC  <Xd>, <Xn>, <cond>
     /// CSINC <Xd>, <Xn>, <Xn>, invert(<cond>)
-    CincCsinc { sf: i32, rd: Register },
+    CincCsinc {
+        sf: i32,
+        rm: Register,
+        cond: i32,
+        rn: Register,
+        rd: Register,
+    },
     /// CINV -- A64
     /// Conditional Invert
     /// CINV  <Wd>, <Wn>, <cond>
     /// CSINV <Wd>, <Wn>, <Wn>, invert(<cond>)
     /// CINV  <Xd>, <Xn>, <cond>
     /// CSINV <Xd>, <Xn>, <Xn>, invert(<cond>)
-    CinvCsinv { sf: i32, rd: Register },
+    CinvCsinv {
+        sf: i32,
+        rm: Register,
+        cond: i32,
+        rn: Register,
+        rd: Register,
+    },
     /// CLREX -- A64
     /// Clear Exclusive
     /// CLREX  {#<imm>}
@@ -1165,6 +1178,7 @@ pub enum ArmAsm {
     CnegCsneg {
         sf: i32,
         rm: Register,
+        cond: i32,
         rn: Register,
         rd: Register,
     },
@@ -1613,14 +1627,14 @@ pub enum ArmAsm {
     /// CSINC <Wd>, WZR, WZR, invert(<cond>)
     /// CSET  <Xd>, <cond>
     /// CSINC <Xd>, XZR, XZR, invert(<cond>)
-    CsetCsinc { sf: i32, rd: Register },
+    CsetCsinc { sf: i32, cond: i32, rd: Register },
     /// CSETM -- A64
     /// Conditional Set Mask
     /// CSETM  <Wd>, <cond>
     /// CSINV <Wd>, WZR, WZR, invert(<cond>)
     /// CSETM  <Xd>, <cond>
     /// CSINV <Xd>, XZR, XZR, invert(<cond>)
-    CsetmCsinv { sf: i32, rd: Register },
+    CsetmCsinv { sf: i32, cond: i32, rd: Register },
     /// CSINC -- A64
     /// Conditional Select Increment
     /// CSINC  <Wd>, <Wn>, <Wm>, <cond>
@@ -2391,6 +2405,7 @@ pub enum ArmAsm {
     /// FCVTZS  <V><d>, <V><n>, #<fbits>
     /// FCVTZS  <Vd>.<T>, <Vn>.<T>, #<fbits>
     FcvtzsAdvsimdFix {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -2444,6 +2459,7 @@ pub enum ArmAsm {
     /// FCVTZU  <V><d>, <V><n>, #<fbits>
     /// FCVTZU  <Vd>.<T>, <Vn>.<T>, #<fbits>
     FcvtzuAdvsimdFix {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -4607,6 +4623,7 @@ pub enum ArmAsm {
         sf: i32,
         n: i32,
         immr: i32,
+        imms: i32,
         rn: Register,
         rd: Register,
     },
@@ -5021,6 +5038,7 @@ pub enum ArmAsm {
         shift: i32,
         rm: Register,
         imm6: i32,
+        rd: Register,
     },
     /// NGC -- A64
     /// Negate with Carry
@@ -5354,6 +5372,7 @@ pub enum ArmAsm {
     /// RSHRN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     RshrnAdvsimd {
         q: i32,
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -5524,6 +5543,7 @@ pub enum ArmAsm {
     /// SCVTF  <V><d>, <V><n>, #<fbits>
     /// SCVTF  <Vd>.<T>, <Vn>.<T>, #<fbits>
     ScvtfAdvsimdFix {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -5825,6 +5845,7 @@ pub enum ArmAsm {
     /// SHL  <V><d>, <V><n>, #<shift>
     /// SHL  <Vd>.<T>, <Vn>.<T>, #<shift>
     ShlAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -5845,6 +5866,7 @@ pub enum ArmAsm {
     /// SHRN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     ShrnAdvsimd {
         q: i32,
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -5864,6 +5886,7 @@ pub enum ArmAsm {
     /// SLI  <V><d>, <V><n>, #<shift>
     /// SLI  <Vd>.<T>, <Vn>.<T>, #<shift>
     SliAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -6376,6 +6399,7 @@ pub enum ArmAsm {
     /// SQRSHRN  <Vb><d>, <Va><n>, #<shift>
     /// SQRSHRN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     SqrshrnAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -6387,6 +6411,7 @@ pub enum ArmAsm {
     /// SQRSHRUN  <Vb><d>, <Va><n>, #<shift>
     /// SQRSHRUN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     SqrshrunAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -6398,6 +6423,7 @@ pub enum ArmAsm {
     /// SQSHL  <V><d>, <V><n>, #<shift>
     /// SQSHL  <Vd>.<T>, <Vn>.<T>, #<shift>
     SqshlAdvsimdImm {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -6421,6 +6447,7 @@ pub enum ArmAsm {
     /// SQSHLU  <V><d>, <V><n>, #<shift>
     /// SQSHLU  <Vd>.<T>, <Vn>.<T>, #<shift>
     SqshluAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -6432,6 +6459,7 @@ pub enum ArmAsm {
     /// SQSHRN  <Vb><d>, <Va><n>, #<shift>
     /// SQSHRN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     SqshrnAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -6443,6 +6471,7 @@ pub enum ArmAsm {
     /// SQSHRUN  <Vb><d>, <Va><n>, #<shift>
     /// SQSHRUN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     SqshrunAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -6498,6 +6527,7 @@ pub enum ArmAsm {
     /// SRI  <V><d>, <V><n>, #<shift>
     /// SRI  <Vd>.<T>, <Vn>.<T>, #<shift>
     SriAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -6521,6 +6551,7 @@ pub enum ArmAsm {
     /// SRSHR  <V><d>, <V><n>, #<shift>
     /// SRSHR  <Vd>.<T>, <Vn>.<T>, #<shift>
     SrshrAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -6532,6 +6563,7 @@ pub enum ArmAsm {
     /// SRSRA  <V><d>, <V><n>, #<shift>
     /// SRSRA  <Vd>.<T>, <Vn>.<T>, #<shift>
     SrsraAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -6560,6 +6592,7 @@ pub enum ArmAsm {
     /// SSHLL{2}  <Vd>.<Ta>, <Vn>.<Tb>, #<shift>
     SshllAdvsimd {
         q: i32,
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -6569,6 +6602,7 @@ pub enum ArmAsm {
     /// SSHR  <V><d>, <V><n>, #<shift>
     /// SSHR  <Vd>.<T>, <Vn>.<T>, #<shift>
     SshrAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -6580,6 +6614,7 @@ pub enum ArmAsm {
     /// SSRA  <V><d>, <V><n>, #<shift>
     /// SSRA  <Vd>.<T>, <Vn>.<T>, #<shift>
     SsraAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -7734,7 +7769,12 @@ pub enum ArmAsm {
     /// Signed extend Long
     /// SXTL{2}  <Vd>.<Ta>, <Vn>.<Tb>
     /// SSHLL{2}  <Vd>.<Ta>, <Vn>.<Tb>, #0
-    SxtlSshllAdvsimd { q: i32, rn: Register, rd: Register },
+    SxtlSshllAdvsimd {
+        q: i32,
+        immh: i32,
+        rn: Register,
+        rd: Register,
+    },
     /// SXTW -- A64
     /// Sign Extend Word
     /// SXTW  <Xd>, <Wn>
@@ -7996,6 +8036,7 @@ pub enum ArmAsm {
     /// UCVTF  <V><d>, <V><n>, #<fbits>
     /// UCVTF  <Vd>.<T>, <Vn>.<T>, #<fbits>
     UcvtfAdvsimdFix {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -8319,6 +8360,7 @@ pub enum ArmAsm {
     /// UQRSHRN  <Vb><d>, <Va><n>, #<shift>
     /// UQRSHRN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     UqrshrnAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -8330,6 +8372,7 @@ pub enum ArmAsm {
     /// UQSHL  <V><d>, <V><n>, #<shift>
     /// UQSHL  <Vd>.<T>, <Vn>.<T>, #<shift>
     UqshlAdvsimdImm {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -8353,6 +8396,7 @@ pub enum ArmAsm {
     /// UQSHRN  <Vb><d>, <Va><n>, #<shift>
     /// UQSHRN{2}  <Vd>.<Tb>, <Vn>.<Ta>, #<shift>
     UqshrnAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -8418,6 +8462,7 @@ pub enum ArmAsm {
     /// URSHR  <V><d>, <V><n>, #<shift>
     /// URSHR  <Vd>.<T>, <Vn>.<T>, #<shift>
     UrshrAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -8438,6 +8483,7 @@ pub enum ArmAsm {
     /// URSRA  <V><d>, <V><n>, #<shift>
     /// URSRA  <Vd>.<T>, <Vn>.<T>, #<shift>
     UrsraAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -8482,6 +8528,7 @@ pub enum ArmAsm {
     /// USHLL{2}  <Vd>.<Ta>, <Vn>.<Tb>, #<shift>
     UshllAdvsimd {
         q: i32,
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -8491,6 +8538,7 @@ pub enum ArmAsm {
     /// USHR  <V><d>, <V><n>, #<shift>
     /// USHR  <Vd>.<T>, <Vn>.<T>, #<shift>
     UshrAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -8521,6 +8569,7 @@ pub enum ArmAsm {
     /// USRA  <V><d>, <V><n>, #<shift>
     /// USRA  <Vd>.<T>, <Vn>.<T>, #<shift>
     UsraAdvsimd {
+        immh: i32,
         immb: i32,
         rn: Register,
         rd: Register,
@@ -8561,7 +8610,12 @@ pub enum ArmAsm {
     /// Unsigned extend Long
     /// UXTL{2}  <Vd>.<Ta>, <Vn>.<Tb>
     /// USHLL{2}  <Vd>.<Ta>, <Vn>.<Tb>, #0
-    UxtlUshllAdvsimd { q: i32, rn: Register, rd: Register },
+    UxtlUshllAdvsimd {
+        q: i32,
+        immh: i32,
+        rn: Register,
+        rd: Register,
+    },
     /// UZP1 -- A64
     /// Unzip vectors (primary)
     /// UZP1  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
@@ -10349,13 +10403,15 @@ impl ArmAsm {
                 n,
                 immr,
                 imms,
+                rn,
                 rd,
             } => {
-                0b0_01_100110_0_000000_000000_00000
+                0b0_01_100110_0_000000_000000_00000_00000
                     | (*sf as u32) << 31
                     | (*n as u32) << 22
                     | (*immr as u32) << 16
                     | (*imms as u32) << 10
+                    | rn << 5
                     | rd << 0
             }
             ArmAsm::Bfm {
@@ -10643,11 +10699,33 @@ impl ArmAsm {
             }
             ArmAsm::Cfinv {} => 0b1101010100_0_0_0_000_0100_000_11111,
             ArmAsm::CfpSys { rt } => 0b1101010100_0_01_011_0111_0011_100_00000 | rt << 0,
-            ArmAsm::CincCsinc { sf, rd } => {
-                0b0_0_0_11010100_0_1_00000 | (*sf as u32) << 31 | rd << 0
+            ArmAsm::CincCsinc {
+                sf,
+                rm,
+                cond,
+                rn,
+                rd,
+            } => {
+                0b0_0_0_11010100_00000_0000_0_1_00000_00000
+                    | (*sf as u32) << 31
+                    | rm << 16
+                    | (*cond as u32) << 12
+                    | rn << 5
+                    | rd << 0
             }
-            ArmAsm::CinvCsinv { sf, rd } => {
-                0b0_1_0_11010100_0_0_00000 | (*sf as u32) << 31 | rd << 0
+            ArmAsm::CinvCsinv {
+                sf,
+                rm,
+                cond,
+                rn,
+                rd,
+            } => {
+                0b0_1_0_11010100_00000_0000_0_0_00000_00000
+                    | (*sf as u32) << 31
+                    | rm << 16
+                    | (*cond as u32) << 12
+                    | rn << 5
+                    | rd << 0
             }
             ArmAsm::Clrex { crm } => 0b1101010100_0_00_011_0011_0000_010_11111 | (*crm as u32) << 8,
             ArmAsm::ClsAdvsimd { q, size, rn, rd } => {
@@ -10994,10 +11072,17 @@ impl ArmAsm {
                         | rd << 0
                 }
             },
-            ArmAsm::CnegCsneg { sf, rm, rn, rd } => {
-                0b0_1_0_11010100_00000_0_1_00000_00000
+            ArmAsm::CnegCsneg {
+                sf,
+                rm,
+                cond,
+                rn,
+                rd,
+            } => {
+                0b0_1_0_11010100_00000_0000_0_1_00000_00000
                     | (*sf as u32) << 31
                     | rm << 16
+                    | (*cond as u32) << 12
                     | rn << 5
                     | rd << 0
             }
@@ -11488,11 +11573,17 @@ impl ArmAsm {
                     | rn << 5
                     | rd << 0
             }
-            ArmAsm::CsetCsinc { sf, rd } => {
-                0b0_0_0_11010100_11111_0_1_11111_00000 | (*sf as u32) << 31 | rd << 0
+            ArmAsm::CsetCsinc { sf, cond, rd } => {
+                0b0_0_0_11010100_11111_0000_0_1_11111_00000
+                    | (*sf as u32) << 31
+                    | (*cond as u32) << 12
+                    | rd << 0
             }
-            ArmAsm::CsetmCsinv { sf, rd } => {
-                0b0_1_0_11010100_11111_0_0_11111_00000 | (*sf as u32) << 31 | rd << 0
+            ArmAsm::CsetmCsinv { sf, cond, rd } => {
+                0b0_1_0_11010100_11111_0000_0_0_11111_00000
+                    | (*sf as u32) << 31
+                    | (*cond as u32) << 12
+                    | rd << 0
             }
             ArmAsm::Csinc {
                 sf,
@@ -12591,6 +12682,7 @@ impl ArmAsm {
                 }
             },
             ArmAsm::FcvtzsAdvsimdFix {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -12598,11 +12690,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 FcvtzsAdvsimdFixSelector::Scalar => {
-                    0b01_0_111110_000_11111_1_00000_00000 | (*immb as u32) << 16 | rn << 5 | rd << 0
+                    0b01_0_111110_0000_000_11111_1_00000_00000
+                        | (*immh as u32) << 19
+                        | (*immb as u32) << 16
+                        | rn << 5
+                        | rd << 0
                 }
                 FcvtzsAdvsimdFixSelector::Vector => {
-                    0b0_0_0_011110_000_11111_1_00000_00000
+                    0b0_0_0_011110_0000_000_11111_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -12660,6 +12757,7 @@ impl ArmAsm {
                     | rd << 0
             }
             ArmAsm::FcvtzuAdvsimdFix {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -12667,11 +12765,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 FcvtzuAdvsimdFixSelector::Scalar => {
-                    0b01_1_111110_000_11111_1_00000_00000 | (*immb as u32) << 16 | rn << 5 | rd << 0
+                    0b01_1_111110_0000_000_11111_1_00000_00000
+                        | (*immh as u32) << 19
+                        | (*immb as u32) << 16
+                        | rn << 5
+                        | rd << 0
                 }
                 FcvtzuAdvsimdFixSelector::Vector => {
-                    0b0_0_1_011110_000_11111_1_00000_00000
+                    0b0_0_1_011110_0000_000_11111_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -15446,13 +15549,15 @@ impl ArmAsm {
                 sf,
                 n,
                 immr,
+                imms,
                 rn,
                 rd,
             } => {
-                0b0_10_100110_0_000000_00000_00000
+                0b0_10_100110_0_000000_000000_00000_00000
                     | (*sf as u32) << 31
                     | (*n as u32) << 22
                     | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }
@@ -15862,12 +15967,14 @@ impl ArmAsm {
                 shift,
                 rm,
                 imm6,
+                rd,
             } => {
-                0b0_1_1_01011_00_0_00000_000000_11111
+                0b0_1_1_01011_00_0_00000_000000_11111_00000
                     | (*sf as u32) << 31
                     | (*shift as u32) << 22
                     | rm << 16
                     | truncate_imm::<_, 6>(*imm6) << 10
+                    | rd << 0
             }
             ArmAsm::NgcSbc { sf, rm, rd } => {
                 0b0_1_0_11010000_00000_000000_11111_00000 | (*sf as u32) << 31 | rm << 16 | rd << 0
@@ -16175,9 +16282,16 @@ impl ArmAsm {
                     | rn << 5
                     | rd << 0
             }
-            ArmAsm::RshrnAdvsimd { q, immb, rn, rd } => {
-                0b0_0_0_011110_000_1000_1_1_00000_00000
+            ArmAsm::RshrnAdvsimd {
+                q,
+                immh,
+                immb,
+                rn,
+                rd,
+            } => {
+                0b0_0_0_011110_0000_000_1000_1_1_00000_00000
                     | (*q as u32) << 30
+                    | (*immh as u32) << 19
                     | (*immb as u32) << 16
                     | rn << 5
                     | rd << 0
@@ -16365,6 +16479,7 @@ impl ArmAsm {
                     | rd << 0
             }
             ArmAsm::ScvtfAdvsimdFix {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -16372,11 +16487,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 ScvtfAdvsimdFixSelector::Scalar => {
-                    0b01_0_111110_000_11100_1_00000_00000 | (*immb as u32) << 16 | rn << 5 | rd << 0
+                    0b01_0_111110_0000_000_11100_1_00000_00000
+                        | (*immh as u32) << 19
+                        | (*immb as u32) << 16
+                        | rn << 5
+                        | rd << 0
                 }
                 ScvtfAdvsimdFixSelector::Vector => {
-                    0b0_0_0_011110_000_11100_1_00000_00000
+                    0b0_0_0_011110_0000_000_11100_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -16648,6 +16768,7 @@ impl ArmAsm {
                     | rd << 0
             }
             ArmAsm::ShlAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -16655,11 +16776,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 ShlAdvsimdSelector::Scalar => {
-                    0b01_0_111110_000_01010_1_00000_00000 | (*immb as u32) << 16 | rn << 5 | rd << 0
+                    0b01_0_111110_0000_000_01010_1_00000_00000
+                        | (*immh as u32) << 19
+                        | (*immb as u32) << 16
+                        | rn << 5
+                        | rd << 0
                 }
                 ShlAdvsimdSelector::Vector => {
-                    0b0_0_0_011110_000_01010_1_00000_00000
+                    0b0_0_0_011110_0000_000_01010_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -16672,9 +16798,16 @@ impl ArmAsm {
                     | rn << 5
                     | rd << 0
             }
-            ArmAsm::ShrnAdvsimd { q, immb, rn, rd } => {
-                0b0_0_0_011110_000_1000_0_1_00000_00000
+            ArmAsm::ShrnAdvsimd {
+                q,
+                immh,
+                immb,
+                rn,
+                rd,
+            } => {
+                0b0_0_0_011110_0000_000_1000_0_1_00000_00000
                     | (*q as u32) << 30
+                    | (*immh as u32) << 19
                     | (*immb as u32) << 16
                     | rn << 5
                     | rd << 0
@@ -16694,6 +16827,7 @@ impl ArmAsm {
                     | rd << 0
             }
             ArmAsm::SliAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -16701,11 +16835,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 SliAdvsimdSelector::Scalar => {
-                    0b01_1_111110_000_01010_1_00000_00000 | (*immb as u32) << 16 | rn << 5 | rd << 0
+                    0b01_1_111110_0000_000_01010_1_00000_00000
+                        | (*immh as u32) << 19
+                        | (*immb as u32) << 16
+                        | rn << 5
+                        | rd << 0
                 }
                 SliAdvsimdSelector::Vector => {
-                    0b0_0_1_011110_000_01010_1_00000_00000
+                    0b0_0_1_011110_0000_000_01010_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -17450,6 +17589,7 @@ impl ArmAsm {
                 }
             },
             ArmAsm::SqrshrnAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -17457,20 +17597,23 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 SqrshrnAdvsimdSelector::Scalar => {
-                    0b01_0_111110_000_1001_1_1_00000_00000
+                    0b01_0_111110_0000_000_1001_1_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 SqrshrnAdvsimdSelector::Vector => {
-                    0b0_0_0_011110_000_1001_1_1_00000_00000
+                    0b0_0_0_011110_0000_000_1001_1_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
             },
             ArmAsm::SqrshrunAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -17478,20 +17621,23 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 SqrshrunAdvsimdSelector::Scalar => {
-                    0b01_1_111110_000_1000_1_1_00000_00000
+                    0b01_1_111110_0000_000_1000_1_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 SqrshrunAdvsimdSelector::Vector => {
-                    0b0_0_1_011110_000_1000_1_1_00000_00000
+                    0b0_0_1_011110_0000_000_1000_1_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
             },
             ArmAsm::SqshlAdvsimdImm {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -17499,14 +17645,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 SqshlAdvsimdImmSelector::Scalar => {
-                    0b01_0_111110_000_011_1_0_1_00000_00000
+                    0b01_0_111110_0000_000_011_1_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 SqshlAdvsimdImmSelector::Vector => {
-                    0b0_0_0_011110_000_011_1_0_1_00000_00000
+                    0b0_0_0_011110_0000_000_011_1_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -17537,6 +17685,7 @@ impl ArmAsm {
                 }
             },
             ArmAsm::SqshluAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -17544,20 +17693,23 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 SqshluAdvsimdSelector::Scalar => {
-                    0b01_1_111110_000_011_0_0_1_00000_00000
+                    0b01_1_111110_0000_000_011_0_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 SqshluAdvsimdSelector::Vector => {
-                    0b0_0_1_011110_000_011_0_0_1_00000_00000
+                    0b0_0_1_011110_0000_000_011_0_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
             },
             ArmAsm::SqshrnAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -17565,20 +17717,23 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 SqshrnAdvsimdSelector::Scalar => {
-                    0b01_0_111110_000_1001_0_1_00000_00000
+                    0b01_0_111110_0000_000_1001_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 SqshrnAdvsimdSelector::Vector => {
-                    0b0_0_0_011110_000_1001_0_1_00000_00000
+                    0b0_0_0_011110_0000_000_1001_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
             },
             ArmAsm::SqshrunAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -17586,14 +17741,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 SqshrunAdvsimdSelector::Scalar => {
-                    0b01_1_111110_000_1000_0_1_00000_00000
+                    0b01_1_111110_0000_000_1000_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 SqshrunAdvsimdSelector::Vector => {
-                    0b0_0_1_011110_000_1000_0_1_00000_00000
+                    0b0_0_1_011110_0000_000_1000_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -17680,6 +17837,7 @@ impl ArmAsm {
                     | rd << 0
             }
             ArmAsm::SriAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -17687,11 +17845,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 SriAdvsimdSelector::Scalar => {
-                    0b01_1_111110_000_01000_1_00000_00000 | (*immb as u32) << 16 | rn << 5 | rd << 0
+                    0b01_1_111110_0000_000_01000_1_00000_00000
+                        | (*immh as u32) << 19
+                        | (*immb as u32) << 16
+                        | rn << 5
+                        | rd << 0
                 }
                 SriAdvsimdSelector::Vector => {
-                    0b0_0_1_011110_000_01000_1_00000_00000
+                    0b0_0_1_011110_0000_000_01000_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -17722,6 +17885,7 @@ impl ArmAsm {
                 }
             },
             ArmAsm::SrshrAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -17729,20 +17893,23 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 SrshrAdvsimdSelector::Scalar => {
-                    0b01_0_111110_000_00_1_0_0_1_00000_00000
+                    0b01_0_111110_0000_000_00_1_0_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 SrshrAdvsimdSelector::Vector => {
-                    0b0_0_0_011110_000_00_1_0_0_1_00000_00000
+                    0b0_0_0_011110_0000_000_00_1_0_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
             },
             ArmAsm::SrsraAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -17750,14 +17917,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 SrsraAdvsimdSelector::Scalar => {
-                    0b01_0_111110_000_00_1_1_0_1_00000_00000
+                    0b01_0_111110_0000_000_00_1_1_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 SrsraAdvsimdSelector::Vector => {
-                    0b0_0_0_011110_000_00_1_1_0_1_00000_00000
+                    0b0_0_0_011110_0000_000_00_1_1_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -17788,14 +17957,22 @@ impl ArmAsm {
                         | rd << 0
                 }
             },
-            ArmAsm::SshllAdvsimd { q, immb, rn, rd } => {
-                0b0_0_0_011110_000_10100_1_00000_00000
+            ArmAsm::SshllAdvsimd {
+                q,
+                immh,
+                immb,
+                rn,
+                rd,
+            } => {
+                0b0_0_0_011110_0000_000_10100_1_00000_00000
                     | (*q as u32) << 30
+                    | (*immh as u32) << 19
                     | (*immb as u32) << 16
                     | rn << 5
                     | rd << 0
             }
             ArmAsm::SshrAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -17803,20 +17980,23 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 SshrAdvsimdSelector::Scalar => {
-                    0b01_0_111110_000_00_0_0_0_1_00000_00000
+                    0b01_0_111110_0000_000_00_0_0_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 SshrAdvsimdSelector::Vector => {
-                    0b0_0_0_011110_000_00_0_0_0_1_00000_00000
+                    0b0_0_0_011110_0000_000_00_0_0_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
             },
             ArmAsm::SsraAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -17824,14 +18004,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 SsraAdvsimdSelector::Scalar => {
-                    0b01_0_111110_000_00_0_1_0_1_00000_00000
+                    0b01_0_111110_0000_000_00_0_1_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 SsraAdvsimdSelector::Vector => {
-                    0b0_0_0_011110_000_00_0_1_0_1_00000_00000
+                    0b0_0_0_011110_0000_000_00_0_1_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -18983,8 +19165,12 @@ impl ArmAsm {
                     | rn << 5
                     | rd << 0
             }
-            ArmAsm::SxtlSshllAdvsimd { q, rn, rd } => {
-                0b0_0_0_011110_000_10100_1_00000_00000 | (*q as u32) << 30 | rn << 5 | rd << 0
+            ArmAsm::SxtlSshllAdvsimd { q, immh, rn, rd } => {
+                0b0_0_0_011110_0000_000_10100_1_00000_00000
+                    | (*q as u32) << 30
+                    | (*immh as u32) << 19
+                    | rn << 5
+                    | rd << 0
             }
             ArmAsm::SxtwSbfm { rn, rd } => {
                 0b1_00_100110_1_000000_011111_00000_00000 | rn << 5 | rd << 0
@@ -19265,6 +19451,7 @@ impl ArmAsm {
                     | rd << 0
             }
             ArmAsm::UcvtfAdvsimdFix {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -19272,11 +19459,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 UcvtfAdvsimdFixSelector::Scalar => {
-                    0b01_1_111110_000_11100_1_00000_00000 | (*immb as u32) << 16 | rn << 5 | rd << 0
+                    0b01_1_111110_0000_000_11100_1_00000_00000
+                        | (*immh as u32) << 19
+                        | (*immb as u32) << 16
+                        | rn << 5
+                        | rd << 0
                 }
                 UcvtfAdvsimdFixSelector::Vector => {
-                    0b0_0_1_011110_000_11100_1_00000_00000
+                    0b0_0_1_011110_0000_000_11100_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -19659,6 +19851,7 @@ impl ArmAsm {
                 }
             },
             ArmAsm::UqrshrnAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -19666,20 +19859,23 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 UqrshrnAdvsimdSelector::Scalar => {
-                    0b01_1_111110_000_1001_1_1_00000_00000
+                    0b01_1_111110_0000_000_1001_1_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 UqrshrnAdvsimdSelector::Vector => {
-                    0b0_0_1_011110_000_1001_1_1_00000_00000
+                    0b0_0_1_011110_0000_000_1001_1_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
             },
             ArmAsm::UqshlAdvsimdImm {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -19687,14 +19883,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 UqshlAdvsimdImmSelector::Scalar => {
-                    0b01_1_111110_000_011_1_0_1_00000_00000
+                    0b01_1_111110_0000_000_011_1_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 UqshlAdvsimdImmSelector::Vector => {
-                    0b0_0_1_011110_000_011_1_0_1_00000_00000
+                    0b0_0_1_011110_0000_000_011_1_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -19725,6 +19923,7 @@ impl ArmAsm {
                 }
             },
             ArmAsm::UqshrnAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -19732,14 +19931,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 UqshrnAdvsimdSelector::Scalar => {
-                    0b01_1_111110_000_1001_0_1_00000_00000
+                    0b01_1_111110_0000_000_1001_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 UqshrnAdvsimdSelector::Vector => {
-                    0b0_0_1_011110_000_1001_0_1_00000_00000
+                    0b0_0_1_011110_0000_000_1001_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -19836,6 +20037,7 @@ impl ArmAsm {
                 }
             },
             ArmAsm::UrshrAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -19843,14 +20045,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 UrshrAdvsimdSelector::Scalar => {
-                    0b01_1_111110_000_00_1_0_0_1_00000_00000
+                    0b01_1_111110_0000_000_00_1_0_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 UrshrAdvsimdSelector::Vector => {
-                    0b0_0_1_011110_000_00_1_0_0_1_00000_00000
+                    0b0_0_1_011110_0000_000_00_1_0_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -19864,6 +20068,7 @@ impl ArmAsm {
                     | rd << 0
             }
             ArmAsm::UrsraAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -19871,14 +20076,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 UrsraAdvsimdSelector::Scalar => {
-                    0b01_1_111110_000_00_1_1_0_1_00000_00000
+                    0b01_1_111110_0000_000_00_1_1_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 UrsraAdvsimdSelector::Vector => {
-                    0b0_0_1_011110_000_00_1_1_0_1_00000_00000
+                    0b0_0_1_011110_0000_000_00_1_1_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -19933,14 +20140,22 @@ impl ArmAsm {
                         | rd << 0
                 }
             },
-            ArmAsm::UshllAdvsimd { q, immb, rn, rd } => {
-                0b0_0_1_011110_000_10100_1_00000_00000
+            ArmAsm::UshllAdvsimd {
+                q,
+                immh,
+                immb,
+                rn,
+                rd,
+            } => {
+                0b0_0_1_011110_0000_000_10100_1_00000_00000
                     | (*q as u32) << 30
+                    | (*immh as u32) << 19
                     | (*immb as u32) << 16
                     | rn << 5
                     | rd << 0
             }
             ArmAsm::UshrAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -19948,14 +20163,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 UshrAdvsimdSelector::Scalar => {
-                    0b01_1_111110_000_00_0_0_0_1_00000_00000
+                    0b01_1_111110_0000_000_00_0_0_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 UshrAdvsimdSelector::Vector => {
-                    0b0_0_1_011110_000_00_0_0_0_1_00000_00000
+                    0b0_0_1_011110_0000_000_00_0_0_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -19986,6 +20203,7 @@ impl ArmAsm {
                 }
             },
             ArmAsm::UsraAdvsimd {
+                immh,
                 immb,
                 rn,
                 rd,
@@ -19993,14 +20211,16 @@ impl ArmAsm {
                 class_selector,
             } => match class_selector {
                 UsraAdvsimdSelector::Scalar => {
-                    0b01_1_111110_000_00_0_1_0_1_00000_00000
+                    0b01_1_111110_0000_000_00_0_1_0_1_00000_00000
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
                 }
                 UsraAdvsimdSelector::Vector => {
-                    0b0_0_1_011110_000_00_0_1_0_1_00000_00000
+                    0b0_0_1_011110_0000_000_00_0_1_0_1_00000_00000
                         | (*q as u32) << 30
+                        | (*immh as u32) << 19
                         | (*immb as u32) << 16
                         | rn << 5
                         | rd << 0
@@ -20040,8 +20260,12 @@ impl ArmAsm {
             ArmAsm::UxthUbfm { rn, rd } => {
                 0b0_10_100110_0_000000_001111_00000_00000 | rn << 5 | rd << 0
             }
-            ArmAsm::UxtlUshllAdvsimd { q, rn, rd } => {
-                0b0_0_1_011110_000_10100_1_00000_00000 | (*q as u32) << 30 | rn << 5 | rd << 0
+            ArmAsm::UxtlUshllAdvsimd { q, immh, rn, rd } => {
+                0b0_0_1_011110_0000_000_10100_1_00000_00000
+                    | (*q as u32) << 30
+                    | (*immh as u32) << 19
+                    | rn << 5
+                    | rd << 0
             }
             ArmAsm::Uzp1Advsimd {
                 q,
