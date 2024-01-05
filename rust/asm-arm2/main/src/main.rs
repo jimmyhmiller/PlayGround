@@ -7,7 +7,7 @@ pub mod compiler;
 pub mod ir;
 pub mod parser;
 
-use crate::{compiler::Compiler, parser::Parser, ir::{print_value, Value, BuiltInTypes}};
+use crate::{compiler::Compiler, parser::Parser, ir::BuiltInTypes};
 
 fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
     let fib: ast::Ast = parser::fib();
@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let hello_ast = parse! {
         fn hello(x) {
-            x == 1
+            x*2+1 == 1*2+1
         }
     };
 
@@ -86,3 +86,4 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 // TODO: Make variables
 // Should we allow reassignment?
+// Need to add guards against type errors
