@@ -167,6 +167,7 @@ pub fn compare(a: Register, b: Register) -> ArmAsm {
 }
 
 impl Condition {
+    #[allow(unused)]
     fn to_arm_condition(&self) -> i32 {
         match self {
             Condition::Equal => 0,

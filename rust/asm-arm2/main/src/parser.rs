@@ -61,6 +61,7 @@ impl Token {
 
 enum Associativity {
     Left,
+    #[allow(dead_code)]
     Right,
 }
 
@@ -345,6 +346,7 @@ fn test_tokenizer1() {
 
 pub struct Parser {
     source: String,
+    #[allow(dead_code)]
     tokenizer: Tokenizer,
     position: usize,
     tokens: Vec<Token>,
@@ -630,6 +632,7 @@ impl Parser {
         }
     }
 
+    #[allow(dead_code)]
     fn peek(&self) -> Token {
         // TODO: Handle end
         self.tokens[self.position + 1]

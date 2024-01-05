@@ -835,7 +835,7 @@ impl Ir {
                         lang.mov_64(lang.ret_reg(), BuiltInTypes::construct_boolean(false));
                         lang.jump(exit);
                     }
-                    Value::RawValue(value) => {
+                    Value::RawValue(_) => {
                         panic!("Should we be returing a raw value?")
                     }
                 },

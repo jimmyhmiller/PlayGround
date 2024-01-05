@@ -21,6 +21,7 @@ pub struct Compiler {
     // DO I need this offset?
     jump_table_offset: usize,
     functions: Vec<Function>,
+    #[allow(dead_code)]
     heap: Option<Mmap>,
 }
 
