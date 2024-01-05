@@ -3,6 +3,8 @@ use std::error::Error;
 
 use mmap_rs::{Mmap, MmapOptions};
 
+use crate::ir::BuiltInTypes;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     name: String,
@@ -223,7 +225,7 @@ impl Compiler {
         let start = usize::from_le_bytes(bytes);
         let memory = &self.code_memory.as_ref().unwrap()[start..];
         let f: fn(u64) -> u64 = unsafe { std::mem::transmute(memory.as_ref().as_ptr()) };
-        let result = f(arg);
+        let result = f(BuiltInTypes::Int.tag(arg as isize) as u64);
         // TODO: When running in release mode, this fails here.
         // I'm guessing I'm not setting up the stack correctly
         Ok(result)

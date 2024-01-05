@@ -18,15 +18,16 @@ pub enum Condition {
 }
 
 #[derive(Debug, Copy, Clone)]
-#[allow(dead_code)]
 pub enum Value {
     Register(VirtualRegister),
-    UnSignedConstant(usize),
     SignedConstant(isize),
+    RawValue(usize),
     // TODO: Think of a better representation
     StringConstantId(usize),
     Function(usize),
     Pointer(usize),
+    True,
+    False,
 }
 
 // I don't know if this is actually the setup I want
@@ -42,24 +43,29 @@ pub enum BuiltInTypes {
 }
 
 impl BuiltInTypes {
-    pub fn tag(&self, pointer: isize) -> isize {
-        let pointer = pointer >> 3;
+    pub fn tag(&self, value: isize) -> isize {
+        let value = value << 3;
+        let tag = self.get_tag();
+        value | tag
+    }
+
+    pub fn get_tag(&self) -> isize {
         match self {
-            BuiltInTypes::Int => pointer | 0b000,
-            BuiltInTypes::Float => pointer | 0b001,
-            BuiltInTypes::String => pointer | 0b010,
-            BuiltInTypes::Bool => pointer | 0b011,
-            BuiltInTypes::Function => pointer | 0b100,
-            BuiltInTypes::Struct => pointer | 0b101,
-            BuiltInTypes::Array => pointer | 0b110,
+            BuiltInTypes::Int => 0b000,
+            BuiltInTypes::Float => 0b001,
+            BuiltInTypes::String => 0b010,
+            BuiltInTypes::Bool => 0b011,
+            BuiltInTypes::Function => 0b100,
+            BuiltInTypes::Struct => 0b101,
+            BuiltInTypes::Array => 0b110,
         }
     }
 
-    pub fn untag(&self, pointer: usize) -> usize {
-        pointer & !0b111
+    pub fn untag(pointer: usize) -> usize {
+        pointer >> 3
     }
 
-    pub fn get_tag(pointer: usize) -> Self {
+    pub fn get_kind(pointer: usize) -> Self {
         match pointer & 0b111 {
             0b000 => BuiltInTypes::Int,
             0b001 => BuiltInTypes::Float,
@@ -99,6 +105,37 @@ impl BuiltInTypes {
             bool.tag(0)
         }
     }
+
+    pub fn print(value: usize) {
+        let tag = BuiltInTypes::get_kind(value);
+        match tag {
+            BuiltInTypes::Int => {
+                let value = BuiltInTypes::untag(value);
+                println!("{}", value);
+            },
+            BuiltInTypes::Float => todo!(),
+            BuiltInTypes::String => {
+                let value = BuiltInTypes::untag(value);
+                let string = unsafe { &*(value as *const StringValue) };
+                println!("{}", string.str);
+            },
+            BuiltInTypes::Bool => {
+                let value = BuiltInTypes::untag(value);
+                if value == 0 {
+                    println!("false");
+                } else {
+                    println!("true");
+                }
+            },
+            BuiltInTypes::Function => todo!(),
+            BuiltInTypes::Struct => todo!(),
+            BuiltInTypes::Array => todo!(),
+        }
+    }
+
+    pub fn tag_size() -> i32 {
+        3
+    }
 }
 
 
@@ -117,7 +154,7 @@ impl From<VirtualRegister> for Value {
 
 impl From<usize> for Value {
     fn from(val: usize) -> Self {
-        Value::UnSignedConstant(val)
+        Value::SignedConstant(val as isize)
     }
 }
 
@@ -142,6 +179,10 @@ enum Instruction {
     Jump(Label),
     Ret(Value),
     Breakpoint,
+    Compare(Value, Value, Value, Condition),
+    Tag(Value, Value, Value),
+    LoadTrue(Value),
+    LoadFalse(Value),
     LoadConstant(Value, Value),
     Call(Value, Value, Vec<Value>),
     HeapLoad(Value, Value),
@@ -172,6 +213,11 @@ impl<T> Into<Value> for *const T {
     }
 }
 
+macro_rules! get_register {
+    ($x:expr) => {
+        vec![get_registers!($x)].into_iter().flatten().collect()
+    }
+}
 macro_rules! get_registers {
     ($x:expr) => {
         if let Ok(register) = $x.try_into() {
@@ -241,11 +287,23 @@ impl Instruction {
             Instruction::Jump(_) => {
                 vec![]
             }
+            Instruction::Compare(a, b, c, _) => {
+                get_registers!(a, b, c)
+            }
+            Instruction::Tag(a, b, c) => {
+                get_registers!(a, b, c)
+            }
             Instruction::HeapLoad(a, b) => {
                 get_registers!(a, b)
             }
             Instruction::HeapStore(a, b) => {
                 get_registers!(a, b)
+            }
+            Instruction::LoadTrue(a) => {
+                get_register!(a)
+            }
+            Instruction::LoadFalse(a) => {
+                get_register!(a)
             }
         }
     }
@@ -398,6 +456,17 @@ impl Ir {
         Value::Register(register)
     }
 
+    pub fn compare(&mut self, a: Value, b: Value, condition: Condition) -> Value {
+        let register = self.volatile_register();
+        let a = self.assign_new(a);
+        let b = self.assign_new(b);
+        let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
+        self.instructions
+            .push(Instruction::Compare(register.into(), a.into(), b.into(), condition));
+        self.instructions.push(Instruction::Tag(register.into(), register.into(), tag.into()));
+        Value::Register(register)
+    }
+
     pub fn jump_if<A, B>(&mut self, label: Label, condition: Condition, a: A, b: B)
     where
         A: Into<Value>,
@@ -435,6 +504,8 @@ impl Ir {
         self.instructions.push(Instruction::Ret(val));
         val
     }
+
+
 
     pub fn label(&mut self, arg: &str) -> Label {
         let label_index = self.labels.len();
@@ -536,7 +607,15 @@ impl Ir {
                     let b = alloc.allocate_register(index, b, &mut lang);
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
-                    lang.sub(dest, a, b)
+                    // TODO: I should instead use another register. But I can't mutate
+                    // things here. The other option is to put this in the Ir.
+                    // Which might be a good idea, but I don't love it.
+                    lang.shift_right(a, a, BuiltInTypes::tag_size());
+                    lang.shift_right(b, b, BuiltInTypes::tag_size());
+                    lang.sub(dest, a, b);
+                    lang.shift_left(dest, dest, BuiltInTypes::tag_size());
+                    lang.shift_left(a, a, BuiltInTypes::tag_size());
+                    lang.shift_left(b, b, BuiltInTypes::tag_size());
                 }
                 Instruction::Add(dest, a, b) => {
                     let a = a.try_into().unwrap();
@@ -554,7 +633,12 @@ impl Ir {
                     let b = alloc.allocate_register(index, b, &mut lang);
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
-                    lang.mul(dest, a, b)
+                    lang.shift_right(a, a, BuiltInTypes::tag_size());
+                    lang.shift_right(b, b, BuiltInTypes::tag_size());
+                    lang.mul(dest, a, b);
+                    lang.shift_left(dest, dest, BuiltInTypes::tag_size());
+                    lang.shift_left(a, a, BuiltInTypes::tag_size());
+                    lang.shift_left(b, b, BuiltInTypes::tag_size());
                 }
                 Instruction::Div(dest, a, b) => {
                     let a = a.try_into().unwrap();
@@ -563,7 +647,12 @@ impl Ir {
                     let b = alloc.allocate_register(index, b, &mut lang);
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
-                    lang.div(dest, a, b)
+                    lang.shift_right(a, a, BuiltInTypes::tag_size());
+                    lang.shift_right(b, b, BuiltInTypes::tag_size());
+                    lang.div(dest, a, b);
+                    lang.shift_left(dest, dest, BuiltInTypes::tag_size());
+                    lang.shift_left(a, a, BuiltInTypes::tag_size());
+                    lang.shift_left(b, b, BuiltInTypes::tag_size());
                 }
                 Instruction::Assign(dest, val) => match val {
                     Value::Register(virt_reg) => {
@@ -571,13 +660,10 @@ impl Ir {
                         let dest = alloc.allocate_register(index, *dest, &mut lang);
                         lang.mov_reg(dest, register);
                     }
-                    Value::UnSignedConstant(i) => {
-                        let register = alloc.allocate_register(index, *dest, &mut lang);
-                        lang.mov_64(register, *i as isize);
-                    }
                     Value::SignedConstant(i) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
-                        lang.mov_64(register, *i);
+                        let tagged = BuiltInTypes::construct_int(*i);
+                        lang.mov_64(register, tagged);
                     }
                     Value::StringConstantId(id) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
@@ -596,6 +682,18 @@ impl Ir {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
                         lang.mov_64(register, *ptr as isize);
                     }
+                    Value::RawValue(value) => {
+                        let register = alloc.allocate_register(index, *dest, &mut lang);
+                        lang.mov_64(register, *value as isize);
+                    }
+                    Value::True => {
+                        let register = alloc.allocate_register(index, *dest, &mut lang);
+                        lang.mov_64(register, BuiltInTypes::construct_boolean(true));
+                    }
+                    Value::False => {
+                        let register = alloc.allocate_register(index, *dest, &mut lang);
+                        lang.mov_64(register, BuiltInTypes::construct_boolean(false));
+                    }
                 },
                 Instruction::LoadConstant(dest, val) => {
                     let val = val.try_into().unwrap();
@@ -603,6 +701,16 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
                     lang.mov_reg(dest, val);
+                }
+                Instruction::LoadTrue(dest) => {
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.mov_64(dest, BuiltInTypes::construct_boolean(true));
+                }
+                Instruction::LoadFalse(dest) => {
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.mov_64(dest, BuiltInTypes::construct_boolean(false));
                 }
                 Instruction::Recurse(dest, args) => {
                     let allocated_registers = lang.allocated_volatile_registers.clone();
@@ -655,6 +763,24 @@ impl Ir {
                         lang.load_from_stack(*register, index as i32 + 2)
                     }
                 }
+                Instruction::Compare(dest, a, b, condition) => {
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, &mut lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, &mut lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.compare_bool(*condition, dest, a, b);
+                }
+                Instruction::Tag(destination, a, b) => {
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, &mut lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, &mut lang);
+                    let dest = destination.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.tag_value(dest, a, b);
+                }
                 Instruction::JumpIf(label, condition, a, b) => {
                     let a = a.try_into().unwrap();
                     let a = alloc.allocate_register(index, a, &mut lang);
@@ -685,10 +811,6 @@ impl Ir {
                             lang.jump(exit);
                         }
                     }
-                    Value::UnSignedConstant(i) => {
-                        lang.mov_64(lang.ret_reg(), *i as isize);
-                        lang.jump(exit);
-                    }
                     Value::SignedConstant(i) => {
                         lang.mov_64(lang.ret_reg(), *i);
                         lang.jump(exit);
@@ -704,6 +826,17 @@ impl Ir {
                     Value::Pointer(ptr) => {
                         lang.mov_64(lang.ret_reg(), *ptr as isize);
                         lang.jump(exit);
+                    }
+                    Value::True => {
+                        lang.mov_64(lang.ret_reg(), BuiltInTypes::construct_boolean(true));
+                        lang.jump(exit);
+                    }
+                    Value::False => {
+                        lang.mov_64(lang.ret_reg(), BuiltInTypes::construct_boolean(false));
+                        lang.jump(exit);
+                    }
+                    Value::RawValue(value) => {
+                        panic!("Should we be returing a raw value?")
                     }
                 },
                 Instruction::HeapLoad(dest, ptr) => {

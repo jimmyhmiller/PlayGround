@@ -5,7 +5,7 @@ use asm::arm::{
 
 use std::collections::HashMap;
 
-use crate::common::Label;
+use crate::{common::Label, ir::{Condition, BuiltInTypes}};
 
 pub fn _print_u32_hex_le(value: u32) {
     let bytes = value.to_le_bytes();
@@ -91,6 +91,29 @@ pub fn div(destination: Register, a: Register, b: Register) -> ArmAsm {
     }
 }
 
+fn shift_right(destination: Register, a: Register, b: i32) -> ArmAsm {
+    ArmAsm::LsrUbfm {
+        sf: destination.sf(),
+        rn: a,
+        rd: destination,
+        n: destination.sf(),
+        immr: b,
+        imms: 0b111111,
+    }
+}
+
+fn shift_left(destination: Register, a: Register, b: i32) -> ArmAsm {
+    let immr = 64 - b;
+    ArmAsm::LslUbfm {
+        sf: destination.sf(),
+        rn: a,
+        rd: destination,
+        n: destination.sf(),
+        immr,
+        imms: immr - 1,
+    }
+}
+
 pub fn ret() -> ArmAsm {
     ArmAsm::Ret {
         rn: Register {
@@ -98,6 +121,39 @@ pub fn ret() -> ArmAsm {
             index: 30,
         },
     }
+}
+
+pub fn or(destination: Register, a: Register, b: Register) -> ArmAsm {
+    ArmAsm::OrrLogShift {
+        sf: destination.sf(),
+        shift: 0,
+        rm: b,
+        rn: a,
+        rd: destination,
+        imm6: 0
+    }
+}
+
+#[allow(unused)]
+pub fn and_imm(destination: Register, a: Register, b: i32) -> ArmAsm {
+    assert!(b == 1);
+    // Too lazy to understand this. But great explanation here
+    // https://kddnewton.com/2022/08/11/aarch64-bitmask-immediates.html
+    ArmAsm::AndLogImm {
+        sf: destination.sf(),
+        n: 1,
+        immr: 0,
+        imms: 0,
+        rn: a,
+        rd: destination,
+    }
+}
+
+pub fn tag_value(destination: Register, value: Register, tag: Register) -> Vec<ArmAsm> {
+    vec![
+        shift_left(destination, value, BuiltInTypes::tag_size()),
+        or(destination, destination, tag),
+    ]
 }
 
 pub fn compare(a: Register, b: Register) -> ArmAsm {
@@ -108,6 +164,48 @@ pub fn compare(a: Register, b: Register) -> ArmAsm {
         imm6: 0,
         rn: a,
     }
+}
+
+impl Condition {
+    fn to_arm_condition(&self) -> i32 {
+        match self {
+            Condition::Equal => 0,
+            Condition::NotEqual => 1,
+            Condition::GreaterThanOrEqual => 10,
+            Condition::LessThan => 11,
+            Condition::GreaterThan => 12,
+            Condition::LessThanOrEqual => 13,
+        }
+    }
+    fn to_arm_inverted_condition(&self) -> i32 {
+        match self {
+            Condition::Equal => 1,
+            Condition::NotEqual => 0,
+            Condition::GreaterThanOrEqual => 11,
+            Condition::LessThan => 10,
+            Condition::GreaterThan => 13,
+            Condition::LessThanOrEqual => 12,
+        }
+    }
+}
+
+pub fn compare_bool(condition: Condition, destination: Register, a: Register, b: Register) -> Vec<ArmAsm> {
+    vec![
+        ArmAsm::SubsAddsubShift {
+            sf: destination.sf(),
+            shift: 0,
+            rm: a,
+            imm6: 0,
+            rn: b,
+            rd: destination,
+        },
+        ArmAsm::CsetCsinc { 
+            sf: destination.sf(), 
+            // For some reason these conditions are inverted
+            cond: condition.to_arm_inverted_condition(),
+            rd: destination, 
+        }
+    ]
 }
 
 pub fn jump_equal(destination: u32) -> ArmAsm {
@@ -310,11 +408,23 @@ impl LowLevelArm {
     pub fn div(&mut self, destination: Register, a: Register, b: Register) {
         self.instructions.push(div(destination, a, b));
     }
+    pub fn shift_right(&mut self, destination: Register, a: Register, b: i32) {
+        self.instructions.push(shift_right(destination, a, b));
+    }
+    pub fn shift_left(&mut self, destination: Register, a: Register, b: i32) {
+        self.instructions.push(shift_left(destination, a, b));
+    }
     pub fn ret(&mut self) {
         self.instructions.push(ret());
     }
     pub fn compare(&mut self, a: Register, b: Register) {
         self.instructions.push(compare(a, b));
+    }
+    pub fn compare_bool(&mut self, condition: Condition, dest: Register, a: Register, b: Register) {
+        self.instructions.extend(compare_bool(condition, dest, a, b));
+    }
+    pub fn tag_value(&mut self, destination: Register, value: Register, tag: Register) {
+        self.instructions.extend(tag_value(destination, value, tag));
     }
     pub fn jump_equal(&mut self, destination: Label) {
         self.instructions.push(jump_equal(destination.index as u32));
@@ -453,7 +563,7 @@ impl LowLevelArm {
     }
 
     pub fn volatile_register(&mut self) -> Register {
-        let next_register = self.free_volatile_registers.pop().unwrap();
+        let next_register = self.free_volatile_registers.pop().expect("No free registers!");
         self.allocated_volatile_registers.push(next_register);
         next_register
     }

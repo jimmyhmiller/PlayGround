@@ -227,7 +227,7 @@ enum Bits {
     Empty(u8),
     AllNums(String),
     HasVariable(Vec<String>),
-    Constraint(String),
+    Constraint(Vec<String>),
     Unknown(String),
 }
 
@@ -237,7 +237,7 @@ impl Bits {
             Bits::Empty(width) => Some("0".repeat(*width as usize)),
             Bits::AllNums(nums) => Some(nums.to_string()),
             Bits::HasVariable(bits) => Some("0".repeat(bits.len())),
-            Bits::Constraint(_) => None,
+            Bits::Constraint(bits) => Some("0".repeat(bits.len())),
             Bits::Unknown(_) => None,
         }
     }
@@ -247,7 +247,7 @@ impl Bits {
     }
 
     fn is_variable(&self) -> bool {
-        matches!(self, Bits::HasVariable(_))
+        matches!(self, Bits::HasVariable(_) | Bits::Constraint(_))
     }
 }
 
@@ -302,7 +302,11 @@ impl ArmBox {
         let bits = if bits.is_empty() {
             Bits::Empty(width)
         } else if bits.iter().any(|x| x.contains("!=")) {
-            Bits::Constraint(bits.join(""))
+            let bits = node.attribute("constraint").unwrap().to_string();
+            let bits = bits.trim();
+            let bits = bits.replace("!= ", "");
+            let bits = bits.chars().map(|x| x.to_string()).collect::<Vec<_>>();
+            Bits::Constraint(bits)
         } else if bits.iter().any(|x| x.chars().any(|y| y.is_alphabetic())) {
             Bits::HasVariable(bits)
         } else if bits.iter().all(|x| x.chars().all(|y| y.is_numeric())) {
@@ -633,7 +637,7 @@ fn get_last_modified_date(file_path: &str) -> Result<SystemTime, std::io::Error>
     metadata.modified()
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn main() -> Result<(), Box<dyn Error>> {
     if get_last_modified_date("build.rs")? > get_last_modified_date("src/arm.rs")? {
         generate_template()?;
     }
