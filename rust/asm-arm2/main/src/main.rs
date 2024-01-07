@@ -78,7 +78,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // println!("{:#?}", hello_ast);
 
     let mut hello_ir = hello_ast.compile(&mut compiler);
-    println!("{:#?}", hello_ir);
+    // println!("{:#?}", hello_ir);
     let mut hello = hello_ir.compile();
 
     // let hello2_ast = ast::hello_world2();

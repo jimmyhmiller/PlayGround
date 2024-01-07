@@ -1,11 +1,14 @@
 use asm::arm::{
     ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector,
-    SP, X0, X19, X20, X21, X22, X29, X3, X30, ZERO_REGISTER, X23, X24,
+    SP, X0, X19, X20, X21, X22, X23, X24, X29, X3, X30, ZERO_REGISTER,
 };
 
 use std::collections::HashMap;
 
-use crate::{common::Label, ir::{Condition, BuiltInTypes}};
+use crate::{
+    common::Label,
+    ir::{BuiltInTypes, Condition},
+};
 
 pub fn _print_u32_hex_le(value: u32) {
     let bytes = value.to_le_bytes();
@@ -130,7 +133,7 @@ pub fn or(destination: Register, a: Register, b: Register) -> ArmAsm {
         rm: b,
         rn: a,
         rd: destination,
-        imm6: 0
+        imm6: 0,
     }
 }
 
@@ -190,7 +193,12 @@ impl Condition {
     }
 }
 
-pub fn compare_bool(condition: Condition, destination: Register, a: Register, b: Register) -> Vec<ArmAsm> {
+pub fn compare_bool(
+    condition: Condition,
+    destination: Register,
+    a: Register,
+    b: Register,
+) -> Vec<ArmAsm> {
     vec![
         ArmAsm::SubsAddsubShift {
             sf: destination.sf(),
@@ -200,12 +208,12 @@ pub fn compare_bool(condition: Condition, destination: Register, a: Register, b:
             rn: b,
             rd: destination,
         },
-        ArmAsm::CsetCsinc { 
-            sf: destination.sf(), 
+        ArmAsm::CsetCsinc {
+            sf: destination.sf(),
             // For some reason these conditions are inverted
             cond: condition.to_arm_inverted_condition(),
-            rd: destination, 
-        }
+            rd: destination,
+        },
     ]
 }
 
@@ -267,7 +275,7 @@ pub fn store_pair(reg1: Register, reg2: Register, destination: Register, offset:
     ArmAsm::StpGen {
         // TODO: Make this better/document this is about 64 bit or not
         opc: 0b10,
-        class_selector: StpGenSelector::PreIndex,
+        class_selector: StpGenSelector::SignedOffset,
         imm7: offset,
         rt2: reg2,
         rt: reg1,
@@ -278,7 +286,7 @@ pub fn store_pair(reg1: Register, reg2: Register, destination: Register, offset:
 pub fn load_pair(reg1: Register, reg2: Register, destination: Register, offset: i32) -> ArmAsm {
     ArmAsm::LdpGen {
         opc: 0b10,
-        class_selector: LdpGenSelector::PostIndex,
+        class_selector: LdpGenSelector::SignedOffset,
         // TODO: Truncate
         imm7: offset,
         rt2: reg2,
@@ -352,14 +360,15 @@ impl LowLevelArm {
 
     pub fn prelude(&mut self, offset: i32) {
         // self.breakpoint();
-        self.move_stack_pointer(-self.max_locals);
+        // 0 is a placeholder we will patch later
+        self.sub_stack_pointer(-self.max_locals);
         self.store_pair(X29, X30, SP, offset);
         self.mov_reg(X29, SP);
     }
 
     pub fn epilogue(&mut self, offset: i32) {
         self.load_pair(X29, X30, SP, offset);
-        self.move_stack_pointer(self.max_locals);
+        self.add_stack_pointer(self.max_locals);
     }
 
     pub fn get_label_index(&mut self) -> usize {
@@ -427,7 +436,8 @@ impl LowLevelArm {
         self.instructions.push(compare(a, b));
     }
     pub fn compare_bool(&mut self, condition: Condition, dest: Register, a: Register, b: Register) {
-        self.instructions.extend(compare_bool(condition, dest, a, b));
+        self.instructions
+            .extend(compare_bool(condition, dest, a, b));
     }
     pub fn tag_value(&mut self, destination: Register, value: Register, tag: Register) {
         self.instructions.extend(tag_value(destination, value, tag));
@@ -459,21 +469,7 @@ impl LowLevelArm {
         self.instructions.push(jump(destination.index as u32));
     }
 
-    pub fn push_to_stack(&mut self, reg: Register, offset: i32) {
-        // TODO: fix this + 2
-        self.increment_stack_size(1);
-        self.instructions.push(ArmAsm::StrImmGen {
-            size: 0b11,
-            imm9: 0, // not used
-            rn: SP,
-            rt: reg,
-            imm12: offset + 2,
-            class_selector: StrImmGenSelector::UnsignedOffset,
-        });
-    }
-
     pub fn store_on_stack(&mut self, reg: Register, offset: i32) {
-        self.increment_stack_size(1);
         self.instructions.push(ArmAsm::StrImmGen {
             size: 0b11,
             imm9: 0, // not used
@@ -482,6 +478,14 @@ impl LowLevelArm {
             imm12: offset,
             class_selector: StrImmGenSelector::UnsignedOffset,
         });
+    }
+
+    pub fn push_to_stack(&mut self, reg: Register, offset: i32) {
+        self.increment_stack_size(1);
+        self.store_on_stack(reg, offset + self.max_locals)
+    }
+    pub fn store_local(&mut self, value: Register, offset: i32) {
+        self.store_on_stack(value, offset);
     }
 
     pub fn load_from_stack(&mut self, destination: Register, offset: i32) {
@@ -498,14 +502,11 @@ impl LowLevelArm {
 
     pub fn pop_from_stack(&mut self, reg: Register, offset: i32) {
         self.increment_stack_size(-1);
-        self.instructions.push(ArmAsm::LdrImmGen {
-            size: 0b11,
-            imm9: 0, // not used
-            rn: SP,
-            rt: reg,
-            imm12: offset + 2,
-            class_selector: LdrImmGenSelector::UnsignedOffset,
-        });
+        self.load_from_stack(reg, offset + self.max_locals)
+    }
+
+    pub fn load_local(&mut self, destination: Register, offset: i32) {
+        self.load_from_stack(destination, offset);
     }
 
     pub fn load_from_heap(&mut self, source: Register, destination: Register, offset: i32) {
@@ -594,7 +595,10 @@ impl LowLevelArm {
     }
 
     pub fn volatile_register(&mut self) -> Register {
-        let next_register = self.free_volatile_registers.pop().expect("No free registers!");
+        let next_register = self
+            .free_volatile_registers
+            .pop()
+            .expect("No free registers!");
         self.allocated_volatile_registers.push(next_register);
         next_register
     }
@@ -637,7 +641,7 @@ impl LowLevelArm {
     }
 
     pub fn patch_prelude_and_epilogue(&mut self) {
-        let max = self.max_stack_size as u64;
+        let max = self.max_stack_size as u64 + self.max_locals as u64;
         let max = max.next_power_of_two();
         let max = max as i32;
         // Find the first store pair and patch it based
@@ -648,7 +652,29 @@ impl LowLevelArm {
             .position(|instruction| matches!(instruction, ArmAsm::StpGen { .. }))
             .map(|i| &mut self.instructions[i])
         {
-            *imm7 = -max;
+            *imm7 = max;
+        } else {
+            unreachable!();
+        }
+
+        if let Some(ArmAsm::SubAddsubImm { imm12, .. }) = self
+            .instructions
+            .iter_mut()
+            .position(|instruction| matches!(instruction, ArmAsm::SubAddsubImm { .. }))
+            .map(|i| &mut self.instructions[i])
+        {
+            *imm12 = (max + 2) * 8;
+        } else {
+            unreachable!();
+        }
+
+        if let Some(ArmAsm::AddAddsubImm { imm12, .. }) = self
+            .instructions
+            .iter_mut()
+            .rposition(|instruction| matches!(instruction, ArmAsm::AddAddsubImm { .. }))
+            .map(|i| &mut self.instructions[i])
+        {
+            *imm12 = (max + 2) * 8;
         } else {
             unreachable!();
         }
@@ -722,25 +748,28 @@ impl LowLevelArm {
         result
     }
 
-    fn move_stack_pointer(&mut self, max_locals: i32) {
-        if max_locals < 0 {
-            self.instructions.push(ArmAsm::SubAddsubImm {
-                sf: SP.sf(),
-                rn: SP,
-                rd: SP,
-                imm12: -max_locals * 8,
-                sh: 0,
-            });
-        } else { 
-            self.instructions.push(ArmAsm::AddAddsubImm {
-                sf: SP.sf(),
-                rn: SP,
-                rd: SP,
-                imm12: max_locals * 8,
-                sh: 0,
-            });
-        }
-       
+    fn add_stack_pointer(&mut self, bytes: i32) {
+        self.instructions.push(ArmAsm::AddAddsubImm {
+            sf: SP.sf(),
+            rn: SP,
+            rd: SP,
+            imm12: bytes * 8,
+            sh: 0,
+        });
+    }
+
+    fn sub_stack_pointer(&mut self, bytes: i32) {
+        self.instructions.push(ArmAsm::SubAddsubImm {
+            sf: SP.sf(),
+            rn: SP,
+            rd: SP,
+            imm12: bytes * 8,
+            sh: 0,
+        });
+    }
+
+    pub fn set_max_locals(&mut self, num_locals: usize) {
+        self.max_locals = num_locals as i32;
     }
 }
 

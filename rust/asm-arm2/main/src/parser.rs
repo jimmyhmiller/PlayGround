@@ -22,6 +22,7 @@ pub enum Token {
     LessThanOrEqual,
     LessThan,
     Equal,
+    EqualEqual,
     NotEqual,
     GreaterThan,
     GreaterThanOrEqual,
@@ -31,6 +32,7 @@ pub enum Token {
     Div,
     True,
     False,
+    Let,
     Comment((usize, usize)),
     Spaces((usize, usize)),
     String((usize, usize)),
@@ -46,7 +48,7 @@ impl Token {
         match self {
             Token::LessThanOrEqual
             | Token::LessThan
-            | Token::Equal
+            | Token::EqualEqual
             | Token::NotEqual
             | Token::GreaterThan
             | Token::GreaterThanOrEqual
@@ -217,7 +219,8 @@ impl<'a> Tokenizer {
             b"else" => Token::Else,
             b"<=" => Token::LessThanOrEqual,
             b"<" => Token::LessThan,
-            b"==" => Token::Equal,
+            b"=" => Token::Equal,
+            b"==" => Token::EqualEqual,
             b"!=" => Token::NotEqual,
             b">" => Token::GreaterThan,
             b">=" => Token::GreaterThanOrEqual,
@@ -227,6 +230,7 @@ impl<'a> Tokenizer {
             b"/" => Token::Div,
             b"true" => Token::True,
             b"false" => Token::False,
+            b"let" => Token::Let,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -392,7 +396,7 @@ impl Parser {
         match self.current_token() {
             Token::LessThanOrEqual
             | Token::LessThan
-            | Token::Equal
+            | Token::EqualEqual
             | Token::NotEqual
             | Token::GreaterThan
             | Token::GreaterThanOrEqual => (10, Associativity::Left),
@@ -480,6 +484,22 @@ impl Parser {
             Token::False => {
                 self.consume();
                 Some(Ast::False)
+            }
+            Token::Let => {
+                self.consume();
+                self.to_next_non_whitespace();
+                let name = match self.current_token() {
+                    Token::Atom((start, end)) => {
+                        // Gross
+                        String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+                    }
+                    _ => panic!("Expected variable name"),
+                };
+                self.to_next_non_whitespace();
+                self.expect_equal();
+                self.to_next_non_whitespace();
+                let value = self.parse_expression(0).unwrap();
+                Some(Ast::Let(Box::new(Ast::Variable(name)), Box::new(value)))
             }
             Token::NewLine | Token::Spaces(_) | Token::Comment(_) => {
                 self.consume();
@@ -718,7 +738,7 @@ impl Parser {
                 left: Box::new(lhs),
                 right: Box::new(rhs),
             },
-            Token::Equal => Ast::Condition {
+            Token::EqualEqual => Ast::Condition {
                 operator: crate::ir::Condition::Equal,
                 left: Box::new(lhs),
                 right: Box::new(rhs),
@@ -756,6 +776,19 @@ impl Parser {
             },
             _ => panic!("Not a binary operator"),
         }
+    }
+
+    fn expect_equal(&mut self) {
+        self.skip_whitespace();
+        if self.is_equal() {
+            self.consume();
+        } else {
+            panic!("Expected equal {:?}", self.get_token_repr());
+        }
+    }
+
+    fn is_equal(&self) -> bool {
+        self.current_token() == Token::Equal
     }
 }
 

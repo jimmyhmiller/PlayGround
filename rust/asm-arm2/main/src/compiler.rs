@@ -163,7 +163,6 @@ impl Compiler {
         self.add_jump_table_entry(index, offset)?;
         Ok(index)
     }
-
     pub fn overwrite_function(&mut self, index: usize, code: &[u8]) -> Result<(), Box<dyn Error>> {
         let offset = self.add_code(code)?;
         let function = &mut self.functions[index];
