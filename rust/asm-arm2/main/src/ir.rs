@@ -106,33 +106,6 @@ impl BuiltInTypes {
         }
     }
 
-    pub fn print(value: usize) {
-        let tag = BuiltInTypes::get_kind(value);
-        match tag {
-            BuiltInTypes::Int => {
-                let value = BuiltInTypes::untag(value);
-                println!("{}", value);
-            },
-            BuiltInTypes::Float => todo!(),
-            BuiltInTypes::String => {
-                let value = BuiltInTypes::untag(value);
-                let string = unsafe { &*(value as *const StringValue) };
-                println!("{}", string.str);
-            },
-            BuiltInTypes::Bool => {
-                let value = BuiltInTypes::untag(value);
-                if value == 0 {
-                    println!("false");
-                } else {
-                    println!("true");
-                }
-            },
-            BuiltInTypes::Function => todo!(),
-            BuiltInTypes::Struct => todo!(),
-            BuiltInTypes::Array => todo!(),
-        }
-    }
-
     pub fn tag_size() -> i32 {
         3
     }
@@ -162,8 +135,8 @@ impl From<usize> for Value {
 // could be confusing with lifetimes and such
 #[derive(Debug, Clone)]
 #[repr(C)]
-struct StringValue {
-    str: String,
+pub struct StringValue {
+    pub str: String,
 }
 
 #[derive(Debug, Clone)]
@@ -190,12 +163,12 @@ enum Instruction {
 }
 
 impl TryInto<VirtualRegister> for &Value {
-    type Error = ();
+    type Error = Value;
 
     fn try_into(self) -> Result<VirtualRegister, Self::Error> {
         match self {
             Value::Register(register) => Ok(*register),
-            _ => Err(()),
+            _ => Err(self.clone()),
         }
     }
 }
@@ -670,8 +643,8 @@ impl Ir {
                         let string = self.string_constants.get(*id).unwrap();
                         let ptr = string as *const _ as u64;
                         // tag the pointer as a string with the pattern 010 in the least significant bits
-                        let ptr = ptr | 0b010;
-                        lang.mov_64(register, ptr as isize);
+                        let tagged = BuiltInTypes::String.tag(ptr as isize);
+                        lang.mov_64(register, tagged as isize);
                     }
                     Value::Function(id) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);

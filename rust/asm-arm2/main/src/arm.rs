@@ -1,6 +1,6 @@
 use asm::arm::{
     ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector,
-    SP, X0, X19, X20, X21, X22, X29, X3, X30, ZERO_REGISTER,
+    SP, X0, X19, X20, X21, X22, X29, X3, X30, ZERO_REGISTER, X23, X24,
 };
 
 use std::collections::HashMap;
@@ -327,7 +327,7 @@ pub const RECURSE_PLACEHOLDER_REGISTER: Register = Register {
 #[allow(unused)]
 impl LowLevelArm {
     pub fn new() -> Self {
-        let canonical_volatile_registers = vec![X22, X21, X20, X19];
+        let canonical_volatile_registers = vec![X24, X23, X22, X21, X20, X19];
         LowLevelArm {
             instructions: vec![],
             label_locations: HashMap::new(),

@@ -666,7 +666,7 @@ impl Parser {
 
     fn is_whitespace(&self) -> bool {
         match self.current_token() {
-            Token::Spaces(_) | Token::NewLine | Token::Comment(_) => true,
+            Token::Spaces(_) | Token::NewLine | Token::Comment(_) | Token::Comma => true,
             _ => false,
         }
     }
