@@ -193,7 +193,12 @@ impl<'a> AstCompiler<'a> {
                 }
                 let mut args: Vec<Value> = args 
                     .iter()
-                    .map(|arg| self.compile_to_ir(&Box::new(arg.clone())))
+                    .map(|arg| {
+                        let value = self.compile_to_ir(&Box::new(arg.clone()));
+                        let reg = self.ir.volatile_register();
+                        self.ir.assign(reg, value);
+                        reg.into()
+                    })
                     .collect();
                 let function = self.compiler.reserve_function(name.as_str()).unwrap();
                 

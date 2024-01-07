@@ -1,9 +1,9 @@
 use core::fmt;
-use std::error::Error;
+use std::{error::Error, mem};
 
 use mmap_rs::{Mmap, MmapOptions};
 
-use crate::ir::BuiltInTypes;
+use crate::ir::{BuiltInTypes, StringValue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
@@ -11,6 +11,13 @@ pub struct Function {
     offset: usize,
     is_foreign: bool,
     pub is_builtin: bool,
+}
+
+
+#[derive(Debug)]
+struct HeapObject<'a> {
+    size: usize,
+    data: &'a [u8],
 }
 
 pub struct Compiler {
@@ -22,7 +29,9 @@ pub struct Compiler {
     jump_table_offset: usize,
     functions: Vec<Function>,
     #[allow(dead_code)]
+    // Need much better system obviously
     heap: Option<Mmap>,
+    heap_offset: usize,
 }
 
 impl fmt::Debug for Compiler {
@@ -60,7 +69,25 @@ impl Compiler {
                     .map()
                     .unwrap(),
             ),
+            heap_offset: 0,
         }
+    }
+
+    pub fn allocate(&mut self, size: usize) -> Result<usize, Box<dyn Error>> {
+        let memory = self.heap.take();
+        let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
+        let buffer = &mut memory[self.heap_offset..];
+        // write the size of the object to the first 8 bytes
+        for (index, byte) in size.to_le_bytes().iter().enumerate() {
+            buffer[index] = *byte;
+        }
+        self.heap_offset += size + 8;
+        let pointer = buffer.as_ptr() as usize;
+        let pointer = BuiltInTypes::Array.tag(pointer as isize) as usize;
+        self.heap = Some(memory.make_read_only().unwrap_or_else(|(_map, e)| {
+            panic!("Failed to make mmap executable: {}", e);
+        }));
+        Ok(pointer)
     }
 
     pub fn add_foreign_function(
@@ -247,5 +274,109 @@ impl Compiler {
         let memory = &self.code_memory.as_ref().unwrap()[start..];
         let f: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(memory.as_ref().as_ptr()) };
         Ok(f(arg1, arg2))
+    }
+
+    pub fn print(&self, value: usize) {
+        let tag = BuiltInTypes::get_kind(value);
+        match tag {
+            BuiltInTypes::Int => {
+                let value = BuiltInTypes::untag(value);
+                println!("{}", value);
+            },
+            BuiltInTypes::Float => todo!(),
+            BuiltInTypes::String => {
+                let value = BuiltInTypes::untag(value);
+                let string = unsafe { &*(value as *const StringValue) };
+                println!("{}", string.str);
+            },
+            BuiltInTypes::Bool => {
+                let value = BuiltInTypes::untag(value);
+                if value == 0 {
+                    println!("false");
+                } else {
+                    println!("true");
+                }
+            },
+            BuiltInTypes::Function => todo!(),
+            BuiltInTypes::Struct => todo!(),
+            BuiltInTypes::Array => {
+                unsafe {
+                    let value = BuiltInTypes::untag(value);
+                    let pointer = value as *const u8;
+                    // get first 8 bytes as size
+                    let size = *(pointer as *const usize);
+                    let pointer = pointer.add(8);
+                    let data = std::slice::from_raw_parts(pointer, size);
+                    let heap_object = HeapObject {
+                        size,
+                        data,
+                    };
+
+                    println!("{:?}", heap_object);
+
+                }
+                // print!("[");
+                // for i in 0..array.size {
+                //     let value = array.data[i];
+                //     self.print(value as usize);
+                //     if i != array.size - 1 {
+                //         print!(", ");
+                //     }
+                // }
+                // println!("]");
+            },
+        }
+    }
+
+    pub fn array_store(&mut self, array: usize, index: usize, value: usize) -> Result<usize, Box<dyn Error>> {
+        unsafe {
+            let tag = BuiltInTypes::get_kind(array);
+            match tag {
+                BuiltInTypes::Array => {
+                    let heap = self.heap.take();
+                    let heap = heap.unwrap().make_mut().map_err(|(_, e)| e)?;
+                    let array = BuiltInTypes::untag(array);
+                    let pointer = array as *mut u8;
+                    // get first 8 bytes as size
+                    let size = *(pointer as *const usize);
+                    let pointer = pointer.add(8);
+                    let data = std::slice::from_raw_parts_mut(pointer, size);
+                    // store all 8 bytes of value in data
+                    for (offset, byte) in value.to_le_bytes().iter().enumerate() {
+                        data[index + offset] = *byte;
+                    }
+                    let mem = heap.make_read_only().unwrap_or_else(|(_map, e)| {
+                        panic!("Failed to make mmap executable: {}", e);
+                    });
+
+                    self.heap = Some(mem);
+                    Ok(BuiltInTypes::Array.tag(array as isize) as usize)
+                },
+                _ => panic!("Not an array"),
+            }
+        }
+    }
+
+    pub(crate) fn array_get(&mut self, array: usize, index: usize) -> Result<usize, Box<dyn Error>> {
+        unsafe {
+            let tag = BuiltInTypes::get_kind(array);
+            match tag {
+                BuiltInTypes::Array => {
+                    let index = BuiltInTypes::untag(index);
+                    let array = BuiltInTypes::untag(array);
+                    let pointer = array as *mut u8;
+                    // get first 8 bytes as size
+                    let size = *(pointer as *const usize);
+                    let pointer = pointer.add(8);
+                    let data = std::slice::from_raw_parts_mut(pointer, size);
+                    // get next 8 bytes as usize
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(&data[index * 8..index * 8 + 8]);
+                    let data = usize::from_le_bytes(bytes);
+                    Ok(data)
+                },
+                _ => panic!("Not an array"),
+            }
+        }
     }
 }
