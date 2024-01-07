@@ -96,7 +96,7 @@ impl<'a> AstCompiler<'a> {
                 last
             }
             Ast::Function { name, args, body } => {
-                // self.ir.breakpoint();
+                self.ir.breakpoint();
                 assert!(self.name.is_empty());
                 // self.ir.breakpoint()
                 self.name = name.clone();
@@ -195,9 +195,16 @@ impl<'a> AstCompiler<'a> {
                     .iter()
                     .map(|arg| {
                         let value = self.compile_to_ir(&Box::new(arg.clone()));
-                        let reg = self.ir.volatile_register();
-                        self.ir.assign(reg, value);
-                        reg.into()
+                        match value {
+                            Value::Register(_) => {
+                                value
+                            },
+                            _ => {
+                                let reg = self.ir.volatile_register();
+                                self.ir.assign(reg, value);
+                                reg.into()
+                            }
+                        }
                     })
                     .collect();
                 let function = self.compiler.reserve_function(name.as_str()).unwrap();

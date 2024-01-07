@@ -70,6 +70,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // println!("{:#?}", hello_ast);
 
     let mut hello_ir = hello_ast.compile(&mut compiler);
+    println!("{:#?}", hello_ir);
     let mut hello = hello_ir.compile();
 
     // let hello2_ast = ast::hello_world2();
@@ -110,3 +111,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 // Think about how to implementing interesting
 // data structures in the language itself
 // Consider checked and uncheck stuff
+
+
+// There is clearly a bug going on with my lifetimes
+// of registers.
+// I had to add a bunch of registers that I shouldn't need from the looks
+// of things. But I need to look closer
