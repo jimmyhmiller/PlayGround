@@ -26,8 +26,18 @@ pub enum Value {
     StringConstantId(usize),
     Function(usize),
     Pointer(usize),
+    Local(usize),
     True,
     False,
+}
+
+impl Value {
+    fn to_local(&self) -> usize {
+        match self {
+            Value::Local(local) => *local,
+            _ => panic!("Expected local"),
+        }
+    }
 }
 
 // I don't know if this is actually the setup I want
@@ -154,12 +164,15 @@ enum Instruction {
     Breakpoint,
     Compare(Value, Value, Value, Condition),
     Tag(Value, Value, Value),
+    // Do I need these?
     LoadTrue(Value),
     LoadFalse(Value),
     LoadConstant(Value, Value),
     Call(Value, Value, Vec<Value>),
     HeapLoad(Value, Value),
     HeapStore(Value, Value),
+    LoadLocal(Value, Value),
+    StoreLocal(Value, Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -278,6 +291,12 @@ impl Instruction {
             Instruction::LoadFalse(a) => {
                 get_register!(a)
             }
+            Instruction::LoadLocal(a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::StoreLocal(a, b) => {
+                get_registers!(a, b)
+            }
         }
     }
 }
@@ -329,6 +348,7 @@ pub struct Ir {
     label_names: Vec<String>,
     label_locations: HashMap<usize, usize>,
     string_constants: Vec<StringValue>,
+    num_locals: usize,
 }
 
 impl Ir {
@@ -340,6 +360,7 @@ impl Ir {
             label_names: vec![],
             label_locations: HashMap::new(),
             string_constants: vec![],
+            num_locals: 0,
         }
     }
 
@@ -555,7 +576,7 @@ impl Ir {
             ir_label_to_lang_label.insert(*label, new_label);
         }
         let lifetimes = self.get_register_lifetime();
-        Self::draw_lifetimes(&lifetimes);
+        // Self::draw_lifetimes(&lifetimes);
         let mut alloc = RegisterAllocator::new(lifetimes);
         for (index, instruction) in self.instructions.iter().enumerate() {
             for (register, (_start, end)) in alloc.lifetimes.iter() {
@@ -667,6 +688,10 @@ impl Ir {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
                         lang.mov_64(register, BuiltInTypes::construct_boolean(false));
                     }
+                    Value::Local(local) => {
+                        let register = alloc.allocate_register(index, *dest, &mut lang);
+                        lang.load_from_stack(register, -(*local as i32));
+                    }
                 },
                 Instruction::LoadConstant(dest, val) => {
                     let val = val.try_into().unwrap();
@@ -674,6 +699,17 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
                     lang.mov_reg(dest, val);
+                }
+                Instruction::LoadLocal(dest, local) => {
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    let local = local.to_local();
+                    lang.load_from_stack(dest, -(local as i32));
+                }
+                Instruction::StoreLocal(dest, value) => {
+                    let value = value.try_into().unwrap();
+                    let value = alloc.allocate_register(index, value, &mut lang);
+                    lang.store_on_stack(value, -(dest.to_local() as i32));
                 }
                 Instruction::LoadTrue(dest) => {
                     let dest = dest.try_into().unwrap();
@@ -688,11 +724,7 @@ impl Ir {
                 Instruction::Recurse(dest, args) => {
                     let allocated_registers = lang.allocated_volatile_registers.clone();
                     for (index, register) in allocated_registers.iter().enumerate() {
-                        // TODO: I don't like this hardcoded 2 here
-                        // it is because the prelude stores 2 registers on the stack
-                        // But we might have locals on the stack as well
-                        // we will need to fix that.
-                        lang.store_on_stack(*register, index as i32 + 2)
+                        lang.push_to_stack(*register, index as i32);
                     }
                     for (index, arg) in args.iter().enumerate() {
                         let arg = arg.try_into().unwrap();
@@ -704,7 +736,7 @@ impl Ir {
                     let register = alloc.allocate_register(index, dest, &mut lang);
                     lang.mov_reg(register, lang.ret_reg());
                     for (index, register) in allocated_registers.iter().enumerate() {
-                        lang.load_from_stack(*register, index as i32 + 2)
+                        lang.pop_from_stack(*register, index as i32);
                     }
                 }
                 Instruction::Call(dest, function, args) => {
@@ -713,11 +745,7 @@ impl Ir {
                     // I only need to store on stack those things that live past the call
                     // I think this is part of the reason why I have too many registers live at a time
                     for (index, register) in allocated_registers.iter().enumerate() {
-                        // TODO: I don't like this hardcoded 2 here
-                        // it is because the prelude stores 2 registers on the stack
-                        // But we might have locals on the stack as well
-                        // we will need to fix that.
-                        lang.store_on_stack(*register, index as i32 + 2)
+                        lang.push_to_stack(*register, index as i32);
                     }
                     for (arg_index, arg) in args.iter().enumerate() {
                         let arg = arg.try_into().unwrap();
@@ -736,7 +764,7 @@ impl Ir {
                     let register = alloc.allocate_register(index, dest, &mut lang);
                     lang.mov_reg(register, lang.ret_reg());
                     for (index, register) in allocated_registers.iter().enumerate() {
-                        lang.load_from_stack(*register, index as i32 + 2)
+                        lang.pop_from_stack(*register, index as i32);
                     }
                 }
                 Instruction::Compare(dest, a, b, condition) => {
@@ -788,7 +816,7 @@ impl Ir {
                         }
                     }
                     Value::SignedConstant(i) => {
-                        lang.mov_64(lang.ret_reg(), *i);
+                        lang.mov_64(lang.ret_reg(), BuiltInTypes::construct_int(*i));
                         lang.jump(exit);
                     }
                     Value::StringConstantId(id) => {
@@ -813,6 +841,10 @@ impl Ir {
                     }
                     Value::RawValue(_) => {
                         panic!("Should we be returing a raw value?")
+                    }
+                    Value::Local(local) => {
+                        lang.load_from_stack(lang.ret_reg(), -(*local as i32));
+                        lang.jump(exit);
                     }
                 },
                 Instruction::HeapLoad(dest, ptr) => {
@@ -954,8 +986,8 @@ pub fn heap_test() -> Ir {
 // }
 
 pub extern "C" fn print_value(value: usize) {
-    assert!(value & 0b111 == 0b010);
-    let value = value & !0b111;
+    assert!(matches!(BuiltInTypes::get_kind(value), BuiltInTypes::String));
+    let value = BuiltInTypes::untag(value);
     let string_value: &StringValue = unsafe { std::mem::transmute(value) };
     let string = &string_value.str;
     println!("{}", string);

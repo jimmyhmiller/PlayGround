@@ -96,7 +96,6 @@ impl<'a> AstCompiler<'a> {
                 last
             }
             Ast::Function { name, args, body } => {
-                self.ir.breakpoint();
                 assert!(self.name.is_empty());
                 // self.ir.breakpoint()
                 self.name = name.clone();

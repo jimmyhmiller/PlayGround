@@ -310,6 +310,7 @@ pub struct LowLevelArm {
     pub allocated_volatile_registers: Vec<Register>,
     pub stack_size: i32,
     pub max_stack_size: i32,
+    pub max_locals: i32,
     pub canonical_volatile_registers: Vec<Register>,
 }
 
@@ -338,6 +339,7 @@ impl LowLevelArm {
             allocated_volatile_registers: vec![],
             stack_size: 0,
             max_stack_size: 0,
+            max_locals: 0,
         }
     }
 
@@ -349,12 +351,15 @@ impl LowLevelArm {
     }
 
     pub fn prelude(&mut self, offset: i32) {
+        // self.breakpoint();
+        self.move_stack_pointer(-self.max_locals);
         self.store_pair(X29, X30, SP, offset);
         self.mov_reg(X29, SP);
     }
 
     pub fn epilogue(&mut self, offset: i32) {
         self.load_pair(X29, X30, SP, offset);
+        self.move_stack_pointer(self.max_locals);
     }
 
     pub fn get_label_index(&mut self) -> usize {
@@ -454,6 +459,19 @@ impl LowLevelArm {
         self.instructions.push(jump(destination.index as u32));
     }
 
+    pub fn push_to_stack(&mut self, reg: Register, offset: i32) {
+        // TODO: fix this + 2
+        self.increment_stack_size(1);
+        self.instructions.push(ArmAsm::StrImmGen {
+            size: 0b11,
+            imm9: 0, // not used
+            rn: SP,
+            rt: reg,
+            imm12: offset + 2,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        });
+    }
+
     pub fn store_on_stack(&mut self, reg: Register, offset: i32) {
         self.increment_stack_size(1);
         self.instructions.push(ArmAsm::StrImmGen {
@@ -474,6 +492,18 @@ impl LowLevelArm {
             rn: SP,
             rt: destination,
             imm12: offset,
+            class_selector: LdrImmGenSelector::UnsignedOffset,
+        });
+    }
+
+    pub fn pop_from_stack(&mut self, reg: Register, offset: i32) {
+        self.increment_stack_size(-1);
+        self.instructions.push(ArmAsm::LdrImmGen {
+            size: 0b11,
+            imm9: 0, // not used
+            rn: SP,
+            rt: reg,
+            imm12: offset + 2,
             class_selector: LdrImmGenSelector::UnsignedOffset,
         });
     }
@@ -690,6 +720,27 @@ impl LowLevelArm {
         });
 
         result
+    }
+
+    fn move_stack_pointer(&mut self, max_locals: i32) {
+        if max_locals < 0 {
+            self.instructions.push(ArmAsm::SubAddsubImm {
+                sf: SP.sf(),
+                rn: SP,
+                rd: SP,
+                imm12: -max_locals * 8,
+                sh: 0,
+            });
+        } else { 
+            self.instructions.push(ArmAsm::AddAddsubImm {
+                sf: SP.sf(),
+                rn: SP,
+                rd: SP,
+                imm12: max_locals * 8,
+                sh: 0,
+            });
+        }
+       
     }
 }
 

@@ -61,11 +61,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("array_store", array_store as *const u8)?;
     compiler.add_builtin_function("array_get", array_get as *const u8)?;
 
+    // let hello_ast = parse! {
+    //     fn hello(x) {
+    //         array_get(array_store(array_store(allocate_array(x), 0, 42), 1, "hello"), 1)
+    //     }
+    // };
+
     let hello_ast = parse! {
         fn hello(x) {
-            array_get(array_store(array_store(allocate_array(x), 0, 42), 1, "hello"), 1)
+            print("hello")
         }
     };
+
+
 
     // println!("{:#?}", hello_ast);
 
