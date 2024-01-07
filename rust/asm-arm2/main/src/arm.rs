@@ -659,6 +659,9 @@ impl LowLevelArm {
             rd: register,
         });
         num >>= 16;
+        if num == 0 {
+            return result;
+        }
         result.push(ArmAsm::Movk {
             sf: register.sf(),
             hw: 0b01,
@@ -666,6 +669,9 @@ impl LowLevelArm {
             rd: register,
         });
         num >>= 16;
+        if num == 0 {
+            return result;
+        }
         result.push(ArmAsm::Movk {
             sf: register.sf(),
             hw: 0b10,
@@ -673,6 +679,9 @@ impl LowLevelArm {
             rd: register,
         });
         num >>= 16;
+        if num == 0 {
+            return result;
+        }
         result.push(ArmAsm::Movk {
             sf: register.sf(),
             hw: 0b11,

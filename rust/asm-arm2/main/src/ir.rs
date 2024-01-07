@@ -555,7 +555,7 @@ impl Ir {
             ir_label_to_lang_label.insert(*label, new_label);
         }
         let lifetimes = self.get_register_lifetime();
-        // Self::draw_lifetimes(&lifetimes);
+        Self::draw_lifetimes(&lifetimes);
         let mut alloc = RegisterAllocator::new(lifetimes);
         for (index, instruction) in self.instructions.iter().enumerate() {
             for (register, (_start, end)) in alloc.lifetimes.iter() {
@@ -709,6 +709,9 @@ impl Ir {
                 }
                 Instruction::Call(dest, function, args) => {
                     let allocated_registers = lang.allocated_volatile_registers.clone();
+
+                    // I only need to store on stack those things that live past the call
+                    // I think this is part of the reason why I have too many registers live at a time
                     for (index, register) in allocated_registers.iter().enumerate() {
                         // TODO: I don't like this hardcoded 2 here
                         // it is because the prelude stores 2 registers on the stack
