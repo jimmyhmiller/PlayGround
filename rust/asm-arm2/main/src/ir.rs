@@ -563,6 +563,7 @@ impl Ir {
 
     pub fn compile(&mut self) -> LowLevelArm {
         let mut lang = LowLevelArm::new();
+        lang.set_max_locals(self.num_locals);
         // lang.breakpoint();
         // zero is a placeholder because this will be patched
         lang.prelude(0);
@@ -704,12 +705,12 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
                     let local = local.to_local();
-                    lang.load_from_stack(dest, -(local as i32));
+                    lang.load_local(dest, -(local as i32));
                 }
                 Instruction::StoreLocal(dest, value) => {
                     let value = value.try_into().unwrap();
                     let value = alloc.allocate_register(index, value, &mut lang);
-                    lang.store_on_stack(value, -(dest.to_local() as i32));
+                    lang.store_local(value, -(dest.to_local() as i32));
                 }
                 Instruction::LoadTrue(dest) => {
                     let dest = dest.try_into().unwrap();
@@ -925,6 +926,18 @@ impl Ir {
         self.instructions
             .push(Instruction::Call(dest, function, vec));
         dest
+    }
+
+    pub fn store_local(&mut self, local_index: usize, reg: VirtualRegister) {
+        self.increment_locals(local_index);
+        self.instructions
+            .push(Instruction::StoreLocal(Value::Local(local_index), reg.into()));
+    }
+
+    fn increment_locals(&mut self, index: usize) {
+        if index >= self.num_locals {
+            self.num_locals = index + 1;
+        }
     }
 }
 

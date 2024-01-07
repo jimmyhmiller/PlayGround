@@ -138,7 +138,7 @@ pub fn get_files<'a>(xml: &'a Document<'a>) -> Vec<Node<'a, 'a>> {
         .filter(|x| {
             let title = x.attribute("title").unwrap_or("");
             title.contains("Base Instructions")
-                || title.contains("SIMD and Floating-point Instructions")
+            // || title.contains("SIMD and Floating-point Instructions")
         })
         .flat_map(|x| x.descendants())
         .filter(|x| x.has_tag_name("iform"))

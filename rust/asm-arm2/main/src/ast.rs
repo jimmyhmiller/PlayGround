@@ -50,6 +50,7 @@ pub enum Ast {
         name: String,
         args: Vec<Ast>,
     },
+    Let(Box<Ast>, Box<Ast>),
     NumberLiteral(i64),
     Variable(String),
     String(String),
@@ -65,17 +66,33 @@ impl Ast {
             ir: Ir::new(),
             name: "".to_string(),
             compiler,
+            local_variables: vec![],
         };
         compiler.compile()
     }
 }
 
+enum VariableLocation {
+    Register(VirtualRegister),
+    Local(usize),
+}
+
+impl From<&VariableLocation> for Value {
+    fn from(location: &VariableLocation) -> Self {
+        match location {
+            VariableLocation::Register(reg) => Value::Register(reg.clone()),
+            VariableLocation::Local(index) => Value::Local(*index),
+        }
+    }
+}
+
 pub struct AstCompiler<'a> {
     pub ast: Ast,
-    pub variables: HashMap<String, VirtualRegister>,
+    pub variables: HashMap<String, VariableLocation>,
     pub ir: Ir,
     pub name: String,
     pub compiler: &'a mut Compiler,
+    pub local_variables: Vec<String>,
 }
 
 impl<'a> AstCompiler<'a> {
@@ -101,7 +118,7 @@ impl<'a> AstCompiler<'a> {
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);
-                    self.variables.insert(arg.clone(), reg);
+                    self.variables.insert(arg.clone(), VariableLocation::Register(reg));
                 }
 
                 for ast in body[..body.len() - 1].iter() {
@@ -223,7 +240,20 @@ impl<'a> AstCompiler<'a> {
             Ast::NumberLiteral(n) => Value::SignedConstant(n as isize),
             Ast::Variable(name) => {
                 let reg = self.variables.get(&name).unwrap();
-                Value::Register(*reg)
+                reg.into()
+            }
+            Ast::Let(name, value) => {
+                if let Ast::Variable(name) = name.as_ref() {
+                    let value = self.compile_to_ir(&value);
+                    let reg = self.ir.volatile_register();
+                    self.ir.assign(reg, value);
+                    let local_index = self.find_or_insert_local(name);
+                    self.ir.store_local(local_index, reg);
+                    self.variables.insert(name.to_string(), VariableLocation::Local(local_index));
+                    reg.into()
+                } else {
+                    panic!("Expected variable")
+                }
             }
             Ast::Condition { operator, left, right } => {
                 let a = self.compile_to_ir(&left);
@@ -240,6 +270,15 @@ impl<'a> AstCompiler<'a> {
             Ast::False => {
                 Value::False
             }
+        }
+    }
+
+    fn find_or_insert_local(&mut self, name: &str) -> usize {
+        if let Some(index) = self.local_variables.iter().position(|n| n == name) {
+            index
+        } else {
+            self.local_variables.push(name.to_string());
+            self.local_variables.len() - 1
         }
     }
 }
