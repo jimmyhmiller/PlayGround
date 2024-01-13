@@ -69,7 +69,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let hello_ast = parse! {
         fn hello(x) {
-            print("hello")
+            let y = "hello"
+            print(y)
         }
     };
 
