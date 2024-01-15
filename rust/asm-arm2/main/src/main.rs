@@ -65,11 +65,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         fn hello(x) {
             let array = allocate_array(16);
             array_store(array, 0, 42);
-            array_store(array, 1, "hello");
-            let result = array_get(array, 1)
+            array_store(array, x, "hello");
+            let result = array_get(array, x)
             print(result)
         }
     };
+
+    // let hello_ast = parse! {
+    //     fn hello(x) {
+    //         print(array_get(array_store(array_store(allocate_array(16), 0, 42), 1, "hello"), 1))
+    //     }
+    // };
 
     // let hello_ast = parse! {
     //     fn hello(x) {
@@ -77,8 +83,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     //         print(y)
     //     }
     // };
-
-
 
     // println!("{:#?}", hello_ast);
 
@@ -92,7 +96,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 // 
     let hello = compiler.add_function("hello", &hello.compile_to_bytes())?;
 
-    compiler.print(compiler.run1(hello, 16).unwrap() as usize);
+    compiler.print(compiler.run1(hello, 1).unwrap() as usize);
     // compiler.print(compiler.run1(hello, 32).unwrap() as usize);
     // println!("Got here");
 
@@ -126,11 +130,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 // Consider checked and uncheck stuff
 
 
-// There is clearly a bug going on with my lifetimes
-// of registers.
-// I had to add a bunch of registers that I shouldn't need from the looks
-// of things. But I need to look closer
 
 
 // Bugs:
-// I don't save arguments anywhere, so they can be overwritten
