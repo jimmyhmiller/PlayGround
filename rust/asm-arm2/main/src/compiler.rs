@@ -74,6 +74,7 @@ impl Compiler {
     }
 
     pub fn allocate(&mut self, size: usize) -> Result<usize, Box<dyn Error>> {
+        let size = size * 8;
         let memory = self.heap.take();
         let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
         let buffer = &mut memory[self.heap_offset..];
