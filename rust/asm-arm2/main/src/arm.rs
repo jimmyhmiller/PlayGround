@@ -470,6 +470,9 @@ impl LowLevelArm {
     }
 
     pub fn store_on_stack(&mut self, reg: Register, offset: i32) {
+        if offset < 0 {
+            println!("Got it");
+        }
         self.instructions.push(ArmAsm::StrImmGen {
             size: 0b11,
             imm9: 0, // not used
@@ -489,6 +492,9 @@ impl LowLevelArm {
     }
 
     pub fn load_from_stack(&mut self, destination: Register, offset: i32) {
+        if offset < 0 {
+            println!("Got it");
+        }
         self.increment_stack_size(-1);
         self.instructions.push(ArmAsm::LdrImmGen {
             size: 0b11,

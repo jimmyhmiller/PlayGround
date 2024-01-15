@@ -332,6 +332,8 @@ impl Compiler {
             let tag = BuiltInTypes::get_kind(array);
             match tag {
                 BuiltInTypes::Array => {
+                    let index = BuiltInTypes::untag(index);
+                    let index = index * 8;
                     let heap = self.heap.take();
                     let heap = heap.unwrap().make_mut().map_err(|(_, e)| e)?;
                     let array = BuiltInTypes::untag(array);

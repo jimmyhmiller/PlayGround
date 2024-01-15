@@ -173,6 +173,7 @@ enum Instruction {
     HeapStore(Value, Value),
     LoadLocal(Value, Value),
     StoreLocal(Value, Value),
+    RegisterArgument(Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -296,6 +297,9 @@ impl Instruction {
             }
             Instruction::StoreLocal(a, b) => {
                 get_registers!(a, b)
+            }
+            Instruction::RegisterArgument(a) => {
+                get_register!(a)
             }
         }
     }
@@ -691,7 +695,7 @@ impl Ir {
                     }
                     Value::Local(local) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
-                        lang.load_from_stack(register, -(*local as i32));
+                        lang.load_from_stack(register, (*local as i32));
                     }
                 },
                 Instruction::LoadConstant(dest, val) => {
@@ -705,12 +709,12 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
                     let local = local.to_local();
-                    lang.load_local(dest, -(local as i32));
+                    lang.load_local(dest, (local as i32));
                 }
                 Instruction::StoreLocal(dest, value) => {
                     let value = value.try_into().unwrap();
                     let value = alloc.allocate_register(index, value, &mut lang);
-                    lang.store_local(value, -(dest.to_local() as i32));
+                    lang.store_local(value, (dest.to_local() as i32));
                 }
                 Instruction::LoadTrue(dest) => {
                     let dest = dest.try_into().unwrap();
@@ -723,11 +727,26 @@ impl Ir {
                     lang.mov_64(dest, BuiltInTypes::construct_boolean(false));
                 }
                 Instruction::Recurse(dest, args) => {
-                    let allocated_registers = lang.allocated_volatile_registers.clone();
-                    for (index, register) in allocated_registers.iter().enumerate() {
+                    // TODO: Clean up duplication
+                    let mut out_live_call_registers = vec![];
+                    for (register, (start, end)) in alloc.lifetimes.iter() {
+                        if *end < index {
+                            continue;
+                        }
+                        if *start > index {
+                            continue;
+                        }
+                        if index != *end {
+                            if let Some(register) = alloc.allocated_registers.get(register) {
+                                out_live_call_registers.push(*register);
+                            }
+                        }
+                    }
+
+                    for (index, register) in out_live_call_registers.iter().enumerate() {
                         lang.push_to_stack(*register, index as i32);
                     }
-                    for (index, arg) in args.iter().enumerate() {
+                    for (index, arg) in args.iter().enumerate().rev() {
                         let arg = arg.try_into().unwrap();
                         let arg = alloc.allocate_register(index, arg, &mut lang);
                         lang.mov_reg(lang.arg(index as u8), arg);
@@ -736,19 +755,33 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let register = alloc.allocate_register(index, dest, &mut lang);
                     lang.mov_reg(register, lang.ret_reg());
-                    for (index, register) in allocated_registers.iter().enumerate() {
+                    for (index, register) in out_live_call_registers.iter().enumerate() {
                         lang.pop_from_stack(*register, index as i32);
                     }
                 }
                 Instruction::Call(dest, function, args) => {
-                    let allocated_registers = lang.allocated_volatile_registers.clone();
+                    // TODO: Clean up duplication
+                    let mut out_live_call_registers = vec![];
+                    for (register, (start, end)) in alloc.lifetimes.iter() {
+                        if *end < index {
+                            continue;
+                        }
+                        if *start > index {
+                            continue;
+                        }
+                        if index != *end {
+                            if let Some(register) = alloc.allocated_registers.get(register) {
+                                out_live_call_registers.push(*register);
+                            }
+                        }
+                    }
 
                     // I only need to store on stack those things that live past the call
                     // I think this is part of the reason why I have too many registers live at a time
-                    for (index, register) in allocated_registers.iter().enumerate() {
+                    for (index, register) in out_live_call_registers.iter().enumerate() {
                         lang.push_to_stack(*register, index as i32);
                     }
-                    for (arg_index, arg) in args.iter().enumerate() {
+                    for (arg_index, arg) in args.iter().enumerate().rev() {
                         let arg = arg.try_into().unwrap();
                         let arg = alloc.allocate_register(index, arg, &mut lang);
                         lang.mov_reg(lang.arg(arg_index as u8), arg);
@@ -764,7 +797,7 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let register = alloc.allocate_register(index, dest, &mut lang);
                     lang.mov_reg(register, lang.ret_reg());
-                    for (index, register) in allocated_registers.iter().enumerate() {
+                    for (index, register) in out_live_call_registers.iter().enumerate() {
                         lang.pop_from_stack(*register, index as i32);
                     }
                 }
@@ -862,6 +895,13 @@ impl Ir {
                     let val = alloc.allocate_register(index, val, &mut lang);
                     lang.store_on_heap(ptr, val, 0);
                 }
+                Instruction::RegisterArgument(arg) => {
+                    // This doesn't actually compile into any code
+                    // it is here to say the argument is live from the beginning
+
+                    let arg = arg.try_into().unwrap();
+                    alloc.allocate_register(index, arg, &mut lang);
+                }
             }
         }
 
@@ -938,6 +978,11 @@ impl Ir {
         if index >= self.num_locals {
             self.num_locals = index + 1;
         }
+    }
+
+    pub fn register_argument(&mut self, reg: VirtualRegister) {
+        self.instructions
+            .push(Instruction::RegisterArgument(reg.try_into().unwrap()));
     }
 }
 

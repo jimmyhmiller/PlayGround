@@ -114,10 +114,11 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::Function { name, args, body } => {
                 assert!(self.name.is_empty());
-                self.ir.breakpoint();
+                // self.ir.breakpoint();
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);
+                    self.ir.register_argument(reg);
                     self.variables.insert(arg.clone(), VariableLocation::Register(reg));
                 }
 
