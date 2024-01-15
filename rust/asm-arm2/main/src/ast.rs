@@ -72,7 +72,7 @@ impl Ast {
     }
 }
 
-enum VariableLocation {
+pub enum VariableLocation {
     Register(VirtualRegister),
     Local(usize),
 }
@@ -114,7 +114,7 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::Function { name, args, body } => {
                 assert!(self.name.is_empty());
-                // self.ir.breakpoint()
+                self.ir.breakpoint();
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);

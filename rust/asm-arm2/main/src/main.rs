@@ -61,18 +61,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("array_store", array_store as *const u8)?;
     compiler.add_builtin_function("array_get", array_get as *const u8)?;
 
-    // let hello_ast = parse! {
-    //     fn hello(x) {
-    //         array_get(array_store(array_store(allocate_array(x), 0, 42), 1, "hello"), 1)
-    //     }
-    // };
-
     let hello_ast = parse! {
         fn hello(x) {
-            let y = "hello"
-            print(y)
+            let array = allocate_array(16);
+            array_store(array, 0, 42);
+            array_store(array, 1, "hello");
+            let result = array_get(array, 1)
+            print(result)
         }
     };
+
+    // let hello_ast = parse! {
+    //     fn hello(x) {
+    //         let y = "hello"
+    //         print(y)
+    //     }
+    // };
 
 
 
@@ -126,3 +130,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 // of registers.
 // I had to add a bunch of registers that I shouldn't need from the looks
 // of things. But I need to look closer
+
+
+// Bugs:
+// I don't save arguments anywhere, so they can be overwritten

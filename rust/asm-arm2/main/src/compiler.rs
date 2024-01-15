@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{error::Error, mem};
+use std::error::Error;
 
 use mmap_rs::{Mmap, MmapOptions};
 
