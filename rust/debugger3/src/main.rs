@@ -82,7 +82,7 @@ fn main() {
                         let frame = thread.selected_frame();
                         println!("{:?}", frame.function());
                         println!("{}", frame.disassemble());
-                        let mut buffer = [0u8; 100];
+                        let mut buffer = [0u8; 1000];
                         process.read_memory(frame.pc_address().load_address(&target), &mut buffer);
                         let instructions = get_instructions(&target, &frame.pc_address(), &mut buffer);
                         instructions.iter().for_each(|instruction| {
