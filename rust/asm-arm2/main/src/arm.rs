@@ -334,6 +334,12 @@ pub const RECURSE_PLACEHOLDER_REGISTER: Register = Register {
 };
 
 #[allow(unused)]
+impl Default for LowLevelArm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LowLevelArm {
     pub fn new() -> Self {
         let canonical_volatile_registers = vec![X24, X23, X22, X21, X20, X19];

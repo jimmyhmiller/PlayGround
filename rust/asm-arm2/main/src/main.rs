@@ -7,7 +7,7 @@ pub mod compiler;
 pub mod ir;
 pub mod parser;
 
-use crate::{compiler::Compiler, parser::Parser, ir::BuiltInTypes};
+use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
 
 fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
     let fib: ast::Ast = parser::fib();
@@ -17,7 +17,7 @@ fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
 
     let time = Instant::now();
 
-    let result1 = compiler.run1(fib, n as u64)?;
+    let result1 = compiler.run1(fib, n)?;
     println!("Our time {:?}", time.elapsed());
     let time = Instant::now();
     let result2 = fib_rust(n as usize);
@@ -52,7 +52,6 @@ fn array_get(compiler: *mut Compiler, array: usize, index: usize) -> usize {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-
     let mut compiler = Compiler::new();
     // Very inefficient way to do array stuff
     // but working
@@ -70,7 +69,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             print(result)
         }
     };
-
 
     // let hello_ast = parse! {
     //     fn hello(x) {
@@ -94,13 +92,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // let hello2_ast = ast::hello_world2();
     // let mut hello2_ir = hello2_ast.compile(&mut compiler);
     // let mut hello2 = hello2_ir.compile();
-// 
+    //
     let hello = compiler.add_function("hello", &hello.compile_to_bytes())?;
 
     compiler.print(compiler.run1(hello, 1).unwrap() as usize);
     // compiler.print(compiler.run1(hello, 32).unwrap() as usize);
     // println!("Got here");
-
 
     // compiler.overwrite_function(hello, &hello2.compile_to_bytes())?;
 
@@ -129,8 +126,5 @@ fn main() -> Result<(), Box<dyn Error>> {
 // Think about how to implementing interesting
 // data structures in the language itself
 // Consider checked and uncheck stuff
-
-
-
 
 // Bugs:
