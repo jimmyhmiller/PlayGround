@@ -81,6 +81,12 @@ pub struct Tokenizer {
     pub position: usize,
 }
 
+impl<'a> Default for Tokenizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> Tokenizer {
     pub fn new() -> Tokenizer {
         Tokenizer { position: 0 }
@@ -400,8 +406,8 @@ impl Parser {
             | Token::NotEqual
             | Token::GreaterThan
             | Token::GreaterThanOrEqual => (10, Associativity::Left),
-            | Token::Plus | Token::Minus => (20, Associativity::Left),
-            | Token::Mul | Token::Div => (30, Associativity::Left),
+            Token::Plus | Token::Minus => (20, Associativity::Left),
+            Token::Mul | Token::Div => (30, Associativity::Left),
             _ => (0, Associativity::Left),
         }
     }
@@ -686,7 +692,11 @@ impl Parser {
 
     fn is_whitespace(&self) -> bool {
         match self.current_token() {
-            Token::Spaces(_) | Token::NewLine | Token::Comment(_) | Token::Comma | Token::SemiColon => true,
+            Token::Spaces(_)
+            | Token::NewLine
+            | Token::Comment(_)
+            | Token::Comma
+            | Token::SemiColon => true,
             _ => false,
         }
     }
@@ -835,15 +845,14 @@ fn test_parse2() {
     println!("{:#?}", ast);
 }
 
-
 #[macro_export]
 macro_rules! parse {
-    ($($t:tt)*) => { 
+    ($($t:tt)*) => {
         Parser::new(stringify!($($t)*).to_string()).parse()
      };
 }
 
-pub fn  fib() -> Ast {
+pub fn fib() -> Ast {
     parse! {
         fn fib(n) {
             if n <= 1 {

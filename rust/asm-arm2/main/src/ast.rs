@@ -80,7 +80,7 @@ pub enum VariableLocation {
 impl From<&VariableLocation> for Value {
     fn from(location: &VariableLocation) -> Self {
         match location {
-            VariableLocation::Register(reg) => Value::Register(reg.clone()),
+            VariableLocation::Register(reg) => Value::Register(*reg),
             VariableLocation::Local(index) => Value::Local(*index),
         }
     }
@@ -108,7 +108,7 @@ impl<'a> AstCompiler<'a> {
             Ast::Program { elements } => {
                 let mut last = Value::SignedConstant(0);
                 for ast in elements.iter() {
-                    last = self.compile_to_ir(&ast);
+                    last = self.compile_to_ir(ast);
                 }
                 last
             }
@@ -119,7 +119,8 @@ impl<'a> AstCompiler<'a> {
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);
                     self.ir.register_argument(reg);
-                    self.variables.insert(arg.clone(), VariableLocation::Register(reg));
+                    self.variables
+                        .insert(arg.clone(), VariableLocation::Register(reg));
                 }
 
                 for ast in body[..body.len() - 1].iter() {
@@ -208,14 +209,12 @@ impl<'a> AstCompiler<'a> {
                 if name == self.name {
                     return self.compile_to_ir(&Ast::Recurse { args });
                 }
-                let mut args: Vec<Value> = args 
+                let mut args: Vec<Value> = args
                     .iter()
                     .map(|arg| {
                         let value = self.compile_to_ir(&Box::new(arg.clone()));
                         match value {
-                            Value::Register(_) => {
-                                value
-                            },
+                            Value::Register(_) => value,
                             _ => {
                                 let reg = self.ir.volatile_register();
                                 self.ir.assign(reg, value);
@@ -225,7 +224,7 @@ impl<'a> AstCompiler<'a> {
                     })
                     .collect();
                 let function = self.compiler.reserve_function(name.as_str()).unwrap();
-                
+
                 if function.is_builtin {
                     let pointer_reg = self.ir.volatile_register();
                     let pointer: Value = self.compiler.get_compiler_ptr().into();
@@ -250,13 +249,18 @@ impl<'a> AstCompiler<'a> {
                     self.ir.assign(reg, value);
                     let local_index = self.find_or_insert_local(name);
                     self.ir.store_local(local_index, reg);
-                    self.variables.insert(name.to_string(), VariableLocation::Local(local_index));
+                    self.variables
+                        .insert(name.to_string(), VariableLocation::Local(local_index));
                     reg.into()
                 } else {
                     panic!("Expected variable")
                 }
             }
-            Ast::Condition { operator, left, right } => {
+            Ast::Condition {
+                operator,
+                left,
+                right,
+            } => {
                 let a = self.compile_to_ir(&left);
                 let b = self.compile_to_ir(&right);
                 self.ir.compare(a, b, operator)
@@ -265,12 +269,8 @@ impl<'a> AstCompiler<'a> {
                 let constant = self.ir.string_constant(str);
                 self.ir.load_string_constant(constant)
             }
-            Ast::True => {
-                Value::True
-            },
-            Ast::False => {
-                Value::False
-            }
+            Ast::True => Value::True,
+            Ast::False => Value::False,
         }
     }
 
@@ -284,15 +284,15 @@ impl<'a> AstCompiler<'a> {
     }
 }
 
-impl Into<Ast> for i64 {
-    fn into(self) -> Ast {
-        Ast::NumberLiteral(self)
+impl From<i64> for Ast {
+    fn from(val: i64) -> Self {
+        Ast::NumberLiteral(val)
     }
 }
 
-impl Into<Ast> for &'static str {
-    fn into(self) -> Ast {
-        Ast::String(self.to_string())
+impl From<&'static str> for Ast {
+    fn from(val: &'static str) -> Self {
+        Ast::String(val.to_string())
     }
 }
 

@@ -13,7 +13,6 @@ pub struct Function {
     pub is_builtin: bool,
 }
 
-
 #[derive(Debug)]
 struct HeapObject<'a> {
     size: usize,
@@ -42,6 +41,12 @@ impl fmt::Debug for Compiler {
             .field("jump_table_offset", &self.jump_table_offset)
             .field("functions", &self.functions)
             .finish()
+    }
+}
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -135,7 +140,7 @@ impl Compiler {
     }
 
     pub fn reserve_function(&mut self, name: &str) -> Result<Function, Box<dyn Error>> {
-        for  function in self.functions.iter_mut() {
+        for function in self.functions.iter_mut() {
             if function.name == name {
                 return Ok(function.clone());
             }
@@ -227,7 +232,7 @@ impl Compiler {
         Ok(start)
     }
 
-   pub fn get_compiler_ptr(&self) -> *const Compiler {
+    pub fn get_compiler_ptr(&self) -> *const Compiler {
         self as *const Compiler
     }
 
@@ -282,13 +287,13 @@ impl Compiler {
             BuiltInTypes::Int => {
                 let value = BuiltInTypes::untag(value);
                 println!("{}", value);
-            },
+            }
             BuiltInTypes::Float => todo!(),
             BuiltInTypes::String => {
                 let value = BuiltInTypes::untag(value);
                 let string = unsafe { &*(value as *const StringValue) };
                 println!("{}", string.str);
-            },
+            }
             BuiltInTypes::Bool => {
                 let value = BuiltInTypes::untag(value);
                 if value == 0 {
@@ -296,7 +301,7 @@ impl Compiler {
                 } else {
                     println!("true");
                 }
-            },
+            }
             BuiltInTypes::Function => todo!(),
             BuiltInTypes::Struct => todo!(),
             BuiltInTypes::Array => {
@@ -307,13 +312,9 @@ impl Compiler {
                     let size = *(pointer as *const usize);
                     let pointer = pointer.add(8);
                     let data = std::slice::from_raw_parts(pointer, size);
-                    let heap_object = HeapObject {
-                        size,
-                        data,
-                    };
+                    let heap_object = HeapObject { size, data };
 
                     println!("{:?}", heap_object);
-
                 }
                 // print!("[");
                 // for i in 0..array.size {
@@ -324,11 +325,16 @@ impl Compiler {
                 //     }
                 // }
                 // println!("]");
-            },
+            }
         }
     }
 
-    pub fn array_store(&mut self, array: usize, index: usize, value: usize) -> Result<usize, Box<dyn Error>> {
+    pub fn array_store(
+        &mut self,
+        array: usize,
+        index: usize,
+        value: usize,
+    ) -> Result<usize, Box<dyn Error>> {
         unsafe {
             let tag = BuiltInTypes::get_kind(array);
             match tag {
@@ -353,13 +359,17 @@ impl Compiler {
 
                     self.heap = Some(mem);
                     Ok(BuiltInTypes::Array.tag(array as isize) as usize)
-                },
+                }
                 _ => panic!("Not an array"),
             }
         }
     }
 
-    pub(crate) fn array_get(&mut self, array: usize, index: usize) -> Result<usize, Box<dyn Error>> {
+    pub(crate) fn array_get(
+        &mut self,
+        array: usize,
+        index: usize,
+    ) -> Result<usize, Box<dyn Error>> {
         unsafe {
             let tag = BuiltInTypes::get_kind(array);
             match tag {
@@ -376,7 +386,7 @@ impl Compiler {
                     bytes.copy_from_slice(&data[index * 8..index * 8 + 8]);
                     let data = usize::from_le_bytes(bytes);
                     Ok(data)
-                },
+                }
                 _ => panic!("Not an array"),
             }
         }

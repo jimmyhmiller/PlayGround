@@ -121,7 +121,6 @@ impl BuiltInTypes {
     }
 }
 
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct VirtualRegister {
     argument: Option<usize>,
@@ -182,7 +181,7 @@ impl TryInto<VirtualRegister> for &Value {
     fn try_into(self) -> Result<VirtualRegister, Self::Error> {
         match self {
             Value::Register(register) => Ok(*register),
-            _ => Err(self.clone()),
+            _ => Err(*self),
         }
     }
 }
@@ -194,16 +193,16 @@ impl TryInto<VirtualRegister> for &VirtualRegister {
     }
 }
 
-impl<T> Into<Value> for *const T {
-    fn into(self) -> Value {
-        Value::Pointer(self as usize)
+impl<T> From<*const T> for Value {
+    fn from(val: *const T) -> Self {
+        Value::Pointer(val as usize)
     }
 }
 
 macro_rules! get_register {
     ($x:expr) => {
         vec![get_registers!($x)].into_iter().flatten().collect()
-    }
+    };
 }
 macro_rules! get_registers {
     ($x:expr) => {
@@ -355,6 +354,12 @@ pub struct Ir {
     num_locals: usize,
 }
 
+impl Default for Ir {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Ir {
     pub fn new() -> Self {
         Self {
@@ -459,9 +464,17 @@ impl Ir {
         let a = self.assign_new(a);
         let b = self.assign_new(b);
         let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
-        self.instructions
-            .push(Instruction::Compare(register.into(), a.into(), b.into(), condition));
-        self.instructions.push(Instruction::Tag(register.into(), register.into(), tag.into()));
+        self.instructions.push(Instruction::Compare(
+            register.into(),
+            a.into(),
+            b.into(),
+            condition,
+        ));
+        self.instructions.push(Instruction::Tag(
+            register.into(),
+            register.into(),
+            tag.into(),
+        ));
         Value::Register(register)
     }
 
@@ -475,7 +488,6 @@ impl Ir {
         self.instructions
             .push(Instruction::JumpIf(label, condition, a.into(), b.into()));
     }
-    
 
     pub fn assign<A>(&mut self, dest: VirtualRegister, val: A)
     where
@@ -502,8 +514,6 @@ impl Ir {
         self.instructions.push(Instruction::Ret(val));
         val
     }
-
-
 
     pub fn label(&mut self, arg: &str) -> Label {
         let label_index = self.labels.len();
@@ -670,7 +680,7 @@ impl Ir {
                         let ptr = string as *const _ as u64;
                         // tag the pointer as a string with the pattern 010 in the least significant bits
                         let tagged = BuiltInTypes::String.tag(ptr as isize);
-                        lang.mov_64(register, tagged as isize);
+                        lang.mov_64(register, tagged);
                     }
                     Value::Function(id) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
@@ -695,7 +705,7 @@ impl Ir {
                     }
                     Value::Local(local) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
-                        lang.load_from_stack(register, (*local as i32));
+                        lang.load_from_stack(register, *local as i32);
                     }
                 },
                 Instruction::LoadConstant(dest, val) => {
@@ -709,12 +719,12 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
                     let local = local.to_local();
-                    lang.load_local(dest, (local as i32));
+                    lang.load_local(dest, local as i32);
                 }
                 Instruction::StoreLocal(dest, value) => {
                     let value = value.try_into().unwrap();
                     let value = alloc.allocate_register(index, value, &mut lang);
-                    lang.store_local(value, (dest.to_local() as i32));
+                    lang.store_local(value, dest.to_local() as i32);
                 }
                 Instruction::LoadTrue(dest) => {
                     let dest = dest.try_into().unwrap();
@@ -886,7 +896,7 @@ impl Ir {
                     let ptr = alloc.allocate_register(index, ptr, &mut lang);
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
-                    lang.load_from_heap( ptr, dest, 0);
+                    lang.load_from_heap(ptr, dest, 0);
                 }
                 Instruction::HeapStore(ptr, val) => {
                     let ptr = ptr.try_into().unwrap();
@@ -970,8 +980,10 @@ impl Ir {
 
     pub fn store_local(&mut self, local_index: usize, reg: VirtualRegister) {
         self.increment_locals(local_index);
-        self.instructions
-            .push(Instruction::StoreLocal(Value::Local(local_index), reg.into()));
+        self.instructions.push(Instruction::StoreLocal(
+            Value::Local(local_index),
+            reg.into(),
+        ));
     }
 
     fn increment_locals(&mut self, index: usize) {
@@ -982,7 +994,7 @@ impl Ir {
 
     pub fn register_argument(&mut self, reg: VirtualRegister) {
         self.instructions
-            .push(Instruction::RegisterArgument(reg.try_into().unwrap()));
+            .push(Instruction::RegisterArgument(reg.into()));
     }
 }
 
@@ -1017,7 +1029,6 @@ pub fn fib() -> Ir {
     ir
 }
 
-
 #[allow(unused)]
 pub fn heap_test() -> Ir {
     let mut ir = Ir::new();
@@ -1044,7 +1055,10 @@ pub fn heap_test() -> Ir {
 // }
 
 pub extern "C" fn print_value(value: usize) {
-    assert!(matches!(BuiltInTypes::get_kind(value), BuiltInTypes::String));
+    assert!(matches!(
+        BuiltInTypes::get_kind(value),
+        BuiltInTypes::String
+    ));
     let value = BuiltInTypes::untag(value);
     let string_value: &StringValue = unsafe { std::mem::transmute(value) };
     let string = &string_value.str;
