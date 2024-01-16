@@ -56,7 +56,7 @@ fn main() {
 
 
     let target = debugger.create_target(
-        "/Users/jimmyhmiller/Documents/Code/ruby/ruby",
+        "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/target/debug/main",
         None,
         None,
         true
@@ -72,13 +72,13 @@ fn main() {
     //         location.set_enabled(true)
     //     }
     // }
-    let breakpoint = target.breakpoint_create_by_location("codegen.rs", 734, None);
+    let breakpoint = target.breakpoint_create_by_location("main.rs", 90, None);
 
 
 
     let mut launch_info = SBLaunchInfo::new();
     // launch_info.set_launch_flags(LaunchFlag::StopAtEntry);
-    launch_info.set_arguments(vec!["--yjit", "--yjit-call-threshold=1","/Users/jimmyhmiller/Documents/Code/ruby/my_file.rb"], true);
+    // launch_info.set_arguments(vec!["--yjit", "--yjit-call-threshold=1","/Users/jimmyhmiller/Documents/Code/ruby/my_file.rb"], true);
     let process = target.launch(&launch_info).unwrap();
 
 

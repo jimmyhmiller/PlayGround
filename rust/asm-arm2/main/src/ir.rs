@@ -568,7 +568,7 @@ impl Ir {
     pub fn compile(&mut self) -> LowLevelArm {
         let mut lang = LowLevelArm::new();
         lang.set_max_locals(self.num_locals);
-        // lang.breakpoint();
+        lang.breakpoint();
         // zero is a placeholder because this will be patched
         lang.prelude(0);
 
