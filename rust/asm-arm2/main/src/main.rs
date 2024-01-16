@@ -71,6 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
+
     // let hello_ast = parse! {
     //     fn hello(x) {
     //         print(array_get(array_store(array_store(allocate_array(16), 0, 42), 1, "hello"), 1))

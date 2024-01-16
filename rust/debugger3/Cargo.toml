@@ -1,11 +1,10 @@
 [package]
-name = "debugger"
+name = "debugger3"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libc = "0.2.131"
-# lldb = "0.0.10"
+lldb = { git = "https://github.com/endoli/lldb.rs.git", rev = "f01fb3120a576b2e13aa480a3509a7d103e92e75" }
 lldb-sys = "0.0.30"
