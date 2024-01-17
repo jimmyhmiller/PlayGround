@@ -1,6 +1,6 @@
 use std::ffi::{CString, c_void};
 
-use lldb::{LaunchFlags, SBDebugger, SBLaunchInfo, SBProcess, SBThread, RunMode, StateType, SBBreakpoint, sys, SBTarget, SBAddress, SBInstructionList, SBError};
+use lldb::{LaunchFlags, SBDebugger, SBLaunchInfo, SBProcess, SBThread, RunMode, StateType, SBBreakpoint, sys, SBTarget, SBAddress, SBInstructionList, SBError, SBFrame};
 
 fn wait_for_instruction(process: &SBProcess, thread: &SBThread) {
     let mut input = String::new();
@@ -28,29 +28,34 @@ fn wait_for_instruction(process: &SBProcess, thread: &SBThread) {
     });
 }
 
-pub fn get_instructions(target: &SBTarget, base_addr: &SBAddress, buffer: &mut [u8]) -> SBInstructionList {
-    let ptr: *mut c_void = buffer.as_mut_ptr() as *mut c_void;
-    let count = buffer.len();
-    let flavor_string = CString::new("intel").unwrap();
-    let flavor = flavor_string.as_ptr();
-    unsafe {
-        SBInstructionList { 
-            raw: sys::SBTargetGetInstructionsWithFlavor(target.raw, base_addr.raw, flavor, ptr, count)
-        }
-    }
-}
 
-trait Extensions {
+
+trait ProcessExtensions {
     fn read_memory(&self, address: u64, buffer: &mut [u8]) -> usize;
+    fn get_instructions(&self, frame: &SBFrame, target: &SBTarget) -> SBInstructionList;
 }
 
-impl Extensions for SBProcess {
+impl ProcessExtensions for SBProcess {
     fn read_memory(&self, address: u64, buffer: &mut [u8]) -> usize {
         let ptr: *mut c_void = buffer.as_mut_ptr() as *mut c_void;
         let count = buffer.len();
         let mut error = SBError::default();
         unsafe {
             sys::SBProcessReadMemory(self.raw, address, ptr, count, error.raw)
+        }
+    }
+    fn get_instructions(&self, frame: &SBFrame, target: &SBTarget) -> SBInstructionList {
+        let mut buffer = [0u8; 1000];
+        self.read_memory(frame.pc_address().load_address(&target), &mut buffer);
+        let base_addr = frame.pc_address();
+        let ptr: *mut c_void = buffer.as_mut_ptr() as *mut c_void;
+        let count = buffer.len();
+        let flavor_string = CString::new("intel").unwrap();
+        let flavor = flavor_string.as_ptr();
+        unsafe {
+            SBInstructionList { 
+                raw: sys::SBTargetGetInstructionsWithFlavor(target.raw, base_addr.raw, flavor, ptr, count)
+            }
         }
     }
 }
@@ -82,12 +87,11 @@ fn main() {
                         let frame = thread.selected_frame();
                         println!("{:?}", frame.function());
                         println!("{}", frame.disassemble());
-                        let mut buffer = [0u8; 1000];
-                        process.read_memory(frame.pc_address().load_address(&target), &mut buffer);
-                        let instructions = get_instructions(&target, &frame.pc_address(), &mut buffer);
+                        let instructions = process.get_instructions(&frame, &target);
                         instructions.iter().for_each(|instruction| {
                             println!("{:?}", instruction);
                         });
+                        
 
                         wait_for_instruction(&process, &thread);
                     } else {
