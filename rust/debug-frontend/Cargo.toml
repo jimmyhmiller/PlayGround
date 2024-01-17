@@ -1,0 +1,14 @@
+[package]
+name = "debug-frontend"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+skia-window = { path = "../skia-window" }
+skia-safe = { version = "0.69.0", features = ["metal", "textlayout"] }
+winit = "0.29.10"
+regex = "1.10.2"
+lldb = { git = "https://github.com/endoli/lldb.rs.git", rev = "f01fb3120a576b2e13aa480a3509a7d103e92e75" }
+lldb-sys = "0.0.30"
