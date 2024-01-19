@@ -7,30 +7,32 @@ pub mod compiler;
 pub mod ir;
 pub mod parser;
 
-#[derive(Debug)]
-struct Message {
+#[derive(Debug, Encode, Decode)]
+pub struct Message {
     kind: String,
-    data: Vec<u8>,
+    data: Data,
 }
 
-impl Message {
-    fn to_binary(&self) -> Vec<u8> {
-        let kind_length = self.kind.len();
-        let data_length = self.data.len();
-        let mut result = vec![0; 8 + 8 + kind_length + data_length];
-        result[0..8].copy_from_slice(&u64::to_le_bytes(kind_length as u64));
-        result[8..16].copy_from_slice(&u64::to_le_bytes(data_length as u64));
-        result[16..16 + kind_length].copy_from_slice(self.kind.as_bytes());
-        result[16 + kind_length..].copy_from_slice(&self.data);
-        result
-    }
 
-    fn from_binary(data: &[u8]) -> Message {
-        let kind_length = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
-        let data_length = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
-        let kind = String::from_utf8(data[16..16 + kind_length].to_vec()).unwrap();
-        let data = data[16 + kind_length..16 + kind_length + data_length].to_vec();
-        Message { kind, data }
+// TODO: This should really live on the debugger side of things
+#[derive(Debug, Encode, Decode)]
+enum Data {
+    ForeignFunction { name: String, pointer: usize },
+    HeapPointer { pointer: usize },
+}
+
+trait Serialize {
+    fn to_binary(&self) -> Vec<u8>;
+    fn from_binary(data: &[u8]) -> Self;
+}
+
+impl<T : Encode + Decode> Serialize for T {
+    fn to_binary(&self) -> Vec<u8> {
+        bincode::encode_to_vec(self, standard()).unwrap()
+    }
+    fn from_binary(data: &[u8]) -> T {
+        let (data, _ ) = bincode::decode_from_slice(data, standard()).unwrap();
+        data
     }
 }
 
@@ -48,9 +50,17 @@ pub fn debugger(message: Message) {
     }
 }
 
+
+use bincode::{Encode, Decode, config::{Config, standard}};
+
 use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
 
 fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
+
+    let data = Data::ForeignFunction { name: "test".to_string(), pointer: 123 };
+    // let data = data.to_binary();
+    // let data = Data::from_binary(&data);
+    println!("{:?}", data);
     let fib: ast::Ast = parser::fib();
     let mut fib: ir::Ir = fib.compile(compiler);
     let mut fib = fib.compile();
@@ -99,7 +109,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     debugger(Message {
         kind: "HeapPointer".to_string(),
-        data: heap_pointer.to_le_bytes().to_vec(),
+        data: Data::HeapPointer { pointer: heap_pointer },
     });
     // Very inefficient way to do array stuff
     // but working
