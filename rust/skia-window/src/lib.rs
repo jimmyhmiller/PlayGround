@@ -18,6 +18,18 @@ use winit::{
     window::WindowBuilder,
 };
 
+pub struct Options {
+    pub vsync: bool
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            vsync: true
+        }
+    }
+}
+
 pub trait App {
     fn on_window_create(&mut self, event_loop_proxy: EventLoopProxy<()>, size: Size);
     // TODO: Consider user event
@@ -30,7 +42,7 @@ pub trait App {
     fn cursor_icon(&mut self) -> winit::window::CursorIcon;
     fn set_window_size(&mut self, size: Size);
 
-    fn create_window(&mut self, title: &str, width: i32, height: i32) {
+    fn create_window(&mut self, title: &str, width: i32, height: i32, options: Options) {
 
         let mut size = LogicalSize::new(width, height);
     
@@ -69,7 +81,7 @@ pub trait App {
             layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
             layer.set_presents_with_transaction(false);
             layer.set_opaque(true);
-            layer.set_display_sync_enabled(true);
+            layer.set_display_sync_enabled(options.vsync);
             layer.set_contents_scale(window.scale_factor() as f64);
             // change some stuff to make resizing nice
             // https://thume.ca/2019/06/19/glitchless-metal-window-resizing/

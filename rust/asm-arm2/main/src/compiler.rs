@@ -78,6 +78,10 @@ impl Compiler {
         }
     }
 
+    pub fn get_heap_pointer(&self) -> usize {
+        self.heap.as_ref().unwrap().as_ptr() as usize
+    }
+
     pub fn allocate(&mut self, size: usize) -> Result<usize, Box<dyn Error>> {
         let size = size * 8;
         let memory = self.heap.take();
