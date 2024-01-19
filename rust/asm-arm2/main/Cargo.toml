@@ -5,11 +5,13 @@ edition = "2021"
 
 
 
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 mmap-rs = "0.5.0"
 asm = { path = "../asm" }
+bincode =  { version = "2.0.0-rc.3", features = ["derive"] }
 
 
 
