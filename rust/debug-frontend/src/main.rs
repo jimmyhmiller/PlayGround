@@ -1,13 +1,13 @@
-use std::{ffi::{c_void, CString}, collections::HashSet};
+use std::{ffi::{c_void, CString}, collections::HashSet, str::from_utf8};
 
-use lldb::{SBDebugger, SBError, SBFrame, SBInstructionList, SBLaunchInfo, SBProcess, SBTarget};
-use lldb_sys::RunMode;
+use lldb::{SBDebugger, SBError, SBFrame, SBInstructionList, SBLaunchInfo, SBProcess, SBTarget, SBBreakpoint, SBValue};
+use lldb_sys::{RunMode, SBTargetBreakpointCreateByName, SBValueGetValueAsUnsigned2};
 use skia_safe::{
     paint,
     textlayout::{FontCollection, ParagraphBuilder, ParagraphStyle, TextStyle},
     FontMgr,
 };
-use skia_window::App;
+use skia_window::{App, Options};
 use winit::{
     event::{ElementState, Event, WindowEvent::KeyboardInput},
     event_loop::EventLoopProxy,
@@ -15,8 +15,37 @@ use winit::{
     window::CursorIcon,
 };
 
+
+#[derive(Debug)]
+struct Message {
+    kind: String,
+    data: Vec<u8>,
+}
+
+impl Message {
+    fn to_binary(&self) -> Vec<u8> {
+        let kind_length = self.kind.len();
+        let data_length = self.data.len();
+        let mut result = vec![0; 8 + 8 + kind_length + data_length];
+        result[0..8].copy_from_slice(&u64::to_le_bytes(kind_length as u64));
+        result[8..16].copy_from_slice(&u64::to_le_bytes(data_length as u64));
+        result[16..16 + kind_length].copy_from_slice(self.kind.as_bytes());
+        result[16 + kind_length..].copy_from_slice(&self.data);
+        result
+    }
+
+    fn from_binary(data: &[u8]) -> Message {
+        let kind_length = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
+        let data_length = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
+        let kind = String::from_utf8(data[16..16 + kind_length].to_vec()).unwrap();
+        let data = data[16 + kind_length..16 + kind_length + data_length].to_vec();
+        Message { kind, data }
+    }
+}
+
 struct Frontend {
     state: State,
+    should_step: bool,
 }
 
 #[allow(unused_variables)]
@@ -36,17 +65,13 @@ impl App for Frontend {
                     match event.state {
                         ElementState::Pressed => match event.physical_key {
                             PhysicalKey::Code(KeyCode::ArrowDown) => {
-                                if let Some(process) = &self.state.process.process {
-                                    if let Some(thread) = process.thread_by_index_id(1) {
-                                        let pc_before = thread.selected_frame().pc();
-                                        thread.step_over(RunMode::OnlyDuringStepping).unwrap();
-                                        let pc_after = thread.selected_frame().pc();
-                                        if pc_before == pc_after {
-                                            thread.selected_frame().set_pc(pc_after + 4);
-                                        }
-                                        self.state.update_process_state();
-                                    }
-                                }
+                                self.step_over();
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowRight) => {
+                                self.keep_stepping();
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowLeft) => {
+                                self.stop_stepping();
                             }
                             _ => {}
                         },
@@ -72,6 +97,10 @@ impl App for Frontend {
     fn end_frame(&mut self) {}
 
     fn tick(&mut self) {
+
+        if self.should_step {
+            self.step_over();
+        }
         if self.state.process.instructions.is_some() {
             return;
         }
@@ -89,8 +118,37 @@ impl App for Frontend {
     fn set_window_size(&mut self, size: skia_window::Size) {}
 }
 
+impl Frontend {
+    fn step_over(&mut self) {
+        if let Some(process) = &self.state.process.process {
+            if let Some(thread) = process.thread_by_index_id(1) {
+                if thread.selected_frame().function_name() == Some("debugger_info") {
+                    println!("Got info!");
+                    thread.resume().unwrap();
+                }
+                let pc_before = thread.selected_frame().pc();
+                thread.step_over(RunMode::OnlyDuringStepping).unwrap();
+                let pc_after = thread.selected_frame().pc();
+                if pc_before == pc_after {
+                    thread.selected_frame().set_pc(pc_after + 4);
+                }
+                self.state.update_process_state();
+            }
+        }
+    }
+
+    fn keep_stepping(&mut self) {
+        self.should_step = true;
+    }
+
+    fn stop_stepping(&mut self) {
+        self.should_step = false;
+    }
+}
+
 fn main() {
     let mut frontend = Frontend {
+        should_step: false,
         state: State {
             disasm: Disasm {
                 disasm_values: vec![],
@@ -122,8 +180,97 @@ fn main() {
             },
         },
     };
-    frontend.create_window("Debug", 1600, 1600);
+    frontend.create_window("Debug", 1600, 1600, Options { vsync: false });
 }
+
+
+// Stolen from compiler
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltInTypes {
+    Int,
+    Float,
+    String,
+    Bool,
+    Function,
+    Struct,
+    Array,
+    None,
+}
+
+impl BuiltInTypes {
+    pub fn tag(&self, value: isize) -> isize {
+        let value = value << 3;
+        let tag = self.get_tag();
+        value | tag
+    }
+
+    pub fn get_tag(&self) -> isize {
+        match self {
+            BuiltInTypes::Int => 0b000,
+            BuiltInTypes::Float => 0b001,
+            BuiltInTypes::String => 0b010,
+            BuiltInTypes::Bool => 0b011,
+            BuiltInTypes::Function => 0b100,
+            BuiltInTypes::Struct => 0b101,
+            BuiltInTypes::Array => 0b110,
+            BuiltInTypes::None => panic!("None has no tag"),
+        }
+    }
+
+    pub fn untag(pointer: usize) -> usize {
+        pointer >> 3
+    }
+
+    pub fn get_kind(pointer: usize) -> Self {
+        match pointer & 0b111 {
+            0b000 => BuiltInTypes::Int,
+            0b001 => BuiltInTypes::Float,
+            0b010 => BuiltInTypes::String,
+            0b011 => BuiltInTypes::Bool,
+            0b100 => BuiltInTypes::Function,
+            0b101 => BuiltInTypes::Struct,
+            0b110 => BuiltInTypes::Array,
+            _ => BuiltInTypes::None
+        }
+    }
+
+    pub fn is_embedded(&self) -> bool {
+        match self {
+            BuiltInTypes::Int => true,
+            BuiltInTypes::Float => true,
+            BuiltInTypes::String => false,
+            BuiltInTypes::Bool => true,
+            BuiltInTypes::Function => false,
+            BuiltInTypes::Struct => false,
+            BuiltInTypes::Array => false,
+            BuiltInTypes::None => false,
+        }
+    }
+
+    pub fn construct_int(value: isize) -> isize {
+        if value > 0b1111111 {
+            panic!("Integer overflow")
+        }
+        BuiltInTypes::Int.tag(value)
+    }
+
+    pub fn construct_boolean(value: bool) -> isize {
+        let bool = BuiltInTypes::Bool;
+        if value {
+            bool.tag(1)
+        } else {
+            bool.tag(0)
+        }
+    }
+
+    pub fn tag_size() -> i32 {
+        3
+    }
+}
+
+
+
+
 
 struct Disasm {
     disasm_values: Vec<ParsedDisasm>,
@@ -185,6 +332,21 @@ impl State {
     fn update_process_state(&mut self) {
         if let (Some(process), Some(target)) = (&self.process.process, &self.process.target) {
             if let Some(thread) = process.thread_by_index_id(1) {
+
+                if thread.selected_frame().function_name() == Some("debugger_info") {
+                    let x0 = thread.selected_frame().get_register("x0").unwrap().to_usize();
+                    let x1 = thread.selected_frame().get_register("x1").unwrap().to_usize();
+    
+                    let mut buffer: Vec<u8> = vec![0; x1];
+                    process.read_memory(x0 as u64, &mut buffer);
+                    let message = Message::from_binary(&buffer);
+                    println!("Message: {:?}", message);
+                    
+
+                    process.continue_execution().unwrap();
+                    return;
+                }
+
                 let frame = thread.selected_frame();
 
                 self.pc = frame.pc();
@@ -213,6 +375,7 @@ impl State {
                     .map(|(i, value)| Memory {
                         address: stack_root + (i as u64 * 8),
                         value: *value,
+                        kind: BuiltInTypes::get_kind(*value as usize)
                     })
                     .collect();
 
@@ -271,11 +434,12 @@ impl State {
 struct Memory {
     address: u64,
     value: u64,
+    kind: BuiltInTypes,
 }
 
 impl Memory {
     fn to_string(&self) -> String {
-        format!("0x{:x}: 0x{:x}", self.address, self.value)
+        format!("0x{:x}: 0x{:x} {:?}", self.address, self.value, self.kind)
     }
 }
 
@@ -303,39 +467,6 @@ struct ParsedDisasm {
 }
 
 impl ParsedDisasm {
-    fn new(line: &str) -> Self {
-        let re = regex::Regex::new(
-            r"(?x)
-            (?P<address>[0-9a-fA-F]+):\s+
-            (?P<hex>[0-9a-fA-F\s]+)\s+
-            (?P<instruction>[a-zA-Z0-9]+)\s+
-            (?P<arguments>[a-zA-Z0-9,\s\#=]+)\s*
-            (?:;\s*(?P<comment>.*))?
-            ",
-        )
-        .unwrap();
-        let captures = re
-            .captures(line)
-            .expect(&format!("failed to parse line {}", line));
-        let address = u64::from_str_radix(&captures["address"], 16).unwrap();
-        let hex = captures["hex"].trim().to_string();
-        let instruction = captures["instruction"].trim().to_string();
-        let arguments = captures["arguments"]
-            .trim()
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect();
-        let comment = captures
-            .name("comment")
-            .map_or_else(|| String::new(), |m| m.as_str().trim().to_string());
-        Self {
-            address,
-            hex,
-            instruction,
-            arguments,
-            comment,
-        }
-    }
 
     // TODO: I should probably make it so I don't just make a big string
     // but instead things I can then chunk up and display with different styles
@@ -357,22 +488,6 @@ impl ParsedDisasm {
             // result.push_str(&format!(";{} ", self.comment));
         }
         result
-    }
-}
-
-#[test]
-fn parse_disasm() {
-    let example = std::fs::read_to_string(
-        "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/debug-frontend/example-disasm.txt",
-    )
-    .unwrap();
-    let lines = example.split("\n");
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let parsed = ParsedDisasm::new(line);
-        println!("{:?}", parsed);
     }
 }
 
@@ -635,6 +750,59 @@ fn debug(state: &State) -> impl Node {
     root
 }
 
+trait FrameExentions {
+    fn get_register(&self, name: &str) -> Option<SBValue>;
+}
+
+impl FrameExentions for SBFrame {
+    fn get_register(&self, name: &str) -> Option<SBValue> {
+        for register in self.registers().into_iter() {
+            if register.name() == name {
+                return Some(register);
+            }
+            for child in register.children().into_iter() {
+                if child.name() == name {
+                    return Some(child);
+                }
+            }
+        }
+        None
+    }
+}
+
+
+trait ValueExtensions {
+    fn to_usize(&self) -> usize;
+}
+
+impl ValueExtensions for SBValue {
+    fn to_usize(&self) -> usize {
+        unsafe { 
+            SBValueGetValueAsUnsigned2(self.raw, 0) as usize
+        }
+    }
+}
+
+
+trait TargetExtensions {
+    fn create_breakpoint_by_name(&self, name: &str, module_name: &str) -> Option<SBBreakpoint>;
+}
+
+impl TargetExtensions for SBTarget {
+    fn create_breakpoint_by_name(&self, name: &str, module_name: &str) -> Option<SBBreakpoint> {
+        unsafe {
+            let name = CString::new(name).unwrap();
+            let module_name = CString::new(module_name).unwrap();
+            let pointer = SBTargetBreakpointCreateByName(self.raw, name.as_ptr(), module_name.as_ptr());
+            if pointer.is_null() {
+                None
+            } else {
+                Some(SBBreakpoint { raw: pointer })
+            }
+        }
+    }
+}
+
 trait ProcessExtensions {
     fn read_memory(&self, address: u64, buffer: &mut [u8]) -> usize;
     fn get_instructions(&self, frame: &SBFrame, target: &SBTarget) -> SBInstructionList;
@@ -679,9 +847,11 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/target/debug/main",
     ) {
 
-        // let breakpoint = target.breakpoint_create_by_location("main.rs", 90);
-        // breakpoint.set_enabled(true);
-        // target.enable_all_breakpoints();
+        let symbol_list = target.find_functions("debugger_info", 2);
+        let symbol = symbol_list.into_iter().next().unwrap();
+        let breakpoint = target.create_breakpoint_by_name("debugger_info", "main").unwrap();
+        breakpoint.set_enabled(true);
+        target.enable_all_breakpoints();
 
         let launchinfo = SBLaunchInfo::new();
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);

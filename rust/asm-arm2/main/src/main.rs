@@ -7,6 +7,47 @@ pub mod compiler;
 pub mod ir;
 pub mod parser;
 
+#[derive(Debug)]
+struct Message {
+    kind: String,
+    data: Vec<u8>,
+}
+
+impl Message {
+    fn to_binary(&self) -> Vec<u8> {
+        let kind_length = self.kind.len();
+        let data_length = self.data.len();
+        let mut result = vec![0; 8 + 8 + kind_length + data_length];
+        result[0..8].copy_from_slice(&u64::to_le_bytes(kind_length as u64));
+        result[8..16].copy_from_slice(&u64::to_le_bytes(data_length as u64));
+        result[16..16 + kind_length].copy_from_slice(self.kind.as_bytes());
+        result[16 + kind_length..].copy_from_slice(&self.data);
+        result
+    }
+
+    fn from_binary(data: &[u8]) -> Message {
+        let kind_length = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
+        let data_length = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
+        let kind = String::from_utf8(data[16..16 + kind_length].to_vec()).unwrap();
+        let data = data[16 + kind_length..16 + kind_length + data_length].to_vec();
+        Message { kind, data }
+    }
+}
+
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn debugger_info(buffer: *const u8, length: usize) {
+    // Hack to make sure this isn't inlined
+    let x = 2;
+}
+
+pub fn debugger(message: Message) {
+    let message = message.to_binary();
+    unsafe {
+        debugger_info(message.as_ptr(), message.len());
+    }
+}
+
 use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
 
 fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
@@ -53,6 +94,13 @@ fn array_get(compiler: *mut Compiler, array: usize, index: usize) -> usize {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut compiler = Compiler::new();
+
+    let heap_pointer = compiler.get_heap_pointer();
+
+    debugger(Message {
+        kind: "HeapPointer".to_string(),
+        data: heap_pointer.to_le_bytes().to_vec(),
+    });
     // Very inefficient way to do array stuff
     // but working
     compiler.add_foreign_function("print", ir::print_value as *const u8)?;
