@@ -1,4 +1,4 @@
-use std::{error::Error, time::Instant};
+use std::{error::Error, time::Instant, mem, slice::from_raw_parts};
 
 mod arm;
 pub mod ast;
@@ -18,7 +18,9 @@ pub struct Message {
 #[derive(Debug, Encode, Decode)]
 enum Data {
     ForeignFunction { name: String, pointer: usize },
+    BuiltinFunction {name: String, pointer: usize},
     HeapPointer { pointer: usize },
+    UserFunction { name: String, pointer: usize, len: usize },
 }
 
 trait Serialize {
@@ -38,16 +40,21 @@ impl<T : Encode + Decode> Serialize for T {
 
 #[no_mangle]
 #[inline(never)]
-pub extern "C" fn debugger_info(buffer: *const u8, length: usize) {
+pub unsafe extern "C" fn debugger_info(buffer: *const u8, length: usize) {
     // Hack to make sure this isn't inlined
     let x = 2;
 }
 
 pub fn debugger(message: Message) {
     let message = message.to_binary();
+    let ptr = message.as_ptr();
+    let length = message.len();
+    mem::forget(message);
     unsafe {
-        debugger_info(message.as_ptr(), message.len());
+        debugger_info(ptr, length);
     }
+    let message = unsafe { from_raw_parts(ptr, length) };
+    // Should make it is so we clean up this memory
 }
 
 

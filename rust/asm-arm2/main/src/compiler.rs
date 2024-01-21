@@ -3,7 +3,7 @@ use std::error::Error;
 
 use mmap_rs::{Mmap, MmapOptions};
 
-use crate::ir::{BuiltInTypes, StringValue};
+use crate::{ir::{BuiltInTypes, StringValue}, debugger, Message, Data};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
@@ -114,6 +114,13 @@ impl Compiler {
             is_builtin: false,
         });
         self.add_jump_table_entry(index, offset)?;
+        debugger(Message {
+            kind: "foreign_function".to_string(),
+            data: Data::ForeignFunction {
+                name: name.to_string(),
+                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap()
+            }
+        });
         Ok(self.functions.len() - 1)
     }
     pub fn add_builtin_function(
@@ -128,6 +135,13 @@ impl Compiler {
             offset,
             is_foreign: true,
             is_builtin: true,
+        });
+        debugger(Message {
+            kind: "builtin_function".to_string(),
+            data: Data::BuiltinFunction {
+                name: name.to_string(),
+                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap()
+            }
         });
         self.add_jump_table_entry(index, offset)?;
         Ok(self.functions.len() - 1)
@@ -170,8 +184,18 @@ impl Compiler {
             is_foreign: false,
             is_builtin: false,
         });
-        self.add_jump_table_entry(index, offset)?;
-        Ok(index)
+        debugger(Message {
+            kind: "user_function".to_string(),
+            data: Data::UserFunction {
+                name: name.to_string(),
+                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap(),
+                len: code.len(),
+            }
+        });
+        let function_pointer = Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
+        println!("{:x}", function_pointer);
+        let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
+        Ok(jump_table_offset)
     }
     pub fn overwrite_function(&mut self, index: usize, code: &[u8]) -> Result<(), Box<dyn Error>> {
         let offset = self.add_code(code)?;
@@ -196,20 +220,22 @@ impl Compiler {
         &mut self,
         index: usize,
         offset: usize,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<usize, Box<dyn Error>> {
+        let jump_table_offset = self.jump_table_offset;
+        self.jump_table_offset += 1;
         let memory = self.jump_table.take();
         let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
-        let buffer = &mut memory[index * 8..];
+        let buffer = &mut memory[jump_table_offset * 8..];
         // Write full usize to buffer
         for (index, byte) in offset.to_le_bytes().iter().enumerate() {
             buffer[index] = *byte;
         }
-        self.jump_table_offset += 8;
         let mem = memory.make_read_only().unwrap_or_else(|(_map, e)| {
             panic!("Failed to make mmap executable: {}", e);
         });
+        self.jump_table_offset += 1;
         self.jump_table = Some(mem);
-        Ok(())
+        Ok(jump_table_offset)
     }
 
     pub fn add_code(&mut self, code: &[u8]) -> Result<usize, Box<dyn Error>> {
@@ -259,10 +285,10 @@ impl Compiler {
             &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
-        let start = usize::from_le_bytes(bytes);
-        let memory = &self.code_memory.as_ref().unwrap()[start..];
-        let f: fn(u64) -> u64 = unsafe { std::mem::transmute(memory.as_ref().as_ptr()) };
-        let result = f(BuiltInTypes::Int.tag(arg as isize) as u64);
+        let start = usize::from_le_bytes(bytes) as *const u8;
+        let f: fn(u64) -> u64 = unsafe { std::mem::transmute(start) };
+        let arg = BuiltInTypes::Int.tag(arg as isize) as u64;
+        let result = f(arg);
         // TODO: When running in release mode, this fails here.
         // I'm guessing I'm not setting up the stack correctly
         Ok(result)

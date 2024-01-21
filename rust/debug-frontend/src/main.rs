@@ -1,5 +1,6 @@
-use std::{ffi::{c_void, CString}, collections::HashSet, str::from_utf8};
+use std::{ffi::{c_void, CString}, collections::{HashSet, HashMap}};
 
+use bincode::{Encode, Decode, config::standard};
 use lldb::{SBDebugger, SBError, SBFrame, SBInstructionList, SBLaunchInfo, SBProcess, SBTarget, SBBreakpoint, SBValue};
 use lldb_sys::{RunMode, SBTargetBreakpointCreateByName, SBValueGetValueAsUnsigned2};
 use skia_safe::{
@@ -16,30 +17,59 @@ use winit::{
 };
 
 
-#[derive(Debug)]
-struct Message {
+#[derive(Debug, Encode, Decode)]
+pub struct Message {
     kind: String,
-    data: Vec<u8>,
+    data: Data,
 }
 
 impl Message {
-    fn to_binary(&self) -> Vec<u8> {
-        let kind_length = self.kind.len();
-        let data_length = self.data.len();
-        let mut result = vec![0; 8 + 8 + kind_length + data_length];
-        result[0..8].copy_from_slice(&u64::to_le_bytes(kind_length as u64));
-        result[8..16].copy_from_slice(&u64::to_le_bytes(data_length as u64));
-        result[16..16 + kind_length].copy_from_slice(self.kind.as_bytes());
-        result[16 + kind_length..].copy_from_slice(&self.data);
-        result
+    fn to_string(&self) -> String {
+        format!("{} {}", self.kind, self.data.to_string())
     }
+}
 
-    fn from_binary(data: &[u8]) -> Message {
-        let kind_length = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
-        let data_length = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
-        let kind = String::from_utf8(data[16..16 + kind_length].to_vec()).unwrap();
-        let data = data[16 + kind_length..16 + kind_length + data_length].to_vec();
-        Message { kind, data }
+// TODO: This should really live on the debugger side of things
+#[derive(Debug, Encode, Decode, Clone)]
+enum Data {
+    ForeignFunction { name: String, pointer: usize },
+    BuiltinFunction {name: String, pointer: usize},
+    HeapPointer { pointer: usize },
+    UserFunction { name: String, pointer: usize, len: usize },
+}
+
+impl Data {
+    fn to_string(&self) -> String {
+        match self {
+            Data::ForeignFunction { name, pointer } => {
+                format!("{}: 0x{:x}", name, pointer)
+            }
+            Data::BuiltinFunction { name, pointer } => {
+                format!("{}: 0x{:x}", name, pointer)
+            }
+            Data::HeapPointer { pointer } => {
+                format!("0x{:x}", pointer)
+            }
+            Data::UserFunction { name, pointer, len  } => {
+                format!("{}: 0x{:x} 0x{:x}", name, pointer, (pointer + len))
+            }
+        }
+    }
+}
+
+
+trait Serialize {
+    fn to_binary(&self) -> Vec<u8>;
+    fn from_binary(data: &[u8]) -> Self;
+}
+
+impl<T : Encode + Decode> Serialize for T {
+    fn to_binary(&self) -> Vec<u8> {
+        bincode::encode_to_vec(self, standard()).unwrap()
+    }
+    fn from_binary(data: &[u8]) -> T {
+        let (data, _ ) = bincode::decode_from_slice(data, standard()).unwrap();
+        data
     }
 }
 
@@ -104,7 +134,7 @@ impl App for Frontend {
         if self.state.process.instructions.is_some() {
             return;
         }
-        self.state.update_process_state();
+        self.state.update_process_state(false);
     }
 
     fn should_redraw(&mut self) -> bool {
@@ -120,19 +150,18 @@ impl App for Frontend {
 
 impl Frontend {
     fn step_over(&mut self) {
-        if let Some(process) = &self.state.process.process {
+        if let Some(process) = self.state.process.process.clone() {
             if let Some(thread) = process.thread_by_index_id(1) {
-                if thread.selected_frame().function_name() == Some("debugger_info") {
-                    println!("Got info!");
-                    thread.resume().unwrap();
-                }
+                let _was_debugger_info = self.state.check_debugger_info(&thread, &process, true);
+                self.state.update_process_state(true);
                 let pc_before = thread.selected_frame().pc();
-                thread.step_over(RunMode::OnlyDuringStepping).unwrap();
+                thread.step_over(RunMode::OnlyThisThread).unwrap();
                 let pc_after = thread.selected_frame().pc();
+                println!("pc before: {:x} , {:x}", pc_before, pc_after);
                 if pc_before == pc_after {
                     thread.selected_frame().set_pc(pc_after + 4);
                 }
-                self.state.update_process_state();
+                self.state.update_process_state(true);
             }
         }
     }
@@ -178,6 +207,8 @@ fn main() {
             stack: Stack {
                 stack: vec![],
             },
+            messages: vec![],
+            functions: HashMap::new(),
         },
     };
     frontend.create_window("Debug", 1600, 1600, Options { vsync: false });
@@ -329,27 +360,22 @@ fn convert_to_u64_array(input: &[u8; 256]) -> Vec<u64> {
 
 
 impl State {
-    fn update_process_state(&mut self) {
-        if let (Some(process), Some(target)) = (&self.process.process, &self.process.target) {
+    fn update_process_state(&mut self, is_stepping: bool) {
+        if let (Some(process), Some(target)) = (self.process.process.clone(), self.process.target.clone()) {
             if let Some(thread) = process.thread_by_index_id(1) {
 
-                if thread.selected_frame().function_name() == Some("debugger_info") {
-                    let x0 = thread.selected_frame().get_register("x0").unwrap().to_usize();
-                    let x1 = thread.selected_frame().get_register("x1").unwrap().to_usize();
-    
-                    let mut buffer: Vec<u8> = vec![0; x1];
-                    process.read_memory(x0 as u64, &mut buffer);
-                    let message = Message::from_binary(&buffer);
-                    println!("Message: {:?}", message);
-                    
+                let was_debugger_info = self.check_debugger_info(&thread, &process, is_stepping);
 
-                    process.continue_execution().unwrap();
+                if was_debugger_info {
                     return;
                 }
 
                 let frame = thread.selected_frame();
 
                 self.pc = frame.pc();
+                if self.pc == 0x100168144 {
+                    println!("GOT IT");
+                }
                 let pc_in_instructions = self
                     .disasm
                     .disasm_values
@@ -389,25 +415,23 @@ impl State {
                             address: instruction.address().load_address(&target),
                             // I think this is data, but not sure
                             hex: "".to_string(),
-                            instruction: instruction.mnemonic(target).to_string(),
+                            instruction: instruction.mnemonic(&target).to_string(),
                             arguments: instruction
-                                .operands(target)
+                                .operands(&target)
                                 .to_string()
                                 .split(',')
                                 .map(|s| s.trim().to_string())
                                 .collect(),
-                            comment: instruction.comment(target).to_string(),
+                            comment: instruction.comment(&target).to_string(),
                         };
                         if instruction.instruction == "udf" {
-                            continue;
-                        }
-                        if instruction.address <= last {
                             continue;
                         }
                         self.disasm.disasm_values.push(instruction);
                     }
                 }
                 self.disasm.disasm_values.sort_by(|a, b| a.address.cmp(&b.address));
+                self.disasm.disasm_values.dedup_by(|a, b| a.address == b.address);
                 self.registers.registers.clear();
                 frame.registers().iter().for_each(|register| {
                     if register.name().contains("General") {
@@ -426,6 +450,36 @@ impl State {
                     }
                 });
             }
+        }
+    }
+
+    fn check_debugger_info(&mut self, thread: &lldb::SBThread, process: &SBProcess, is_stepping: bool) -> bool {
+        if thread.selected_frame().function_name() == Some("debugger_info") {
+            let x0 = thread.selected_frame().get_register("x0").unwrap().to_usize();
+            let x1 = thread.selected_frame().get_register("x1").unwrap().to_usize();
+    
+            let mut buffer: Vec<u8> = vec![0; x1];
+            process.read_memory(x0 as u64, &mut buffer);
+            let message = Message::from_binary(&buffer);
+            match message.data.clone() {
+                Data::ForeignFunction { name, pointer } => {},
+                Data::BuiltinFunction { name, pointer } => {},
+                Data::HeapPointer { pointer } => {},
+                Data::UserFunction { name, pointer, len } => {
+                    self.process.target.as_mut().unwrap().breakpoint_create_by_address(pointer as u64);
+                    self.functions.insert(pointer, Function::User { name, address_range: (pointer, pointer + len) });
+                }
+            }
+            self.messages.push(message);
+
+            if is_stepping {
+                thread.step_over(RunMode::OnlyThisThread).unwrap();
+            } else {
+                process.continue_execution().unwrap();
+            }
+            true
+        } else {
+            false
         }
     }
 }
@@ -447,6 +501,27 @@ struct Stack {
     stack: Vec<Memory>,
 }
 
+enum Function {
+    Foreign { name: String, pointer: usize },
+    Builtin { name: String, pointer: usize },
+    User { 
+        name: String,
+        address_range: (usize, usize),
+     },
+}
+
+impl Function {
+    fn get_name(&self) -> String {
+        match self {
+            Function::Foreign { name, pointer: _ } => name.to_string(),
+            Function::Builtin { name, pointer: _ } => name.to_string(),
+            Function::User { name, address_range: _ } => name.to_string(),
+        }
+    }
+}
+
+type Address = usize;
+
 struct State {
     pc: u64,
     disasm: Disasm,
@@ -455,6 +530,8 @@ struct State {
     stack: Stack,
     sp: u64,
     fp: u64,
+    messages: Vec<Message>,
+    functions: HashMap<Address, Function>,
 }
 
 #[derive(Debug)]
@@ -473,7 +550,7 @@ impl ParsedDisasm {
     fn to_string(&self, show_address: bool, show_hex: bool) -> String {
         let mut result = String::new();
         if show_address {
-            result.push_str(&format!("{:x} ", self.address));
+            result.push_str(&format!("0x{:x} ", self.address));
         }
         if show_hex {
             result.push_str(&format!("{} ", self.hex));
@@ -505,6 +582,21 @@ enum Direction {
 
 struct Layout {
     direction: Direction,
+    margin: f32,
+    child_spacing: f32,
+}
+
+impl Layout {
+    fn with_margin(self, margin: f32) -> Self {
+        Self { margin, ..self }
+    }
+
+    fn with_child_spacing(self, child_spacing: f32) -> Self {
+        Self {
+            child_spacing,
+            ..self
+        }
+    }
 }
 
 struct Root {
@@ -515,39 +607,40 @@ struct Root {
 impl Node for Root {
     fn draw(&self, canvas: &skia_safe::Canvas) {
         canvas.save();
+        canvas.translate((self.layout.margin, self.layout.margin));
         for child in &self.children {
             canvas.save();
             child.draw(canvas);
             canvas.restore();
             if self.layout.direction == Direction::Horizontal {
-                canvas.translate((child.width(), 0.0));
+                canvas.translate((child.width() + self.layout.child_spacing, 0.0));
             } else {
-                canvas.translate((0.0, child.height()));
+                canvas.translate((0.0, child.height() + self.layout.child_spacing));
             }
         }
         canvas.restore();
     }
     fn height(&self) -> f32 {
         if self.layout.direction == Direction::Vertical {
-            self.children.iter().map(|child| child.height()).sum()
+            self.children.iter().map(|child| child.height()).sum::<f32>() + self.layout.margin
         } else {
             self.children
                 .iter()
                 .map(|child| child.height())
                 .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap_or_default()
+                .unwrap_or_default() + self.layout.margin
         }
     }
 
     fn width(&self) -> f32 {
         if self.layout.direction == Direction::Horizontal {
-            self.children.iter().map(|child| child.width()).sum()
+            self.children.iter().map(|child| child.width()).sum::<f32>() + self.layout.margin
         } else {
             self.children
                 .iter()
                 .map(|child| child.width())
                 .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap_or_default()
+                .unwrap_or_default() + self.layout.margin
         }
     }
 }
@@ -568,7 +661,7 @@ impl Paragraph {
         paint.set_color(skia_safe::Color::BLACK);
         // canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 1000.0, 1000.0), &paint);
         text_style.set_foreground_paint(&paint);
-        text_style.set_font_size(36.0);
+        text_style.set_font_size(32.0);
 
         let mut builder = ParagraphBuilder::new(&paragraph_style, &font_collection);
         builder.push_style(&text_style);
@@ -623,12 +716,16 @@ impl Root {
 fn horizontal() -> Layout {
     Layout {
         direction: Direction::Horizontal,
+        margin: 0.0,
+        child_spacing: 0.0,
     }
 }
 
 fn vertical() -> Layout {
     Layout {
         direction: Direction::Vertical,
+        margin: 0.0,
+        child_spacing: 0.0,
     }
 }
 
@@ -672,17 +769,21 @@ fn disasm(state: &State) -> impl Node {
         &disasm
             .iter()
             .map(|disasm| {
-                if disasm.address == state.pc {
-                    format!(
-                        "> {}",
-                        disasm.to_string(state.disasm.show_address, state.disasm.show_hex)
-                    )
+                let prefix = if disasm.address == state.pc {
+                    "> "
+                } else {
+                    "  "
+                };
+                if let Some(function) = state.functions.get(&(disasm.address as usize)) {
+                    format!("{}{: <11} {}", prefix, function.get_name(), disasm.to_string(false, state.disasm.show_hex))
                 } else {
                     format!(
-                        "  {}",
+                        "{}{}",
+                        prefix,
                         disasm.to_string(state.disasm.show_address, state.disasm.show_hex)
                     )
                 }
+
             })
             .collect::<Vec<String>>(),
     )
@@ -742,12 +843,25 @@ fn stack(state: &State) -> impl Node {
 }
 
 fn debug(state: &State) -> impl Node {
+    let mut outer = Root::new(vertical().with_child_spacing(30.0));
     let mut root = Root::new(horizontal());
     root.add(disasm(state));
     root.add(registers(state));
     // root.add(memory(state));
     root.add(stack(state));
-    root
+    outer.add(root);
+    outer.add(meta(state));
+    outer
+}
+
+fn meta(state: &State) -> impl Node {
+    lines(
+        &state
+            .messages
+            .iter()
+            .map(|message| format!("{}", message.to_string()))
+            .collect::<Vec<String>>(),
+    )
 }
 
 trait FrameExentions {
