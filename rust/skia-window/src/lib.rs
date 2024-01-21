@@ -1,6 +1,4 @@
 
-use std::any::Any;
-
 use metal::MetalLayerRef;
 use raw_window_handle::HasWindowHandle;
 use skia_safe::{gpu, scalar, ColorType};

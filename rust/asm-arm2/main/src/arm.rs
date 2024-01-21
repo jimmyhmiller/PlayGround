@@ -365,7 +365,7 @@ impl LowLevelArm {
     }
 
     pub fn prelude(&mut self, offset: i32) {
-        // self.breakpoint();
+        self.breakpoint();
         // 0 is a placeholder we will patch later
         self.sub_stack_pointer(-self.max_locals);
         self.store_pair(X29, X30, SP, offset);
