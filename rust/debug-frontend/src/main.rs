@@ -76,6 +76,7 @@ impl<T : Encode + Decode> Serialize for T {
 struct Frontend {
     state: State,
     should_step: bool,
+    should_step_hyper: bool,
 }
 
 #[allow(unused_variables)]
@@ -98,10 +99,18 @@ impl App for Frontend {
                                 self.step_over();
                             }
                             PhysicalKey::Code(KeyCode::ArrowRight) => {
-                                self.keep_stepping();
+                                if self.should_step {
+                                    self.should_step_hyper = true;
+                                } else {
+                                    self.keep_stepping();
+                                }
                             }
                             PhysicalKey::Code(KeyCode::ArrowLeft) => {
-                                self.stop_stepping();
+                                if self.should_step_hyper {
+                                    self.should_step_hyper = false;
+                                } else {
+                                    self.stop_stepping();
+                                }
                             }
                             _ => {}
                         },
@@ -127,9 +136,21 @@ impl App for Frontend {
     fn end_frame(&mut self) {}
 
     fn tick(&mut self) {
-
+        let start = std::time::Instant::now();
+        let ms_threshold = 10;
         if self.should_step {
             self.step_over();
+        }
+        if self.should_step_hyper {
+            let mut i = 0;
+            loop {
+                let elapsed = start.elapsed().as_millis();
+                if elapsed > ms_threshold {
+                    break;
+                }
+                self.step_over();
+                i += 1;
+            }
         }
         if self.state.process.instructions.is_some() {
             return;
@@ -153,11 +174,9 @@ impl Frontend {
         if let Some(process) = self.state.process.process.clone() {
             if let Some(thread) = process.thread_by_index_id(1) {
                 let _was_debugger_info = self.state.check_debugger_info(&thread, &process, true);
-                self.state.update_process_state(true);
                 let pc_before = thread.selected_frame().pc();
-                thread.step_over(RunMode::OnlyThisThread).unwrap();
+                thread.step_instruction(true).unwrap();
                 let pc_after = thread.selected_frame().pc();
-                println!("pc before: {:x} , {:x}", pc_before, pc_after);
                 if pc_before == pc_after {
                     thread.selected_frame().set_pc(pc_after + 4);
                 }
@@ -169,6 +188,7 @@ impl Frontend {
     fn keep_stepping(&mut self) {
         self.should_step = true;
     }
+    
 
     fn stop_stepping(&mut self) {
         self.should_step = false;
@@ -178,6 +198,7 @@ impl Frontend {
 fn main() {
     let mut frontend = Frontend {
         should_step: false,
+        should_step_hyper: false,
         state: State {
             disasm: Disasm {
                 disasm_values: vec![],
