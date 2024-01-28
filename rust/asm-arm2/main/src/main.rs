@@ -64,10 +64,6 @@ use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
 
 fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
 
-    let data = Data::ForeignFunction { name: "test".to_string(), pointer: 123 };
-    // let data = data.to_binary();
-    // let data = Data::from_binary(&data);
-    println!("{:?}", data);
     let fib: ast::Ast = parser::fib();
     let mut fib: ir::Ir = fib.compile(compiler);
     let mut fib = fib.compile();
