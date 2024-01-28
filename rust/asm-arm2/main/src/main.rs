@@ -38,6 +38,7 @@ impl<T : Encode + Decode> Serialize for T {
     }
 }
 
+#[allow(unused)]
 #[no_mangle]
 #[inline(never)]
 pub unsafe extern "C" fn debugger_info(buffer: *const u8, length: usize) {
@@ -53,12 +54,13 @@ pub fn debugger(message: Message) {
     unsafe {
         debugger_info(ptr, length);
     }
+    #[allow(unused)]
     let message = unsafe { from_raw_parts(ptr, length) };
     // Should make it is so we clean up this memory
 }
 
 
-use bincode::{Encode, Decode, config::{Config, standard}};
+use bincode::{Encode, Decode, config::standard};
 
 use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
 
@@ -157,6 +159,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     let hello = compiler.add_function("hello", &hello.compile_to_bytes())?;
 
     compiler.print(compiler.run1(hello, 1).unwrap() as usize);
+
+
+    let tail_recursive_count_down = parse! {
+        fn count_down(x) {
+            if x == 0 {
+            } else {
+                count_down(x - 1)
+            }
+        }
+    };
+
+    let mut tail_recursive_count_down_ir = tail_recursive_count_down.compile(&mut compiler);
+    let mut tail_recursive_count_down = tail_recursive_count_down_ir.compile();
+    let tail_recursive_count_down = compiler.add_function("count_down", &tail_recursive_count_down.compile_to_bytes())?;
+    let start = Instant::now();
+    compiler.run1(tail_recursive_count_down, 100_000_000).unwrap();
+    println!("Time {:?}", start.elapsed());
     // compiler.print(compiler.run1(hello, 32).unwrap() as usize);
     // println!("Got here");
 
