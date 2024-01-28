@@ -295,7 +295,6 @@ pub fn load_pair(reg1: Register, reg2: Register, destination: Register, offset: 
     }
 }
 
-#[allow(unused)]
 pub fn branch_with_link(destination: i32) -> ArmAsm {
     ArmAsm::Bl { imm26: destination }
 }
@@ -321,17 +320,6 @@ pub struct LowLevelArm {
     pub max_locals: i32,
     pub canonical_volatile_registers: Vec<Register>,
 }
-
-// We don't know the address of the recursive call
-// so we are using a placeholder
-// This is probably not the best approach, but will
-// work for now.
-// I realized after implementing this, I could just probably
-// have used a label and always had a self/start label.
-pub const RECURSE_PLACEHOLDER_REGISTER: Register = Register {
-    size: Size::S64,
-    index: 255,
-};
 
 #[allow(unused)]
 impl Default for LowLevelArm {
@@ -365,7 +353,7 @@ impl LowLevelArm {
     }
 
     pub fn prelude(&mut self, offset: i32) {
-        self.breakpoint();
+        // self.breakpoint();
         // 0 is a placeholder we will patch later
         self.sub_stack_pointer(-self.max_locals);
         self.store_pair(X29, X30, SP, offset);
@@ -557,7 +545,6 @@ impl LowLevelArm {
     pub fn compile(&mut self) -> &Vec<ArmAsm> {
         self.patch_labels();
         self.patch_prelude_and_epilogue();
-        self.patch_recurse();
         &self.instructions
     }
 
@@ -579,21 +566,42 @@ impl LowLevelArm {
         self.instructions.push(branch_with_link_register(register));
     }
 
+    pub fn recurse(&mut self, label: Label) {
+        self.instructions.push(branch_with_link(label.index as i32));
+    }
+
     pub fn patch_labels(&mut self) {
         for (instruction_index, instruction) in self.instructions.iter_mut().enumerate() {
-            if let ArmAsm::BCond { imm19, cond: _ } = instruction {
-                let label_index = *imm19 as usize;
-                let label_location = self.label_locations.get(&label_index);
-                match label_location {
-                    Some(label_location) => {
-                        let relative_position =
-                            *label_location as isize - instruction_index as isize;
-                        *imm19 = relative_position as i32;
-                    }
-                    None => {
-                        println!("Couldn't find label {:?}", self.labels.get(label_index));
+            match instruction {
+                ArmAsm::BCond { imm19, cond: _ } => {
+                    let label_index = *imm19 as usize;
+                    let label_location = self.label_locations.get(&label_index);
+                    match label_location {
+                        Some(label_location) => {
+                            let relative_position =
+                                *label_location as isize - instruction_index as isize;
+                            *imm19 = relative_position as i32;
+                        }
+                        None => {
+                            println!("Couldn't find label {:?}", self.labels.get(label_index));
+                        }
                     }
                 }
+                ArmAsm::Bl { imm26 } => {
+                    let label_index = *imm26 as usize;
+                    let label_location = self.label_locations.get(&label_index);
+                    match label_location {
+                        Some(label_location) => {
+                            let relative_position =
+                                *label_location as isize - instruction_index as isize;
+                            *imm26 = relative_position as i32;
+                        }
+                        None => {
+                            println!("Couldn't find label {:?}", self.labels.get(label_index));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -642,10 +650,6 @@ impl LowLevelArm {
             size: Size::S64,
             index: arg,
         }
-    }
-
-    pub fn recurse(&self) -> Register {
-        RECURSE_PLACEHOLDER_REGISTER
     }
 
     pub fn ret_reg(&self) -> Register {
@@ -705,15 +709,6 @@ impl LowLevelArm {
         }
     }
 
-    pub fn patch_recurse(&mut self) {
-        for (index, instruction) in self.instructions.iter_mut().enumerate() {
-            if let ArmAsm::Blr { rn } = instruction {
-                if rn == &RECURSE_PLACEHOLDER_REGISTER {
-                    *instruction = branch_with_link(-(index as i32));
-                }
-            }
-        }
-    }
 
     pub fn mov_64_bit_num(register: Register, num: isize) -> Vec<ArmAsm> {
         // TODO: This is not optimal, but it works

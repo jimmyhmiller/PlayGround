@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use asm::arm::Register;
 
 use crate::{
-    arm::{LowLevelArm, RECURSE_PLACEHOLDER_REGISTER},
+    arm::LowLevelArm,
     common::Label,
 };
 
@@ -604,8 +604,14 @@ impl Ir {
         let mut lang = LowLevelArm::new();
         lang.set_max_locals(self.num_locals);
         // lang.breakpoint();
+        
+        let before_prelude = lang.new_label("before_prelude");
+        lang.write_label(before_prelude);
         // zero is a placeholder because this will be patched
         lang.prelude(0);
+
+        let after_prelude = lang.new_label("after_prelude");
+        lang.write_label(after_prelude);
 
         let exit = lang.new_label("exit");
 
@@ -761,7 +767,7 @@ impl Ir {
                     let dest = alloc.allocate_register(index, dest, &mut lang);
                     lang.mov_64(dest, BuiltInTypes::construct_boolean(false));
                 }
-                Instruction::Recurse(dest, args) | Instruction::TailRecurse(dest, args) => {
+                Instruction::Recurse(dest, args) => {
                     // TODO: Clean up duplication
                     let mut out_live_call_registers = vec![];
                     for (register, (start, end)) in alloc.lifetimes.iter() {
@@ -786,13 +792,24 @@ impl Ir {
                         let arg = alloc.allocate_register(index, arg, &mut lang);
                         lang.mov_reg(lang.arg(index as u8), arg);
                     }
-                    lang.call(RECURSE_PLACEHOLDER_REGISTER);
+                    lang.recurse(before_prelude);
                     let dest = dest.try_into().unwrap();
                     let register = alloc.allocate_register(index, dest, &mut lang);
                     lang.mov_reg(register, lang.ret_reg());
                     for (index, register) in out_live_call_registers.iter().enumerate() {
                         lang.pop_from_stack(*register, index as i32);
                     }
+                }
+                Instruction::TailRecurse(dest, args) => {
+                    for (index, arg) in args.iter().enumerate().rev() {
+                        let arg = arg.try_into().unwrap();
+                        let arg = alloc.allocate_register(index, arg, &mut lang);
+                        lang.mov_reg(lang.arg(index as u8), arg);
+                    }
+                    lang.jump(after_prelude);
+                    let dest = dest.try_into().unwrap();
+                    let register = alloc.allocate_register(index, dest, &mut lang);
+                    lang.mov_reg(register, lang.ret_reg());
                 }
                 Instruction::Call(dest, function, args) => {
                     // TODO: Clean up duplication
@@ -1080,14 +1097,37 @@ pub fn heap_test() -> Ir {
 // }
 
 pub extern "C" fn print_value(value: usize) {
-    assert!(matches!(
-        BuiltInTypes::get_kind(value),
-        BuiltInTypes::String
-    ));
-    let value = BuiltInTypes::untag(value);
-    let string_value: &StringValue = unsafe { std::mem::transmute(value) };
-    let string = &string_value.str;
-    println!("{}", string);
+    let kind = BuiltInTypes::get_kind(value);
+    match kind {
+        BuiltInTypes::Int => {
+            let value = BuiltInTypes::untag(value);
+            println!("{}", value);
+        }
+        BuiltInTypes::Float => {
+            let value = BuiltInTypes::untag(value);
+            println!("{}", value);
+        },
+        BuiltInTypes::String => {
+            let value = BuiltInTypes::untag(value);
+            let string_value: &StringValue = unsafe { std::mem::transmute(value) };
+            let string = &string_value.str;
+            println!("{}", string);
+        },
+        BuiltInTypes::Bool => {
+            let value = BuiltInTypes::untag(value);
+            println!("{}", value == 1);
+        },
+        BuiltInTypes::Function => {
+            println!("Function");
+        },
+        BuiltInTypes::Struct => {
+            println!("Struct");
+        },
+        BuiltInTypes::Array => {
+            println!("Array");
+        },
+    }
+
 }
 
 

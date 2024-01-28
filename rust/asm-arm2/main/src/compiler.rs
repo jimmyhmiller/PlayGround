@@ -193,7 +193,6 @@ impl Compiler {
             }
         });
         let function_pointer = Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
-        println!("{:x}", function_pointer);
         let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
         Ok(jump_table_offset)
     }

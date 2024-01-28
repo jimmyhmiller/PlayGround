@@ -77,6 +77,7 @@ struct Frontend {
     state: State,
     should_step: bool,
     should_step_hyper: bool,
+    is_continuing: bool,
 }
 
 #[allow(unused_variables)]
@@ -96,9 +97,11 @@ impl App for Frontend {
                     match event.state {
                         ElementState::Pressed => match event.physical_key {
                             PhysicalKey::Code(KeyCode::ArrowDown) => {
+                                self.is_continuing = false;
                                 self.step_over();
                             }
                             PhysicalKey::Code(KeyCode::ArrowRight) => {
+                                self.is_continuing = false;
                                 if self.should_step {
                                     self.should_step_hyper = true;
                                 } else {
@@ -106,11 +109,18 @@ impl App for Frontend {
                                 }
                             }
                             PhysicalKey::Code(KeyCode::ArrowLeft) => {
+                                self.is_continuing = false;
                                 if self.should_step_hyper {
                                     self.should_step_hyper = false;
                                 } else {
                                     self.stop_stepping();
                                 }
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                                self.is_continuing = true;
+                                self.should_step = false;
+                                self.should_step_hyper = false;
+                                self.state.process.process.as_mut().unwrap().continue_execution().unwrap();
                             }
                             _ => {}
                         },
@@ -151,6 +161,9 @@ impl App for Frontend {
                 self.step_over();
                 i += 1;
             }
+        }
+        if self.is_continuing {
+            self.state.update_process_state(false);
         }
         if self.state.process.instructions.is_some() {
             return;
@@ -199,6 +212,7 @@ fn main() {
     let mut frontend = Frontend {
         should_step: false,
         should_step_hyper: false,
+        is_continuing: false,
         state: State {
             disasm: Disasm {
                 disasm_values: vec![],
@@ -383,7 +397,11 @@ fn convert_to_u64_array(input: &[u8; 256]) -> Vec<u64> {
 impl State {
     fn update_process_state(&mut self, is_stepping: bool) {
         if let (Some(process), Some(target)) = (self.process.process.clone(), self.process.target.clone()) {
+            if !process.is_stopped() {
+                return;
+            }
             if let Some(thread) = process.thread_by_index_id(1) {
+                
 
                 let was_debugger_info = self.check_debugger_info(&thread, &process, is_stepping);
 
