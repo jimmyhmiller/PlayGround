@@ -150,13 +150,14 @@ pub struct StringValue {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-enum Instruction {
+pub enum Instruction {
     Sub(Value, Value, Value),
     Add(Value, Value, Value),
     Mul(Value, Value, Value),
     Div(Value, Value, Value),
     Assign(VirtualRegister, Value),
     Recurse(Value, Vec<Value>),
+    TailRecurse(Value, Vec<Value>),
     JumpIf(Label, Condition, Value, Value),
     Jump(Label),
     Ret(Value),
@@ -236,6 +237,14 @@ impl Instruction {
                 get_registers!(a, b)
             }
             Instruction::Recurse(a, args) => {
+                let mut result: Vec<VirtualRegister> =
+                    args.iter().filter_map(|arg| get_registers!(arg)).collect();
+                if let Ok(register) = a.try_into() {
+                    result.push(register);
+                }
+                result
+            }
+            Instruction::TailRecurse(a, args) => {
                 let mut result: Vec<VirtualRegister> =
                     args.iter().filter_map(|arg| get_registers!(arg)).collect();
                 if let Ok(register) = a.try_into() {
@@ -346,7 +355,7 @@ impl RegisterAllocator {
 #[derive(Debug, Clone)]
 pub struct Ir {
     register_index: usize,
-    instructions: Vec<Instruction>,
+    pub instructions: Vec<Instruction>,
     labels: Vec<Label>,
     label_names: Vec<String>,
     label_locations: HashMap<usize, usize>,
@@ -404,6 +413,22 @@ impl Ir {
         }
         self.instructions
             .push(Instruction::Recurse(register.into(), new_args));
+        Value::Register(register)
+    }
+
+    pub fn tail_recurse<A>(&mut self, args: Vec<A>) -> Value
+    where
+        A: Into<Value>,
+    {
+        let register = self.volatile_register();
+        let mut new_args: Vec<Value> = vec![];
+        for arg in args.into_iter() {
+            let value: Value = arg.into();
+            let reg = self.assign_new(value);
+            new_args.push(reg.into());
+        }
+        self.instructions
+            .push(Instruction::TailRecurse(register.into(), new_args));
         Value::Register(register)
     }
 
@@ -736,7 +761,7 @@ impl Ir {
                     let dest = alloc.allocate_register(index, dest, &mut lang);
                     lang.mov_64(dest, BuiltInTypes::construct_boolean(false));
                 }
-                Instruction::Recurse(dest, args) => {
+                Instruction::Recurse(dest, args) | Instruction::TailRecurse(dest, args) => {
                     // TODO: Clean up duplication
                     let mut out_live_call_registers = vec![];
                     for (register, (start, end)) in alloc.lifetimes.iter() {
@@ -1064,6 +1089,7 @@ pub extern "C" fn print_value(value: usize) {
     let string = &string_value.str;
     println!("{}", string);
 }
+
 
 // TODO:
 // I need to properly tag every value

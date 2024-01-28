@@ -46,6 +46,9 @@ pub enum Ast {
     Recurse {
         args: Vec<Ast>,
     },
+    TailRecurse {
+        args: Vec<Ast>,
+    },
     Call {
         name: String,
         args: Vec<Ast>,
@@ -67,6 +70,7 @@ impl Ast {
             name: "".to_string(),
             compiler,
             local_variables: vec![],
+            tail_position: true,
         };
         compiler.compile()
     }
@@ -93,22 +97,23 @@ pub struct AstCompiler<'a> {
     pub name: String,
     pub compiler: &'a mut Compiler,
     pub local_variables: Vec<String>,
+    pub tail_position: bool,
 }
 
 impl<'a> AstCompiler<'a> {
     pub fn compile(&mut self) -> Ir {
-        self.compile_to_ir(&Box::new(self.ast.clone()));
+        self.compile_to_ir(&Box::new(self.ast.clone()), true);
         let mut ir = Ir::new();
         std::mem::swap(&mut ir, &mut self.ir);
         ir
     }
 
-    pub fn compile_to_ir(&mut self, ast: &Ast) -> Value {
+    pub fn compile_to_ir(&mut self, ast: &Ast, tail_position: bool) -> Value {
         match ast.clone() {
             Ast::Program { elements } => {
                 let mut last = Value::SignedConstant(0);
                 for ast in elements.iter() {
-                    last = self.compile_to_ir(ast);
+                    last = self.compile_to_ir(ast, true);
                 }
                 last
             }
@@ -124,10 +129,10 @@ impl<'a> AstCompiler<'a> {
                 }
 
                 for ast in body[..body.len() - 1].iter() {
-                    self.compile_to_ir(&Box::new(ast));
+                    self.compile_to_ir(&Box::new(ast), tail_position);
                 }
                 let last = body.last().unwrap();
-                let return_value = self.compile_to_ir(&Box::new(last));
+                let return_value = self.compile_to_ir(&Box::new(last), tail_position);
                 self.ir.ret(return_value)
             }
             Ast::If {
@@ -143,8 +148,8 @@ impl<'a> AstCompiler<'a> {
                     right,
                 } = condition.as_ref()
                 {
-                    let a = self.compile_to_ir(left);
-                    let b = self.compile_to_ir(right);
+                    let a = self.compile_to_ir(left, tail_position);
+                    let b = self.compile_to_ir(right, tail_position);
                     let end_if_label = self.ir.label("end_if");
 
                     let result_reg = self.ir.volatile_register();
@@ -154,7 +159,7 @@ impl<'a> AstCompiler<'a> {
 
                     let mut else_result = Value::SignedConstant(0);
                     for ast in else_.iter() {
-                        else_result = self.compile_to_ir(&Box::new(ast));
+                        else_result = self.compile_to_ir(&Box::new(ast), tail_position);
                     }
                     self.ir.assign(result_reg, else_result);
                     self.ir.jump(end_if_label);
@@ -163,7 +168,7 @@ impl<'a> AstCompiler<'a> {
 
                     let mut then_result = Value::SignedConstant(0);
                     for ast in then.iter() {
-                        then_result = self.compile_to_ir(&Box::new(ast));
+                        then_result = self.compile_to_ir(&Box::new(ast), tail_position);
                     }
                     self.ir.assign(result_reg, then_result);
 
@@ -175,31 +180,35 @@ impl<'a> AstCompiler<'a> {
                 }
             }
             Ast::Add { left, right } => {
-                let left = self.compile_to_ir(&left);
-                let right = self.compile_to_ir(&right);
+                let left = self.compile_to_ir(&left, false);
+                let right = self.compile_to_ir(&right, false);
                 self.ir.add(left, right)
             }
             Ast::Sub { left, right } => {
-                let left = self.compile_to_ir(&left);
-                let right = self.compile_to_ir(&right);
+                let left = self.compile_to_ir(&left, false);
+                let right = self.compile_to_ir(&right, false);
                 self.ir.sub(left, right)
             }
             Ast::Mul { left, right } => {
-                let left = self.compile_to_ir(&left);
-                let right = self.compile_to_ir(&right);
+                let left = self.compile_to_ir(&left, false);
+                let right = self.compile_to_ir(&right, false);
                 self.ir.mul(left, right)
             }
             Ast::Div { left, right } => {
-                let left = self.compile_to_ir(&left);
-                let right = self.compile_to_ir(&right);
+                let left = self.compile_to_ir(&left, false);
+                let right = self.compile_to_ir(&right, false);
                 self.ir.div(left, right)
             }
-            Ast::Recurse { args } => {
+            Ast::Recurse { args } | Ast::TailRecurse { args } => {
                 let args = args
                     .iter()
-                    .map(|arg| self.compile_to_ir(&Box::new(arg.clone())))
+                    .map(|arg| self.compile_to_ir(&Box::new(arg.clone()), false))
                     .collect();
-                self.ir.recurse(args)
+                if matches!(ast, Ast::TailRecurse { .. }) {
+                    self.ir.tail_recurse(args)
+                } else {
+                    self.ir.recurse(args)
+                }
             }
             // TODO: Have an idea of built in functions to call
             // These functions should be passed as the first argument context
@@ -207,12 +216,16 @@ impl<'a> AstCompiler<'a> {
             // like heap allocate and such
             Ast::Call { name, args } => {
                 if name == self.name {
-                    return self.compile_to_ir(&Ast::Recurse { args });
+                    if tail_position {
+                        return self.compile_to_ir(&Ast::TailRecurse { args }, tail_position);
+                    } else {
+                        return self.compile_to_ir(&Ast::Recurse { args }, tail_position);
+                    }
                 }
                 let mut args: Vec<Value> = args
                     .iter()
                     .map(|arg| {
-                        let value = self.compile_to_ir(&Box::new(arg.clone()));
+                        let value = self.compile_to_ir(&Box::new(arg.clone()), false);
                         match value {
                             Value::Register(_) => value,
                             _ => {
@@ -244,7 +257,7 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::Let(name, value) => {
                 if let Ast::Variable(name) = name.as_ref() {
-                    let value = self.compile_to_ir(&value);
+                    let value = self.compile_to_ir(&value, false);
                     let reg = self.ir.volatile_register();
                     self.ir.assign(reg, value);
                     let local_index = self.find_or_insert_local(name);
@@ -261,8 +274,8 @@ impl<'a> AstCompiler<'a> {
                 left,
                 right,
             } => {
-                let a = self.compile_to_ir(&left);
-                let b = self.compile_to_ir(&right);
+                let a = self.compile_to_ir(&left, false);
+                let b = self.compile_to_ir(&right, false);
                 self.ir.compare(a, b, operator)
             }
             Ast::String(str) => {
@@ -319,7 +332,7 @@ macro_rules! ast {
     ((fn $name:ident[$arg1:ident $arg2:ident]
         $body:tt
      )) => {
-        Ast::Func{
+        Ast::Function {
             name: stringify!($name).to_string(),
             args: vec![stringify!($arg1).to_string(), stringify!($arg2).to_string()],
             body: vec![ast!($body)]
@@ -328,10 +341,10 @@ macro_rules! ast {
     ((fn $name:ident[$arg1:ident $arg2:ident $arg3:ident]
         $body:tt
      )) => {
-        Ast::Func{
+        Ast::Function {
             name: stringify!($name).to_string(),
             args: vec![stringify!($arg1).to_string(), stringify!($arg2).to_string(), stringify!($arg3).to_string()],
-            body: vec![Ast::Return(Box::new(ast!($body)))]
+            body: vec![ast!($body)]
         }
     };
     ((let [$name:tt $val:tt]
@@ -345,7 +358,7 @@ macro_rules! ast {
         $result1:tt
         $result2:tt
     )) => {
-        Ast::If{
+        Ast::If {
             condition: Box::new(Ast::Condition {
                 operator: ast!($cond),
                 left: Box::new(ast!($arg)),
@@ -388,6 +401,12 @@ macro_rules! ast {
         Ast::Call {
             name: stringify!($f).to_string(),
             args: vec![ast!($arg)]
+        }
+    };
+    (($f:ident $($arg:tt)+)) => {
+        Ast::Call {
+            name: stringify!($f).to_string(),
+            args: vec![$(ast!($arg)),+]
         }
     };
     (<=) => {
@@ -442,4 +461,77 @@ pub fn hello_world2() -> Ast {
         (fn hello []
             (test))
     }
+}
+
+
+
+
+#[cfg(test)]
+fn check_tail_recursion(ast: Ast) -> bool {
+    let ir = ast.compile(&mut Compiler::new());
+    ir.instructions.iter().any(|instruction| {
+        matches!(instruction, ir::Instruction::TailRecurse { .. })
+    })
+}
+
+#[test]
+fn tail_position() {
+    
+
+    // simple case
+    let my_ast = ast! {
+        (fn tail_recursive [n]
+            (tail_recursive (- n 1)))
+    };
+
+    assert!(check_tail_recursion(my_ast));
+
+    let my_ast = ast! {
+        (fn tail_recursive [n]
+            (if (= n 0)
+                0
+                (tail_recursive (- n 1))))
+    };
+
+    assert!(check_tail_recursion(my_ast));
+
+    let my_ast = ast! {
+        (fn tail_recursive [n]
+            (if (= n 0)
+                0
+                (if (= n 1)
+                    1
+                    (tail_recursive (- n 1)))))
+    };
+
+    assert!(check_tail_recursion(my_ast));
+
+    // my ast macro didn't let me write this correctly
+    // but I just want the check the general syntactic form
+    let reduce = ast! {
+        (fn reduce [f acc list]
+            (if (= list list)
+                acc
+                (reduce f (f acc (head list)) (tail list))))
+    };
+
+    assert!(check_tail_recursion(reduce));
+    
+
+    // not tail recursive
+    let my_ast = ast! {
+        (fn not_tail_recursive [n]
+            (if (= n 0)
+                0
+                (if (= n 1)
+                    1
+                    (+ (not_tail_recursive (- n 1)) (not_tail_recursive (- n 2))))))
+
+    };
+
+    assert!(!check_tail_recursion(my_ast));
+
+    // fib is not tail
+    let my_ast = fib();
+    assert!(!check_tail_recursion(my_ast));
 }
