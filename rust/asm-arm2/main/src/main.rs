@@ -183,14 +183,27 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // println!("{}", compiler.run(hello)?);
 
-    // TODO I should make this work
-    // let top_level = parse!(
-    //     let x = 1;
-    //     let y = 2;
-    //     let z = x + y;
-    //     print(z);
-    // );
+    let top_level = parse!(
+        let x = 1;
+        let y = 2;
+        let z = x + y;
+        function print_z(z) {
+            print(z)
+        }
+        print_z(z)
+    );
 
+    // If i want something like the over to work, I need to
+    // 1. Compile the whole thing as a function that I can call
+    // 2. Return the location of funtions nested
+    // For this I am ignoring closures for now
+    // I need to make the Compiler deal with this rather
+    // than doing everything piecemeal like I am now
+
+    // let mut top_level_ir = top_level.compile(&mut compiler);
+    // let mut top_level = top_level_ir.compile();
+    // let top_level = compiler.add_function("top_level", &top_level.compile_to_bytes())?;
+    // compiler.run(top_level)?;
 
     test_fib(&mut compiler, 32)?;
     Ok(())
