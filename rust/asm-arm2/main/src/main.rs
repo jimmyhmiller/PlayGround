@@ -183,6 +183,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // println!("{}", compiler.run(hello)?);
 
+    // TODO I should make this work
+    // let top_level = parse!(
+    //     let x = 1;
+    //     let y = 2;
+    //     let z = x + y;
+    //     print(z);
+    // );
+
+
     test_fib(&mut compiler, 32)?;
     Ok(())
 }

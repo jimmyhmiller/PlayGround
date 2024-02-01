@@ -1,5 +1,5 @@
 use ir::{Ir, Value, VirtualRegister};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::{
     compiler::Compiler,
@@ -65,17 +65,25 @@ impl Ast {
     pub fn compile(&self, compiler: &mut Compiler) -> Ir {
         let mut compiler = AstCompiler {
             ast: self.clone(),
-            variables: HashMap::new(),
             ir: Ir::new(),
             name: "".to_string(),
             compiler,
-            local_variables: vec![],
-            tail_position: true,
+            context: vec![],
+            current_context: Context {
+                tail_position: true,
+                in_function: false,
+            },
+            next_context: Context {
+                tail_position: true,
+                in_function: false,
+            },
+            environment_stack: vec![Environment::new()],
         };
         compiler.compile()
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum VariableLocation {
     Register(VirtualRegister),
     Local(usize),
@@ -90,30 +98,83 @@ impl From<&VariableLocation> for Value {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Context {
+    pub tail_position: bool,
+    pub in_function: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Environment {
+    pub local_variables: Vec<String>,
+    pub variables: HashMap<String, VariableLocation>,
+}
+
+impl Environment {
+    fn new() -> Self {
+        Environment { 
+            local_variables: vec![],
+            variables: HashMap::new()
+         }
+    }
+}
+
 pub struct AstCompiler<'a> {
     pub ast: Ast,
-    pub variables: HashMap<String, VariableLocation>,
     pub ir: Ir,
     pub name: String,
     pub compiler: &'a mut Compiler,
-    pub local_variables: Vec<String>,
-    pub tail_position: bool,
+    // This feels dumb and complicated. But my brain
+    // won't let me think of a better way
+    // I know there is one.
+    pub context: Vec<Context>,
+    pub current_context: Context,
+    pub next_context: Context,
+    pub environment_stack: Vec<Environment>,
 }
 
 impl<'a> AstCompiler<'a> {
+
+    pub fn tail_position(&mut self) {
+        self.next_context.tail_position = true;
+    }
+
+    pub fn not_tail_position(&mut self) {
+        self.next_context.tail_position = false;
+    }
+
+    pub fn in_function(&mut self) {
+        self.next_context.in_function = true;
+    }
+
+    pub fn is_tail_position(&self) -> bool {
+        self.current_context.tail_position
+    }
+
+    pub fn call_compile(&mut self, ast: &Ast) -> Value {
+        // Does this even work?
+        self.context.push(self.current_context.clone());
+        self.current_context = self.next_context.clone();
+        let result = self.compile_to_ir(ast);
+        self.next_context = self.current_context.clone();
+        self.current_context = self.context.pop().unwrap();
+        result
+    }
+
     pub fn compile(&mut self) -> Ir {
-        self.compile_to_ir(&Box::new(self.ast.clone()), true);
+        self.tail_position();
+        self.call_compile(&Box::new(self.ast.clone()));
         let mut ir = Ir::new();
         std::mem::swap(&mut ir, &mut self.ir);
         ir
     }
-
-    pub fn compile_to_ir(&mut self, ast: &Ast, tail_position: bool) -> Value {
+    pub fn compile_to_ir(&mut self, ast: &Ast) -> Value {
         match ast.clone() {
             Ast::Program { elements } => {
                 let mut last = Value::SignedConstant(0);
                 for ast in elements.iter() {
-                    last = self.compile_to_ir(ast, true);
+                    self.tail_position();
+                    last = self.call_compile(ast);
                 }
                 last
             }
@@ -124,15 +185,14 @@ impl<'a> AstCompiler<'a> {
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);
                     self.ir.register_argument(reg);
-                    self.variables
-                        .insert(arg.clone(), VariableLocation::Register(reg));
+                    self.insert_variable(arg.clone(), VariableLocation::Register(reg));
                 }
 
                 for ast in body[..body.len() - 1].iter() {
-                    self.compile_to_ir(&Box::new(ast), tail_position);
+                    self.call_compile(&Box::new(ast));
                 }
                 let last = body.last().unwrap();
-                let return_value = self.compile_to_ir(&Box::new(last), tail_position);
+                let return_value = self.call_compile(&Box::new(last));
                 self.ir.ret(return_value)
             }
             Ast::If {
@@ -148,8 +208,8 @@ impl<'a> AstCompiler<'a> {
                     right,
                 } = condition.as_ref()
                 {
-                    let a = self.compile_to_ir(left, tail_position);
-                    let b = self.compile_to_ir(right, tail_position);
+                    let a = self.call_compile(left);
+                    let b = self.call_compile(right);
                     let end_if_label = self.ir.label("end_if");
 
                     let result_reg = self.ir.volatile_register();
@@ -159,7 +219,7 @@ impl<'a> AstCompiler<'a> {
 
                     let mut else_result = Value::SignedConstant(0);
                     for ast in else_.iter() {
-                        else_result = self.compile_to_ir(&Box::new(ast), tail_position);
+                        else_result = self.call_compile(&Box::new(ast));
                     }
                     self.ir.assign(result_reg, else_result);
                     self.ir.jump(end_if_label);
@@ -168,7 +228,7 @@ impl<'a> AstCompiler<'a> {
 
                     let mut then_result = Value::SignedConstant(0);
                     for ast in then.iter() {
-                        then_result = self.compile_to_ir(&Box::new(ast), tail_position);
+                        then_result = self.call_compile(&Box::new(ast));
                     }
                     self.ir.assign(result_reg, then_result);
 
@@ -180,29 +240,40 @@ impl<'a> AstCompiler<'a> {
                 }
             }
             Ast::Add { left, right } => {
-                let left = self.compile_to_ir(&left, false);
-                let right = self.compile_to_ir(&right, false);
+                self.not_tail_position();
+                let left = self.call_compile(&left);
+                self.not_tail_position();
+                let right = self.call_compile(&right);
                 self.ir.add(left, right)
             }
             Ast::Sub { left, right } => {
-                let left = self.compile_to_ir(&left, false);
-                let right = self.compile_to_ir(&right, false);
+                self.not_tail_position();
+                let left = self.call_compile(&left);
+                self.not_tail_position();
+                let right = self.call_compile(&right);
                 self.ir.sub(left, right)
             }
             Ast::Mul { left, right } => {
-                let left = self.compile_to_ir(&left, false);
-                let right = self.compile_to_ir(&right, false);
+                self.not_tail_position();
+                let left = self.call_compile(&left);
+                self.not_tail_position();
+                let right = self.call_compile(&right);
                 self.ir.mul(left, right)
             }
             Ast::Div { left, right } => {
-                let left = self.compile_to_ir(&left, false);
-                let right = self.compile_to_ir(&right, false);
+                self.not_tail_position();
+                let left = self.call_compile(&left);
+                self.not_tail_position();
+                let right = self.call_compile(&right);
                 self.ir.div(left, right)
             }
             Ast::Recurse { args } | Ast::TailRecurse { args } => {
                 let args = args
                     .iter()
-                    .map(|arg| self.compile_to_ir(&Box::new(arg.clone()), false))
+                    .map(|arg| {
+                        self.not_tail_position();
+                        self.call_compile(&Box::new(arg.clone()))
+                    })
                     .collect();
                 if matches!(ast, Ast::TailRecurse { .. }) {
                     self.ir.tail_recurse(args)
@@ -216,16 +287,18 @@ impl<'a> AstCompiler<'a> {
             // like heap allocate and such
             Ast::Call { name, args } => {
                 if name == self.name {
-                    if tail_position {
-                        return self.compile_to_ir(&Ast::TailRecurse { args }, tail_position);
+                    if self.is_tail_position() {
+                        return self.call_compile(&Ast::TailRecurse { args });
                     } else {
-                        return self.compile_to_ir(&Ast::Recurse { args }, tail_position);
+                        return self.call_compile(&Ast::Recurse { args });
                     }
                 }
+
                 let mut args: Vec<Value> = args
                     .iter()
                     .map(|arg| {
-                        let value = self.compile_to_ir(&Box::new(arg.clone()), false);
+                        self.not_tail_position();
+                        let value = self.call_compile(&Box::new(arg.clone()));
                         match value {
                             Value::Register(_) => value,
                             _ => {
@@ -252,18 +325,19 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::NumberLiteral(n) => Value::SignedConstant(n as isize),
             Ast::Variable(name) => {
-                let reg = self.variables.get(&name).unwrap();
+                let reg = self.get_variable(&name);
                 reg.into()
             }
             Ast::Let(name, value) => {
                 if let Ast::Variable(name) = name.as_ref() {
-                    let value = self.compile_to_ir(&value, false);
+                    self.not_tail_position();
+                    let value = self.call_compile(&value);
+                    self.not_tail_position();
                     let reg = self.ir.volatile_register();
                     self.ir.assign(reg, value);
                     let local_index = self.find_or_insert_local(name);
                     self.ir.store_local(local_index, reg);
-                    self.variables
-                        .insert(name.to_string(), VariableLocation::Local(local_index));
+                    self.insert_variable(name.to_string(), VariableLocation::Local(local_index));
                     reg.into()
                 } else {
                     panic!("Expected variable")
@@ -274,8 +348,11 @@ impl<'a> AstCompiler<'a> {
                 left,
                 right,
             } => {
-                let a = self.compile_to_ir(&left, false);
-                let b = self.compile_to_ir(&right, false);
+
+                self.not_tail_position();
+                let a = self.call_compile(&left);
+                self.not_tail_position();
+                let b = self.call_compile(&right);
                 self.ir.compare(a, b, operator)
             }
             Ast::String(str) => {
@@ -288,12 +365,24 @@ impl<'a> AstCompiler<'a> {
     }
 
     fn find_or_insert_local(&mut self, name: &str) -> usize {
-        if let Some(index) = self.local_variables.iter().position(|n| n == name) {
+        let current_env = self.environment_stack.last_mut().unwrap();
+        if let Some(index) = current_env.local_variables.iter().position(|n| n == name) {
             index
         } else {
-            self.local_variables.push(name.to_string());
-            self.local_variables.len() - 1
+            current_env.local_variables.push(name.to_string());
+            current_env.local_variables.len() - 1
         }
+    }
+
+    fn insert_variable(&mut self, clone: String, reg: VariableLocation) {
+        let mut current_env = self.environment_stack.last_mut().unwrap();
+        current_env.variables.insert(clone, reg);
+    }
+
+    fn get_variable(&self, name: &str) -> &VariableLocation {
+        // TODO: Should walk the environment stack
+        let current_env = self.environment_stack.last().unwrap();
+        current_env.variables.get(name).unwrap()
     }
 }
 
