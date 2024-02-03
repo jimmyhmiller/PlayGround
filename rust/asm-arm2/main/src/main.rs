@@ -1,4 +1,6 @@
 use std::{error::Error, time::Instant, mem, slice::from_raw_parts};
+use bincode::{Encode, Decode, config::standard};
+use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
 
 mod arm;
 pub mod ast;
@@ -59,10 +61,6 @@ pub fn debugger(message: Message) {
     // Should make it is so we clean up this memory
 }
 
-
-use bincode::{Encode, Decode, config::standard};
-
-use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
 
 fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
 
@@ -125,86 +123,50 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let hello_ast = parse! {
         fn hello(x) {
-            let array = allocate_array(16);
+            let array = allocate_array(128);
             array_store(array, 0, 42);
             array_store(array, x, "hello");
             let result = array_get(array, x)
             print(result)
+            result
         }
-    };
 
-    // let hello_ast = parse! {
-    //     fn hello(x) {
-    //         print(array_get(array_store(array_store(allocate_array(16), 0, 42), 1, "hello"), 1))
-    //     }
-    // };
-
-    // let hello_ast = parse! {
-    //     fn hello(x) {
-    //         let y = "hello"
-    //         print(y)
-    //     }
-    // };
-
-    // println!("{:#?}", hello_ast);
-
-    let mut hello_ir = hello_ast.compile(&mut compiler);
-    // println!("{:#?}", hello_ir);
-    let mut hello = hello_ir.compile();
-
-    // let hello2_ast = ast::hello_world2();
-    // let mut hello2_ir = hello2_ast.compile(&mut compiler);
-    // let mut hello2 = hello2_ir.compile();
-    //
-    let hello = compiler.add_function("hello", &hello.compile_to_bytes())?;
-
-    compiler.print(compiler.run1(hello, 1).unwrap() as usize);
-
-
-    let tail_recursive_count_down = parse! {
         fn count_down(x) {
             if x == 0 {
+                0
             } else {
                 count_down(x - 1)
             }
         }
     };
 
-    let mut tail_recursive_count_down_ir = tail_recursive_count_down.compile(&mut compiler);
-    let mut tail_recursive_count_down = tail_recursive_count_down_ir.compile();
-    let tail_recursive_count_down = compiler.add_function("count_down", &tail_recursive_count_down.compile_to_bytes())?;
-    let start = Instant::now();
-    compiler.run1(tail_recursive_count_down, 100_000_000).unwrap();
-    println!("Time {:?}", start.elapsed());
-    // compiler.print(compiler.run1(hello, 32).unwrap() as usize);
-    // println!("Got here");
+    compiler.compile_ast(hello_ast)?;
 
-    // compiler.overwrite_function(hello, &hello2.compile_to_bytes())?;
+    let hello_result = compiler.run_function("hello", vec![1]);
+    compiler.print(hello_result as usize);
+    let countdown_result = compiler.run_function("count_down", vec![10000000]);
+    compiler.print(countdown_result as usize);
 
-    // println!("{}", compiler.run(hello)?);
+   
 
-    let top_level = parse!(
-        let x = 1;
-        let y = 2;
-        let z = x + y;
-        function print_z(z) {
-            print(z)
-        }
-        print_z(z)
-    );
+    // let top_level = parse!(
+    //     let x = 1;
+    //     let y = 2;
+    //     let z = x + y;
+    //     function print_z(z) {
+    //         print(z)
+    //     }
+    //     print_z(z)
+    // );
 
-    // If i want something like the over to work, I need to
-    // 1. Compile the whole thing as a function that I can call
-    // 2. Return the location of funtions nested
-    // For this I am ignoring closures for now
-    // I need to make the Compiler deal with this rather
-    // than doing everything piecemeal like I am now
+    // // If i want something like the over to work, I need to
+    // // 1. Compile the whole thing as a function that I can call
+    // // 2. Return the location of funtions nested
+    // // For this I am ignoring closures for now
+    // // I need to make the Compiler deal with this rather
+    // // than doing everything piecemeal like I am now
 
-    // let mut top_level_ir = top_level.compile(&mut compiler);
-    // let mut top_level = top_level_ir.compile();
-    // let top_level = compiler.add_function("top_level", &top_level.compile_to_bytes())?;
-    // compiler.run(top_level)?;
-
+  
     test_fib(&mut compiler, 32)?;
     Ok(())
 }

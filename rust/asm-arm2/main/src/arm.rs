@@ -489,7 +489,6 @@ impl LowLevelArm {
         if offset < 0 {
             println!("Got it");
         }
-        self.increment_stack_size(-1);
         self.instructions.push(ArmAsm::LdrImmGen {
             size: 0b11,
             imm9: 0, // not used

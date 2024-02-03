@@ -23,7 +23,7 @@ pub enum Value {
     SignedConstant(isize),
     RawValue(usize),
     // TODO: Think of a better representation
-    StringConstantId(usize),
+    StringConstantPtr(usize),
     Function(usize),
     Pointer(usize),
     Local(usize),
@@ -101,7 +101,7 @@ impl BuiltInTypes {
     }
 
     pub fn construct_int(value: isize) -> isize {
-        if value > 0b1111111 {
+        if value > isize::MAX >> 3 {
             panic!("Integer overflow")
         }
         BuiltInTypes::Int.tag(value)
@@ -359,7 +359,6 @@ pub struct Ir {
     labels: Vec<Label>,
     label_names: Vec<String>,
     label_locations: HashMap<usize, usize>,
-    string_constants: Vec<StringValue>,
     num_locals: usize,
 }
 
@@ -377,7 +376,6 @@ impl Ir {
             labels: vec![],
             label_names: vec![],
             label_locations: HashMap::new(),
-            string_constants: vec![],
             num_locals: 0,
         }
     }
@@ -705,12 +703,9 @@ impl Ir {
                         let tagged = BuiltInTypes::construct_int(*i);
                         lang.mov_64(register, tagged);
                     }
-                    Value::StringConstantId(id) => {
+                    Value::StringConstantPtr(ptr) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
-                        let string = self.string_constants.get(*id).unwrap();
-                        let ptr = string as *const _ as u64;
-                        // tag the pointer as a string with the pattern 010 in the least significant bits
-                        let tagged = BuiltInTypes::String.tag(ptr as isize);
+                        let tagged = BuiltInTypes::String.tag(*ptr as isize);
                         lang.mov_64(register, tagged);
                     }
                     Value::Function(id) => {
@@ -905,8 +900,8 @@ impl Ir {
                         lang.mov_64(lang.ret_reg(), BuiltInTypes::construct_int(*i));
                         lang.jump(exit);
                     }
-                    Value::StringConstantId(id) => {
-                        lang.mov_64(lang.ret_reg(), *id as isize);
+                    Value::StringConstantPtr(ptr) => {
+                        lang.mov_64(lang.ret_reg(), *ptr as isize);
                         lang.jump(exit);
                     }
                     Value::Function(id) => {
@@ -929,7 +924,7 @@ impl Ir {
                         panic!("Should we be returing a raw value?")
                     }
                     Value::Local(local) => {
-                        lang.load_from_stack(lang.ret_reg(), -(*local as i32));
+                        lang.load_from_stack(lang.ret_reg(), *local as i32);
                         lang.jump(exit);
                     }
                 },
@@ -972,15 +967,6 @@ impl Ir {
 
     pub fn jump(&mut self, label: Label) {
         self.instructions.push(Instruction::Jump(label));
-    }
-
-    pub fn string_constant(&mut self, arg: String) -> Value {
-        // TODO: Make this correct
-        // We need to forget the string so we never clean it up
-        let string_value = StringValue { str: arg };
-        self.string_constants.push(string_value);
-        let index = self.string_constants.len() - 1;
-        Value::StringConstantId(index)
     }
 
     pub fn load_string_constant(&mut self, string_constant: Value) -> Value {
