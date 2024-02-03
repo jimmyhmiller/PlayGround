@@ -502,7 +502,9 @@ impl State {
             let message = Message::from_binary(&buffer);
             match message.data.clone() {
                 Data::ForeignFunction { name, pointer } => {},
-                Data::BuiltinFunction { name, pointer } => {},
+                Data::BuiltinFunction { name, pointer } => {
+                    
+                },
                 Data::HeapPointer { pointer } => {},
                 Data::UserFunction { name, pointer, len } => {
                     self.process.target.as_mut().unwrap().breakpoint_create_by_address(pointer as u64);

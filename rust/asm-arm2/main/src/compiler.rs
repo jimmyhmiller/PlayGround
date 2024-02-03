@@ -3,12 +3,13 @@ use std::error::Error;
 
 use mmap_rs::{Mmap, MmapOptions};
 
-use crate::{ir::{BuiltInTypes, StringValue}, debugger, Message, Data};
+use crate::{ast::Ast, debugger, ir::{BuiltInTypes, StringValue, Value}, parser::Parser, Data, Message};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     name: String,
     offset: usize,
+    jump_table_offset: usize,
     is_foreign: bool,
     pub is_builtin: bool,
 }
@@ -31,6 +32,7 @@ pub struct Compiler {
     // Need much better system obviously
     heap: Option<Mmap>,
     heap_offset: usize,
+    string_constants: Vec<StringValue>,
 }
 
 impl fmt::Debug for Compiler {
@@ -75,6 +77,7 @@ impl Compiler {
                     .unwrap(),
             ),
             heap_offset: 0,
+            string_constants: vec![],
         }
     }
 
@@ -107,13 +110,14 @@ impl Compiler {
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         let offset = function as usize;
+        let jump_table_offset = self.add_jump_table_entry(index, offset)?;
         self.functions.push(Function {
             name: name.to_string(),
             offset,
+            jump_table_offset,
             is_foreign: true,
             is_builtin: false,
         });
-        self.add_jump_table_entry(index, offset)?;
         debugger(Message {
             kind: "foreign_function".to_string(),
             data: Data::ForeignFunction {
@@ -130,12 +134,7 @@ impl Compiler {
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         let offset = function as usize;
-        self.functions.push(Function {
-            name: name.to_string(),
-            offset,
-            is_foreign: true,
-            is_builtin: true,
-        });
+
         debugger(Message {
             kind: "builtin_function".to_string(),
             data: Data::BuiltinFunction {
@@ -143,7 +142,14 @@ impl Compiler {
                 pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap()
             }
         });
-        self.add_jump_table_entry(index, offset)?;
+        let jump_table_offset = self.add_jump_table_entry(index, offset)?;
+        self.functions.push(Function {
+            name: name.to_string(),
+            offset,
+            jump_table_offset,
+            is_foreign: true,
+            is_builtin: true,
+        });
         Ok(self.functions.len() - 1)
     }
 
@@ -164,14 +170,15 @@ impl Compiler {
             }
         }
         let index = self.functions.len();
+        let jump_table_offset = self.add_jump_table_entry(index, 0)?;
         let function = Function {
             name: name.to_string(),
             offset: 0,
+            jump_table_offset,
             is_foreign: false,
             is_builtin: true,
         };
         self.functions.push(function.clone());
-        self.add_jump_table_entry(index, 0)?;
         Ok(function)
     }
 
@@ -181,6 +188,7 @@ impl Compiler {
         self.functions.push(Function {
             name: name.to_string(),
             offset,
+            jump_table_offset: 0,
             is_foreign: false,
             is_builtin: false,
         });
@@ -194,6 +202,8 @@ impl Compiler {
         });
         let function_pointer = Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
         let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
+
+        self.functions[index].jump_table_offset = jump_table_offset;
         Ok(jump_table_offset)
     }
     pub fn overwrite_function(&mut self, index: usize, code: &[u8]) -> Result<(), Box<dyn Error>> {
@@ -368,6 +378,7 @@ impl Compiler {
             let tag = BuiltInTypes::get_kind(array);
             match tag {
                 BuiltInTypes::Array => {
+                    // TODO: Bounds check
                     let index = BuiltInTypes::untag(index);
                     let index = index * 8;
                     let heap = self.heap.take();
@@ -419,5 +430,62 @@ impl Compiler {
                 _ => panic!("Not an array"),
             }
         }
+    }
+
+    fn get_top_level_functions(&self, ast: crate::ast::Ast) -> Vec<Ast> {
+        let mut functions = Vec::new();
+        for node in ast.nodes() {
+            match node {
+                Ast::Function {..} => {
+                    // TODO: Get rid of this clone
+                    functions.push(node.clone());
+                }
+                _ => {}
+            }
+        }
+        functions
+    }
+
+    pub fn compile(&mut self, code: String) -> Result<(), Box<dyn Error>> {
+        let mut parser = Parser::new(code);
+        let ast = parser.parse();
+        self.compile_ast(ast)
+    }
+
+    // TODO: Strings disappear because I am holding on to them only in IR
+
+    pub fn compile_ast(&mut self, ast: crate::ast::Ast) -> Result<(), Box<dyn Error>> {
+        let functions = self.get_top_level_functions(ast);
+        for function in functions {
+            let mut ir = function.compile(self);
+            let mut code = ir.compile();
+            self.add_function(&function.name(), &code.compile_to_bytes())?;
+        }
+        Ok(())
+    }
+
+    // TODO: Make less ugly
+    pub(crate) fn run_function(&self, arg: &str, vec: Vec<i32>) -> u64 {
+        match vec.len() {
+            0 => {
+                let function = self.functions.iter().find(|f| f.name == arg).unwrap();
+                self.run(function.jump_table_offset).unwrap()
+            }
+            1 => {
+                let function = self.functions.iter().find(|f| f.name == arg).unwrap();
+                self.run1(function.jump_table_offset, vec[0] as u64).unwrap()
+            }
+            2 => {
+                let function = self.functions.iter().find(|f| f.name == arg).unwrap();
+                self.run2(function.jump_table_offset, vec[0] as u64, vec[1] as u64).unwrap()
+            }
+            _ => panic!("Too many arguments"),
+        }
+    }
+
+    pub fn add_string(&mut self, string_value: StringValue) -> Value {
+        self.string_constants.push(string_value);
+        let last = self.string_constants.last().unwrap();
+        return Value::StringConstantPtr(last as *const StringValue as usize)
     }
 }

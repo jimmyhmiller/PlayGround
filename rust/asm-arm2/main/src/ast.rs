@@ -1,5 +1,5 @@
 use ir::{Ir, Value, VirtualRegister};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use crate::{
     compiler::Compiler,
@@ -80,6 +80,20 @@ impl Ast {
             environment_stack: vec![Environment::new()],
         };
         compiler.compile()
+    }
+
+    pub fn nodes(&self) -> &Vec<Ast> {
+        match self {
+            Ast::Program { elements } => elements,
+            _ => panic!("Only works on program"),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Ast::Function { name, .. } => name.as_str(),
+            _ => panic!("Only works on function"),
+        }
     }
 }
 
@@ -356,8 +370,8 @@ impl<'a> AstCompiler<'a> {
                 self.ir.compare(a, b, operator)
             }
             Ast::String(str) => {
-                let constant = self.ir.string_constant(str);
-                self.ir.load_string_constant(constant)
+                let constant_ptr = self.string_constant(str);
+                self.ir.load_string_constant(constant_ptr)
             }
             Ast::True => Value::True,
             Ast::False => Value::False,
@@ -375,7 +389,7 @@ impl<'a> AstCompiler<'a> {
     }
 
     fn insert_variable(&mut self, clone: String, reg: VariableLocation) {
-        let mut current_env = self.environment_stack.last_mut().unwrap();
+        let current_env = self.environment_stack.last_mut().unwrap();
         current_env.variables.insert(clone, reg);
     }
 
@@ -383,6 +397,10 @@ impl<'a> AstCompiler<'a> {
         // TODO: Should walk the environment stack
         let current_env = self.environment_stack.last().unwrap();
         current_env.variables.get(name).unwrap()
+    }
+
+    fn string_constant(&mut self, str: String) -> Value {
+        self.compiler.add_string(ir::StringValue { str })
     }
 }
 

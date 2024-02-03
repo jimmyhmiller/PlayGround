@@ -1,6 +1,7 @@
 {:paths ["src" "resources"]
  :deps {org.clojure/clojure {:mvn/version "1.11.1"}
-        clj-anki/clj-anki {:mvn/version "0.0.4"}}
+        clj-anki/clj-anki {:mvn/version "0.0.4"}
+        clj-chess/clj-chess {:mvn/version "0.5.0"}}
  :aliases
  {:run-m {:main-opts ["-m" "jimmyhmiller.anki"]}
   :run-x {:ns-default jimmyhmiller.anki
