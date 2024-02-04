@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use asm::arm::Register;
 
 use crate::{
-    arm::LowLevelArm,
-    common::Label,
+    arm::LowLevelArm, common::Label, compiler::Compiler
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -27,6 +26,7 @@ pub enum Value {
     Function(usize),
     Pointer(usize),
     Local(usize),
+    FreeVariable(usize),
     True,
     False,
 }
@@ -710,8 +710,8 @@ impl Ir {
                     }
                     Value::Function(id) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
-                        let function = id;
-                        lang.mov_64(register, *function as isize);
+                        let function = BuiltInTypes::Function.tag(*id as isize);
+                        lang.mov_64(register, function as isize);
                     }
                     Value::Pointer(ptr) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
@@ -732,6 +732,13 @@ impl Ir {
                     Value::Local(local) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
                         lang.load_from_stack(register, *local as i32);
+                    },
+                    Value::FreeVariable(free_variable) => {
+                        let register = alloc.allocate_register(index, *dest, &mut lang);
+                        // The idea here is that I would store free variables after the locals on the stack
+                        // Need to make sure I preserve that space
+                        // and that at this point in the program I know how many locals there are.
+                        lang.load_from_stack(register, (*free_variable + self.num_locals) as i32);
                     }
                 },
                 Instruction::LoadConstant(dest, val) => {
@@ -836,9 +843,9 @@ impl Ir {
                     // TODO:
                     // I am not actually checking any tags here
                     // or unmasking or anything. Just straight up calling it
-
                     let function =
                         alloc.allocate_register(index, function.try_into().unwrap(), &mut lang);
+                    lang.shift_right(function, function, BuiltInTypes::tag_size());
                     lang.call(function);
 
                     let dest = dest.try_into().unwrap();
@@ -925,6 +932,10 @@ impl Ir {
                     }
                     Value::Local(local) => {
                         lang.load_from_stack(lang.ret_reg(), *local as i32);
+                        lang.jump(exit);
+                    }
+                    Value::FreeVariable(free_variable) => {
+                        lang.load_from_stack(lang.ret_reg(), (*free_variable + self.num_locals) as i32);
                         lang.jump(exit);
                     }
                 },
@@ -1082,7 +1093,7 @@ pub fn heap_test() -> Ir {
 //     ir
 // }
 
-pub extern "C" fn print_value(value: usize) {
+pub extern "C" fn print_value(compiler: *mut Compiler, value: usize) {
     let kind = BuiltInTypes::get_kind(value);
     match kind {
         BuiltInTypes::Int => {
@@ -1104,7 +1115,12 @@ pub extern "C" fn print_value(value: usize) {
             println!("{}", value == 1);
         },
         BuiltInTypes::Function => {
-            println!("Function");
+            unsafe {
+                let value = BuiltInTypes::untag(value);
+                let function = (*compiler).get_function_by_pointer(value);
+                println!("{}", value);
+                println!("Function {:?}" , function);
+            }
         },
         BuiltInTypes::Struct => {
             println!("Struct");

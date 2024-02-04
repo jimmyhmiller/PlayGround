@@ -101,6 +101,7 @@ impl Ast {
 pub enum VariableLocation {
     Register(VirtualRegister),
     Local(usize),
+    FreeVariable(usize),
 }
 
 impl From<&VariableLocation> for Value {
@@ -108,6 +109,8 @@ impl From<&VariableLocation> for Value {
         match location {
             VariableLocation::Register(reg) => Value::Register(*reg),
             VariableLocation::Local(index) => Value::Local(*index),
+            VariableLocation::FreeVariable(index) => Value::FreeVariable(*index),
+
         }
     }
 }
@@ -122,13 +125,15 @@ pub struct Context {
 pub struct Environment {
     pub local_variables: Vec<String>,
     pub variables: HashMap<String, VariableLocation>,
+    pub free_variables: Vec<String>,
 }
 
 impl Environment {
     fn new() -> Self {
         Environment { 
             local_variables: vec![],
-            variables: HashMap::new()
+            variables: HashMap::new(),
+            free_variables: vec![],
          }
     }
 }
@@ -193,7 +198,9 @@ impl<'a> AstCompiler<'a> {
                 last
             }
             Ast::Function { name, args, body } => {
-                assert!(self.name.is_empty());
+                self.create_new_environment();
+                let old_ir = std::mem::replace(&mut self.ir, Ir::new());
+                assert!(!name.is_empty());
                 // self.ir.breakpoint();
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
@@ -202,12 +209,23 @@ impl<'a> AstCompiler<'a> {
                     self.insert_variable(arg.clone(), VariableLocation::Register(reg));
                 }
 
-                for ast in body[..body.len() - 1].iter() {
+                for ast in body[..body.len().saturating_sub(1)].iter() {
                     self.call_compile(&Box::new(ast));
                 }
+                // TODO: Need some concept of nil I think
                 let last = body.last().unwrap();
                 let return_value = self.call_compile(&Box::new(last));
-                self.ir.ret(return_value)
+                self.ir.ret(return_value);
+
+
+                let mut code = self.ir.compile();
+                let pointer = self.compiler.upsert_function(&name, &code.compile_to_bytes()).unwrap();
+
+                self.ir = old_ir;
+                let function = self.ir.function(pointer);
+
+                self.pop_environment();
+                function
             }
             Ast::If {
                 condition,
@@ -323,23 +341,31 @@ impl<'a> AstCompiler<'a> {
                         }
                     })
                     .collect();
-                let function = self.compiler.reserve_function(name.as_str()).unwrap();
 
-                if function.is_builtin {
-                    let pointer_reg = self.ir.volatile_register();
-                    let pointer: Value = self.compiler.get_compiler_ptr().into();
-                    self.ir.assign(pointer_reg, pointer);
-                    args.insert(0, pointer_reg.into());
+                if let Some(function) = self.get_variable(&name) {
+                    let reg = self.ir.volatile_register();
+                    self.ir.assign(reg, &function);
+                    self.ir.call(reg.into(), args)
+                } else {
+                    let function = self.compiler.reserve_function(name.as_str()).unwrap();
+
+                    if function.is_builtin {
+                        let pointer_reg = self.ir.volatile_register();
+                        let pointer: Value = self.compiler.get_compiler_ptr().into();
+                        self.ir.assign(pointer_reg, pointer);
+                        args.insert(0, pointer_reg.into());
+                    }
+                    // TODO: Do an indirect call via jump table
+                    let function_pointer = self.compiler.get_function_pointer(function).unwrap();
+    
+                    let function = self.ir.function(function_pointer);
+                    self.ir.call(function, args)
                 }
-                // TODO: Do an indirect call via jump table
-                let function_pointer = self.compiler.get_function_pointer(function).unwrap();
-
-                let function = self.ir.function(function_pointer);
-                self.ir.call(function, args)
+               
             }
             Ast::NumberLiteral(n) => Value::SignedConstant(n as isize),
             Ast::Variable(name) => {
-                let reg = self.get_variable(&name);
+                let reg = &self.get_variable_alloc_free_variable(&name);
                 reg.into()
             }
             Ast::Let(name, value) => {
@@ -393,15 +419,37 @@ impl<'a> AstCompiler<'a> {
         current_env.variables.insert(clone, reg);
     }
 
-    fn get_variable(&self, name: &str) -> &VariableLocation {
+    fn get_variable(&self, name: &str) -> Option<VariableLocation> {
+        self.environment_stack.last().unwrap().variables.get(name).cloned()
+    }
+
+    fn get_variable_alloc_free_variable(&mut self, name: &str) -> VariableLocation {
         // TODO: Should walk the environment stack
-        let current_env = self.environment_stack.last().unwrap();
-        current_env.variables.get(name).unwrap()
+        if let Some(variable) = self.environment_stack.last().unwrap().variables.get(name) {
+            variable.clone()
+        } else {
+            let current_env = self.environment_stack.last_mut().unwrap();
+            current_env.free_variables.push(name.to_string());
+            let index = current_env.free_variables.len() - 1;
+            current_env.variables.insert(name.to_string(), VariableLocation::FreeVariable(index));
+            let current_env = self.environment_stack.last().unwrap();
+            current_env.variables.get(name).unwrap().clone()
+        }
     }
 
     fn string_constant(&mut self, str: String) -> Value {
         self.compiler.add_string(ir::StringValue { str })
     }
+
+    fn create_new_environment(&mut self) {
+        self.environment_stack.push(Environment::new());
+    }
+
+    fn pop_environment(&mut self) {
+        self.environment_stack.pop();
+    }
+
+   
 }
 
 impl From<i64> for Ast {
