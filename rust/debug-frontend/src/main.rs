@@ -412,9 +412,6 @@ impl State {
                 let frame = thread.selected_frame();
 
                 self.pc = frame.pc();
-                if self.pc == 0x100168144 {
-                    println!("GOT IT");
-                }
                 let pc_in_instructions = self
                     .disasm
                     .disasm_values
@@ -503,7 +500,7 @@ impl State {
             match message.data.clone() {
                 Data::ForeignFunction { name, pointer } => {},
                 Data::BuiltinFunction { name, pointer } => {
-                    
+
                 },
                 Data::HeapPointer { pointer } => {},
                 Data::UserFunction { name, pointer, len } => {

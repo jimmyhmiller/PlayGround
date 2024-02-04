@@ -135,13 +135,6 @@ impl Compiler {
         let index = self.functions.len();
         let offset = function as usize;
 
-        debugger(Message {
-            kind: "builtin_function".to_string(),
-            data: Data::BuiltinFunction {
-                name: name.to_string(),
-                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap()
-            }
-        });
         let jump_table_offset = self.add_jump_table_entry(index, offset)?;
         self.functions.push(Function {
             name: name.to_string(),
@@ -150,6 +143,13 @@ impl Compiler {
             is_foreign: true,
             is_builtin: true,
         });
+        debugger(Message {
+            kind: "builtin_function".to_string(),
+            data: Data::BuiltinFunction {
+                name: name.to_string(),
+                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap()
+            }
+        });
         Ok(self.functions.len() - 1)
     }
 
@@ -157,10 +157,22 @@ impl Compiler {
         for (index, function) in self.functions.iter_mut().enumerate() {
             if function.name == name {
                 self.overwrite_function(index, code)?;
-                return Ok(index);
+                break;
             }
         }
-        self.add_function(name, code)
+        self.add_function(name, code)?;
+
+        let function = self.find_function(name).unwrap();
+        let function_pointer = Self::get_function_pointer(self, function.clone()).unwrap();
+        debugger(Message {
+            kind: "user_function".to_string(),
+            data: Data::UserFunction {
+                name: name.to_string(),
+                pointer: function_pointer,
+                len: code.len(),
+            }
+        });
+        Ok(function_pointer)
     }
 
     pub fn reserve_function(&mut self, name: &str) -> Result<Function, Box<dyn Error>> {
@@ -183,6 +195,7 @@ impl Compiler {
     }
 
     pub fn add_function(&mut self, name: &str, code: &[u8]) -> Result<usize, Box<dyn Error>> {
+
         let offset = self.add_code(code)?;
         let index = self.functions.len();
         self.functions.push(Function {
@@ -192,26 +205,22 @@ impl Compiler {
             is_foreign: false,
             is_builtin: false,
         });
-        debugger(Message {
-            kind: "user_function".to_string(),
-            data: Data::UserFunction {
-                name: name.to_string(),
-                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap(),
-                len: code.len(),
-            }
-        });
         let function_pointer = Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
         let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
 
         self.functions[index].jump_table_offset = jump_table_offset;
         Ok(jump_table_offset)
     }
-    pub fn overwrite_function(&mut self, index: usize, code: &[u8]) -> Result<(), Box<dyn Error>> {
+
+    pub fn overwrite_function(&mut self, index: usize, code: &[u8]) -> Result<usize, Box<dyn Error>> {
         let offset = self.add_code(code)?;
         let function = &mut self.functions[index];
         function.offset = offset;
-        self.add_jump_table_entry(index, offset)?;
-        Ok(())
+        let function_pointer = Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
+        let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
+        let function = &mut self.functions[index];
+        function.jump_table_offset = jump_table_offset;
+        Ok(jump_table_offset)
     }
 
     pub fn get_function_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
@@ -228,7 +237,7 @@ impl Compiler {
     pub fn add_jump_table_entry(
         &mut self,
         index: usize,
-        offset: usize,
+        pointer: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let jump_table_offset = self.jump_table_offset;
         self.jump_table_offset += 1;
@@ -236,7 +245,7 @@ impl Compiler {
         let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
         let buffer = &mut memory[jump_table_offset * 8..];
         // Write full usize to buffer
-        for (index, byte) in offset.to_le_bytes().iter().enumerate() {
+        for (index, byte) in pointer.to_le_bytes().iter().enumerate() {
             buffer[index] = *byte;
         }
         let mem = memory.make_read_only().unwrap_or_else(|(_map, e)| {
@@ -282,10 +291,12 @@ impl Compiler {
             &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
-        let start = usize::from_le_bytes(bytes);
-        let memory = &self.code_memory.as_ref().unwrap()[start..];
-        let f: fn() -> u64 = unsafe { std::mem::transmute(memory.as_ref().as_ptr()) };
-        Ok(f())
+        let start = usize::from_le_bytes(bytes) as *const u8;
+        let f: fn() -> u64 = unsafe { std::mem::transmute(start) };
+        let result = f();
+        // TODO: When running in release mode, this fails here.
+        // I'm guessing I'm not setting up the stack correctly
+        Ok(result)
     }
 
     pub fn run1(&self, jump_table_offset: usize, arg: u64) -> Result<u64, Box<dyn Error>> {
@@ -455,12 +466,7 @@ impl Compiler {
     // TODO: Strings disappear because I am holding on to them only in IR
 
     pub fn compile_ast(&mut self, ast: crate::ast::Ast) -> Result<(), Box<dyn Error>> {
-        let functions = self.get_top_level_functions(ast);
-        for function in functions {
-            let mut ir = function.compile(self);
-            let mut code = ir.compile();
-            self.add_function(&function.name(), &code.compile_to_bytes())?;
-        }
+        ast.compile(self);
         Ok(())
     }
 
@@ -487,5 +493,14 @@ impl Compiler {
         self.string_constants.push(string_value);
         let last = self.string_constants.last().unwrap();
         return Value::StringConstantPtr(last as *const StringValue as usize)
+    }
+
+    pub(crate) fn find_function(&self, name: &str) -> Option<Function> {
+        self.functions.iter().find(|f| f.name == name).cloned()
+    }
+
+    pub fn get_function_by_pointer(&self, value: usize) -> Option<&Function> {
+        let offset = value - self.code_memory.as_ref().unwrap().as_ptr() as usize;
+        self.functions.iter().find(|f| f.offset == offset)
     }
 }

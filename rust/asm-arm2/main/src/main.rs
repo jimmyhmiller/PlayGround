@@ -64,14 +64,11 @@ pub fn debugger(message: Message) {
 
 fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
 
-    let fib: ast::Ast = parser::fib();
-    let mut fib: ir::Ir = fib.compile(compiler);
-    let mut fib = fib.compile();
-    let fib = compiler.add_function("fib", &fib.compile_to_bytes())?;
+    compiler.compile_ast(parser::fib())?;
 
     let time = Instant::now();
 
-    let result1 = compiler.run1(fib, n)?;
+    let result1 = compiler.run_function("fib", vec![n as i32]);
     println!("Our time {:?}", time.elapsed());
     let time = Instant::now();
     let result2 = fib_rust(n as usize);
@@ -116,19 +113,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
     // Very inefficient way to do array stuff
     // but working
-    compiler.add_foreign_function("print", ir::print_value as *const u8)?;
+    compiler.add_builtin_function("print", ir::print_value as *const u8)?;
     compiler.add_builtin_function("allocate_array", allocate_array as *const u8)?;
     compiler.add_builtin_function("array_store", array_store as *const u8)?;
     compiler.add_builtin_function("array_get", array_get as *const u8)?;
 
     let hello_ast = parse! {
         fn hello(x) {
-            let array = allocate_array(128);
+            let array = allocate_array(16);
             array_store(array, 0, 42);
             array_store(array, x, "hello");
             let result = array_get(array, x)
             print(result)
-            result
         }
 
         fn count_down(x) {
@@ -138,6 +134,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 count_down(x - 1)
             }
         }
+
+        fn hello2() {
+            let y = fn thing() {
+                42
+            }
+            print(y)
+            print(y())
+        }
+
     };
 
     compiler.compile_ast(hello_ast)?;
@@ -146,6 +151,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.print(hello_result as usize);
     let countdown_result = compiler.run_function("count_down", vec![10000000]);
     compiler.print(countdown_result as usize);
+
+    let hello2_result = compiler.run_function("hello2", vec![]);
+    compiler.print(hello2_result as usize);
 
    
 
@@ -159,12 +167,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     //     print_z(z)
     // );
 
-    // // If i want something like the over to work, I need to
-    // // 1. Compile the whole thing as a function that I can call
-    // // 2. Return the location of funtions nested
-    // // For this I am ignoring closures for now
-    // // I need to make the Compiler deal with this rather
-    // // than doing everything piecemeal like I am now
+    // If i want something like the over to work, I need to
+    // 1. Compile the whole thing as a function that I can call
+    // 2. Return the location of funtions nested
+    // For this I am ignoring closures for now
+    // I need to make the Compiler deal with this rather
+    // than doing everything piecemeal like I am now
+    // I also need a place to store variables
+    // Probably a concept of namespaces
+
+
+
+    // TODO: As I'm compiling an ast to ir,
+    // I need to separate out functions into their own units
+    // of code.
 
   
     test_fib(&mut compiler, 32)?;
