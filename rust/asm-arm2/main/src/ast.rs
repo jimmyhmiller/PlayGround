@@ -224,6 +224,9 @@ impl<'a> AstCompiler<'a> {
                 self.ir = old_ir;
 
                 if self.has_free_variables() {
+                    // When I get those free variables, I'd need to 
+                    // make sure that the variables they refer to are
+                    // heap allocated. How am I going to do that?
                     println!("{} must be a closure", name);
                 }
 
@@ -424,6 +427,7 @@ impl<'a> AstCompiler<'a> {
         current_env.variables.insert(clone, reg);
     }
 
+    // TODO: Need to walk the environment stack
     fn get_variable(&self, name: &str) -> Option<VariableLocation> {
         self.environment_stack.last().unwrap().variables.get(name).cloned()
     }
