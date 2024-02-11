@@ -42,12 +42,14 @@ impl Value {
 
 // I don't know if this is actually the setup I want
 // But I want get some stuff down there
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltInTypes {
     Int,
     Float,
     String,
     Bool,
     Function,
+    Closure,
     Struct,
     Array,
 }
@@ -66,8 +68,9 @@ impl BuiltInTypes {
             BuiltInTypes::String => 0b010,
             BuiltInTypes::Bool => 0b011,
             BuiltInTypes::Function => 0b100,
-            BuiltInTypes::Struct => 0b101,
-            BuiltInTypes::Array => 0b110,
+            BuiltInTypes::Closure => 0b101,
+            BuiltInTypes::Struct => 0b110,
+            BuiltInTypes::Array => 0b111,
         }
     }
 
@@ -82,8 +85,9 @@ impl BuiltInTypes {
             0b010 => BuiltInTypes::String,
             0b011 => BuiltInTypes::Bool,
             0b100 => BuiltInTypes::Function,
-            0b101 => BuiltInTypes::Struct,
-            0b110 => BuiltInTypes::Array,
+            0b101 => BuiltInTypes::Closure,
+            0b110 => BuiltInTypes::Struct,
+            0b111 => BuiltInTypes::Array,
             _ => panic!("Invalid tag"),
         }
     }
@@ -97,6 +101,7 @@ impl BuiltInTypes {
             BuiltInTypes::Function => false,
             BuiltInTypes::Struct => false,
             BuiltInTypes::Array => false,
+            BuiltInTypes::Closure => false,
         }
     }
 
@@ -120,6 +125,30 @@ impl BuiltInTypes {
         3
     }
 }
+
+#[test]
+fn tag_and_untag() {
+    let kinds = [
+        BuiltInTypes::Int,
+        BuiltInTypes::Float,
+        BuiltInTypes::String,
+        BuiltInTypes::Bool,
+        BuiltInTypes::Function,
+        BuiltInTypes::Closure,
+        BuiltInTypes::Struct,
+        BuiltInTypes::Array,
+    ];
+    for kind in kinds.iter() {
+        let tag = kind.get_tag();
+        let value = 123;
+        let tagged = kind.tag(value);
+        // assert_eq!(tagged & 0b111a, tag);
+        assert_eq!(kind, &BuiltInTypes::get_kind(tagged as usize));
+        assert_eq!(value as usize, BuiltInTypes::untag(tagged as usize));
+    }
+
+}
+
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct VirtualRegister {
@@ -1121,6 +1150,9 @@ pub extern "C" fn print_value(compiler: *mut Compiler, value: usize) {
                 println!("{}", value);
                 println!("Function {:?}" , function);
             }
+        },
+        BuiltInTypes::Closure => {
+            println!("Closure");
         },
         BuiltInTypes::Struct => {
             println!("Struct");

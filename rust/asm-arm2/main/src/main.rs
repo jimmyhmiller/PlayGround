@@ -102,6 +102,12 @@ fn array_get(compiler: *mut Compiler, array: usize, index: usize) -> usize {
     compiler.array_get(array, index).unwrap()
 }
 
+fn make_closure(compiler: *mut Compiler, function: usize, free_variable_pointer: *const usize, num_free: usize) -> usize {
+    let compiler = unsafe { &mut *compiler };
+    let free_variables = unsafe { from_raw_parts(free_variable_pointer, num_free) };
+    compiler.make_closure(function, free_variables).unwrap()
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut compiler = Compiler::new();
 
@@ -140,6 +146,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 42
             }
             print(y)
+            print(y())
+        }
+
+        fn hello_closure() {
+            let x = 42;
+            let y = fn closure_fn() {
+                x
+            }
             print(y())
         }
 
