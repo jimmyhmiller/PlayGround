@@ -85,8 +85,8 @@ impl Compiler {
         self.heap.as_ref().unwrap().as_ptr() as usize
     }
 
-    pub fn allocate(&mut self, size: usize) -> Result<usize, Box<dyn Error>> {
-        let size = size * 8;
+    pub fn allocate(&mut self, bytes: usize) -> Result<usize, Box<dyn Error>> {
+        let size = bytes * 8;
         let memory = self.heap.take();
         let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
         let buffer = &mut memory[self.heap_offset..];
@@ -353,6 +353,7 @@ impl Compiler {
                 }
             }
             BuiltInTypes::Function => todo!(),
+            BuiltInTypes::Closure => todo!(),
             BuiltInTypes::Struct => todo!(),
             BuiltInTypes::Array => {
                 unsafe {
@@ -502,5 +503,46 @@ impl Compiler {
     pub fn get_function_by_pointer(&self, value: usize) -> Option<&Function> {
         let offset = value - self.code_memory.as_ref().unwrap().as_ptr() as usize;
         self.functions.iter().find(|f| f.offset == offset)
+    }
+
+    // TODO: Call this
+    // After I make a function, I need to check if there are free variables
+    // If so I need to grab those variables from the evironment
+    // pop them on the stack
+    // call this funciton with a pointer to the base of the stack
+    // and the number of variables
+    // then I need to pop the stack
+    // and get the closure
+    // When it comes to function calls
+    // if it is a function, do direct call.
+    // if it is a closure, grab the closure data
+    // and put the free variables on the stack before the locals
+
+    pub fn make_closure(&mut self, function: usize, free_variables: &[usize]) -> Result<usize, Box<dyn Error>> {
+        let memory = self.allocate(8 + 1 + free_variables.len() * 8)?;
+        let pointer = memory as *mut u8;
+        let num_free: u8 = free_variables.len().try_into()?;
+        let function = function.to_le_bytes();
+        let free_variables = free_variables.iter().map(|v| v.to_le_bytes()).flatten();
+        // write function pointer
+        for (index, byte) in function.iter().enumerate() {
+            unsafe {
+                pointer.add(index).write(*byte);
+            }
+        }
+        // Write number of free variables
+        let num_free = num_free.to_le_bytes();
+        for (index, byte) in num_free.iter().enumerate() {
+            unsafe {
+                pointer.add(index + 8).write(*byte);
+            }
+        }
+        // write free variables
+        for (index, byte) in free_variables.enumerate() {
+            unsafe {
+                pointer.add(index + 8).write(byte);
+            }
+        }
+        Ok(BuiltInTypes::Closure.tag(memory as isize) as usize)
     }
 }

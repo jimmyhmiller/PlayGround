@@ -222,6 +222,11 @@ impl<'a> AstCompiler<'a> {
                 let pointer = self.compiler.upsert_function(&name, &code.compile_to_bytes()).unwrap();
 
                 self.ir = old_ir;
+
+                if self.has_free_variables() {
+                    println!("{} must be a closure", name);
+                }
+
                 let function = self.ir.function(pointer);
 
                 self.pop_environment();
@@ -447,6 +452,15 @@ impl<'a> AstCompiler<'a> {
 
     fn pop_environment(&mut self) {
         self.environment_stack.pop();
+    }
+
+    fn get_current_env(&self) -> &Environment {
+        self.environment_stack.last().unwrap()
+    }
+
+    fn has_free_variables(&self) -> bool {
+        let current_env = self.get_current_env();
+        !current_env.free_variables.is_empty()
     }
 
    

@@ -224,10 +224,12 @@ fn main() {
                     Register {
                         name: "x0".to_string(),
                         value: Value::Integer(0),
+                        kind: BuiltInTypes::Int,
                     },
                     Register {
                         name: "x1".to_string(),
                         value: Value::Integer(1),
+                        kind: BuiltInTypes::Int,
                     },
                 ],
             },
@@ -258,6 +260,7 @@ pub enum BuiltInTypes {
     String,
     Bool,
     Function,
+    Closure,
     Struct,
     Array,
     None,
@@ -277,8 +280,9 @@ impl BuiltInTypes {
             BuiltInTypes::String => 0b010,
             BuiltInTypes::Bool => 0b011,
             BuiltInTypes::Function => 0b100,
-            BuiltInTypes::Struct => 0b101,
-            BuiltInTypes::Array => 0b110,
+            BuiltInTypes::Closure => 0b101,
+            BuiltInTypes::Struct => 0b110,
+            BuiltInTypes::Array => 0b111,
             BuiltInTypes::None => panic!("None has no tag"),
         }
     }
@@ -294,9 +298,10 @@ impl BuiltInTypes {
             0b010 => BuiltInTypes::String,
             0b011 => BuiltInTypes::Bool,
             0b100 => BuiltInTypes::Function,
-            0b101 => BuiltInTypes::Struct,
-            0b110 => BuiltInTypes::Array,
-            _ => BuiltInTypes::None
+            0b101 => BuiltInTypes::Closure,
+            0b110 => BuiltInTypes::Struct,
+            0b111 => BuiltInTypes::Array,
+            _ => panic!("Invalid tag"),
         }
     }
 
@@ -309,12 +314,13 @@ impl BuiltInTypes {
             BuiltInTypes::Function => false,
             BuiltInTypes::Struct => false,
             BuiltInTypes::Array => false,
+            BuiltInTypes::Closure => false,
             BuiltInTypes::None => false,
         }
     }
 
     pub fn construct_int(value: isize) -> isize {
-        if value > 0b1111111 {
+        if value > isize::MAX >> 3 {
             panic!("Integer overflow")
         }
         BuiltInTypes::Int.tag(value)
@@ -331,6 +337,19 @@ impl BuiltInTypes {
 
     pub fn tag_size() -> i32 {
         3
+    }
+    pub fn to_string(&self) -> String {
+        match self {
+            BuiltInTypes::Int => "Int".to_string(),
+            BuiltInTypes::Float => "Float".to_string(),
+            BuiltInTypes::String => "String".to_string(),
+            BuiltInTypes::Bool => "Bool".to_string(),
+            BuiltInTypes::Function => "Function".to_string(),
+            BuiltInTypes::Closure => "Closure".to_string(),
+            BuiltInTypes::Struct => "Struct".to_string(),
+            BuiltInTypes::Array => "Array".to_string(),
+            BuiltInTypes::None => "None".to_string(),
+        }
     }
 }
 
@@ -363,11 +382,12 @@ impl Value {
 struct Register {
     name: String,
     value: Value,
+    kind: BuiltInTypes,
 }
 
 impl Register {
     fn to_string(&self) -> String {
-        format!("{}: {}", self.name, self.value.to_string())
+        format!("{}: {} - {}", self.name, self.value.to_string(), self.kind.to_string())
     }
 }
 
@@ -480,6 +500,7 @@ impl State {
                                 self.registers.registers.push(Register {
                                     name: child.name().to_string(),
                                     value: Value::String(child.value().to_string()),
+                                    kind: BuiltInTypes::get_kind(usize::from_str_radix(child.value().trim_start_matches("0x"), 16).unwrap()),
                                 });
                             }
                         });
