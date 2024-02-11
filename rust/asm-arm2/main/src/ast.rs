@@ -227,6 +227,14 @@ impl<'a> AstCompiler<'a> {
                     // When I get those free variables, I'd need to 
                     // make sure that the variables they refer to are
                     // heap allocated. How am I going to do that?
+                    // I actually probably need to think about this more
+                    // If they are already heap allocated, then I just 
+                    // store the pointer. If they are immutable variables,
+                    // I just take the value
+                    // If they are mutable, then I'd need to heap allocate
+                    // but maybe I just heap allocate all mutable variables?
+                    // What about functions that change overtime?
+                    // Not 100% sure about all of this
                     println!("{} must be a closure", name);
                 }
 
