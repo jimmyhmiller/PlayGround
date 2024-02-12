@@ -203,6 +203,10 @@ pub enum Instruction {
     LoadLocal(Value, Value),
     StoreLocal(Value, Value),
     RegisterArgument(Value),
+    PushStack(Value),
+    PopStack(Value),
+    LoadFreeVariable(Value, usize),
+    GetStackPointer(Value, isize),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -336,6 +340,18 @@ impl Instruction {
                 get_registers!(a, b)
             }
             Instruction::RegisterArgument(a) => {
+                get_register!(a)
+            }
+            Instruction::PushStack(a) => {
+                get_register!(a)
+            }
+            Instruction::PopStack(a) => {
+                get_register!(a)
+            }
+            Instruction::LoadFreeVariable(a, _) => {
+                get_register!(a)
+            }
+            Instruction::GetStackPointer(a, _) => {
                 get_register!(a)
             }
         }
@@ -989,6 +1005,26 @@ impl Ir {
                     let arg = arg.try_into().unwrap();
                     alloc.allocate_register(index, arg, &mut lang);
                 }
+                Instruction::PushStack(val) => {
+                    let val = val.try_into().unwrap();
+                    let val = alloc.allocate_register(index, val, &mut lang);
+                    lang.push_to_stack(val, 0);
+                }
+                Instruction::PopStack(val) => {
+                    let val = val.try_into().unwrap();
+                    let val = alloc.allocate_register(index, val, &mut lang);
+                    lang.pop_from_stack(val, 0);
+                }
+                Instruction::LoadFreeVariable(dest, free_variable) => {
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.load_from_stack(dest, (*free_variable + self.num_locals) as i32);
+                }
+                Instruction::GetStackPointer(dest, offset) => {
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.get_stack_pointer(dest, *offset);
+                }
             }
         }
 
@@ -1054,6 +1090,22 @@ impl Ir {
         ));
     }
 
+    pub fn load_local(&mut self, reg: VirtualRegister, local_index: usize) -> Value {
+        let register = self.volatile_register();
+        self.increment_locals(local_index);
+        self.instructions
+            .push(Instruction::LoadLocal(register.into(), Value::Local(local_index)));
+        register.into()
+    }
+
+    pub fn push_to_stack(&mut self, reg: VirtualRegister) {
+        self.instructions.push(Instruction::PushStack(reg.into()));
+    }
+
+    pub fn pop_from_stack(&mut self, reg: VirtualRegister) {
+        self.instructions.push(Instruction::PopStack(reg.into()));
+    }
+
     fn increment_locals(&mut self, index: usize) {
         if index >= self.num_locals {
             self.num_locals = index + 1;
@@ -1063,6 +1115,18 @@ impl Ir {
     pub fn register_argument(&mut self, reg: VirtualRegister) {
         self.instructions
             .push(Instruction::RegisterArgument(reg.into()));
+    }
+
+    pub fn load_free_variable(&mut self, reg: VirtualRegister, index: usize) {
+        self.instructions
+            .push(Instruction::LoadLocal(reg.into(), Value::FreeVariable(index)));
+    }
+
+    pub fn get_stack_pointer(&mut self, offset: isize) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::GetStackPointer(dest, offset));
+        dest
     }
 }
 

@@ -102,9 +102,11 @@ fn array_get(compiler: *mut Compiler, array: usize, index: usize) -> usize {
     compiler.array_get(array, index).unwrap()
 }
 
-fn make_closure(compiler: *mut Compiler, function: usize, free_variable_pointer: *const usize, num_free: usize) -> usize {
+fn make_closure(compiler: *mut Compiler, function: usize, num_free: usize, free_variable_pointer: usize) -> usize {
+    println!("0x{:x}", free_variable_pointer);
     let compiler = unsafe { &mut *compiler };
-    let free_variables = unsafe { from_raw_parts(free_variable_pointer, num_free) };
+    let num_free = BuiltInTypes::untag(num_free);
+    let free_variables = unsafe { from_raw_parts(free_variable_pointer as *const usize, num_free) };
     compiler.make_closure(function, free_variables).unwrap()
 }
 
@@ -123,6 +125,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("allocate_array", allocate_array as *const u8)?;
     compiler.add_builtin_function("array_store", array_store as *const u8)?;
     compiler.add_builtin_function("array_get", array_get as *const u8)?;
+    compiler.add_builtin_function("make_closure", make_closure as *const u8)?;
 
     let hello_ast = parse! {
         fn hello(x) {
@@ -154,7 +157,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let y = fn closure_fn() {
                 x
             }
-            print(y())
+            print(y)
         }
 
     };
@@ -168,6 +171,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let hello2_result = compiler.run_function("hello2", vec![]);
     compiler.print(hello2_result as usize);
+
+
+    let hello_closure_result = compiler.run_function("hello_closure", vec![]);
+    compiler.print(hello_closure_result as usize);
 
    
 
