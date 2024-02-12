@@ -777,6 +777,16 @@ impl LowLevelArm {
     pub fn set_max_locals(&mut self, num_locals: usize) {
         self.max_locals = num_locals as i32;
     }
+
+    pub fn get_stack_pointer(&mut self, destination: Register, offset: isize) {
+        self.instructions.push(ArmAsm::AddAddsubImm {
+            sf: destination.sf(),
+            rn: SP,
+            rd: destination,
+            imm12: offset as i32 * 8,
+            sh: 0,
+        });
+    }
 }
 
 #[allow(dead_code)]

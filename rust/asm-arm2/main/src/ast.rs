@@ -1,4 +1,5 @@
 use ir::{Ir, Value, VirtualRegister};
+use core::num;
 use std::collections::HashMap;
 
 use crate::{
@@ -219,7 +220,7 @@ impl<'a> AstCompiler<'a> {
 
 
                 let mut code = self.ir.compile();
-                let pointer = self.compiler.upsert_function(&name, &code.compile_to_bytes()).unwrap();
+                let function_pointer = self.compiler.upsert_function(&name, &code.compile_to_bytes()).unwrap();
 
                 self.ir = old_ir;
 
@@ -235,10 +236,64 @@ impl<'a> AstCompiler<'a> {
                     // but maybe I just heap allocate all mutable variables?
                     // What about functions that change overtime?
                     // Not 100% sure about all of this
-                    println!("{} must be a closure", name);
+
+                    for free_variable in self.get_current_env().free_variables.clone().iter(){
+                        let variable = self.get_variable(free_variable).unwrap();
+                        // we are now going to push these variables onto the stack
+                        
+                        match variable {
+                            VariableLocation::Register(reg) => {
+                                let reg = self.ir.volatile_register();
+                                self.ir.assign(reg, reg);
+                                self.ir.push_to_stack(reg);
+                            }
+                            VariableLocation::Local(index) => {
+                                let reg = self.ir.volatile_register();
+                                self.ir.load_local(reg, index);
+                                self.ir.push_to_stack(reg);
+                            }
+                            VariableLocation::FreeVariable(index) => {
+                                panic!("We are trying to find this variable concretely and found a free variable")
+                            }
+                        }
+                        // load count of free variables
+                        let num_free = self.get_current_env().free_variables.len();
+
+                        // get a pointer to the start of the free variables on the stack
+                        let free_variable_pointer = self.ir.get_stack_pointer((num_free as isize + 1));
+                        
+
+                        let num_free = Value::SignedConstant(num_free as isize);
+                        let num_free_reg = self.ir.volatile_register();
+                        self.ir.assign(num_free_reg, num_free);
+                        // Call make_closure
+                        let make_closure = self.compiler.find_function("make_closure").unwrap();
+                        let make_closure = self.compiler.get_function_pointer(make_closure).unwrap();
+                        let make_closure_reg = self.ir.volatile_register();
+                        self.ir.assign(make_closure_reg, make_closure);
+                        let function_pointer_reg = self.ir.volatile_register();
+                        self.ir.assign(function_pointer_reg, function_pointer);
+
+                        let compiler_pointer_reg = self.ir.volatile_register();
+                        let compiler_pointer: Value = self.compiler.get_compiler_ptr().into();
+                        self.ir.assign(compiler_pointer_reg, compiler_pointer);
+
+                        let closure = self.ir.call(
+                            make_closure_reg.into(),
+                            vec![
+                                compiler_pointer_reg.into(),
+                                function_pointer_reg.into(),
+                                num_free_reg.into(),
+                                free_variable_pointer.into(),
+                            ]
+                        );
+                        self.pop_environment();
+                        return closure;
+                        
+                    }
                 }
 
-                let function = self.ir.function(pointer);
+                let function = self.ir.function(function_pointer);
 
                 self.pop_environment();
                 function
@@ -358,11 +413,14 @@ impl<'a> AstCompiler<'a> {
                     })
                     .collect();
 
-                if let Some(function) = self.get_variable(&name) {
+                if let Some(function) = self.get_variable_current_env(&name) {
+                    // TODO: Right now, this would only find variables in the current environment
                     let reg = self.ir.volatile_register();
                     self.ir.assign(reg, &function);
                     self.ir.call(reg.into(), args)
                 } else {
+                    // TODO: I shouldn't just assume the function will exist
+                    // unless I have a good plan for dealing with when it doesn't
                     let function = self.compiler.reserve_function(name.as_str()).unwrap();
 
                     if function.is_builtin {
@@ -436,7 +494,7 @@ impl<'a> AstCompiler<'a> {
     }
 
     // TODO: Need to walk the environment stack
-    fn get_variable(&self, name: &str) -> Option<VariableLocation> {
+    fn get_variable_current_env(&self, name: &str) -> Option<VariableLocation> {
         self.environment_stack.last().unwrap().variables.get(name).cloned()
     }
 
@@ -452,6 +510,17 @@ impl<'a> AstCompiler<'a> {
             let current_env = self.environment_stack.last().unwrap();
             current_env.variables.get(name).unwrap().clone()
         }
+    }
+
+    fn get_variable(&self, name: &str) -> Option<VariableLocation> {
+        for env in self.environment_stack.iter().rev() {
+            if let Some(variable) = env.variables.get(name) {
+                if !matches!(&variable, VariableLocation::FreeVariable(_)) {
+                    return Some(variable.clone());
+                }
+            }
+        }
+        None
     }
 
     fn string_constant(&mut self, str: String) -> Value {

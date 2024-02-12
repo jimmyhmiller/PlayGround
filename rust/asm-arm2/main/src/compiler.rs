@@ -1,5 +1,5 @@
 use core::fmt;
-use std::error::Error;
+use std::{error::Error, slice::{from_raw_parts, from_raw_parts_mut}};
 
 use mmap_rs::{Mmap, MmapOptions};
 
@@ -519,30 +519,30 @@ impl Compiler {
     // and put the free variables on the stack before the locals
 
     pub fn make_closure(&mut self, function: usize, free_variables: &[usize]) -> Result<usize, Box<dyn Error>> {
-        let memory = self.allocate(8 + 1 + free_variables.len() * 8)?;
-        let pointer = memory as *mut u8;
+        let len = 8 + 1 + free_variables.len() * 8;
+        let heap_pointer = self.allocate(len)?;
+        let pointer = heap_pointer as *mut u8;
+        let pointer = BuiltInTypes::untag(pointer as usize) as *mut u8;
         let num_free: u8 = free_variables.len().try_into()?;
         let function = function.to_le_bytes();
         let free_variables = free_variables.iter().map(|v| v.to_le_bytes()).flatten();
+        let memory = self.heap.take();
+        let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
+        let buffer = unsafe { from_raw_parts_mut(pointer, len) };
         // write function pointer
         for (index, byte) in function.iter().enumerate() {
-            unsafe {
-                pointer.add(index).write(*byte);
-            }
+            buffer[index] = *byte;
         }
         // Write number of free variables
+        buffer[8] = num_free;
         let num_free = num_free.to_le_bytes();
-        for (index, byte) in num_free.iter().enumerate() {
-            unsafe {
-                pointer.add(index + 8).write(*byte);
-            }
-        }
         // write free variables
         for (index, byte) in free_variables.enumerate() {
-            unsafe {
-                pointer.add(index + 8).write(byte);
-            }
+            buffer[9 + index] = byte;
         }
-        Ok(BuiltInTypes::Closure.tag(memory as isize) as usize)
+        memory.make_read_only().unwrap_or_else(|(_map, e)| {
+            panic!("Failed to make mmap read_only: {}", e);
+        });
+        Ok(BuiltInTypes::Closure.tag(heap_pointer as isize) as usize)
     }
 }
