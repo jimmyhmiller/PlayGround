@@ -1,10 +1,9 @@
 use ir::{Ir, Value, VirtualRegister};
-use core::num;
 use std::collections::HashMap;
 
 use crate::{
     compiler::Compiler,
-    ir::{self, Condition},
+    ir::{self, BuiltInTypes, Condition},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +221,8 @@ impl<'a> AstCompiler<'a> {
                 let mut code = self.ir.compile();
                 let function_pointer = self.compiler.upsert_function(&name, &code.compile_to_bytes()).unwrap();
 
+                code.share_label_info_debug(function_pointer);
+
                 self.ir = old_ir;
 
                 if self.has_free_variables() {
@@ -260,7 +261,7 @@ impl<'a> AstCompiler<'a> {
                         let num_free = self.get_current_env().free_variables.len();
 
                         // get a pointer to the start of the free variables on the stack
-                        let free_variable_pointer = self.ir.get_stack_pointer((num_free as isize + 1));
+                        let free_variable_pointer = self.ir.get_stack_pointer_imm(num_free as isize + 1);
                         
 
                         let num_free = Value::SignedConstant(num_free as isize);
@@ -390,6 +391,7 @@ impl<'a> AstCompiler<'a> {
             // like heap allocate and such
             Ast::Call { name, args } => {
                 if name == self.name {
+                    // TODO: I'm guessing I can have tail recursive closures that I will need to deal with
                     if self.is_tail_position() {
                         return self.call_compile(&Ast::TailRecurse { args });
                     } else {
@@ -415,9 +417,58 @@ impl<'a> AstCompiler<'a> {
 
                 if let Some(function) = self.get_variable_current_env(&name) {
                     // TODO: Right now, this would only find variables in the current environment
-                    let reg = self.ir.volatile_register();
-                    self.ir.assign(reg, &function);
-                    self.ir.call(reg.into(), args)
+                    // I also need to deal wiht functions vs closures
+                    let function_register = self.ir.volatile_register();
+
+
+                    let closure_register = self.ir.volatile_register();
+                    self.ir.assign(closure_register, &function);
+                    // Check if the tag is a closure
+                    let tag = self.ir.get_tag(closure_register.into());
+                    let closure_tag = BuiltInTypes::Closure.get_tag();
+                    let closure_tag = Value::RawValue(closure_tag as usize);
+                    let call_function = self.ir.label("call_function");
+                    let skip_load_function = self.ir.label("skip_load_function");
+                    // TODO: It might be better to change the layout of these jumps
+                    // so that the non-closure case is the fall through
+                    // I just have to think about the correct way to do that
+                    self.ir.jump_if(call_function, Condition::NotEqual, tag, closure_tag);
+                    // I need to grab the function pointer
+                    // Closures are a pointer to a structure like this
+                    // struct Closure {
+                    //     function_pointer: *const u8,
+                    //     num_free_variables: usize,
+                    //     ree_variables: *const Value,
+                    // }
+                    let closure_register = self.ir.untag(closure_register.into());
+                    // TODO:
+                    // I'm currently not getting the correct data. Need to figure out why.
+                    // probably should build a heap viewer
+                    let function_pointer = self.ir.load_from_memory(closure_register, 0);
+                    self.ir.assign(function_register, function_pointer);
+                    let num_free_variables = self.ir.load_from_memory(closure_register, 8);
+                    // for each variable I need to push them onto the stack after the prelude
+                    let loop_start = self.ir.label("loop_start");
+                    let counter = self.ir.volatile_register();
+                    self.ir.assign(counter, Value::SignedConstant(0));
+                    self.ir.write_label(loop_start);
+                    self.ir.jump_if(skip_load_function, Condition::GreaterThanOrEqual, counter, num_free_variables);
+                    // TODO: This needs to change based on counter
+                    let free_variable = self.ir.load_from_memory(closure_register, 16);
+                    let offset = self.ir.volatile_register();
+                    self.ir.assign(offset, counter);
+                    // TODO: This is hard coded to 3 because of the prelude.
+                    // but it probably isn't right
+                    let free_variable_offset = self.ir.add(offset, 3);
+                    let free_variable_slot_pointer = self.ir.get_stack_pointer(free_variable_offset);
+                    self.ir.heap_store(free_variable_slot_pointer, free_variable);
+                    let counter_increment = self.ir.add(1, counter);
+                    self.ir.assign(counter, counter_increment);
+                    self.ir.jump(loop_start);
+                    self.ir.write_label(call_function);
+                    self.ir.assign(function_register, &function);
+                    self.ir.write_label(skip_load_function);
+                    self.ir.call(function_register.into(), args)
                 } else {
                     // TODO: I shouldn't just assume the function will exist
                     // unless I have a good plan for dealing with when it doesn't

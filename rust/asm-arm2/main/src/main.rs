@@ -23,6 +23,7 @@ enum Data {
     BuiltinFunction {name: String, pointer: usize},
     HeapPointer { pointer: usize },
     UserFunction { name: String, pointer: usize, len: usize },
+    Label { label: String, function_pointer: usize, label_index: usize, label_location: usize },
 }
 
 trait Serialize {
@@ -89,7 +90,9 @@ fn fib_rust(n: usize) -> usize {
 fn allocate_array(compiler: *mut Compiler, value: usize) -> usize {
     let value = BuiltInTypes::untag(value);
     let compiler = unsafe { &mut *compiler };
-    compiler.allocate(value).unwrap()
+    let pointer = compiler.allocate(value).unwrap();
+    let pointer = BuiltInTypes::Array.tag(pointer as isize) as usize;
+    pointer
 }
 
 fn array_store(compiler: *mut Compiler, array: usize, index: usize, value: usize) -> usize {
@@ -157,20 +160,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             let y = fn closure_fn() {
                 x
             }
-            print(y)
+            print(y())
         }
 
     };
 
     compiler.compile_ast(hello_ast)?;
 
-    let hello_result = compiler.run_function("hello", vec![1]);
-    compiler.print(hello_result as usize);
-    let countdown_result = compiler.run_function("count_down", vec![10000000]);
-    compiler.print(countdown_result as usize);
+    // let hello_result = compiler.run_function("hello", vec![1]);
+    // compiler.print(hello_result as usize);
+    // let countdown_result = compiler.run_function("count_down", vec![10000000]);
+    // compiler.print(countdown_result as usize);
 
-    let hello2_result = compiler.run_function("hello2", vec![]);
-    compiler.print(hello2_result as usize);
+    // let hello2_result = compiler.run_function("hello2", vec![]);
+    // compiler.print(hello2_result as usize);
 
 
     let hello_closure_result = compiler.run_function("hello_closure", vec![]);
