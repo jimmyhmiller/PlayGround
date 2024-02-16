@@ -6,8 +6,7 @@ use asm::arm::{
 use std::collections::HashMap;
 
 use crate::{
-    common::Label,
-    ir::{BuiltInTypes, Condition},
+    common::Label, debugger, ir::{BuiltInTypes, Condition}, Data, Message
 };
 
 pub fn _print_u32_hex_le(value: u32) {
@@ -52,7 +51,7 @@ pub fn mov_sp(destination: Register, source: Register) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
+
 pub fn add(destination: Register, a: Register, b: Register) -> ArmAsm {
     ArmAsm::AddAddsubShift {
         sf: destination.sf(),
@@ -148,6 +147,17 @@ pub fn and_imm(destination: Register, a: Register, b: i32) -> ArmAsm {
         immr: 0,
         imms: 0,
         rn: a,
+        rd: destination,
+    }
+}
+
+pub fn get_tag(destination: Register, value: Register) -> ArmAsm {
+    ArmAsm::AndLogImm {
+        sf: destination.sf(),
+        n: 1,
+        immr: 0,
+        imms: 2,
+        rn: value,
         rd: destination,
     }
 }
@@ -436,6 +446,9 @@ impl LowLevelArm {
     pub fn tag_value(&mut self, destination: Register, value: Register, tag: Register) {
         self.instructions.extend(tag_value(destination, value, tag));
     }
+    pub fn get_tag(&mut self, destination: Register, value: Register) {
+        self.instructions.push(get_tag(destination, value));
+    }
     pub fn jump_equal(&mut self, destination: Label) {
         self.instructions.push(jump_equal(destination.index as u32));
     }
@@ -508,7 +521,7 @@ impl LowLevelArm {
         self.load_from_stack(destination, offset);
     }
 
-    pub fn load_from_heap(&mut self, source: Register, destination: Register, offset: i32) {
+    pub fn load_from_heap(&mut self, destination: Register, source: Register, offset: i32) {
         self.instructions.push(ArmAsm::LdrImmGen {
             size: 0b11,
             imm9: 0, // not used
@@ -519,7 +532,7 @@ impl LowLevelArm {
         });
     }
 
-    pub fn store_on_heap(&mut self, source: Register, destination: Register, offset: i32) {
+    pub fn store_on_heap(&mut self, destination: Register,  source: Register,  offset: i32) {
         self.instructions.push(ArmAsm::StrImmGen {
             size: 0b11,
             imm9: 0, // not used
@@ -778,7 +791,7 @@ impl LowLevelArm {
         self.max_locals = num_locals as i32;
     }
 
-    pub fn get_stack_pointer(&mut self, destination: Register, offset: isize) {
+    pub fn get_stack_pointer_imm(&mut self, destination: Register, offset: isize) {
         self.instructions.push(ArmAsm::AddAddsubImm {
             sf: destination.sf(),
             rn: SP,
@@ -787,7 +800,27 @@ impl LowLevelArm {
             sh: 0,
         });
     }
+    pub fn get_stack_pointer(&mut self, destination: Register, offset: Register) {
+        self.get_stack_pointer_imm(destination, 0);
+        self.instructions.push(add(destination, destination, offset));
+    }
+
+    pub fn share_label_info_debug(&self, function_pointer: usize) {
+        for (label_index, label) in self.labels.iter().enumerate() {
+            let label_location = *self.label_locations.get(&label_index).unwrap() * 4;
+            debugger(Message { 
+                kind: "label".to_string(), 
+                data: Data::Label {
+                    label: label.to_string(),
+                    function_pointer,
+                    label_index,
+                    label_location
+                }
+            });
+        }
+    }
 }
+
 
 #[allow(dead_code)]
 fn fib() -> LowLevelArm {

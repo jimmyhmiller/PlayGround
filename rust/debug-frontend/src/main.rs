@@ -36,7 +36,11 @@ enum Data {
     BuiltinFunction {name: String, pointer: usize},
     HeapPointer { pointer: usize },
     UserFunction { name: String, pointer: usize, len: usize },
+    Label { label: String, function_pointer: usize, label_index: usize, label_location: usize },
 }
+
+#[derive(Debug, Encode, Decode, Clone)]
+struct Label { label: String, function_pointer: usize, label_index: usize, label_location: usize }
 
 impl Data {
     fn to_string(&self) -> String {
@@ -52,6 +56,9 @@ impl Data {
             }
             Data::UserFunction { name, pointer, len  } => {
                 format!("{}: 0x{:x} 0x{:x}", name, pointer, (pointer + len))
+            }
+            Data::Label { label, function_pointer, label_index, label_location } => {
+                format!("{}: 0x{:x} 0x{:x} 0x{:x}", label, function_pointer, label_index, label_location)
             }
         }
     }
@@ -246,6 +253,7 @@ fn main() {
             },
             messages: vec![],
             functions: HashMap::new(),
+            labels: HashMap::new(),
         },
     };
     frontend.create_window("Debug", 1600, 1600, Options { vsync: false });
@@ -520,8 +528,9 @@ impl State {
             let message = Message::from_binary(&buffer);
             match message.data.clone() {
                 Data::ForeignFunction { name, pointer } => {},
-                Data::BuiltinFunction { name, pointer } => {
-
+                Data::BuiltinFunction { name, pointer } => {},
+                Data::Label { label, function_pointer, label_index, label_location } => {
+                    self.labels.insert(function_pointer + label_location, Label { label, function_pointer, label_index, label_location });
                 },
                 Data::HeapPointer { pointer } => {},
                 Data::UserFunction { name, pointer, len } => {
@@ -591,6 +600,7 @@ struct State {
     fp: u64,
     messages: Vec<Message>,
     functions: HashMap<Address, Function>,
+    labels: HashMap<Address, Label>,
 }
 
 #[derive(Debug)]
@@ -835,6 +845,8 @@ fn disasm(state: &State) -> impl Node {
                 };
                 if let Some(function) = state.functions.get(&(disasm.address as usize)) {
                     format!("{}{: <11} {}", prefix, function.get_name(), disasm.to_string(false, state.disasm.show_hex))
+                } else if let Some(label) = state.labels.get(&(disasm.address as usize)) {
+                    format!("{}{: <11} {}", prefix, label.label, disasm.to_string(false, state.disasm.show_hex))
                 } else {
                     format!(
                         "{}{}",

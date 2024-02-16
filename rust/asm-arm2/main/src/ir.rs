@@ -206,7 +206,10 @@ pub enum Instruction {
     PushStack(Value),
     PopStack(Value),
     LoadFreeVariable(Value, usize),
-    GetStackPointer(Value, isize),
+    GetStackPointer(Value, Value),
+    GetStackPointerImm(Value, isize),
+    GetTag(Value, Value),
+    Untag(Value, Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -351,8 +354,17 @@ impl Instruction {
             Instruction::LoadFreeVariable(a, _) => {
                 get_register!(a)
             }
-            Instruction::GetStackPointer(a, _) => {
+            Instruction::GetStackPointer(a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::GetStackPointerImm(a, _) => {
                 get_register!(a)
+            }
+            Instruction::GetTag(a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::Untag(a, b) => {
+                get_registers!(a, b)
             }
         }
     }
@@ -592,6 +604,7 @@ impl Ir {
     }
 
     pub fn write_label(&mut self, early_exit: Label) {
+        assert!(!self.label_locations.contains_key(&self.instructions.len()));
         self.label_locations
             .insert(self.instructions.len(), early_exit.index);
     }
@@ -989,7 +1002,7 @@ impl Ir {
                     let ptr = alloc.allocate_register(index, ptr, &mut lang);
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
-                    lang.load_from_heap(ptr, dest, 0);
+                    lang.load_from_heap(dest, ptr , 0);
                 }
                 Instruction::HeapStore(ptr, val) => {
                     let ptr = ptr.try_into().unwrap();
@@ -1023,7 +1036,28 @@ impl Ir {
                 Instruction::GetStackPointer(dest, offset) => {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
-                    lang.get_stack_pointer(dest, *offset);
+                    let offset = offset.try_into().unwrap();
+                    let offset = alloc.allocate_register(index, offset, &mut lang);
+                    lang.get_stack_pointer(dest, offset);
+                }
+                Instruction::GetStackPointerImm(dest, offset) => {
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.get_stack_pointer_imm(dest, *offset);
+                }
+                Instruction::GetTag(dest, value) => {
+                    let value = value.try_into().unwrap();
+                    let value = alloc.allocate_register(index, value, &mut lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.get_tag(dest, value);
+                }
+                Instruction::Untag(dest, value) => {
+                    let value = value.try_into().unwrap();
+                    let value = alloc.allocate_register(index, value, &mut lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.shift_right(dest, value, BuiltInTypes::tag_size());
                 }
             }
         }
@@ -1122,12 +1156,45 @@ impl Ir {
             .push(Instruction::LoadLocal(reg.into(), Value::FreeVariable(index)));
     }
 
-    pub fn get_stack_pointer(&mut self, offset: isize) -> Value {
+    pub fn get_stack_pointer(&mut self, offset: Value) -> Value {
         let dest = self.volatile_register().into();
         self.instructions
             .push(Instruction::GetStackPointer(dest, offset));
         dest
     }
+
+    pub fn get_stack_pointer_imm(&mut self, num_free: isize) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::GetStackPointerImm(dest, num_free));
+        dest
+    }
+
+    pub fn load_from_memory(&mut self, source: Value, offset: i32) -> Value {
+        let offset_reg: VirtualRegister = self.volatile_register();
+        self.assign(offset_reg, Value::RawValue(offset as usize));
+        let source = self.add(source, offset_reg);
+        let dest = self.volatile_register();
+        self.instructions
+            .push(Instruction::HeapLoad(dest.into(), source.into()));
+        dest.into()
+    }
+
+    pub fn get_tag(&mut self, value: Value) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::GetTag(dest, value.into()));
+        dest.into()
+    }
+
+    pub fn untag(&mut self, closure_register: Value) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::Untag(dest, closure_register.into()));
+        dest.into()
+    }
+
+
 }
 
 #[allow(unused)]

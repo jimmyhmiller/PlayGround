@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{error::Error, slice::{from_raw_parts, from_raw_parts_mut}};
 
-use mmap_rs::{Mmap, MmapOptions};
+use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
 use crate::{ast::Ast, debugger, ir::{BuiltInTypes, StringValue, Value}, parser::Parser, Data, Message};
 
@@ -30,7 +30,7 @@ pub struct Compiler {
     functions: Vec<Function>,
     #[allow(dead_code)]
     // Need much better system obviously
-    heap: Option<Mmap>,
+    heap: Option<MmapMut>,
     heap_offset: usize,
     string_constants: Vec<StringValue>,
 }
@@ -74,7 +74,11 @@ impl Compiler {
                 MmapOptions::new(MmapOptions::page_size() * 100)
                     .unwrap()
                     .map()
-                    .unwrap(),
+                    .unwrap()
+                    .make_mut()
+                    .unwrap_or_else(|(_map, e)| {
+                        panic!("Failed to make mmap executable: {}", e);
+                    }),
             ),
             heap_offset: 0,
             string_constants: vec![],
@@ -88,7 +92,7 @@ impl Compiler {
     pub fn allocate(&mut self, bytes: usize) -> Result<usize, Box<dyn Error>> {
         let size = bytes * 8;
         let memory = self.heap.take();
-        let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
+        let mut memory = memory.unwrap();
         let buffer = &mut memory[self.heap_offset..];
         // write the size of the object to the first 8 bytes
         for (index, byte) in size.to_le_bytes().iter().enumerate() {
@@ -96,10 +100,7 @@ impl Compiler {
         }
         self.heap_offset += size + 8;
         let pointer = buffer.as_ptr() as usize;
-        let pointer = BuiltInTypes::Array.tag(pointer as isize) as usize;
-        self.heap = Some(memory.make_read_only().unwrap_or_else(|(_map, e)| {
-            panic!("Failed to make mmap executable: {}", e);
-        }));
+        self.heap = Some(memory);
         Ok(pointer)
     }
 
@@ -393,8 +394,6 @@ impl Compiler {
                     // TODO: Bounds check
                     let index = BuiltInTypes::untag(index);
                     let index = index * 8;
-                    let heap = self.heap.take();
-                    let heap = heap.unwrap().make_mut().map_err(|(_, e)| e)?;
                     let array = BuiltInTypes::untag(array);
                     let pointer = array as *mut u8;
                     // get first 8 bytes as size
@@ -405,11 +404,6 @@ impl Compiler {
                     for (offset, byte) in value.to_le_bytes().iter().enumerate() {
                         data[index + offset] = *byte;
                     }
-                    let mem = heap.make_read_only().unwrap_or_else(|(_map, e)| {
-                        panic!("Failed to make mmap executable: {}", e);
-                    });
-
-                    self.heap = Some(mem);
                     Ok(BuiltInTypes::Array.tag(array as isize) as usize)
                 }
                 _ => panic!("Not an array"),
@@ -519,30 +513,26 @@ impl Compiler {
     // and put the free variables on the stack before the locals
 
     pub fn make_closure(&mut self, function: usize, free_variables: &[usize]) -> Result<usize, Box<dyn Error>> {
-        let len = 8 + 1 + free_variables.len() * 8;
+        let len = 8 + 8 + free_variables.len() * 8;
         let heap_pointer = self.allocate(len)?;
         let pointer = heap_pointer as *mut u8;
-        let pointer = BuiltInTypes::untag(pointer as usize) as *mut u8;
-        let num_free: u8 = free_variables.len().try_into()?;
+        let num_free = free_variables.len();
         let function = function.to_le_bytes();
         let free_variables = free_variables.iter().map(|v| v.to_le_bytes()).flatten();
-        let memory = self.heap.take();
-        let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
         let buffer = unsafe { from_raw_parts_mut(pointer, len) };
         // write function pointer
         for (index, byte) in function.iter().enumerate() {
             buffer[index] = *byte;
         }
-        // Write number of free variables
-        buffer[8] = num_free;
         let num_free = num_free.to_le_bytes();
+        // Write number of free variables
+        for (index, byte) in num_free.iter().enumerate() {
+            buffer[8 + index] = *byte;
+        }
         // write free variables
         for (index, byte) in free_variables.enumerate() {
-            buffer[9 + index] = byte;
+            buffer[16 + index] = byte;
         }
-        memory.make_read_only().unwrap_or_else(|(_map, e)| {
-            panic!("Failed to make mmap read_only: {}", e);
-        });
         Ok(BuiltInTypes::Closure.tag(heap_pointer as isize) as usize)
     }
 }
