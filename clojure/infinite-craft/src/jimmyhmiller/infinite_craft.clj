@@ -19,6 +19,8 @@
              {:headers {:authority "neal.fun"
                         :referer "https://neal.fun/infinite-craft/"}
               :accept :json
+              :socket-timeout 10000
+              :connection-timeout 10000
               :query-params {:first first :second  second}
               :as :json})))
 
@@ -65,6 +67,11 @@
 (count (:pairs @state))
 (count (:elements @state))
 
+(count
+ (set
+  (filter :isNew
+          (map :result (:results @state)))))
+
 
 (def stop-stats (atom false))
 
@@ -92,7 +99,10 @@
       (loop []
         (when (not @stop)
           (Thread/sleep 3000)
-          (step-once)
+          (try
+            (step-once)
+            (catch Exception e
+              (println "Timed out continuing to next one")))
           (recur)))))
 
 
