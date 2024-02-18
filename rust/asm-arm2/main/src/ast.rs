@@ -267,6 +267,7 @@ impl<'a> AstCompiler<'a> {
                         let num_free = Value::SignedConstant(num_free as isize);
                         let num_free_reg = self.ir.volatile_register();
                         self.ir.assign(num_free_reg, num_free);
+                        let num_free_reg = self.ir.tag(num_free_reg.into(), BuiltInTypes::Int.get_tag());
                         // Call make_closure
                         let make_closure = self.compiler.find_function("make_closure").unwrap();
                         let make_closure = self.compiler.get_function_pointer(make_closure).unwrap();

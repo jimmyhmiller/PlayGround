@@ -254,6 +254,10 @@ fn main() {
             messages: vec![],
             functions: HashMap::new(),
             labels: HashMap::new(),
+            heap: Heap {
+                memory: vec![],
+                heap_pointers: vec![],
+            }
         },
     };
     frontend.create_window("Debug", 1600, 1600, Options { vsync: false });
@@ -469,6 +473,22 @@ impl State {
                     })
                     .collect();
 
+                // TODO: Handle more complex heap
+                if let Some(heap_pointer) = self.heap.heap_pointers.get(0) {
+                    let heap_root = *heap_pointer as u64;
+                    let heap = &mut [0u8; 256];
+                    process.read_memory(heap_root, heap);
+                    let heap = convert_to_u64_array(heap);
+                    self.heap.memory = heap
+                        .iter()
+                        .enumerate()
+                        .map(|(i, value)| Memory {
+                            address: heap_root + (i as u64 * 8),
+                            value: *value,
+                            kind: BuiltInTypes::get_kind(*value as usize)
+                        })
+                        .collect();
+                }
 
 
                 if !pc_in_instructions || remaining < 30 {
@@ -532,7 +552,9 @@ impl State {
                 Data::Label { label, function_pointer, label_index, label_location } => {
                     self.labels.insert(function_pointer + label_location, Label { label, function_pointer, label_index, label_location });
                 },
-                Data::HeapPointer { pointer } => {},
+                Data::HeapPointer { pointer } => {
+                    self.heap.heap_pointers.push(pointer);
+                },
                 Data::UserFunction { name, pointer, len } => {
                     self.process.target.as_mut().unwrap().breakpoint_create_by_address(pointer as u64);
                     self.functions.insert(pointer, Function::User { name, address_range: (pointer, pointer + len) });
@@ -590,6 +612,11 @@ impl Function {
 
 type Address = usize;
 
+struct Heap {
+    memory: Vec<Memory>,
+    heap_pointers: Vec<usize>,
+}
+
 struct State {
     pc: u64,
     disasm: Disasm,
@@ -601,6 +628,7 @@ struct State {
     messages: Vec<Message>,
     functions: HashMap<Address, Function>,
     labels: HashMap<Address, Label>,
+    heap: Heap,
 }
 
 #[derive(Debug)]
@@ -889,8 +917,16 @@ fn registers(state: &State) -> impl Node {
 }
 
 fn memory(state: &State) -> impl Node {
-    empty()
+    lines(
+        &state
+            .heap
+            .memory
+            .iter()
+            .map(|memory| memory.to_string())
+            .collect::<Vec<String>>(),
+    )
 }
+
 
 fn stack(state: &State) -> impl Node {
     lines(
@@ -915,13 +951,18 @@ fn stack(state: &State) -> impl Node {
 
 fn debug(state: &State) -> impl Node {
     let mut outer = Root::new(vertical().with_child_spacing(30.0));
-    let mut root = Root::new(horizontal());
-    root.add(disasm(state));
-    root.add(registers(state));
+    let mut row1 = Root::new(horizontal());
+    let mut row2 = Root::new(horizontal());
+    row1.add(disasm(state));
+    row1.add(registers(state));
     // root.add(memory(state));
-    root.add(stack(state));
-    outer.add(root);
-    outer.add(meta(state));
+    row1.add(stack(state));
+
+    row2.add(meta(state));
+    row2.add(memory(state));
+
+    outer.add(row1);
+    outer.add(row2);
     outer
 }
 
