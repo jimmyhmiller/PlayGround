@@ -2,10 +2,11 @@
 // Big Sur or later.
 
 use futures::StreamExt;
-use std::collections::BTreeSet;
+
 use std::error::Error;
-use std::io::{Stdin, Stdout};
-use std::rc::Rc;
+
+use std::ops::{Index, IndexMut};
+
 use std::sync::Arc;
 use std::time::Duration;
 use std::vec;
@@ -13,13 +14,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use tokio::{io, task, time};
+use tokio::{io, task};
 
 use btleplug::api::{
-    Central, Characteristic, Manager as _, Peripheral, ScanFilter, ValueNotification,
+    Central, Characteristic, Manager as _, Peripheral, ScanFilter,
 };
 use btleplug::platform::{self, Manager};
-use vampirc_uci::{parse_one, UciMessage, UciMove, UciSearchControl, UciSquare};
+use vampirc_uci::{parse_one, UciFen, UciMessage, UciMove, UciSearchControl, UciSquare};
 
 const WRITE: &str = "1b7e8272-2877-41c3-b46e-cf057c562023";
 const BOARD_DATA: &str = "1b7e8262-2877-41c3-b46e-cf057c562023";
@@ -60,19 +61,7 @@ fn led_value_for_square(square: &str) -> u8 {
     }
 }
 
-fn encode_move_to_leds(start: &str, end: &str) -> [u8; 10] {
-    let start_led = led_value_for_square(start);
-    let end_led = led_value_for_square(end);
 
-    let start_row = start.chars().nth(1).unwrap().to_digit(10).unwrap() as usize;
-    let end_row = end.chars().nth(1).unwrap().to_digit(10).unwrap() as usize;
-
-    let mut rows = [0u8; 8];
-    rows[8 - start_row] |= start_led;
-    rows[8 - end_row] |= end_led;
-
-    create_led_control_message(rows)
-}
 
 fn encode_leds(positions: Vec<Coord>) -> [u8; 10] {
     let mut rows = [0u8; 8];
@@ -84,6 +73,7 @@ fn encode_leds(positions: Vec<Coord>) -> [u8; 10] {
     }
     create_led_control_message(rows)
 }
+
 
 fn turn_off_all_leds() -> [u8; 10] {
     create_led_control_message([0; 8])
@@ -115,8 +105,137 @@ fn board_state_as_square_and_piece(board_state: &[u8]) -> Vec<SquareAndPiece> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum CastlingSide {
+    KingSide,
+    QueenSide,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CastlingRights {
+    color: Color,
+    side: CastlingSide,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct BoardState {
-    board: Vec<SquareAndPiece>,
+    board: Board,
+    active_color: Color,
+    castling_rights: Vec<CastlingRights>,
+    en_passant_square: Option<Coord>,
+    halfmove_clock: u8,
+    fullmove_number: u8,
+}
+
+impl BoardState {
+    fn to_fen(&self) -> String {
+        let mut result = String::new();
+        for row in (0..8).rev() {
+            let mut empty = 0;
+            for col in 0..8 {
+                let index = row * 8 + col;
+                let square = &self.board[index];
+                let symbol = match &square.piece {
+                    Some(piece) => match piece {
+                        Piece {
+                            piece_type,
+                            color: Color::White,
+                        } => match piece_type {
+                            PieceType::Pawn => 'P',
+                            PieceType::Rook => 'R',
+                            PieceType::Knight => 'N',
+                            PieceType::Bishop => 'B',
+                            PieceType::Queen => 'Q',
+                            PieceType::King => 'K',
+                        },
+                        Piece {
+                            piece_type,
+                            color: Color::Black,
+                        } => match piece_type {
+                            PieceType::Pawn => 'p',
+                            PieceType::Rook => 'r',
+                            PieceType::Knight => 'n',
+                            PieceType::Bishop => 'b',
+                            PieceType::Queen => 'q',
+                            PieceType::King => 'k',
+                        },
+                    },
+                    None => {
+                        empty += 1;
+                        continue;
+                    }
+                };
+                if empty > 0 {
+                    result.push_str(&empty.to_string());
+                    empty = 0;
+                }
+                result.push(symbol);
+            }
+            if empty > 0 {
+                result.push_str(&empty.to_string());
+            }
+            if row > 0 {
+                result.push('/');
+            }
+        }
+        result.push(' ');
+        result.push(match self.active_color {
+            Color::White => 'w',
+            Color::Black => 'b',
+        });
+        result.push(' ');
+        let mut castling_rights = String::new();
+        for rights in &self.castling_rights {
+            match rights {
+                CastlingRights {
+                    color: Color::White,
+                    side: CastlingSide::KingSide,
+                } => {
+                    castling_rights.push('K');
+                }
+                CastlingRights {
+                    color: Color::White,
+                    side: CastlingSide::QueenSide,
+                } => {
+                    castling_rights.push('Q');
+                }
+                CastlingRights {
+                    color: Color::Black,
+                    side: CastlingSide::KingSide,
+                } => {
+                    castling_rights.push('k');
+                }
+                CastlingRights {
+                    color: Color::Black,
+                    side: CastlingSide::QueenSide,
+                } => {
+                    castling_rights.push('q');
+                }
+            }
+        }
+        if castling_rights.is_empty() {
+            castling_rights.push('-');
+        }
+        result.push_str(&castling_rights);
+        result.push(' ');
+        result.push(match self.en_passant_square {
+            Some(coord) => coord_to_str(coord).chars().nth(0).unwrap(),
+            None => '-',
+        });
+        result.push(' ');
+        result.push_str(&self.halfmove_clock.to_string());
+        result.push(' ');
+        result.push_str(&self.fullmove_number.to_string());
+        result
+    }
+}
+
+#[test]
+fn fen_starting_position() {
+    let board = BoardState::initial_board();
+    assert_eq!(
+        board.to_fen(),
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    );
 }
 
 fn fill_board_missing_pieces(board: Vec<SquareAndPiece>) -> Vec<SquareAndPiece> {
@@ -173,7 +292,31 @@ impl BoardState {
         ]);
         board.sort_by(|a, b| a.square.cmp(&b.square));
 
-        BoardState { board }
+        BoardState { 
+            board: Board { board },
+            active_color: Color::White,
+            castling_rights: vec![
+                CastlingRights {
+                    color: Color::White,
+                    side: CastlingSide::KingSide,
+                },
+                CastlingRights {
+                    color: Color::White,
+                    side: CastlingSide::QueenSide,
+                },
+                CastlingRights {
+                    color: Color::Black,
+                    side: CastlingSide::KingSide,
+                },
+                CastlingRights {
+                    color: Color::Black,
+                    side: CastlingSide::QueenSide,
+                },
+            ],
+            en_passant_square: None,
+            halfmove_clock: 0,
+            fullmove_number: 1,
+         }
     }
 
     fn move_piece(&mut self, from: &str, to: &str) {
@@ -190,6 +333,45 @@ impl BoardState {
         new_board
     }
 
+   
+
+    
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Board {
+    board: Vec<SquareAndPiece>
+}
+
+impl Index<usize> for Board {
+    type Output = SquareAndPiece;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.board[index]
+    }
+}
+
+impl IndexMut<usize> for Board {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.board[index]
+    }
+}
+
+
+
+impl Board {
+    fn find_incorrect_squares(&self, other: &Board) -> Vec<Coord> {
+        let mut result = Vec::new();
+        for i in 0..64 {
+            let piece = self.board[i].piece;
+            let other_piece = other.board[i].piece;
+            if piece != other_piece {
+                result.push(square_num_to_coord(i));
+            }
+        }
+        result
+    }
+
     fn diff_board(&self, other: &BoardState) -> Vec<(usize, Option<Piece>, Option<Piece>)> {
         let mut result = Vec::new();
         for i in 0..64 {
@@ -197,22 +379,6 @@ impl BoardState {
             let other_piece = other.board[i].piece;
             if piece != other_piece {
                 result.push((i, piece, other_piece));
-            }
-        }
-        result
-    }
-
-    fn find_incorrect_squares(&self, desired: &BoardState) -> Vec<Coord> {
-        if desired.board.len() < 64 || self.board.len() < 64 {
-            // return every piece as incorrect
-            return (0..64).map(|x| square_num_to_coord(x)).collect();
-        }
-        let mut result = Vec::new();
-        for i in 0..64 {
-            let piece = self.board[i].piece;
-            let desired_piece = desired.board[i].piece;
-            if piece != desired_piece {
-                result.push(square_num_to_coord(i));
             }
         }
         result
@@ -344,13 +510,13 @@ fn test_board_state_as_square_and_piece() {
     );
 }
 
-fn print_ascii_board(board: Vec<SquareAndPiece>) {
+fn print_ascii_board(board: Board) {
     println!("  +-----------------+");
     for row in 0..8 {
         print!("{} |", 8 - row); // Print row numbers
         for col in 0..8 {
             let index = row * 8 + col;
-            let square = &board[index];
+            let square = &board.board[index];
             let symbol = match &square.piece {
                 Some(piece) => match piece {
                     Piece { piece_type, color } => match (piece_type, color) {
@@ -500,7 +666,7 @@ fn test_square_num_to_coord() {
 }
 
 fn coord_to_square_num(coord: Coord) -> usize {
-    let row = match coord.file {
+    coord.rank * 8 + match coord.file {
         File::A => 0,
         File::B => 1,
         File::C => 2,
@@ -509,8 +675,7 @@ fn coord_to_square_num(coord: Coord) -> usize {
         File::F => 5,
         File::G => 6,
         File::H => 7,
-    };
-    row * 8 + coord.rank
+    }
 }
 
 #[test]
@@ -524,24 +689,17 @@ fn test_coord_to_square_num() {
     );
     assert_eq!(
         coord_to_square_num(Coord {
-            file: File::A,
-            rank: 1
+            file: File::B,
+            rank: 0
         }),
         1
     );
     assert_eq!(
         coord_to_square_num(Coord {
-            file: File::B,
+            file: File::H,
             rank: 0
         }),
-        8
-    );
-    assert_eq!(
-        coord_to_square_num(Coord {
-            file: File::H,
-            rank: 7
-        }),
-        63
+        7
     );
 }
 
@@ -657,6 +815,7 @@ async fn send_message(
     message: UciMessage,
 ) -> Result<(), Box<dyn Error>> {
     let message = message.to_string();
+    println!("Sending message: {}", message);
     stdin.write_all(format!("{}\n", message).as_bytes()).await?;
     stdin.flush().await?;
     Ok(())
@@ -694,7 +853,7 @@ async fn init_game(
 
 async fn process_chessnut(
     chessnut: Arc<Box<platform::Peripheral>>,
-    chessnut_board_position: Arc<Mutex<Option<BoardState>>>,
+    chessnut_board_position: Arc<Mutex<Option<Board>>>,
 ) -> Result<(), String> {
     let mut notifaction_stream = chessnut.notifications().await.expect("error");
     while let Some(notification) = notifaction_stream.next().await {
@@ -702,11 +861,9 @@ async fn process_chessnut(
             continue;
         }
         let data = notification.value;
-        let board_state = BoardState {
-            board: board_state_as_square_and_piece(&data[2..34]),
-        };
+        let board_state = board_state_as_square_and_piece(&data[2..34]);
         let mut chessnut_board_position = chessnut_board_position.lock().await;
-        *chessnut_board_position = Some(board_state);
+        *chessnut_board_position = Some(Board{ board: board_state});
     }
     Ok(())
 }
@@ -743,14 +900,18 @@ fn test_encoding_led() {
 async fn wait_for_board_to_be_correct(
     writer: &Characteristic,
     chessnut: &Arc<Box<platform::Peripheral>>,
-    chessnut_board_position: Arc<Mutex<Option<BoardState>>>,
-    desired_position: BoardState,
+    chessnut_board_position: Arc<Mutex<Option<Board>>>,
+    desired_position: Board,
 ) -> Result<(), Box<dyn Error>> {
     loop {
         let current_chessnut_board = chessnut_board_position.lock().await;
         if let Some(chessnut_board_state) = &*current_chessnut_board {
             let incorrect = chessnut_board_state.find_incorrect_squares(&desired_position);
             if incorrect.is_empty() {
+                let message = turn_off_all_leds();
+                chessnut
+                    .write(&writer, &message, btleplug::api::WriteType::WithResponse)
+                    .await?;
                 return Ok(());
             }
             let message = encode_leds(incorrect);
@@ -762,8 +923,8 @@ async fn wait_for_board_to_be_correct(
 }
 
 async fn wait_for_board_to_change(
-    chessnut_board_position: &Arc<Mutex<Option<BoardState>>>,
-) -> Result<BoardState, Box<dyn Error>> {
+    chessnut_board_position: &Arc<Mutex<Option<Board>>>,
+) -> Result<Board, Box<dyn Error>> {
     let cloned_position = chessnut_board_position.clone();
     let current_board = cloned_position.lock().await;
     let cloned_board = current_board.as_ref().unwrap().clone();
@@ -786,7 +947,7 @@ async fn get_next_board(
     board_state: BoardState,
     writer: &Characteristic,
     chessnut: &Arc<Box<platform::Peripheral>>,
-    chessnut_board_position: Arc<Mutex<Option<BoardState>>>,
+    chessnut_board_position: Arc<Mutex<Option<Board>>>,
 ) -> Result<BoardState, Box<dyn Error>> {
     send_message(
         stdin,
@@ -806,9 +967,10 @@ async fn get_next_board(
         let msg: UciMessage = parse_one(&line);
         match msg {
             UciMessage::BestMove { best_move, ponder } => {
+                println!("Best move: {:?}", best_move);
                 let from = best_move.from.to_string();
                 let to = best_move.to.to_string();
-                let message = encode_move_to_leds(&from, &to);
+                let message = encode_leds(vec![str_to_coord(&from), str_to_coord(&to)]);
                 chessnut
                     .write(&writer, &message, btleplug::api::WriteType::WithResponse)
                     .await?;
@@ -817,7 +979,7 @@ async fn get_next_board(
                     &writer,
                     &chessnut,
                     chessnut_board_position.clone(),
-                    new_board.clone(),
+                    new_board.clone().board,
                 )
                 .await?;
                 return Ok(new_board);
@@ -834,7 +996,7 @@ async fn get_next_board(
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut board_state = BoardState::initial_board();
 
-    let chessnut_board_position: Arc<Mutex<Option<BoardState>>> = Arc::new(Mutex::new(None));
+    let chessnut_board_position: Arc<Mutex<Option<Board>>> = Arc::new(Mutex::new(None));
 
     let chessnut = Arc::new(Box::new(get_chessnut_board().await?));
 
@@ -868,14 +1030,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &writer,
         &chessnut.clone(),
         chessnut_board_position.clone(),
-        board_state.clone(),
+        board_state.clone().board,
     )
     .await?;
 
     loop {
         let new_board = wait_for_board_to_change(&chessnut_board_position).await?;
         let new_move = new_board.diff_board(&board_state);
-        if new_move.len() == 1 {
+        if new_move.len() == 2 {
+            board_state.board = new_board;
             let (from, _, _) = new_move[0];
             let (to, _, _) = new_move[1];
             let from = coord_to_str(square_num_to_coord(from));
@@ -884,7 +1047,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &mut stdin,
                 UciMessage::Position {
                     startpos: false,
-                    fen: None,
+                    fen: Some(UciFen(board_state.to_fen())),
                     moves: vec![UciMove {
                         from: UciSquare {
                             file: from.chars().nth(0).unwrap(),
@@ -898,7 +1061,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }],
                 },
             ).await?;
+        } else {
+            continue;
         }
+
+        board_state.active_color = match board_state.active_color {
+            Color::White => Color::Black,
+            Color::Black => Color::White,
+        };
 
         let new_board = get_next_board(
             &mut stdin,
@@ -910,7 +1080,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await?;
         board_state = new_board;
+        board_state.active_color = match board_state.active_color {
+            Color::White => Color::Black,
+            Color::Black => Color::White,
+        };
+
+        let clear_leds = turn_off_all_leds();
+        chessnut
+            .write(&writer, &clear_leds, btleplug::api::WriteType::WithResponse)
+            .await?;
+
     }
 
     Ok(())
 }
+
+
+// TODO: Absolutely mess but kind of working
+// Biggest issue is detecting moves I make
+// I need them to be valid moves
+// I much just make version 2,
+// pulling in rust chess to handle the board state
