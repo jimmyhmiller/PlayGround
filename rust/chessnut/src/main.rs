@@ -1,5 +1,5 @@
-// See the "macOS permissions note" in README.md before running this on macOS
-// Big Sur or later.
+
+mod main2;
 
 use futures::StreamExt;
 
@@ -992,8 +992,8 @@ async fn get_next_board(
     Ok(board_state)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+
+async fn old_main() -> Result<(), Box<dyn Error>> {
     let mut board_state = BoardState::initial_board();
 
     let chessnut_board_position: Arc<Mutex<Option<Board>>> = Arc::new(Mutex::new(None));
@@ -1095,6 +1095,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    main2::main().await
+}
 
 // TODO: Absolutely mess but kind of working
 // Biggest issue is detecting moves I make
