@@ -458,10 +458,10 @@ impl<'a> AstCompiler<'a> {
                     let free_variable = self.ir.load_from_memory(closure_register, 16);
                     let offset = self.ir.volatile_register();
                     self.ir.assign(offset, counter);
-                    // TODO: This is hard coded to 3 because of the prelude.
-                    // but it probably isn't right
-                    let free_variable_offset = self.ir.add(offset, 3);
+                    let free_variable_offset = self.ir.add(offset, 0);
                     let free_variable_slot_pointer = self.ir.get_stack_pointer(free_variable_offset);
+                    // TODO: Hardcoded 4 for prelude. Need to actually figure out that value correctly
+                    let free_variable_slot_pointer = self.ir.sub(free_variable_slot_pointer, 4);
                     self.ir.heap_store(free_variable_slot_pointer, free_variable);
                     let counter_increment = self.ir.add(1, counter);
                     self.ir.assign(counter, counter_increment);
