@@ -1,0 +1,15 @@
+[package]
+name = "chessnut"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+btleplug = { version = "0.10", features = ["serde"] }
+futures = "0.3.30"
+tokio = { version = "1", features = ["full"] }
+vampirc-uci = "0.11"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
