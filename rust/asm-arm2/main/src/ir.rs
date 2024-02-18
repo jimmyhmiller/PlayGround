@@ -1194,6 +1194,14 @@ impl Ir {
         dest.into()
     }
 
+    pub fn tag(&mut self, reg: Value, tag: isize) -> Value {
+        let dest = self.volatile_register().into();
+        let tag = self.assign_new(Value::RawValue(tag as usize));
+        self.instructions
+            .push(Instruction::Tag(dest, reg.into(), tag.into()));
+        dest.into()
+    }
+
 
 }
 

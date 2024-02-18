@@ -1,6 +1,12 @@
-(ns jimmyhmiller.chessnut)
+(ns jimmyhmiller.chessnut
+  (:import [org.sputnikdev.bluetooth.manager.impl BluetoothManagerBuilder]))
 
 
+(let [builder (BluetoothManagerBuilder.)
+      _ (.withBlueGigaTransport builder "^*.$")
+      manager (.build builder)]
+  ;; Use `manager` here
+  )
 
 
 

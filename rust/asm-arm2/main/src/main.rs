@@ -106,7 +106,6 @@ fn array_get(compiler: *mut Compiler, array: usize, index: usize) -> usize {
 }
 
 fn make_closure(compiler: *mut Compiler, function: usize, num_free: usize, free_variable_pointer: usize) -> usize {
-    println!("0x{:x}", free_variable_pointer);
     let compiler = unsafe { &mut *compiler };
     let num_free = BuiltInTypes::untag(num_free);
     let free_variables = unsafe { from_raw_parts(free_variable_pointer as *const usize, num_free) };
