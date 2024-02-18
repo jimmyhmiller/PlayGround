@@ -156,8 +156,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         fn hello_closure() {
             let x = 42;
+            let z = 2;
             let y = fn closure_fn() {
-                x
+                x + z
             }
             print(y())
         }
