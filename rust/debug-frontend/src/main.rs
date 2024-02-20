@@ -1,7 +1,13 @@
-use std::{ffi::{c_void, CString}, collections::{HashSet, HashMap}};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::{c_void, CString},
+};
 
-use bincode::{Encode, Decode, config::standard};
-use lldb::{SBDebugger, SBError, SBFrame, SBInstructionList, SBLaunchInfo, SBProcess, SBTarget, SBBreakpoint, SBValue};
+use bincode::{config::standard, Decode, Encode};
+use lldb::{
+    SBBreakpoint, SBDebugger, SBError, SBFrame, SBInstructionList, SBLaunchInfo, SBProcess,
+    SBTarget, SBValue,
+};
 use lldb_sys::{RunMode, SBTargetBreakpointCreateByName, SBValueGetValueAsUnsigned2};
 use skia_safe::{
     paint,
@@ -15,7 +21,6 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::CursorIcon,
 };
-
 
 #[derive(Debug, Encode, Decode)]
 pub struct Message {
@@ -32,15 +37,37 @@ impl Message {
 // TODO: This should really live on the debugger side of things
 #[derive(Debug, Encode, Decode, Clone)]
 enum Data {
-    ForeignFunction { name: String, pointer: usize },
-    BuiltinFunction {name: String, pointer: usize},
-    HeapPointer { pointer: usize },
-    UserFunction { name: String, pointer: usize, len: usize },
-    Label { label: String, function_pointer: usize, label_index: usize, label_location: usize },
+    ForeignFunction {
+        name: String,
+        pointer: usize,
+    },
+    BuiltinFunction {
+        name: String,
+        pointer: usize,
+    },
+    HeapPointer {
+        pointer: usize,
+    },
+    UserFunction {
+        name: String,
+        pointer: usize,
+        len: usize,
+    },
+    Label {
+        label: String,
+        function_pointer: usize,
+        label_index: usize,
+        label_location: usize,
+    },
 }
 
 #[derive(Debug, Encode, Decode, Clone)]
-struct Label { label: String, function_pointer: usize, label_index: usize, label_location: usize }
+struct Label {
+    label: String,
+    function_pointer: usize,
+    label_index: usize,
+    label_location: usize,
+}
 
 impl Data {
     fn to_string(&self) -> String {
@@ -54,28 +81,35 @@ impl Data {
             Data::HeapPointer { pointer } => {
                 format!("0x{:x}", pointer)
             }
-            Data::UserFunction { name, pointer, len  } => {
+            Data::UserFunction { name, pointer, len } => {
                 format!("{}: 0x{:x} 0x{:x}", name, pointer, (pointer + len))
             }
-            Data::Label { label, function_pointer, label_index, label_location } => {
-                format!("{}: 0x{:x} 0x{:x} 0x{:x}", label, function_pointer, label_index, label_location)
+            Data::Label {
+                label,
+                function_pointer,
+                label_index,
+                label_location,
+            } => {
+                format!(
+                    "{}: 0x{:x} 0x{:x} 0x{:x}",
+                    label, function_pointer, label_index, label_location
+                )
             }
         }
     }
 }
-
 
 trait Serialize {
     fn to_binary(&self) -> Vec<u8>;
     fn from_binary(data: &[u8]) -> Self;
 }
 
-impl<T : Encode + Decode> Serialize for T {
+impl<T: Encode + Decode> Serialize for T {
     fn to_binary(&self) -> Vec<u8> {
         bincode::encode_to_vec(self, standard()).unwrap()
     }
     fn from_binary(data: &[u8]) -> T {
-        let (data, _ ) = bincode::decode_from_slice(data, standard()).unwrap();
+        let (data, _) = bincode::decode_from_slice(data, standard()).unwrap();
         data
     }
 }
@@ -100,40 +134,44 @@ impl App for Frontend {
         // TODO: This is super gross
         match event {
             Event::WindowEvent { window_id, event } => match event {
-                KeyboardInput { event, .. } => {
-                    match event.state {
-                        ElementState::Pressed => match event.physical_key {
-                            PhysicalKey::Code(KeyCode::ArrowDown) => {
-                                self.is_continuing = false;
-                                self.step_over();
+                KeyboardInput { event, .. } => match event.state {
+                    ElementState::Pressed => match event.physical_key {
+                        PhysicalKey::Code(KeyCode::ArrowDown) => {
+                            self.is_continuing = false;
+                            self.step_over();
+                        }
+                        PhysicalKey::Code(KeyCode::ArrowRight) => {
+                            self.is_continuing = false;
+                            if self.should_step {
+                                self.should_step_hyper = true;
+                            } else {
+                                self.keep_stepping();
                             }
-                            PhysicalKey::Code(KeyCode::ArrowRight) => {
-                                self.is_continuing = false;
-                                if self.should_step {
-                                    self.should_step_hyper = true;
-                                } else {
-                                    self.keep_stepping();
-                                }
-                            }
-                            PhysicalKey::Code(KeyCode::ArrowLeft) => {
-                                self.is_continuing = false;
-                                if self.should_step_hyper {
-                                    self.should_step_hyper = false;
-                                } else {
-                                    self.stop_stepping();
-                                }
-                            }
-                            PhysicalKey::Code(KeyCode::ArrowUp) => {
-                                self.is_continuing = true;
-                                self.should_step = false;
+                        }
+                        PhysicalKey::Code(KeyCode::ArrowLeft) => {
+                            self.is_continuing = false;
+                            if self.should_step_hyper {
                                 self.should_step_hyper = false;
-                                self.state.process.process.as_mut().unwrap().continue_execution().unwrap();
+                            } else {
+                                self.stop_stepping();
                             }
-                            _ => {}
-                        },
+                        }
+                        PhysicalKey::Code(KeyCode::ArrowUp) => {
+                            self.is_continuing = true;
+                            self.should_step = false;
+                            self.should_step_hyper = false;
+                            self.state
+                                .process
+                                .process
+                                .as_mut()
+                                .unwrap()
+                                .continue_execution()
+                                .unwrap();
+                        }
                         _ => {}
-                    }
-                }
+                    },
+                    _ => {}
+                },
                 _ => {}
             },
             _ => {}
@@ -208,7 +246,6 @@ impl Frontend {
     fn keep_stepping(&mut self) {
         self.should_step = true;
     }
-    
 
     fn stop_stepping(&mut self) {
         self.should_step = false;
@@ -248,21 +285,18 @@ fn main() {
             pc: 0,
             sp: 0,
             fp: 0,
-            stack: Stack {
-                stack: vec![],
-            },
+            stack: Stack { stack: vec![] },
             messages: vec![],
             functions: HashMap::new(),
             labels: HashMap::new(),
             heap: Heap {
                 memory: vec![],
                 heap_pointers: vec![],
-            }
+            },
         },
     };
     frontend.create_window("Debug", 1600, 1600, Options { vsync: false });
 }
-
 
 // Stolen from compiler
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,10 +399,6 @@ impl BuiltInTypes {
     }
 }
 
-
-
-
-
 struct Disasm {
     disasm_values: Vec<ParsedDisasm>,
     show_address: bool,
@@ -399,7 +429,12 @@ struct Register {
 
 impl Register {
     fn to_string(&self) -> String {
-        format!("{}: {} - {}", self.name, self.value.to_string(), self.kind.to_string())
+        format!(
+            "{}: {} - {}",
+            self.name,
+            self.value.to_string(),
+            self.kind.to_string()
+        )
     }
 }
 
@@ -417,24 +452,23 @@ fn convert_to_u64_array(input: &[u8; 256]) -> Vec<u64> {
     input
         .chunks(8)
         .map(|chunk| {
-            chunk.iter().enumerate().fold(0, |acc, (i, &byte)| {
-                acc | (byte as u64) << (8 * i)
-            })
+            chunk
+                .iter()
+                .enumerate()
+                .fold(0, |acc, (i, &byte)| acc | (byte as u64) << (8 * i))
         })
         .collect()
 }
 
-
-
 impl State {
     fn update_process_state(&mut self, is_stepping: bool) {
-        if let (Some(process), Some(target)) = (self.process.process.clone(), self.process.target.clone()) {
+        if let (Some(process), Some(target)) =
+            (self.process.process.clone(), self.process.target.clone())
+        {
             if !process.is_stopped() {
                 return;
             }
             if let Some(thread) = process.thread_by_index_id(1) {
-                
-
                 let was_debugger_info = self.check_debugger_info(&thread, &process, is_stepping);
 
                 if was_debugger_info {
@@ -453,10 +487,14 @@ impl State {
 
                 // TODO: Make this actually correct
                 // Consider when we have later addresses, but gaps
-                let last = self.disasm.disasm_values.last().map(|v| v.address).unwrap_or(0);
+                let last = self
+                    .disasm
+                    .disasm_values
+                    .last()
+                    .map(|v| v.address)
+                    .unwrap_or(0);
                 let remaining = last.saturating_sub(self.pc) / 4;
 
-                
                 self.sp = frame.sp();
                 self.fp = frame.fp();
                 let stack_root = frame.sp() - 128;
@@ -469,7 +507,7 @@ impl State {
                     .map(|(i, value)| Memory {
                         address: stack_root + (i as u64 * 8),
                         value: *value,
-                        kind: BuiltInTypes::get_kind(*value as usize)
+                        kind: BuiltInTypes::get_kind(*value as usize),
                     })
                     .collect();
 
@@ -485,11 +523,10 @@ impl State {
                         .map(|(i, value)| Memory {
                             address: heap_root + (i as u64 * 8),
                             value: *value,
-                            kind: BuiltInTypes::get_kind(*value as usize)
+                            kind: BuiltInTypes::get_kind(*value as usize),
                         })
                         .collect();
                 }
-
 
                 if !pc_in_instructions || remaining < 30 {
                     let instructions = process.get_instructions(&frame, &target);
@@ -514,8 +551,12 @@ impl State {
                         self.disasm.disasm_values.push(instruction);
                     }
                 }
-                self.disasm.disasm_values.sort_by(|a, b| a.address.cmp(&b.address));
-                self.disasm.disasm_values.dedup_by(|a, b| a.address == b.address);
+                self.disasm
+                    .disasm_values
+                    .sort_by(|a, b| a.address.cmp(&b.address));
+                self.disasm
+                    .disasm_values
+                    .dedup_by(|a, b| a.address == b.address);
                 self.registers.registers.clear();
                 frame.registers().iter().for_each(|register| {
                     if register.name().contains("General") {
@@ -528,7 +569,13 @@ impl State {
                                 self.registers.registers.push(Register {
                                     name: child.name().to_string(),
                                     value: Value::String(child.value().to_string()),
-                                    kind: BuiltInTypes::get_kind(usize::from_str_radix(child.value().trim_start_matches("0x"), 16).unwrap()),
+                                    kind: BuiltInTypes::get_kind(
+                                        usize::from_str_radix(
+                                            child.value().trim_start_matches("0x"),
+                                            16,
+                                        )
+                                        .unwrap(),
+                                    ),
                                 });
                             }
                         });
@@ -538,26 +585,62 @@ impl State {
         }
     }
 
-    fn check_debugger_info(&mut self, thread: &lldb::SBThread, process: &SBProcess, is_stepping: bool) -> bool {
+    fn check_debugger_info(
+        &mut self,
+        thread: &lldb::SBThread,
+        process: &SBProcess,
+        is_stepping: bool,
+    ) -> bool {
         if thread.selected_frame().function_name() == Some("debugger_info") {
-            let x0 = thread.selected_frame().get_register("x0").unwrap().to_usize();
-            let x1 = thread.selected_frame().get_register("x1").unwrap().to_usize();
-    
+            let x0 = thread
+                .selected_frame()
+                .get_register("x0")
+                .unwrap()
+                .to_usize();
+            let x1 = thread
+                .selected_frame()
+                .get_register("x1")
+                .unwrap()
+                .to_usize();
+
             let mut buffer: Vec<u8> = vec![0; x1];
             process.read_memory(x0 as u64, &mut buffer);
             let message = Message::from_binary(&buffer);
             match message.data.clone() {
-                Data::ForeignFunction { name, pointer } => {},
-                Data::BuiltinFunction { name, pointer } => {},
-                Data::Label { label, function_pointer, label_index, label_location } => {
-                    self.labels.insert(function_pointer + label_location, Label { label, function_pointer, label_index, label_location });
-                },
+                Data::ForeignFunction { name, pointer } => {}
+                Data::BuiltinFunction { name, pointer } => {}
+                Data::Label {
+                    label,
+                    function_pointer,
+                    label_index,
+                    label_location,
+                } => {
+                    self.labels.insert(
+                        function_pointer + label_location,
+                        Label {
+                            label,
+                            function_pointer,
+                            label_index,
+                            label_location,
+                        },
+                    );
+                }
                 Data::HeapPointer { pointer } => {
                     self.heap.heap_pointers.push(pointer);
-                },
+                }
                 Data::UserFunction { name, pointer, len } => {
-                    self.process.target.as_mut().unwrap().breakpoint_create_by_address(pointer as u64);
-                    self.functions.insert(pointer, Function::User { name, address_range: (pointer, pointer + len) });
+                    self.process
+                        .target
+                        .as_mut()
+                        .unwrap()
+                        .breakpoint_create_by_address(pointer as u64);
+                    self.functions.insert(
+                        pointer,
+                        Function::User {
+                            name,
+                            address_range: (pointer, pointer + len),
+                        },
+                    );
                 }
             }
             self.messages.push(message);
@@ -592,12 +675,18 @@ struct Stack {
 }
 
 enum Function {
-    Foreign { name: String, pointer: usize },
-    Builtin { name: String, pointer: usize },
-    User { 
+    Foreign {
+        name: String,
+        pointer: usize,
+    },
+    Builtin {
+        name: String,
+        pointer: usize,
+    },
+    User {
         name: String,
         address_range: (usize, usize),
-     },
+    },
 }
 
 impl Function {
@@ -605,7 +694,10 @@ impl Function {
         match self {
             Function::Foreign { name, pointer: _ } => name.to_string(),
             Function::Builtin { name, pointer: _ } => name.to_string(),
-            Function::User { name, address_range: _ } => name.to_string(),
+            Function::User {
+                name,
+                address_range: _,
+            } => name.to_string(),
         }
     }
 }
@@ -641,7 +733,6 @@ struct ParsedDisasm {
 }
 
 impl ParsedDisasm {
-
     // TODO: I should probably make it so I don't just make a big string
     // but instead things I can then chunk up and display with different styles
     fn to_string(&self, show_address: bool, show_hex: bool) -> String {
@@ -719,13 +810,18 @@ impl Node for Root {
     }
     fn height(&self) -> f32 {
         if self.layout.direction == Direction::Vertical {
-            self.children.iter().map(|child| child.height()).sum::<f32>() + self.layout.margin
+            self.children
+                .iter()
+                .map(|child| child.height())
+                .sum::<f32>()
+                + self.layout.margin
         } else {
             self.children
                 .iter()
                 .map(|child| child.height())
                 .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap_or_default() + self.layout.margin
+                .unwrap_or_default()
+                + self.layout.margin
         }
     }
 
@@ -737,7 +833,8 @@ impl Node for Root {
                 .iter()
                 .map(|child| child.width())
                 .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap_or_default() + self.layout.margin
+                .unwrap_or_default()
+                + self.layout.margin
         }
     }
 }
@@ -872,9 +969,19 @@ fn disasm(state: &State) -> impl Node {
                     "  "
                 };
                 if let Some(function) = state.functions.get(&(disasm.address as usize)) {
-                    format!("{}{: <11} {}", prefix, function.get_name(), disasm.to_string(false, state.disasm.show_hex))
+                    format!(
+                        "{}{: <11} {}",
+                        prefix,
+                        function.get_name(),
+                        disasm.to_string(false, state.disasm.show_hex)
+                    )
                 } else if let Some(label) = state.labels.get(&(disasm.address as usize)) {
-                    format!("{}{: <11} {}", prefix, label.label, disasm.to_string(false, state.disasm.show_hex))
+                    format!(
+                        "{}{: <11} {}",
+                        prefix,
+                        label.label,
+                        disasm.to_string(false, state.disasm.show_hex)
+                    )
                 } else {
                     format!(
                         "{}{}",
@@ -882,14 +989,12 @@ fn disasm(state: &State) -> impl Node {
                         disasm.to_string(state.disasm.show_address, state.disasm.show_hex)
                     )
                 }
-
             })
             .collect::<Vec<String>>(),
     )
 }
 
 fn registers(state: &State) -> impl Node {
-
     let mut mentioned_registers = state
         .disasm
         .disasm_values
@@ -903,7 +1008,6 @@ fn registers(state: &State) -> impl Node {
     mentioned_registers.insert("pc".to_string());
     mentioned_registers.insert("sp".to_string());
     mentioned_registers.insert("fp".to_string());
-
 
     lines(
         &state
@@ -926,7 +1030,6 @@ fn memory(state: &State) -> impl Node {
             .collect::<Vec<String>>(),
     )
 }
-
 
 fn stack(state: &State) -> impl Node {
     lines(
@@ -996,19 +1099,15 @@ impl FrameExentions for SBFrame {
     }
 }
 
-
 trait ValueExtensions {
     fn to_usize(&self) -> usize;
 }
 
 impl ValueExtensions for SBValue {
     fn to_usize(&self) -> usize {
-        unsafe { 
-            SBValueGetValueAsUnsigned2(self.raw, 0) as usize
-        }
+        unsafe { SBValueGetValueAsUnsigned2(self.raw, 0) as usize }
     }
 }
-
 
 trait TargetExtensions {
     fn create_breakpoint_by_name(&self, name: &str, module_name: &str) -> Option<SBBreakpoint>;
@@ -1019,7 +1118,8 @@ impl TargetExtensions for SBTarget {
         unsafe {
             let name = CString::new(name).unwrap();
             let module_name = CString::new(module_name).unwrap();
-            let pointer = SBTargetBreakpointCreateByName(self.raw, name.as_ptr(), module_name.as_ptr());
+            let pointer =
+                SBTargetBreakpointCreateByName(self.raw, name.as_ptr(), module_name.as_ptr());
             if pointer.is_null() {
                 None
             } else {
@@ -1072,10 +1172,11 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
     if let Some(target) = debugger.create_target_simple(
         "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/target/debug/main",
     ) {
-
         let symbol_list = target.find_functions("debugger_info", 2);
         let symbol = symbol_list.into_iter().next().unwrap();
-        let breakpoint = target.create_breakpoint_by_name("debugger_info", "main").unwrap();
+        let breakpoint = target
+            .create_breakpoint_by_name("debugger_info", "main")
+            .unwrap();
         breakpoint.set_enabled(true);
         target.enable_all_breakpoints();
 

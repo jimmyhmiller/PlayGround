@@ -268,6 +268,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
 
 [[package]]
+name = "bincode"
+version = "2.0.0-rc.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f11ea1a0346b94ef188834a65c068a03aec181c94896d481d7a0a40d85b0ce95"
+dependencies = [
+ "bincode_derive",
+ "serde",
+]
+
+[[package]]
+name = "bincode_derive"
+version = "2.0.0-rc.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e30759b3b99a1b802a7a3aa21c85c3ded5c28e1c83170d82d70f08bbf7f3e4c"
+dependencies = [
+ "virtue",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.65.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -691,7 +710,10 @@ dependencies = [
 name = "debug-frontend2"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "gpui",
+ "lldb",
+ "lldb-sys",
 ]
 
 [[package]]
@@ -1574,6 +1596,26 @@ name = "linux-raw-sys"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01cda141df6706de531b6c46c3a33ecca755538219bd484262fa09410c13539c"
+
+[[package]]
+name = "lldb"
+version = "0.0.11"
+source = "git+https://github.com/endoli/lldb.rs.git?rev=f01fb3120a576b2e13aa480a3509a7d103e92e75#f01fb3120a576b2e13aa480a3509a7d103e92e75"
+dependencies = [
+ "libc",
+ "lldb-sys",
+]
+
+[[package]]
+name = "lldb-sys"
+version = "0.0.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b3b0f707f881bcd1ae0cd38e5b7e5d98459f0eea464db98f93b165fa68dcdec"
+dependencies = [
+ "bitflags 2.4.2",
+ "cc",
+ "libc",
+]
 
 [[package]]
 name = "lock_api"
@@ -3084,6 +3126,12 @@ name = "version_check"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
+
+[[package]]
+name = "virtue"
+version = "0.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9dcc60c0624df774c82a0ef104151231d37da4962957d691c011c852b2473314"
 
 [[package]]
 name = "waker-fn"

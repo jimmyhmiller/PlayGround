@@ -6,4 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", sha="ac3e0afb3d64bceb0566fb5fbf56b3e2bfed73e4" }
+gpui = { git = "https://github.com/zed-industries/zed", sha="0a5df7d597bc662d44df049669de42f404dfeaec" }
+lldb = { git = "https://github.com/endoli/lldb.rs.git", rev = "f01fb3120a576b2e13aa480a3509a7d103e92e75" }
+lldb-sys = "0.0.30"
+bincode =  { version = "2.0.0-rc.3", features = ["derive"] }
