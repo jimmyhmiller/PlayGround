@@ -1,5 +1,6 @@
 
 mod main2;
+mod pgn_processor;
 
 use futures::StreamExt;
 
@@ -1098,7 +1099,10 @@ async fn old_main() -> Result<(), Box<dyn Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    main2::main().await
+    main2::main().await?;
+    // pgn_processor::main_old()?;
+    // println!("{}", pgn_processor::main()?);
+    Ok(())
 }
 
 // TODO: Absolutely mess but kind of working
