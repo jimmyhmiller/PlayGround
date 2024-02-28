@@ -238,7 +238,6 @@ fn draw_board_ascii(board_builder: &BoardBuilder) {
 
 
 pub async fn main() -> Result<(), Box<dyn Error>> {
-    let mut board_state = BoardBuilder::default();
 
     let chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>> = Arc::new(Mutex::new(None));
 
@@ -271,137 +270,140 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     let reader = io::BufReader::new(stdout);
     let mut lines = reader.lines();
 
-    init_game(&mut stdin, &mut lines).await?;
+    loop {
+        let mut board_state = BoardBuilder::default();
+        init_game(&mut stdin, &mut lines).await?;
 
-    let desired_position = wait_for_board_to_be_correct(
-        &writer,
-        &chessnut.clone(),
-        chessnut_board_position.clone(),
-        board_state.clone(),
-    )
-    .await?;
-
-
-    let mut is_initial_position = true;
-
-    if !are_same_board(&Some(desired_position), &Some(board_state)) {
-
-        let desired_position = wait_for_two_queens(&chessnut.clone(), chessnut_board_position.clone()).await;
-        send_message(&mut stdin, UciMessage::UciNewGame).await?;
-        send_message(
-            &mut stdin,
-            UciMessage::Position {
-                startpos: false,
-                fen: Some(UciFen(desired_position.to_string())),
-                moves: vec![],
-            },
+        let desired_position = wait_for_board_to_be_correct(
+            &writer,
+            &chessnut.clone(),
+            chessnut_board_position.clone(),
+            board_state.clone(),
         )
         .await?;
-        is_initial_position = false;
-        board_state = desired_position.clone();
-    }
-
-    let color = wait_for_color_chosen(&chessnut.clone(), chessnut_board_position.clone()).await?;
-
-    if !is_initial_position {
-        let color = wait_for_color_chosen(&chessnut.clone(), chessnut_board_position.clone()).await?;
-        board_state.side_to_move(color);
-    }
-
-    wait_for_board_to_be_correct(
-        &writer,
-        &chessnut.clone(),
-        chessnut_board_position.clone(),
-        board_state.clone(),
-    )
-    .await?;
-
-    let how_many_openings_from_book = if is_initial_position {
-        rand::thread_rng().gen_range(2..10)
-    } else {
-        0
-    };
-    println!("How many openings from book: {}", how_many_openings_from_book);
-    let mut moves : Vec<ChessMove> = vec![];
 
 
-    if color == Color::Black && board_state.get_side_to_move() == Color::White{
-        let (new_board, chess_move) = wait_for_bot_move(
-            &mut stdin,
-            &mut lines,
-            &openings_book,
-            how_many_openings_from_book,
-            &moves,
-            board_state.clone(),
-            &writer,
-            &chessnut,
-            chessnut_board_position.clone(),
-        ).await?;
-        moves.push(chess_move.clone());
-        board_state = new_board.clone();
-        board_state.next_side();
-    }
+        let mut is_initial_position = true;
 
-    loop {
+        if !are_same_board(&Some(desired_position), &Some(board_state)) {
 
-        let next_state = wait_for_next_move(board_state, chessnut_board_position.clone()).await;
-
-        if next_state.is_err() {
-            // TODO: Print this properly with different starting positions and all that
-            for move_ in moves {
-                println!("{}", move_);
-            }
-            println!("Game over");
-            break;
-        }
-
-        let (new_board, new_move) = next_state.unwrap();
-        
-        moves.push(new_move.clone());
-        send_move_to_bot(board_state, new_move, &mut stdin, &mut lines).await?;
-
-        board_state = new_board.clone();
-        board_state.next_side();
-
-        if new_board.status() != BoardStatus::Ongoing {
-            for move_ in moves {
-                println!("{}", move_);
-            }
-            println!("Game over");
-            break;
-        }
-        
-        let (new_board, chess_move) = wait_for_bot_move(
-            &mut stdin,
-            &mut lines,
-            &openings_book,
-            how_many_openings_from_book,
-            &moves,
-            new_board,
-            &writer,
-            &chessnut,
-            chessnut_board_position.clone(),
-        ).await?;
-
-        moves.push(chess_move.clone());
-
-        board_state = new_board.clone();
-        board_state.next_side();
-        if board_state.status() != BoardStatus::Ongoing {
-            for move_ in moves {
-                println!("{}", move_);
-            }
-            println!("Game over");
-            break;
-        }
-
-        let clear_leds = turn_off_all_leds();
-        chessnut
-            .write(&writer, &clear_leds, btleplug::api::WriteType::WithResponse)
+            let desired_position = wait_for_two_queens(&chessnut.clone(), chessnut_board_position.clone()).await;
+            send_message(&mut stdin, UciMessage::UciNewGame).await?;
+            send_message(
+                &mut stdin,
+                UciMessage::Position {
+                    startpos: false,
+                    fen: Some(UciFen(desired_position.to_string())),
+                    moves: vec![],
+                },
+            )
             .await?;
+            is_initial_position = false;
+            board_state = desired_position.clone();
+        }
+
+        let color = wait_for_color_chosen(&chessnut.clone(), chessnut_board_position.clone()).await?;
+
+        if !is_initial_position {
+            let color = wait_for_color_chosen(&chessnut.clone(), chessnut_board_position.clone()).await?;
+            board_state.side_to_move(color);
+        }
+
+        wait_for_board_to_be_correct(
+            &writer,
+            &chessnut.clone(),
+            chessnut_board_position.clone(),
+            board_state.clone(),
+        )
+        .await?;
+
+        let how_many_openings_from_book = if is_initial_position {
+            rand::thread_rng().gen_range(2..10)
+        } else {
+            0
+        };
+        println!("How many openings from book: {}", how_many_openings_from_book);
+        let mut moves : Vec<ChessMove> = vec![];
+
+
+        if color == Color::Black && board_state.get_side_to_move() == Color::White{
+            let (new_board, chess_move) = wait_for_bot_move(
+                &mut stdin,
+                &mut lines,
+                &openings_book,
+                how_many_openings_from_book,
+                &moves,
+                board_state.clone(),
+                &writer,
+                &chessnut,
+                chessnut_board_position.clone(),
+            ).await?;
+            moves.push(chess_move.clone());
+            board_state = new_board.clone();
+            board_state.next_side();
+        }
+
+        loop {
+
+            let next_state = wait_for_next_move(board_state, chessnut_board_position.clone()).await;
+
+            if next_state.is_err() {
+                // TODO: Print this properly with different starting positions and all that
+                for move_ in moves {
+                    println!("{}", move_);
+                }
+                println!("Game over");
+                break;
+            }
+
+            let (new_board, new_move) = next_state.unwrap();
+            
+            moves.push(new_move.clone());
+            send_move_to_bot(board_state, new_move, &mut stdin, &mut lines).await?;
+
+            board_state = new_board.clone();
+            board_state.next_side();
+
+            if new_board.status() != BoardStatus::Ongoing {
+                for move_ in moves {
+                    println!("{}", move_);
+                }
+                println!("Game over");
+                break;
+            }
+            
+            let (new_board, chess_move) = wait_for_bot_move(
+                &mut stdin,
+                &mut lines,
+                &openings_book,
+                how_many_openings_from_book,
+                &moves,
+                new_board,
+                &writer,
+                &chessnut,
+                chessnut_board_position.clone(),
+            ).await?;
+
+            moves.push(chess_move.clone());
+
+            board_state = new_board.clone();
+            board_state.next_side();
+            if board_state.status() != BoardStatus::Ongoing {
+                for move_ in moves {
+                    println!("{}", move_);
+                }
+                println!("Game over");
+                break;
+            }
+
+            let clear_leds = turn_off_all_leds();
+            chessnut
+                .write(&writer, &clear_leds, btleplug::api::WriteType::WithResponse)
+                .await?;
+
+        }
 
     }
-
     Ok(())
 }
 
@@ -545,6 +547,7 @@ fn are_same_board(board1: &Option<BoardBuilder>, board2: &Option<BoardBuilder>) 
 
 async fn wait_for_next_move(board_state: BoardBuilder, chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>) -> Result<(BoardBuilder, ChessMove), GameState> {
     let original_board_position = Some(board_state.clone());
+    let mut has_sent_error = false;
     loop {
         let new_position = chessnut_board_position.lock().await;
         let mut new_position = new_position.clone();
@@ -570,7 +573,10 @@ async fn wait_for_next_move(board_state: BoardBuilder, chessnut_board_position: 
                         }
                     }
                     Err(e) => {
-                        println!("Error: {}", e);
+                        if !has_sent_error {
+                            has_sent_error = true;
+                            println!("Error: {}", e);
+                        }
                     }
                 }
             }
