@@ -697,6 +697,7 @@ impl Ir {
                     lang.breakpoint();
                 }
                 Instruction::Sub(dest, a, b) => {
+                    // TODO: I need to guard here
                     let a = a.try_into().unwrap();
                     let a = alloc.allocate_register(index, a, &mut lang);
                     let b = b.try_into().unwrap();
@@ -714,6 +715,7 @@ impl Ir {
                     lang.shift_left(b, b, BuiltInTypes::tag_size());
                 }
                 Instruction::Add(dest, a, b) => {
+                    // TODO: I need to guard here
                     let a = a.try_into().unwrap();
                     let a = alloc.allocate_register(index, a, &mut lang);
                     let b = b.try_into().unwrap();
@@ -723,6 +725,7 @@ impl Ir {
                     lang.add(dest, a, b)
                 }
                 Instruction::Mul(dest, a, b) => {
+                    // TODO: I need to guard here
                     let a = a.try_into().unwrap();
                     let a = alloc.allocate_register(index, a, &mut lang);
                     let b = b.try_into().unwrap();
@@ -737,6 +740,7 @@ impl Ir {
                     lang.shift_left(b, b, BuiltInTypes::tag_size());
                 }
                 Instruction::Div(dest, a, b) => {
+                    // TODO: I need to guard here
                     let a = a.try_into().unwrap();
                     let a = alloc.allocate_register(index, a, &mut lang);
                     let b = b.try_into().unwrap();
