@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use chess::{Board, ChessMove, Piece};
 use pgn_reader::{BufferedReader, RawHeader, San, SanPlus, Skip, Visitor};
 use std::collections::HashMap;
@@ -86,6 +87,7 @@ impl Visitor for GameCounter {
     }
 }
 
+#[allow(dead_code)]
 pub fn main_old() -> io::Result<usize> {
     // open file in buffered reader
 

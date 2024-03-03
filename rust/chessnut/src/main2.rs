@@ -1,14 +1,15 @@
 use std::{error::Error, str::FromStr, sync::Arc};
 
 use btleplug::{api::{Characteristic, Peripheral}, platform};
-use chess::{Board, BoardBuilder, BoardStatus, ChessMove, Color, File, Game, Piece, Rank, Square, ALL_FILES, ALL_SQUARES};
+use chess::{Board, BoardBuilder, BoardStatus, ChessMove, Color, File, Piece, Rank, Square, ALL_FILES, ALL_SQUARES};
 use futures::StreamExt;
-use tokio::{io::{self, AsyncBufReadExt, BufReader, Lines}, process::{ChildStdin, ChildStdout, Command}, sync::Mutex, task, time::sleep};
+use tokio::{io::{self, AsyncBufReadExt, BufReader, Lines}, process::{ChildStdin, ChildStdout, Command}, sync::Mutex, task};
 use vampirc_uci::{parse_one, UciFen, UciMessage, UciMove, UciPiece, UciSearchControl, UciSquare};
 
-use crate::{create_led_control_message, get_chessnut_board, init_game, pgn_processor::OpeningBook, print_ascii_board, send_message, turn_off_all_leds, BOARD_DATA, WRITE};
+use crate::{create_led_control_message, get_chessnut_board, init_game, pgn_processor::OpeningBook, send_message, turn_off_all_leds, BOARD_DATA, WRITE};
 
 use rand::Rng;
+use clipboard::{ClipboardContext, ClipboardProvider};
 
 trait BoardDiff {
     fn find_incorrect_squares(&self, other: &BoardBuilder) -> Vec<Square>;
@@ -29,8 +30,7 @@ impl BoardDiff for BoardBuilder {
 fn led_value_for_square(square: &str) -> u8 {
     let square = square.to_uppercase();
     match square.chars().nth(1) {
-        Some(row_char) => {
-            let row = row_char.to_digit(10).unwrap() as usize;
+        Some(_) => {
             let col = square.chars().nth(0).unwrap() as usize - 'A' as usize;
             1 << (7 - col)
         }
@@ -179,7 +179,6 @@ fn test_board_state_as_square_and_piece() {
     println!("{}", result);
     // square 1 is white pawn
 
-    let a1 = result[Square::A1];
     assert_eq!(
         result[Square::A1],
         Some((Piece::Pawn, Color::White)),
@@ -204,6 +203,7 @@ async fn process_chessnut(
 }
 
 
+#[allow(dead_code)]
 fn draw_board_ascii(board_builder: &BoardBuilder) {
     println!("  +-----------------+");
     for rank in (Rank::First as u8..=Rank::Eighth as u8).rev() {
@@ -349,9 +349,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
 
             if next_state.is_err() {
                 // TODO: Print this properly with different starting positions and all that
-                for move_ in moves {
-                    println!("{}", move_);
-                }
+                moves.add_to_clipboard();
                 println!("Game over");
                 break;
             }
@@ -365,9 +363,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             board_state.next_side();
 
             if new_board.status() != BoardStatus::Ongoing {
-                for move_ in moves {
-                    println!("{}", move_);
-                }
+                moves.add_to_clipboard();
                 println!("Game over");
                 break;
             }
@@ -389,9 +385,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             board_state = new_board.clone();
             board_state.next_side();
             if board_state.status() != BoardStatus::Ongoing {
-                for move_ in moves {
-                    println!("{}", move_);
-                }
+                moves.add_to_clipboard();
                 println!("Game over");
                 break;
             }
@@ -404,10 +398,9 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         }
 
     }
-    Ok(())
 }
 
-async fn wait_for_two_queens(chessnut: &Arc<Box<platform::Peripheral>>, chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>) -> BoardBuilder {
+async fn wait_for_two_queens(_chessnut: &Arc<Box<platform::Peripheral>>, chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>) -> BoardBuilder {
     loop {
         let new_position = chessnut_board_position.lock().await;
         let mut number_of_queens = 0;
@@ -424,7 +417,7 @@ async fn wait_for_two_queens(chessnut: &Arc<Box<platform::Peripheral>>, chessnut
     }
 }
 
-async fn wait_for_color_chosen(chessnut: &Arc<Box<platform::Peripheral>>, chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>) -> Result<Color, Box<dyn Error>> {
+async fn wait_for_color_chosen(_chessnut: &Arc<Box<platform::Peripheral>>, chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>) -> Result<Color, Box<dyn Error>> {
     // TODO: Make lights be all fancy
     loop {
         let new_position = chessnut_board_position.lock().await;
@@ -505,13 +498,41 @@ impl PieceUciExtensions for Piece {
     }
 }
 
+trait ClipBoardExtensions {
+    fn add_to_clipboard(&self);
+}
 
-async fn send_move_to_bot(new_board: BoardBuilder, new_move: ChessMove, stdin: &mut tokio::process::ChildStdin, lines: &mut io::Lines<io::BufReader<tokio::process::ChildStdout>>) -> Result<(), Box<dyn Error>>{
+impl ClipBoardExtensions for Vec<ChessMove> {
+    fn add_to_clipboard(&self) {
+        let mut string = String::new();
+        for move_ in self {
+            string.push_str(&format!("{} ", move_));
+        }
+        let mut clipboard: ClipboardContext = clipboard::ClipboardProvider::new().unwrap();
+        clipboard.set_contents(string.clone()).unwrap();
+
+        println!("{}", string);
+    }
+}
+
+
+
+async fn send_move_to_bot(old_board: BoardBuilder, new_move: ChessMove, stdin: &mut tokio::process::ChildStdin, _lines: &mut io::Lines<io::BufReader<tokio::process::ChildStdout>>) -> Result<(), Box<dyn Error>>{
+    // check for en passant
+
+    let old_board = old_board;
+    // let moved_piece = old_board[new_move.get_dest()].unwrap().0;
+    // if moved_piece == Piece::Pawn {
+    //     if new_move.get_source().get_rank() == Rank::Second && new_move.get_dest().get_rank() == Rank::Fourth {
+    //         old_board.en_passant(Some(new_move.get_dest().get_file()));
+    //     }
+    // }
+
     send_message(
         stdin,
         UciMessage::Position {
             startpos: false,
-            fen: Some(UciFen(new_board.to_string())),
+            fen: Some(UciFen(old_board.to_string())),
             moves: vec![UciMove {
                 from: UciSquare {
                     file: new_move.get_source().get_file().to_uci(),
@@ -733,7 +754,7 @@ async fn wait_for_bot_move(
     while let Some(line) = lines.next_line().await? {
         let msg: UciMessage = parse_one(&line);
         match msg {
-            UciMessage::BestMove { best_move, ponder } => {
+            UciMessage::BestMove { best_move, ponder: _ } => {
                 println!("Best move: {:?}", best_move);
                 let from = best_move.from.to_string();
                 let to = best_move.to.to_string();
