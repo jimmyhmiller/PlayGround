@@ -149,9 +149,9 @@ fn create_trie<'a>(
     if index >= NUMBER_MOVES {
         return
     }
-    for (index, (opening, count)) in openings.iter().enumerate() {
+    for (opening, count) in openings.iter() {
         let mut root = &mut *parent;
-        for (level, move_) in opening.iter().enumerate() {
+        for move_ in opening.iter() {
            if root.children.contains_key(move_) {
                root = root.children.get_mut(move_).unwrap();
                root.count += count;
@@ -500,11 +500,6 @@ pub fn main() -> io::Result<usize> {
     // TODO: Convert raw numbers into percentages
     // Then I can generate a random number to choose a move
 
-    let mut root = TrieNode {
-        children: HashMap::new(),
-        count: 0,
-        san: NULL_SAN,
-    };
     // let trie = load_openings(&mut root)?;
     // println!("Writing trie to file");
     // write_trie_to_file(trie, "trie.txt")?;
