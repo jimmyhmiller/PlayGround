@@ -17,13 +17,21 @@ use winit::{
 };
 
 pub struct Options {
-    pub vsync: bool
+    pub vsync: bool,
+    pub width: i32,
+    pub height: i32,
+    pub title: String,
+    pub position: (i32, i32),
 }
 
 impl Default for Options {
     fn default() -> Self {
         Options {
-            vsync: true
+            vsync: true,
+            width: 800,
+            height: 600,
+            title: "Default Title".to_string(),
+            position: (0, 0),
         }
     }
 }
@@ -40,9 +48,10 @@ pub trait App {
     fn cursor_icon(&mut self) -> winit::window::CursorIcon;
     fn set_window_size(&mut self, size: Size);
 
-    fn create_window(&mut self, title: &str, width: i32, height: i32, options: Options) {
+    fn create_window(&mut self, title: &str, options: Options) {
+        
 
-        let mut size = LogicalSize::new(width, height);
+        let mut size = LogicalSize::new(options.width, options.height);
     
         let events_loop = EventLoop::new().unwrap();
     
@@ -50,6 +59,10 @@ pub trait App {
     
         let window = WindowBuilder::new()
             .with_inner_size(size)
+            .with_position(winit::dpi::PhysicalPosition::new(
+                options.position.0 as f64,
+                options.position.1 as f64,
+            ))
             .with_title(title.to_string())
             .with_titlebar_transparent(true)
             .with_fullsize_content_view(true)
