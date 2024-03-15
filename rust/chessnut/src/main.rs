@@ -1,23 +1,23 @@
-
-
 mod pgn_processor;
-
-
 use std::{error::Error, str::FromStr, sync::Arc};
 
-use btleplug::api::{Central, Characteristic, Manager as _, Peripheral, ScanFilter };
-use chess::{Board, BoardBuilder, BoardStatus, ChessMove, Color, File, Piece, Rank, Square, ALL_FILES, ALL_SQUARES};
-use futures::StreamExt;
-use tokio::{io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader, Lines}, process::{ChildStdin, ChildStdout, Command}, sync::Mutex, task};
-use vampirc_uci::{parse_one, UciFen, UciMessage, UciMove, UciPiece, UciSearchControl, UciSquare};
-
-use btleplug::platform::{self, Manager};
-
 use crate::pgn_processor::OpeningBook;
-
-use rand::Rng;
+use btleplug::api::{Central, Characteristic, Manager as _, Peripheral, ScanFilter};
+use btleplug::platform::{self, Manager};
+use chess::{
+    Board, BoardBuilder, BoardStatus, ChessMove, Color, File, Piece, Rank, Square, ALL_FILES,
+    ALL_SQUARES,
+};
 use clipboard::{ClipboardContext, ClipboardProvider};
-
+use futures::StreamExt;
+use rand::Rng;
+use tokio::{
+    io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
+    process::{ChildStdin, ChildStdout, Command},
+    sync::Mutex,
+    task,
+};
+use vampirc_uci::{parse_one, UciFen, UciMessage, UciMove, UciPiece, UciSearchControl, UciSquare};
 
 const WRITE: &str = "1b7e8272-2877-41c3-b46e-cf057c562023";
 const BOARD_DATA: &str = "1b7e8262-2877-41c3-b46e-cf057c562023";
@@ -31,7 +31,6 @@ fn create_led_control_message(rows: [u8; 8]) -> [u8; 10] {
     message[2..].copy_from_slice(&rows);
     message
 }
-
 
 fn turn_off_all_leds() -> [u8; 10] {
     create_led_control_message([0; 8])
@@ -132,9 +131,6 @@ async fn init_game(
     Ok(())
 }
 
-
-
-
 trait BoardDiff {
     fn find_incorrect_squares(&self, other: &BoardBuilder) -> Vec<Square>;
 }
@@ -161,8 +157,6 @@ fn led_value_for_square(square: &str) -> u8 {
         None => 0,
     }
 }
-
-
 
 fn encode_leds(positions: Vec<Square>) -> [u8; 10] {
     let mut rows = [0u8; 8];
@@ -201,8 +195,7 @@ async fn wait_for_board_to_be_correct(
                     .await?;
                 return Ok(desired_position);
             }
-            
-            
+
             if incorrect.is_empty() {
                 let message = turn_off_all_leds();
                 chessnut
@@ -219,8 +212,7 @@ async fn wait_for_board_to_be_correct(
 }
 
 fn convert_num_to_piece(num: u8) -> Option<Piece> {
-
-    // Value 0123456789ABC 
+    // Value 0123456789ABC
     // Piece .qkbpnRPrBNQK
     match num {
         0 => None,
@@ -241,7 +233,7 @@ fn convert_num_to_piece(num: u8) -> Option<Piece> {
 }
 
 fn convert_num_to_color(num: u8) -> Option<Color> {
-    // Value 0123456789ABC 
+    // Value 0123456789ABC
     // Piece .qkbpnRPrBNQK
     // lowercase is black
     // uppercase is white
@@ -260,10 +252,8 @@ fn convert_num_to_color(num: u8) -> Option<Color> {
         11 => Some(Color::White),
         12 => Some(Color::White),
         _ => None,
-        
     }
 }
-
 
 fn board_state_as_square_and_piece(board_state: &[u8]) -> BoardBuilder {
     let mut board_builder = BoardBuilder::new();
@@ -292,7 +282,6 @@ fn board_state_as_square_and_piece(board_state: &[u8]) -> BoardBuilder {
     board_builder
 }
 
-
 #[test]
 fn test_board_state_as_square_and_piece() {
     let board_state = [
@@ -303,10 +292,7 @@ fn test_board_state_as_square_and_piece() {
     println!("{}", result);
     // square 1 is white pawn
 
-    assert_eq!(
-        result[Square::A1],
-        Some((Piece::Pawn, Color::White)),
-    );
+    assert_eq!(result[Square::A1], Some((Piece::Pawn, Color::White)),);
 }
 
 async fn process_chessnut(
@@ -332,7 +318,10 @@ fn draw_board_ascii(board_builder: &BoardBuilder) {
     for rank in (Rank::First as u8..=Rank::Eighth as u8).rev() {
         print!("{} | ", rank + 1); // Print the rank numbers on the left
         for file in ALL_FILES {
-            let square = Square::make_square(Rank::from_index(rank as usize), File::from_index(file as usize));
+            let square = Square::make_square(
+                Rank::from_index(rank as usize),
+                File::from_index(file as usize),
+            );
             let piece_option = board_builder[square];
             let piece_char = match piece_option {
                 Some(piece) => match piece {
@@ -359,9 +348,7 @@ fn draw_board_ascii(board_builder: &BoardBuilder) {
     println!("    a b c d e f g h  "); // Print the file letters below
 }
 
-
 pub async fn start_process() -> Result<(), Box<dyn Error>> {
-
     let chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>> = Arc::new(Mutex::new(None));
 
     let chessnut = Arc::new(Box::new(get_chessnut_board().await?));
@@ -373,7 +360,6 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
     );
 
     let openings_book = OpeningBook::open("trie3.txt")?;
-
 
     let writer = chessnut.characteristics();
     let writer = writer.iter().find(|x| x.uuid.to_string() == WRITE).unwrap();
@@ -405,12 +391,11 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
         )
         .await?;
 
-
         let mut is_initial_position = true;
 
         if !are_same_board(&Some(desired_position), &Some(board_state)) {
-
-            let desired_position = wait_for_two_queens(&chessnut.clone(), chessnut_board_position.clone()).await;
+            let desired_position =
+                wait_for_two_queens(&chessnut.clone(), chessnut_board_position.clone()).await;
             send_message(&mut stdin, UciMessage::UciNewGame).await?;
             send_message(
                 &mut stdin,
@@ -425,10 +410,12 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
             board_state = desired_position.clone();
         }
 
-        let color = wait_for_color_chosen(&chessnut.clone(), chessnut_board_position.clone()).await?;
+        let color =
+            wait_for_color_chosen(&chessnut.clone(), chessnut_board_position.clone()).await?;
 
         if !is_initial_position {
-            let color = wait_for_color_chosen(&chessnut.clone(), chessnut_board_position.clone()).await?;
+            let color =
+                wait_for_color_chosen(&chessnut.clone(), chessnut_board_position.clone()).await?;
             board_state.side_to_move(color);
         }
 
@@ -445,11 +432,13 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
         } else {
             0
         };
-        println!("How many openings from book: {}", how_many_openings_from_book);
-        let mut moves : Vec<ChessMove> = vec![];
+        println!(
+            "How many openings from book: {}",
+            how_many_openings_from_book
+        );
+        let mut moves: Vec<ChessMove> = vec![];
 
-
-        if color == Color::Black && board_state.get_side_to_move() == Color::White{
+        if color == Color::Black && board_state.get_side_to_move() == Color::White {
             let (new_board, chess_move) = wait_for_bot_move(
                 &mut stdin,
                 &mut lines,
@@ -460,14 +449,14 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
                 &writer,
                 &chessnut,
                 chessnut_board_position.clone(),
-            ).await?;
+            )
+            .await?;
             moves.push(chess_move.clone());
             board_state = new_board.clone();
             board_state.next_side();
         }
 
         loop {
-
             let next_state = wait_for_next_move(board_state, chessnut_board_position.clone()).await;
 
             if next_state.is_err() {
@@ -478,7 +467,7 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
             }
 
             let (new_board, new_move) = next_state.unwrap();
-            
+
             moves.push(new_move.clone());
             send_move_to_bot(board_state, new_move, &mut stdin, &mut lines).await?;
 
@@ -490,7 +479,7 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
                 println!("Game over");
                 break;
             }
-            
+
             let (new_board, chess_move) = wait_for_bot_move(
                 &mut stdin,
                 &mut lines,
@@ -501,7 +490,8 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
                 &writer,
                 &chessnut,
                 chessnut_board_position.clone(),
-            ).await?;
+            )
+            .await?;
 
             moves.push(chess_move.clone());
 
@@ -517,13 +507,14 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
             chessnut
                 .write(&writer, &clear_leds, btleplug::api::WriteType::WithResponse)
                 .await?;
-
         }
-
     }
 }
 
-async fn wait_for_two_queens(_chessnut: &Arc<Box<platform::Peripheral>>, chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>) -> BoardBuilder {
+async fn wait_for_two_queens(
+    _chessnut: &Arc<Box<platform::Peripheral>>,
+    chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
+) -> BoardBuilder {
     loop {
         let new_position = chessnut_board_position.lock().await;
         let mut number_of_queens = 0;
@@ -540,7 +531,10 @@ async fn wait_for_two_queens(_chessnut: &Arc<Box<platform::Peripheral>>, chessnu
     }
 }
 
-async fn wait_for_color_chosen(_chessnut: &Arc<Box<platform::Peripheral>>, chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>) -> Result<Color, Box<dyn Error>> {
+async fn wait_for_color_chosen(
+    _chessnut: &Arc<Box<platform::Peripheral>>,
+    chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
+) -> Result<Color, Box<dyn Error>> {
     // TODO: Make lights be all fancy
     loop {
         let new_position = chessnut_board_position.lock().await;
@@ -563,7 +557,6 @@ async fn wait_for_color_chosen(_chessnut: &Arc<Box<platform::Peripheral>>, chess
             return Ok(Color::Black);
         }
     }
-
 }
 
 trait FileUciExtensions {
@@ -638,19 +631,12 @@ impl ClipBoardExtensions for Vec<ChessMove> {
     }
 }
 
-
-
-async fn send_move_to_bot(old_board: BoardBuilder, new_move: ChessMove, stdin: &mut tokio::process::ChildStdin, _lines: &mut io::Lines<io::BufReader<tokio::process::ChildStdout>>) -> Result<(), Box<dyn Error>>{
-    // check for en passant
-
-    let old_board = old_board;
-    // let moved_piece = old_board[new_move.get_dest()].unwrap().0;
-    // if moved_piece == Piece::Pawn {
-    //     if new_move.get_source().get_rank() == Rank::Second && new_move.get_dest().get_rank() == Rank::Fourth {
-    //         old_board.en_passant(Some(new_move.get_dest().get_file()));
-    //     }
-    // }
-
+async fn send_move_to_bot(
+    old_board: BoardBuilder,
+    new_move: ChessMove,
+    stdin: &mut tokio::process::ChildStdin,
+    _lines: &mut io::Lines<io::BufReader<tokio::process::ChildStdout>>,
+) -> Result<(), Box<dyn Error>> {
     send_message(
         stdin,
         UciMessage::Position {
@@ -659,16 +645,17 @@ async fn send_move_to_bot(old_board: BoardBuilder, new_move: ChessMove, stdin: &
             moves: vec![UciMove {
                 from: UciSquare {
                     file: new_move.get_source().get_file().to_uci(),
-                    rank: new_move.get_source().get_rank().to_uci()
+                    rank: new_move.get_source().get_rank().to_uci(),
                 },
                 to: UciSquare {
                     file: new_move.get_dest().get_file().to_uci(),
-                    rank: new_move.get_dest().get_rank().to_uci()
+                    rank: new_move.get_dest().get_rank().to_uci(),
                 },
                 promotion: new_move.get_promotion().map(|x| x.to_uci()),
             }],
         },
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -689,14 +676,19 @@ fn are_same_board(board1: &Option<BoardBuilder>, board2: &Option<BoardBuilder>) 
     true
 }
 
-async fn wait_for_next_move(board_state: BoardBuilder, chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>) -> Result<(BoardBuilder, ChessMove), GameState> {
+async fn wait_for_next_move(
+    board_state: BoardBuilder,
+    chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
+) -> Result<(BoardBuilder, ChessMove), GameState> {
     let original_board_position = Some(board_state.clone());
     let mut has_sent_error = false;
     loop {
         let new_position = chessnut_board_position.lock().await;
         let mut new_position = new_position.clone();
         // The new position is one where the current side has moved
-        new_position.as_mut().map(|x| x.side_to_move(board_state.next_side_new().get_side_to_move()));
+        new_position
+            .as_mut()
+            .map(|x| x.side_to_move(board_state.next_side_new().get_side_to_move()));
 
         if !are_same_board(&new_position, &original_board_position) {
             let mut original_board_position = original_board_position.clone().unwrap();
@@ -709,7 +701,8 @@ async fn wait_for_next_move(board_state: BoardBuilder, chessnut_board_position: 
             if let Ok(current_board) = Board::try_from(original_board_position) {
                 match Board::try_from(new_position.unwrap()) {
                     Ok(new_board) => {
-                        if let Some((new_board, new_move)) = infer_move(&current_board, &new_board) {
+                        if let Some((new_board, new_move)) = infer_move(&current_board, &new_board)
+                        {
                             let board_builder = BoardBuilder::try_from(new_board).unwrap();
                             return Ok((board_builder, new_move));
                         } else {
@@ -730,19 +723,19 @@ async fn wait_for_next_move(board_state: BoardBuilder, chessnut_board_position: 
 
 #[derive(Debug)]
 enum GameState {
-    Resign
+    Resign,
 }
 
 fn check_for_resign(current_board_position: &BoardBuilder) -> Result<(), GameState> {
     let mut white_king_found = false;
     let mut black_king_found = false;
     for square in ALL_SQUARES {
-       if current_board_position[square] == Some((Piece::King, Color::White)) {
-           white_king_found = true;
-       }
-         if current_board_position[square] == Some((Piece::King, Color::Black)) {
-              black_king_found = true;
-         }
+        if current_board_position[square] == Some((Piece::King, Color::White)) {
+            white_king_found = true;
+        }
+        if current_board_position[square] == Some((Piece::King, Color::Black)) {
+            black_king_found = true;
+        }
     }
     if !white_king_found && !black_king_found {
         return Err(GameState::Resign);
@@ -750,46 +743,92 @@ fn check_for_resign(current_board_position: &BoardBuilder) -> Result<(), GameSta
     Ok(())
 }
 
-
 fn infer_move(before: &Board, after: &Board) -> Option<(Board, ChessMove)> {
-
     // Check each possible castle scenario first
     // by manually looking at king and rook positions before and after
+    if before.piece_on(Square::from_str("e1").unwrap()) == Some(Piece::King)
+        && after.piece_on(Square::from_str("g1").unwrap()) == Some(Piece::King)
+    {
+        if before.piece_on(Square::from_str("h1").unwrap()) == Some(Piece::Rook)
+            && after.piece_on(Square::from_str("f1").unwrap()) == Some(Piece::Rook)
+        {
+            return Some((
+                before.make_move_new(ChessMove::new(
+                    Square::from_str("e1").unwrap(),
+                    Square::from_str("g1").unwrap(),
+                    None,
+                )),
+                ChessMove::new(
+                    Square::from_str("e1").unwrap(),
+                    Square::from_str("g1").unwrap(),
+                    None,
+                ),
+            ));
+        }
+    }
+    if before.piece_on(Square::from_str("e1").unwrap()) == Some(Piece::King)
+        && after.piece_on(Square::from_str("c1").unwrap()) == Some(Piece::King)
+    {
+        if before.piece_on(Square::from_str("a1").unwrap()) == Some(Piece::Rook)
+            && after.piece_on(Square::from_str("d1").unwrap()) == Some(Piece::Rook)
+        {
+            return Some((
+                before.make_move_new(ChessMove::new(
+                    Square::from_str("e1").unwrap(),
+                    Square::from_str("c1").unwrap(),
+                    None,
+                )),
+                ChessMove::new(
+                    Square::from_str("e1").unwrap(),
+                    Square::from_str("c1").unwrap(),
+                    None,
+                ),
+            ));
+        }
+    }
+    if before.piece_on(Square::from_str("e8").unwrap()) == Some(Piece::King)
+        && after.piece_on(Square::from_str("g8").unwrap()) == Some(Piece::King)
+    {
+        if before.piece_on(Square::from_str("h8").unwrap()) == Some(Piece::Rook)
+            && after.piece_on(Square::from_str("f8").unwrap()) == Some(Piece::Rook)
+        {
+            return Some((
+                before.make_move_new(ChessMove::new(
+                    Square::from_str("e8").unwrap(),
+                    Square::from_str("g8").unwrap(),
+                    None,
+                )),
+                ChessMove::new(
+                    Square::from_str("e8").unwrap(),
+                    Square::from_str("g8").unwrap(),
+                    None,
+                ),
+            ));
+        }
+    }
+    if before.piece_on(Square::from_str("e8").unwrap()) == Some(Piece::King)
+        && after.piece_on(Square::from_str("c8").unwrap()) == Some(Piece::King)
+    {
+        if before.piece_on(Square::from_str("a8").unwrap()) == Some(Piece::Rook)
+            && after.piece_on(Square::from_str("d8").unwrap()) == Some(Piece::Rook)
+        {
+            return Some((
+                before.make_move_new(ChessMove::new(
+                    Square::from_str("e8").unwrap(),
+                    Square::from_str("c8").unwrap(),
+                    None,
+                )),
+                ChessMove::new(
+                    Square::from_str("e8").unwrap(),
+                    Square::from_str("c8").unwrap(),
+                    None,
+                ),
+            ));
+        }
+    }
 
-
-    if before.piece_on(
-        Square::from_str("e1").unwrap()) == Some(Piece::King) && after.piece_on(Square::from_str("g1").unwrap()) == Some(Piece::King) {
-        if before.piece_on(Square::from_str("h1").unwrap()) == Some(Piece::Rook) && after.piece_on(Square::from_str("f1").unwrap()) == Some(Piece::Rook) {
-            return Some(
-                (before.make_move_new(ChessMove::new(Square::from_str("e1").unwrap(), Square::from_str("g1").unwrap(), None)),
-                ChessMove::new(Square::from_str("e1").unwrap(), Square::from_str("g1").unwrap(), None)));
-        }
-    }
-    if before.piece_on(Square::from_str("e1").unwrap()) == Some(Piece::King) && after.piece_on(Square::from_str("c1").unwrap()) == Some(Piece::King) {
-        if before.piece_on(Square::from_str("a1").unwrap()) == Some(Piece::Rook) && after.piece_on(Square::from_str("d1").unwrap()) == Some(Piece::Rook) {
-            return Some(
-                (before.make_move_new(ChessMove::new(Square::from_str("e1").unwrap(), Square::from_str("c1").unwrap(), None)),
-                ChessMove::new(Square::from_str("e1").unwrap(), Square::from_str("c1").unwrap(), None)));
-        }
-    }
-    if before.piece_on(Square::from_str("e8").unwrap()) == Some(Piece::King) && after.piece_on(Square::from_str("g8").unwrap()) == Some(Piece::King) {
-        if before.piece_on(Square::from_str("h8").unwrap()) == Some(Piece::Rook) && after.piece_on(Square::from_str("f8").unwrap()) == Some(Piece::Rook) {
-            return Some(
-                (before.make_move_new(ChessMove::new(Square::from_str("e8").unwrap(), Square::from_str("g8").unwrap(), None)),
-                ChessMove::new(Square::from_str("e8").unwrap(), Square::from_str("g8").unwrap(), None)));
-        }
-    }
-    if before.piece_on(Square::from_str("e8").unwrap()) == Some(Piece::King) && after.piece_on(Square::from_str("c8").unwrap()) == Some(Piece::King) {
-        if before.piece_on(Square::from_str("a8").unwrap()) == Some(Piece::Rook) && after.piece_on(Square::from_str("d8").unwrap()) == Some(Piece::Rook) {
-            return Some(
-                (before.make_move_new(ChessMove::new(Square::from_str("e8").unwrap(), Square::from_str("c8").unwrap(), None)),
-                ChessMove::new(Square::from_str("e8").unwrap(), Square::from_str("c8").unwrap(), None)));
-        }
-    }
-    
     for from_square in ALL_SQUARES {
         for to_square in ALL_SQUARES {
-
             if from_square == to_square {
                 continue;
             }
@@ -801,7 +840,6 @@ fn infer_move(before: &Board, after: &Board) -> Option<(Board, ChessMove)> {
                 continue;
             }
 
-
             let before_color = before.color_on(from_square).unwrap();
             let after_color = after.color_on(to_square).unwrap();
             if before_color != after_color {
@@ -810,20 +848,26 @@ fn infer_move(before: &Board, after: &Board) -> Option<(Board, ChessMove)> {
             let piece_before = before.piece_on(from_square).unwrap();
             let piece_after = after.piece_on(to_square).unwrap();
             let mut promotion = None;
-            if piece_before == Piece::Pawn && (to_square.get_rank() == Rank::First || to_square.get_rank() == Rank::Eighth) {
+            if piece_before == Piece::Pawn
+                && (to_square.get_rank() == Rank::First || to_square.get_rank() == Rank::Eighth)
+            {
                 promotion = Some(piece_after);
             }
             let move_ = ChessMove::new(from_square, to_square, promotion);
             let after_move = before.make_move_new(move_);
 
-            if before.legal(move_) && are_same_board(&Some(BoardBuilder::from(after_move)), &Some(BoardBuilder::from(after))) {
+            if before.legal(move_)
+                && are_same_board(
+                    &Some(BoardBuilder::from(after_move)),
+                    &Some(BoardBuilder::from(after)),
+                )
+            {
                 return Some((before.make_move_new(move_), move_));
             }
         }
     }
     None
 }
-
 
 async fn wait_for_bot_move(
     stdin: &mut ChildStdin,
@@ -836,8 +880,6 @@ async fn wait_for_bot_move(
     chessnut: &Arc<Box<platform::Peripheral>>,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> Result<(BoardBuilder, ChessMove), Box<dyn Error>> {
-
-
     if how_many_openings_from_book > 0 && (played_moves.len() / 2) <= how_many_openings_from_book {
         let board = Board::try_from(board_state.clone()).unwrap();
         if let Some(choices) = openings_book.get_choices(&played_moves) {
@@ -846,19 +888,11 @@ async fn wait_for_bot_move(
             let mut new_board = BoardBuilder::try_from(new_board).unwrap();
             new_board.next_side();
             send_move_to_bot(new_board, chess_move.clone(), stdin, lines).await?;
-            wait_for_board_to_be_correct(
-                &writer,
-                &chessnut,
-                chessnut_board_position,
-                new_board,
-            )
-            .await?;
+            wait_for_board_to_be_correct(&writer, &chessnut, chessnut_board_position, new_board)
+                .await?;
             return Ok((new_board, chess_move.clone()));
         }
-
     }
-
-
 
     send_message(
         stdin,
@@ -877,11 +911,17 @@ async fn wait_for_bot_move(
     while let Some(line) = lines.next_line().await? {
         let msg: UciMessage = parse_one(&line);
         match msg {
-            UciMessage::BestMove { best_move, ponder: _ } => {
+            UciMessage::BestMove {
+                best_move,
+                ponder: _,
+            } => {
                 println!("Best move: {:?}", best_move);
                 let from = best_move.from.to_string();
                 let to = best_move.to.to_string();
-                let message = encode_leds(vec![Square::from_str(&from).unwrap(), Square::from_str(&to).unwrap()]);
+                let message = encode_leds(vec![
+                    Square::from_str(&from).unwrap(),
+                    Square::from_str(&to).unwrap(),
+                ]);
                 chessnut
                     .write(&writer, &message, btleplug::api::WriteType::WithResponse)
                     .await?;
@@ -896,8 +936,7 @@ async fn wait_for_bot_move(
                         UciPiece::Knight => Piece::Knight,
                         UciPiece::Pawn => Piece::Pawn,
                         UciPiece::King => Piece::King,
-                        
-                    })
+                    }),
                 );
                 let new_board = board.make_move_new(move_);
                 let mut new_board = BoardBuilder::try_from(new_board).unwrap();
@@ -920,7 +959,6 @@ async fn wait_for_bot_move(
     }
     panic!("No best move found");
 }
-
 
 trait BoardExtensions {
     fn next_side(&mut self);
@@ -949,8 +987,6 @@ impl BoardExtensions for BoardBuilder {
         board.status()
     }
 }
-
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
