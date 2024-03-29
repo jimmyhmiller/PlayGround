@@ -924,7 +924,6 @@ pub enum Selector {
     Indentifer(String),
 }
 
-
 pub struct TextView(usize);
 
 pub struct ViewTextBuffer<T: TextBuffer> {
@@ -937,7 +936,6 @@ impl<T> ViewTextBuffer<T>
 where
     T: TextBuffer<Item = u8>,
 {
-
     pub fn text_view_for_selector(&mut self, selector: &Selector) -> TextView {
         match selector {
             Selector::Lines(start, end) => {
@@ -954,7 +952,7 @@ where
         let (start, end) = self.text_views[text_view.0];
         self.text_buffer.lines().skip(start).take(end - start)
     }
-    
+
     pub fn new_simple(file: SimpleTextBuffer) -> ViewTextBuffer<SimpleTextBuffer> {
         ViewTextBuffer {
             text_buffer: file,
@@ -962,10 +960,7 @@ where
             text_views: vec![],
         }
     }
-
-
 }
-
 
 impl<T> TextBuffer for ViewTextBuffer<T>
 where
@@ -999,7 +994,7 @@ where
                     *end += 1;
                 }
                 // above, move start down
-                if line < *start {
+                if line <= *start {
                     *start += 1;
                     *end += 1;
                 }
@@ -1033,6 +1028,91 @@ where
     }
 }
 
+mod view_test_action {
+    use std::str::from_utf8;
+
+    use quickcheck::Arbitrary;
+    use quickcheck_macros::quickcheck;
+    use standard_dist::StandardDist;
+
+    use crate::headless_editor::{Selector, SimpleTextBuffer, TextBuffer, ViewTextBuffer};
+
+    #[derive(StandardDist, Debug, Clone)]
+    enum Action {
+        InsertBefore,
+        InsertAfter,
+        InsertMiddle,
+    }
+
+    impl Arbitrary for Action {
+        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+            rand::random::<Action>()
+        }
+    }
+
+    #[quickcheck]
+    fn prop(actions: Vec<Action>) -> bool {
+        let expected = "world\nis\ngood";
+
+        let mut view_text_buffer = ViewTextBuffer::<SimpleTextBuffer>::new_simple(
+            SimpleTextBuffer::new_with_contents(format!("Hello\n{}\nasdfasdf\n", expected).as_bytes()),
+        );
+
+
+        let view = view_text_buffer.text_view_for_selector(&Selector::Lines(1, 4));
+
+        let lines = view_text_buffer.get_lines_for_text_view(&view);
+        let text = lines.map(|x| from_utf8(x).unwrap()).collect::<Vec<_>>().join("\n");
+        if text != expected {
+            println!("Expected {}, got {:?}", expected, text);
+            return false;
+        }
+
+        for action in actions {
+            let (start, end) = view_text_buffer.text_views[view.0];
+            match action {
+                Action::InsertBefore => {
+                    view_text_buffer.insert_bytes(start.saturating_sub(1), 0, b"\n");
+                    let lines = view_text_buffer.get_lines_for_text_view(&view);
+                    let text = lines.filter(|x| !x.is_empty()).map(|x| from_utf8(x).unwrap()).collect::<Vec<_>>().join("\n");
+                    if text != expected {
+                        println!("Expected {:?}, got {:?}", expected, text);
+                        return false;
+                    }
+                }
+                Action::InsertAfter => {
+                    // let number_of_lines = view_text_buffer.text_buffer.line_count();
+                    // let number_of_lines_left = number_of_lines - end;
+                    // let offset = number_of_lines_left.min(*offset);
+                    view_text_buffer.insert_bytes(end + 1, 0, b"\n");
+                    let lines = view_text_buffer.get_lines_for_text_view(&view);
+                    let text = lines.filter(|x| !x.is_empty()).map(|x| from_utf8(x).unwrap()).collect::<Vec<_>>().join("\n");
+                    if text != expected {
+                        println!("Expected {:?}, got {:?}", expected, text);
+                        return false;
+                    }
+                }
+                Action::InsertMiddle => {
+                    view_text_buffer.insert_bytes(start, 0, b"\n");
+                    let lines = view_text_buffer.get_lines_for_text_view(&view);
+                    let text = lines.filter(|x| !x.is_empty()).map(|x| from_utf8(x).unwrap()).collect::<Vec<_>>().join("\n");
+                    if text != expected {
+                        println!("Expected {:?}, got {:?}", expected, text);
+                        return false;
+                    }
+                }
+            }
+        }
+        let lines = view_text_buffer.get_lines_for_text_view(&view);
+        let text = lines.map(|x| from_utf8(x).unwrap()).collect::<Vec<_>>().join("\n");
+        if text != expected {
+            println!("Expected {}, got {:?}", expected, text);
+            return false;
+        }
+
+        true
+    }
+}
 
 pub trait VirtualCursor: Clone + Debug {
     fn move_to(&mut self, line: usize, column: usize);
