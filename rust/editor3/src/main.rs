@@ -13,7 +13,7 @@ use winit::{
 // "#D36247", "#FFB5A3", "#F58C73", "#B54226", "#D39147", "#FFD4A3", "#F5B873",
 // "#7CAABD", "#4C839A", "#33985C", "#83CDA1", "#53B079", "#1C8245", "#353f38" "#39463e"
 
-use skia_safe::{Color4f, Font, FontStyle, Paint, RRect, Rect, Typeface};
+use skia_safe::{font, textlayout::{FontCollection, Paragraph, ParagraphBuilder, ParagraphStyle, TextStyle}, Color4f, Font, FontMgr, FontStyle, Paint, RRect, Rect, Typeface};
 
 #[derive(Copy, Clone)]
 pub struct Color {
@@ -75,6 +75,230 @@ struct Size {
     width: f32,
     height: f32,
 }
+impl Size {
+    fn to_rect(&self) -> Rect {
+        Rect::from_wh(self.width, self.height)
+    }
+}
+
+struct Bounds {
+    size: Size,
+}
+
+#[derive(Copy, Clone)]
+struct Layout {
+    position: Position,
+    size: Size,
+}
+
+
+trait Drawable {
+    fn draw(&self, layout: &Layout, canvas: &skia_safe::Canvas);
+    fn compute_layout(&mut self, bounds: Bounds) -> Layout;
+    fn get_layout(&self) -> Layout;
+}
+
+
+struct Text {
+    content: String,
+    paragraph: Option<Paragraph>,
+    layout: Layout,
+}
+
+impl Text {
+    fn new(content: String) -> Text {
+        Text {
+            content,
+            paragraph: None,
+            layout: Layout {
+                position: Position { x: 0.0, y: 0.0 },
+                size: Size { width: 0.0, height: 0.0 },
+            },
+        }
+    }
+}
+
+// TODO: Lots of work needed to make this setup work properly
+
+impl Drawable for Text {
+    fn draw(&self, layout: &Layout, canvas: &skia_safe::Canvas) {
+        let paragraph = self.paragraph.as_ref().unwrap();
+        paragraph.paint(canvas, (layout.position.x, layout.position.y));
+    }
+
+    fn compute_layout(&mut self, bounds: Bounds) -> Layout {
+        if self.paragraph.is_none() {
+                // Create a font collection
+            let mut font_collection = FontCollection::new();
+            let font_manager = FontMgr::new();
+
+            let family_name = "Ubuntu Mono";
+    
+            font_collection.set_default_font_manager(font_manager, family_name);
+
+            // Define the paragraph style
+            let paragraph_style = ParagraphStyle::new();
+
+            // Define the text style
+            let mut text_style = TextStyle::new();
+            text_style.set_font_size(24.0);
+
+            // Build the paragraph
+            let mut paragraph_builder = ParagraphBuilder::new(&paragraph_style, font_collection);
+            paragraph_builder.push_style(&text_style);
+            paragraph_builder.add_text(self.content.as_str());
+            let mut paragraph = paragraph_builder.build();
+            paragraph.layout(bounds.size.width as f32);
+            self.paragraph = Some(paragraph);
+        }
+    
+        let paragraph = self.paragraph.as_ref().unwrap();
+
+        let height = paragraph.height();
+        let width = paragraph.max_intrinsic_width();
+
+        let layout = Layout {
+            position: Position { x: 0.0, y: 0.0 },
+            size: Size {
+                width: width as f32,
+                height: height as f32,
+            },
+        };
+        self.layout = layout;
+        layout
+    }
+    
+    fn get_layout(&self) -> Layout {
+        self.layout
+    }
+}
+
+struct RoundedRect {
+    layout: Layout,
+    radius: f32,
+    color: Color,
+    children: Vec<Box<dyn Drawable>>,
+}
+
+impl RoundedRect {
+    fn new(radius: f32, color: Color) -> RoundedRect {
+        RoundedRect {
+            layout: Layout {
+                position: Position { x: 0.0, y: 0.0 },
+                size: Size { width: 0.0, height: 0.0 },
+            },
+            radius,
+            color,
+            children: vec![],
+        }
+    }
+}
+
+impl Drawable for RoundedRect {
+    fn draw(&self, layout: &Layout, canvas: &skia_safe::Canvas) {
+        let paint = self.color.as_paint();
+        let bounds_rounded = RRect::new_rect_xy(self.layout.size.to_rect(), self.radius, self.radius);
+        canvas.draw_rrect(bounds_rounded, &paint);
+        for child in self.children.iter() {
+            let layout = child.get_layout();
+            child.draw(&layout, canvas);
+            canvas.translate((0.0, layout.size.height));
+        }
+    }
+
+    fn compute_layout(&mut self, bounds: Bounds) -> Layout {
+        let mut y = 0.0;
+        let mut width = 0.0;
+        for child in self.children.iter_mut() {
+            let layout = child.compute_layout(Bounds {
+                size: Size {
+                    width: bounds.size.width,
+                    height: bounds.size.height,
+                },
+            });
+            y += layout.size.height;
+            width = layout.size.width.max(width);
+        }
+        self.layout =  Layout {
+            position: Position { x: 0.0, y: 0.0 },
+            size: Size {
+                width: width,
+                height: y,
+            },
+        };
+
+        self.layout
+    }
+
+    fn get_layout(&self) -> Layout {
+       self.layout
+    }
+}
+
+
+struct Container {
+    children: Vec<Box<dyn Drawable>>,
+    layout: Layout,
+}
+
+impl Container {
+    fn new() -> Container {
+        Container {
+            children: vec![],
+            layout: Layout {
+                position: Position { x: 0.0, y: 0.0 },
+                size: Size { width: 0.0, height: 0.0 },
+            },
+        }
+    }
+}
+
+impl Drawable for Container {
+    fn draw(&self, layout: &Layout, canvas: &skia_safe::Canvas) {
+        canvas.save();
+        for child in self.children.iter() {
+            let layout = child.get_layout();
+            child.draw(&layout, canvas);
+            canvas.translate((0.0, layout.size.height));
+        }
+        canvas.restore();
+    }
+
+    fn compute_layout(&mut self, bounds: Bounds) -> Layout {
+        let mut y = 0.0;
+        let mut width = 0.0;
+        for child in self.children.iter_mut() {
+            let layout = child.compute_layout(Bounds {
+                size: Size {
+                    width: bounds.size.width,
+                    height: bounds.size.height,
+                },
+            });
+            child.get_layout().position = Position { x: 0.0, y };
+            y += layout.size.height;
+            width = layout.size.width;
+        }
+        
+        Layout {
+            position: Position { x: 0.0, y: 0.0 },
+            size: Size {
+                width,
+                height: y,
+            },
+        }
+    }
+    
+    fn get_layout(&self) -> Layout {
+        Layout {
+            position: Position { x: 0.0, y: 0.0 },
+            size: Size {
+                width: 0.0,
+                height: 0.0,
+            },
+        }
+    }
+}
+
 
 struct Pane {
     scroll_offset: f64,
@@ -181,38 +405,28 @@ impl App for Editor {
         let margin_top = 30.0;
         let margin_left = 30.0;
 
-        let font = Font::new(
-            Typeface::new("Ubuntu Mono", FontStyle::normal()).unwrap(),
-            font_size,
-        );
+        // TODO: Don't do this in the draw loop
+        let font_mgr = FontMgr::new();
 
+        let family_name = "Ubuntu Mono";
+        let style = FontStyle::normal();
+
+        let typeface = font_mgr.match_family_style(family_name, style).unwrap();
+        let font = Font::from_typeface(typeface, font_size);
         let white = &Color::parse_hex("#dc9941").as_paint();
 
-        for pane in self.panes.iter() {
-            canvas.save();
-            canvas.translate((pane.position.x, pane.position.y));
-            let radius = 20.0;
-            let bounds = Rect::from_xywh(0.0, 0.0, pane.size.width, pane.size.height);
-            let bounds_rounded = RRect::new_rect_xy(bounds, radius, radius);
-            canvas.draw_rrect(bounds_rounded, &paint);
-            canvas.clip_rect(bounds, None, None);
-            canvas.translate((margin_left, margin_top));
+        canvas.translate((300.0, 300.0));
 
-            let scroll_offset = pane.scroll_offset as f32;
-            canvas.translate((0.0, scroll_offset as f32));
-            let file = &self.files[pane.file];
 
-            let lines = file.get_lines_for_text_view(&pane.text_view.as_ref().unwrap());
-            for (index, line) in lines.enumerate() {
-                canvas.draw_str(
-                    from_utf8(line).unwrap(),
-                    (0.0, (index + 1) as f32 * font_size),
-                    &font,
-                    white,
-                );
-            }
-            canvas.restore();
-        }
+        let mut container = self.render();
+        container.compute_layout(Bounds {
+            size: Size {
+                width: 1800.0,
+                height: 1800.0,
+            },
+        });
+
+        container.draw(&container.get_layout(), canvas);
     }
 
     fn end_frame(&mut self) {}
@@ -237,6 +451,23 @@ impl Editor {
             let text_view = file.text_view_for_selector(&pane.selector);
             pane.text_view = Some(text_view);
         }
+    }
+
+    fn render(&mut self) -> Container {
+        let mut root = Container::new();
+        for pane in self.panes.iter() {
+            let mut container = RoundedRect::new(20.0, Color::parse_hex("#353f38"));
+          
+            let file = &self.files[pane.file];
+            let lines = file.get_lines_for_text_view(&pane.text_view.as_ref().unwrap());
+            for (index, line) in lines.enumerate() {
+               container.children.push(Box::new(Text::new(
+                   from_utf8(line).unwrap().to_string(),
+               )));
+            }
+            root.children.push(Box::new(container));
+        }
+        root
     }
 }
 

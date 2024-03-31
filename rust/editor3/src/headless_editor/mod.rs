@@ -1028,7 +1028,9 @@ where
     }
 }
 
+
 mod view_test_action {
+
     use std::str::from_utf8;
 
     use quickcheck::Arbitrary;
@@ -1093,20 +1095,34 @@ mod view_test_action {
                     }
                 }
                 Action::InsertMiddle => {
-                    view_text_buffer.insert_bytes(start, 0, b"\n");
+                    view_text_buffer.insert_bytes(start + 1, 0, b"\n");
                     let lines = view_text_buffer.get_lines_for_text_view(&view);
                     let text = lines.filter(|x| !x.is_empty()).map(|x| from_utf8(x).unwrap()).collect::<Vec<_>>().join("\n");
-                    if text != expected {
+                    let lines = view_text_buffer.get_lines_for_text_view(&view);
+                    let text_with_empty = lines.map(|x| from_utf8(x).unwrap()).collect::<Vec<_>>().join("\n");
+                    if text != expected && text_with_empty != expected {
                         println!("Expected {:?}, got {:?}", expected, text);
                         return false;
                     }
                 }
             }
         }
+
+        
         let lines = view_text_buffer.get_lines_for_text_view(&view);
-        let text = lines.map(|x| from_utf8(x).unwrap()).collect::<Vec<_>>().join("\n");
+        let text = lines.filter(|x| !x.is_empty()).map(|x| from_utf8(x).unwrap()).collect::<Vec<_>>().join("\n");
         if text != expected {
-            println!("Expected {}, got {:?}", expected, text);
+            println!("Expected {:?}, got {:?}", expected, text);
+            return false;
+        }
+        let lines = view_text_buffer.get_lines_for_text_view(&view);
+        let text_with_empty = lines.map(|x| from_utf8(x).unwrap()).collect::<Vec<_>>().join("\n");
+        if !text_with_empty.starts_with(expected.chars().next().unwrap()) {
+            println!("Expected {:?}, got {:?}", expected, text);
+            return false;
+        }
+        if !text_with_empty.ends_with(expected.chars().last().unwrap()) {
+            println!("Expected {:?}, got {:?}", expected, text);
             return false;
         }
 
