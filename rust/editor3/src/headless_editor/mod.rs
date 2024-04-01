@@ -990,7 +990,7 @@ where
                 // or at least a good test setup
                 // Probably should write some property tests
                 // Seems like something we could define some clever properties for
-                if line > *start && line <= *end {
+                if line > *start && line < *end {
                     *end += 1;
                 }
                 // above, move start down
@@ -1086,7 +1086,7 @@ mod view_test_action {
                     // let number_of_lines = view_text_buffer.text_buffer.line_count();
                     // let number_of_lines_left = number_of_lines - end;
                     // let offset = number_of_lines_left.min(*offset);
-                    view_text_buffer.insert_bytes(end + 1, 0, b"\n");
+                    view_text_buffer.insert_bytes(end, 0, b"\n");
                     let lines = view_text_buffer.get_lines_for_text_view(&view);
                     let text = lines.filter(|x| !x.is_empty()).map(|x| from_utf8(x).unwrap()).collect::<Vec<_>>().join("\n");
                     if text != expected {
@@ -1122,7 +1122,7 @@ mod view_test_action {
             return false;
         }
         if !text_with_empty.ends_with(expected.chars().last().unwrap()) {
-            println!("Expected {:?}, got {:?}", expected, text);
+            println!("Expected {:?}, got {:?}", expected, text_with_empty);
             return false;
         }
 
