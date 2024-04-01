@@ -1,6 +1,6 @@
 mod headless_editor;
 
-use std::str::from_utf8;
+use std::{ops::Add, str::from_utf8};
 
 use headless_editor::{Selector, SimpleTextBuffer, TextBuffer, TextView, ViewTextBuffer};
 use rand::{thread_rng, Rng};
@@ -13,7 +13,7 @@ use winit::{
 // "#D36247", "#FFB5A3", "#F58C73", "#B54226", "#D39147", "#FFD4A3", "#F5B873",
 // "#7CAABD", "#4C839A", "#33985C", "#83CDA1", "#53B079", "#1C8245", "#353f38" "#39463e"
 
-use skia_safe::{font, textlayout::{FontCollection, Paragraph, ParagraphBuilder, ParagraphStyle, TextStyle}, Color4f, Font, FontMgr, FontStyle, Paint, RRect, Rect, Typeface};
+use skia_safe::{font, textlayout::{FontCollection, Paragraph, ParagraphBuilder, ParagraphStyle, TextStyle}, Canvas, Color4f, Font, FontMgr, FontStyle, Paint, RRect, Rect, Typeface};
 
 #[derive(Copy, Clone)]
 pub struct Color {
@@ -64,20 +64,33 @@ impl Color {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 struct Position {
     x: f32,
     y: f32,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 struct Size {
     width: f32,
     height: f32,
 }
+
+
 impl Size {
     fn to_rect(&self) -> Rect {
         Rect::from_wh(self.width, self.height)
+    }
+}
+
+impl Add for Size {
+    type Output = Size;
+
+    fn add(self, other: Size) -> Size {
+        Size {
+            width: self.width + other.width,
+            height: self.height + other.height,
+        }
     }
 }
 
@@ -85,17 +98,184 @@ struct Bounds {
     size: Size,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 struct Layout {
     position: Position,
     size: Size,
 }
 
+#[derive(Debug, Copy, Clone)]
+enum Sides {
+    Top(f32),
+    Bottom(f32),
+    Left(f32),
+    Right(f32),
+}
+
+#[derive(Debug, Clone)]
+struct Style {
+    margin: Vec<Sides>,
+    padding: Vec<Sides>,
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Style {
+            margin: vec![],
+            padding: vec![],
+        }
+    }
+}
+
 
 trait Drawable {
-    fn draw(&self, layout: &Layout, canvas: &skia_safe::Canvas);
+    fn draw(&self, canvas: &Canvas);
     fn compute_layout(&mut self, bounds: Bounds) -> Layout;
     fn get_layout(&self) -> Layout;
+    fn get_styles(&self) -> &Style;
+    fn get_styles_mut(&mut self) -> &mut Style;
+    fn set_styles(&mut self, style: Style);
+    fn margin(mut self, value: f32) -> Self where Self: Sized {
+        let style = self.get_styles_mut();
+        style.margin = vec![
+            Sides::Top(value),
+            Sides::Bottom(value),
+            Sides::Left(value),
+            Sides::Right(value),
+        ];
+        self
+    }
+    fn padding(mut self, value: f32) -> Self where Self: Sized {
+        let style = self.get_styles_mut();
+        style.padding = vec![
+            Sides::Top(value),
+            Sides::Bottom(value),
+            Sides::Left(value),
+            Sides::Right(value),
+        ];
+        self
+    }
+    fn margin_top(mut self, value: f32) -> Self where Self: Sized {
+        self.get_styles_mut().margin.push(Sides::Top(value));
+        self
+    }
+    fn margin_bottom(mut self, value: f32) -> Self where Self: Sized {
+        self.get_styles_mut().margin.push(Sides::Bottom(value));
+        self
+    }
+    fn margin_left(mut self, value: f32) -> Self where Self: Sized {
+        self.get_styles_mut().margin.push(Sides::Left(value));
+        self
+    }
+    fn margin_right(mut self, value: f32) -> Self where Self: Sized {
+        self.get_styles_mut().margin.push(Sides::Right(value));
+        self
+    }
+    fn padding_top(mut self, value: f32) -> Self where Self: Sized {
+        self.get_styles_mut().padding.push(Sides::Top(value));
+        self
+    }
+    fn padding_bottom(mut self, value: f32) -> Self where Self: Sized {
+        self.get_styles_mut().padding.push(Sides::Bottom(value));
+        self
+    }
+    fn padding_left(mut self, value: f32) -> Self where Self: Sized {
+        self.get_styles_mut().padding.push(Sides::Left(value));
+        self
+    }
+    fn padding_right(mut self, value: f32) -> Self where Self: Sized {
+        self.get_styles_mut().padding.push(Sides::Right(value));
+        self
+    }
+    fn draw_margin_top_left(&self, canvas: &Canvas) {
+        let style = self.get_styles();
+        for side in style.margin.iter() {
+            match side {
+                Sides::Top(value) => {
+                    canvas.translate((0.0, *value));
+                }
+                Sides::Left(value) => {
+                    canvas.translate((*value, 0.0));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn draw_margin_bottom_right(&self, canvas: &Canvas) {
+        let style = self.get_styles();
+        for side in style.margin.iter() {
+            match side {
+                Sides::Bottom(value) => {
+                    canvas.translate((0.0, -*value));
+                }
+                Sides::Right(value) => {
+                    canvas.translate((-*value, 0.0));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn margin_size(&self) -> Size {
+        let style = self.get_styles();
+        let mut width = 0.0;
+        let mut height = 0.0;
+        for side in style.margin.iter() {
+            match side {
+                Sides::Top(value) => {
+                    height += value;
+                }
+                Sides::Bottom(value) => {
+                    height += value;
+                }
+                Sides::Left(value) => {
+                    width += value;
+                }
+                Sides::Right(value) => {
+                    width += value;
+                }
+            }
+        }
+        Size { width, height }
+    }
+    fn draw_padding(&self, canvas: &Canvas) {
+        let style = self.get_styles();
+        for side in style.padding.iter() {
+            match side {
+                Sides::Top(value) => {
+                    canvas.translate((0.0, *value));
+                }
+                Sides::Left(value) => {
+                    canvas.translate((*value, 0.0));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn padding_size(&self) -> Size {
+        let style = self.get_styles();
+        let mut width = 0.0;
+        let mut height = 0.0;
+        for side in style.padding.iter() {
+            match side {
+                Sides::Top(value) => {
+                    height += value;
+                }
+                Sides::Bottom(value) => {
+                    height += value;
+                }
+                Sides::Left(value) => {
+                    width += value;
+                }
+                Sides::Right(value) => {
+                    width += value;
+                }
+            }
+        }
+        Size { width, height }
+    }
 }
 
 
@@ -103,6 +283,7 @@ struct Text {
     content: String,
     paragraph: Option<Paragraph>,
     layout: Layout,
+    style: Style,
 }
 
 impl Text {
@@ -114,6 +295,7 @@ impl Text {
                 position: Position { x: 0.0, y: 0.0 },
                 size: Size { width: 0.0, height: 0.0 },
             },
+            style: Style::default(),
         }
     }
 }
@@ -121,12 +303,16 @@ impl Text {
 // TODO: Lots of work needed to make this setup work properly
 
 impl Drawable for Text {
-    fn draw(&self, layout: &Layout, canvas: &skia_safe::Canvas) {
+    fn draw(&self, canvas: &skia_safe::Canvas) {
         let paragraph = self.paragraph.as_ref().unwrap();
-        paragraph.paint(canvas, (layout.position.x, layout.position.y));
+        paragraph.paint(canvas, (self.layout.position.x, self.layout.position.y));
     }
 
     fn compute_layout(&mut self, bounds: Bounds) -> Layout {
+
+        // TODO: If I make the assumption of a monospaced font,
+        // I don't really need to do this, just need to calculate
+        // some stuff once and use those parameters
         if self.paragraph.is_none() {
                 // Create a font collection
             let mut font_collection = FontCollection::new();
@@ -141,7 +327,7 @@ impl Drawable for Text {
 
             // Define the text style
             let mut text_style = TextStyle::new();
-            text_style.set_font_size(24.0);
+            text_style.set_font_size(32.0);
 
             // Build the paragraph
             let mut paragraph_builder = ParagraphBuilder::new(&paragraph_style, font_collection);
@@ -171,12 +357,25 @@ impl Drawable for Text {
     fn get_layout(&self) -> Layout {
         self.layout
     }
+
+    fn get_styles(&self) -> &Style {
+        &self.style
+    }
+    
+    fn set_styles(&mut self, style: Style) {
+        self.style = style;
+    }
+    
+    fn get_styles_mut(&mut self) -> &mut Style {
+        &mut self.style
+    }
 }
 
 struct RoundedRect {
     layout: Layout,
     radius: f32,
     color: Color,
+    style: Style,
     children: Vec<Box<dyn Drawable>>,
 }
 
@@ -189,21 +388,30 @@ impl RoundedRect {
             },
             radius,
             color,
+            style: Style::default(),
             children: vec![],
         }
     }
 }
 
 impl Drawable for RoundedRect {
-    fn draw(&self, layout: &Layout, canvas: &skia_safe::Canvas) {
+    fn draw(&self, canvas: &skia_safe::Canvas) {
+
+        canvas.save();
+        self.draw_margin_top_left(canvas);
         let paint = self.color.as_paint();
-        let bounds_rounded = RRect::new_rect_xy(self.layout.size.to_rect(), self.radius, self.radius);
+        let rect = (self.padding_size() + self.layout.size).to_rect();
+        let bounds_rounded = RRect::new_rect_xy(rect, self.radius, self.radius);
         canvas.draw_rrect(bounds_rounded, &paint);
+
+        self.draw_padding(canvas);
         for child in self.children.iter() {
             let layout = child.get_layout();
-            child.draw(&layout, canvas);
+            child.draw(canvas);
             canvas.translate((0.0, layout.size.height));
         }
+        self.draw_margin_bottom_right(canvas);
+        canvas.restore();
     }
 
     fn compute_layout(&mut self, bounds: Bounds) -> Layout {
@@ -233,12 +441,25 @@ impl Drawable for RoundedRect {
     fn get_layout(&self) -> Layout {
        self.layout
     }
+    
+    fn get_styles(&self) -> &Style {
+        &self.style
+    }
+    
+    fn set_styles(&mut self, style: Style) {
+        self.style = style;
+    }
+    
+    fn get_styles_mut(&mut self) -> &mut Style {
+        &mut self.style
+    }
 }
 
 
 struct Container {
     children: Vec<Box<dyn Drawable>>,
     layout: Layout,
+    style: Style,
 }
 
 impl Container {
@@ -249,17 +470,22 @@ impl Container {
                 position: Position { x: 0.0, y: 0.0 },
                 size: Size { width: 0.0, height: 0.0 },
             },
+            style: Style::default(),
         }
     }
 }
 
 impl Drawable for Container {
-    fn draw(&self, layout: &Layout, canvas: &skia_safe::Canvas) {
+    fn draw(&self, canvas: &skia_safe::Canvas) {
         canvas.save();
         for child in self.children.iter() {
             let layout = child.get_layout();
-            child.draw(&layout, canvas);
-            canvas.translate((0.0, layout.size.height));
+            child.draw(canvas);
+
+            // TODO: This should probably just be factored as part of the layout
+            let margin_height = child.margin_size().height;
+            let padding_height = child.padding_size().height;
+            canvas.translate((0.0, layout.size.height + margin_height + padding_height));
         }
         canvas.restore();
     }
@@ -296,6 +522,18 @@ impl Drawable for Container {
                 height: 0.0,
             },
         }
+    }
+
+    fn get_styles(&self) -> &Style {
+        &self.style
+    }
+    
+    fn set_styles(&mut self, style: Style) {
+        self.style = style;
+    }
+    
+    fn get_styles_mut(&mut self) -> &mut Style {
+        &mut self.style
     }
 }
 
@@ -400,23 +638,7 @@ impl App for Editor {
         let mut text_paint = Paint::default();
         text_paint.set_color(Color::parse_hex("#FFD4A3").as_sk_color());
 
-        let font_size = 32.0;
-
-        let margin_top = 30.0;
-        let margin_left = 30.0;
-
-        // TODO: Don't do this in the draw loop
-        let font_mgr = FontMgr::new();
-
-        let family_name = "Ubuntu Mono";
-        let style = FontStyle::normal();
-
-        let typeface = font_mgr.match_family_style(family_name, style).unwrap();
-        let font = Font::from_typeface(typeface, font_size);
-        let white = &Color::parse_hex("#dc9941").as_paint();
-
         canvas.translate((300.0, 300.0));
-
 
         let mut container = self.render();
         container.compute_layout(Bounds {
@@ -426,7 +648,9 @@ impl App for Editor {
             },
         });
 
-        container.draw(&container.get_layout(), canvas);
+        canvas.save();
+        container.draw(canvas);
+        canvas.restore();
     }
 
     fn end_frame(&mut self) {}
@@ -456,7 +680,10 @@ impl Editor {
     fn render(&mut self) -> Container {
         let mut root = Container::new();
         for pane in self.panes.iter() {
-            let mut container = RoundedRect::new(20.0, Color::parse_hex("#353f38"));
+            let mut container =
+                RoundedRect::new(20.0, Color::parse_hex("#353f38"))
+                    .margin(30.0)
+                    .padding(30.0);
           
             let file = &self.files[pane.file];
             let lines = file.get_lines_for_text_view(&pane.text_view.as_ref().unwrap());
