@@ -168,6 +168,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             end
         }
 
+        fn range(start, end) {
+            Range {
+                start: start,
+                end: end
+            }
+        }
+
 
 
     };

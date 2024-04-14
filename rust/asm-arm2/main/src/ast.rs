@@ -64,6 +64,7 @@ pub enum Ast {
     String(String),
     True,
     False,
+    StructCreation { name: String, fields: Vec<(String, Ast)> },
 
 }
 
@@ -338,6 +339,10 @@ impl<'a> AstCompiler<'a> {
                         panic!("Expected identifier got {:?}", field)
                     }
                 }).collect() });
+                Value::Null
+            }
+            Ast::StructCreation { name, fields } => {
+                // TODO: allocate struct and return it
                 Value::Null
             }
             Ast::If {

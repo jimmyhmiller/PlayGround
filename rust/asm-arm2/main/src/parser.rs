@@ -472,6 +472,8 @@ impl Parser {
                 self.to_next_non_whitespace();
                 if self.is_open_paren() {
                     Some(self.parse_call(name))
+                } else if self.is_open_curly() {
+                    Some(self.parse_struct_creation(name))
                 } else {
                     Some(Ast::Variable(name))
                 }
@@ -591,8 +593,10 @@ impl Parser {
 
     fn parse_args(&mut self) -> Vec<String> {
         let mut result = Vec::new();
+        self.skip_whitespace();
         while !self.at_end() && !self.is_close_paren() {
             result.push(self.parse_arg());
+            self.skip_whitespace();
         }
         result
     }
@@ -627,7 +631,7 @@ impl Parser {
                 self.consume();
                 name
             }
-            _ => panic!("Expected arg"),
+            _ => panic!("Expected arg got {:?}", self.current_token()),
         }
     }
 
@@ -681,7 +685,7 @@ impl Parser {
         if self.is_close_curly() {
             self.consume();
         } else {
-            panic!("Expected close curly");
+            panic!("Expected close curly got {:?}", self.get_token_repr());
         }
     }
 
@@ -720,6 +724,40 @@ impl Parser {
         self.expect_close_paren();
         Ast::Call { name, args }
     }
+
+    fn parse_struct_creation(&mut self, name: String) -> Ast {
+        self.expect_open_curly();
+        let mut fields = Vec::new();
+        while !self.at_end() && !self.is_close_curly() {
+            if let Some(field) = self.parse_struct_field_creation() {
+                fields.push(field);
+            } else {
+                break;
+            }
+        }
+
+        self.expect_close_curly();
+        Ast::StructCreation { name, fields }
+    }
+
+    fn parse_struct_field_creation(&mut self) -> Option<(String, Ast)> {
+        self.skip_whitespace();
+        match self.current_token() {
+            Token::Atom((start, end)) => {
+                // Gross
+                let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
+                self.consume();
+                self.skip_whitespace();
+                self.expect_colon();
+                self.skip_whitespace();
+                let value = self.parse_expression(0).unwrap();
+                Some((name, value))
+            }
+            _ => None,
+        }
+    }
+
+
 
     fn get_token_repr(&self) -> String {
         match self.current_token() {
@@ -843,6 +881,20 @@ impl Parser {
     fn is_equal(&self) -> bool {
         self.current_token() == Token::Equal
     }
+
+    fn expect_colon(&mut self) {
+        self.skip_whitespace();
+        if self.is_colon() {
+            self.consume();
+        } else {
+            panic!("Expected colon");
+        }
+    }
+
+    fn is_colon(&self) -> bool {
+        self.current_token() == Token::Colon
+    }
+
 }
 
 #[test]
