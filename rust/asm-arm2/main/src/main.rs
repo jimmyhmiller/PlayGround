@@ -163,7 +163,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             print(y())
         }
 
+        struct Range {
+            start
+            end
+        }
+
+
+
     };
+
+    // println!("{:#?}", hello_ast);
 
     compiler.compile_ast(hello_ast)?;
 

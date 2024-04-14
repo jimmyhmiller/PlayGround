@@ -17,6 +17,10 @@ pub enum Ast {
         args: Vec<String>,
         body: Vec<Ast>,
     },
+    Struct {
+        name: String,
+        fields: Vec<Ast>
+    },
     If {
         condition: Box<Ast>,
         then: Vec<Ast>,
@@ -55,10 +59,12 @@ pub enum Ast {
     },
     Let(Box<Ast>, Box<Ast>),
     NumberLiteral(i64),
+    Identifier(String),
     Variable(String),
     String(String),
     True,
     False,
+
 }
 
 impl Ast {
@@ -218,7 +224,7 @@ impl<'a> AstCompiler<'a> {
                 self.ir.ret(return_value);
 
 
-                let mut code = self.ir.compile();
+                let mut code = self.ir.compile(&name);
                 let function_pointer = self.compiler.upsert_function(&name, &code.compile_to_bytes()).unwrap();
 
                 code.share_label_info_debug(function_pointer);
@@ -299,6 +305,11 @@ impl<'a> AstCompiler<'a> {
 
                 self.pop_environment();
                 function
+            }
+
+            Ast::Struct { name, fields } => {
+                // TODO: Do something with the struct
+                Value::Null
             }
             Ast::If {
                 condition,
@@ -493,6 +504,9 @@ impl<'a> AstCompiler<'a> {
             Ast::Variable(name) => {
                 let reg = &self.get_variable_alloc_free_variable(&name);
                 reg.into()
+            }
+            Ast::Identifier(_) => {
+                todo!()
             }
             Ast::Let(name, value) => {
                 if let Ast::Variable(name) = name.as_ref() {
