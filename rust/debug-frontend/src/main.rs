@@ -295,7 +295,7 @@ fn main() {
             },
         },
     };
-    frontend.create_window("Debug", 1600, 1600, Options { vsync: false });
+    frontend.create_window("Debug", Options { vsync: false, width: 2400, height: 1800, title: "Debugger".to_string(), position: (0, 0)});
 }
 
 // Stolen from compiler

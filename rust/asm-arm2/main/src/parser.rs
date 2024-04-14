@@ -33,6 +33,7 @@ pub enum Token {
     True,
     False,
     Let,
+    Struct,
     Comment((usize, usize)),
     Spaces((usize, usize)),
     String((usize, usize)),
@@ -237,6 +238,7 @@ impl<'a> Tokenizer {
             b"true" => Token::True,
             b"false" => Token::False,
             b"let" => Token::Let,
+            b"struct" => Token::Struct,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -455,6 +457,10 @@ impl Parser {
                 self.to_next_atom();
                 Some(self.parse_function())
             }
+            Token::Struct => {
+                self.to_next_atom();
+                Some(self.parse_struct())
+            }
             Token::If => {
                 self.to_next_non_whitespace();
                 Some(self.parse_if())
@@ -531,6 +537,21 @@ impl Parser {
         Ast::Function { name, args, body }
     }
 
+    fn parse_struct(&mut self) -> Ast {
+        let name = match self.current_token() {
+            Token::Atom((start, end)) => {
+                // Gross
+                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+            }
+            _ => panic!("Expected struct name"),
+        };
+        self.to_next_non_whitespace();
+        self.expect_open_curly();
+        let fields = self.parse_struct_fields();
+        self.expect_close_curly();
+        Ast::Struct { name, fields }
+    }
+
     fn consume(&mut self) {
         self.position += 1;
     }
@@ -574,6 +595,28 @@ impl Parser {
             result.push(self.parse_arg());
         }
         result
+    }
+
+    fn parse_struct_fields(&mut self) -> Vec<Ast> {
+        let mut result = Vec::new();
+        self.skip_whitespace();
+        while !self.at_end() && !self.is_close_curly() {
+            result.push(self.parse_struct_field());
+            self.skip_whitespace();
+        }
+        result
+    }
+
+    fn parse_struct_field(&mut self) -> Ast {
+        match self.current_token() {
+            Token::Atom((start, end)) => {
+                // Gross
+                let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
+                self.consume();
+                Ast::Identifier(name)
+            }
+            _ => panic!("Expected field name got {:?}", self.current_token()),
+        }
     }
 
     fn parse_arg(&mut self) -> String {

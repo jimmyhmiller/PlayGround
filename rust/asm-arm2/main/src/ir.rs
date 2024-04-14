@@ -29,6 +29,7 @@ pub enum Value {
     FreeVariable(usize),
     True,
     False,
+    Null,
 }
 
 impl Value {
@@ -656,7 +657,7 @@ impl Ir {
         }
     }
 
-    pub fn compile(&mut self) -> LowLevelArm {
+    pub fn compile(&mut self, name: &str) -> LowLevelArm {
         let mut lang = LowLevelArm::new();
         lang.set_max_locals(self.num_locals);
         // lang.breakpoint();
@@ -672,16 +673,21 @@ impl Ir {
         let exit = lang.new_label("exit");
 
         let mut ir_label_to_lang_label: HashMap<Label, Label> = HashMap::new();
-
-        for label in self.labels.iter() {
+        let mut labels : Vec<&Label> = self.labels.iter().collect();
+        labels.sort_by_key(|label| label.index);
+        for label in labels.iter() {
             let new_label = lang.new_label(&self.label_names[label.index]);
-            ir_label_to_lang_label.insert(*label, new_label);
+            ir_label_to_lang_label.insert(**label, new_label);
         }
         let lifetimes = self.get_register_lifetime();
+        // println!("compiling {}", name);
         // Self::draw_lifetimes(&lifetimes);
         let mut alloc = RegisterAllocator::new(lifetimes);
+        
         for (index, instruction) in self.instructions.iter().enumerate() {
-            for (register, (_start, end)) in alloc.lifetimes.iter() {
+            let mut lifetimes : Vec<(&VirtualRegister, &(usize, usize))> = alloc.lifetimes.iter().collect();
+            lifetimes.sort_by_key(|(_, (start, _))| *start);
+            for (register, (_start, end)) in lifetimes {
                 if index == end + 1 {
                     if let Some(register) = alloc.allocated_registers.get(register) {
                         lang.free_register(*register);
@@ -801,6 +807,10 @@ impl Ir {
                         // Need to make sure I preserve that space
                         // and that at this point in the program I know how many locals there are.
                         lang.load_from_stack(register, (*free_variable + self.num_locals) as i32);
+                    }
+                    Value::Null => {
+                        let register = alloc.allocate_register(index, *dest, &mut lang);
+                        lang.mov_64(register, 0 as isize);
                     }
                 },
                 Instruction::LoadConstant(dest, val) => {
@@ -991,6 +1001,10 @@ impl Ir {
                     }
                     Value::RawValue(_) => {
                         panic!("Should we be returing a raw value?")
+                    }
+                    Value::Null => {
+                        lang.mov_64(lang.ret_reg(), 0);
+                        lang.jump(exit);
                     }
                     Value::Local(local) => {
                         lang.load_from_stack(lang.ret_reg(), *local as i32);
