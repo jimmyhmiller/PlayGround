@@ -85,7 +85,9 @@ impl Ast {
             },
             environment_stack: vec![Environment::new()],
         };
-        compiler.compile()
+        let ir = compiler.compile();
+        println!("{:#?}", compiler);
+        ir
     }
 
     pub fn nodes(&self) -> &Vec<Ast> {
@@ -128,10 +130,28 @@ pub struct Context {
 }
 
 #[derive(Debug, Clone)]
+pub struct Struct {
+    name: String,
+    fields: Vec<String>,
+
+}
+
+
+// TODO: I have a global kind of compiler thing with functions
+// I think structs should maybe go there?
+// I also need to deal with namespacing
+// Or maybe I should just put everything in this environment and then
+// things in the top level are global/namespaced
+// in fact, I don't think I will have "global",
+// just namesapces
+// With "core" being included by default
+
+#[derive(Debug, Clone)]
 pub struct Environment {
     pub local_variables: Vec<String>,
     pub variables: HashMap<String, VariableLocation>,
     pub free_variables: Vec<String>,
+    pub structs: Vec<Struct>,
 }
 
 impl Environment {
@@ -140,10 +160,12 @@ impl Environment {
             local_variables: vec![],
             variables: HashMap::new(),
             free_variables: vec![],
+            structs: vec![],
          }
     }
 }
 
+#[derive(Debug)]
 pub struct AstCompiler<'a> {
     pub ast: Ast,
     pub ir: Ir,
@@ -308,7 +330,14 @@ impl<'a> AstCompiler<'a> {
             }
 
             Ast::Struct { name, fields } => {
-                // TODO: Do something with the struct
+                let env = self.current_env_mut();
+                env.structs.push(Struct { name: name.clone(), fields: fields.iter().map(|field| {
+                    if let Ast::Identifier(name) = field {
+                        name.clone()
+                    } else {
+                        panic!("Expected identifier got {:?}", field)
+                    }
+                }).collect() });
                 Value::Null
             }
             Ast::If {
@@ -542,6 +571,10 @@ impl<'a> AstCompiler<'a> {
             Ast::True => Value::True,
             Ast::False => Value::False,
         }
+    }
+
+    fn current_env_mut(&mut self) -> &mut Environment {
+        self.environment_stack.last_mut().unwrap()
     }
 
     fn find_or_insert_local(&mut self, name: &str) -> usize {
