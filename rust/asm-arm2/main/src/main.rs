@@ -95,6 +95,13 @@ fn allocate_array(compiler: *mut Compiler, value: usize) -> usize {
     pointer
 }
 
+fn allocate_struct(compiler: *mut Compiler, value: usize) -> usize {
+    let value = BuiltInTypes::untag(value);
+    let compiler = unsafe { &mut *compiler };
+    let pointer = compiler.allocate(value).unwrap();
+    pointer
+}
+
 fn array_store(compiler: *mut Compiler, array: usize, index: usize, value: usize) -> usize {
     let compiler = unsafe { &mut *compiler };
     compiler.array_store(array, index, value).unwrap()
@@ -125,43 +132,44 @@ fn main() -> Result<(), Box<dyn Error>> {
     // but working
     compiler.add_builtin_function("print", ir::print_value as *const u8)?;
     compiler.add_builtin_function("allocate_array", allocate_array as *const u8)?;
+    compiler.add_builtin_function("allocate_struct", allocate_struct as *const u8)?;
     compiler.add_builtin_function("array_store", array_store as *const u8)?;
     compiler.add_builtin_function("array_get", array_get as *const u8)?;
     compiler.add_builtin_function("make_closure", make_closure as *const u8)?;
 
     let hello_ast = parse! {
-        fn hello(x) {
-            let array = allocate_array(16);
-            array_store(array, 0, 42);
-            array_store(array, x, "hello");
-            let result = array_get(array, x)
-            print(result)
-        }
+        // fn hello(x) {
+        //     let array = allocate_array(16);
+        //     array_store(array, 0, 42);
+        //     array_store(array, x, "hello");
+        //     let result = array_get(array, x)
+        //     print(result)
+        // }
 
-        fn count_down(x) {
-            if x == 0 {
-                0
-            } else {
-                count_down(x - 1)
-            }
-        }
+        // fn count_down(x) {
+        //     if x == 0 {
+        //         0
+        //     } else {
+        //         count_down(x - 1)
+        //     }
+        // }
 
-        fn hello2() {
-            let y = fn thing() {
-                42
-            }
-            print(y)
-            print(y())
-        }
+        // fn hello2() {
+        //     let y = fn thing() {
+        //         42
+        //     }
+        //     print(y)
+        //     print(y())
+        // }
 
-        fn hello_closure() {
-            let x = 42;
-            let z = 2;
-            let y = fn closure_fn() {
-                x + z
-            }
-            print(y())
-        }
+        // fn hello_closure() {
+        //     let x = 42;
+        //     let z = 2;
+        //     let y = fn closure_fn() {
+        //         x + z
+        //     }
+        //     print(y())
+        // }
 
         struct Range {
             start
@@ -174,8 +182,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 end: end
             }
         }
-
-
 
     };
 
@@ -192,7 +198,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // compiler.print(hello2_result as usize);
 
 
-    let hello_closure_result = compiler.run_function("hello_closure", vec![]);
+    let hello_closure_result = compiler.run_function("range", vec![0, 10]);
     compiler.print(hello_closure_result as usize);
 
    

@@ -578,7 +578,12 @@ impl Ir {
             .push(Instruction::Assign(dest, val.into()));
     }
 
-    fn assign_new(&mut self, val: Value) -> VirtualRegister {
+    pub fn assign_new<A>(&mut self, val: A) -> VirtualRegister
+    where
+        A: Into<Value> 
+        {
+
+        let val = val.into();
         if let Value::Register(register) = val {
             return register;
         }
@@ -1107,7 +1112,7 @@ impl Ir {
         register.into()
     }
 
-    pub fn heap_store(&mut self, source: Value, dest: Value) {
+    pub fn heap_store(&mut self, dest: Value, source: Value) {
         let source = self.assign_new(source);
         let dest = self.assign_new(dest);
         self.instructions
@@ -1150,12 +1155,12 @@ impl Ir {
         register.into()
     }
 
-    pub fn push_to_stack(&mut self, reg: VirtualRegister) {
-        self.instructions.push(Instruction::PushStack(reg.into()));
+    pub fn push_to_stack(&mut self, reg: Value) {
+        self.instructions.push(Instruction::PushStack(reg));
     }
 
-    pub fn pop_from_stack(&mut self, reg: VirtualRegister) {
-        self.instructions.push(Instruction::PopStack(reg.into()));
+    pub fn pop_from_stack(&mut self, reg: Value) {
+        self.instructions.push(Instruction::PopStack(reg));
     }
 
     fn increment_locals(&mut self, index: usize) {
