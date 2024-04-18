@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{error::Error, slice::{from_raw_parts, from_raw_parts_mut}};
+use std::{collections::HashMap, error::Error, slice::{from_raw_parts, from_raw_parts_mut}};
 
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
@@ -20,6 +20,19 @@ struct HeapObject<'a> {
     data: &'a [u8],
 }
 
+#[derive(Debug, Clone)]
+pub struct Struct {
+    pub name: String,
+    pub fields: Vec<String>,
+}
+
+impl Struct {
+    pub fn size(&self) -> usize {
+        self.fields.len()
+    }
+}
+
+
 pub struct Compiler {
     code_offset: usize,
     code_memory: Option<Mmap>,
@@ -27,6 +40,7 @@ pub struct Compiler {
     jump_table: Option<Mmap>,
     // DO I need this offset?
     jump_table_offset: usize,
+    structs: HashMap<String, Struct>,
     functions: Vec<Function>,
     #[allow(dead_code)]
     // Need much better system obviously
@@ -69,6 +83,7 @@ impl Compiler {
                     .unwrap(),
             ),
             jump_table_offset: 0,
+            structs: HashMap::new(),
             functions: Vec::new(),
             heap: Some(
                 MmapOptions::new(MmapOptions::page_size() * 100)
@@ -327,8 +342,9 @@ impl Compiler {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
         let start = usize::from_le_bytes(bytes);
-        let memory = &self.code_memory.as_ref().unwrap()[start..];
-        let f: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(memory.as_ref().as_ptr()) };
+        let arg1 = BuiltInTypes::Int.tag(arg1 as isize) as u64;
+        let arg2 = BuiltInTypes::Int.tag(arg2 as isize) as u64;
+        let f: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(start) };
         Ok(f(arg1, arg2))
     }
 
@@ -355,7 +371,9 @@ impl Compiler {
             }
             BuiltInTypes::Function => todo!(),
             BuiltInTypes::Closure => todo!(),
-            BuiltInTypes::Struct => todo!(),
+            BuiltInTypes::Struct => {
+                println!("Got Struct! Need to store type and stuff so I know what I'm doing here")
+            }
             BuiltInTypes::Array => {
                 unsafe {
                     let value = BuiltInTypes::untag(value);
@@ -534,5 +552,13 @@ impl Compiler {
             buffer[16 + index] = byte;
         }
         Ok(BuiltInTypes::Closure.tag(heap_pointer as isize) as usize)
+    }
+    
+    pub fn add_struct(&mut self, s: Struct) {
+        self.structs.insert(s.name.clone(), s);
+    }
+    
+    pub fn get_struct(&self, name: &str) -> Option<&Struct> {
+        self.structs.get(name)
     }
 }

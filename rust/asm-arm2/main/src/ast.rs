@@ -2,7 +2,7 @@ use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
 use crate::{
-    compiler::Compiler,
+    compiler::{Compiler, Struct},
     ir::{self, BuiltInTypes, Condition},
 };
 
@@ -87,7 +87,7 @@ impl Ast {
             environment_stack: vec![Environment::new()],
         };
         let ir = compiler.compile();
-        println!("{:#?}", compiler);
+        // println!("{:#?}", compiler);
         ir
     }
 
@@ -130,13 +130,6 @@ pub struct Context {
     pub in_function: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct Struct {
-    name: String,
-    fields: Vec<String>,
-
-}
-
 
 // TODO: I have a global kind of compiler thing with functions
 // I think structs should maybe go there?
@@ -152,7 +145,6 @@ pub struct Environment {
     pub local_variables: Vec<String>,
     pub variables: HashMap<String, VariableLocation>,
     pub free_variables: Vec<String>,
-    pub structs: Vec<Struct>,
 }
 
 impl Environment {
@@ -161,7 +153,6 @@ impl Environment {
             local_variables: vec![],
             variables: HashMap::new(),
             free_variables: vec![],
-            structs: vec![],
          }
     }
 }
@@ -275,12 +266,12 @@ impl<'a> AstCompiler<'a> {
                             VariableLocation::Register(reg) => {
                                 let reg = self.ir.volatile_register();
                                 self.ir.assign(reg, reg);
-                                self.ir.push_to_stack(reg);
+                                self.ir.push_to_stack(reg.into());
                             }
                             VariableLocation::Local(index) => {
                                 let reg = self.ir.volatile_register();
                                 self.ir.load_local(reg, index);
-                                self.ir.push_to_stack(reg);
+                                self.ir.push_to_stack(reg.into());
                             }
                             VariableLocation::FreeVariable(index) => {
                                 panic!("We are trying to find this variable concretely and found a free variable")
@@ -305,9 +296,8 @@ impl<'a> AstCompiler<'a> {
                         let function_pointer_reg = self.ir.volatile_register();
                         self.ir.assign(function_pointer_reg, function_pointer);
 
-                        let compiler_pointer_reg = self.ir.volatile_register();
-                        let compiler_pointer: Value = self.compiler.get_compiler_ptr().into();
-                        self.ir.assign(compiler_pointer_reg, compiler_pointer);
+
+                        let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
 
                         let closure = self.ir.call(
                             make_closure_reg.into(),
@@ -331,8 +321,8 @@ impl<'a> AstCompiler<'a> {
             }
 
             Ast::Struct { name, fields } => {
-                let env = self.current_env_mut();
-                env.structs.push(Struct { name: name.clone(), fields: fields.iter().map(|field| {
+                
+                self.compiler.add_struct(Struct { name: name.clone(), fields: fields.iter().map(|field| {
                     if let Ast::Identifier(name) = field {
                         name.clone()
                     } else {
@@ -342,8 +332,50 @@ impl<'a> AstCompiler<'a> {
                 Value::Null
             }
             Ast::StructCreation { name, fields } => {
-                // TODO: allocate struct and return it
-                Value::Null
+                let field_results = fields.iter().map(|field| {
+                    self.call_compile(&field.1)
+                }).collect::<Vec<_>>();
+
+                let struct_type = self.compiler.get_struct(&name).expect(&format!("Struct not found {}", name));
+
+                for field in fields.iter() {
+                    let mut found = false;
+                    for defined_field in struct_type.fields.iter() {
+                        if &field.0 == defined_field {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        panic!("Struct field not defined {}", field.0);
+                    }
+                }
+                
+                let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
+
+                let allocate_struct = self.compiler.find_function("allocate_struct").unwrap();
+                let allocate_struct = self.compiler.get_function_pointer(allocate_struct).unwrap();
+                let allocate_struct = self.ir.assign_new(allocate_struct);
+
+                let size_reg  = self.ir.assign_new(struct_type.size());
+                // TODO: I need store the struct type here, so I know things about what data is here.
+
+                let struct_ptr = self.ir.call(
+                    allocate_struct.into(),
+                    vec![
+                        compiler_pointer_reg.into(),
+                        size_reg.into(),
+                    ]
+                );
+
+                let struct_ptr = self.ir.assign_new(struct_ptr);
+                
+                for (i, reg) in field_results.iter().enumerate() {
+                    let offset = self.ir.add(i * 4, struct_ptr);
+                    self.ir.heap_store(*reg, offset);
+                }
+
+                self.ir.tag(struct_ptr.into(), BuiltInTypes::Struct.get_tag())
             }
             Ast::If {
                 condition,
