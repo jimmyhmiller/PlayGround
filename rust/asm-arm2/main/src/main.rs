@@ -138,48 +138,60 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("make_closure", make_closure as *const u8)?;
 
     let hello_ast = parse! {
-        // fn hello(x) {
-        //     let array = allocate_array(16);
-        //     array_store(array, 0, 42);
-        //     array_store(array, x, "hello");
-        //     let result = array_get(array, x)
-        //     print(result)
-        // }
+        fn hello(x) {
+            let array = allocate_array(16);
+            array_store(array, 0, 42);
+            array_store(array, x, "hello");
+            let result = array_get(array, x)
+            print(result)
+        }
 
-        // fn count_down(x) {
-        //     if x == 0 {
-        //         0
-        //     } else {
-        //         count_down(x - 1)
-        //     }
-        // }
+        fn count_down(x) {
+            if x == 0 {
+                0
+            } else {
+                count_down(x - 1)
+            }
+        }
 
-        // fn hello2() {
-        //     let y = fn thing() {
-        //         42
-        //     }
-        //     print(y)
-        //     print(y())
-        // }
+        fn hello2() {
+            let y = fn thing() {
+                42
+            }
+            print(y)
+            print(y())
+        }
 
-        // fn hello_closure() {
-        //     let x = 42;
-        //     let z = 2;
-        //     let y = fn closure_fn() {
-        //         x + z
-        //     }
-        //     print(y())
-        // }
+        fn hello_closure() {
+            let x = 42;
+            let z = 2;
+            let y = fn closure_fn() {
+                x + z
+            }
+            print(y())
+        }
 
         struct Range {
             start
             end
         }
 
+        struct OtherStruct {
+            x
+            y
+        }
+
         fn range(start, end) {
             Range {
                 start: start,
                 end: end
+            }
+        }
+
+        fn other_struct(x, y) {
+            OtherStruct {
+                x: x,
+                y: y
             }
         }
 
@@ -198,7 +210,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // compiler.print(hello2_result as usize);
 
 
-    let hello_closure_result = compiler.run_function("range", vec![0, 10]);
+    let hello_closure_result = compiler.run_function("other_struct", vec![0, 10]);
     compiler.print(hello_closure_result as usize);
 
    
