@@ -211,6 +211,7 @@ pub enum Instruction {
     GetStackPointerImm(Value, isize),
     GetTag(Value, Value),
     Untag(Value, Value),
+    HeapStoreOffset(Value, Value, usize),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -329,6 +330,9 @@ impl Instruction {
                 get_registers!(a, b)
             }
             Instruction::HeapStore(a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::HeapStoreOffset(a, b, _) => {
                 get_registers!(a, b)
             }
             Instruction::LoadTrue(a) => {
@@ -1034,6 +1038,13 @@ impl Ir {
                     let val = alloc.allocate_register(index, val, &mut lang);
                     lang.store_on_heap(ptr, val, 0);
                 }
+                Instruction::HeapStoreOffset(ptr, val, offset) => {
+                    let ptr = ptr.try_into().unwrap();
+                    let ptr = alloc.allocate_register(index, ptr, &mut lang);
+                    let val = val.try_into().unwrap();
+                    let val = alloc.allocate_register(index, val, &mut lang);
+                    lang.store_on_heap(ptr, val, *offset as i32);
+                }
                 Instruction::RegisterArgument(arg) => {
                     // This doesn't actually compile into any code
                     // it is here to say the argument is live from the beginning
@@ -1112,11 +1123,26 @@ impl Ir {
         register.into()
     }
 
-    pub fn heap_store(&mut self, dest: Value, source: Value) {
-        let source = self.assign_new(source);
-        let dest = self.assign_new(dest);
+    pub fn heap_store<A, B>(&mut self, dest: A, source: B)
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        let source = self.assign_new(source.into());
+        let dest = self.assign_new(dest.into());
         self.instructions
-            .push(Instruction::HeapStore(source.into(), dest.into()));
+            .push(Instruction::HeapStore(dest.into(), source.into()));
+    }
+
+    pub fn heap_store_offset<A, B>(&mut self, dest: A, source: B, offset: usize)
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        let source = self.assign_new(source.into());
+        let dest = self.assign_new(dest.into());
+        self.instructions
+            .push(Instruction::HeapStoreOffset(dest.into(), source.into(), offset));
     }
 
     pub fn heap_load(&mut self, dest: Value, source: Value) -> Value {
@@ -1265,7 +1291,7 @@ pub fn heap_test() -> Ir {
     ir.breakpoint();
     let n = ir.arg(0);
     let location = ir.arg(1);
-    ir.heap_store(n.into(), location.into());
+    ir.heap_store(n, location);
     let temp_reg = ir.volatile_register();
     let result = ir.heap_load(temp_reg.into(), location.into());
     let result_reg = ir.volatile_register();

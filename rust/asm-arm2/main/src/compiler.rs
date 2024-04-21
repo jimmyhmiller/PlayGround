@@ -32,6 +32,35 @@ impl Struct {
     }
 }
 
+struct StructManager {
+    name_to_id: HashMap<String, usize>,
+    structs: Vec<Struct>,
+}
+
+impl StructManager {
+    fn new() -> Self {
+        Self {
+            name_to_id: HashMap::new(),
+            structs: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, name: String, s: Struct) {
+        let id = self.structs.len();
+        self.name_to_id.insert(name.clone(), id);
+        self.structs.push(s);
+    }
+
+    fn get(&self, name: &str) -> Option<(usize, &Struct)> {
+        let id = self.name_to_id.get(name)?;
+        self.structs.get(*id).map(|x| (*id, x))
+    }
+    
+    fn get_by_id(&self, type_id: usize) -> Option<&Struct> {
+        self.structs.get(type_id)
+    }
+}
+
 
 pub struct Compiler {
     code_offset: usize,
@@ -40,7 +69,7 @@ pub struct Compiler {
     jump_table: Option<Mmap>,
     // DO I need this offset?
     jump_table_offset: usize,
-    structs: HashMap<String, Struct>,
+    structs: StructManager,
     functions: Vec<Function>,
     #[allow(dead_code)]
     // Need much better system obviously
@@ -83,7 +112,7 @@ impl Compiler {
                     .unwrap(),
             ),
             jump_table_offset: 0,
-            structs: HashMap::new(),
+            structs: StructManager::new(),
             functions: Vec::new(),
             heap: Some(
                 MmapOptions::new(MmapOptions::page_size() * 100)
@@ -348,55 +377,75 @@ impl Compiler {
         Ok(f(arg1, arg2))
     }
 
-    pub fn print(&self, value: usize) {
+    pub fn get_repr(&self, value: usize) -> String {
         let tag = BuiltInTypes::get_kind(value);
         match tag {
             BuiltInTypes::Int => {
                 let value = BuiltInTypes::untag(value);
-                println!("{}", value);
+                value.to_string()
             }
             BuiltInTypes::Float => todo!(),
             BuiltInTypes::String => {
                 let value = BuiltInTypes::untag(value);
                 let string = unsafe { &*(value as *const StringValue) };
-                println!("{}", string.str);
+                string.str.clone()
             }
             BuiltInTypes::Bool => {
                 let value = BuiltInTypes::untag(value);
                 if value == 0 {
-                    println!("false");
+                    "false".to_string()
                 } else {
-                    println!("true");
+                    "true".to_string()
                 }
             }
             BuiltInTypes::Function => todo!(),
             BuiltInTypes::Closure => todo!(),
             BuiltInTypes::Struct => {
-                println!("Got Struct! Need to store type and stuff so I know what I'm doing here")
+                unsafe {
+                    let value = BuiltInTypes::untag(value);
+                    let pointer = value as *const u8;
+                    // get first 8 bytes as size le encoded
+                    let size = *(pointer as *const usize);
+                    let pointer = pointer.add(8);
+                    let data = std::slice::from_raw_parts(pointer, size);
+                    let heap_object = HeapObject { size, data };
+                    // type id is the first 8 bytes of data
+                    let type_id = usize::from_le_bytes(data[0..8].try_into().unwrap());
+                    let struct_value = self.structs.get_by_id(type_id as usize);
+                    self.get_struct_repr(struct_value.unwrap(), data[8..].to_vec())
+                }
             }
             BuiltInTypes::Array => {
                 unsafe {
                     let value = BuiltInTypes::untag(value);
                     let pointer = value as *const u8;
-                    // get first 8 bytes as size
+                    // get first 8 bytes as size le encoded
                     let size = *(pointer as *const usize);
                     let pointer = pointer.add(8);
                     let data = std::slice::from_raw_parts(pointer, size);
                     let heap_object = HeapObject { size, data };
 
-                    println!("{:?}", heap_object);
+                    let mut repr = "[".to_string();
+                    for i in 0..heap_object.size {
+                        let value = &heap_object.data[i * 8..i * 8 + 8];
+                        let mut bytes = [0u8; 8];
+                        bytes.copy_from_slice(value);
+                        let value = usize::from_le_bytes(bytes);
+                        repr.push_str(&self.get_repr(value));
+                        if i != heap_object.size - 1 {
+                            repr.push_str(", ");
+                        }
+                    }
+                    repr.push_str("]");
+                    repr
                 }
-                // print!("[");
-                // for i in 0..array.size {
-                //     let value = array.data[i];
-                //     self.print(value as usize);
-                //     if i != array.size - 1 {
-                //         print!(", ");
-                //     }
-                // }
-                // println!("]");
             }
         }
+    }
+
+    pub fn print(&self, value: usize) {
+        let tag = BuiltInTypes::get_kind(value);
+        println!("{}", self.get_repr(value));
     }
 
     pub fn array_store(
@@ -419,7 +468,7 @@ impl Compiler {
                     let pointer = pointer.add(8);
                     let data = std::slice::from_raw_parts_mut(pointer, size);
                     // store all 8 bytes of value in data
-                    for (offset, byte) in value.to_le_bytes().iter().enumerate() {
+                    for (offset, byte) in value.to_be_bytes().iter().enumerate() {
                         data[index + offset] = *byte;
                     }
                     Ok(BuiltInTypes::Array.tag(array as isize) as usize)
@@ -558,7 +607,29 @@ impl Compiler {
         self.structs.insert(s.name.clone(), s);
     }
     
-    pub fn get_struct(&self, name: &str) -> Option<&Struct> {
+    pub fn get_struct(&self, name: &str) -> Option<(usize, &Struct)> {
         self.structs.get(name)
+    }
+    
+    fn get_struct_repr(&self, struct_value: &Struct, to_vec: Vec<u8>) -> String {
+        // It should look like this
+        // struct_name { field1: value1, field2: value2 }
+        let mut repr = struct_value.name.clone();
+        repr.push_str(" { ");
+        for (index, field) in struct_value.fields.iter().enumerate() {
+            repr.push_str(field);
+            repr.push_str(": ");
+            let value = &to_vec[index * 8..index * 8 + 8];
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(value);
+            let value = usize::from_le_bytes(bytes);
+            repr.push_str(&self.get_repr(value));
+            if index != struct_value.fields.len() - 1 {
+                repr.push_str(", ");
+            }
+        }
+        repr.push_str(" }");
+        repr
+
     }
 }
