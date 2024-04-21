@@ -336,7 +336,7 @@ impl<'a> AstCompiler<'a> {
                     self.call_compile(&field.1)
                 }).collect::<Vec<_>>();
 
-                let struct_type = self.compiler.get_struct(&name).expect(&format!("Struct not found {}", name));
+                let (struct_id, struct_type) = self.compiler.get_struct(&name).expect(&format!("Struct not found {}", name));
 
                 for field in fields.iter() {
                     let mut found = false;
@@ -357,7 +357,7 @@ impl<'a> AstCompiler<'a> {
                 let allocate_struct = self.compiler.get_function_pointer(allocate_struct).unwrap();
                 let allocate_struct = self.ir.assign_new(allocate_struct);
 
-                let size_reg  = self.ir.assign_new(struct_type.size());
+                let size_reg  = self.ir.assign_new(struct_type.size() + 1);
                 // TODO: I need store the struct type here, so I know things about what data is here.
 
                 let struct_ptr = self.ir.call(
@@ -368,12 +368,22 @@ impl<'a> AstCompiler<'a> {
                     ]
                 );
 
+                // TODO: I want a better way to make clear the structure here.
+                // Maybe I just make a struct and have a way of generating code
+                // based on that struct?
+
+
                 let struct_ptr = self.ir.assign_new(struct_ptr);
+                let label = self.ir.label("struct");
+                self.ir.write_label(label);
+                let mut offset = 1;
+                self.ir.heap_store_offset(struct_ptr, Value::SignedConstant(struct_id as isize), offset);
+                offset += 1;
                 
                 for (i, reg) in field_results.iter().enumerate() {
-                    let offset = self.ir.add(i * 4, struct_ptr);
-                    self.ir.heap_store(*reg, offset);
+                    self.ir.heap_store_offset(struct_ptr, *reg, offset + i);
                 }
+                
 
                 self.ir.tag(struct_ptr.into(), BuiltInTypes::Struct.get_tag())
             }

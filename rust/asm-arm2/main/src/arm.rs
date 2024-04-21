@@ -532,7 +532,7 @@ impl LowLevelArm {
         });
     }
 
-    pub fn store_on_heap(&mut self, destination: Register,  source: Register,  offset: i32) {
+    pub fn store_on_heap(&mut self, destination: Register, source: Register, offset: i32) {
         self.instructions.push(ArmAsm::StrImmGen {
             size: 0b11,
             imm9: 0, // not used
