@@ -408,9 +408,9 @@ impl Compiler {
                     let size = *(pointer as *const usize);
                     let pointer = pointer.add(8);
                     let data = std::slice::from_raw_parts(pointer, size);
-                    let heap_object = HeapObject { size, data };
                     // type id is the first 8 bytes of data
                     let type_id = usize::from_le_bytes(data[0..8].try_into().unwrap());
+                    let type_id = BuiltInTypes::untag(type_id);
                     let struct_value = self.structs.get_by_id(type_id as usize);
                     self.get_struct_repr(struct_value.unwrap(), data[8..].to_vec())
                 }
@@ -468,7 +468,7 @@ impl Compiler {
                     let pointer = pointer.add(8);
                     let data = std::slice::from_raw_parts_mut(pointer, size);
                     // store all 8 bytes of value in data
-                    for (offset, byte) in value.to_be_bytes().iter().enumerate() {
+                    for (offset, byte) in value.to_le_bytes().iter().enumerate() {
                         data[index + offset] = *byte;
                     }
                     Ok(BuiltInTypes::Array.tag(array as isize) as usize)
