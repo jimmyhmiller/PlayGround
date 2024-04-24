@@ -15,6 +15,7 @@ pub enum Token {
     SemiColon,
     Colon,
     Comma,
+    Dot,
     NewLine,
     If,
     Fn,
@@ -56,7 +57,8 @@ impl Token {
             | Token::Plus
             | Token::Minus
             | Token::Mul
-            | Token::Div => true,
+            | Token::Div
+            | Token::Dot => true,
             _ => false,
         }
     }
@@ -217,6 +219,7 @@ impl<'a> Tokenizer {
             && !self.is_comma(input_bytes)
             && !self.is_newline(input_bytes)
             && !self.is_quote(input_bytes)
+            && !self.is_dot(input_bytes)
         {
             self.consume();
         }
@@ -239,6 +242,7 @@ impl<'a> Tokenizer {
             b"false" => Token::False,
             b"let" => Token::Let,
             b"struct" => Token::Struct,
+            b"." => Token::Dot,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -285,6 +289,9 @@ impl<'a> Tokenizer {
         } else if self.is_close_bracket(input_bytes) {
             self.consume();
             Token::CloseBracket
+        } else if self.is_dot(input_bytes) {
+            self.consume();
+            Token::Dot
         } else {
             // println!("identifier");
             self.parse_identifier(input_bytes)
@@ -306,6 +313,10 @@ impl<'a> Tokenizer {
 
     pub fn is_comma(&self, input_bytes: &[u8]) -> bool {
         self.current_byte(input_bytes) == b','
+    }
+
+    pub fn is_dot(&self, input_bytes: &[u8]) -> bool {
+        self.current_byte(input_bytes) == b'.'
     }
 
     pub fn get_line(&mut self, input_bytes: &[u8]) -> Vec<Token> {
@@ -342,6 +353,8 @@ impl<'a> Tokenizer {
         self.position = 0;
         result
     }
+    
+
 }
 
 #[test]
@@ -362,10 +375,12 @@ pub struct Parser {
     tokenizer: Tokenizer,
     position: usize,
     tokens: Vec<Token>,
+    current_line: usize,
 }
 
 impl Parser {
     pub fn new(source: String) -> Parser {
+        println!("{}", source);
         let mut tokenizer = Tokenizer::new();
         let input_bytes = source.as_bytes();
         // TODO: I is probably better not to parse all at once
@@ -375,6 +390,7 @@ impl Parser {
             tokenizer,
             position: 0,
             tokens,
+            current_line: 1,
         }
     }
 
@@ -410,6 +426,8 @@ impl Parser {
             | Token::GreaterThanOrEqual => (10, Associativity::Left),
             Token::Plus | Token::Minus => (20, Associativity::Left),
             Token::Mul | Token::Div => (30, Associativity::Left),
+            // TODO: No idea what this should be
+            Token::Dot => (40, Associativity::Left),
             _ => (0, Associativity::Left),
         }
     }
@@ -519,7 +537,7 @@ impl Parser {
                 self.consume();
                 self.parse_atom()
             }
-            _ => panic!("Expected atom {}", self.get_token_repr()),
+            _ => panic!("Expected atom {} at line {}", self.get_token_repr(), self.current_line),
         }
     }
 
@@ -555,6 +573,9 @@ impl Parser {
     }
 
     fn consume(&mut self) {
+        if self.is_newline() {
+            self.increment_line();
+        }
         self.position += 1;
     }
 
@@ -685,7 +706,7 @@ impl Parser {
         if self.is_close_curly() {
             self.consume();
         } else {
-            panic!("Expected close curly got {:?}", self.get_token_repr());
+            panic!("Expected close curly got {:?} at line {}", self.get_token_repr(), self.current_line);
         }
     }
 
@@ -865,6 +886,17 @@ impl Parser {
                 left: Box::new(lhs),
                 right: Box::new(rhs),
             },
+            Token::Dot => {
+                assert!(matches!(rhs, Ast::Variable(_)));
+                let rhs = match rhs {
+                    Ast::Variable(name) => Ast::Identifier(name),
+                    _ => panic!("Not a variable"),
+                };
+                Ast::PropertyAccess {
+                    object: Box::new(lhs),
+                    property: Box::new(rhs),
+                }
+            },
             _ => panic!("Not a binary operator"),
         }
     }
@@ -887,12 +919,26 @@ impl Parser {
         if self.is_colon() {
             self.consume();
         } else {
-            panic!("Expected colon");
+            panic!("Expected colon got {} at line {}", self.get_token_repr(), self.current_line);
         }
     }
 
     fn is_colon(&self) -> bool {
         self.current_token() == Token::Colon
+    }
+    
+    fn increment_line(&mut self) {
+        self.current_line += 1;
+    }
+    
+    fn is_newline(&self) -> bool {
+        self.current_token() == Token::NewLine
+    }
+    
+    pub fn from_file(arg: &str) -> Result<Ast, std::io::Error> {
+        let source = std::fs::read_to_string(arg)?;
+        let mut parser = Parser::new(source);
+        Ok(parser.parse())
     }
 
 }

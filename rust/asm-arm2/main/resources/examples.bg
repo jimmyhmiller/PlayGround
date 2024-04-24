@@ -1,0 +1,126 @@
+fn hello(x) {
+    let array = allocate_array(16)
+    array_store(array, 0, 42)
+    array_store(array, x, "hello")
+    let result = array_get(array, x)
+    print(result)
+}
+
+fn count_down(x) {
+    if x == 0 {
+        0
+    } else {
+        count_down(x - 1)
+    }
+}
+
+fn hello2() {
+    let y = fn thing() {
+        42
+    }
+    print(y)
+    print(y())
+}
+
+fn hello_closure() {
+    let x = 42;
+    let z = 2;
+    let y = fn closure_fn() {
+        x + z
+    }
+    print(y())
+}
+
+struct Range {
+    start
+    end
+}
+
+struct OtherStruct {
+    x
+    y
+}
+
+fn range(start, end) {
+    Range {
+        start: start,
+        end: end
+    }
+}
+
+fn other_struct(x, y) {
+    OtherStruct {
+        x: x,
+        y: y
+    }
+}
+
+
+fn get_range_start() {
+    let range = range(0, 10);
+    print(range.start)
+}
+
+fn mainThread(depth) {
+    let maxDepth = math_max(6, depth)
+
+    let stretchDepth = maxDepth + 1
+    let check = itemCheck(bottomUpTree(stretchDepth))
+    print("stretch tree of depth ", stretchDepth, "\t check: ", check)
+
+    let longLivedTree = bottomUpTree(maxDepth)
+    depthLoop(4, maxDepth, longLivedTree)
+}
+
+fn depthLoop(depth, maxDepth, longLivedTree) {
+    // TODO: with my current code
+    // this parses as a struct creation
+    // need to think about that.
+    if depth > maxDepth {
+        print("long lived tree of depth ", maxDepth, "\t check: ", itemCheck(longLivedTree))
+    } else {
+        let iterations = 1 << (maxDepth - depth + 4)
+        work(iterations, depth)
+        depthLoop(depth + 2, maxDepth, longLivedTree)
+    }
+}
+
+fn work(iterations, depth) {
+    workHelper(iterations, depth, 0, 0)
+}
+
+fn workHelper(iterations, depth, i, accumCheck) {
+    if i < iterations {
+        let newCheck = accumCheck + itemCheck(bottomUpTree(depth))
+        workHelper(iterations, depth, i + 1, newCheck)
+    } else {
+        print(iterations, "\t trees of depth ", depth, "\t check: ", accumCheck)
+    }
+}
+
+struct TreeNode {
+    left
+    right
+}
+
+fn itemCheck(node) {
+    if node.left == null {
+        1
+    } else {
+        1 + itemCheck(node.left) + itemCheck(node.right)
+    }
+}
+
+fn bottomUpTree(depth) {
+    if depth > 0 {
+        TreeNode {
+            left: bottomUpTree(depth - 1),
+            right: bottomUpTree(depth - 1)
+        }
+    } else {
+        TreeNode {
+            left: null,
+            right: null
+        }
+    }
+}
