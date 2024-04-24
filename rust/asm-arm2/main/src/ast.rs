@@ -59,12 +59,15 @@ pub enum Ast {
     },
     Let(Box<Ast>, Box<Ast>),
     NumberLiteral(i64),
+    // TODO: Should I have both identifier and variable?
+    // When should I have them?
     Identifier(String),
     Variable(String),
     String(String),
     True,
     False,
     StructCreation { name: String, fields: Vec<(String, Ast)> },
+    PropertyAccess { object: Box<Ast>, property: Box<Ast> },
 
 }
 
@@ -386,6 +389,10 @@ impl<'a> AstCompiler<'a> {
                 
 
                 self.ir.tag(struct_ptr.into(), BuiltInTypes::Struct.get_tag())
+            }
+            Ast::PropertyAccess { object, property } => {
+                println!("Got property access!");
+                Value::Null
             }
             Ast::If {
                 condition,
