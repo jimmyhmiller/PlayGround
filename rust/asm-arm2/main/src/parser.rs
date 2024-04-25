@@ -1,6 +1,9 @@
 // Stolen from my edtior, so probably not great
 // Need to deal with failure?
-// Maybe not at the token level?
+// Maybe not at the token level?\
+
+
+// TODO: Parse Null
 
 use crate::ast::Ast;
 
@@ -436,7 +439,7 @@ impl Parser {
     // https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing
     fn parse_expression(&mut self, min_precedence: usize) -> Option<Ast> {
         self.skip_whitespace();
-        let mut lhs = self.parse_atom()?;
+        let mut lhs = self.parse_atom(min_precedence)?;
         self.skip_whitespace();
         // println!("lhs {:?}", lhs);
         // println!("current_token {:?}", self.get_token_repr());
@@ -469,7 +472,7 @@ impl Parser {
         Some(lhs)
     }
 
-    fn parse_atom(&mut self) -> Option<Ast> {
+    fn parse_atom(&mut self, min_precedence: usize) -> Option<Ast> {
         match self.current_token() {
             Token::Fn => {
                 self.to_next_atom();
@@ -490,7 +493,10 @@ impl Parser {
                 self.to_next_non_whitespace();
                 if self.is_open_paren() {
                     Some(self.parse_call(name))
-                } else if self.is_open_curly() {
+                }
+                // TODO: Hack to try and let struct creation work in ambiguous contexts
+                // like if. Need a better way.
+                else if self.is_open_curly() && min_precedence == 0 {
                     Some(self.parse_struct_creation(name))
                 } else {
                     Some(Ast::Variable(name))
@@ -535,7 +541,7 @@ impl Parser {
             }
             Token::NewLine | Token::Spaces(_) | Token::Comment(_) => {
                 self.consume();
-                self.parse_atom()
+                self.parse_atom(min_precedence)
             }
             _ => panic!("Expected atom {} at line {}", self.get_token_repr(), self.current_line),
         }
@@ -810,7 +816,7 @@ impl Parser {
     // but it's an expression
 
     fn parse_if(&mut self) -> Ast {
-        let condition = Box::new(self.parse_expression(0).unwrap());
+        let condition = Box::new(self.parse_expression(1).unwrap());
         let then = self.parse_block();
         self.to_next_non_whitespace();
         if self.is_else() {
