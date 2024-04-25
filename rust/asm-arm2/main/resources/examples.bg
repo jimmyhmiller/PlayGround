@@ -79,6 +79,7 @@ fn depthLoop(depth, maxDepth, longLivedTree) {
     if depth > maxDepth {
         print("long lived tree of depth ", maxDepth, "\t check: ", itemCheck(longLivedTree))
     } else {
+        // TODO: << shouldn't compile. Don't know what it is doing
         let iterations = 1 << (maxDepth - depth + 4)
         work(iterations, depth)
         depthLoop(depth + 2, maxDepth, longLivedTree)

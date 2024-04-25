@@ -137,9 +137,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("array_get", array_get as *const u8)?;
     compiler.add_builtin_function("make_closure", make_closure as *const u8)?;
 
-    // print current directory
-    let current_dir = std::env::current_dir()?;
-    println!("The current directory is {}", current_dir.display());
+
+    // TODO: getting no free registers in MainThread!
     let hello_ast = Parser::from_file("main/resources/examples.bg")?;
 
     println!("{:#?}", hello_ast);
