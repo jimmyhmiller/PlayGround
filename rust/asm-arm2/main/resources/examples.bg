@@ -1,35 +1,43 @@
-// fn hello(x) {
-//     let array = allocate_array(16)
-//     array_store(array, 0, 42)
-//     array_store(array, x, "hello")
-//     let result = array_get(array, x)
-//     print(result)
-// }
+fn a() {
+    b()
+}
 
-// fn count_down(x) {
-//     if x == 0 {
-//         0
-//     } else {
-//         count_down(x - 1)
-//     }
-// }
+fn b() {
+    42
+}
 
-// fn hello2() {
-//     let y = fn thing() {
-//         42
-//     }
-//     print(y)
-//     print(y())
-// }
+fn hello(x) {
+    let array = allocate_array(16)
+    array_store(array, 0, 42)
+    array_store(array, x, "hello")
+    let result = array_get(array, x)
+    print(result)
+}
 
-// fn hello_closure() {
-//     let x = 42;
-//     let z = 2;
-//     let y = fn closure_fn() {
-//         x + z
-//     }
-//     print(y())
-// }
+fn count_down(x) {
+    if x == 0 {
+        0
+    } else {
+        count_down(x - 1)
+    }
+}
+
+fn hello2() {
+    let y = fn thing() {
+        42
+    }
+    print(y)
+    print(y())
+}
+
+fn hello_closure() {
+    let x = 42;
+    let z = 2;
+    let y = fn closure_fn() {
+        x + z
+    }
+    print(y())
+}
 
 struct Range {
     start
@@ -61,6 +69,22 @@ fn get_range_start() {
     print(range.start)
 }
 
+fn math_max(a, b) {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn math_pow(base, exp) {
+    if exp == 0 {
+        1
+    } else {
+        base * math_pow(base, exp - 1)
+    }
+}
+
 fn mainThread(depth) {
     let maxDepth = math_max(6, depth)
 
@@ -69,6 +93,7 @@ fn mainThread(depth) {
     print("stretch tree of depth ", stretchDepth, "\t check: ", check)
 
     let longLivedTree = bottomUpTree(maxDepth)
+
     depthLoop(4, maxDepth, longLivedTree)
 }
 
@@ -81,7 +106,7 @@ fn depthLoop(depth, maxDepth, longLivedTree) {
         print("long lived tree of depth ")
     } else {
         // TODO: << shouldn't compile. Don't know what it is doing
-        let iterations = 1 << (maxDepth - depth + 4)
+        let iterations = math_pow(maxDepth - depth + 4, 2)
         work(iterations, depth)
         depthLoop(depth + 2, maxDepth, longLivedTree)
     }
@@ -108,7 +133,7 @@ struct TreeNode {
 
 fn itemCheck(node) {
     // TODO: replace with null
-    if node.left == 0 {
+    if node.left == null {
         1
     } else {
         1 + itemCheck(node.left) + itemCheck(node.right)
@@ -124,8 +149,8 @@ fn bottomUpTree(depth) {
     } else {
         TreeNode {
             // todo: replace with null
-            left: 0,
-            right: 0
+            left: null,
+            right: null
         }
     }
 }

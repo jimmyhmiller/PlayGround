@@ -1156,8 +1156,8 @@ impl Ir {
         dest.into()
     }
 
-    pub fn function(&mut self, function_index: usize) -> Value {
-        let function = self.assign_new(Value::Function(function_index));
+    pub fn function(&mut self, function_index: Value) -> Value {
+        let function = self.assign_new(function_index);
         function.into()
     }
 

@@ -591,6 +591,7 @@ impl State {
         process: &SBProcess,
         is_stepping: bool,
     ) -> bool {
+        println!("{:?}", thread.selected_frame().function_name());
         if thread.selected_frame().function_name() == Some("debugger_info") {
             let x0 = thread
                 .selected_frame()

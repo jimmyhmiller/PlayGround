@@ -68,6 +68,7 @@ pub enum Ast {
     False,
     StructCreation { name: String, fields: Vec<(String, Ast)> },
     PropertyAccess { object: Box<Ast>, property: Box<Ast> },
+    Null,
 
 }
 
@@ -316,7 +317,7 @@ impl<'a> AstCompiler<'a> {
                     }
                 }
 
-                let function = self.ir.function(function_pointer);
+                let function = self.ir.function(Value::Function(function_pointer));
 
                 self.pop_environment();
                 function
@@ -376,8 +377,6 @@ impl<'a> AstCompiler<'a> {
 
 
                 let struct_ptr = self.ir.assign_new(struct_ptr);
-                let label = self.ir.label("struct");
-                self.ir.write_label(label);
                 let mut offset = 1;
                 self.ir.heap_store_offset(struct_ptr, Value::SignedConstant(struct_id as isize), offset);
                 offset += 1;
@@ -575,7 +574,9 @@ impl<'a> AstCompiler<'a> {
                         args.insert(0, pointer_reg.into());
                     }
                     // TODO: Do an indirect call via jump table
-                    let function_pointer = self.compiler.get_function_pointer(function).unwrap();
+                    let jump_table_pointer = self.compiler.get_jump_table_pointer(function).unwrap();
+                    let jump_table_point_reg = self.ir.assign_new(Value::Pointer(jump_table_pointer.try_into().unwrap()));
+                    let function_pointer = self.ir.load_from_memory(jump_table_point_reg.into(), 0);
     
                     let function = self.ir.function(function_pointer);
                     self.ir.call(function, args)
@@ -623,6 +624,7 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::True => Value::True,
             Ast::False => Value::False,
+            Ast::Null => Value::Null,
         }
     }
 

@@ -3,7 +3,7 @@
 // Maybe not at the token level?\
 
 
-// TODO: Parse Null
+// TODO: Fix parsing parentheses for precedence
 
 use crate::ast::Ast;
 
@@ -36,6 +36,7 @@ pub enum Token {
     Div,
     True,
     False,
+    Null,
     Let,
     Struct,
     Comment((usize, usize)),
@@ -243,6 +244,7 @@ impl<'a> Tokenizer {
             b"/" => Token::Div,
             b"true" => Token::True,
             b"false" => Token::False,
+            b"null" => Token::Null,
             b"let" => Token::Let,
             b"struct" => Token::Struct,
             b"." => Token::Dot,
@@ -521,6 +523,10 @@ impl Parser {
             Token::False => {
                 self.consume();
                 Some(Ast::False)
+            }
+            Token::Null => {
+                self.consume();
+                Some(Ast::Null)
             }
             Token::Let => {
                 self.consume();
