@@ -154,7 +154,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // compiler.print(hello2_result as usize);
 
 
-    let hello_closure_result = compiler.run_function("other_struct", vec![0, 10]);
+    let hello_closure_result = compiler.run_function("mainThread", vec![20]);
     compiler.print(hello_closure_result as usize);
 
    

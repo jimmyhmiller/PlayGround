@@ -396,13 +396,14 @@ impl RegisterAllocator {
     ) -> Register {
         let (start, _end) = self.lifetimes.get(&register).unwrap();
         if index == *start {
-            assert!(!self.allocated_registers.contains_key(&register));
+            // Is it okay that the register is already allocated for the argument?
             if let Some(arg) = register.argument {
                 let reg = lang.arg(arg as u8);
                 self.allocated_registers.insert(register, reg);
                 lang.reserve_register(reg);
                 reg
             } else {
+                assert!(!self.allocated_registers.contains_key(&register));
                 let reg = lang.volatile_register();
                 self.allocated_registers.insert(register, reg);
                 reg
@@ -667,6 +668,8 @@ impl Ir {
     }
 
     pub fn compile(&mut self, name: &str) -> LowLevelArm {
+
+        // println!("{:#?}", self.instructions);
         let mut lang = LowLevelArm::new();
         lang.set_max_locals(self.num_locals);
         // lang.breakpoint();
