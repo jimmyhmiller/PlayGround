@@ -194,7 +194,6 @@ impl<'a> AstCompiler<'a> {
     }
 
     pub fn call_compile(&mut self, ast: &Ast) -> Value {
-        // Does this even work?
         self.context.push(self.current_context.clone());
         self.current_context = self.next_context.clone();
         let result = self.compile_to_ir(ast);
@@ -262,7 +261,7 @@ impl<'a> AstCompiler<'a> {
                     // Not 100% sure about all of this
 
                     for free_variable in self.get_current_env().free_variables.clone().iter(){
-                        let variable = self.get_variable(free_variable).unwrap();
+                        let variable = self.get_variable(free_variable).expect(&format!("Can't find variable {}", free_variable));
                         // we are now going to push these variables onto the stack
                         
                         match variable {

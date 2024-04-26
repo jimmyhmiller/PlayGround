@@ -1,35 +1,35 @@
-fn hello(x) {
-    let array = allocate_array(16)
-    array_store(array, 0, 42)
-    array_store(array, x, "hello")
-    let result = array_get(array, x)
-    print(result)
-}
+// fn hello(x) {
+//     let array = allocate_array(16)
+//     array_store(array, 0, 42)
+//     array_store(array, x, "hello")
+//     let result = array_get(array, x)
+//     print(result)
+// }
 
-fn count_down(x) {
-    if x == 0 {
-        0
-    } else {
-        count_down(x - 1)
-    }
-}
+// fn count_down(x) {
+//     if x == 0 {
+//         0
+//     } else {
+//         count_down(x - 1)
+//     }
+// }
 
-fn hello2() {
-    let y = fn thing() {
-        42
-    }
-    print(y)
-    print(y())
-}
+// fn hello2() {
+//     let y = fn thing() {
+//         42
+//     }
+//     print(y)
+//     print(y())
+// }
 
-fn hello_closure() {
-    let x = 42;
-    let z = 2;
-    let y = fn closure_fn() {
-        x + z
-    }
-    print(y())
-}
+// fn hello_closure() {
+//     let x = 42;
+//     let z = 2;
+//     let y = fn closure_fn() {
+//         x + z
+//     }
+//     print(y())
+// }
 
 struct Range {
     start
@@ -77,7 +77,8 @@ fn depthLoop(depth, maxDepth, longLivedTree) {
     // this parses as a struct creation
     // need to think about that.
     if depth > maxDepth {
-        print("long lived tree of depth ", maxDepth, "\t check: ", itemCheck(longLivedTree))
+        // print("long lived tree of depth ", maxDepth, "\t check: ", itemCheck(longLivedTree))
+        print("long lived tree of depth ")
     } else {
         // TODO: << shouldn't compile. Don't know what it is doing
         let iterations = 1 << (maxDepth - depth + 4)
@@ -95,7 +96,8 @@ fn workHelper(iterations, depth, i, accumCheck) {
         let newCheck = accumCheck + itemCheck(bottomUpTree(depth))
         workHelper(iterations, depth, i + 1, newCheck)
     } else {
-        print(iterations, "\t trees of depth ", depth, "\t check: ", accumCheck)
+        // print(iterations, "\t trees of depth ", depth, "\t check: ", accumCheck)
+        print(iterations)
     }
 }
 
@@ -105,7 +107,8 @@ struct TreeNode {
 }
 
 fn itemCheck(node) {
-    if node.left == null {
+    // TODO: replace with null
+    if node.left == 0 {
         1
     } else {
         1 + itemCheck(node.left) + itemCheck(node.right)
@@ -120,8 +123,9 @@ fn bottomUpTree(depth) {
         }
     } else {
         TreeNode {
-            left: null,
-            right: null
+            // todo: replace with null
+            left: 0,
+            right: 0
         }
     }
 }

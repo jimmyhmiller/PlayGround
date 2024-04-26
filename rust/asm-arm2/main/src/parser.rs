@@ -383,7 +383,6 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(source: String) -> Parser {
-        println!("{}", source);
         let mut tokenizer = Tokenizer::new();
         let input_bytes = source.as_bytes();
         // TODO: I is probably better not to parse all at once
