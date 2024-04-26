@@ -8,10 +8,11 @@ use crate::{ast::Ast, debugger, ir::{BuiltInTypes, StringValue, Value}, parser::
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     name: String,
-    offset: usize,
+    offset_or_pointer: usize,
     jump_table_offset: usize,
     is_foreign: bool,
     pub is_builtin: bool,
+    is_defined: bool,
 }
 
 #[derive(Debug)]
@@ -158,10 +159,11 @@ impl Compiler {
         let jump_table_offset = self.add_jump_table_entry(index, offset)?;
         self.functions.push(Function {
             name: name.to_string(),
-            offset,
+            offset_or_pointer: offset,
             jump_table_offset,
             is_foreign: true,
             is_builtin: false,
+            is_defined: true,
         });
         debugger(Message {
             kind: "foreign_function".to_string(),
@@ -183,10 +185,11 @@ impl Compiler {
         let jump_table_offset = self.add_jump_table_entry(index, offset)?;
         self.functions.push(Function {
             name: name.to_string(),
-            offset,
+            offset_or_pointer: offset,
             jump_table_offset,
             is_foreign: true,
             is_builtin: true,
+            is_defined: true,
         });
         debugger(Message {
             kind: "builtin_function".to_string(),
@@ -230,10 +233,11 @@ impl Compiler {
         let jump_table_offset = self.add_jump_table_entry(index, 0)?;
         let function = Function {
             name: name.to_string(),
-            offset: 0,
+            offset_or_pointer: 0,
             jump_table_offset,
             is_foreign: false,
-            is_builtin: true,
+            is_builtin: false,
+            is_defined: false,
         };
         self.functions.push(function.clone());
         Ok(function)
@@ -245,10 +249,11 @@ impl Compiler {
         let index = self.functions.len();
         self.functions.push(Function {
             name: name.to_string(),
-            offset,
+            offset_or_pointer: offset,
             jump_table_offset: 0,
             is_foreign: false,
             is_builtin: false,
+            is_defined: true,
         });
         let function_pointer = Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
         let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
@@ -260,12 +265,14 @@ impl Compiler {
     pub fn overwrite_function(&mut self, index: usize, code: &[u8]) -> Result<usize, Box<dyn Error>> {
         let offset = self.add_code(code)?;
         let function = &mut self.functions[index];
-        function.offset = offset;
-        let function_pointer = Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
-        let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
+        function.offset_or_pointer = offset;
+        let jump_table_offset = function.jump_table_offset;
+        let function_clone = function.clone();
+        let function_pointer = self.get_function_pointer(function_clone).unwrap();
+        self.modify_jump_table_entry(jump_table_offset, function_pointer)?;
         let function = &mut self.functions[index];
-        function.jump_table_offset = jump_table_offset;
-        Ok(jump_table_offset)
+        function.is_defined = true;
+        Ok(function.jump_table_offset)
     }
 
     pub fn get_function_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
@@ -273,10 +280,14 @@ impl Compiler {
         // if it is a foreign function, return the offset
         // if it is a local function, return the offset + the start of code_memory
         if function.is_foreign {
-            Ok(function.offset)
+            Ok(function.offset_or_pointer)
         } else {
-            Ok(function.offset + self.code_memory.as_ref().unwrap().as_ptr() as usize)
+            Ok(function.offset_or_pointer + self.code_memory.as_ref().unwrap().as_ptr() as usize)
         }
+    }
+    
+    pub fn get_jump_table_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
+        Ok(function.jump_table_offset * 8 + self.jump_table.as_ref().unwrap().as_ptr() as usize)
     }
 
     pub fn add_jump_table_entry(
@@ -285,21 +296,39 @@ impl Compiler {
         pointer: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let jump_table_offset = self.jump_table_offset;
-        self.jump_table_offset += 1;
         let memory = self.jump_table.take();
         let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
         let buffer = &mut memory[jump_table_offset * 8..];
+        let pointer = BuiltInTypes::Function.tag(pointer as isize) as usize;
         // Write full usize to buffer
         for (index, byte) in pointer.to_le_bytes().iter().enumerate() {
             buffer[index] = *byte;
         }
         let mem = memory.make_read_only().unwrap_or_else(|(_map, e)| {
-            panic!("Failed to make mmap executable: {}", e);
+            panic!("Failed to make mmap read_only: {}", e);
         });
         self.jump_table_offset += 1;
         self.jump_table = Some(mem);
         Ok(jump_table_offset)
     }
+
+    fn modify_jump_table_entry(&mut self, jump_table_offset: usize, function_pointer: usize) -> Result<usize, Box<dyn Error>>{
+        let memory = self.jump_table.take();
+        let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
+        let buffer = &mut memory[jump_table_offset * 8..];
+
+        let function_pointer = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
+        // Write full usize to buffer
+        for (index, byte) in function_pointer.to_le_bytes().iter().enumerate() {
+            buffer[index] = *byte;
+        }
+        let mem = memory.make_read_only().unwrap_or_else(|(_map, e)| {
+            panic!("Failed to make mmap read_only: {}", e);
+        });
+        self.jump_table = Some(mem);
+        Ok(jump_table_offset)
+    }
+
 
     pub fn add_code(&mut self, code: &[u8]) -> Result<usize, Box<dyn Error>> {
         let start = self.code_offset;
@@ -336,7 +365,7 @@ impl Compiler {
             &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
-        let start = usize::from_le_bytes(bytes) as *const u8;
+        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
         let f: fn() -> u64 = unsafe { std::mem::transmute(start) };
         let result = f();
         // TODO: When running in release mode, this fails here.
@@ -350,7 +379,7 @@ impl Compiler {
             &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
-        let start = usize::from_le_bytes(bytes) as *const u8;
+        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
         let f: fn(u64) -> u64 = unsafe { std::mem::transmute(start) };
         let arg = BuiltInTypes::Int.tag(arg as isize) as u64;
         let result = f(arg);
@@ -370,7 +399,7 @@ impl Compiler {
             &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
-        let start = usize::from_le_bytes(bytes);
+        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes));
         let arg1 = BuiltInTypes::Int.tag(arg1 as isize) as u64;
         let arg2 = BuiltInTypes::Int.tag(arg2 as isize) as u64;
         let f: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(start) };
@@ -563,7 +592,7 @@ impl Compiler {
 
     pub fn get_function_by_pointer(&self, value: usize) -> Option<&Function> {
         let offset = value - self.code_memory.as_ref().unwrap().as_ptr() as usize;
-        self.functions.iter().find(|f| f.offset == offset)
+        self.functions.iter().find(|f| f.offset_or_pointer == offset)
     }
 
     // TODO: Call this
@@ -632,4 +661,13 @@ impl Compiler {
         repr
 
     }
+    
+    pub fn check_functions(&self) {
+        let undefined_functions: Vec<&Function> = self.functions.iter().filter(|f| !f.is_defined).collect();
+        if !undefined_functions.is_empty() {
+            panic!("Undefined functions: {:?}", undefined_functions.iter().map(|f| f.name.clone()).collect::<Vec<String>>());
+        }
+    }
+    
+
 }

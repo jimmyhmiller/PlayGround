@@ -50,6 +50,7 @@ pub unsafe extern "C" fn debugger_info(buffer: *const u8, length: usize) {
 }
 
 pub fn debugger(message: Message) {
+    // println!("{:?}", message);
     let message = message.to_binary();
     let ptr = message.as_ptr();
     let length = message.len();
@@ -139,11 +140,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 
     // TODO: getting no free registers in MainThread!
-    let hello_ast = Parser::from_file("main/resources/examples.bg")?;
+    let hello_ast = Parser::from_file("/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/main/resources/examples.bg")?;
 
-    println!("{:#?}", hello_ast);
+    // println!("{:#?}", hello_ast);
 
     compiler.compile_ast(hello_ast)?;
+
+    compiler.check_functions();
 
     // let hello_result = compiler.run_function("hello", vec![1]);
     // compiler.print(hello_result as usize);
