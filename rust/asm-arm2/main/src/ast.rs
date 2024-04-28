@@ -336,6 +336,7 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::StructCreation { name, fields } => {
                 let field_results = fields.iter().map(|field| {
+                    self.not_tail_position();
                     self.call_compile(&field.1)
                 }).collect::<Vec<_>>();
 
@@ -389,8 +390,16 @@ impl<'a> AstCompiler<'a> {
                 self.ir.tag(struct_ptr.into(), BuiltInTypes::Struct.get_tag())
             }
             Ast::PropertyAccess { object, property } => {
-                println!("Got property access!");
-                Value::Null
+                let object = self.call_compile(object.as_ref());
+                let object = self.ir.assign_new(object);
+                let property = if let Ast::Identifier(name) = property.as_ref() {
+                    name.clone()
+                } else {
+                    panic!("Expected identifier")
+                };
+                let constant_ptr = self.string_constant(property);
+                let constant_ptr = self.ir.assign_new(constant_ptr);
+                self.call_builtin("property_access", vec![object.into(), constant_ptr.into()])
             }
             Ast::If {
                 condition,
@@ -696,6 +705,19 @@ impl<'a> AstCompiler<'a> {
     fn has_free_variables(&self) -> bool {
         let current_env = self.get_current_env();
         !current_env.free_variables.is_empty()
+    }
+    
+    fn call_builtin(&mut self, arg: &str, args: Vec<Value>) -> Value {
+        let mut args = args;
+        let function = self.compiler.find_function(arg).unwrap();
+        assert!(function.is_builtin);
+        let function = self.compiler.get_function_pointer(function).unwrap();
+        let function = self.ir.assign_new(function);
+        let pointer_reg = self.ir.volatile_register();
+        let pointer: Value = self.compiler.get_compiler_ptr().into();
+        self.ir.assign(pointer_reg, pointer);
+        args.insert(0, pointer_reg.into());
+        self.ir.call(function.into(), args)
     }
 
    
