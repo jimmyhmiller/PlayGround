@@ -53,6 +53,7 @@ pub enum BuiltInTypes {
     Closure,
     Struct,
     Array,
+    Null,
 }
 
 impl BuiltInTypes {
@@ -62,6 +63,7 @@ impl BuiltInTypes {
         value | tag
     }
 
+    // TODO: Given this scheme how do I represent null?
     pub fn get_tag(&self) -> isize {
         match self {
             BuiltInTypes::Int => 0b000,
@@ -72,6 +74,7 @@ impl BuiltInTypes {
             BuiltInTypes::Closure => 0b101,
             BuiltInTypes::Struct => 0b110,
             BuiltInTypes::Array => 0b111,
+            BuiltInTypes::Null => 0b111,
         }
     }
 
@@ -80,6 +83,9 @@ impl BuiltInTypes {
     }
 
     pub fn get_kind(pointer: usize) -> Self {
+        if pointer == 0b111 {
+            return BuiltInTypes::Null;
+        }
         match pointer & 0b111 {
             0b000 => BuiltInTypes::Int,
             0b001 => BuiltInTypes::Float,
@@ -103,6 +109,7 @@ impl BuiltInTypes {
             BuiltInTypes::Struct => false,
             BuiltInTypes::Array => false,
             BuiltInTypes::Closure => false,
+            BuiltInTypes::Null => true,
         }
     }
 
@@ -822,7 +829,7 @@ impl Ir {
                     }
                     Value::Null => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
-                        lang.mov_64(register, 0 as isize);
+                        lang.mov_64(register, 0b111 as isize);
                     }
                 },
                 Instruction::LoadConstant(dest, val) => {
@@ -1015,7 +1022,7 @@ impl Ir {
                         panic!("Should we be returing a raw value?")
                     }
                     Value::Null => {
-                        lang.mov_64(lang.ret_reg(), 0);
+                        lang.mov_64(lang.ret_reg(), 0b111);
                         lang.jump(exit);
                     }
                     Value::Local(local) => {
@@ -1313,47 +1320,14 @@ pub fn heap_test() -> Ir {
 //     ir
 // }
 
-pub extern "C" fn print_value(compiler: *mut Compiler, value: usize) {
-    let kind = BuiltInTypes::get_kind(value);
-    match kind {
-        BuiltInTypes::Int => {
-            let value = BuiltInTypes::untag(value);
-            println!("{}", value);
-        }
-        BuiltInTypes::Float => {
-            let value = BuiltInTypes::untag(value);
-            println!("{}", value);
-        },
-        BuiltInTypes::String => {
-            let value = BuiltInTypes::untag(value);
-            let string_value: &StringValue = unsafe { std::mem::transmute(value) };
-            let string = &string_value.str;
-            println!("{}", string);
-        },
-        BuiltInTypes::Bool => {
-            let value = BuiltInTypes::untag(value);
-            println!("{}", value == 1);
-        },
-        BuiltInTypes::Function => {
-            unsafe {
-                let value = BuiltInTypes::untag(value);
-                let function = (*compiler).get_function_by_pointer(value);
-                println!("{}", value);
-                println!("Function {:?}" , function);
-            }
-        },
-        BuiltInTypes::Closure => {
-            println!("Closure");
-        },
-        BuiltInTypes::Struct => {
-            println!("Struct");
-        },
-        BuiltInTypes::Array => {
-            println!("Array");
-        },
-    }
-
+pub extern "C" fn println_value(compiler: &Compiler, value: usize) {
+    compiler.println(value);
 }
+
+pub extern "C" fn print_value(compiler: &Compiler, value: usize) {
+    compiler.print(value);
+}
+
 
 
 // TODO:

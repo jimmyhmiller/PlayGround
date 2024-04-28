@@ -69,6 +69,11 @@ fn get_range_start() {
     print(range.start)
 }
 
+struct TreeNode {
+    left
+    right
+}
+
 fn math_max(a, b) {
     if a > b {
         a
@@ -90,49 +95,49 @@ fn mainThread(depth) {
 
     let stretchDepth = maxDepth + 1
     let check = itemCheck(bottomUpTree(stretchDepth))
-    print("stretch tree of depth ", stretchDepth, "\t check: ", check)
+    print("stretch tree of depth ")
+    print(stretchDepth)
+    print(" check: ")
+    println(check)
 
     let longLivedTree = bottomUpTree(maxDepth)
-
-    depthLoop(4, maxDepth, longLivedTree)
+    loopThroughDepths(4, maxDepth, longLivedTree)
 }
 
-fn depthLoop(depth, maxDepth, longLivedTree) {
-    // TODO: with my current code
-    // this parses as a struct creation
-    // need to think about that.
+fn loopThroughDepths(depth, maxDepth, longLivedTree) {
     if depth > maxDepth {
-        // print("long lived tree of depth ", maxDepth, "\t check: ", itemCheck(longLivedTree))
         print("long lived tree of depth ")
+        print(maxDepth)
+        print(" check: ")
+        println(itemCheck(longLivedTree))
     } else {
-        // TODO: << shouldn't compile. Don't know what it is doing
-        let iterations = math_pow(maxDepth - depth + 4, 2)
-        work(iterations, depth)
-        depthLoop(depth + 2, maxDepth, longLivedTree)
+        let iterations = math_pow(2, maxDepth - depth + 4)
+        let check = doWork(iterations, depth)
+        print(iterations)
+        print(" trees of depth ")
+        print(depth)
+        print(" check: ")
+        println(check)
+        loopThroughDepths(depth + 2, maxDepth, longLivedTree)
     }
 }
 
-fn work(iterations, depth) {
-    workHelper(iterations, depth, 0, 0)
+fn doWork(iterations, depth) {
+    doWorkHelper(iterations, depth, 0, 0)
 }
 
-fn workHelper(iterations, depth, i, accumCheck) {
+fn doWorkHelper(iterations, depth, i, accumCheck) {
     if i < iterations {
         let newCheck = accumCheck + itemCheck(bottomUpTree(depth))
-        workHelper(iterations, depth, i + 1, newCheck)
+        doWorkHelper(iterations, depth, i + 1, newCheck)
     } else {
-        // print(iterations, "\t trees of depth ", depth, "\t check: ", accumCheck)
-        print(iterations)
+        accumCheck
     }
 }
 
-struct TreeNode {
-    left
-    right
-}
+
 
 fn itemCheck(node) {
-    // TODO: replace with null
     if node.left == null {
         1
     } else {
@@ -148,7 +153,6 @@ fn bottomUpTree(depth) {
         }
     } else {
         TreeNode {
-            // todo: replace with null
             left: null,
             right: null
         }

@@ -120,6 +120,11 @@ fn make_closure(compiler: *mut Compiler, function: usize, num_free: usize, free_
     compiler.make_closure(function, free_variables).unwrap()
 }
 
+fn property_access(compiler: *mut Compiler, struct_pointer: usize, str_constant_ptr: usize) -> usize {
+    let compiler = unsafe { &mut *compiler };
+    compiler.property_access(struct_pointer, str_constant_ptr)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut compiler = Compiler::new();
 
@@ -131,12 +136,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
     // Very inefficient way to do array stuff
     // but working
+    compiler.add_builtin_function("println", ir::println_value as *const u8)?;
     compiler.add_builtin_function("print", ir::print_value as *const u8)?;
     compiler.add_builtin_function("allocate_array", allocate_array as *const u8)?;
     compiler.add_builtin_function("allocate_struct", allocate_struct as *const u8)?;
     compiler.add_builtin_function("array_store", array_store as *const u8)?;
     compiler.add_builtin_function("array_get", array_get as *const u8)?;
     compiler.add_builtin_function("make_closure", make_closure as *const u8)?;
+    compiler.add_builtin_function("property_access", property_access as *const u8)?;
 
 
     // TODO: getting no free registers in MainThread!
@@ -157,8 +164,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // compiler.print(hello2_result as usize);
 
 
-    let hello_closure_result = compiler.run_function("mainThread", vec![20]);
-    compiler.print(hello_closure_result as usize);
+    let hello_closure_result = compiler.run_function("mainThread", vec![21]);
+    compiler.println(hello_closure_result as usize);
 
    
 

@@ -3,7 +3,7 @@ use std::{collections::HashMap, error::Error, slice::{from_raw_parts, from_raw_p
 
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
-use crate::{ast::Ast, debugger, ir::{BuiltInTypes, StringValue, Value}, parser::Parser, Data, Message};
+use crate::{ast::Ast, debugger, ir::{println_value, BuiltInTypes, StringValue, Value}, parser::Parser, Data, Message};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
@@ -57,7 +57,7 @@ impl StructManager {
         self.structs.get(*id).map(|x| (*id, x))
     }
     
-    fn get_by_id(&self, type_id: usize) -> Option<&Struct> {
+    pub fn get_by_id(&self, type_id: usize) -> Option<&Struct> {
         self.structs.get(type_id)
     }
 }
@@ -76,6 +76,8 @@ pub struct Compiler {
     // Need much better system obviously
     heap: Option<MmapMut>,
     heap_offset: usize,
+    // This is broken because I'm trying to do raw pointers
+    // but vecs can resize
     string_constants: Vec<StringValue>,
 }
 
@@ -116,7 +118,7 @@ impl Compiler {
             structs: StructManager::new(),
             functions: Vec::new(),
             heap: Some(
-                MmapOptions::new(MmapOptions::page_size() * 100)
+                MmapOptions::new(MmapOptions::page_size() * 10000000)
                     .unwrap()
                     .map()
                     .unwrap()
@@ -409,6 +411,7 @@ impl Compiler {
     pub fn get_repr(&self, value: usize) -> String {
         let tag = BuiltInTypes::get_kind(value);
         match tag {
+            BuiltInTypes::Null => "null".to_string(),
             BuiltInTypes::Int => {
                 let value = BuiltInTypes::untag(value);
                 value.to_string()
@@ -416,7 +419,7 @@ impl Compiler {
             BuiltInTypes::Float => todo!(),
             BuiltInTypes::String => {
                 let value = BuiltInTypes::untag(value);
-                let string = unsafe { &*(value as *const StringValue) };
+                let string = &self.string_constants[value];
                 string.str.clone()
             }
             BuiltInTypes::Bool => {
@@ -472,9 +475,12 @@ impl Compiler {
         }
     }
 
-    pub fn print(&self, value: usize) {
-        let tag = BuiltInTypes::get_kind(value);
+    pub fn println(&self, value: usize) {
         println!("{}", self.get_repr(value));
+    }
+
+    pub fn print(&self, value: usize) {
+        print!("{}", self.get_repr(value));
     }
 
     pub fn array_store(
@@ -582,8 +588,8 @@ impl Compiler {
 
     pub fn add_string(&mut self, string_value: StringValue) -> Value {
         self.string_constants.push(string_value);
-        let last = self.string_constants.last().unwrap();
-        return Value::StringConstantPtr(last as *const StringValue as usize)
+        let offset = self.string_constants.len() - 1;
+        return Value::StringConstantPtr(offset);
     }
 
     pub(crate) fn find_function(&self, name: &str) -> Option<Function> {
@@ -631,6 +637,30 @@ impl Compiler {
         }
         Ok(BuiltInTypes::Closure.tag(heap_pointer as isize) as usize)
     }
+
+    pub fn property_access(&self, struct_pointer: usize, str_constant_ptr: usize) -> usize {
+        unsafe {
+            let struct_pointer = BuiltInTypes::untag(struct_pointer);
+            let struct_pointer = struct_pointer as *const u8;
+            let size = *(struct_pointer as *const usize);
+            let str_constant_ptr: usize = BuiltInTypes::untag(str_constant_ptr);
+            let string_value = &self.string_constants[str_constant_ptr];
+            let string = &string_value.str;
+            let struct_pointer = struct_pointer.add(8);
+            let data = std::slice::from_raw_parts(struct_pointer, size);
+            // type id is the first 8 bytes of data
+            let type_id = usize::from_le_bytes(data[0..8].try_into().unwrap());
+            let type_id = BuiltInTypes::untag(type_id);
+            let struct_value = self.structs.get_by_id(type_id as usize).unwrap();
+            let field_index = struct_value.fields.iter().position(|f| f == string).unwrap();
+            let field_index = (field_index + 1) * 8;
+            let field = &data[field_index..field_index + 8];
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(field);
+            let value = usize::from_le_bytes(bytes);
+            value
+        }
+    }
     
     pub fn add_struct(&mut self, s: Struct) {
         self.structs.insert(s.name.clone(), s);
@@ -668,6 +698,9 @@ impl Compiler {
             panic!("Undefined functions: {:?}", undefined_functions.iter().map(|f| f.name.clone()).collect::<Vec<String>>());
         }
     }
+    
+
+
     
 
 }
