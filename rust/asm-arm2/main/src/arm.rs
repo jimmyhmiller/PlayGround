@@ -1,5 +1,5 @@
 use asm::arm::{
-    ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector, SP, X0, X19, X20, X21, X22, X23, X24, X25, X26, X29, X3, X30, ZERO_REGISTER
+    ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector, SP, X0, X10, X11, X12, X13, X14, X15, X19, X20, X21, X22, X23, X24, X25, X26, X29, X3, X30, X9, ZERO_REGISTER
 };
 
 use std::collections::HashMap;
@@ -339,7 +339,7 @@ impl Default for LowLevelArm {
 
 impl LowLevelArm {
     pub fn new() -> Self {
-        let canonical_volatile_registers = vec![X26, X25, X24, X23, X22, X21, X20, X19];
+        let canonical_volatile_registers = vec![X9, X10, X11, X12, X13, X14, X15];
         LowLevelArm {
             instructions: vec![],
             label_locations: HashMap::new(),
@@ -364,6 +364,7 @@ impl LowLevelArm {
     pub fn prelude(&mut self, offset: i32) {
         // self.breakpoint();
         // 0 is a placeholder we will patch later
+        // TODO: make better/faster/fewer instructions
         self.sub_stack_pointer(-self.max_locals);
         self.store_pair(X29, X30, SP, offset);
         self.mov_reg(X29, SP);
@@ -557,6 +558,14 @@ impl LowLevelArm {
         self.patch_labels();
         self.patch_prelude_and_epilogue();
         &self.instructions
+    }
+
+    pub fn compile_directly(&mut self) -> Vec<u8> {
+        let bytes = self.instructions
+            .iter()
+            .flat_map(|x| x.encode().to_le_bytes())
+            .collect();
+        bytes
     }
 
     pub fn compile_to_bytes(&mut self) -> Vec<u8> {
@@ -766,7 +775,7 @@ impl LowLevelArm {
         result
     }
 
-    fn add_stack_pointer(&mut self, bytes: i32) {
+    pub fn add_stack_pointer(&mut self, bytes: i32) {
         self.instructions.push(ArmAsm::AddAddsubImm {
             sf: SP.sf(),
             rn: SP,
@@ -776,7 +785,7 @@ impl LowLevelArm {
         });
     }
 
-    fn sub_stack_pointer(&mut self, bytes: i32) {
+   pub fn sub_stack_pointer(&mut self, bytes: i32) {
         self.instructions.push(ArmAsm::SubAddsubImm {
             sf: SP.sf(),
             rn: SP,

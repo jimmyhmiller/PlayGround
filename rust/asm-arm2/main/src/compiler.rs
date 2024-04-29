@@ -1,9 +1,20 @@
 use core::fmt;
-use std::{collections::HashMap, error::Error, slice::{from_raw_parts, from_raw_parts_mut}};
+use std::{
+    collections::HashMap,
+    error::Error,
+    mem,
+    slice::{from_raw_parts, from_raw_parts_mut},
+};
 
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
-use crate::{ast::Ast, debugger, ir::{println_value, BuiltInTypes, StringValue, Value}, parser::Parser, Data, Message};
+use crate::{
+    ast::Ast,
+    debugger,
+    ir::{println_value, BuiltInTypes, StringValue, Value},
+    parser::Parser,
+    Data, Message,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
@@ -56,12 +67,88 @@ impl StructManager {
         let id = self.name_to_id.get(name)?;
         self.structs.get(*id).map(|x| (*id, x))
     }
-    
+
     pub fn get_by_id(&self, type_id: usize) -> Option<&Struct> {
         self.structs.get(type_id)
     }
 }
 
+struct Heap {
+    segments: Vec<Option<MmapMut>>,
+    heap_offset: usize,
+    segment_offset: usize,
+    segment_size: usize,
+}
+
+impl Heap {
+    fn new() -> Self {
+        let segment_size = MmapOptions::page_size() * 10;
+        Self {
+            segments: vec![Some(
+                MmapOptions::new(segment_size)
+                    .unwrap()
+                    .map()
+                    .unwrap()
+                    .make_mut()
+                    .unwrap_or_else(|(_map, e)| {
+                        panic!("Failed to make mmap executable: {}", e);
+                    }),
+            )],
+            heap_offset: 0,
+            segment_offset: 0,
+            segment_size,
+        }
+    }
+
+    fn segment_pointer(&self, arg: usize) -> usize {
+        let segment = self.segments.get(arg as usize).unwrap();
+        segment.as_ref().unwrap().as_ptr() as usize
+    }
+
+    // TODO: I need garbage collection now
+    // In order to do that I need to know what is on the stack
+    // and I need to grab things from registers
+    // Once I have those, I can walk references and mark things.
+    // Then I could try moving things
+    // Or I could keep a list of free pages or something.
+
+    fn allocate(&mut self, bytes: usize) -> Result<usize, Box<dyn Error>> {
+        if self.heap_offset + bytes + 8 > self.segment_size {
+            self.segment_offset += 1;
+            self.segments.push(Some(
+                MmapOptions::new(self.segment_size)
+                    .unwrap()
+                    .map()
+                    .unwrap()
+                    .make_mut()
+                    .unwrap_or_else(|(_map, e)| {
+                        panic!("Failed to make mmap executable: {}", e);
+                    }),
+            ));
+            let segment_pointer = self.segment_pointer(self.segment_offset);
+            debugger(Message {
+                kind: "HeapSegmentPointer".to_string(),
+                data: Data::HeapSegmentPointer {
+                    pointer: segment_pointer,
+                },
+            });
+            self.heap_offset = 0;
+        }
+
+        let size = bytes * 8;
+        let memory = mem::replace(&mut self.segments[self.segment_offset], None);
+        let mut memory = memory.unwrap();
+        let buffer = &mut memory[self.heap_offset..];
+        // write the size of the object to the first 8 bytes
+        for (index, byte) in size.to_le_bytes().iter().enumerate() {
+            buffer[index] = *byte;
+        }
+        self.heap_offset += size + 8;
+        let pointer = buffer.as_ptr() as usize;
+        self.segments[self.segment_offset] = Some(memory);
+        Ok(pointer)
+    }
+}
 
 pub struct Compiler {
     code_offset: usize,
@@ -73,11 +160,8 @@ pub struct Compiler {
     structs: StructManager,
     functions: Vec<Function>,
     #[allow(dead_code)]
-    // Need much better system obviously
-    heap: Option<MmapMut>,
-    heap_offset: usize,
-    // This is broken because I'm trying to do raw pointers
-    // but vecs can resize
+    heap: Heap,
+    stack: Option<MmapMut>,
     string_constants: Vec<StringValue>,
 }
 
@@ -117,38 +201,29 @@ impl Compiler {
             jump_table_offset: 0,
             structs: StructManager::new(),
             functions: Vec::new(),
-            heap: Some(
-                MmapOptions::new(MmapOptions::page_size() * 10000000)
+            heap: Heap::new(),
+            stack: Some(
+                MmapOptions::new(8 * 1024 * 1024)
                     .unwrap()
-                    .map()
-                    .unwrap()
-                    .make_mut()
-                    .unwrap_or_else(|(_map, e)| {
-                        panic!("Failed to make mmap executable: {}", e);
-                    }),
+                    .map_mut()
+                    .unwrap(),
             ),
-            heap_offset: 0,
             string_constants: vec![],
         }
     }
 
     pub fn get_heap_pointer(&self) -> usize {
-        self.heap.as_ref().unwrap().as_ptr() as usize
+        // TODO: I need to tell my debugger about all the heap pointers
+        self.heap.segment_pointer(0)
     }
 
     pub fn allocate(&mut self, bytes: usize) -> Result<usize, Box<dyn Error>> {
-        let size = bytes * 8;
-        let memory = self.heap.take();
-        let mut memory = memory.unwrap();
-        let buffer = &mut memory[self.heap_offset..];
-        // write the size of the object to the first 8 bytes
-        for (index, byte) in size.to_le_bytes().iter().enumerate() {
-            buffer[index] = *byte;
-        }
-        self.heap_offset += size + 8;
-        let pointer = buffer.as_ptr() as usize;
-        self.heap = Some(memory);
-        Ok(pointer)
+        self.heap.allocate(bytes)
+    }
+
+    fn get_stack_pointer(&self) -> usize {
+        // I think I want the end of the stack
+        (self.stack.as_ref().unwrap().as_ptr() as usize) + (8 * 1024 * 1024)
     }
 
     pub fn add_foreign_function(
@@ -171,8 +246,9 @@ impl Compiler {
             kind: "foreign_function".to_string(),
             data: Data::ForeignFunction {
                 name: name.to_string(),
-                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap()
-            }
+                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone())
+                    .unwrap(),
+            },
         });
         Ok(self.functions.len() - 1)
     }
@@ -197,8 +273,9 @@ impl Compiler {
             kind: "builtin_function".to_string(),
             data: Data::BuiltinFunction {
                 name: name.to_string(),
-                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap()
-            }
+                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone())
+                    .unwrap(),
+            },
         });
         Ok(self.functions.len() - 1)
     }
@@ -220,7 +297,7 @@ impl Compiler {
                 name: name.to_string(),
                 pointer: function_pointer,
                 len: code.len(),
-            }
+            },
         });
         Ok(function_pointer)
     }
@@ -246,7 +323,6 @@ impl Compiler {
     }
 
     pub fn add_function(&mut self, name: &str, code: &[u8]) -> Result<usize, Box<dyn Error>> {
-
         let offset = self.add_code(code)?;
         let index = self.functions.len();
         self.functions.push(Function {
@@ -257,14 +333,19 @@ impl Compiler {
             is_builtin: false,
             is_defined: true,
         });
-        let function_pointer = Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
+        let function_pointer =
+            Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
         let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
 
         self.functions[index].jump_table_offset = jump_table_offset;
         Ok(jump_table_offset)
     }
 
-    pub fn overwrite_function(&mut self, index: usize, code: &[u8]) -> Result<usize, Box<dyn Error>> {
+    pub fn overwrite_function(
+        &mut self,
+        index: usize,
+        code: &[u8],
+    ) -> Result<usize, Box<dyn Error>> {
         let offset = self.add_code(code)?;
         let function = &mut self.functions[index];
         function.offset_or_pointer = offset;
@@ -287,7 +368,7 @@ impl Compiler {
             Ok(function.offset_or_pointer + self.code_memory.as_ref().unwrap().as_ptr() as usize)
         }
     }
-    
+
     pub fn get_jump_table_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
         Ok(function.jump_table_offset * 8 + self.jump_table.as_ref().unwrap().as_ptr() as usize)
     }
@@ -314,7 +395,11 @@ impl Compiler {
         Ok(jump_table_offset)
     }
 
-    fn modify_jump_table_entry(&mut self, jump_table_offset: usize, function_pointer: usize) -> Result<usize, Box<dyn Error>>{
+    fn modify_jump_table_entry(
+        &mut self,
+        jump_table_offset: usize,
+        function_pointer: usize,
+    ) -> Result<usize, Box<dyn Error>> {
         let memory = self.jump_table.take();
         let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
         let buffer = &mut memory[jump_table_offset * 8..];
@@ -330,7 +415,6 @@ impl Compiler {
         self.jump_table = Some(mem);
         Ok(jump_table_offset)
     }
-
 
     pub fn add_code(&mut self, code: &[u8]) -> Result<usize, Box<dyn Error>> {
         let start = self.code_offset;
@@ -382,11 +466,21 @@ impl Compiler {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
         let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-        let f: fn(u64) -> u64 = unsafe { std::mem::transmute(start) };
+
+        let trampoline = self.functions.iter().find(|f| f.name == "trampoline").unwrap();
+        let trampoline_jump_table_offset = trampoline.jump_table_offset;
+        let trampoline_offset = &self.jump_table.as_ref().unwrap()
+            [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
+
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(trampoline_offset);
+        let trampoline_start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
+
+
+        let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
         let arg = BuiltInTypes::Int.tag(arg as isize) as u64;
-        let result = f(arg);
-        // TODO: When running in release mode, this fails here.
-        // I'm guessing I'm not setting up the stack correctly
+        let stack_pointer = self.get_stack_pointer();
+        let result = f(stack_pointer as u64, start as u64, arg);
         Ok(result)
     }
 
@@ -544,7 +638,7 @@ impl Compiler {
         let mut functions = Vec::new();
         for node in ast.nodes() {
             match node {
-                Ast::Function {..} => {
+                Ast::Function { .. } => {
                     // TODO: Get rid of this clone
                     functions.push(node.clone());
                 }
@@ -576,11 +670,15 @@ impl Compiler {
             }
             1 => {
                 let function = self.functions.iter().find(|f| f.name == arg).unwrap();
-                self.run1(function.jump_table_offset, vec[0] as u64).unwrap()
+                let result = self
+                    .run1(function.jump_table_offset, vec[0] as u64)
+                    .unwrap();
+                result
             }
             2 => {
                 let function = self.functions.iter().find(|f| f.name == arg).unwrap();
-                self.run2(function.jump_table_offset, vec[0] as u64, vec[1] as u64).unwrap()
+                self.run2(function.jump_table_offset, vec[0] as u64, vec[1] as u64)
+                    .unwrap()
             }
             _ => panic!("Too many arguments"),
         }
@@ -598,8 +696,18 @@ impl Compiler {
 
     pub fn get_function_by_pointer(&self, value: usize) -> Option<&Function> {
         let offset = value - self.code_memory.as_ref().unwrap().as_ptr() as usize;
-        self.functions.iter().find(|f| f.offset_or_pointer == offset)
+        self.functions
+            .iter()
+            .find(|f| f.offset_or_pointer == offset)
     }
+
+    pub fn get_function_by_pointer_mut(&mut self, value: usize) -> Option<&mut Function> {
+        let offset = value - self.code_memory.as_ref().unwrap().as_ptr() as usize;
+        self.functions
+            .iter_mut()
+            .find(|f| f.offset_or_pointer == offset)
+    }
+
 
     // TODO: Call this
     // After I make a function, I need to check if there are free variables
@@ -614,7 +722,11 @@ impl Compiler {
     // if it is a closure, grab the closure data
     // and put the free variables on the stack before the locals
 
-    pub fn make_closure(&mut self, function: usize, free_variables: &[usize]) -> Result<usize, Box<dyn Error>> {
+    pub fn make_closure(
+        &mut self,
+        function: usize,
+        free_variables: &[usize],
+    ) -> Result<usize, Box<dyn Error>> {
         let len = 8 + 8 + free_variables.len() * 8;
         let heap_pointer = self.allocate(len)?;
         let pointer = heap_pointer as *mut u8;
@@ -652,7 +764,11 @@ impl Compiler {
             let type_id = usize::from_le_bytes(data[0..8].try_into().unwrap());
             let type_id = BuiltInTypes::untag(type_id);
             let struct_value = self.structs.get_by_id(type_id as usize).unwrap();
-            let field_index = struct_value.fields.iter().position(|f| f == string).unwrap();
+            let field_index = struct_value
+                .fields
+                .iter()
+                .position(|f| f == string)
+                .unwrap();
             let field_index = (field_index + 1) * 8;
             let field = &data[field_index..field_index + 8];
             let mut bytes = [0u8; 8];
@@ -661,15 +777,15 @@ impl Compiler {
             value
         }
     }
-    
+
     pub fn add_struct(&mut self, s: Struct) {
         self.structs.insert(s.name.clone(), s);
     }
-    
+
     pub fn get_struct(&self, name: &str) -> Option<(usize, &Struct)> {
         self.structs.get(name)
     }
-    
+
     fn get_struct_repr(&self, struct_value: &Struct, to_vec: Vec<u8>) -> String {
         // It should look like this
         // struct_name { field1: value1, field2: value2 }
@@ -689,18 +805,23 @@ impl Compiler {
         }
         repr.push_str(" }");
         repr
-
     }
-    
+
     pub fn check_functions(&self) {
-        let undefined_functions: Vec<&Function> = self.functions.iter().filter(|f| !f.is_defined).collect();
+        let undefined_functions: Vec<&Function> =
+            self.functions.iter().filter(|f| !f.is_defined).collect();
         if !undefined_functions.is_empty() {
-            panic!("Undefined functions: {:?}", undefined_functions.iter().map(|f| f.name.clone()).collect::<Vec<String>>());
+            panic!(
+                "Undefined functions: {:?}",
+                undefined_functions
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect::<Vec<String>>()
+            );
         }
     }
     
-
-
-    
-
+    pub fn get_function_by_name_mut(&mut self, name: &str) -> Option<&mut Function> {
+        self.functions.iter_mut().find(|f| f.name == name)
+    }
 }
