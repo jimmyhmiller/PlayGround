@@ -1,5 +1,8 @@
 use std::{error::Error, time::Instant, mem, slice::from_raw_parts};
+use arm::LowLevelArm;
+use asm::arm::{ArmAsm, SP, X0, X1, X10, X2, X3, X4};
 use bincode::{Encode, Decode, config::standard};
+use ir::Ir;
 use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
 
 mod arm;
@@ -21,7 +24,7 @@ pub struct Message {
 enum Data {
     ForeignFunction { name: String, pointer: usize },
     BuiltinFunction {name: String, pointer: usize},
-    HeapPointer { pointer: usize },
+    HeapSegmentPointer { pointer: usize },
     UserFunction { name: String, pointer: usize, len: usize },
     Label { label: String, function_pointer: usize, label_index: usize, label_location: usize },
 }
@@ -125,14 +128,41 @@ fn property_access(compiler: *mut Compiler, struct_pointer: usize, str_constant_
     compiler.property_access(struct_pointer, str_constant_ptr)
 }
 
+fn compile_trampoline(compiler: &mut Compiler) {
+    let mut lang = LowLevelArm::new();
+    lang.prelude(0);
+    // lang.breakpoint();
+    // set SP to equal the first argument
+    lang.mov_reg(X10, SP);
+    lang.mov_reg(SP, X0);
+    lang.sub_stack_pointer(2);
+    lang.push_to_stack(X10, 0);
+    lang.mov_reg(X10, X1);
+    lang.mov_reg(X0, X2);
+    lang.mov_reg(X1, X3);
+    lang.mov_reg(X2, X4);
+    lang.call(X10);
+    // lang.breakpoint();
+    lang.pop_from_stack(X10, 0);
+    lang.mov_reg(SP, X10);
+    lang.epilogue(0);
+    lang.ret();
+
+    let function_pointer = compiler.add_function("trampoline", &lang.compile_directly()).unwrap();
+    let function = compiler.get_function_by_name_mut("trampoline").unwrap();
+    function.is_builtin = true;
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut compiler = Compiler::new();
+
+    compile_trampoline(&mut compiler);
 
     let heap_pointer = compiler.get_heap_pointer();
 
     debugger(Message {
         kind: "HeapPointer".to_string(),
-        data: Data::HeapPointer { pointer: heap_pointer },
+        data: Data::HeapSegmentPointer { pointer: heap_pointer },
     });
     // Very inefficient way to do array stuff
     // but working
@@ -163,9 +193,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     // let hello2_result = compiler.run_function("hello2", vec![]);
     // compiler.print(hello2_result as usize);
 
+    let time = Instant::now();
 
-    let hello_closure_result = compiler.run_function("mainThread", vec![21]);
-    compiler.println(hello_closure_result as usize);
+    let result = compiler.run_function("mainThread", vec![21]);
+    println!("Our time {:?}", time.elapsed());
+    compiler.println(result as usize);
 
    
 

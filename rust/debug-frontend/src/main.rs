@@ -45,9 +45,7 @@ enum Data {
         name: String,
         pointer: usize,
     },
-    HeapPointer {
-        pointer: usize,
-    },
+    HeapSegmentPointer { pointer: usize },
     UserFunction {
         name: String,
         pointer: usize,
@@ -60,6 +58,7 @@ enum Data {
         label_location: usize,
     },
 }
+
 
 #[derive(Debug, Encode, Decode, Clone)]
 struct Label {
@@ -78,7 +77,7 @@ impl Data {
             Data::BuiltinFunction { name, pointer } => {
                 format!("{}: 0x{:x}", name, pointer)
             }
-            Data::HeapPointer { pointer } => {
+            Data::HeapSegmentPointer { pointer } => {
                 format!("0x{:x}", pointer)
             }
             Data::UserFunction { name, pointer, len } => {
@@ -626,7 +625,7 @@ impl State {
                         },
                     );
                 }
-                Data::HeapPointer { pointer } => {
+                Data::HeapSegmentPointer { pointer } => {
                     self.heap.heap_pointers.push(pointer);
                 }
                 Data::UserFunction { name, pointer, len } => {

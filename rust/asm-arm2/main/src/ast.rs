@@ -224,7 +224,6 @@ impl<'a> AstCompiler<'a> {
                 self.create_new_environment();
                 let old_ir = std::mem::replace(&mut self.ir, Ir::new());
                 assert!(!name.is_empty());
-                // self.ir.breakpoint();
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);

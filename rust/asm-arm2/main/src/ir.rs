@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{arch::aarch64::uint16x4_t, collections::HashMap};
 
 use asm::arm::Register;
 
@@ -1320,12 +1320,14 @@ pub fn heap_test() -> Ir {
 //     ir
 // }
 
-pub extern "C" fn println_value(compiler: &Compiler, value: usize) {
+pub extern "C" fn println_value(compiler: &Compiler, value: usize) -> usize {
     compiler.println(value);
+    return 0b111;
 }
 
-pub extern "C" fn print_value(compiler: &Compiler, value: usize) {
+pub extern "C" fn print_value(compiler: &Compiler, value: usize) -> usize {
     compiler.print(value);
+    return 0b111;
 }
 
 
