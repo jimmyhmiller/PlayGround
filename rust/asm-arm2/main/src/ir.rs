@@ -132,6 +132,20 @@ impl BuiltInTypes {
     pub fn tag_size() -> i32 {
         3
     }
+    
+    pub fn is_heap_pointer(value: usize) -> bool {
+        match BuiltInTypes::get_kind(value) {
+            BuiltInTypes::Int => false,
+            BuiltInTypes::Float => false,
+            BuiltInTypes::String => true,
+            BuiltInTypes::Bool => false,
+            BuiltInTypes::Function => true,
+            BuiltInTypes::Closure => true,
+            BuiltInTypes::Struct => true,
+            BuiltInTypes::Array => true,
+            BuiltInTypes::Null => false,
+        }
+    }
 }
 
 #[test]

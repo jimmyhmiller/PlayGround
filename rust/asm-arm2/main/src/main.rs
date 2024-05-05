@@ -94,15 +94,16 @@ fn fib_rust(n: usize) -> usize {
 fn allocate_array(compiler: *mut Compiler, value: usize) -> usize {
     let value = BuiltInTypes::untag(value);
     let compiler = unsafe { &mut *compiler };
-    let pointer = compiler.allocate(value).unwrap();
+    // TODO: Stack pointer should be passed in
+    let pointer = compiler.allocate(value, 0).unwrap();
     let pointer = BuiltInTypes::Array.tag(pointer as isize) as usize;
     pointer
 }
 
-fn allocate_struct(compiler: *mut Compiler, value: usize) -> usize {
+fn allocate_struct(compiler: *mut Compiler, value: usize, stack_pointer: usize) -> usize {
     let value = BuiltInTypes::untag(value);
     let compiler = unsafe { &mut *compiler };
-    let pointer = compiler.allocate(value).unwrap();
+    let pointer = compiler.allocate(value, stack_pointer).unwrap();
     pointer
 }
 
