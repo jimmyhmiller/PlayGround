@@ -1,5 +1,5 @@
 use asm::arm::{
-    ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector, SP, X0, X10, X11, X12, X13, X14, X15, X19, X20, X21, X22, X23, X24, X25, X26, X29, X3, X30, X9, ZERO_REGISTER
+    ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector, SP, X0, X10, X11, X12, X13, X14, X15, X16, X19, X20, X21, X22, X23, X24, X25, X26, X29, X3, X30, X9, ZERO_REGISTER
 };
 
 use std::collections::HashMap;
@@ -339,7 +339,7 @@ impl Default for LowLevelArm {
 
 impl LowLevelArm {
     pub fn new() -> Self {
-        let canonical_volatile_registers = vec![X9, X10, X11, X12, X13, X14, X15];
+        let canonical_volatile_registers = vec![X9, X10, X11, X12, X13, X14, X15, X16];
         LowLevelArm {
             instructions: vec![],
             label_locations: HashMap::new(),

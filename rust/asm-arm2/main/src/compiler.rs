@@ -112,7 +112,7 @@ impl Heap {
     // Then I could try moving things
     // Or I could keep a list of free pages or something.
 
-    fn allocate(&mut self, bytes: usize) -> Result<usize, Box<dyn Error>> {
+    fn allocate(&mut self, bytes: usize, stack_pointer: usize) -> Result<usize, Box<dyn Error>> {
         if self.heap_offset + bytes + 8 > self.segment_size {
             self.segment_offset += 1;
             self.segments.push(Some(
@@ -212,13 +212,41 @@ impl Compiler {
         }
     }
 
+    pub fn find_gc_roots(&self, current_stack_pointer: usize) -> Vec<usize> {
+        // TODO: Only go up to stack pointer
+        
+        // Get the stack as a [usize]
+        let stack = self.stack.as_ref().unwrap();
+        // I'm adding to the end of the stack I've allocated so I only need to go from the end
+        // til the current stack
+
+        let stack_end = stack.as_ptr() as usize + (8 * 1024 * 1024);
+        let aligned_current_stack_pointer = current_stack_pointer & !0b111;
+        let distance_till_end = stack_end - aligned_current_stack_pointer as usize;
+        let stack = unsafe { std::slice::from_raw_parts(aligned_current_stack_pointer as *const usize, distance_till_end / 8) };
+        let mut roots = Vec::new();
+        
+        // Walk the stack
+        for value in stack {
+            if BuiltInTypes::is_heap_pointer(*value) {
+                roots.push(*value);
+            }
+        }
+        roots
+    }
+
     pub fn get_heap_pointer(&self) -> usize {
         // TODO: I need to tell my debugger about all the heap pointers
         self.heap.segment_pointer(0)
     }
 
-    pub fn allocate(&mut self, bytes: usize) -> Result<usize, Box<dyn Error>> {
-        self.heap.allocate(bytes)
+    pub fn allocate(&mut self, bytes: usize, stack_pointer: usize) -> Result<usize, Box<dyn Error>> {
+        let segment = self.heap.segment_offset;
+        let result = self.heap.allocate(bytes, stack_pointer);
+        if segment != self.heap.segment_offset {
+            self.find_gc_roots(stack_pointer);
+        }
+        result
     }
 
     fn get_stack_pointer(&self) -> usize {
@@ -728,7 +756,8 @@ impl Compiler {
         free_variables: &[usize],
     ) -> Result<usize, Box<dyn Error>> {
         let len = 8 + 8 + free_variables.len() * 8;
-        let heap_pointer = self.allocate(len)?;
+        // TODO: Stack pointer should be passed in
+        let heap_pointer = self.allocate(len, 0)?;
         let pointer = heap_pointer as *mut u8;
         let num_free = free_variables.len();
         let function = function.to_le_bytes();

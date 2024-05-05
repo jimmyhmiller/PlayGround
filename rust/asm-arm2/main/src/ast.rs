@@ -361,6 +361,7 @@ impl<'a> AstCompiler<'a> {
                 let allocate_struct = self.ir.assign_new(allocate_struct);
 
                 let size_reg  = self.ir.assign_new(struct_type.size() + 1);
+                let stack_pointer = self.ir.get_stack_pointer_imm(0);
                 // TODO: I need store the struct type here, so I know things about what data is here.
 
                 let struct_ptr = self.ir.call(
@@ -368,6 +369,7 @@ impl<'a> AstCompiler<'a> {
                     vec![
                         compiler_pointer_reg.into(),
                         size_reg.into(),
+                        stack_pointer.into(),
                     ]
                 );
 

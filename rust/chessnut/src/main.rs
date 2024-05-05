@@ -950,6 +950,10 @@ async fn wait_for_bot_move(
                     new_board,
                 )
                 .await?;
+                // sleep random time between 5 and 30 seconds
+                let mut rng = rand::thread_rng();
+                let sleep_time = rng.gen_range(5..30);
+                tokio::time::sleep(tokio::time::Duration::from_secs(sleep_time)).await;
                 return Ok((new_board, move_));
             }
             _ => {
