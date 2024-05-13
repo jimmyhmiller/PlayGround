@@ -2,6 +2,7 @@ use std::{error::Error, time::Instant, mem, slice::from_raw_parts};
 use arm::LowLevelArm;
 use asm::arm::{ArmAsm, SP, X0, X1, X10, X2, X3, X4};
 use bincode::{Encode, Decode, config::standard};
+use compiler::StackMapDetails;
 use ir::Ir;
 use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
 
@@ -27,6 +28,7 @@ enum Data {
     HeapSegmentPointer { pointer: usize },
     UserFunction { name: String, pointer: usize, len: usize },
     Label { label: String, function_pointer: usize, label_index: usize, label_location: usize },
+    StackMap { pc: usize, name: String, stack_map: Vec<(usize, StackMapDetails)> },
 }
 
 trait Serialize {
@@ -95,15 +97,15 @@ fn allocate_array(compiler: *mut Compiler, value: usize) -> usize {
     let value = BuiltInTypes::untag(value);
     let compiler = unsafe { &mut *compiler };
     // TODO: Stack pointer should be passed in
-    let pointer = compiler.allocate(value, 0).unwrap();
+    let pointer = compiler.allocate(value, 0, BuiltInTypes::Array).unwrap();
     let pointer = BuiltInTypes::Array.tag(pointer as isize) as usize;
     pointer
 }
 
-fn allocate_struct(compiler: *mut Compiler, value: usize, stack_pointer: usize) -> usize {
+fn allocate_struct(compiler: *mut Compiler, value: usize, stack_pointer: usize,) -> usize {
     let value = BuiltInTypes::untag(value);
     let compiler = unsafe { &mut *compiler };
-    let pointer = compiler.allocate(value, stack_pointer).unwrap();
+    let pointer = compiler.allocate(value, stack_pointer, BuiltInTypes::Struct).unwrap();
     pointer
 }
 
@@ -131,8 +133,8 @@ fn property_access(compiler: *mut Compiler, struct_pointer: usize, str_constant_
 
 fn compile_trampoline(compiler: &mut Compiler) {
     let mut lang = LowLevelArm::new();
-    lang.prelude(0);
     // lang.breakpoint();
+    lang.prelude(-2);
     // set SP to equal the first argument
     lang.mov_reg(X10, SP);
     lang.mov_reg(SP, X0);
@@ -146,7 +148,7 @@ fn compile_trampoline(compiler: &mut Compiler) {
     // lang.breakpoint();
     lang.pop_from_stack(X10, 0);
     lang.mov_reg(SP, X10);
-    lang.epilogue(0);
+    lang.epilogue(2);
     lang.ret();
 
     let function_pointer = compiler.add_function("trampoline", &lang.compile_directly()).unwrap();
@@ -196,10 +198,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let time = Instant::now();
 
-    let result = compiler.run_function("mainThread", vec![21]);
+    // let result = compiler.run_function("mainThread", vec![21]);
+    // println!("Our time {:?}", time.elapsed());
+    // compiler.println(result as usize);
+    
+    // let result = compiler.run_function("simpleFunctionWithLocals", vec![]);
+    // println!("Our time {:?}", time.elapsed());
+    // compiler.println(result as usize);
+
+    let result = compiler.run_function("testGcSimple", vec![]);
     println!("Our time {:?}", time.elapsed());
     compiler.println(result as usize);
-
    
 
     // let top_level = parse!(

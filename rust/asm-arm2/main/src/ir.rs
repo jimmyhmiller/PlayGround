@@ -57,6 +57,11 @@ pub enum BuiltInTypes {
 }
 
 impl BuiltInTypes {
+
+    pub fn null_value() -> isize {
+        0b111
+    }
+
     pub fn tag(&self, value: isize) -> isize {
         let value = value << 3;
         let tag = self.get_tag();
@@ -83,7 +88,7 @@ impl BuiltInTypes {
     }
 
     pub fn get_kind(pointer: usize) -> Self {
-        if pointer == 0b111 {
+        if pointer == Self::null_value() as usize {
             return BuiltInTypes::Null;
         }
         match pointer & 0b111 {
@@ -137,12 +142,12 @@ impl BuiltInTypes {
         match BuiltInTypes::get_kind(value) {
             BuiltInTypes::Int => false,
             BuiltInTypes::Float => false,
-            BuiltInTypes::String => true,
+            BuiltInTypes::String => false,
             BuiltInTypes::Bool => false,
-            BuiltInTypes::Function => true,
+            BuiltInTypes::Function => false,
             BuiltInTypes::Closure => true,
             BuiltInTypes::Struct => true,
-            BuiltInTypes::Array => true,
+            BuiltInTypes::Array => false,
             BuiltInTypes::Null => false,
         }
     }
@@ -219,7 +224,8 @@ pub enum Instruction {
     LoadTrue(Value),
     LoadFalse(Value),
     LoadConstant(Value, Value),
-    Call(Value, Value, Vec<Value>),
+    // bool is builtin?
+    Call(Value, Value, Vec<Value>, bool),
     HeapLoad(Value, Value),
     HeapStore(Value, Value),
     LoadLocal(Value, Value),
@@ -233,6 +239,7 @@ pub enum Instruction {
     GetTag(Value, Value),
     Untag(Value, Value),
     HeapStoreOffset(Value, Value, usize),
+    CurrentStackPosition(Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -311,7 +318,7 @@ impl Instruction {
                 }
                 result
             }
-            Instruction::Call(a, b, args) => {
+            Instruction::Call(a, b, args, _) => {
                 let mut result: Vec<VirtualRegister> =
                     args.iter().filter_map(|arg| get_registers!(arg)).collect();
                 if let Ok(register) = a.try_into() {
@@ -382,6 +389,9 @@ impl Instruction {
             }
             Instruction::GetStackPointer(a, b) => {
                 get_registers!(a, b)
+            }
+            Instruction::CurrentStackPosition(a) => {
+                get_register!(a)
             }
             Instruction::GetStackPointerImm(a, _) => {
                 get_register!(a)
@@ -697,8 +707,15 @@ impl Ir {
         
         let before_prelude = lang.new_label("before_prelude");
         lang.write_label(before_prelude);
+        
         // zero is a placeholder because this will be patched
         lang.prelude(0);
+
+        // I believe this is fine because it is volatile and we 
+        // are at the beginning of the function
+        let register = lang.canonical_volatile_registers[0];
+        lang.mov_64(register, BuiltInTypes::null_value());
+        lang.set_all_locals_to_null(register);
 
         let after_prelude = lang.new_label("after_prelude");
         lang.write_label(after_prelude);
@@ -731,6 +748,7 @@ impl Ir {
             if let Some(label) = label {
                 lang.write_label(ir_label_to_lang_label[&self.labels[*label]]);
             }
+            // println!("instruction {:?}", instruction);
             match instruction {
                 Instruction::Breakpoint => {
                     lang.breakpoint();
@@ -832,7 +850,7 @@ impl Ir {
                     }
                     Value::Local(local) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
-                        lang.load_from_stack(register, *local as i32);
+                        lang.load_local(register, *local as i32)
                     },
                     Value::FreeVariable(free_variable) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
@@ -918,7 +936,7 @@ impl Ir {
                     let register = alloc.allocate_register(index, dest, &mut lang);
                     lang.mov_reg(register, lang.ret_reg());
                 }
-                Instruction::Call(dest, function, args) => {
+                Instruction::Call(dest, function, args, builtin) => {
                     // TODO: Clean up duplication
                     let mut out_live_call_registers = vec![];
                     for (register, (start, end)) in alloc.lifetimes.iter() {
@@ -951,7 +969,12 @@ impl Ir {
                     let function =
                         alloc.allocate_register(index, function.try_into().unwrap(), &mut lang);
                     lang.shift_right(function, function, BuiltInTypes::tag_size());
-                    lang.call(function);
+                    if *builtin {
+                        lang.call_builtin(function);
+                    } else {
+                        lang.call(function);
+                    }
+
 
                     let dest = dest.try_into().unwrap();
                     let register = alloc.allocate_register(index, dest, &mut lang);
@@ -1040,7 +1063,7 @@ impl Ir {
                         lang.jump(exit);
                     }
                     Value::Local(local) => {
-                        lang.load_from_stack(lang.ret_reg(), *local as i32);
+                        lang.store_local(lang.ret_reg(), *local as i32);
                         lang.jump(exit);
                     }
                     Value::FreeVariable(free_variable) => {
@@ -1102,6 +1125,11 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
                     lang.get_stack_pointer_imm(dest, *offset);
+                }
+                Instruction::CurrentStackPosition(dest ) => {
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    lang.get_current_stack_position(dest)
                 }
                 Instruction::GetTag(dest, value) => {
                     let value = value.try_into().unwrap();
@@ -1185,9 +1213,18 @@ impl Ir {
     pub fn call(&mut self, function: Value, vec: Vec<Value>) -> Value {
         let dest = self.volatile_register().into();
         self.instructions
-            .push(Instruction::Call(dest, function, vec));
+            .push(Instruction::Call(dest, function, vec, false));
         dest
     }
+
+
+    pub fn call_builtin(&mut self, function: Value, vec: Vec<Value>) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::Call(dest, function, vec, true));
+        dest
+    }
+
 
     pub fn store_local(&mut self, local_index: usize, reg: VirtualRegister) {
         self.increment_locals(local_index);
@@ -1272,6 +1309,18 @@ impl Ir {
         let tag = self.assign_new(Value::RawValue(tag as usize));
         self.instructions
             .push(Instruction::Tag(dest, reg.into(), tag.into()));
+        dest.into()
+    }
+
+
+    /// Gets the stack position of live values.
+    /// This includes locals and any values we've pushed.
+    /// It's is not the same as the actual SP because we
+    /// update that at the beginning of the function.
+    pub fn get_current_stack_position(&mut self) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::CurrentStackPosition(dest));
         dest.into()
     }
 

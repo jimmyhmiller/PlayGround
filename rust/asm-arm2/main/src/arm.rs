@@ -1,5 +1,5 @@
 use asm::arm::{
-    ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector, SP, X0, X10, X11, X12, X13, X14, X15, X16, X19, X20, X21, X22, X23, X24, X25, X26, X29, X3, X30, X9, ZERO_REGISTER
+    ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector, SP, X0, X10, X11, X12, X13, X14, X15, X16, X20, X21, X22, X29, X3, X30, X9, ZERO_REGISTER
 };
 
 use std::collections::HashMap;
@@ -284,7 +284,7 @@ pub fn store_pair(reg1: Register, reg2: Register, destination: Register, offset:
     ArmAsm::StpGen {
         // TODO: Make this better/document this is about 64 bit or not
         opc: 0b10,
-        class_selector: StpGenSelector::SignedOffset,
+        class_selector: StpGenSelector::PreIndex,
         imm7: offset,
         rt2: reg2,
         rt: reg1,
@@ -295,7 +295,7 @@ pub fn store_pair(reg1: Register, reg2: Register, destination: Register, offset:
 pub fn load_pair(reg1: Register, reg2: Register, destination: Register, offset: i32) -> ArmAsm {
     ArmAsm::LdpGen {
         opc: 0b10,
-        class_selector: LdpGenSelector::SignedOffset,
+        class_selector: LdpGenSelector::PostIndex,
         // TODO: Truncate
         imm7: offset,
         rt2: reg2,
@@ -328,6 +328,16 @@ pub struct LowLevelArm {
     pub max_stack_size: i32,
     pub max_locals: i32,
     pub canonical_volatile_registers: Vec<Register>,
+    // The goal right now is that everytime we 
+    // make a "built-in" call, we keep a map
+    // of code offset to max stack value at a point.
+    // (We could change this to be discrete places rather than
+    //  a threshold if needed)
+    // Then when we compile, we can map to pc and lookup
+    // the locations based on that pc
+    // This means, we should be able to walk the stack
+    // and figure out where to look for potential roots
+    pub stack_map: HashMap<usize, usize>,
 }
 
 #[allow(unused)]
@@ -351,6 +361,7 @@ impl LowLevelArm {
             stack_size: 0,
             max_stack_size: 0,
             max_locals: 0,
+            stack_map: HashMap::new(),
         }
     }
 
@@ -365,14 +376,14 @@ impl LowLevelArm {
         // self.breakpoint();
         // 0 is a placeholder we will patch later
         // TODO: make better/faster/fewer instructions
-        self.sub_stack_pointer(-self.max_locals);
         self.store_pair(X29, X30, SP, offset);
         self.mov_reg(X29, SP);
+        self.sub_stack_pointer(-self.max_locals);
     }
 
     pub fn epilogue(&mut self, offset: i32) {
-        self.load_pair(X29, X30, SP, offset);
         self.add_stack_pointer(self.max_locals);
+        self.load_pair(X29, X30, SP, offset);
     }
 
     pub fn get_label_index(&mut self) -> usize {
@@ -477,9 +488,6 @@ impl LowLevelArm {
     }
 
     pub fn store_on_stack(&mut self, reg: Register, offset: i32) {
-        if offset < 0 {
-            println!("Got it");
-        }
         self.instructions.push(ArmAsm::StrImmGen {
             size: 0b11,
             imm9: 0, // not used
@@ -495,7 +503,7 @@ impl LowLevelArm {
         self.store_on_stack(reg, offset + self.max_locals)
     }
     pub fn store_local(&mut self, value: Register, offset: i32) {
-        self.store_on_stack(value, offset);
+        self.store_on_stack(value, offset + 2);
     }
 
     pub fn load_from_stack(&mut self, destination: Register, offset: i32) {
@@ -518,7 +526,7 @@ impl LowLevelArm {
     }
 
     pub fn load_local(&mut self, destination: Register, offset: i32) {
-        self.load_from_stack(destination, offset);
+        self.load_from_stack(destination, offset + 2);
     }
 
     pub fn load_from_heap(&mut self, destination: Register, source: Register, offset: i32) {
@@ -584,6 +592,28 @@ impl LowLevelArm {
 
     pub fn call(&mut self, register: Register) {
         self.instructions.push(branch_with_link_register(register));
+    }
+
+    pub fn call_builtin(&mut self, register: Register) {
+        self.instructions.push(branch_with_link_register(register));
+        self.update_stack_map();
+    }
+
+
+    // TODO: I should pass this information to my debugger
+    // then I could visualize every stack frame
+    // and do dynamic checking if the invariants I expect to hold
+    // do in fact hold.
+    fn update_stack_map(&mut self) {
+        let offset = self.instructions.len() - 1;
+        let stack_size = self.stack_size;
+        // TODO: Should I keep track of locals here?
+        // Right now I null them out, so it would never matter
+        self.stack_map.insert(offset, stack_size as usize);
+    }
+
+    pub fn translate_stack_map(&self, pc: usize) -> Vec<(usize, usize)> {
+        self.stack_map.iter().map(|(key, value)| ((*key * 4) + pc, *value)).collect()
     }
 
     pub fn recurse(&mut self, label: Label) {
@@ -677,8 +707,15 @@ impl LowLevelArm {
     }
 
     pub fn patch_prelude_and_epilogue(&mut self) {
-        let max = self.max_stack_size as u64 + self.max_locals as u64;
-        let max = max.next_power_of_two();
+        let mut max = self.max_stack_size as u64 + self.max_locals as u64;
+        let remainder = max % 2;
+        if remainder != 0 {
+            max += 1;
+        }
+
+        // Does this need to be aligned somehow? Next power of two was causing issues
+        // where I was having values on the stack from native code.
+        // I don't think getting rid of it was the right answer.
         let max = max as i32;
         // Find the first store pair and patch it based
         // on the max stack size
@@ -688,7 +725,7 @@ impl LowLevelArm {
             .position(|instruction| matches!(instruction, ArmAsm::StpGen { .. }))
             .map(|i| &mut self.instructions[i])
         {
-            *imm7 = max;
+            *imm7 = -2
         } else {
             unreachable!();
         }
@@ -723,7 +760,7 @@ impl LowLevelArm {
             .rposition(|instruction| matches!(instruction, ArmAsm::LdpGen { .. }))
             .map(|i| &mut self.instructions[i])
         {
-            *imm7 = max;
+            *imm7 = 2;
         } else {
             unreachable!();
         }
@@ -825,6 +862,17 @@ impl LowLevelArm {
                     label_location
                 }
             });
+        }
+    }
+    
+    pub fn get_current_stack_position(&mut self, dest: Register) {
+        // TODO: Not sure if max_locals is calculated at this point or I need to patch or something later
+        self.get_stack_pointer_imm(dest, (self.max_locals + self.stack_size) as isize)
+    }
+    
+    pub fn set_all_locals_to_null(&mut self, null_register: Register)  {
+        for local_offset in 0..self.max_locals {
+            self.store_local(null_register, local_offset)
         }
     }
 }

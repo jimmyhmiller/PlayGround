@@ -241,7 +241,7 @@ impl<'a> AstCompiler<'a> {
 
 
                 let mut code = self.ir.compile(&name);
-                let function_pointer = self.compiler.upsert_function(&name, &code.compile_to_bytes()).unwrap();
+                let function_pointer = self.compiler.upsert_function(&name, &mut code).unwrap();
 
                 code.share_label_info_debug(function_pointer);
 
@@ -360,11 +360,12 @@ impl<'a> AstCompiler<'a> {
                 let allocate_struct = self.compiler.get_function_pointer(allocate_struct).unwrap();
                 let allocate_struct = self.ir.assign_new(allocate_struct);
 
+                // Shift size left one so we can use it to mark
                 let size_reg  = self.ir.assign_new(struct_type.size() + 1);
-                let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                let stack_pointer = self.ir.get_current_stack_position();
                 // TODO: I need store the struct type here, so I know things about what data is here.
 
-                let struct_ptr = self.ir.call(
+                let struct_ptr = self.ir.call_builtin(
                     allocate_struct.into(),
                     vec![
                         compiler_pointer_reg.into(),
@@ -577,19 +578,27 @@ impl<'a> AstCompiler<'a> {
                     // unless I have a good plan for dealing with when it doesn't
                     let function = self.compiler.reserve_function(name.as_str()).unwrap();
 
-                    if function.is_builtin {
+                    let builtin = function.is_builtin;
+                    if builtin {
                         let pointer_reg = self.ir.volatile_register();
                         let pointer: Value = self.compiler.get_compiler_ptr().into();
                         self.ir.assign(pointer_reg, pointer);
                         args.insert(0, pointer_reg.into());
                     }
+
+
                     // TODO: Do an indirect call via jump table
                     let jump_table_pointer = self.compiler.get_jump_table_pointer(function).unwrap();
                     let jump_table_point_reg = self.ir.assign_new(Value::Pointer(jump_table_pointer.try_into().unwrap()));
                     let function_pointer = self.ir.load_from_memory(jump_table_point_reg.into(), 0);
     
                     let function = self.ir.function(function_pointer);
-                    self.ir.call(function, args)
+                    if builtin {
+                        self.ir.call_builtin(function, args)
+                    } else {
+                        self.ir.call(function, args)
+                    }
+
                 }
                
             }

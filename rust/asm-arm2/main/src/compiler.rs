@@ -6,9 +6,11 @@ use std::{
     slice::{from_raw_parts, from_raw_parts_mut},
 };
 
+use bincode::{Decode, Encode};
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
 use crate::{
+    arm::LowLevelArm,
     ast::Ast,
     debugger,
     ir::{println_value, BuiltInTypes, StringValue, Value},
@@ -135,7 +137,7 @@ impl Heap {
             self.heap_offset = 0;
         }
 
-        let size = bytes * 8;
+        let size = (bytes * 8) << 1;
         let memory = mem::replace(&mut self.segments[self.segment_offset], None);
         let mut memory = memory.unwrap();
         let buffer = &mut memory[self.heap_offset..];
@@ -144,10 +146,24 @@ impl Heap {
             buffer[index] = *byte;
         }
         self.heap_offset += size + 8;
+        // need to make sure my offset is aligned
+        // going to round up to the nearest 8 bytes
+        let remainder = self.heap_offset % 8;
+        if remainder != 0 {
+            self.heap_offset += 8 - remainder;
+        }
+        assert!(self.heap_offset % 8 == 0, "Heap offset is not aligned");
+
         let pointer = buffer.as_ptr() as usize;
         self.segments[self.segment_offset] = Some(memory);
         Ok(pointer)
     }
+}
+
+#[derive(Debug, Encode, Decode, Clone)]
+pub struct StackMapDetails {
+    pub number_of_locals: usize,
+    pub current_stack_size: usize,
 }
 
 pub struct Compiler {
@@ -163,6 +179,7 @@ pub struct Compiler {
     heap: Heap,
     stack: Option<MmapMut>,
     string_constants: Vec<StringValue>,
+    stack_map: Vec<(usize, StackMapDetails)>,
 }
 
 impl fmt::Debug for Compiler {
@@ -209,30 +226,158 @@ impl Compiler {
                     .unwrap(),
             ),
             string_constants: vec![],
+            stack_map: vec![],
         }
     }
 
-    pub fn find_gc_roots(&self, current_stack_pointer: usize) -> Vec<usize> {
+    pub fn mark(&mut self, latest_root: usize, current_stack_pointer: usize) -> Vec<usize> {
+        let mut marked = 0;
+
         // TODO: Only go up to stack pointer
-        
+
         // Get the stack as a [usize]
         let stack = self.stack.as_ref().unwrap();
         // I'm adding to the end of the stack I've allocated so I only need to go from the end
         // til the current stack
 
         let stack_end = stack.as_ptr() as usize + (8 * 1024 * 1024);
-        let aligned_current_stack_pointer = current_stack_pointer & !0b111;
-        let distance_till_end = stack_end - aligned_current_stack_pointer as usize;
-        let stack = unsafe { std::slice::from_raw_parts(aligned_current_stack_pointer as *const usize, distance_till_end / 8) };
+        // let current_stack_pointer = current_stack_pointer & !0b111;
+        let distance_till_end = stack_end - current_stack_pointer as usize;
+        let num_64_till_end = distance_till_end / 8;
+        let stack = unsafe {
+            std::slice::from_raw_parts(stack.as_ptr() as *const usize, 8 * 1024 * 1024 / 8)
+        };
+        let stack = &stack[stack.len() - num_64_till_end..];
         let mut roots = Vec::new();
-        
         // Walk the stack
+
+        let mut to_mark: Vec<usize> = vec![];
+
+        if BuiltInTypes::is_heap_pointer(latest_root) {
+            unsafe {
+                let untagged = BuiltInTypes::untag(latest_root);
+                let pointer = untagged as *mut u8;
+                if pointer as usize % 8 != 0 {
+                    panic!("Not aligned");
+                }
+
+                marked += 1;
+
+                let mut data: usize = *pointer.cast::<usize>();
+                data |= 1;
+                *pointer.cast::<usize>() = data;
+
+                let size = (*(pointer as *const usize) >> 1);
+                // Why would it be 16?
+                let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, size / 8);
+                for datum in data.iter() {
+                    if BuiltInTypes::is_heap_pointer(*datum) {
+                        to_mark.push(*datum)
+                    }
+                }
+            }
+            roots.push(latest_root);
+        }
+
+        // TODO: It seems I might be putting untagged pointers on the stack
+
         for value in stack {
             if BuiltInTypes::is_heap_pointer(*value) {
+                unsafe {
+                    let untagged = BuiltInTypes::untag(*value);
+                    println!(
+                        "builtintypes: {:?} {} {}",
+                        BuiltInTypes::get_kind(*value),
+                        value,
+                        untagged
+                    );
+                    let pointer = untagged as *mut u8;
+                    if pointer as usize % 8 != 0 {
+                        panic!("Not aligned");
+                    }
+
+                    marked += 1;
+
+                    let mut data: usize = *pointer.cast::<usize>();
+                    data |= 1;
+                    *pointer.cast::<usize>() = data;
+
+                    let size = (*(pointer as *const usize) >> 1);
+                    // Why would it be 16?
+                    let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, size / 8);
+                    for datum in data.iter() {
+                        if BuiltInTypes::is_heap_pointer(*datum) {
+                            to_mark.push(*datum)
+                        }
+                    }
+                }
                 roots.push(*value);
             }
         }
+
+        while !to_mark.is_empty() {
+            let value = to_mark.pop().unwrap();
+            let untagged = BuiltInTypes::untag(value);
+            let pointer = untagged as *mut u8;
+            if pointer as usize % 8 != 0 {
+                panic!("Not aligned");
+            }
+            unsafe {
+                let mut data: usize = *pointer.cast::<usize>();
+                // check right most bit
+                if (data & 1) == 1 {
+                    continue;
+                }
+                data |= 1;
+                *pointer.cast::<usize>() = data;
+
+                marked += 1;
+
+                let size = (*(pointer as *const usize) >> 1);
+                // Why would it be 16?
+                let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, (size / 8));
+                for datum in data.iter() {
+                    if BuiltInTypes::is_heap_pointer(*datum) {
+                        to_mark.push(*datum)
+                    }
+                }
+            }
+        }
+
+        self.sweep();
+
+        println!("marked {}", marked);
+
         roots
+    }
+
+    fn sweep(&mut self) {
+        for segment in self.heap.segments.iter_mut() {
+            if let Some(segment) = segment {
+                let mut offset = 0;
+                // TODO: I'm scanning whole segment even if unused
+                while offset < self.heap.segment_size {
+                    unsafe {
+                        let mut pointer = segment.as_ptr();
+
+                        let mut data: usize = *pointer.cast::<usize>();
+
+                        // check right most bit
+                        if (data & 1) == 1 {
+                            // println!("marked!");
+                            data &= !1;
+                        }
+                        let size = (data >> 1) - 8;
+                        // println!("size: {}", size);
+                        offset += size;
+                        let remainder = offset % 8;
+                        if remainder != 0 {
+                            offset += 8 - remainder;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn get_heap_pointer(&self) -> usize {
@@ -240,13 +385,18 @@ impl Compiler {
         self.heap.segment_pointer(0)
     }
 
-    pub fn allocate(&mut self, bytes: usize, stack_pointer: usize) -> Result<usize, Box<dyn Error>> {
+    pub fn allocate(
+        &mut self,
+        bytes: usize,
+        stack_pointer: usize,
+        kind: BuiltInTypes,
+    ) -> Result<usize, Box<dyn Error>> {
         let segment = self.heap.segment_offset;
-        let result = self.heap.allocate(bytes, stack_pointer);
-        if segment != self.heap.segment_offset {
-            self.find_gc_roots(stack_pointer);
-        }
-        result
+        let result = self.heap.allocate(bytes, stack_pointer).unwrap(); // TODO: do better
+                                                                        // if segment != self.heap.segment_offset {
+        // self.mark(kind.tag(result.clone() as isize) as usize, stack_pointer);
+        // }
+        Ok(result)
     }
 
     fn get_stack_pointer(&self) -> usize {
@@ -308,23 +458,54 @@ impl Compiler {
         Ok(self.functions.len() - 1)
     }
 
-    pub fn upsert_function(&mut self, name: &str, code: &[u8]) -> Result<usize, Box<dyn Error>> {
+    pub fn upsert_function(
+        &mut self,
+        name: &str,
+        code: &mut LowLevelArm,
+    ) -> Result<usize, Box<dyn Error>> {
+        let bytes = &(code.compile_to_bytes());
         for (index, function) in self.functions.iter_mut().enumerate() {
             if function.name == name {
-                self.overwrite_function(index, code)?;
+                self.overwrite_function(index, bytes)?;
                 break;
             }
         }
-        self.add_function(name, code)?;
+        self.add_function(name, bytes)?;
 
+        // TODO: Make this better
         let function = self.find_function(name).unwrap();
         let function_pointer = Self::get_function_pointer(self, function.clone()).unwrap();
+
+        let translated_stack_map = code.translate_stack_map(function_pointer);
+        let translated_stack_map: Vec<(usize, StackMapDetails)> = translated_stack_map
+            .iter()
+            .map(|(key, value)| {
+                (
+                    *key,
+                    StackMapDetails {
+                        current_stack_size: *value,
+                        number_of_locals: code.max_locals as usize,
+                    },
+                )
+            })
+            .collect();
+
+        debugger(Message {
+            kind: "stack_map".to_string(),
+            data: Data::StackMap {
+                pc: function_pointer,
+                name: name.to_string(),
+                stack_map: translated_stack_map.clone(),
+            },
+        });
+        self.stack_map.extend(translated_stack_map);
+
         debugger(Message {
             kind: "user_function".to_string(),
             data: Data::UserFunction {
                 name: name.to_string(),
                 pointer: function_pointer,
-                len: code.len(),
+                len: bytes.len(),
             },
         });
         Ok(function_pointer)
@@ -480,10 +661,23 @@ impl Compiler {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
         let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-        let f: fn() -> u64 = unsafe { std::mem::transmute(start) };
-        let result = f();
-        // TODO: When running in release mode, this fails here.
-        // I'm guessing I'm not setting up the stack correctly
+
+        let trampoline = self
+            .functions
+            .iter()
+            .find(|f| f.name == "trampoline")
+            .unwrap();
+        let trampoline_jump_table_offset = trampoline.jump_table_offset;
+        let trampoline_offset = &self.jump_table.as_ref().unwrap()
+            [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
+
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(trampoline_offset);
+        let trampoline_start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
+
+        let f: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
+        let stack_pointer = self.get_stack_pointer();
+        let result = f(stack_pointer as u64, start as u64);
         Ok(result)
     }
 
@@ -495,7 +689,11 @@ impl Compiler {
         bytes.copy_from_slice(offset);
         let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
 
-        let trampoline = self.functions.iter().find(|f| f.name == "trampoline").unwrap();
+        let trampoline = self
+            .functions
+            .iter()
+            .find(|f| f.name == "trampoline")
+            .unwrap();
         let trampoline_jump_table_offset = trampoline.jump_table_offset;
         let trampoline_offset = &self.jump_table.as_ref().unwrap()
             [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
@@ -503,7 +701,6 @@ impl Compiler {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(trampoline_offset);
         let trampoline_start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-
 
         let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
         let arg = BuiltInTypes::Int.tag(arg as isize) as u64;
@@ -518,6 +715,7 @@ impl Compiler {
         arg1: u64,
         arg2: u64,
     ) -> Result<u64, Box<dyn Error>> {
+        unimplemented!("Add trampoline");
         // get offset stored in jump table as a usize
         let offset =
             &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
@@ -723,7 +921,7 @@ impl Compiler {
     }
 
     pub fn get_function_by_pointer(&self, value: usize) -> Option<&Function> {
-        let offset = value - self.code_memory.as_ref().unwrap().as_ptr() as usize;
+        let offset = value.saturating_sub(self.code_memory.as_ref().unwrap().as_ptr() as usize);
         self.functions
             .iter()
             .find(|f| f.offset_or_pointer == offset)
@@ -735,7 +933,6 @@ impl Compiler {
             .iter_mut()
             .find(|f| f.offset_or_pointer == offset)
     }
-
 
     // TODO: Call this
     // After I make a function, I need to check if there are free variables
@@ -757,7 +954,7 @@ impl Compiler {
     ) -> Result<usize, Box<dyn Error>> {
         let len = 8 + 8 + free_variables.len() * 8;
         // TODO: Stack pointer should be passed in
-        let heap_pointer = self.allocate(len, 0)?;
+        let heap_pointer = self.allocate(len, 0, BuiltInTypes::Closure)?;
         let pointer = heap_pointer as *mut u8;
         let num_free = free_variables.len();
         let function = function.to_le_bytes();
@@ -849,7 +1046,7 @@ impl Compiler {
             );
         }
     }
-    
+
     pub fn get_function_by_name_mut(&mut self, name: &str) -> Option<&mut Function> {
         self.functions.iter_mut().find(|f| f.name == name)
     }
