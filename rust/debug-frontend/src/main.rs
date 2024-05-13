@@ -34,31 +34,22 @@ impl Message {
     }
 }
 
+#[derive(Debug, Encode, Decode, Clone)]
+pub struct StackMapDetails {
+    pub number_of_locals: usize,
+    pub current_stack_size: usize,
+}
+
 // TODO: This should really live on the debugger side of things
 #[derive(Debug, Encode, Decode, Clone)]
 enum Data {
-    ForeignFunction {
-        name: String,
-        pointer: usize,
-    },
-    BuiltinFunction {
-        name: String,
-        pointer: usize,
-    },
+    ForeignFunction { name: String, pointer: usize },
+    BuiltinFunction {name: String, pointer: usize},
     HeapSegmentPointer { pointer: usize },
-    UserFunction {
-        name: String,
-        pointer: usize,
-        len: usize,
-    },
-    Label {
-        label: String,
-        function_pointer: usize,
-        label_index: usize,
-        label_location: usize,
-    },
+    UserFunction { name: String, pointer: usize, len: usize },
+    Label { label: String, function_pointer: usize, label_index: usize, label_location: usize },
+    StackMap { pc: usize, name: String, stack_map: Vec<(usize, StackMapDetails)> },
 }
-
 
 #[derive(Debug, Encode, Decode, Clone)]
 struct Label {
@@ -93,6 +84,13 @@ impl Data {
                     "{}: 0x{:x} 0x{:x} 0x{:x}",
                     label, function_pointer, label_index, label_location
                 )
+            }
+            Data::StackMap { pc, name, stack_map } => {
+
+                let stack_map_details_string = stack_map.iter().map(|(key, details)| {
+                    format!("0x{:x}: size: {}, locals: {}", key, details.current_stack_size, details.number_of_locals)
+                }).collect::<Vec<String>>().join(" | ");
+                format!("{}, 0x{:x}, {}", name, pc, stack_map_details_string)
             }
         }
     }
@@ -232,7 +230,14 @@ impl Frontend {
             if let Some(thread) = process.thread_by_index_id(1) {
                 let _was_debugger_info = self.state.check_debugger_info(&thread, &process, true);
                 let pc_before = thread.selected_frame().pc();
-                thread.step_instruction(true).unwrap();
+
+                let current_instruction = self.state.disasm.disasm_values.iter().find(|x| x.address == pc_before);
+                let step_over = if current_instruction.map(|x| format!("{} {}", x.instruction, x.arguments.join(" "))) == Some("mov x29 sp".to_string()) {
+                    false    
+                } else {
+                    true
+                };
+                thread.step_instruction(step_over).unwrap();
                 let pc_after = thread.selected_frame().pc();
                 if pc_before == pc_after {
                     thread.selected_frame().set_pc(pc_after + 4);
@@ -298,7 +303,7 @@ fn main() {
 }
 
 // Stolen from compiler
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltInTypes {
     Int,
     Float,
@@ -308,16 +313,23 @@ pub enum BuiltInTypes {
     Closure,
     Struct,
     Array,
+    Null,
     None,
 }
 
 impl BuiltInTypes {
+
+    pub fn null_value() -> isize {
+        0b111
+    }
+
     pub fn tag(&self, value: isize) -> isize {
         let value = value << 3;
         let tag = self.get_tag();
         value | tag
     }
 
+    // TODO: Given this scheme how do I represent null?
     pub fn get_tag(&self) -> isize {
         match self {
             BuiltInTypes::Int => 0b000,
@@ -328,7 +340,8 @@ impl BuiltInTypes {
             BuiltInTypes::Closure => 0b101,
             BuiltInTypes::Struct => 0b110,
             BuiltInTypes::Array => 0b111,
-            BuiltInTypes::None => panic!("None has no tag"),
+            BuiltInTypes::Null => 0b111,
+            BuiltInTypes::None => 0,
         }
     }
 
@@ -336,7 +349,12 @@ impl BuiltInTypes {
         pointer >> 3
     }
 
+    
+
     pub fn get_kind(pointer: usize) -> Self {
+        if pointer == Self::null_value() as usize {
+            return BuiltInTypes::Null;
+        }
         match pointer & 0b111 {
             0b000 => BuiltInTypes::Int,
             0b001 => BuiltInTypes::Float,
@@ -360,6 +378,7 @@ impl BuiltInTypes {
             BuiltInTypes::Struct => false,
             BuiltInTypes::Array => false,
             BuiltInTypes::Closure => false,
+            BuiltInTypes::Null => true,
             BuiltInTypes::None => false,
         }
     }
@@ -383,6 +402,21 @@ impl BuiltInTypes {
     pub fn tag_size() -> i32 {
         3
     }
+    
+    pub fn is_heap_pointer(value: usize) -> bool {
+        match BuiltInTypes::get_kind(value) {
+            BuiltInTypes::Int => false,
+            BuiltInTypes::Float => false,
+            BuiltInTypes::String => false,
+            BuiltInTypes::Bool => false,
+            BuiltInTypes::Function => false,
+            BuiltInTypes::Closure => true,
+            BuiltInTypes::Struct => true,
+            BuiltInTypes::Array => true,
+            BuiltInTypes::Null => false,
+            BuiltInTypes::None => false,
+        }
+    }
     pub fn to_string(&self) -> String {
         match self {
             BuiltInTypes::Int => "Int".to_string(),
@@ -393,6 +427,7 @@ impl BuiltInTypes {
             BuiltInTypes::Closure => "Closure".to_string(),
             BuiltInTypes::Struct => "Struct".to_string(),
             BuiltInTypes::Array => "Array".to_string(),
+            BuiltInTypes::Null => "Null".to_string(),
             BuiltInTypes::None => "None".to_string(),
         }
     }
@@ -590,7 +625,7 @@ impl State {
         process: &SBProcess,
         is_stepping: bool,
     ) -> bool {
-        println!("{:?}", thread.selected_frame().function_name());
+        // println!("{:?}", thread.selected_frame().function_name());
         if thread.selected_frame().function_name() == Some("debugger_info") {
             let x0 = thread
                 .selected_frame()
@@ -641,6 +676,10 @@ impl State {
                             address_range: (pointer, pointer + len),
                         },
                     );
+                }
+                Data::StackMap { pc, name, stack_map } => {
+                    // TODO: do something here
+                    println!("{}", message.data.to_string());
                 }
             }
             self.messages.push(message);

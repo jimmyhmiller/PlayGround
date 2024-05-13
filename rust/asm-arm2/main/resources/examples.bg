@@ -158,3 +158,60 @@ fn bottomUpTree(depth) {
         }
     }
 }
+
+fn testGcSimple(n) {
+    let x = TreeNode {
+        left: null
+        right: null
+    }
+
+    let y = TreeNode {
+        left: x,
+        right: x
+    }
+
+    let z = TreeNode {
+        left: y,
+        right: y,
+    }
+    z
+}
+
+fn testGc(n) {
+    if n > 10 {
+        0
+    } else {
+        let x = TreeNode {
+            left: null
+            right: null
+        }
+        1 + testGc(n + 1)
+
+        let y = TreeNode {
+            left: x,
+            right: x
+        }
+
+        1 + testGc(n + 1)
+
+        let z = TreeNode {
+            left: y,
+            right: y,
+        }
+        println(x)
+        println(y)
+        println(z)
+        println(2)
+        println(2)
+        println(2)
+        println(2)
+        println(2)
+
+    }
+}
+
+fn simpleFunctionWithLocals() {
+    let x = 2;
+    let y = 3;
+    x + y
+}
