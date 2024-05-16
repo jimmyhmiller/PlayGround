@@ -392,8 +392,9 @@ impl Compiler {
         kind: BuiltInTypes,
     ) -> Result<usize, Box<dyn Error>> {
         let segment = self.heap.segment_offset;
-        let result = self.heap.allocate(bytes, stack_pointer).unwrap(); // TODO: do better
-                                                                        // if segment != self.heap.segment_offset {
+        let result = self.heap.allocate(bytes, stack_pointer).unwrap(); 
+        // TODO: do better
+        // if segment != self.heap.segment_offset {
         // self.mark(kind.tag(result.clone() as isize) as usize, stack_pointer);
         // }
         Ok(result)

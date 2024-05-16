@@ -69,21 +69,6 @@ pub fn debugger(message: Message) {
 }
 
 
-fn test_fib(compiler: &mut Compiler, n: u64) -> Result<(), Box<dyn Error>> {
-
-    compiler.compile_ast(parser::fib())?;
-
-    let time = Instant::now();
-
-    let result1 = compiler.run_function("fib", vec![n as i32]);
-    println!("Our time {:?}", time.elapsed());
-    let time = Instant::now();
-    let result2 = fib_rust(n as usize);
-    println!("Rust time {:?}", time.elapsed());
-    println!("{} {}", BuiltInTypes::untag(result1 as usize), result2);
-
-    Ok(())
-}
 
 fn fib_rust(n: usize) -> usize {
     if n <= 1 {
@@ -197,38 +182,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     // compiler.print(hello2_result as usize);
 
     let time = Instant::now();
-
-    // let result = compiler.run_function("mainThread", vec![21]);
-    // println!("Our time {:?}", time.elapsed());
-    // compiler.println(result as usize);
+    let result = compiler.run_function("mainThread", vec![21]);
+    println!("Our time {:?}", time.elapsed());
+    compiler.println(result as usize);
     
     // let result = compiler.run_function("simpleFunctionWithLocals", vec![]);
     // println!("Our time {:?}", time.elapsed());
     // compiler.println(result as usize);
 
-    let result = compiler.run_function("testGcSimple", vec![]);
-    println!("Our time {:?}", time.elapsed());
-    compiler.println(result as usize);
-   
-
-    // let top_level = parse!(
-    //     let x = 1;
-    //     let y = 2;
-    //     let z = x + y;
-    //     function print_z(z) {
-    //         print(z)
-    //     }
-    //     print_z(z)
-    // );
-
-    // If i want something like the over to work, I need to
-    // 1. Compile the whole thing as a function that I can call
-    // 2. Return the location of funtions nested
-    // For this I am ignoring closures for now
-    // I need to make the Compiler deal with this rather
-    // than doing everything piecemeal like I am now
-    // I also need a place to store variables
-    // Probably a concept of namespaces
+    // let result = compiler.run_function("testGcSimple", vec![]);
+    // println!("Our time {:?}", time.elapsed());
+    // compiler.println(result as usize);
 
 
 
@@ -236,8 +200,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     // I need to separate out functions into their own units
     // of code.
 
-  
-    test_fib(&mut compiler, 32)?;
+    let n = 32;
+    let time = Instant::now();
+    let result1 = compiler.run_function("fib", vec![n as i32]);
+    println!("Our time {:?}", time.elapsed());
+    let time = Instant::now();
+    let result2 = fib_rust(n as usize);
+    println!("Rust time {:?}", time.elapsed());
+    println!("{} {}", BuiltInTypes::untag(result1 as usize), result2);
     Ok(())
 }
 
