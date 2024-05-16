@@ -137,6 +137,10 @@ impl App for Frontend {
                             self.is_continuing = false;
                             self.step_over();
                         }
+                        PhysicalKey::Code(KeyCode::KeyI) => {
+                            self.is_continuing = false;
+                            self.step_in();
+                        }
                         PhysicalKey::Code(KeyCode::ArrowRight) => {
                             self.is_continuing = false;
                             if self.should_step {
@@ -225,7 +229,7 @@ impl App for Frontend {
 }
 
 impl Frontend {
-    fn step_over(&mut self) {
+    fn step(&mut self, force_in: bool) {
         if let Some(process) = self.state.process.process.clone() {
             if let Some(thread) = process.thread_by_index_id(1) {
                 let _was_debugger_info = self.state.check_debugger_info(&thread, &process, true);
@@ -237,6 +241,7 @@ impl Frontend {
                 } else {
                     true
                 };
+                let step_over = if force_in { false } else { step_over };
                 thread.step_instruction(step_over).unwrap();
                 let pc_after = thread.selected_frame().pc();
                 if pc_before == pc_after {
@@ -245,6 +250,14 @@ impl Frontend {
                 self.state.update_process_state(true);
             }
         }
+    }
+
+    fn step_over(&mut self) {
+        self.step(false)
+    }
+
+    fn step_in(&mut self) {
+        self.step(true);
     }
 
     fn keep_stepping(&mut self) {

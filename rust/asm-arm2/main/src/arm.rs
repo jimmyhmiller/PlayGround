@@ -411,7 +411,6 @@ impl LowLevelArm {
         destination: Register,
         offset: i32,
     ) {
-        self.increment_stack_size(2);
         self.instructions
             .push(store_pair(reg1, reg2, destination, offset));
     }
@@ -422,7 +421,6 @@ impl LowLevelArm {
         destination: Register,
         offset: i32,
     ) {
-        self.increment_stack_size(-2);
         self.instructions
             .push(load_pair(reg1, reg2, destination, offset));
     }
@@ -488,45 +486,38 @@ impl LowLevelArm {
     }
 
     pub fn store_on_stack(&mut self, reg: Register, offset: i32) {
-        self.instructions.push(ArmAsm::StrImmGen {
+        self.instructions.push(ArmAsm::SturGen {
             size: 0b11,
-            imm9: 0, // not used
-            rn: SP,
+            imm9: offset * 8,
+            rn: X29,
             rt: reg,
-            imm12: offset,
-            class_selector: StrImmGenSelector::UnsignedOffset,
-        });
+        })
     }
 
     pub fn push_to_stack(&mut self, reg: Register, offset: i32) {
         self.increment_stack_size(1);
-        self.store_on_stack(reg, offset + self.max_locals)
+        self.store_on_stack(reg, -(offset + self.max_locals + 1))
     }
     pub fn store_local(&mut self, value: Register, offset: i32) {
-        self.store_on_stack(value, offset + 2);
+        self.store_on_stack(value, -(offset + 1));
     }
 
     pub fn load_from_stack(&mut self, destination: Register, offset: i32) {
-        if offset < 0 {
-            println!("Got it");
-        }
-        self.instructions.push(ArmAsm::LdrImmGen {
+        self.instructions.push(ArmAsm::LdurGen {
             size: 0b11,
-            imm9: 0, // not used
-            rn: SP,
+            imm9: offset * 8,
+            rn: X29,
             rt: destination,
-            imm12: offset,
-            class_selector: LdrImmGenSelector::UnsignedOffset,
         });
     }
 
     pub fn pop_from_stack(&mut self, reg: Register, offset: i32) {
         self.increment_stack_size(-1);
-        self.load_from_stack(reg, offset + self.max_locals)
+        self.load_from_stack(reg, -(offset + self.max_locals + 1))
     }
 
     pub fn load_local(&mut self, destination: Register, offset: i32) {
-        self.load_from_stack(destination, offset + 2);
+        self.load_from_stack(destination, -(offset + 1));
     }
 
     pub fn load_from_heap(&mut self, destination: Register, source: Register, offset: i32) {
@@ -592,6 +583,8 @@ impl LowLevelArm {
 
     pub fn call(&mut self, register: Register) {
         self.instructions.push(branch_with_link_register(register));
+        // TODO: I could be smarter her and not to do leaf nodes
+        self.update_stack_map();
     }
 
     pub fn call_builtin(&mut self, register: Register) {
@@ -606,7 +599,7 @@ impl LowLevelArm {
     // do in fact hold.
     fn update_stack_map(&mut self) {
         let offset = self.instructions.len() - 1;
-        let stack_size = self.stack_size;
+        let stack_size = self.stack_size - 2; // We don't need the pair we store for prelude
         // TODO: Should I keep track of locals here?
         // Right now I null them out, so it would never matter
         self.stack_map.insert(offset, stack_size as usize);
@@ -717,8 +710,8 @@ impl LowLevelArm {
         // where I was having values on the stack from native code.
         // I don't think getting rid of it was the right answer.
         let max = max as i32;
-        // Find the first store pair and patch it based
-        // on the max stack size
+
+        // TODO: I don't need to patch because it is no longer based on max
         if let Some(ArmAsm::StpGen { imm7, .. }) = self
             .instructions
             .iter_mut()
@@ -736,7 +729,7 @@ impl LowLevelArm {
             .position(|instruction| matches!(instruction, ArmAsm::SubAddsubImm { .. }))
             .map(|i| &mut self.instructions[i])
         {
-            *imm12 = (max + 2) * 8;
+            *imm12 = max * 8;
         } else {
             unreachable!();
         }
@@ -747,7 +740,7 @@ impl LowLevelArm {
             .rposition(|instruction| matches!(instruction, ArmAsm::AddAddsubImm { .. }))
             .map(|i| &mut self.instructions[i])
         {
-            *imm12 = (max + 2) * 8;
+            *imm12 = max * 8;
         } else {
             unreachable!();
         }
