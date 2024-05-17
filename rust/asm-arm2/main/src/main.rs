@@ -118,12 +118,10 @@ fn property_access(compiler: *mut Compiler, struct_pointer: usize, str_constant_
 
 fn compile_trampoline(compiler: &mut Compiler) {
     let mut lang = LowLevelArm::new();
-    lang.breakpoint();
     lang.prelude(-2);
     // set SP to equal the first argument
     lang.mov_reg(X10, SP);
     lang.mov_reg(SP, X0);
-    lang.sub_stack_pointer(2);
     lang.push_to_stack(X10, 0);
     lang.mov_reg(X10, X1);
     lang.mov_reg(X0, X2);
