@@ -230,6 +230,16 @@ impl Compiler {
         }
     }
 
+    pub fn find_stack_data(&self, pointer: usize) -> Option<&StackMapDetails> {
+        
+        for (key, value) in self.stack_map.iter() {
+            if *key == pointer.saturating_sub(4) {
+                return Some(value);
+            }
+        }
+        None
+    }
+
     pub fn mark(&mut self, latest_root: usize, current_stack_pointer: usize) -> Vec<usize> {
         let mut marked = 0;
 
@@ -253,98 +263,104 @@ impl Compiler {
 
         let mut to_mark: Vec<usize> = vec![];
 
-        if BuiltInTypes::is_heap_pointer(latest_root) {
-            unsafe {
-                let untagged = BuiltInTypes::untag(latest_root);
-                let pointer = untagged as *mut u8;
-                if pointer as usize % 8 != 0 {
-                    panic!("Not aligned");
-                }
-
-                marked += 1;
-
-                let mut data: usize = *pointer.cast::<usize>();
-                data |= 1;
-                *pointer.cast::<usize>() = data;
-
-                let size = (*(pointer as *const usize) >> 1);
-                // Why would it be 16?
-                let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, size / 8);
-                for datum in data.iter() {
-                    if BuiltInTypes::is_heap_pointer(*datum) {
-                        to_mark.push(*datum)
-                    }
-                }
+        for value in stack {
+            if let Some(details) = self.find_stack_data(*value) {
+                println!("0x{:x}: {:?}", value, details);
             }
-            roots.push(latest_root);
         }
+
+        // if BuiltInTypes::is_heap_pointer(latest_root) {
+        //     unsafe {
+        //         let untagged = BuiltInTypes::untag(latest_root);
+        //         let pointer = untagged as *mut u8;
+        //         if pointer as usize % 8 != 0 {
+        //             panic!("Not aligned");
+        //         }
+
+        //         marked += 1;
+
+        //         let mut data: usize = *pointer.cast::<usize>();
+        //         data |= 1;
+        //         *pointer.cast::<usize>() = data;
+
+        //         let size = (*(pointer as *const usize) >> 1);
+        //         // Why would it be 16?
+        //         let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, size / 8);
+        //         for datum in data.iter() {
+        //             if BuiltInTypes::is_heap_pointer(*datum) {
+        //                 to_mark.push(*datum)
+        //             }
+        //         }
+        //     }
+        //     roots.push(latest_root);
+        // }
 
         // TODO: It seems I might be putting untagged pointers on the stack
 
-        for value in stack {
-            if BuiltInTypes::is_heap_pointer(*value) {
-                unsafe {
-                    let untagged = BuiltInTypes::untag(*value);
-                    println!(
-                        "builtintypes: {:?} {} {}",
-                        BuiltInTypes::get_kind(*value),
-                        value,
-                        untagged
-                    );
-                    let pointer = untagged as *mut u8;
-                    if pointer as usize % 8 != 0 {
-                        panic!("Not aligned");
-                    }
+        // for value in stack {
+        //     if BuiltInTypes::is_heap_pointer(*value) {
+        //         unsafe {
+        //             let untagged = BuiltInTypes::untag(*value);
+        //             println!(
+        //                 "builtintypes: {:?} {} {}",
+        //                 BuiltInTypes::get_kind(*value),
+        //                 value,
+        //                 untagged
+        //             );
+        //             let pointer = untagged as *mut u8;
+        //             if pointer as usize % 8 != 0 {
+        //                 panic!("Not aligned");
+        //             }
 
-                    marked += 1;
+        //             marked += 1;
 
-                    let mut data: usize = *pointer.cast::<usize>();
-                    data |= 1;
-                    *pointer.cast::<usize>() = data;
+        //             let mut data: usize = *pointer.cast::<usize>();
+        //             data |= 1;
+        //             *pointer.cast::<usize>() = data;
 
-                    let size = (*(pointer as *const usize) >> 1);
-                    // Why would it be 16?
-                    let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, size / 8);
-                    for datum in data.iter() {
-                        if BuiltInTypes::is_heap_pointer(*datum) {
-                            to_mark.push(*datum)
-                        }
-                    }
-                }
-                roots.push(*value);
-            }
-        }
+        //             let size = (*(pointer as *const usize) >> 1);
+        //             // Why would it be 16?
+        //             let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, size / 8);
+        //             for datum in data.iter() {
+        //                 if BuiltInTypes::is_heap_pointer(*datum) {
+        //                     to_mark.push(*datum)
+        //                 }
+        //             }
+        //         }
+        //         roots.push(*value);
+        //     }
+        // }
 
-        while !to_mark.is_empty() {
-            let value = to_mark.pop().unwrap();
-            let untagged = BuiltInTypes::untag(value);
-            let pointer = untagged as *mut u8;
-            if pointer as usize % 8 != 0 {
-                panic!("Not aligned");
-            }
-            unsafe {
-                let mut data: usize = *pointer.cast::<usize>();
-                // check right most bit
-                if (data & 1) == 1 {
-                    continue;
-                }
-                data |= 1;
-                *pointer.cast::<usize>() = data;
+        // while !to_mark.is_empty() {
+        //     let value = to_mark.pop().unwrap();
+        //     let untagged = BuiltInTypes::untag(value);
+        //     let pointer = untagged as *mut u8;
+        //     if pointer as usize % 8 != 0 {
+        //         panic!("Not aligned");
+        //     }
+        //     unsafe {
+        //         let mut data: usize = *pointer.cast::<usize>();
+        //         // check right most bit
+        //         if (data & 1) == 1 {
+        //             continue;
+        //         }
+        //         data |= 1;
+        //         *pointer.cast::<usize>() = data;
 
-                marked += 1;
+        //         marked += 1;
 
-                let size = (*(pointer as *const usize) >> 1);
-                // Why would it be 16?
-                let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, (size / 8));
-                for datum in data.iter() {
-                    if BuiltInTypes::is_heap_pointer(*datum) {
-                        to_mark.push(*datum)
-                    }
-                }
-            }
-        }
+        //         let size = (*(pointer as *const usize) >> 1);
+        //         // Why would it be 16?
+        //         let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, (size / 8));
+        //         for datum in data.iter() {
+        //             if BuiltInTypes::is_heap_pointer(*datum) {
+        //                 to_mark.push(*datum)
+        //             }
+        //         }
+        //     }
+        // }
 
-        self.sweep();
+        // self.sweep();
 
         println!("marked {}", marked);
 
@@ -395,7 +411,7 @@ impl Compiler {
         let result = self.heap.allocate(bytes, stack_pointer).unwrap(); 
         // TODO: do better
         // if segment != self.heap.segment_offset {
-        // self.mark(kind.tag(result.clone() as isize) as usize, stack_pointer);
+        self.mark(kind.tag(result.clone() as isize) as usize, stack_pointer);
         // }
         Ok(result)
     }
