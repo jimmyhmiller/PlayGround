@@ -599,10 +599,10 @@ impl LowLevelArm {
     // do in fact hold.
     fn update_stack_map(&mut self) {
         let offset = self.instructions.len() - 1;
-        let stack_size = self.stack_size - 2; // We don't need the pair we store for prelude
+        let stack_size = self.stack_size as usize;
         // TODO: Should I keep track of locals here?
         // Right now I null them out, so it would never matter
-        self.stack_map.insert(offset, stack_size as usize);
+        self.stack_map.insert(offset, stack_size);
     }
 
     pub fn translate_stack_map(&self, pc: usize) -> Vec<(usize, usize)> {
@@ -830,7 +830,7 @@ impl LowLevelArm {
     }
 
     pub fn get_stack_pointer_imm(&mut self, destination: Register, offset: isize) {
-        self.instructions.push(ArmAsm::AddAddsubImm {
+        self.instructions.push(ArmAsm::SubAddsubImm {
             sf: destination.sf(),
             rn: SP,
             rd: destination,
