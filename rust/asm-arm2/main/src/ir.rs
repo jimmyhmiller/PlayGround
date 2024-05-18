@@ -1063,7 +1063,7 @@ impl Ir {
                         lang.jump(exit);
                     }
                     Value::Local(local) => {
-                        lang.store_local(lang.ret_reg(), *local as i32);
+                        lang.load_local(lang.ret_reg(), *local as i32);
                         lang.jump(exit);
                     }
                     Value::FreeVariable(free_variable) => {

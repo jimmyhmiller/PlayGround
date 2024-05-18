@@ -160,6 +160,11 @@ fn bottomUpTree(depth) {
 }
 
 fn testGcSimple(n) {
+    let garbage = TreeNode {
+        left: null
+        right: null
+    }
+
     let x = TreeNode {
         left: null
         right: null
@@ -178,10 +183,6 @@ fn testGcSimple(n) {
 }
 
 fn testGcNested(n) {
-    let x = TreeNode {
-        left: null
-        right: null
-    }
     let y = testGcSimple()
 
     let z = TreeNode {
@@ -189,7 +190,12 @@ fn testGcNested(n) {
         right: y
     }
 
-    z
+    let q = TreeNode {
+        left: z
+        right: z
+    }
+
+    q
 }
 
 fn testGc(n) {

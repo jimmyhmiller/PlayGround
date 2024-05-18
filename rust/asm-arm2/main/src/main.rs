@@ -179,20 +179,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     // let hello2_result = compiler.run_function("hello2", vec![]);
     // compiler.print(hello2_result as usize);
 
-    // let time = Instant::now();
-    // let result = compiler.run_function("mainThread", vec![21]);
-    // println!("Our time {:?}", time.elapsed());
-    // compiler.println(result as usize);
+    let time = Instant::now();
+    let result = compiler.run_function("mainThread", vec![21]);
+    println!("Our time {:?}", time.elapsed());
+    compiler.println(result as usize);
     
     // let result = compiler.run_function("simpleFunctionWithLocals", vec![]);
     // println!("Our time {:?}", time.elapsed());
     // compiler.println(result as usize);
 
 
-    let time = Instant::now();
-    let result = compiler.run_function("testGcNested", vec![]);
-    println!("Our time {:?}", time.elapsed());
-    compiler.println(result as usize);
+    // let time = Instant::now();
+    // let result = compiler.run_function("testGcNested", vec![]);
+    // println!("Our time {:?}", time.elapsed());
+    // compiler.println(result as usize);
 
 
 

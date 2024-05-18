@@ -75,11 +75,18 @@ impl StructManager {
     }
 }
 
+struct FreeListEntry {
+    segment: usize,
+    offset: usize,
+    size: usize,
+}
+
 struct Heap {
     segments: Vec<Option<MmapMut>>,
     heap_offset: usize,
     segment_offset: usize,
     segment_size: usize,
+    free_list: Vec<FreeListEntry>,
 }
 
 impl Heap {
@@ -99,6 +106,7 @@ impl Heap {
             heap_offset: 0,
             segment_offset: 0,
             segment_size,
+            free_list: vec![],
         }
     }
 
@@ -115,7 +123,25 @@ impl Heap {
     // Or I could keep a list of free pages or something.
 
     fn allocate(&mut self, bytes: usize, stack_pointer: usize) -> Result<usize, Box<dyn Error>> {
-        if self.heap_offset + bytes + 8 > self.segment_size {
+
+
+        // if self.free_list.len() > 0 {
+        //     println!("got some free!")
+        // }
+
+        // TODO: Should I only use identical slots?
+        let potential_spot = self.free_list.iter().position(|x| {
+            x.size == (bytes + 1) * 8
+        });
+
+        let potential_spot = if let Some(spot) = potential_spot {
+            Some(self.free_list.remove(spot))
+        } else {
+            None
+        };
+
+
+        if potential_spot.is_none() &&  self.heap_offset + bytes + 8 > self.segment_size {
             self.segment_offset += 1;
             self.segments.push(Some(
                 MmapOptions::new(self.segment_size)
@@ -140,23 +166,35 @@ impl Heap {
         let size = (bytes * 8) << 1;
         let memory = mem::replace(&mut self.segments[self.segment_offset], None);
         let mut memory = memory.unwrap();
-        let buffer = &mut memory[self.heap_offset..];
+
+        let offset = if let Some(entry) = &potential_spot {
+            entry.offset
+        } else {
+            self.heap_offset
+        };
+        let buffer = &mut memory[offset..];
         // write the size of the object to the first 8 bytes
         for (index, byte) in size.to_le_bytes().iter().enumerate() {
             buffer[index] = *byte;
         }
-        self.heap_offset += size + 8;
-        // need to make sure my offset is aligned
-        // going to round up to the nearest 8 bytes
-        let remainder = self.heap_offset % 8;
-        if remainder != 0 {
-            self.heap_offset += 8 - remainder;
+        if potential_spot.is_none() {
+            self.heap_offset += (size >> 1) + 8;
+            // need to make sure my offset is aligned
+            // going to round up to the nearest 8 bytes
+            let remainder = self.heap_offset % 8;
+            if remainder != 0 {
+                self.heap_offset += 8 - remainder;
+            }
+            assert!(self.heap_offset % 8 == 0, "Heap offset is not aligned");
         }
-        assert!(self.heap_offset % 8 == 0, "Heap offset is not aligned");
 
         let pointer = buffer.as_ptr() as usize;
         self.segments[self.segment_offset] = Some(memory);
         Ok(pointer)
+    }
+    
+    fn add_free(&mut self, entry: FreeListEntry) {
+       self.free_list.push(entry);
     }
 }
 
@@ -261,129 +299,103 @@ impl Compiler {
         let mut roots = Vec::new();
         // Walk the stack
 
-        let mut to_mark: Vec<usize> = vec![];
+        let mut to_mark: Vec<usize> = vec![latest_root];
 
-        for value in stack {
-            if let Some(details) = self.find_stack_data(*value) {
-                println!("0x{:x}: {:?}", value, details);
+        let mut i = 0;
+        while i < stack.len() {
+            let value = stack[i];
+
+            if let Some(details) = self.find_stack_data(value) {
+                // println!("0x{:x}: {:?}", value, details);
+                let stack_values = details.current_stack_size;
+                let locals = details.number_of_locals;
+                let padding = (stack_values + locals) % 2;
+                i += padding;
+                i += 1;
+                for j in i..(stack_values + locals + i) {
+                    if BuiltInTypes::is_heap_pointer(stack[j]) {
+                        // println!("Pushing mark 0x{:?}", stack[j]);
+                        to_mark.push(stack[j]);
+                    }
+                }
+                continue;
+            }
+            i += 1;
+        }
+
+        while !to_mark.is_empty() {
+            let value = to_mark.pop().unwrap();
+            let untagged = BuiltInTypes::untag(value);
+            let pointer = untagged as *mut u8;
+            if pointer as usize % 8 != 0 {
+                panic!("Not aligned");
+            }
+            unsafe {
+                let mut data: usize = *pointer.cast::<usize>();
+                // check right most bit
+                if (data & 1) == 1 {
+                    continue;
+                }
+                data |= 1;
+                *pointer.cast::<usize>() = data;
+
+                marked += 1;
+
+                let size = (*(pointer as *const usize) >> 1);
+                // Why would it be 16?
+                let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, (size / 8));
+                for datum in data.iter() {
+                    if BuiltInTypes::is_heap_pointer(*datum) {
+                        to_mark.push(*datum)
+                    }
+                }
             }
         }
 
-        // if BuiltInTypes::is_heap_pointer(latest_root) {
-        //     unsafe {
-        //         let untagged = BuiltInTypes::untag(latest_root);
-        //         let pointer = untagged as *mut u8;
-        //         if pointer as usize % 8 != 0 {
-        //             panic!("Not aligned");
-        //         }
+        self.sweep();
 
-        //         marked += 1;
-
-        //         let mut data: usize = *pointer.cast::<usize>();
-        //         data |= 1;
-        //         *pointer.cast::<usize>() = data;
-
-        //         let size = (*(pointer as *const usize) >> 1);
-        //         // Why would it be 16?
-        //         let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, size / 8);
-        //         for datum in data.iter() {
-        //             if BuiltInTypes::is_heap_pointer(*datum) {
-        //                 to_mark.push(*datum)
-        //             }
-        //         }
-        //     }
-        //     roots.push(latest_root);
-        // }
-
-        // TODO: It seems I might be putting untagged pointers on the stack
-
-        // for value in stack {
-        //     if BuiltInTypes::is_heap_pointer(*value) {
-        //         unsafe {
-        //             let untagged = BuiltInTypes::untag(*value);
-        //             println!(
-        //                 "builtintypes: {:?} {} {}",
-        //                 BuiltInTypes::get_kind(*value),
-        //                 value,
-        //                 untagged
-        //             );
-        //             let pointer = untagged as *mut u8;
-        //             if pointer as usize % 8 != 0 {
-        //                 panic!("Not aligned");
-        //             }
-
-        //             marked += 1;
-
-        //             let mut data: usize = *pointer.cast::<usize>();
-        //             data |= 1;
-        //             *pointer.cast::<usize>() = data;
-
-        //             let size = (*(pointer as *const usize) >> 1);
-        //             // Why would it be 16?
-        //             let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, size / 8);
-        //             for datum in data.iter() {
-        //                 if BuiltInTypes::is_heap_pointer(*datum) {
-        //                     to_mark.push(*datum)
-        //                 }
-        //             }
-        //         }
-        //         roots.push(*value);
-        //     }
-        // }
-
-        // while !to_mark.is_empty() {
-        //     let value = to_mark.pop().unwrap();
-        //     let untagged = BuiltInTypes::untag(value);
-        //     let pointer = untagged as *mut u8;
-        //     if pointer as usize % 8 != 0 {
-        //         panic!("Not aligned");
-        //     }
-        //     unsafe {
-        //         let mut data: usize = *pointer.cast::<usize>();
-        //         // check right most bit
-        //         if (data & 1) == 1 {
-        //             continue;
-        //         }
-        //         data |= 1;
-        //         *pointer.cast::<usize>() = data;
-
-        //         marked += 1;
-
-        //         let size = (*(pointer as *const usize) >> 1);
-        //         // Why would it be 16?
-        //         let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, (size / 8));
-        //         for datum in data.iter() {
-        //             if BuiltInTypes::is_heap_pointer(*datum) {
-        //                 to_mark.push(*datum)
-        //             }
-        //         }
-        //     }
-        // }
-
-        // self.sweep();
-
-        println!("marked {}", marked);
+        // println!("marked {}", marked);
 
         roots
     }
 
     fn sweep(&mut self) {
-        for segment in self.heap.segments.iter_mut() {
+        let num_segments = self.heap.segments.len();
+        let mut free_entries: Vec<FreeListEntry> = vec![];
+        for (segment_index, segment) in self.heap.segments.iter_mut().enumerate() {
             if let Some(segment) = segment {
                 let mut offset = 0;
+                let segment_range = if num_segments > 1 && segment_index == num_segments - 1 {
+                    self.heap.segment_size
+                } else {
+                    self.heap.heap_offset
+                };
                 // TODO: I'm scanning whole segment even if unused
-                while offset < self.heap.segment_size {
+                let pointer = segment.as_mut_ptr();
+                while offset < segment_range {
                     unsafe {
-                        let mut pointer = segment.as_ptr();
-
+                        let pointer = pointer.add(offset);
                         let mut data: usize = *pointer.cast::<usize>();
+
+                        if data == 0 {
+                            break;
+                        }
 
                         // check right most bit
                         if (data & 1) == 1 {
                             // println!("marked!");
                             data &= !1;
+                        } else {
+                            free_entries.push(FreeListEntry {
+                                segment: segment_index,
+                                offset,
+                                size: (data >> 1) + 8,
+                            });
+                            // println!("Found garbage!");
                         }
-                        let size = (data >> 1) - 8;
+
+                        *pointer.cast::<usize>() = data;
+                        let size = (data >> 1) + 8;
                         // println!("size: {}", size);
                         offset += size;
                         let remainder = offset % 8;
@@ -393,6 +405,10 @@ impl Compiler {
                     }
                 }
             }
+        }
+
+        for entry in free_entries {
+            self.heap.add_free(entry);
         }
     }
 
@@ -410,9 +426,9 @@ impl Compiler {
         let segment = self.heap.segment_offset;
         let result = self.heap.allocate(bytes, stack_pointer).unwrap(); 
         // TODO: do better
-        // if segment != self.heap.segment_offset {
-        self.mark(kind.tag(result.clone() as isize) as usize, stack_pointer);
-        // }
+        if segment != self.heap.segment_offset {
+            self.mark(kind.tag(result.clone() as isize) as usize, stack_pointer);
+        }
         Ok(result)
     }
 
