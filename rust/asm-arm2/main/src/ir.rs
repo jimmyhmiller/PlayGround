@@ -1,10 +1,8 @@
-use std::{arch::aarch64::uint16x4_t, collections::HashMap};
+use std::collections::HashMap;
 
 use asm::arm::Register;
 
-use crate::{
-    arm::LowLevelArm, common::Label, compiler::Compiler
-};
+use crate::{arm::LowLevelArm, common::Label, compiler::Compiler};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Condition {
@@ -57,7 +55,6 @@ pub enum BuiltInTypes {
 }
 
 impl BuiltInTypes {
-
     pub fn null_value() -> isize {
         0b111
     }
@@ -137,7 +134,7 @@ impl BuiltInTypes {
     pub fn tag_size() -> i32 {
         3
     }
-    
+
     pub fn is_heap_pointer(value: usize) -> bool {
         match BuiltInTypes::get_kind(value) {
             BuiltInTypes::Int => false,
@@ -166,16 +163,13 @@ fn tag_and_untag() {
         BuiltInTypes::Array,
     ];
     for kind in kinds.iter() {
-        let tag = kind.get_tag();
         let value = 123;
         let tagged = kind.tag(value);
         // assert_eq!(tagged & 0b111a, tag);
         assert_eq!(kind, &BuiltInTypes::get_kind(tagged as usize));
         assert_eq!(value as usize, BuiltInTypes::untag(tagged as usize));
     }
-
 }
-
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct VirtualRegister {
@@ -616,9 +610,8 @@ impl Ir {
 
     pub fn assign_new<A>(&mut self, val: A) -> VirtualRegister
     where
-        A: Into<Value> 
-        {
-
+        A: Into<Value>,
+    {
         let val = val.into();
         if let Value::Register(register) = val {
             return register;
@@ -698,20 +691,19 @@ impl Ir {
         }
     }
 
-    pub fn compile(&mut self, name: &str) -> LowLevelArm {
-
+    pub fn compile(&mut self, _name: &str) -> LowLevelArm {
         // println!("{:#?}", self.instructions);
         let mut lang = LowLevelArm::new();
         lang.set_max_locals(self.num_locals);
         // lang.breakpoint();
-        
+
         let before_prelude = lang.new_label("before_prelude");
         lang.write_label(before_prelude);
-        
+
         // zero is a placeholder because this will be patched
         lang.prelude(0);
 
-        // I believe this is fine because it is volatile and we 
+        // I believe this is fine because it is volatile and we
         // are at the beginning of the function
         let register = lang.canonical_volatile_registers[0];
         lang.mov_64(register, BuiltInTypes::null_value());
@@ -723,7 +715,7 @@ impl Ir {
         let exit = lang.new_label("exit");
 
         let mut ir_label_to_lang_label: HashMap<Label, Label> = HashMap::new();
-        let mut labels : Vec<&Label> = self.labels.iter().collect();
+        let mut labels: Vec<&Label> = self.labels.iter().collect();
         labels.sort_by_key(|label| label.index);
         for label in labels.iter() {
             let new_label = lang.new_label(&self.label_names[label.index]);
@@ -733,9 +725,10 @@ impl Ir {
         // println!("compiling {}", name);
         // Self::draw_lifetimes(&lifetimes);
         let mut alloc = RegisterAllocator::new(lifetimes);
-        
+
         for (index, instruction) in self.instructions.iter().enumerate() {
-            let mut lifetimes : Vec<(&VirtualRegister, &(usize, usize))> = alloc.lifetimes.iter().collect();
+            let mut lifetimes: Vec<(&VirtualRegister, &(usize, usize))> =
+                alloc.lifetimes.iter().collect();
             lifetimes.sort_by_key(|(_, (start, _))| *start);
             for (register, (_start, end)) in lifetimes {
                 if index == end + 1 {
@@ -830,7 +823,7 @@ impl Ir {
                     Value::Function(id) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
                         let function = BuiltInTypes::Function.tag(*id as isize);
-                        lang.mov_64(register, function as isize);
+                        lang.mov_64(register, function);
                     }
                     Value::Pointer(ptr) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
@@ -851,7 +844,7 @@ impl Ir {
                     Value::Local(local) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
                         lang.load_local(register, *local as i32)
-                    },
+                    }
                     Value::FreeVariable(free_variable) => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
                         // The idea here is that I would store free variables after the locals on the stack
@@ -861,7 +854,7 @@ impl Ir {
                     }
                     Value::Null => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
-                        lang.mov_64(register, 0b111 as isize);
+                        lang.mov_64(register, 0b111_isize);
                     }
                 },
                 Instruction::LoadConstant(dest, val) => {
@@ -975,7 +968,6 @@ impl Ir {
                         lang.call(function);
                     }
 
-
                     let dest = dest.try_into().unwrap();
                     let register = alloc.allocate_register(index, dest, &mut lang);
                     lang.mov_reg(register, lang.ret_reg());
@@ -1067,7 +1059,10 @@ impl Ir {
                         lang.jump(exit);
                     }
                     Value::FreeVariable(free_variable) => {
-                        lang.load_from_stack(lang.ret_reg(), (*free_variable + self.num_locals) as i32);
+                        lang.load_from_stack(
+                            lang.ret_reg(),
+                            (*free_variable + self.num_locals) as i32,
+                        );
                         lang.jump(exit);
                     }
                 },
@@ -1076,7 +1071,7 @@ impl Ir {
                     let ptr = alloc.allocate_register(index, ptr, &mut lang);
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
-                    lang.load_from_heap(dest, ptr , 0);
+                    lang.load_from_heap(dest, ptr, 0);
                 }
                 Instruction::HeapStore(ptr, val) => {
                     let ptr = ptr.try_into().unwrap();
@@ -1126,7 +1121,7 @@ impl Ir {
                     let dest = alloc.allocate_register(index, dest, &mut lang);
                     lang.get_stack_pointer_imm(dest, *offset);
                 }
-                Instruction::CurrentStackPosition(dest ) => {
+                Instruction::CurrentStackPosition(dest) => {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
                     lang.get_current_stack_position(dest)
@@ -1193,8 +1188,11 @@ impl Ir {
     {
         let source = self.assign_new(source.into());
         let dest = self.assign_new(dest.into());
-        self.instructions
-            .push(Instruction::HeapStoreOffset(dest.into(), source.into(), offset));
+        self.instructions.push(Instruction::HeapStoreOffset(
+            dest.into(),
+            source.into(),
+            offset,
+        ));
     }
 
     pub fn heap_load(&mut self, dest: Value, source: Value) -> Value {
@@ -1217,14 +1215,12 @@ impl Ir {
         dest
     }
 
-
     pub fn call_builtin(&mut self, function: Value, vec: Vec<Value>) -> Value {
         let dest = self.volatile_register().into();
         self.instructions
             .push(Instruction::Call(dest, function, vec, true));
         dest
     }
-
 
     pub fn store_local(&mut self, local_index: usize, reg: VirtualRegister) {
         self.increment_locals(local_index);
@@ -1235,11 +1231,12 @@ impl Ir {
     }
 
     pub fn load_local(&mut self, reg: VirtualRegister, local_index: usize) -> Value {
-        let register = self.volatile_register();
         self.increment_locals(local_index);
-        self.instructions
-            .push(Instruction::LoadLocal(register.into(), Value::Local(local_index)));
-        register.into()
+        self.instructions.push(Instruction::LoadLocal(
+            reg.into(),
+            Value::Local(local_index),
+        ));
+        reg.into()
     }
 
     pub fn push_to_stack(&mut self, reg: Value) {
@@ -1262,8 +1259,10 @@ impl Ir {
     }
 
     pub fn load_free_variable(&mut self, reg: VirtualRegister, index: usize) {
-        self.instructions
-            .push(Instruction::LoadLocal(reg.into(), Value::FreeVariable(index)));
+        self.instructions.push(Instruction::LoadLocal(
+            reg.into(),
+            Value::FreeVariable(index),
+        ));
     }
 
     pub fn get_stack_pointer(&mut self, offset: Value) -> Value {
@@ -1286,32 +1285,31 @@ impl Ir {
         let source = self.add(source, offset_reg);
         let dest = self.volatile_register();
         self.instructions
-            .push(Instruction::HeapLoad(dest.into(), source.into()));
+            .push(Instruction::HeapLoad(dest.into(), source));
         dest.into()
     }
 
     pub fn get_tag(&mut self, value: Value) -> Value {
         let dest = self.volatile_register().into();
         self.instructions
-            .push(Instruction::GetTag(dest, value.into()));
-        dest.into()
+            .push(Instruction::GetTag(dest, value));
+        dest
     }
 
     pub fn untag(&mut self, closure_register: Value) -> Value {
         let dest = self.volatile_register().into();
         self.instructions
-            .push(Instruction::Untag(dest, closure_register.into()));
-        dest.into()
+            .push(Instruction::Untag(dest, closure_register));
+        dest
     }
 
     pub fn tag(&mut self, reg: Value, tag: isize) -> Value {
         let dest = self.volatile_register().into();
         let tag = self.assign_new(Value::RawValue(tag as usize));
         self.instructions
-            .push(Instruction::Tag(dest, reg.into(), tag.into()));
-        dest.into()
+            .push(Instruction::Tag(dest, reg, tag.into()));
+        dest
     }
-
 
     /// Gets the stack position of live values.
     /// This includes locals and any values we've pushed.
@@ -1321,10 +1319,8 @@ impl Ir {
         let dest = self.volatile_register().into();
         self.instructions
             .push(Instruction::CurrentStackPosition(dest));
-        dest.into()
+        dest
     }
-
-
 }
 
 #[allow(unused)]
@@ -1385,15 +1381,13 @@ pub fn heap_test() -> Ir {
 
 pub extern "C" fn println_value(compiler: &Compiler, value: usize) -> usize {
     compiler.println(value);
-    return 0b111;
+    0b111
 }
 
 pub extern "C" fn print_value(compiler: &Compiler, value: usize) -> usize {
     compiler.print(value);
-    return 0b111;
+    0b111
 }
-
-
 
 // TODO:
 // I need to properly tag every value

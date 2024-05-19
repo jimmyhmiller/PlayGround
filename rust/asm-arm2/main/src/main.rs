@@ -1,10 +1,9 @@
-use std::{error::Error, time::Instant, mem, slice::from_raw_parts};
-use arm::LowLevelArm;
-use asm::arm::{ArmAsm, SP, X0, X1, X10, X2, X3, X4};
-use bincode::{Encode, Decode, config::standard};
-use compiler::StackMapDetails;
-use ir::Ir;
 use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
+use arm::LowLevelArm;
+use asm::arm::{SP, X0, X1, X10, X2, X3, X4};
+use bincode::{config::standard, Decode, Encode};
+use compiler::StackMapDetails;
+use std::{error::Error, mem, slice::from_raw_parts, time::Instant};
 
 mod arm;
 pub mod ast;
@@ -19,16 +18,36 @@ pub struct Message {
     data: Data,
 }
 
-
 // TODO: This should really live on the debugger side of things
 #[derive(Debug, Encode, Decode)]
 enum Data {
-    ForeignFunction { name: String, pointer: usize },
-    BuiltinFunction {name: String, pointer: usize},
-    HeapSegmentPointer { pointer: usize },
-    UserFunction { name: String, pointer: usize, len: usize },
-    Label { label: String, function_pointer: usize, label_index: usize, label_location: usize },
-    StackMap { pc: usize, name: String, stack_map: Vec<(usize, StackMapDetails)> },
+    ForeignFunction {
+        name: String,
+        pointer: usize,
+    },
+    BuiltinFunction {
+        name: String,
+        pointer: usize,
+    },
+    HeapSegmentPointer {
+        pointer: usize,
+    },
+    UserFunction {
+        name: String,
+        pointer: usize,
+        len: usize,
+    },
+    Label {
+        label: String,
+        function_pointer: usize,
+        label_index: usize,
+        label_location: usize,
+    },
+    StackMap {
+        pc: usize,
+        name: String,
+        stack_map: Vec<(usize, StackMapDetails)>,
+    },
 }
 
 trait Serialize {
@@ -36,12 +55,12 @@ trait Serialize {
     fn from_binary(data: &[u8]) -> Self;
 }
 
-impl<T : Encode + Decode> Serialize for T {
+impl<T: Encode + Decode> Serialize for T {
     fn to_binary(&self) -> Vec<u8> {
         bincode::encode_to_vec(self, standard()).unwrap()
     }
     fn from_binary(data: &[u8]) -> T {
-        let (data, _ ) = bincode::decode_from_slice(data, standard()).unwrap();
+        let (data, _) = bincode::decode_from_slice(data, standard()).unwrap();
         data
     }
 }
@@ -68,8 +87,6 @@ pub fn debugger(message: Message) {
     // Should make it is so we clean up this memory
 }
 
-
-
 fn fib_rust(n: usize) -> usize {
     if n <= 1 {
         return n;
@@ -83,15 +100,17 @@ fn allocate_array(compiler: *mut Compiler, value: usize) -> usize {
     let compiler = unsafe { &mut *compiler };
     // TODO: Stack pointer should be passed in
     let pointer = compiler.allocate(value, 0, BuiltInTypes::Array).unwrap();
-    let pointer = BuiltInTypes::Array.tag(pointer as isize) as usize;
-    pointer
+    
+    BuiltInTypes::Array.tag(pointer as isize) as usize
 }
 
-fn allocate_struct(compiler: *mut Compiler, value: usize, stack_pointer: usize,) -> usize {
+fn allocate_struct(compiler: *mut Compiler, value: usize, stack_pointer: usize) -> usize {
     let value = BuiltInTypes::untag(value);
     let compiler = unsafe { &mut *compiler };
-    let pointer = compiler.allocate(value, stack_pointer, BuiltInTypes::Struct).unwrap();
-    pointer
+    
+    compiler
+        .allocate(value, stack_pointer, BuiltInTypes::Struct)
+        .unwrap()
 }
 
 fn array_store(compiler: *mut Compiler, array: usize, index: usize, value: usize) -> usize {
@@ -104,14 +123,23 @@ fn array_get(compiler: *mut Compiler, array: usize, index: usize) -> usize {
     compiler.array_get(array, index).unwrap()
 }
 
-fn make_closure(compiler: *mut Compiler, function: usize, num_free: usize, free_variable_pointer: usize) -> usize {
+fn make_closure(
+    compiler: *mut Compiler,
+    function: usize,
+    num_free: usize,
+    free_variable_pointer: usize,
+) -> usize {
     let compiler = unsafe { &mut *compiler };
     let num_free = BuiltInTypes::untag(num_free);
     let free_variables = unsafe { from_raw_parts(free_variable_pointer as *const usize, num_free) };
     compiler.make_closure(function, free_variables).unwrap()
 }
 
-fn property_access(compiler: *mut Compiler, struct_pointer: usize, str_constant_ptr: usize) -> usize {
+fn property_access(
+    compiler: *mut Compiler,
+    struct_pointer: usize,
+    str_constant_ptr: usize,
+) -> usize {
     let compiler = unsafe { &mut *compiler };
     compiler.property_access(struct_pointer, str_constant_ptr)
 }
@@ -134,7 +162,9 @@ fn compile_trampoline(compiler: &mut Compiler) {
     lang.epilogue(2);
     lang.ret();
 
-    let function_pointer = compiler.add_function("trampoline", &lang.compile_directly()).unwrap();
+    compiler
+        .add_function("trampoline", &lang.compile_directly())
+        .unwrap();
     let function = compiler.get_function_by_name_mut("trampoline").unwrap();
     function.is_builtin = true;
 }
@@ -148,7 +178,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     debugger(Message {
         kind: "HeapPointer".to_string(),
-        data: Data::HeapSegmentPointer { pointer: heap_pointer },
+        data: Data::HeapSegmentPointer {
+            pointer: heap_pointer,
+        },
     });
     // Very inefficient way to do array stuff
     // but working
@@ -161,9 +193,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("make_closure", make_closure as *const u8)?;
     compiler.add_builtin_function("property_access", property_access as *const u8)?;
 
-
     // TODO: getting no free registers in MainThread!
-    let hello_ast = Parser::from_file("/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/main/resources/examples.bg")?;
+    let hello_ast = Parser::from_file(
+        "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/main/resources/examples.bg",
+    )?;
 
     // println!("{:#?}", hello_ast);
 
@@ -183,18 +216,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = compiler.run_function("mainThread", vec![21]);
     println!("Our time {:?}", time.elapsed());
     compiler.println(result as usize);
-    
-    // let result = compiler.run_function("simpleFunctionWithLocals", vec![]);
+
+    // let time = Instant::now();
+    // let result = compiler.run_function("testGcWithTree", vec![21]);
     // println!("Our time {:?}", time.elapsed());
     // compiler.println(result as usize);
 
+    // let result = compiler.run_function("simpleFunctionWithLocals", vec![]);
+    // println!("Our time {:?}", time.elapsed());
+    // compiler.println(result as usize);
 
     // let time = Instant::now();
     // let result = compiler.run_function("testGcNested", vec![]);
     // println!("Our time {:?}", time.elapsed());
     // compiler.println(result as usize);
-
-
 
     // TODO: As I'm compiling an ast to ir,
     // I need to separate out functions into their own units
@@ -202,7 +237,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let n = 32;
     let time = Instant::now();
-    let result1 = compiler.run_function("fib", vec![n as i32]);
+    let result1 = compiler.run_function("fib", vec![n]);
     println!("Our time {:?}", time.elapsed());
     let time = Instant::now();
     let result2 = fib_rust(n as usize);

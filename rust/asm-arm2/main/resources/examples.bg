@@ -159,6 +159,16 @@ fn bottomUpTree(depth) {
     }
 }
 
+fn testGcWithTree(n) {
+    bottomUpTree(n)
+    bottomUpTree(n - 1)
+    bottomUpTree(n - 2)
+    bottomUpTree(n - 3)
+    bottomUpTree(n - 4)
+    bottomUpTree(n - 5)
+    bottomUpTree(n - 6)
+}
+
 fn testGcSimple(n) {
     let garbage = TreeNode {
         left: null

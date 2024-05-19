@@ -1,11 +1,15 @@
 use asm::arm::{
-    ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector, SP, X0, X10, X11, X12, X13, X14, X15, X16, X20, X21, X22, X29, X3, X30, X9, ZERO_REGISTER
+    ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector,
+    SP, X0, X10, X11, X12, X13, X14, X15, X16, X20, X21, X22, X29, X3, X30, X9, ZERO_REGISTER,
 };
 
 use std::collections::HashMap;
 
 use crate::{
-    common::Label, debugger, ir::{BuiltInTypes, Condition}, Data, Message
+    common::Label,
+    debugger,
+    ir::{BuiltInTypes, Condition},
+    Data, Message,
 };
 
 pub fn _print_u32_hex_le(value: u32) {
@@ -49,7 +53,6 @@ pub fn mov_sp(destination: Register, source: Register) -> ArmAsm {
         rd: destination,
     }
 }
-
 
 pub fn add(destination: Register, a: Register, b: Register) -> ArmAsm {
     ArmAsm::AddAddsubShift {
@@ -328,7 +331,7 @@ pub struct LowLevelArm {
     pub max_stack_size: i32,
     pub max_locals: i32,
     pub canonical_volatile_registers: Vec<Register>,
-    // The goal right now is that everytime we 
+    // The goal right now is that everytime we
     // make a "built-in" call, we keep a map
     // of code offset to max stack value at a point.
     // (We could change this to be discrete places rather than
@@ -560,7 +563,8 @@ impl LowLevelArm {
     }
 
     pub fn compile_directly(&mut self) -> Vec<u8> {
-        let bytes = self.instructions
+        let bytes = self
+            .instructions
             .iter()
             .flat_map(|x| x.encode().to_le_bytes())
             .collect();
@@ -592,7 +596,6 @@ impl LowLevelArm {
         self.update_stack_map();
     }
 
-
     // TODO: I should pass this information to my debugger
     // then I could visualize every stack frame
     // and do dynamic checking if the invariants I expect to hold
@@ -606,7 +609,10 @@ impl LowLevelArm {
     }
 
     pub fn translate_stack_map(&self, pc: usize) -> Vec<(usize, usize)> {
-        self.stack_map.iter().map(|(key, value)| ((*key * 4) + pc, *value)).collect()
+        self.stack_map
+            .iter()
+            .map(|(key, value)| ((*key * 4) + pc, *value))
+            .collect()
     }
 
     pub fn recurse(&mut self, label: Label) {
@@ -759,7 +765,6 @@ impl LowLevelArm {
         }
     }
 
-
     pub fn mov_64_bit_num(register: Register, num: isize) -> Vec<ArmAsm> {
         // TODO: This is not optimal, but it works
         let mut num = num;
@@ -815,7 +820,7 @@ impl LowLevelArm {
         });
     }
 
-   pub fn sub_stack_pointer(&mut self, bytes: i32) {
+    pub fn sub_stack_pointer(&mut self, bytes: i32) {
         self.instructions.push(ArmAsm::SubAddsubImm {
             sf: SP.sf(),
             rn: SP,
@@ -840,36 +845,36 @@ impl LowLevelArm {
     }
     pub fn get_stack_pointer(&mut self, destination: Register, offset: Register) {
         self.get_stack_pointer_imm(destination, 0);
-        self.instructions.push(add(destination, destination, offset));
+        self.instructions
+            .push(add(destination, destination, offset));
     }
 
     pub fn share_label_info_debug(&self, function_pointer: usize) {
         for (label_index, label) in self.labels.iter().enumerate() {
             let label_location = *self.label_locations.get(&label_index).unwrap() * 4;
-            debugger(Message { 
-                kind: "label".to_string(), 
+            debugger(Message {
+                kind: "label".to_string(),
                 data: Data::Label {
                     label: label.to_string(),
                     function_pointer,
                     label_index,
-                    label_location
-                }
+                    label_location,
+                },
             });
         }
     }
-    
+
     pub fn get_current_stack_position(&mut self, dest: Register) {
         // TODO: Not sure if max_locals is calculated at this point or I need to patch or something later
         self.get_stack_pointer_imm(dest, (self.max_locals + self.stack_size) as isize)
     }
-    
-    pub fn set_all_locals_to_null(&mut self, null_register: Register)  {
+
+    pub fn set_all_locals_to_null(&mut self, null_register: Register) {
         for local_offset in 0..self.max_locals {
             self.store_local(null_register, local_offset)
         }
     }
 }
-
 
 #[allow(dead_code)]
 fn fib() -> LowLevelArm {
