@@ -2,7 +2,6 @@
 // Need to deal with failure?
 // Maybe not at the token level?\
 
-
 // TODO: Fix parsing parentheses for precedence
 
 use crate::ast::Ast;
@@ -88,13 +87,13 @@ pub struct Tokenizer {
     pub position: usize,
 }
 
-impl<'a> Default for Tokenizer {
+impl Default for Tokenizer {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a> Tokenizer {
+impl Tokenizer {
     pub fn new() -> Tokenizer {
         Tokenizer { position: 0 }
     }
@@ -358,8 +357,6 @@ impl<'a> Tokenizer {
         self.position = 0;
         result
     }
-    
-
 }
 
 #[test]
@@ -548,7 +545,11 @@ impl Parser {
                 self.consume();
                 self.parse_atom(min_precedence)
             }
-            _ => panic!("Expected atom {} at line {}", self.get_token_repr(), self.current_line),
+            _ => panic!(
+                "Expected atom {} at line {}",
+                self.get_token_repr(),
+                self.current_line
+            ),
         }
     }
 
@@ -717,7 +718,11 @@ impl Parser {
         if self.is_close_curly() {
             self.consume();
         } else {
-            panic!("Expected close curly got {:?} at line {}", self.get_token_repr(), self.current_line);
+            panic!(
+                "Expected close curly got {:?} at line {}",
+                self.get_token_repr(),
+                self.current_line
+            );
         }
     }
 
@@ -788,8 +793,6 @@ impl Parser {
             _ => None,
         }
     }
-
-
 
     fn get_token_repr(&self) -> String {
         match self.current_token() {
@@ -907,7 +910,7 @@ impl Parser {
                     object: Box::new(lhs),
                     property: Box::new(rhs),
                 }
-            },
+            }
             _ => panic!("Not a binary operator"),
         }
     }
@@ -930,28 +933,31 @@ impl Parser {
         if self.is_colon() {
             self.consume();
         } else {
-            panic!("Expected colon got {} at line {}", self.get_token_repr(), self.current_line);
+            panic!(
+                "Expected colon got {} at line {}",
+                self.get_token_repr(),
+                self.current_line
+            );
         }
     }
 
     fn is_colon(&self) -> bool {
         self.current_token() == Token::Colon
     }
-    
+
     fn increment_line(&mut self) {
         self.current_line += 1;
     }
-    
+
     fn is_newline(&self) -> bool {
         self.current_token() == Token::NewLine
     }
-    
+
     pub fn from_file(arg: &str) -> Result<Ast, std::io::Error> {
         let source = std::fs::read_to_string(arg)?;
         let mut parser = Parser::new(source);
         Ok(parser.parse())
     }
-
 }
 
 #[test]
