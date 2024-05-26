@@ -620,6 +620,7 @@ impl<'a> AstCompiler<'a> {
 
                     let function = self.ir.function(function_pointer);
                     if builtin {
+                        // self.ir.breakpoint();
                         self.ir.call_builtin(function, args)
                     } else {
                         self.ir.call(function, args)

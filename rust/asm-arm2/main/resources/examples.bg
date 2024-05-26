@@ -145,6 +145,26 @@ fn itemCheck(node) {
     }
 }
 
+struct Pointless {
+    x
+}
+
+fn simpleMakeTree() {
+    println("simpleMakeTree")
+    TreeNode {
+        left: null,
+        right: null
+    }
+}
+
+fn testMakeTree() {
+    simpleMakeTree()
+    TreeNode {
+        left: simpleMakeTree(),
+        right: simpleMakeTree()
+    }
+}
+
 fn bottomUpTree(depth) {
     if depth > 0 {
         TreeNode {
@@ -160,52 +180,62 @@ fn bottomUpTree(depth) {
 }
 
 fn testGcWithTree(n) {
+    // fails when gc right now
     bottomUpTree(n)
-    bottomUpTree(n - 1)
-    bottomUpTree(n - 2)
-    bottomUpTree(n - 3)
-    bottomUpTree(n - 4)
-    bottomUpTree(n - 5)
-    bottomUpTree(n - 6)
+//     println("here")
+//     println(bottomUpTree(n))
 }
 
 fn testGcSimple(n) {
+    println("Starting garbage")
     let garbage = TreeNode {
         left: null
         right: null
     }
+    println("garbage")
 
     let x = TreeNode {
         left: null
         right: null
     }
 
+    println("x")
+
     let y = TreeNode {
         left: x,
         right: x
     }
 
+    println("y")
+
     let z = TreeNode {
         left: y,
         right: y,
     }
+
+    println("z")
     z
 }
 
 fn testGcNested(n) {
     let y = testGcSimple()
 
+    println("done with call")
+
     let z = TreeNode {
         left: y
         right: y
     }
+    println("z2")
 
     let q = TreeNode {
         left: z
         right: z
     }
 
-    q
+    println("q")
+
+    y
 }
 
 fn testGc(n) {

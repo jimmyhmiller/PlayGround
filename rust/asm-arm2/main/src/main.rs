@@ -146,19 +146,34 @@ fn property_access(
 
 fn compile_trampoline(compiler: &mut Compiler) {
     let mut lang = LowLevelArm::new();
+    // lang.breakpoint();
     lang.prelude(-2);
+
     // set SP to equal the first argument
+
+    // Should I store or push?
+    for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+        lang.store_on_stack(*reg, -((i + 2) as i32));
+    }
+
+
     lang.mov_reg(X10, SP);
     lang.mov_reg(SP, X0);
     lang.push_to_stack(X10, 0);
+
     lang.mov_reg(X10, X1);
     lang.mov_reg(X0, X2);
     lang.mov_reg(X1, X3);
     lang.mov_reg(X2, X4);
+
+
     lang.call(X10);
     // lang.breakpoint();
     lang.pop_from_stack(X10, 0);
     lang.mov_reg(SP, X10);
+    for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate().rev() {
+        lang.load_from_stack(*reg, -((i + 2) as i32));
+    }
     lang.epilogue(2);
     lang.ret();
 
@@ -168,6 +183,8 @@ fn compile_trampoline(compiler: &mut Compiler) {
     let function = compiler.get_function_by_name_mut("trampoline").unwrap();
     function.is_builtin = true;
 }
+
+
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut compiler = Compiler::new();
@@ -192,6 +209,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("array_get", array_get as *const u8)?;
     compiler.add_builtin_function("make_closure", make_closure as *const u8)?;
     compiler.add_builtin_function("property_access", property_access as *const u8)?;
+    // compiler.add_builtin_function("gc", gc as *const u8)?;
 
     // TODO: getting no free registers in MainThread!
     let hello_ast = Parser::from_file(
@@ -212,15 +230,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     // let hello2_result = compiler.run_function("hello2", vec![]);
     // compiler.print(hello2_result as usize);
 
+    // let time = Instant::now();
+    // let result = compiler.run_function("mainThread", vec![10]);
+    // println!("Our time {:?}", time.elapsed());
+    // compiler.println(result as usize);
+
     let time = Instant::now();
     let result = compiler.run_function("mainThread", vec![21]);
     println!("Our time {:?}", time.elapsed());
     compiler.println(result as usize);
-
-    // let time = Instant::now();
-    // let result = compiler.run_function("testGcWithTree", vec![21]);
-    // println!("Our time {:?}", time.elapsed());
-    // compiler.println(result as usize);
 
     // let result = compiler.run_function("simpleFunctionWithLocals", vec![]);
     // println!("Our time {:?}", time.elapsed());
@@ -235,14 +253,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     // I need to separate out functions into their own units
     // of code.
 
-    let n = 32;
-    let time = Instant::now();
-    let result1 = compiler.run_function("fib", vec![n]);
-    println!("Our time {:?}", time.elapsed());
-    let time = Instant::now();
-    let result2 = fib_rust(n as usize);
-    println!("Rust time {:?}", time.elapsed());
-    println!("{} {}", BuiltInTypes::untag(result1 as usize), result2);
+    // let n = 32;
+    // let time = Instant::now();
+    // let result1 = compiler.run_function("fib", vec![n]);
+    // println!("Our time {:?}", time.elapsed());
+    // let time = Instant::now();
+    // let result2 = fib_rust(n as usize);
+    // println!("Rust time {:?}", time.elapsed());
+    // println!("{} {}", BuiltInTypes::untag(result1 as usize), result2);
     Ok(())
 }
 

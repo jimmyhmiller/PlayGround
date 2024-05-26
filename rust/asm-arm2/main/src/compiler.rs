@@ -12,6 +12,9 @@ use crate::{
     Data, Message,
 };
 
+const GC_ALWAYS: bool = false;
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     name: String,
@@ -69,11 +72,17 @@ impl StructManager {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 struct FreeListEntry {
     segment: usize,
     offset: usize,
     size: usize,
+}
+
+impl FreeListEntry {
+    fn range(&self) -> std::ops::Range<usize> {
+        self.offset..self.offset + self.size
+    }
 }
 
 struct Heap {
@@ -86,7 +95,7 @@ struct Heap {
 
 impl Heap {
     fn new() -> Self {
-        let segment_size = MmapOptions::page_size() * 10;
+        let segment_size = MmapOptions::page_size() * 100;
         Self {
             segments: vec![Some(
                 MmapOptions::new(segment_size)
@@ -123,21 +132,27 @@ impl Heap {
         // }
 
         // TODO: Should I only use identical slots?
-        let potential_spot = self.free_list.iter().position(|x| x.size > (bytes + 1) * 8);
+        let potential_spot = self.free_list.iter().position(|x| {
+            x.size >= (bytes + 1) * 8 && self.segment_size - x.offset >= (bytes + 1) * 8
+        });
 
         let potential_spot = if let Some(spot_index) = potential_spot {
             let spot = self.free_list.get_mut(spot_index).unwrap();
+            let mut spot_clone = spot.clone();
             spot.size -= (bytes + 1) * 8;
+            spot.offset += (bytes + 1) * 8;
             if spot.size == 0 {
-                let spot_clone = Some(*spot);
                 self.free_list.remove(spot_index);
-                spot_clone
+                Some(spot_clone)
             } else {
-                Some(*spot)
+                spot_clone.size = (bytes + 1) * 8;
+                Some(spot_clone)
             }
         } else {
             None
         };
+
+        // TODO: With multiple sizes, I don't think I'm dealing with my free entries correctly
 
         if potential_spot.is_none() && self.heap_offset + bytes + 8 > self.segment_size {
             self.segment_offset += 1;
@@ -167,22 +182,25 @@ impl Heap {
             self.segment_offset
         };
 
-        let size = (bytes * 8) << 1;
+
         let memory = self.segments[segment_offset].take();
         let mut memory = memory.unwrap();
 
-        let offset = if let Some(entry) = &potential_spot {
-            entry.offset
+        let offset = if let Some(spot) = &potential_spot {
+            spot.offset
         } else {
             self.heap_offset
         };
-        let buffer = &mut memory[offset..];
+
+        let buffer = &mut memory[offset..offset+8];
+
+        let shifted_size = (bytes * 8) << 1;
         // write the size of the object to the first 8 bytes
-        for (index, byte) in size.to_le_bytes().iter().enumerate() {
+        for (index, byte) in shifted_size.to_le_bytes().iter().enumerate() {
             buffer[index] = *byte;
         }
         if potential_spot.is_none() {
-            self.heap_offset += (size >> 1) + 8;
+            self.heap_offset += (bytes + 1) * 8;
             // need to make sure my offset is aligned
             // going to round up to the nearest 8 bytes
             let remainder = self.heap_offset % 8;
@@ -199,9 +217,20 @@ impl Heap {
 
     fn add_free(&mut self, entry: FreeListEntry) {
         for current_entry in self.free_list.iter_mut() {
+
+            if *current_entry == entry {
+                println!("Double free!");
+            }
+
             if current_entry.segment == entry.segment
                 && current_entry.offset + current_entry.size == entry.offset
             {
+                current_entry.size += entry.size;
+                return;
+            }
+            if current_entry.segment == entry.segment 
+                && entry.offset + entry.size == current_entry.offset {
+                current_entry.offset = entry.offset;
                 current_entry.size += entry.size;
                 return;
             }
@@ -214,6 +243,7 @@ impl Heap {
 pub struct StackMapDetails {
     pub number_of_locals: usize,
     pub current_stack_size: usize,
+    pub max_stack_size: usize,
 }
 
 const STACK_SIZE: usize = 1024 * 1024 * 8;
@@ -287,6 +317,7 @@ impl Compiler {
     }
 
     pub fn mark(&mut self, latest_root: usize, current_stack_pointer: usize) {
+        // println!("Marking");
         // Get the stack as a [usize]
         let stack = self.stack.as_ref().unwrap();
         // I'm adding to the end of the stack I've allocated so I only need to go from the end
@@ -295,10 +326,15 @@ impl Compiler {
         let stack_end = stack.as_ptr() as usize + (STACK_SIZE);
         // let current_stack_pointer = current_stack_pointer & !0b111;
         let distance_till_end = stack_end - current_stack_pointer;
-        let num_64_till_end = distance_till_end / 8;
+        let num_64_till_end = (distance_till_end / 8) + 1;
         let stack =
             unsafe { std::slice::from_raw_parts(stack.as_ptr() as *const usize, STACK_SIZE / 8) };
         let stack = &stack[stack.len() - num_64_till_end..];
+
+
+        // for value in stack.iter() {
+        //    println!("0x{:x}", value)
+        // }
         // Walk the stack
 
         let mut to_mark: Vec<usize> = vec![latest_root];
@@ -308,14 +344,38 @@ impl Compiler {
             let value = stack[i];
 
             if let Some(details) = self.find_stack_data(value) {
-                // println!("0x{:x}: {:?}", value, details);
-                let stack_values = details.current_stack_size;
-                let locals = details.number_of_locals;
-                let padding = (stack_values + locals) % 2;
-                i += padding;
-                i += 1;
-                for j in i..(stack_values + locals + i) {
+
+                let mut frame_size = details.max_stack_size + details.number_of_locals;
+                if frame_size % 2 != 0 {
+                    frame_size += 1;
+                }
+
+                let bottom_of_frame = i + frame_size + 1;
+                let top_of_frame = i + 1;
+
+                let active_frame = details.current_stack_size + details.number_of_locals;
+
+                // for j in (bottom_of_frame-active_frame)..bottom_of_frame {
+                //     let kind = BuiltInTypes::get_kind(stack[j]);
+                //     println!("0x{:x} {}", stack[j], if matches!(kind, BuiltInTypes::Struct) {
+                //         self.get_repr(stack[j], 0)
+                //     } else {
+                //         "".to_string()
+                //     });
+                // }
+
+                i = bottom_of_frame;
+
+
+
+                for j in (bottom_of_frame-active_frame)..bottom_of_frame {
+
                     if BuiltInTypes::is_heap_pointer(stack[j]) {
+
+                        let untagged = BuiltInTypes::untag(stack[j]);
+                        if untagged as usize % 8 != 0 {
+                            println!("Not aligned");
+                        }
                         // println!("Pushing mark 0x{:?}", stack[j]);
                         to_mark.push(stack[j]);
                     }
@@ -327,10 +387,11 @@ impl Compiler {
 
         while let Some(value) = to_mark.pop() {
             
+            let tagged = value;
             let untagged = BuiltInTypes::untag(value);
             let pointer = untagged as *mut u8;
             if pointer as usize % 8 != 0 {
-                panic!("Not aligned");
+                panic!("Not aligned {:x}", pointer as usize);
             }
             unsafe {
                 let mut data: usize = *pointer.cast::<usize>();
@@ -340,9 +401,10 @@ impl Compiler {
                 }
                 data |= 1;
                 *pointer.cast::<usize>() = data;
+                
+                // println!("Marking 0x{:x}", tagged);
 
                 let size = *(pointer as *const usize) >> 1;
-                // Why would it be 16?
                 let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, size / 8);
                 for datum in data.iter() {
                     if BuiltInTypes::is_heap_pointer(*datum) {
@@ -358,8 +420,10 @@ impl Compiler {
     }
 
     fn sweep(&mut self) {
+        // println!("Sweeping");
         let num_segments = self.heap.segments.len();
         let mut free_entries: Vec<FreeListEntry> = vec![];
+        let mut freed_pointers : Vec<usize> = vec![];
         for (segment_index, segment) in self.heap.segments.iter_mut().enumerate() {
             let free_in_segment: Vec<&FreeListEntry> = self
                 .heap
@@ -378,8 +442,8 @@ impl Compiler {
                 let pointer = segment.as_mut_ptr();
                 while offset < segment_range {
                     for free in free_in_segment.iter() {
-                        if offset == free.offset {
-                            offset += free.size;
+                        if free.range().contains(&offset) {
+                            offset = free.range().end;
                             break;
                         }
                     }
@@ -391,7 +455,6 @@ impl Compiler {
                         let mut data: usize = *pointer.cast::<usize>();
 
                         if data == 0 {
-                            println!("offset: {}, segment_range: {}", offset, segment_range);
                             offset += 8;
                             continue;
                         }
@@ -406,6 +469,7 @@ impl Compiler {
                                 offset,
                                 size: (data >> 1) + 8,
                             };
+                            freed_pointers.push(pointer as usize);
                             let mut entered = false;
                             for current_entry in free_entries.iter_mut() {
                                 if current_entry.segment == entry.segment
@@ -434,9 +498,16 @@ impl Compiler {
             }
         }
 
+        // for pointer in freed_pointers {
+        //     let tagged = BuiltInTypes::Struct.tag(pointer as isize) as usize;
+        //     println!("Freeing 0x{:x} {:?}", tagged, self.get_repr(tagged, 0));
+        // }
+
         for entry in free_entries {
             self.heap.add_free(entry);
         }
+
+        // println!("======\n\n");
     }
 
     pub fn get_heap_pointer(&self) -> usize {
@@ -453,6 +524,9 @@ impl Compiler {
         let segment = self.heap.segment_offset;
         let result = self.heap.allocate(bytes, stack_pointer).unwrap();
         // TODO: do better
+        if GC_ALWAYS {
+            self.mark(kind.tag(result as isize) as usize, stack_pointer);
+        }
         if segment != self.heap.segment_offset {
             self.mark(kind.tag(result as isize) as usize, stack_pointer);
         }
@@ -545,6 +619,7 @@ impl Compiler {
                     StackMapDetails {
                         current_stack_size: *value,
                         number_of_locals: code.max_locals as usize,
+                        max_stack_size: code.max_stack_size as usize,
                     },
                 )
             })
@@ -778,37 +853,41 @@ impl Compiler {
         unimplemented!("Add trampoline");
     }
 
-    pub fn get_repr(&self, value: usize, depth: usize) -> String {
+    pub fn get_repr(&self, value: usize, depth: usize) -> Option<String> {
         if depth > 1000 {
-            return "...".to_string();
+            return Some("...".to_string());
         }
         let tag = BuiltInTypes::get_kind(value);
         match tag {
-            BuiltInTypes::Null => "null".to_string(),
+            BuiltInTypes::Null => Some("null".to_string()),
             BuiltInTypes::Int => {
                 let value = BuiltInTypes::untag(value);
-                value.to_string()
+                Some(value.to_string())
             }
             BuiltInTypes::Float => todo!(),
             BuiltInTypes::String => {
                 let value = BuiltInTypes::untag(value);
                 let string = &self.string_constants[value];
-                string.str.clone()
+                Some(string.str.clone())
             }
             BuiltInTypes::Bool => {
                 let value = BuiltInTypes::untag(value);
                 if value == 0 {
-                    "false".to_string()
+                    Some("false".to_string())
                 } else {
-                    "true".to_string()
+                    Some("true".to_string())
                 }
             }
-            BuiltInTypes::Function => todo!(),
+            BuiltInTypes::Function => Some("function".to_string()),
             BuiltInTypes::Closure => todo!(),
             BuiltInTypes::Struct => {
                 unsafe {
                     let value = BuiltInTypes::untag(value);
                     let pointer = value as *const u8;
+
+                    if pointer as usize % 8 != 0 {
+                        panic!("Not aligned");
+                    }
                     // get first 8 bytes as size le encoded
                     let size = *(pointer as *const usize) >> 1;
                     let pointer = pointer.add(8);
@@ -817,7 +896,7 @@ impl Compiler {
                     let type_id = usize::from_le_bytes(data[0..8].try_into().unwrap());
                     let type_id = BuiltInTypes::untag(type_id);
                     let struct_value = self.structs.get_by_id(type_id as usize);
-                    self.get_struct_repr(struct_value.unwrap(), data[8..].to_vec(), depth + 1)
+                    Some(self.get_struct_repr(struct_value?, data[8..].to_vec(), depth + 1)?)
                 }
             }
             BuiltInTypes::Array => {
@@ -836,24 +915,24 @@ impl Compiler {
                         let mut bytes = [0u8; 8];
                         bytes.copy_from_slice(value);
                         let value = usize::from_le_bytes(bytes);
-                        repr.push_str(&self.get_repr(value, depth + 1));
+                        repr.push_str(&self.get_repr(value, depth + 1)?);
                         if i != heap_object.size - 1 {
                             repr.push_str(", ");
                         }
                     }
                     repr.push(']');
-                    repr
+                    Some(repr)
                 }
             }
         }
     }
 
     pub fn println(&self, value: usize) {
-        println!("{}", self.get_repr(value, 0));
+        println!("{}", self.get_repr(value, 0).unwrap());
     }
 
     pub fn print(&self, value: usize) {
-        print!("{}", self.get_repr(value, 0));
+        print!("{}", self.get_repr(value, 0).unwrap());
     }
 
     pub fn array_store(
@@ -1051,7 +1130,7 @@ impl Compiler {
         self.structs.get(name)
     }
 
-    fn get_struct_repr(&self, struct_value: &Struct, to_vec: Vec<u8>, depth: usize) -> String {
+    fn get_struct_repr(&self, struct_value: &Struct, to_vec: Vec<u8>, depth: usize) -> Option<String> {
         // It should look like this
         // struct_name { field1: value1, field2: value2 }
         let mut repr = struct_value.name.clone();
@@ -1063,13 +1142,13 @@ impl Compiler {
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(value);
             let value = usize::from_le_bytes(bytes);
-            repr.push_str(&self.get_repr(value, depth + 1));
+            repr.push_str(&self.get_repr(value, depth + 1)?);
             if index != struct_value.fields.len() - 1 {
                 repr.push_str(", ");
             }
         }
         repr.push_str(" }");
-        repr
+        Some(repr)
     }
 
     pub fn check_functions(&self) {
