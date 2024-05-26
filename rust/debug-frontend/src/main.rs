@@ -532,15 +532,10 @@ impl State {
                     .map(|v| v.address)
                     .any(|v| v == self.pc);
 
-                // TODO: Make this actually correct
-                // Consider when we have later addresses, but gaps
-                let last = self
-                    .disasm
-                    .disasm_values
-                    .last()
-                    .map(|v| v.address)
-                    .unwrap_or(0);
-                let remaining = last.saturating_sub(self.pc) / 4;
+                // make sure the address 8 instructions ahead exists in disasm
+                let n = 30;
+                let n_ahead = self.disasm.disasm_values.iter().find(|x| x.address == self.pc + n * 4).is_some();
+
 
                 self.sp = frame.sp();
                 self.fp = frame.fp();
@@ -575,28 +570,9 @@ impl State {
                         .collect();
                 }
 
-                if !pc_in_instructions || remaining < 30 {
+                if !pc_in_instructions || !n_ahead {
                     let instructions = process.get_instructions(&frame, &target);
-                    self.process.instructions = Some(instructions.clone());
-                    for instruction in &instructions {
-                        let instruction = ParsedDisasm {
-                            address: instruction.address().load_address(&target),
-                            // I think this is data, but not sure
-                            hex: "".to_string(),
-                            instruction: instruction.mnemonic(&target).to_string(),
-                            arguments: instruction
-                                .operands(&target)
-                                .to_string()
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .collect(),
-                            comment: instruction.comment(&target).to_string(),
-                        };
-                        if instruction.instruction == "udf" {
-                            continue;
-                        }
-                        self.disasm.disasm_values.push(instruction);
-                    }
+                    self.process_instructions(instructions, target);
                 }
                 self.disasm
                     .disasm_values
@@ -632,6 +608,30 @@ impl State {
         }
     }
 
+    fn process_instructions(&mut self, instructions: SBInstructionList, target: SBTarget) {
+        self.process.instructions = Some(instructions.clone());
+        for instruction in &instructions {
+            let instruction = ParsedDisasm {
+                address: instruction.address().load_address(&target),
+                // I think this is data, but not sure
+                hex: "".to_string(),
+                instruction: instruction.mnemonic(&target).to_string(),
+                arguments: instruction
+                    .operands(&target)
+                    .to_string()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect(),
+                comment: instruction.comment(&target).to_string(),
+            };
+            if instruction.instruction == "udf" {
+                continue;
+            }
+            self.disasm.disasm_values.push(instruction);
+            self.disasm.disasm_values.sort_by(|a, b| a.address.cmp(&b.address));
+        }
+    }
+    
     fn check_debugger_info(
         &mut self,
         thread: &lldb::SBThread,
@@ -682,6 +682,16 @@ impl State {
                         .as_mut()
                         .unwrap()
                         .breakpoint_create_by_address(pointer as u64);
+
+                    if let (Some(process), Some(target)) =
+                        (self.process.process.clone(), self.process.target.clone())
+                    {
+                        let frame = thread.selected_frame();
+                        let instructions = process.get_instructions(&frame, &target);
+                        // self.process_instructions(instructions, target);
+                    }
+
+
                     self.functions.insert(
                         pointer,
                         Function::User {
@@ -1010,6 +1020,18 @@ fn disasm(state: &State) -> impl Node {
         }
     }
     let disasm = &state.disasm.disasm_values[start..];
+    let mut contiguous_disasm = vec![];
+    let mut last_address = 0;
+    for disasm in disasm.iter() {
+        if disasm.address == last_address + 4 || last_address == 0 {
+            contiguous_disasm.push(disasm);
+        } else {
+            break;
+        }
+        last_address = disasm.address;
+    }
+
+    let disasm = contiguous_disasm;
 
     lines(
         &disasm

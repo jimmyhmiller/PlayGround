@@ -1,6 +1,5 @@
 use asm::arm::{
-    ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector,
-    SP, X0, X10, X11, X12, X13, X14, X15, X16, X20, X21, X22, X29, X3, X30, X9, ZERO_REGISTER,
+    ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector, SP, X0, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X3, X30, ZERO_REGISTER
 };
 
 use std::collections::HashMap;
@@ -352,7 +351,8 @@ impl Default for LowLevelArm {
 
 impl LowLevelArm {
     pub fn new() -> Self {
-        let canonical_volatile_registers = vec![X9, X10, X11, X12, X13, X14, X15, X16];
+        // https://github.com/apple/swift/blob/main/docs/ABI/CallConvSummary.rst#arm64
+        let canonical_volatile_registers = vec![X19, X20, X21, X22, X23, X24, X25, X26, X27, X28];
         LowLevelArm {
             instructions: vec![],
             label_locations: HashMap::new(),
@@ -617,6 +617,7 @@ impl LowLevelArm {
 
     pub fn recurse(&mut self, label: Label) {
         self.instructions.push(branch_with_link(label.index as i32));
+        self.update_stack_map();
     }
 
     pub fn patch_labels(&mut self) {
