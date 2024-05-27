@@ -187,6 +187,10 @@ fn compile_trampoline(compiler: &mut Compiler) {
 
 
 fn main() -> Result<(), Box<dyn Error>> {
+
+    // TODO: Set this up to be a proper main where I can pass it a file
+    // maybe make a repl?
+
     let mut compiler = Compiler::new();
 
     compile_trampoline(&mut compiler);
