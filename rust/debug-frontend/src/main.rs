@@ -1026,7 +1026,9 @@ fn disasm(state: &State) -> impl Node {
         if disasm.address == last_address + 4 || last_address == 0 {
             contiguous_disasm.push(disasm);
         } else {
-            break;
+            if disasm.address > state.pc {
+                break;
+            }
         }
         last_address = disasm.address;
     }
@@ -1036,6 +1038,7 @@ fn disasm(state: &State) -> impl Node {
     lines(
         &disasm
             .iter()
+            .take(40)
             .map(|disasm| {
                 let prefix = if disasm.address == state.pc {
                     "> "

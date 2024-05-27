@@ -91,6 +91,7 @@ struct Heap {
     segment_offset: usize,
     segment_size: usize,
     free_list: Vec<FreeListEntry>,
+    scale_factor: usize,
 }
 
 impl Heap {
@@ -110,6 +111,7 @@ impl Heap {
             heap_offset: 0,
             segment_offset: 0,
             segment_size,
+            scale_factor: 1,
             free_list: vec![],
         }
     }
@@ -138,7 +140,7 @@ impl Heap {
 
         let potential_spot = if let Some(spot_index) = potential_spot {
             let spot = self.free_list.get_mut(spot_index).unwrap();
-            let mut spot_clone = spot.clone();
+            let mut spot_clone = *spot;
             spot.size -= (bytes + 1) * 8;
             spot.offset += (bytes + 1) * 8;
             if spot.size == 0 {
@@ -156,23 +158,32 @@ impl Heap {
 
         if potential_spot.is_none() && self.heap_offset + bytes + 8 > self.segment_size {
             self.segment_offset += 1;
-            self.segments.push(Some(
-                MmapOptions::new(self.segment_size)
-                    .unwrap()
-                    .map()
-                    .unwrap()
-                    .make_mut()
-                    .unwrap_or_else(|(_map, e)| {
-                        panic!("Failed to make mmap executable: {}", e);
-                    }),
-            ));
-            let segment_pointer = self.segment_pointer(self.segment_offset);
-            debugger(Message {
-                kind: "HeapSegmentPointer".to_string(),
-                data: Data::HeapSegmentPointer {
-                    pointer: segment_pointer,
-                },
-            });
+
+            if self.segment_offset >= self.segments.len() {
+                for i in 0..self.scale_factor {
+                    self.segments.push(Some(
+                        MmapOptions::new(self.segment_size * self.scale_factor)
+                            .unwrap()
+                            .map()
+                            .unwrap()
+                            .make_mut()
+                            .unwrap_or_else(|(_map, e)| {
+                                panic!("Failed to make mmap executable: {}", e);
+                            }),
+                    ));
+                    let segment_pointer = self.segment_pointer(self.segment_offset + i);
+                    debugger(Message {
+                        kind: "HeapSegmentPointer".to_string(),
+                        data: Data::HeapSegmentPointer {
+                            pointer: segment_pointer,
+                        },
+                    });
+                }
+                self.scale_factor *= 2;
+                self.scale_factor = self.scale_factor.min(64);
+                
+            }
+            
             self.heap_offset = 0;
         }
 
@@ -317,6 +328,8 @@ impl Compiler {
     }
 
     pub fn mark(&mut self, latest_root: usize, current_stack_pointer: usize) {
+
+        let start = std::time::Instant::now();
         // println!("Marking");
         // Get the stack as a [usize]
         let stack = self.stack.as_ref().unwrap();
@@ -351,7 +364,7 @@ impl Compiler {
                 }
 
                 let bottom_of_frame = i + frame_size + 1;
-                let top_of_frame = i + 1;
+                let _top_of_frame = i + 1;
 
                 let active_frame = details.current_stack_size + details.number_of_locals;
 
@@ -387,7 +400,7 @@ impl Compiler {
 
         while let Some(value) = to_mark.pop() {
             
-            let tagged = value;
+            let _tagged = value;
             let untagged = BuiltInTypes::untag(value);
             let pointer = untagged as *mut u8;
             if pointer as usize % 8 != 0 {
@@ -416,21 +429,24 @@ impl Compiler {
 
         self.sweep();
 
+        println!("Marking took {:?}", start.elapsed());
+
         // println!("marked {}", marked);
     }
 
     fn sweep(&mut self) {
         // println!("Sweeping");
-        let num_segments = self.heap.segments.len();
+        let num_segments = self.heap.segment_offset;
         let mut free_entries: Vec<FreeListEntry> = vec![];
-        let mut freed_pointers : Vec<usize> = vec![];
-        for (segment_index, segment) in self.heap.segments.iter_mut().enumerate() {
-            let free_in_segment: Vec<&FreeListEntry> = self
+        for (segment_index, segment) in self.heap.segments.iter_mut().take(num_segments).enumerate() {
+            let mut free_in_segment: Vec<&FreeListEntry> = self
                 .heap
                 .free_list
                 .iter()
                 .filter(|x| x.segment == segment_index)
                 .collect();
+
+            free_in_segment.sort_by_key(|x| x.offset);
             if let Some(segment) = segment {
                 let mut offset = 0;
                 let segment_range = if num_segments > 1 && segment_index != num_segments - 1 {
@@ -444,6 +460,8 @@ impl Compiler {
                     for free in free_in_segment.iter() {
                         if free.range().contains(&offset) {
                             offset = free.range().end;
+                        }
+                        if free.offset > offset {
                             break;
                         }
                     }
@@ -469,14 +487,14 @@ impl Compiler {
                                 offset,
                                 size: (data >> 1) + 8,
                             };
-                            freed_pointers.push(pointer as usize);
                             let mut entered = false;
-                            for current_entry in free_entries.iter_mut() {
+                            for current_entry in free_entries.iter_mut().rev() {
                                 if current_entry.segment == entry.segment
                                     && current_entry.offset + current_entry.size == entry.offset
                                 {
                                     current_entry.size += entry.size;
                                     entered = true;
+                                    break;
                                 }
                             }
                             if !entered {
@@ -521,13 +539,13 @@ impl Compiler {
         stack_pointer: usize,
         kind: BuiltInTypes,
     ) -> Result<usize, Box<dyn Error>> {
-        let segment = self.heap.segment_offset;
+        let segment_len = self.heap.segments.len();
         let result = self.heap.allocate(bytes, stack_pointer).unwrap();
         // TODO: do better
         if GC_ALWAYS {
             self.mark(kind.tag(result as isize) as usize, stack_pointer);
         }
-        if segment != self.heap.segment_offset {
+        if segment_len != self.heap.segments.len() {
             self.mark(kind.tag(result as isize) as usize, stack_pointer);
         }
         Ok(result)
