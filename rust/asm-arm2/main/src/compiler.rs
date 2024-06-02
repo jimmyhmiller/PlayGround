@@ -92,6 +92,7 @@ struct Heap {
     segment_size: usize,
     free_list: Vec<FreeListEntry>,
     scale_factor: usize,
+    free_segments: Vec<usize>,
 }
 
 impl Heap {
@@ -113,6 +114,7 @@ impl Heap {
             segment_size,
             scale_factor: 1,
             free_list: vec![],
+            free_segments: vec![],
         }
     }
 
@@ -129,14 +131,17 @@ impl Heap {
     // Or I could keep a list of free pages or something.
 
     fn allocate(&mut self, bytes: usize, _stack_pointer: usize) -> Result<usize, Box<dyn Error>> {
-        // if self.free_list.len() > 0 {
-        //     println!("got some free!")
-        // }
 
-        // TODO: Should I only use identical slots?
-        let potential_spot = self.free_list.iter().position(|x| {
-            x.size >= (bytes + 1) * 8 && self.segment_size - x.offset >= (bytes + 1) * 8
-        });
+
+        // TODO: Need to look at empty segments first
+
+        let potential_spot = if self.heap_offset + bytes + 8 > self.segment_size {
+            self.free_list.iter().position(|x| {
+                x.size >= (bytes + 1) * 8 && self.segment_size - x.offset >= (bytes + 1) * 8
+            })
+        } else {
+            None
+        };
 
         let potential_spot = if let Some(spot_index) = potential_spot {
             let spot = self.free_list.get_mut(spot_index).unwrap();
@@ -227,6 +232,11 @@ impl Heap {
     }
 
     fn add_free(&mut self, entry: FreeListEntry) {
+
+
+        // TODO: If a whole segment is free
+        // I need a fast path where I don't have to update free list
+
         for current_entry in self.free_list.iter_mut() {
 
             if *current_entry == entry {
