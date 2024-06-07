@@ -99,7 +99,7 @@ fn allocate_array(compiler: *mut Compiler, value: usize) -> usize {
     let value = BuiltInTypes::untag(value);
     let compiler = unsafe { &mut *compiler };
     // TODO: Stack pointer should be passed in
-    let pointer = compiler.allocate(value, 0, BuiltInTypes::Array).unwrap();
+    let pointer = compiler.allocate(value, 0, BuiltInTypes::Array, 0).unwrap();
     
     BuiltInTypes::Array.tag(pointer as isize) as usize
 }
@@ -109,7 +109,7 @@ fn allocate_struct(compiler: *mut Compiler, value: usize, stack_pointer: usize) 
     let compiler = unsafe { &mut *compiler };
     
     compiler
-        .allocate(value, stack_pointer, BuiltInTypes::Struct)
+        .allocate(value, stack_pointer, BuiltInTypes::Struct, 0)
         .unwrap()
 }
 
@@ -135,7 +135,7 @@ fn make_closure(
     compiler.make_closure(function, free_variables).unwrap()
 }
 
-fn property_access(
+pub extern "C" fn property_access(
     compiler: *mut Compiler,
     struct_pointer: usize,
     str_constant_ptr: usize,
@@ -215,16 +215,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("property_access", property_access as *const u8)?;
     // compiler.add_builtin_function("gc", gc as *const u8)?;
 
+
+    let parse_time = Instant::now();
     // TODO: getting no free registers in MainThread!
     let hello_ast = Parser::from_file(
         "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/main/resources/examples.bg",
     )?;
-
+    println!("Parse time {:?}", parse_time.elapsed());
     // println!("{:#?}", hello_ast);
+    
 
+    let compile_time = Instant::now();
     compiler.compile_ast(hello_ast)?;
 
     compiler.check_functions();
+    println!("Compile time {:?}", compile_time.elapsed());
 
     // let hello_result = compiler.run_function("hello", vec![1]);
     // compiler.print(hello_result as usize);
