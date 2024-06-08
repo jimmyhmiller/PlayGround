@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{collections::HashMap, error::Error, slice::from_raw_parts_mut};
+use std::{collections::HashMap, error::Error, ops::Range, slice::from_raw_parts_mut};
 
 use bincode::{Decode, Encode};
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
@@ -120,6 +120,71 @@ impl Segment {
 
 }
 
+// TODO: It might be faster
+// to have all the bitmaps together
+// and then keep track of the indexes
+
+struct Segment2 {
+    memory: MmapMut,
+    size: usize,
+    object_size: usize,
+    allocated_bitmap: Vec<u64>,
+    reference_bitmap: Vec<u64>,
+}
+
+impl Segment2 {
+    fn new(size: usize, object_size: usize) -> Self {
+        assert!(size % object_size == 0, "Size must be a multiple of object size");
+        assert!(object_size % 8 == 0, "Object size must be a multiple of 8");
+        assert!(size % 64 == 0, "Size must be a multiple of 64");
+        let memory = MmapOptions::new(size)
+            .unwrap()
+            .map_mut()
+            .unwrap()
+            .make_mut()
+            .unwrap_or_else(|(_map, e)| {
+                panic!("Failed to make mmap executable: {}", e);
+            });
+        let bitmap_size = size / object_size / 64;
+        let bitmap = vec![0; bitmap_size];
+        Self {
+            memory,
+            size,
+            object_size,
+            allocated_bitmap: bitmap.clone(),
+            reference_bitmap: bitmap,
+        }
+    }
+
+    fn find_empty_slot(&self) -> Option<usize> {
+        for (index, word) in self.allocated_bitmap.iter().enumerate() {
+            if *word != u64::MAX {
+                for i in 0..64 {
+                    if (word & (1 << i)) == 0 {
+                        return Some(index * 64 + i);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn set_slot(&mut self, index: usize) {
+        let word_index = index / 64;
+        let bit_index = index % 64;
+        self.allocated_bitmap[word_index] |= 1 << bit_index;
+    }
+}
+
+struct Heap2 {
+    segments: HashMap<usize, Vec<Segment2>>,
+    segment_offsets: HashMap<usize, usize>,
+    pending_marks: Vec<usize>,
+    pointer_to_segment: Vec<(Range<usize>, (usize, usize))>,
+    scale_factor: usize,
+}
+
+
 struct Heap {
     segments: Vec<Segment>,
     segment_offset: usize,
@@ -222,10 +287,6 @@ impl Heap {
     
     fn add_free(&mut self, entry: FreeListEntry) {
 
-
-        // TODO: If a whole segment is free
-        // I need a fast path where I don't have to update free list
-
         for current_entry in self.free_list.iter_mut() {
 
             if *current_entry == entry {
@@ -284,11 +345,10 @@ pub struct Compiler {
     code_memory: Option<Mmap>,
     // TODO: Think about the jump table more
     jump_table: Option<Mmap>,
-    // DO I need this offset?
+    // Do I need this offset?
     jump_table_offset: usize,
     structs: StructManager,
     functions: Vec<Function>,
-    #[allow(dead_code)]
     heap: Heap,
     stack: Option<MmapMut>,
     string_constants: Vec<StringValue>,
@@ -387,20 +447,7 @@ impl Compiler {
                 let _top_of_frame = i + 1;
 
                 let active_frame = details.current_stack_size + details.number_of_locals;
-
-                // for j in (bottom_of_frame-active_frame)..bottom_of_frame {
-                //     let kind = BuiltInTypes::get_kind(stack[j]);
-                //     println!("0x{:x} {}", stack[j], if matches!(kind, BuiltInTypes::Struct) {
-                //         self.get_repr(stack[j], 0)
-                //     } else {
-                //         "".to_string()
-                //     });
-                // }
-
                 i = bottom_of_frame;
-
-
-
                 for j in (bottom_of_frame-active_frame)..bottom_of_frame {
 
                     if BuiltInTypes::is_heap_pointer(stack[j]) {
