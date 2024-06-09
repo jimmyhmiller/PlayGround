@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{collections::HashMap, error::Error, ops::Range, slice::from_raw_parts_mut};
 
-use bincode::{Decode, Encode};
+use bincode::{enc::write, Decode, Encode};
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
 use crate::{
@@ -124,12 +124,18 @@ impl Segment {
 // to have all the bitmaps together
 // and then keep track of the indexes
 
+enum Mode {
+    FillFromStart(usize),
+    FreeList,
+}
+
 struct Segment2 {
     memory: MmapMut,
     size: usize,
     object_size: usize,
     allocated_bitmap: Vec<u64>,
     reference_bitmap: Vec<u64>,
+    mode: Mode,
 }
 
 impl Segment2 {
@@ -153,19 +159,38 @@ impl Segment2 {
             object_size,
             allocated_bitmap: bitmap.clone(),
             reference_bitmap: bitmap,
+            mode: Mode::FillFromStart(0),
         }
     }
 
-    fn find_empty_slot(&self) -> Option<usize> {
-        for (index, word) in self.allocated_bitmap.iter().enumerate() {
-            if *word != u64::MAX {
-                for i in 0..64 {
-                    if (word & (1 << i)) == 0 {
-                        return Some(index * 64 + i);
+    fn number_of_slots(&self) -> usize {
+        self.size / self.object_size
+    }
+
+    fn find_empty_slot(&mut self) -> Option<usize> {
+        match self.mode {
+            Mode::FillFromStart(index) => {
+                if index + 1 >= self.number_of_slots() {
+                    self.mode = Mode::FreeList;
+                    return None;
+                }
+                self.mode = Mode::FillFromStart(index + 1);
+                
+                return Some(index);
+            }
+            Mode::FreeList => {
+                for (index, word) in self.allocated_bitmap.iter().enumerate() {
+                    if *word != u64::MAX {
+                        for i in 0..64 {
+                            if (word & (1 << i)) == 0 {
+                                return Some(index * 64 + i);
+                            }
+                        }
                     }
                 }
             }
         }
+        
         None
     }
 
@@ -173,6 +198,25 @@ impl Segment2 {
         let word_index = index / 64;
         let bit_index = index % 64;
         self.allocated_bitmap[word_index] |= 1 << bit_index;
+    }
+
+    fn write_object(&mut self, index: usize, size: usize) {
+        let start = index * self.object_size;
+        let end = start + self.object_size;
+        let memory = &mut self.memory;
+        let shifted_size = size << 1;
+        let buffer = &mut memory[start..end];
+        // write the size of the object to the first 8 bytes
+        buffer[0..8].copy_from_slice(&shifted_size.to_le_bytes());
+        // I don't technically need to do this
+        // write zeros for the rest of object_size
+        for i in 8..buffer.len() {
+            buffer[i] = 0;
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.allocated_bitmap.iter().all(|x| *x == u64::MAX)
     }
 }
 
@@ -182,6 +226,62 @@ struct Heap2 {
     pending_marks: Vec<usize>,
     pointer_to_segment: Vec<(Range<usize>, (usize, usize))>,
     scale_factor: usize,
+}
+
+impl Heap2 {
+    fn get_segment_or_create(&mut self, size: usize) -> &mut Segment2 {
+        // TODO: Need a large object heap
+        let nearest_power_of_two = size.next_power_of_two();
+        let segment_offset = *self.segment_offsets.get(&nearest_power_of_two).unwrap_or(&0);
+        let segments = self.segments.entry(nearest_power_of_two).or_insert_with(|| Vec::new());
+        if segments.is_empty() {
+            let segment = Segment2::new(size * 64 * 10, size);
+            segments.push(segment);
+            self.segment_offsets.insert(nearest_power_of_two, 0);
+        }
+        segments.get_mut(segment_offset).unwrap()
+    }
+
+    fn get_segment_by_size(&mut self, size: usize) -> &mut Segment2 {
+        let nearest_power_of_two = size.next_power_of_two();
+        let segment_offset = *self.segment_offsets.get(&nearest_power_of_two).unwrap();
+        let segments = self.segments.get_mut(&nearest_power_of_two).unwrap();
+        segments.get_mut(segment_offset).unwrap()
+    }
+
+    fn create_new_segment(&mut self, size: usize) {
+        let nearest_power_of_two = size.next_power_of_two();
+        let segments = self.segments.entry(nearest_power_of_two).or_insert_with(|| Vec::new());
+        let segment = Segment2::new(size * 64 * 10, size);
+        segments.push(segment);
+        self.segment_offsets.insert(nearest_power_of_two, segments.len() - 1);
+    }
+
+    fn allocate(&mut self, size: usize) -> usize {
+        let mut segment = self.get_segment_or_create(size);
+        if segment.is_full() {
+            self.create_new_segment(size);
+            segment = self.get_segment_by_size(size);
+        }
+        let slot = segment.find_empty_slot();
+        if slot.is_none() {
+            panic!("No empty slot found");
+        }
+        let slot = slot.unwrap();
+        segment.set_slot(slot);
+        segment.write_object(slot, size);
+        slot
+    }
+    
+    fn new() -> Self {
+        Self {
+            segments: HashMap::new(),
+            segment_offsets: HashMap::new(),
+            pending_marks: vec![],
+            pointer_to_segment: vec![],
+            scale_factor: 2,
+        }
+    }
 }
 
 
@@ -350,6 +450,7 @@ pub struct Compiler {
     structs: StructManager,
     functions: Vec<Function>,
     heap: Heap,
+    heap2: Heap2,
     stack: Option<MmapMut>,
     string_constants: Vec<StringValue>,
     stack_map: Vec<(usize, StackMapDetails)>,
@@ -392,6 +493,7 @@ impl Compiler {
             structs: StructManager::new(),
             functions: Vec::new(),
             heap: Heap::new(),
+            heap2: Heap2::new(),
             stack: Some(MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap()),
             string_constants: vec![],
             stack_map: vec![],
@@ -603,6 +705,9 @@ impl Compiler {
         kind: BuiltInTypes,
         depth: usize,
     ) -> Result<usize, Box<dyn Error>> {
+
+        self.heap2.allocate((bytes + 1) * 8);
+
         if GC_ALWAYS && !GC_NEVER {
             self.mark(stack_pointer);
         }
