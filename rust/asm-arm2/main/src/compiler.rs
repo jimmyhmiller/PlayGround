@@ -189,7 +189,6 @@ impl Heap {
         // write the size of the object to the first 8 bytes
         buffer[..shifted_size.to_le_bytes().len()].copy_from_slice(&shifted_size.to_le_bytes());
 
-        
         buffer.as_ptr() as usize
     }
 
