@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{collections::HashMap, error::Error, ops::Range, slice::from_raw_parts_mut};
+use std::{collections::HashMap, error::Error, slice::from_raw_parts_mut};
 
 use bincode::{Decode, Encode};
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
@@ -12,9 +12,9 @@ use crate::{
     Data, Message,
 };
 
-// TODO: Make better
 const GC_ALWAYS: bool = false;
 const GC_NEVER: bool = false;
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
@@ -86,12 +86,14 @@ impl FreeListEntry {
     }
 }
 
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SegmentAction {
     Increment,
     AllocateMore,
     UseFree,
 }
+
 
 struct Segment {
     memory: MmapMut,
@@ -115,280 +117,7 @@ impl Segment {
             size,
         }
     }
-}
 
-// TODO: It might be faster
-// to have all the bitmaps together
-// and then keep track of the indexes
-
-#[derive(Debug, PartialEq, Eq)]
-enum Mode {
-    FillFromStart(usize),
-    FreeList,
-    Full,
-}
-
-// TODO:
-// If i want to do this quickly, I need
-// a fast way to get from pointer to reference bitmap
-// I could store the bitmap in the segment itself.
-// Then I could back into the pointer what the slot is and the size
-// Then given that I can find the beginning of the segment
-// and then update the bitmap
-// I think that would be sufficiently fast
-
-
-struct Segment2 {
-    memory: MmapMut,
-    size: usize,
-    object_size: usize,
-    allocated_bitmap: Vec<u64>,
-    reference_bitmap: Vec<u64>,
-    mode: Mode,
-}
-
-impl Segment2 {
-    fn new(size: usize, object_size: usize) -> Self {
-        assert!(
-            size % object_size == 0,
-            "Size must be a multiple of object size"
-        );
-        assert!(object_size % 8 == 0, "Object size must be a multiple of 8");
-        assert!(size % 64 == 0, "Size must be a multiple of 64");
-        let memory = MmapOptions::new(size)
-            .unwrap()
-            .map_mut()
-            .unwrap()
-            .make_mut()
-            .unwrap_or_else(|(_map, e)| {
-                panic!("Failed to make mmap executable: {}", e);
-            });
-        let bitmap_size = size / object_size / 64;
-        let bitmap = vec![0; bitmap_size];
-        Self {
-            memory,
-            size,
-            object_size,
-            allocated_bitmap: bitmap.clone(),
-            reference_bitmap: bitmap,
-            mode: Mode::FillFromStart(0),
-        }
-    }
-
-    fn number_of_slots(&self) -> usize {
-        self.size / self.object_size
-    }
-
-    fn find_empty_slot(&mut self) -> Option<usize> {
-        match self.mode {
-            Mode::FillFromStart(index) => {
-                if index + 1 > self.number_of_slots() {
-                    self.mode = Mode::FreeList;
-                    self.reset_mode();
-                    return self.find_empty_slot();
-                }
-                self.mode = if index + 1 == self.number_of_slots() {
-                    Mode::Full
-                } else {
-                    Mode::FillFromStart(index + 1)
-                };
-                // println!("{:?}, {}", self.mode, index);
-                return Some(index);
-            }
-            Mode::FreeList => {
-                for (index, word) in self.allocated_bitmap.iter().enumerate() {
-                    if *word != u64::MAX {
-                        for i in 0..64 {
-                            if (word & (1 << i)) == 0 {
-                                let slot = index * 64 + i;
-                                return Some(slot);
-                            }
-                        }
-                    }
-                }
-            }
-            Mode::Full => return None,
-        }
-
-        None
-    }
-
-    fn set_allocated_slot(&mut self, index: usize) {
-        let word_index = index / 64;
-        let bit_index = index % 64;
-        assert!(self.allocated_bitmap[word_index] & (1 << bit_index) == 0);
-        self.allocated_bitmap[word_index] |= 1 << bit_index;
-    }
-
-    fn set_reference_slot(&mut self, index: usize) {
-        let word_index = index / 64;
-        let bit_index = index % 64;
-        self.reference_bitmap[word_index] |= 1 << bit_index;
-    }
-
-    fn get_reference_slot(&self, slot: usize) -> usize {
-        let word_index = slot / 64;
-        let bit_index = slot % 64;
-        let bit = ((self.reference_bitmap[word_index] & (1 << bit_index)) >> bit_index) as usize;
-        assert!(bit == 0 || bit == 1);
-        bit
-    }
-
-    fn write_object(&mut self, index: usize, size: usize) {
-        let start = index * self.object_size;
-        let end = start + self.object_size;
-        let memory = &mut self.memory;
-        let shifted_size = (size << 1) as u32;
-        let buffer = &mut memory[start..end];
-        // write the size of the object to the first 8 bytes
-        buffer[0..4].copy_from_slice(&shifted_size.to_le_bytes());
-        // I don't technically need to do this
-        // write zeros for the rest of object_size
-        for i in 8..buffer.len() {
-            buffer[i] = 0;
-        }
-    }
-
-    fn is_full(&self) -> bool {
-        if self.mode == Mode::Full {
-            return true;
-        }
-        if matches!(self.mode, Mode::FillFromStart(_)) {
-            return false;
-        }
-        self.allocated_bitmap.iter().all(|x| *x == u64::MAX)
-    }
-
-    fn set_full(&mut self) {
-        if self.is_full() {
-            self.mode = Mode::Full;
-        }
-    }
-
-    fn deallocate_unreferenced(&mut self) {
-        // For all the bits in reference_bitmap
-        // we want any that are 0 to be 0 in allocated_bitmap
-        // but keep the ones that are 1
-        self.allocated_bitmap
-            .iter_mut()
-            .zip(self.reference_bitmap.iter())
-            .for_each(|(allocated, reference)| {
-                *allocated &= *reference;
-            });
-        self.reference_bitmap.iter_mut().for_each(|x| *x = 0);
-
-        self.reset_mode();
-    }
-
-    fn reset_mode(&mut self) {
-        if self.is_full() {
-            self.mode = Mode::Full;
-            return;
-        }
-        if self.allocated_bitmap.iter().all(|x| *x == 0) {
-            self.mode = Mode::FillFromStart(0);
-            return;
-        }
-    }
-}
-
-struct Heap2 {
-    segments: Vec<(usize, Vec<Segment2>)>,
-    segment_offsets: HashMap<usize, usize>,
-    pending_marks: Vec<usize>,
-    pointer_to_segment: Vec<(usize, (usize, usize))>,
-    scale_factor: usize,
-}
-
-impl Heap2 {
-    fn get_segment_or_create(&mut self, size: usize) -> &mut Segment2 {
-        // TODO: Need a large object heap
-        let nearest_power_of_two = size.next_power_of_two();
-        let segment_offset = *self
-            .segment_offsets
-            .get(&nearest_power_of_two)
-            .unwrap_or(&0);
-        let mut position = self
-            .segments
-            .iter()
-            .position(|x| x.0 == nearest_power_of_two);
-
-        if position.is_none() {
-            let segment = Segment2::new(size * 64 * 100, size);
-            let start = segment.memory.as_ptr() as usize;
-            self.pointer_to_segment
-                .push((start, (nearest_power_of_two, 0)));
-            self.pointer_to_segment.sort();
-            self.segments.push((nearest_power_of_two, vec![segment]));
-            self.segment_offsets.insert(nearest_power_of_two, 0);
-            position = Some(self.segments.len() - 1);
-        }
-        self.segments
-            .get_mut(position.unwrap())
-            .unwrap()
-            .1
-            .get_mut(segment_offset)
-            .unwrap()
-    }
-
-    fn all_segments_full(&self, size: usize) -> bool {
-        let nearest_power_of_two = size.next_power_of_two();
-        if let Some((_, segments)) = self.segments.iter().find(|x| x.0 == nearest_power_of_two) {
-            return segments.iter().all(|x| x.is_full());
-        }
-        false
-    }
-
-    fn create_new_segment(&mut self, size: usize) {
-        let nearest_power_of_two = size.next_power_of_two();
-        if let Some((_, segments)) = self.segments.iter().find(|x| x.0 == nearest_power_of_two) {
-            for (index, segment) in segments.iter().enumerate() {
-                if !segment.is_full() {
-                    self.segment_offsets.insert(nearest_power_of_two, index);
-                    return;
-                }
-            }
-        }
-
-        let segment_count = self
-            .segments
-            .iter()
-            .find(|x| x.0 == nearest_power_of_two)
-            .unwrap()
-            .1
-            .len();
-
-        if let Some((_, segments)) = self
-            .segments
-            .iter_mut()
-            .find(|x| x.0 == nearest_power_of_two)
-        {
-            for _ in 0..self.scale_factor {
-                let segment = Segment2::new(size * 64 * 100, size);
-                self.pointer_to_segment.push((
-                    segment.memory.as_ptr() as usize,
-                    (nearest_power_of_two, segments.len()),
-                ));
-                segments.push(segment);
-            }
-        }
-        self.pointer_to_segment.sort();
-
-        self.segment_offsets
-            .insert(nearest_power_of_two, segment_count);
-        self.scale_factor *= 2;
-        self.scale_factor = self.scale_factor.min(64);
-    }
-
-    fn new() -> Self {
-        Self {
-            segments: Vec::new(),
-            segment_offsets: HashMap::new(),
-            pending_marks: vec![],
-            pointer_to_segment: vec![],
-            scale_factor: 2,
-        }
-    }
 }
 
 struct Heap {
@@ -427,10 +156,11 @@ impl Heap {
     }
 
     fn create_more_segments(&mut self, size: usize) -> SegmentAction {
+
         if self.switch_to_available_segment(size) {
             return SegmentAction::Increment;
         }
-
+        
         for (segment_index, segment) in self.segments.iter().enumerate() {
             if segment.offset + size < segment.size {
                 self.segment_offset = segment_index;
@@ -454,16 +184,18 @@ impl Heap {
         self.scale_factor *= 2;
         self.scale_factor = self.scale_factor.min(64);
         return SegmentAction::AllocateMore;
+
     }
 
+    
     fn write_object(&mut self, segment_offset: usize, offset: usize, shifted_size: usize) -> usize {
         let memory = &mut self.segments[segment_offset].memory;
-
-        let buffer = &mut memory[offset..offset + 8];
-
+    
+        let buffer = &mut memory[offset..offset+8];
+    
         // write the size of the object to the first 8 bytes
         buffer[..shifted_size.to_le_bytes().len()].copy_from_slice(&shifted_size.to_le_bytes());
-
+    
         let pointer = buffer.as_ptr() as usize;
         pointer
     }
@@ -487,9 +219,15 @@ impl Heap {
         }
         true
     }
-
+    
     fn add_free(&mut self, entry: FreeListEntry) {
+
+
+        // TODO: If a whole segment is free
+        // I need a fast path where I don't have to update free list
+
         for current_entry in self.free_list.iter_mut() {
+
             if *current_entry == entry {
                 println!("Double free!");
             }
@@ -500,9 +238,8 @@ impl Heap {
                 current_entry.size += entry.size;
                 return;
             }
-            if current_entry.segment == entry.segment
-                && entry.offset + entry.size == current_entry.offset
-            {
+            if current_entry.segment == entry.segment 
+                && entry.offset + entry.size == current_entry.offset {
                 current_entry.offset = entry.offset;
                 current_entry.size += entry.size;
                 return;
@@ -516,24 +253,20 @@ impl Heap {
 
         debug_assert!(self.all_disjoint(), "Free list is not disjoint");
     }
-
+    
     fn current_offset(&self) -> usize {
         self.segments[self.segment_offset].offset
     }
-
+    
     fn current_segment_size(&self) -> usize {
         self.segments[self.segment_offset].size
     }
-
+    
     fn increment_current_offset(&mut self, size: usize) {
         self.segments[self.segment_offset].offset += size;
         // align to 8 bytes
-        self.segments[self.segment_offset].offset =
-            (self.segments[self.segment_offset].offset + 7) & !7;
-        assert!(
-            self.segments[self.segment_offset].offset % 8 == 0,
-            "Heap offset is not aligned"
-        );
+        self.segments[self.segment_offset].offset = (self.segments[self.segment_offset].offset + 7) & !7;
+        assert!(self.segments[self.segment_offset].offset % 8 == 0, "Heap offset is not aligned");
     }
 }
 
@@ -551,12 +284,12 @@ pub struct Compiler {
     code_memory: Option<Mmap>,
     // TODO: Think about the jump table more
     jump_table: Option<Mmap>,
-    // Do I need this offset?
+    // DO I need this offset?
     jump_table_offset: usize,
     structs: StructManager,
     functions: Vec<Function>,
+    #[allow(dead_code)]
     heap: Heap,
-    heap2: Heap2,
     stack: Option<MmapMut>,
     string_constants: Vec<StringValue>,
     stack_map: Vec<(usize, StackMapDetails)>,
@@ -599,7 +332,6 @@ impl Compiler {
             structs: StructManager::new(),
             functions: Vec::new(),
             heap: Heap::new(),
-            heap2: Heap2::new(),
             stack: Some(MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap()),
             string_constants: vec![],
             stack_map: vec![],
@@ -615,7 +347,8 @@ impl Compiler {
         None
     }
 
-    pub fn mark2(&mut self, current_stack_pointer: usize) {
+    pub fn mark(&mut self, current_stack_pointer: usize) {
+
         let start = std::time::Instant::now();
         // println!("Marking");
         // Get the stack as a [usize]
@@ -631,6 +364,7 @@ impl Compiler {
             unsafe { std::slice::from_raw_parts(stack.as_ptr() as *const usize, STACK_SIZE / 8) };
         let stack = &stack[stack.len() - num_64_till_end..];
 
+
         // for value in stack.iter() {
         //    println!("0x{:x}", value)
         // }
@@ -643,6 +377,7 @@ impl Compiler {
             let value = stack[i];
 
             if let Some(details) = self.find_stack_data(value) {
+
                 let mut frame_size = details.max_stack_size + details.number_of_locals;
                 if frame_size % 2 != 0 {
                     frame_size += 1;
@@ -652,9 +387,24 @@ impl Compiler {
                 let _top_of_frame = i + 1;
 
                 let active_frame = details.current_stack_size + details.number_of_locals;
+
+                // for j in (bottom_of_frame-active_frame)..bottom_of_frame {
+                //     let kind = BuiltInTypes::get_kind(stack[j]);
+                //     println!("0x{:x} {}", stack[j], if matches!(kind, BuiltInTypes::Struct) {
+                //         self.get_repr(stack[j], 0)
+                //     } else {
+                //         "".to_string()
+                //     });
+                // }
+
                 i = bottom_of_frame;
-                for j in (bottom_of_frame - active_frame)..bottom_of_frame {
+
+
+
+                for j in (bottom_of_frame-active_frame)..bottom_of_frame {
+
                     if BuiltInTypes::is_heap_pointer(stack[j]) {
+
                         let untagged = BuiltInTypes::untag(stack[j]);
                         if untagged as usize % 8 != 0 {
                             println!("Not aligned");
@@ -669,6 +419,7 @@ impl Compiler {
         }
 
         while let Some(value) = to_mark.pop() {
+            
             let _tagged = value;
             let untagged = BuiltInTypes::untag(value);
             let pointer = untagged as *mut u8;
@@ -676,132 +427,14 @@ impl Compiler {
                 panic!("Not aligned {:x}", pointer as usize);
             }
             unsafe {
-                let mut data = pointer.cast::<usize>();
-
-                let mut address = data as usize;
-                let size = unsafe { *data >> 1 };
-                let mut segment_pointer_belongs_to = None;
-                for (start, (size, segment_index)) in self.heap2.pointer_to_segment.iter().rev() {
-                    
-                    if address >= *start {
-                        segment_pointer_belongs_to = self
-                            .heap2
-                            .segments
-                            .iter_mut()
-                            .find(|x| x.0 == *size)
-                            .unwrap()
-                            .1
-                            .get_mut(*segment_index);
-                        break;
-                    }
-                }
-
-                if segment_pointer_belongs_to.is_none() {
-                    panic!("Pointer not in any segment");
-                }
-                let segment_pointer_belongs_to = segment_pointer_belongs_to.unwrap();
-
-                let offset = address - segment_pointer_belongs_to.memory.as_ptr() as usize;
-                let slot = offset / size;
-
-                let referenced = segment_pointer_belongs_to.get_reference_slot(slot);
-                if referenced == 1 {
+                let mut data: usize = *pointer.cast::<usize>();
+                // check right most bit
+                if (data & 1) == 1 {
                     continue;
                 }
-
-                segment_pointer_belongs_to.set_reference_slot(slot);
-                let referenced = segment_pointer_belongs_to.get_reference_slot(slot);
-                assert!(referenced == 1);
-
-                let size = *(pointer as *const usize) >> 1;
-                let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, size / 8);
-                for datum in data.iter() {
-                    if BuiltInTypes::is_heap_pointer(*datum) {
-                        to_mark.push(*datum)
-                    }
-                }
-            }
-        }
-
-        // self.sweep();
-
-        println!("Marking took {:?}", start.elapsed());
-
-        // println!("marked {}", marked);
-    }
-
-    pub fn mark(
-        &mut self,
-        current_stack_pointer: usize,
-        mark_fn: impl Fn(&mut Compiler, *mut usize) -> bool,
-    ) {
-        let start = std::time::Instant::now();
-        // println!("Marking");
-        // Get the stack as a [usize]
-        let stack = self.stack.as_ref().unwrap();
-        // I'm adding to the end of the stack I've allocated so I only need to go from the end
-        // til the current stack
-
-        let stack_end = stack.as_ptr() as usize + (STACK_SIZE);
-        // let current_stack_pointer = current_stack_pointer & !0b111;
-        let distance_till_end = stack_end - current_stack_pointer;
-        let num_64_till_end = (distance_till_end / 8) + 1;
-        let stack =
-            unsafe { std::slice::from_raw_parts(stack.as_ptr() as *const usize, STACK_SIZE / 8) };
-        let stack = &stack[stack.len() - num_64_till_end..];
-
-        // for value in stack.iter() {
-        //    println!("0x{:x}", value)
-        // }
-        // Walk the stack
-
-        let mut to_mark: Vec<usize> = Vec::with_capacity(128);
-
-        let mut i = 0;
-        while i < stack.len() {
-            let value = stack[i];
-
-            if let Some(details) = self.find_stack_data(value) {
-                let mut frame_size = details.max_stack_size + details.number_of_locals;
-                if frame_size % 2 != 0 {
-                    frame_size += 1;
-                }
-
-                let bottom_of_frame = i + frame_size + 1;
-                let _top_of_frame = i + 1;
-
-                let active_frame = details.current_stack_size + details.number_of_locals;
-                i = bottom_of_frame;
-                for j in (bottom_of_frame - active_frame)..bottom_of_frame {
-                    if BuiltInTypes::is_heap_pointer(stack[j]) {
-                        let untagged = BuiltInTypes::untag(stack[j]);
-                        if untagged as usize % 8 != 0 {
-                            println!("Not aligned");
-                        }
-                        // println!("Pushing mark 0x{:?}", stack[j]);
-                        to_mark.push(stack[j]);
-                    }
-                }
-                continue;
-            }
-            i += 1;
-        }
-
-        while let Some(value) = to_mark.pop() {
-            let _tagged = value;
-            let untagged = BuiltInTypes::untag(value);
-            let pointer = untagged as *mut u8;
-            if pointer as usize % 8 != 0 {
-                panic!("Not aligned {:x}", pointer as usize);
-            }
-            unsafe {
-                let mut data = pointer.cast::<usize>();
-                let is_already_marked = mark_fn(self, data);
-                if is_already_marked {
-                    continue;
-                }
-                // *pointer.cast::<usize>() = data;
-
+                data |= 1;
+                *pointer.cast::<usize>() = data;
+                
                 // println!("Marking 0x{:x}", tagged);
 
                 let size = *(pointer as *const usize) >> 1;
@@ -814,7 +447,7 @@ impl Compiler {
             }
         }
 
-        // self.sweep();
+        self.sweep();
 
         println!("Marking took {:?}", start.elapsed());
 
@@ -834,6 +467,7 @@ impl Compiler {
                 .iter()
                 .filter(|x| x.segment == segment_index)
                 .collect();
+            
 
             free_in_segment.sort_by_key(|x| x.offset);
             let mut offset = 0;
@@ -875,9 +509,8 @@ impl Compiler {
                                 entered = true;
                                 break;
                             }
-                            if current_entry.segment == entry.segment
-                                && entry.offset + entry.size == current_entry.offset
-                            {
+                            if current_entry.segment == entry.segment 
+                                && entry.offset + entry.size == current_entry.offset {
                                 current_entry.offset = entry.offset;
                                 current_entry.size += entry.size;
                                 entered = true;
@@ -916,62 +549,6 @@ impl Compiler {
         self.heap.segment_pointer(0)
     }
 
-    pub fn mark_bits(&mut self, data: *mut usize) -> bool {
-        unsafe {
-            let value = *data;
-            // check right most bit
-            if (value & 1) == 1 {
-                return true;
-            }
-            *data = value | 1;
-            return false;
-        }
-    }
-
-    fn sweep2(&mut self) {
-        for (_, segments) in self.heap2.segments.iter_mut() {
-            for segment in segments.iter_mut() {
-                if segment.mode == Mode::FillFromStart(0) {
-                    continue;
-                }
-                segment.deallocate_unreferenced();
-            }
-        }
-    }
-
-    fn allocate2(&mut self, stack_pointer: usize, size: usize) -> usize {
-        // TODO: Better
-        if GC_ALWAYS {
-            self.mark2(stack_pointer);
-            self.sweep2();
-        }
-
-        // if self.heap2.all_segments_full(size) {
-        //     self.mark(stack_pointer, Self::mark_in_bitmap);
-        //     self.sweep2();
-        // }
-        let mut segment = self.heap2.get_segment_or_create(size);
-        if segment.is_full() {
-            self.heap2.create_new_segment(size);
-            self.mark2(stack_pointer);
-            self.sweep2();
-            segment = self.heap2.get_segment_or_create(size);
-        }
-        let slot = segment.find_empty_slot();
-        if slot.is_none() {
-            panic!(
-                "No empty slot found {:?} {:?}",
-                segment.mode,
-                segment.is_full()
-            );
-        }
-        let slot = slot.unwrap();
-        segment.set_allocated_slot(slot);
-        segment.write_object(slot, size);
-        let pointer = segment.memory.as_ptr() as usize + slot * size;
-        pointer
-    }
-
     pub fn allocate(
         &mut self,
         bytes: usize,
@@ -979,12 +556,8 @@ impl Compiler {
         kind: BuiltInTypes,
         depth: usize,
     ) -> Result<usize, Box<dyn Error>> {
-        let result = self.allocate2(stack_pointer, (bytes + 1) * 8);
-        // self.mark( stack_pointer, Self::mark_in_bitmap);
-        return Ok(result);
-
         if GC_ALWAYS && !GC_NEVER {
-            self.mark(stack_pointer, Self::mark_bits);
+            self.mark(stack_pointer);
         }
 
         if depth > 1 {
@@ -995,11 +568,7 @@ impl Compiler {
         let shifted_size = (bytes * 8) << 1;
 
         if self.heap.current_offset() + size < self.heap.current_segment_size() {
-            let pointer = self.heap.write_object(
-                self.heap.segment_offset,
-                self.heap.current_offset(),
-                shifted_size,
-            );
+            let pointer = self.heap.write_object(self.heap.segment_offset, self.heap.current_offset(), shifted_size);
             self.heap.increment_current_offset(size);
             return Ok(pointer);
         }
@@ -1008,38 +577,35 @@ impl Compiler {
             return self.allocate(bytes, stack_pointer, kind, depth + 1);
         }
 
-        assert!(
-            !self.heap.segments.iter().any(|x| x.offset == 0),
-            "Available segment not being used"
-        );
+        assert!(!self.heap.segments.iter().any(|x| x.offset == 0), "Available segment not being used");
 
-        let mut spot = self
-            .heap
-            .free_list
-            .iter_mut()
-            .enumerate()
-            .find(|(_, x)| x.size >= size);
+
+
+        let mut spot = self.heap.free_list.iter_mut().enumerate().find(|(_, x)| {
+            x.size >= size
+        });
+        
 
         if spot.is_none() {
+
             if !GC_NEVER {
-                self.mark(stack_pointer, Self::mark_bits);
+                self.mark(stack_pointer);
             }
             if self.heap.switch_to_available_segment(size) {
                 return self.allocate(bytes, stack_pointer, kind, depth + 1);
             }
 
-            spot = self
-                .heap
-                .free_list
-                .iter_mut()
-                .enumerate()
-                .find(|(_, x)| x.size >= size);
+            spot = self.heap.free_list.iter_mut().enumerate().find(|(_, x)| {
+                x.size >= size
+            });
+        
 
             if spot.is_none() {
                 self.heap.create_more_segments(size);
                 return self.allocate(bytes, stack_pointer, kind, depth + 1);
             }
         }
+
 
         let (spot_index, spot) = spot.unwrap();
 
@@ -1050,11 +616,9 @@ impl Compiler {
         if spot.size == 0 {
             self.heap.free_list.remove(spot_index);
         }
-
-        let pointer = self
-            .heap
-            .write_object(spot_clone.segment, spot_clone.offset, shifted_size);
-        Ok(pointer)
+        
+        let pointer = self.heap.write_object(spot_clone.segment, spot_clone.offset, shifted_size);
+        Ok(pointer)   
     }
 
     fn get_stack_pointer(&self) -> usize {
@@ -1538,8 +1102,9 @@ impl Compiler {
             }
             1 => {
                 let function = self.functions.iter().find(|f| f.name == arg).unwrap();
-
-                self.run1(function.jump_table_offset, vec[0] as u64)
+                
+                self
+                    .run1(function.jump_table_offset, vec[0] as u64)
                     .unwrap()
             }
             2 => {
@@ -1640,7 +1205,7 @@ impl Compiler {
             let field = &data[field_index..field_index + 8];
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(field);
-
+            
             usize::from_le_bytes(bytes)
         }
     }
@@ -1653,12 +1218,7 @@ impl Compiler {
         self.structs.get(name)
     }
 
-    fn get_struct_repr(
-        &self,
-        struct_value: &Struct,
-        to_vec: Vec<u8>,
-        depth: usize,
-    ) -> Option<String> {
+    fn get_struct_repr(&self, struct_value: &Struct, to_vec: Vec<u8>, depth: usize) -> Option<String> {
         // It should look like this
         // struct_name { field1: value1, field2: value2 }
         let mut repr = struct_value.name.clone();
