@@ -178,7 +178,7 @@ impl Heap {
 
         self.scale_factor *= 2;
         self.scale_factor = self.scale_factor.min(64);
-        return SegmentAction::AllocateMore;
+        SegmentAction::AllocateMore
     }
 
     fn write_object(&mut self, segment_offset: usize, offset: usize, shifted_size: usize) -> usize {
@@ -189,8 +189,8 @@ impl Heap {
         // write the size of the object to the first 8 bytes
         buffer[..shifted_size.to_le_bytes().len()].copy_from_slice(&shifted_size.to_le_bytes());
 
-        let pointer = buffer.as_ptr() as usize;
-        pointer
+        
+        buffer.as_ptr() as usize
     }
 
     fn free_are_disjoint(entry1: &FreeListEntry, entry2: &FreeListEntry) -> bool {
@@ -603,7 +603,7 @@ impl Compiler {
 
         let (spot_index, spot) = spot.unwrap();
 
-        let mut spot_clone = spot.clone();
+        let mut spot_clone = *spot;
         spot_clone.size = size;
         spot.size -= size;
         spot.offset += size;
