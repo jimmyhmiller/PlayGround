@@ -44,7 +44,6 @@ pub const SP: Register = Register {
 };
 
 pub fn truncate_imm<T: Into<i32>, const WIDTH: usize>(imm: T) -> u32 {
-
     let value: i32 = imm.into();
     let masked = (value as u32) & ((1 << WIDTH) - 1);
 

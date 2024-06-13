@@ -95,7 +95,7 @@ impl Ast {
             },
             environment_stack: vec![Environment::new()],
         };
-        
+
         // println!("{:#?}", compiler);
         compiler.compile()
     }
@@ -381,11 +381,7 @@ impl<'a> AstCompiler<'a> {
 
                 let struct_ptr = self.ir.call_builtin(
                     allocate_struct.into(),
-                    vec![
-                        compiler_pointer_reg.into(),
-                        size_reg.into(),
-                        stack_pointer,
-                    ],
+                    vec![compiler_pointer_reg.into(), size_reg.into(), stack_pointer],
                 );
 
                 // TODO: I want a better way to make clear the structure here.

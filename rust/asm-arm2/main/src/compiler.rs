@@ -15,7 +15,6 @@ use crate::{
 const GC_ALWAYS: bool = false;
 const GC_NEVER: bool = false;
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     name: String,
@@ -86,14 +85,12 @@ impl FreeListEntry {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SegmentAction {
     Increment,
     AllocateMore,
     UseFree,
 }
-
 
 struct Segment {
     memory: MmapMut,
@@ -117,7 +114,6 @@ impl Segment {
             size,
         }
     }
-
 }
 
 struct Heap {
@@ -156,11 +152,10 @@ impl Heap {
     }
 
     fn create_more_segments(&mut self, size: usize) -> SegmentAction {
-
         if self.switch_to_available_segment(size) {
             return SegmentAction::Increment;
         }
-        
+
         for (segment_index, segment) in self.segments.iter().enumerate() {
             if segment.offset + size < segment.size {
                 self.segment_offset = segment_index;
@@ -184,18 +179,16 @@ impl Heap {
         self.scale_factor *= 2;
         self.scale_factor = self.scale_factor.min(64);
         return SegmentAction::AllocateMore;
-
     }
 
-    
     fn write_object(&mut self, segment_offset: usize, offset: usize, shifted_size: usize) -> usize {
         let memory = &mut self.segments[segment_offset].memory;
-    
-        let buffer = &mut memory[offset..offset+8];
-    
+
+        let buffer = &mut memory[offset..offset + 8];
+
         // write the size of the object to the first 8 bytes
         buffer[..shifted_size.to_le_bytes().len()].copy_from_slice(&shifted_size.to_le_bytes());
-    
+
         let pointer = buffer.as_ptr() as usize;
         pointer
     }
@@ -219,15 +212,12 @@ impl Heap {
         }
         true
     }
-    
+
     fn add_free(&mut self, entry: FreeListEntry) {
-
-
         // TODO: If a whole segment is free
         // I need a fast path where I don't have to update free list
 
         for current_entry in self.free_list.iter_mut() {
-
             if *current_entry == entry {
                 println!("Double free!");
             }
@@ -238,8 +228,9 @@ impl Heap {
                 current_entry.size += entry.size;
                 return;
             }
-            if current_entry.segment == entry.segment 
-                && entry.offset + entry.size == current_entry.offset {
+            if current_entry.segment == entry.segment
+                && entry.offset + entry.size == current_entry.offset
+            {
                 current_entry.offset = entry.offset;
                 current_entry.size += entry.size;
                 return;
@@ -253,20 +244,24 @@ impl Heap {
 
         debug_assert!(self.all_disjoint(), "Free list is not disjoint");
     }
-    
+
     fn current_offset(&self) -> usize {
         self.segments[self.segment_offset].offset
     }
-    
+
     fn current_segment_size(&self) -> usize {
         self.segments[self.segment_offset].size
     }
-    
+
     fn increment_current_offset(&mut self, size: usize) {
         self.segments[self.segment_offset].offset += size;
         // align to 8 bytes
-        self.segments[self.segment_offset].offset = (self.segments[self.segment_offset].offset + 7) & !7;
-        assert!(self.segments[self.segment_offset].offset % 8 == 0, "Heap offset is not aligned");
+        self.segments[self.segment_offset].offset =
+            (self.segments[self.segment_offset].offset + 7) & !7;
+        assert!(
+            self.segments[self.segment_offset].offset % 8 == 0,
+            "Heap offset is not aligned"
+        );
     }
 }
 
@@ -348,7 +343,6 @@ impl Compiler {
     }
 
     pub fn mark(&mut self, current_stack_pointer: usize) {
-
         let start = std::time::Instant::now();
         // println!("Marking");
         // Get the stack as a [usize]
@@ -364,7 +358,6 @@ impl Compiler {
             unsafe { std::slice::from_raw_parts(stack.as_ptr() as *const usize, STACK_SIZE / 8) };
         let stack = &stack[stack.len() - num_64_till_end..];
 
-
         // for value in stack.iter() {
         //    println!("0x{:x}", value)
         // }
@@ -377,7 +370,6 @@ impl Compiler {
             let value = stack[i];
 
             if let Some(details) = self.find_stack_data(value) {
-
                 let mut frame_size = details.max_stack_size + details.number_of_locals;
                 if frame_size % 2 != 0 {
                     frame_size += 1;
@@ -399,12 +391,8 @@ impl Compiler {
 
                 i = bottom_of_frame;
 
-
-
-                for j in (bottom_of_frame-active_frame)..bottom_of_frame {
-
+                for j in (bottom_of_frame - active_frame)..bottom_of_frame {
                     if BuiltInTypes::is_heap_pointer(stack[j]) {
-
                         let untagged = BuiltInTypes::untag(stack[j]);
                         if untagged as usize % 8 != 0 {
                             println!("Not aligned");
@@ -419,7 +407,6 @@ impl Compiler {
         }
 
         while let Some(value) = to_mark.pop() {
-            
             let _tagged = value;
             let untagged = BuiltInTypes::untag(value);
             let pointer = untagged as *mut u8;
@@ -434,7 +421,7 @@ impl Compiler {
                 }
                 data |= 1;
                 *pointer.cast::<usize>() = data;
-                
+
                 // println!("Marking 0x{:x}", tagged);
 
                 let size = *(pointer as *const usize) >> 1;
@@ -467,7 +454,6 @@ impl Compiler {
                 .iter()
                 .filter(|x| x.segment == segment_index)
                 .collect();
-            
 
             free_in_segment.sort_by_key(|x| x.offset);
             let mut offset = 0;
@@ -509,8 +495,9 @@ impl Compiler {
                                 entered = true;
                                 break;
                             }
-                            if current_entry.segment == entry.segment 
-                                && entry.offset + entry.size == current_entry.offset {
+                            if current_entry.segment == entry.segment
+                                && entry.offset + entry.size == current_entry.offset
+                            {
                                 current_entry.offset = entry.offset;
                                 current_entry.size += entry.size;
                                 entered = true;
@@ -568,7 +555,11 @@ impl Compiler {
         let shifted_size = (bytes * 8) << 1;
 
         if self.heap.current_offset() + size < self.heap.current_segment_size() {
-            let pointer = self.heap.write_object(self.heap.segment_offset, self.heap.current_offset(), shifted_size);
+            let pointer = self.heap.write_object(
+                self.heap.segment_offset,
+                self.heap.current_offset(),
+                shifted_size,
+            );
             self.heap.increment_current_offset(size);
             return Ok(pointer);
         }
@@ -577,17 +568,19 @@ impl Compiler {
             return self.allocate(bytes, stack_pointer, kind, depth + 1);
         }
 
-        assert!(!self.heap.segments.iter().any(|x| x.offset == 0), "Available segment not being used");
+        assert!(
+            !self.heap.segments.iter().any(|x| x.offset == 0),
+            "Available segment not being used"
+        );
 
-
-
-        let mut spot = self.heap.free_list.iter_mut().enumerate().find(|(_, x)| {
-            x.size >= size
-        });
-        
+        let mut spot = self
+            .heap
+            .free_list
+            .iter_mut()
+            .enumerate()
+            .find(|(_, x)| x.size >= size);
 
         if spot.is_none() {
-
             if !GC_NEVER {
                 self.mark(stack_pointer);
             }
@@ -595,17 +588,18 @@ impl Compiler {
                 return self.allocate(bytes, stack_pointer, kind, depth + 1);
             }
 
-            spot = self.heap.free_list.iter_mut().enumerate().find(|(_, x)| {
-                x.size >= size
-            });
-        
+            spot = self
+                .heap
+                .free_list
+                .iter_mut()
+                .enumerate()
+                .find(|(_, x)| x.size >= size);
 
             if spot.is_none() {
                 self.heap.create_more_segments(size);
                 return self.allocate(bytes, stack_pointer, kind, depth + 1);
             }
         }
-
 
         let (spot_index, spot) = spot.unwrap();
 
@@ -616,9 +610,11 @@ impl Compiler {
         if spot.size == 0 {
             self.heap.free_list.remove(spot_index);
         }
-        
-        let pointer = self.heap.write_object(spot_clone.segment, spot_clone.offset, shifted_size);
-        Ok(pointer)   
+
+        let pointer = self
+            .heap
+            .write_object(spot_clone.segment, spot_clone.offset, shifted_size);
+        Ok(pointer)
     }
 
     fn get_stack_pointer(&self) -> usize {
@@ -1102,9 +1098,8 @@ impl Compiler {
             }
             1 => {
                 let function = self.functions.iter().find(|f| f.name == arg).unwrap();
-                
-                self
-                    .run1(function.jump_table_offset, vec[0] as u64)
+
+                self.run1(function.jump_table_offset, vec[0] as u64)
                     .unwrap()
             }
             2 => {
@@ -1205,7 +1200,7 @@ impl Compiler {
             let field = &data[field_index..field_index + 8];
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(field);
-            
+
             usize::from_le_bytes(bytes)
         }
     }
@@ -1218,7 +1213,12 @@ impl Compiler {
         self.structs.get(name)
     }
 
-    fn get_struct_repr(&self, struct_value: &Struct, to_vec: Vec<u8>, depth: usize) -> Option<String> {
+    fn get_struct_repr(
+        &self,
+        struct_value: &Struct,
+        to_vec: Vec<u8>,
+        depth: usize,
+    ) -> Option<String> {
         // It should look like this
         // struct_name { field1: value1, field2: value2 }
         let mut repr = struct_value.name.clone();

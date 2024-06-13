@@ -1,5 +1,6 @@
 use asm::arm::{
-    ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector, SP, X0, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X3, X30, ZERO_REGISTER
+    ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector,
+    SP, X0, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X3, X30, ZERO_REGISTER,
 };
 
 use std::collections::HashMap;
