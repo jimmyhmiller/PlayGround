@@ -1291,8 +1291,7 @@ impl Ir {
 
     pub fn get_tag(&mut self, value: Value) -> Value {
         let dest = self.volatile_register().into();
-        self.instructions
-            .push(Instruction::GetTag(dest, value));
+        self.instructions.push(Instruction::GetTag(dest, value));
         dest
     }
 

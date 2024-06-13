@@ -100,14 +100,14 @@ fn allocate_array(compiler: *mut Compiler, value: usize) -> usize {
     let compiler = unsafe { &mut *compiler };
     // TODO: Stack pointer should be passed in
     let pointer = compiler.allocate(value, 0, BuiltInTypes::Array, 0).unwrap();
-    
+
     BuiltInTypes::Array.tag(pointer as isize) as usize
 }
 
 fn allocate_struct(compiler: *mut Compiler, value: usize, stack_pointer: usize) -> usize {
     let value = BuiltInTypes::untag(value);
     let compiler = unsafe { &mut *compiler };
-    
+
     compiler
         .allocate(value, stack_pointer, BuiltInTypes::Struct, 0)
         .unwrap()
@@ -156,7 +156,6 @@ fn compile_trampoline(compiler: &mut Compiler) {
         lang.store_on_stack(*reg, -((i + 2) as i32));
     }
 
-
     lang.mov_reg(X10, SP);
     lang.mov_reg(SP, X0);
     lang.push_to_stack(X10, 0);
@@ -166,12 +165,17 @@ fn compile_trampoline(compiler: &mut Compiler) {
     lang.mov_reg(X1, X3);
     lang.mov_reg(X2, X4);
 
-
     lang.call(X10);
     // lang.breakpoint();
     lang.pop_from_stack(X10, 0);
     lang.mov_reg(SP, X10);
-    for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate().rev() {
+    for (i, reg) in lang
+        .canonical_volatile_registers
+        .clone()
+        .iter()
+        .enumerate()
+        .rev()
+    {
         lang.load_from_stack(*reg, -((i + 2) as i32));
     }
     lang.epilogue(2);
@@ -184,10 +188,7 @@ fn compile_trampoline(compiler: &mut Compiler) {
     function.is_builtin = true;
 }
 
-
-
 fn main() -> Result<(), Box<dyn Error>> {
-
     // TODO: Set this up to be a proper main where I can pass it a file
     // maybe make a repl?
 
@@ -215,7 +216,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("property_access", property_access as *const u8)?;
     // compiler.add_builtin_function("gc", gc as *const u8)?;
 
-
     let parse_time = Instant::now();
     // TODO: getting no free registers in MainThread!
     let hello_ast = Parser::from_file(
@@ -223,7 +223,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     println!("Parse time {:?}", parse_time.elapsed());
     // println!("{:#?}", hello_ast);
-    
 
     let compile_time = Instant::now();
     compiler.compile_ast(hello_ast)?;
