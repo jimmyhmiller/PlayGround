@@ -3,7 +3,7 @@ use arm::LowLevelArm;
 use asm::arm::{SP, X0, X1, X10, X2, X3, X4};
 use bincode::{config::standard, Decode, Encode};
 use compiler::{Allocator, StackMapDetails};
-use gc::simple_mark_and_sweep::SimpleMarkSweepHeap;
+use gc::{compacting::CompactingHeap, simple_mark_and_sweep::SimpleMarkSweepHeap};
 use std::{error::Error, mem, slice::from_raw_parts, time::Instant};
 
 mod arm;
@@ -194,7 +194,8 @@ fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
 fn main() -> Result<(), Box<dyn Error>> {
     // TODO: Set this up to be a proper main where I can pass it a file
     // maybe make a repl?
-    type Alloc = SimpleMarkSweepHeap;
+    type Alloc = CompactingHeap;
+    // type Alloc = SimpleMarkSweepHeap;
     let allocator = Alloc::new();
 
     let mut compiler = Compiler::new(allocator);

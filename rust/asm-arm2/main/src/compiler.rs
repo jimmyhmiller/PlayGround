@@ -108,8 +108,8 @@ impl StackMap {
 
 
 pub trait Allocator {
-    fn allocate(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize,  kind: BuiltInTypes) -> Result<usize, Box<dyn Error>>;
-    fn gc(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize);
+    fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize,  kind: BuiltInTypes) -> Result<usize, Box<dyn Error>>;
+    fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize);
 }
 
 pub struct Compiler<Alloc: Allocator> {
@@ -170,7 +170,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         stack_pointer: usize,
         kind: BuiltInTypes,
     ) -> Result<usize, Box<dyn Error>> {
-       self.heap.allocate(&self.stack, &self.stack_map, stack_pointer, bytes, kind)
+       self.heap.allocate(&mut self.stack, &self.stack_map, stack_pointer, bytes, kind)
     }
 
     fn get_stack_pointer(&self) -> usize {

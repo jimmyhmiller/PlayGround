@@ -582,26 +582,31 @@ impl State {
                     .dedup_by(|a, b| a.address == b.address);
                 self.registers.registers.clear();
                 frame.registers().iter().for_each(|register| {
-                    if register.name().contains("General") {
-                        register.children().for_each(|child| {
-                            if child.name().contains("x")
-                                || child.name() == "pc"
-                                || child.name() == "sp"
-                                || child.name() == "fp"
-                            {
-                                self.registers.registers.push(Register {
-                                    name: child.name().to_string(),
-                                    value: Value::String(child.value().to_string()),
-                                    kind: BuiltInTypes::get_kind(
-                                        usize::from_str_radix(
-                                            child.value().trim_start_matches("0x"),
-                                            16,
-                                        )
-                                        .unwrap(),
-                                    ),
-                                });
-                            }
-                        });
+                    if let Some(name) = register.name() {
+                        if name.contains("General") {
+                            register.children().for_each(|child| {
+                                if let Some(child_name) = child.name() {
+                                    if child_name.contains("x")
+                                    || child_name == "pc"
+                                    || child_name == "sp"
+                                    || child_name == "fp"
+                                {
+                                    self.registers.registers.push(Register {
+                                        name: child_name.to_string(),
+                                        value: Value::String(child.value().unwrap_or("no-value").to_string()),
+                                        kind: BuiltInTypes::get_kind(
+                                            usize::from_str_radix(
+                                                child.value().unwrap_or("no-value").trim_start_matches("0x"),
+                                                16,
+                                            )
+                                            .unwrap(),
+                                        ),
+                                    });
+                                }
+                                }
+                                
+                            })
+                        };
                     }
                 });
             }
@@ -1163,11 +1168,11 @@ trait FrameExentions {
 impl FrameExentions for SBFrame {
     fn get_register(&self, name: &str) -> Option<SBValue> {
         for register in self.registers().into_iter() {
-            if register.name() == name {
+            if matches!(register.name(), Some(n) if n == name) {
                 return Some(register);
             }
             for child in register.children().into_iter() {
-                if child.name() == name {
+                if matches!(child.name(), Some(n) if n == name){
                     return Some(child);
                 }
             }
