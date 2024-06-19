@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use asm::arm::Register;
 
-use crate::{arm::LowLevelArm, common::Label, compiler::Compiler};
+use crate::{arm::LowLevelArm, common::Label, compiler::{Allocator, Compiler}};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Condition {
@@ -1378,12 +1378,12 @@ pub fn heap_test() -> Ir {
 //     ir
 // }
 
-pub extern "C" fn println_value(compiler: &Compiler, value: usize) -> usize {
+pub extern "C" fn println_value<Alloc: Allocator>(compiler: &Compiler<Alloc>, value: usize) -> usize {
     compiler.println(value);
     0b111
 }
 
-pub extern "C" fn print_value(compiler: &Compiler, value: usize) -> usize {
+pub extern "C" fn print_value<Alloc: Allocator>(compiler: &Compiler<Alloc>, value: usize) -> usize {
     compiler.print(value);
     0b111
 }
