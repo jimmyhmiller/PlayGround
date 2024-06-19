@@ -2,7 +2,7 @@ use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
 use crate::{
-    compiler::{Compiler, Struct},
+    compiler::{Allocator, Compiler, Struct},
     ir::{self, BuiltInTypes, Condition},
 };
 
@@ -78,7 +78,7 @@ pub enum Ast {
 }
 
 impl Ast {
-    pub fn compile(&self, compiler: &mut Compiler) -> Ir {
+    pub fn compile<Alloc: Allocator>(&self, compiler: &mut Compiler<Alloc>) -> Ir {
         let mut compiler = AstCompiler {
             ast: self.clone(),
             ir: Ir::new(),
@@ -165,11 +165,11 @@ impl Environment {
 }
 
 #[derive(Debug)]
-pub struct AstCompiler<'a> {
+pub struct AstCompiler<'a, Alloc: Allocator> {
     pub ast: Ast,
     pub ir: Ir,
     pub name: String,
-    pub compiler: &'a mut Compiler,
+    pub compiler: &'a mut Compiler<Alloc>,
     // This feels dumb and complicated. But my brain
     // won't let me think of a better way
     // I know there is one.
@@ -179,7 +179,7 @@ pub struct AstCompiler<'a> {
     pub environment_stack: Vec<Environment>,
 }
 
-impl<'a> AstCompiler<'a> {
+impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
     pub fn tail_position(&mut self) {
         self.next_context.tail_position = true;
     }

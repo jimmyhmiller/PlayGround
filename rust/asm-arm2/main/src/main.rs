@@ -2,7 +2,8 @@ use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
 use arm::LowLevelArm;
 use asm::arm::{SP, X0, X1, X10, X2, X3, X4};
 use bincode::{config::standard, Decode, Encode};
-use compiler::StackMapDetails;
+use compiler::{Allocator, StackMapDetails};
+use gc::simple_mark_and_sweep::SimpleMarkSweepHeap;
 use std::{error::Error, mem, slice::from_raw_parts, time::Instant};
 
 mod arm;
@@ -11,6 +12,7 @@ pub mod common;
 pub mod compiler;
 pub mod ir;
 pub mod parser;
+mod gc;
 
 #[derive(Debug, Encode, Decode)]
 pub struct Message {
@@ -87,6 +89,7 @@ pub fn debugger(message: Message) {
     // Should make it is so we clean up this memory
 }
 
+#[allow(unused)]
 fn fib_rust(n: usize) -> usize {
     if n <= 1 {
         return n;
@@ -94,37 +97,37 @@ fn fib_rust(n: usize) -> usize {
     fib_rust(n - 1) + fib_rust(n - 2)
 }
 
-// Do these need to be extern "C"?
-fn allocate_array(compiler: *mut Compiler, value: usize) -> usize {
+
+extern "C" fn allocate_array<Alloc: Allocator>(compiler: *mut Compiler<Alloc>, value: usize) -> usize {
     let value = BuiltInTypes::untag(value);
     let compiler = unsafe { &mut *compiler };
     // TODO: Stack pointer should be passed in
-    let pointer = compiler.allocate(value, 0, BuiltInTypes::Array, 0).unwrap();
+    let pointer = compiler.allocate(value, 0, BuiltInTypes::Array).unwrap();
 
     BuiltInTypes::Array.tag(pointer as isize) as usize
 }
 
-fn allocate_struct(compiler: *mut Compiler, value: usize, stack_pointer: usize) -> usize {
+extern "C" fn allocate_struct<Alloc: Allocator>(compiler: *mut Compiler<Alloc>, value: usize, stack_pointer: usize) -> usize {
     let value = BuiltInTypes::untag(value);
     let compiler = unsafe { &mut *compiler };
 
     compiler
-        .allocate(value, stack_pointer, BuiltInTypes::Struct, 0)
+        .allocate(value, stack_pointer, BuiltInTypes::Struct)
         .unwrap()
 }
 
-fn array_store(compiler: *mut Compiler, array: usize, index: usize, value: usize) -> usize {
+extern "C" fn array_store<Alloc: Allocator>(compiler: *mut Compiler<Alloc>, array: usize, index: usize, value: usize) -> usize {
     let compiler = unsafe { &mut *compiler };
     compiler.array_store(array, index, value).unwrap()
 }
 
-fn array_get(compiler: *mut Compiler, array: usize, index: usize) -> usize {
+extern "C" fn array_get<Alloc: Allocator>(compiler: *mut Compiler<Alloc>, array: usize, index: usize) -> usize {
     let compiler = unsafe { &mut *compiler };
     compiler.array_get(array, index).unwrap()
 }
 
-fn make_closure(
-    compiler: *mut Compiler,
+extern "C" fn make_closure<Alloc: Allocator>(
+    compiler: *mut Compiler<Alloc>,
     function: usize,
     num_free: usize,
     free_variable_pointer: usize,
@@ -135,8 +138,8 @@ fn make_closure(
     compiler.make_closure(function, free_variables).unwrap()
 }
 
-pub extern "C" fn property_access(
-    compiler: *mut Compiler,
+pub extern "C" fn property_access<Alloc: Allocator>(
+    compiler: *mut Compiler<Alloc>,
     struct_pointer: usize,
     str_constant_ptr: usize,
 ) -> usize {
@@ -144,7 +147,7 @@ pub extern "C" fn property_access(
     compiler.property_access(struct_pointer, str_constant_ptr)
 }
 
-fn compile_trampoline(compiler: &mut Compiler) {
+fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
     lang.prelude(-2);
@@ -191,29 +194,31 @@ fn compile_trampoline(compiler: &mut Compiler) {
 fn main() -> Result<(), Box<dyn Error>> {
     // TODO: Set this up to be a proper main where I can pass it a file
     // maybe make a repl?
+    type Alloc = SimpleMarkSweepHeap;
+    let allocator = Alloc::new();
 
-    let mut compiler = Compiler::new();
+    let mut compiler = Compiler::new(allocator);
 
     compile_trampoline(&mut compiler);
 
-    let heap_pointer = compiler.get_heap_pointer();
+    // let heap_pointer = compiler.get_heap_pointer();
 
-    debugger(Message {
-        kind: "HeapPointer".to_string(),
-        data: Data::HeapSegmentPointer {
-            pointer: heap_pointer,
-        },
-    });
+    // debugger(Message {
+    //     kind: "HeapPointer".to_string(),
+    //     data: Data::HeapSegmentPointer {
+    //         pointer: heap_pointer,
+    //     },
+    // });
     // Very inefficient way to do array stuff
     // but working
-    compiler.add_builtin_function("println", ir::println_value as *const u8)?;
-    compiler.add_builtin_function("print", ir::print_value as *const u8)?;
-    compiler.add_builtin_function("allocate_array", allocate_array as *const u8)?;
-    compiler.add_builtin_function("allocate_struct", allocate_struct as *const u8)?;
-    compiler.add_builtin_function("array_store", array_store as *const u8)?;
-    compiler.add_builtin_function("array_get", array_get as *const u8)?;
-    compiler.add_builtin_function("make_closure", make_closure as *const u8)?;
-    compiler.add_builtin_function("property_access", property_access as *const u8)?;
+    compiler.add_builtin_function("println", ir::println_value::<Alloc> as *const u8)?;
+    compiler.add_builtin_function("print", ir::print_value::<Alloc> as *const u8)?;
+    compiler.add_builtin_function("allocate_array", allocate_array::<Alloc> as *const u8)?;
+    compiler.add_builtin_function("allocate_struct", allocate_struct::<Alloc> as *const u8)?;
+    compiler.add_builtin_function("array_store", array_store::<Alloc> as *const u8)?;
+    compiler.add_builtin_function("array_get", array_get::<Alloc> as *const u8)?;
+    compiler.add_builtin_function("make_closure", make_closure::<Alloc> as *const u8)?;
+    compiler.add_builtin_function("property_access", property_access::<Alloc> as *const u8)?;
     // compiler.add_builtin_function("gc", gc as *const u8)?;
 
     let parse_time = Instant::now();
