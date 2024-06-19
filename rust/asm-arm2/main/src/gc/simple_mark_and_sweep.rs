@@ -43,13 +43,6 @@ impl Segment {
             size,
         }
     }
-    #[allow(unused)]
-    fn copy_data_to_offset(&mut self, data: &[u8]) -> *const u8 {
-        let buffer = &mut self.memory[self.offset..];
-        buffer.copy_from_slice(data);
-        self.offset += data.len();
-        buffer.as_ptr()
-    }
 }
 
 
@@ -62,16 +55,19 @@ pub struct SimpleMarkSweepHeap {
 }
 
 impl Allocator for SimpleMarkSweepHeap {
-    fn allocate(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes) -> Result<usize, Box<dyn Error>> {
-        self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, 0)
+    fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes) -> Result<usize, Box<dyn Error>> {
+        let pointer = self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, 0)?;
+        println!("Allocated 0x{:x}", pointer);
+        Ok(pointer)
     }
 
-    fn gc(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize) {
+    fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) {
         self.mark_and_sweep(stack, stack_map, stack_pointer);
     }
 }
 
 impl SimpleMarkSweepHeap {
+    #[allow(unused)]
     pub fn new() -> Self {
         let segment_size = MmapOptions::page_size() * 100;
         Self {
@@ -217,12 +213,12 @@ impl SimpleMarkSweepHeap {
         println!("Mark and sweep took {:?}", start.elapsed());
     }
 
-    pub fn mark(&mut self, stack: &MmapMut, stack_map: &StackMap, current_stack_pointer: usize) {
+    pub fn mark(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize) {
         // I'm adding to the end of the stack I've allocated so I only need to go from the end
         // til the current stack
         let stack_end = stack.as_ptr() as usize + stack.size();
         // let current_stack_pointer = current_stack_pointer & !0b111;
-        let distance_till_end = stack_end - current_stack_pointer;
+        let distance_till_end = stack_end - stack_pointer;
         let num_64_till_end = (distance_till_end / 8) + 1;
         let stack =
             unsafe { std::slice::from_raw_parts(stack.as_ptr() as *const usize, stack.size() / 8) };
@@ -372,7 +368,7 @@ impl SimpleMarkSweepHeap {
             self.add_free(entry);
         }
     }
-    fn allocate_inner(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes, depth: usize) ->  Result<usize, Box<dyn Error>>  {
+    fn allocate_inner(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes, depth: usize) ->  Result<usize, Box<dyn Error>> {
         if GC_ALWAYS && !GC_NEVER {
             self.mark_and_sweep(stack, stack_map, stack_pointer);
         }
