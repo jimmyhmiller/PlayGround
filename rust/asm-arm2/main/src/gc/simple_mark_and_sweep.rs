@@ -20,11 +20,11 @@ enum SegmentAction {
     Increment,
     AllocateMore,
 }
-
 struct Segment {
     memory: MmapMut,
     offset: usize,
     size: usize,
+    memory_range: std::ops::Range<*const u8>,
 }
 
 impl Segment {
@@ -37,31 +37,79 @@ impl Segment {
             .unwrap_or_else(|(_map, e)| {
                 panic!("Failed to make mmap executable: {}", e);
             });
+        let memory_range = memory.as_ptr_range();
         Self {
             memory,
             offset: 0,
             size,
+            memory_range,
         }
     }
 }
 
-
-pub struct SimpleMarkSweepHeap {
+pub struct Space {
     segments: Vec<Segment>,
     segment_offset: usize,
     segment_size: usize,
-    free_list: Vec<FreeListEntry>,
     scale_factor: usize,
+}
+
+
+impl Space {
+    fn new(segment_size: usize, scale_factor: usize) -> Self {
+        let mut space = vec![];
+        space.push(Segment::new(segment_size));
+        Self {
+            segments: space,
+            segment_offset: 0,
+            segment_size,
+            scale_factor,
+        }
+    }
+
+
+    
+    pub fn contains(&self, pointer: *const u8) -> bool {
+        for segment in self.segments.iter() {
+            if segment.memory_range.contains(&pointer) {
+                return true;
+            }
+        }
+        false
+    }
+
+}
+
+pub struct SimpleMarkSweepHeap {
+    space: Space,
+    free_list: Vec<FreeListEntry>,
 }
 
 impl Allocator for SimpleMarkSweepHeap {
     fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes) -> Result<usize, Box<dyn Error>> {
-        let pointer = self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, 0)?;
-        println!("Allocated 0x{:x}", pointer);
-        Ok(pointer)
+
+        if GC_ALWAYS {
+            self.gc(stack, stack_map, stack_pointer);
+        }
+
+        if self.can_allocate(bytes) {
+            return self.allocate_inner(bytes, 0);
+        } else {
+            self.gc(stack, stack_map, stack_pointer);
+            if self.can_allocate(bytes) {
+                return self.allocate_inner(bytes, 0);
+            } else {
+                self.create_more_segments(bytes);
+                return self.allocate_inner(bytes, 0);
+            }
+        }
+
     }
 
     fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) {
+        if GC_NEVER {
+            return;
+        }
         self.mark_and_sweep(stack, stack_map, stack_pointer);
     }
 }
@@ -71,46 +119,51 @@ impl SimpleMarkSweepHeap {
     pub fn new() -> Self {
         let segment_size = MmapOptions::page_size() * 100;
         Self {
-            segments: vec![Segment::new(segment_size), Segment::new(segment_size)],
-            segment_offset: 0,
-            segment_size,
-            scale_factor: 2,
+            space: Space {
+                segments: vec![Segment::new(segment_size), Segment::new(segment_size)],
+                segment_offset: 0,
+                segment_size,
+                scale_factor: 1,
+            },
             free_list: vec![],
         }
     }
 
     fn segment_pointer(&self, arg: usize) -> usize {
-        let segment = self.segments.get(arg).unwrap();
+        let segment = self.space.segments.get(arg).unwrap();
         segment.memory.as_ptr() as usize
     }
 
     fn switch_to_available_segment(&mut self, size: usize) -> bool {
-        for (segment_index, segment) in self.segments.iter().enumerate() {
+        for (segment_index, segment) in self.space.segments.iter().enumerate() {
             if segment.size - segment.offset > size {
-                self.segment_offset = segment_index;
+                self.space.segment_offset = segment_index;
                 return true;
             }
         }
         false
     }
 
-    fn create_more_segments(&mut self, size: usize) -> SegmentAction {
+    fn create_more_segments(&mut self, bytes: usize) -> SegmentAction {
+
+        let size = (bytes + 1) * 8;
+
         if self.switch_to_available_segment(size) {
             return SegmentAction::Increment;
         }
 
-        for (segment_index, segment) in self.segments.iter().enumerate() {
+        for (segment_index, segment) in self.space.segments.iter().enumerate() {
             if segment.offset + size < segment.size {
-                self.segment_offset = segment_index;
+                self.space.segment_offset = segment_index;
                 return SegmentAction::Increment;
             }
         }
 
-        self.segment_offset = self.segments.len();
+        self.space.segment_offset = self.space.segments.len();
 
-        for i in 0..self.scale_factor {
-            self.segments.push(Segment::new(self.segment_size));
-            let segment_pointer = self.segment_pointer(self.segment_offset + i);
+        for i in 0..self.space.scale_factor {
+            self.space.segments.push(Segment::new(self.space.segment_size));
+            let segment_pointer = self.segment_pointer(self.space.segment_offset + i);
             debugger(Message {
                 kind: "HeapSegmentPointer".to_string(),
                 data: Data::HeapSegmentPointer {
@@ -119,13 +172,13 @@ impl SimpleMarkSweepHeap {
             });
         }
 
-        self.scale_factor *= 2;
-        self.scale_factor = self.scale_factor.min(64);
+        self.space.scale_factor *= 2;
+        self.space.scale_factor = self.space.scale_factor.min(64);
         SegmentAction::AllocateMore
     }
 
     fn write_object(&mut self, segment_offset: usize, offset: usize, shifted_size: usize) -> usize {
-        let memory = &mut self.segments[segment_offset].memory;
+        let memory = &mut self.space.segments[segment_offset].memory;
 
         let buffer = &mut memory[offset..offset + 8];
 
@@ -178,8 +231,8 @@ impl SimpleMarkSweepHeap {
                 return;
             }
         }
-        if entry.offset == 0 && entry.size == self.segments[entry.segment].offset {
-            self.segments[entry.segment].offset = 0;
+        if entry.offset == 0 && entry.size == self.space.segments[entry.segment].offset {
+            self.space.segments[entry.segment].offset = 0;
         } else {
             self.free_list.push(entry);
         }
@@ -188,20 +241,20 @@ impl SimpleMarkSweepHeap {
     }
 
     fn current_offset(&self) -> usize {
-        self.segments[self.segment_offset].offset
+        self.space.segments[self.space.segment_offset].offset
     }
 
     fn current_segment_size(&self) -> usize {
-        self.segments[self.segment_offset].size
+        self.space.segments[self.space.segment_offset].size
     }
 
     fn increment_current_offset(&mut self, size: usize) {
-        self.segments[self.segment_offset].offset += size;
+        self.space.segments[self.space.segment_offset].offset += size;
         // align to 8 bytes
-        self.segments[self.segment_offset].offset =
-            (self.segments[self.segment_offset].offset + 7) & !7;
+        self.space.segments[self.space.segment_offset].offset =
+            (self.space.segments[self.space.segment_offset].offset + 7) & !7;
         debug_assert!(
-            self.segments[self.segment_offset].offset % 8 == 0,
+            self.space.segments[self.space.segment_offset].offset % 8 == 0,
             "Heap offset is not aligned"
         );
     }
@@ -290,7 +343,7 @@ impl SimpleMarkSweepHeap {
     fn sweep(&mut self) {
         // println!("Sweeping");
         let mut free_entries: Vec<FreeListEntry> = Vec::with_capacity(128);
-        for (segment_index, segment) in self.segments.iter_mut().enumerate() {
+        for (segment_index, segment) in self.space.segments.iter_mut().enumerate() {
             if segment.offset == 0 {
                 continue;
             }
@@ -368,10 +421,26 @@ impl SimpleMarkSweepHeap {
             self.add_free(entry);
         }
     }
-    fn allocate_inner(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes, depth: usize) ->  Result<usize, Box<dyn Error>> {
-        if GC_ALWAYS && !GC_NEVER {
-            self.mark_and_sweep(stack, stack_map, stack_pointer);
+
+    fn can_allocate(&mut self, bytes: usize) -> bool {
+        let size = (bytes + 1) * 8;
+
+        if self.current_offset() + size < self.current_segment_size() {
+            return true;
         }
+        if self.switch_to_available_segment(size) {
+            return true;
+        }
+
+        let spot = self
+            .free_list
+            .iter_mut()
+            .enumerate()
+            .find(|(_, x)| x.size >= size);
+        spot.is_some()
+    }
+
+    fn allocate_inner(&mut self, bytes: usize, depth: usize) ->  Result<usize, Box<dyn Error>> {
 
         if depth > 1 {
             // This might feel a bit dumb
@@ -387,7 +456,7 @@ impl SimpleMarkSweepHeap {
 
         if self.current_offset() + size < self.current_segment_size() {
             let pointer = self.write_object(
-                self.segment_offset,
+                self.space.segment_offset,
                 self.current_offset(),
                 shifted_size,
             );
@@ -396,11 +465,11 @@ impl SimpleMarkSweepHeap {
         }
 
         if self.switch_to_available_segment(size) {
-            return self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, depth + 1);
+            return self.allocate_inner(bytes, depth + 1);
         }
 
         debug_assert!(
-            !self.segments.iter().any(|x| x.offset == 0),
+            !self.space.segments.iter().any(|x| x.offset == 0),
             "Available segment not being used"
         );
 
@@ -411,11 +480,8 @@ impl SimpleMarkSweepHeap {
             .find(|(_, x)| x.size >= size);
 
         if spot.is_none() {
-            if !GC_NEVER {
-                self.mark_and_sweep(stack, stack_map, stack_pointer);
-            }
             if self.switch_to_available_segment(size) {
-                return self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, depth + 1);
+                return self.allocate_inner(bytes, depth + 1);
             }
 
             spot = self
@@ -426,7 +492,7 @@ impl SimpleMarkSweepHeap {
 
             if spot.is_none() {
                 self.create_more_segments(size);
-                return self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, depth + 1);
+                return self.allocate_inner(bytes, depth + 1);
             }
         }
 
@@ -445,6 +511,55 @@ impl SimpleMarkSweepHeap {
         Ok(pointer)
     }
 
+    pub fn object_iter_from_current(&self) -> impl Iterator<Item = *const u8> {
+
+        let mut valid_pointers : Vec<*const u8> = vec![];
+        for (segment_index, segment) in self.space.segments.iter().enumerate() {
+            if segment.offset == 0 {
+                continue;
+            }
+            let mut free_in_segment: Vec<&FreeListEntry> = self
+                .free_list
+                .iter()
+                .filter(|x| x.segment == segment_index)
+                .collect();
+
+            free_in_segment.sort_by_key(|x| x.offset);
+            let mut offset = 0;
+            let segment_range = segment.offset;
+            // TODO: I'm scanning whole segment even if unused
+            let pointer = segment.memory.as_ptr();
+            while offset < segment_range {
+                for free in free_in_segment.iter() {
+                    if free.range().contains(&offset) {
+                        offset = free.range().end;
+                    }
+                    if free.offset > offset {
+                        break;
+                    }
+                }
+                if offset >= segment_range {
+                    break;
+                }
+                valid_pointers.push(unsafe { pointer.add(offset) });
+                
+            }
+        }
+        valid_pointers.into_iter()
+    }
+
+    pub fn contains(&self, pointer: *const u8) -> bool {
+        self.space.contains(pointer)
+    }
+
+    pub fn copy_data_to_offset(&mut self, data: &[u8]) -> isize {
+        let pointer = self.allocate_inner(data.len(), 0).unwrap();
+        let pointer = pointer as *mut u8;
+        unsafe {
+            std::ptr::copy(data.as_ptr(), pointer, data.len());
+        }
+        pointer as isize
+    }
 
 
 }
