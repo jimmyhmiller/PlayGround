@@ -6,6 +6,8 @@ use mmap_rs::{MmapMut, MmapOptions};
 
 use crate::{compiler::{Allocator, StackMap, GC_ALWAYS, GC_NEVER}, ir::BuiltInTypes};
 
+use super::simple_mark_and_sweep::SimpleMarkSweepHeap;
+
 struct Segment {
     memory: MmapMut,
     offset: usize,
@@ -91,7 +93,6 @@ impl Space {
         }
     }
 
-
     fn object_iter_from_current(&self) -> impl Iterator<Item = *const u8> {
         ObjectIterator {
             space: self,
@@ -99,7 +100,7 @@ impl Space {
             offset: self.segments[self.segment_offset].offset,
         }
     }
-
+    
     fn contains(&self, pointer: *const u8) -> bool {
         for segment in self.segments.iter() {
             if segment.memory_range.contains(&pointer) {
@@ -201,13 +202,13 @@ impl Space {
     }
 }
 
-pub struct CompactingHeap {
-    from_space: Space,
-    to_space: Space,
+pub struct SimpleGeneration {
+    young: Space,
+    old: SimpleMarkSweepHeap,
 }
 
 
-impl Allocator for CompactingHeap {
+impl Allocator for SimpleGeneration {
     fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes) -> Result<usize, Box<dyn Error>> {
         if GC_ALWAYS {
             self.gc(stack, stack_map, stack_pointer);
@@ -217,36 +218,37 @@ impl Allocator for CompactingHeap {
         Ok(pointer)
     }
     
-    // TODO: Still got bugs here
-    // Simple cases work, but not all cases
     fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) {
+        println!("gc started");
+        // TODO: Need to figure out when to do a Major GC
         if GC_NEVER {
             return;
         }
+        // self.old.gc(stack, stack_map, stack_pointer);
         let start = std::time::Instant::now();
         let roots = self.gather_roots(stack, stack_map, stack_pointer);
         let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
-        mem::swap(&mut self.from_space, &mut self.to_space);
         let stack_buffer = get_live_stack(stack, stack_pointer);
         for (i, (stack_offset, _)) in roots.iter().enumerate() {
             debug_assert!(BuiltInTypes::untag(new_roots[i]) % 8 == 0, "Pointer is not aligned");
             stack_buffer[*stack_offset] = new_roots[i];
         }
         
-
-        self.to_space.clear();
+        self.young.clear();
         println!("GC took: {:?}", start.elapsed());
     }
     
 }
 
-impl CompactingHeap {
+impl SimpleGeneration {
 
     pub fn new() -> Self {
-        let segment_size = MmapOptions::page_size() * 100;
-        let from_space = Space::new(segment_size, 1);
-        let to_space = Space::new(segment_size, 1);
-        Self { from_space, to_space }
+        // TODO: Should my old be mark and sweep with free list?
+        let young_size = MmapOptions::page_size() * 10000;
+        let old_size = MmapOptions::page_size() * 100;
+        let young = Space::new(young_size, 1);
+        let old = SimpleMarkSweepHeap::new();
+        Self { young, old }
     }
 
     fn allocate_inner(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes, depth: usize) ->  Result<usize, Box<dyn Error>> {
@@ -259,13 +261,13 @@ impl CompactingHeap {
             panic!("Recursed more than once in allocate")
         }
 
-        if self.from_space.can_allocate(bytes) {
-            return self.from_space.allocate(bytes);
+        if self.young.can_allocate(bytes) {
+            return self.young.allocate(bytes);
         } else {
             self.gc(stack, stack_map, stack_pointer);
         }
-        if !self.from_space.can_allocate(bytes) {
-            self.from_space.resize();
+        if !self.young.can_allocate(bytes) {
+            
         }
         self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, depth + 1)
     }
@@ -282,8 +284,15 @@ impl CompactingHeap {
 
     // I really want to experiment more with gc, but it feels so bogged down in the implementation
     // details right now.
-    #[allow(unused)]
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
+        
+
+        // This is broken. 
+        // I need to figured out a better way to deal with stuff
+        // if I'm going to mark and sweep the old generation
+        // Maybe I start with a compact? 
+        // More memory, but fewer pause times?
+        let iter = self.old.object_iter_from_current();
         // TODO: Is this vec the best way? Probably not
         // I could hand this the pointers to the stack location
         // then resolve what they point to and update them?
@@ -293,7 +302,8 @@ impl CompactingHeap {
             new_roots.push(self.copy_using_cheneys_algorithm(*root));
         }
 
-        for object in self.to_space.object_iter() {
+        // If I'm doing generational, I will need to do this only for new objects
+        for object in iter {
 
             let size: usize = *(object as *const usize) >> 1;
             let marked = size & 1 == 1;
@@ -329,7 +339,7 @@ impl CompactingHeap {
         let first_field = *(pointer.add(8).cast::<usize>());
         if BuiltInTypes::is_heap_pointer(first_field) {
             let untagged_data = BuiltInTypes::untag(first_field);
-            if self.to_space.contains(untagged_data as *const u8) {
+            if !self.young.contains(untagged_data as *const u8) {
                 debug_assert!(untagged_data % 8 == 0, "Pointer is not aligned");
                 return first_field;
             }
@@ -338,7 +348,7 @@ impl CompactingHeap {
 
         let size = *(pointer as *const usize) >> 1;
         let data = std::slice::from_raw_parts(pointer as *const u8, size + 8);
-        let new_pointer = self.to_space.copy_data_to_offset(data);
+        let new_pointer = self.old.copy_data_to_offset(data);
         debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
         // update header of original object to now be the forwarding pointer
         let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
@@ -379,6 +389,10 @@ impl CompactingHeap {
 
                 for j in (bottom_of_frame - active_frame)..bottom_of_frame {
                     if BuiltInTypes::is_heap_pointer(stack[j]) {
+                        let untagged = BuiltInTypes::untag(stack[j]);
+                        if !self.young.contains(untagged as *const u8) {
+                            continue;
+                        }
                         roots.push((j, stack[j]));
                         let untagged = BuiltInTypes::untag(stack[j]);
                         debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
@@ -389,6 +403,8 @@ impl CompactingHeap {
             }
             i += 1;
         }
+
+        
         roots
     }
     
