@@ -735,6 +735,9 @@ impl<Alloc: Allocator> Compiler<Alloc> {
 
     pub fn property_access(&self, struct_pointer: usize, str_constant_ptr: usize) -> usize {
         unsafe {
+            if BuiltInTypes::untag(struct_pointer) as usize % 8 != 0 {
+                panic!("Not aligned");
+            }
             let struct_pointer = BuiltInTypes::untag(struct_pointer);
             let struct_pointer = struct_pointer as *const u8;
             let size = *(struct_pointer as *const usize) >> 1;

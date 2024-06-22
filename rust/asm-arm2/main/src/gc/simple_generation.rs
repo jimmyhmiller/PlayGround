@@ -1,6 +1,6 @@
 
 
-use std::{error::Error, mem};
+use std::error::Error;
 
 use mmap_rs::{MmapMut, MmapOptions};
 
@@ -39,7 +39,6 @@ struct Space {
     segments: Vec<Segment>,
     segment_offset: usize,
     segment_size: usize,
-    scale_factor: usize,
 }
 
 struct ObjectIterator {
@@ -74,30 +73,13 @@ impl Iterator for ObjectIterator {
 }
 
 impl Space {
-    fn new(segment_size: usize, scale_factor: usize) -> Self {
+    fn new(segment_size: usize) -> Self {
         let mut space = vec![];
         space.push(Segment::new(segment_size));
         Self {
             segments: space,
             segment_offset: 0,
             segment_size,
-            scale_factor,
-        }
-    }
-
-    fn object_iter(&self) -> impl Iterator<Item = *const u8> {
-        ObjectIterator {
-            space: self,
-            segment_index: 0,
-            offset: 0,
-        }
-    }
-
-    fn object_iter_from_current(&self) -> impl Iterator<Item = *const u8> {
-        ObjectIterator {
-            space: self,
-            segment_index: self.segment_offset,
-            offset: self.segments[self.segment_offset].offset,
         }
     }
     
@@ -110,18 +92,6 @@ impl Space {
         false
     }
     
-    fn copy_data_to_offset(&mut self, data: &[u8]) -> isize {
-        if !self.can_allocate(data.len()) {
-            self.resize();
-        }
-        let segment = self.segments.get_mut(self.segment_offset).unwrap();
-        let buffer = &mut segment.memory[segment.offset..segment.offset + data.len()];
-        buffer.copy_from_slice(data);
-        let pointer = buffer.as_ptr() as isize;
-        self.increment_current_offset(data.len());
-        pointer
-
-    }
 
     fn write_object(&mut self, segment_offset: usize, offset: usize, shifted_size: usize) -> usize {
         let memory = &mut self.segments[segment_offset].memory;
@@ -191,20 +161,16 @@ impl Space {
         self.segment_offset = 0;
     }
     
-    fn resize(&mut self) {
-        let offset = self.segment_offset;
-        for _ in 0..self.scale_factor {
-            self.segments.push(Segment::new(self.segment_size));
-        }
-        self.segment_offset = offset + 1;
-        self.scale_factor *= 2;
-        self.scale_factor = self.scale_factor.min(64);
-    }
 }
+
+
 
 pub struct SimpleGeneration {
     young: Space,
     old: SimpleMarkSweepHeap,
+    copied: Vec<usize>,
+    gc_count: usize,
+    full_gc_frequency: usize,
 }
 
 
@@ -219,22 +185,18 @@ impl Allocator for SimpleGeneration {
     }
     
     fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) {
-        println!("gc started");
         // TODO: Need to figure out when to do a Major GC
         if GC_NEVER {
             return;
         }
-        // self.old.gc(stack, stack_map, stack_pointer);
-        let start = std::time::Instant::now();
-        let roots = self.gather_roots(stack, stack_map, stack_pointer);
-        let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
-        let stack_buffer = get_live_stack(stack, stack_pointer);
-        for (i, (stack_offset, _)) in roots.iter().enumerate() {
-            debug_assert!(BuiltInTypes::untag(new_roots[i]) % 8 == 0, "Pointer is not aligned");
-            stack_buffer[*stack_offset] = new_roots[i];
+        if self.gc_count % self.full_gc_frequency == 0 {
+            self.full_gc(stack, stack_map, stack_pointer);
+        } else {
+            self.minor_gc(stack, stack_map, stack_pointer);
         }
-        
-        self.young.clear();
+        // self.old.gc(stack, stack_map, stack_pointer);
+        let start = self.minor_gc(stack, stack_map, stack_pointer);
+        self.gc_count += 1;
         println!("GC took: {:?}", start.elapsed());
     }
     
@@ -243,12 +205,14 @@ impl Allocator for SimpleGeneration {
 impl SimpleGeneration {
 
     pub fn new() -> Self {
-        // TODO: Should my old be mark and sweep with free list?
+        // TODO: Make these configurable and play with configurations
         let young_size = MmapOptions::page_size() * 10000;
-        let old_size = MmapOptions::page_size() * 100;
-        let young = Space::new(young_size, 1);
-        let old = SimpleMarkSweepHeap::new();
-        Self { young, old }
+        let young = Space::new(young_size);
+        let old = SimpleMarkSweepHeap::new(10);
+        let copied = vec![];
+        let gc_count = 0;
+        let full_gc_frequency = 10;
+        Self { young, old, copied, gc_count, full_gc_frequency }
     }
 
     fn allocate_inner(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes, depth: usize) ->  Result<usize, Box<dyn Error>> {
@@ -267,9 +231,27 @@ impl SimpleGeneration {
             self.gc(stack, stack_map, stack_pointer);
         }
         if !self.young.can_allocate(bytes) {
-            
+            panic!("Failed to allocate");
         }
         self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, depth + 1)
+    }
+
+    fn minor_gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) -> std::time::Instant {
+        let start = std::time::Instant::now();
+        let roots = self.gather_roots(stack, stack_map, stack_pointer);
+        let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
+        let stack_buffer = get_live_stack(stack, stack_pointer);
+        for (i, (stack_offset, _)) in roots.iter().enumerate() {
+            debug_assert!(BuiltInTypes::untag(new_roots[i]) % 8 == 0, "Pointer is not aligned");
+            stack_buffer[*stack_offset] = new_roots[i];
+        }
+        self.young.clear();
+        start
+    }
+
+    fn full_gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) {
+        self.minor_gc(stack, stack_map, stack_pointer);
+        self.old.gc(stack, stack_map, stack_pointer);
     }
 
 
@@ -286,25 +268,13 @@ impl SimpleGeneration {
     // details right now.
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
         
-
-        // This is broken. 
-        // I need to figured out a better way to deal with stuff
-        // if I'm going to mark and sweep the old generation
-        // Maybe I start with a compact? 
-        // More memory, but fewer pause times?
-        let iter = self.old.object_iter_from_current();
-        // TODO: Is this vec the best way? Probably not
-        // I could hand this the pointers to the stack location
-        // then resolve what they point to and update them?
-        // I should think about how to get rid of this allocation at the very least.
         let mut new_roots = vec![];
         for root in roots.iter() {
-            new_roots.push(self.copy_using_cheneys_algorithm(*root));
+            new_roots.push(self.copy(*root));
         }
 
-        // If I'm doing generational, I will need to do this only for new objects
-        for object in iter {
-
+        while let Some(object) = self.copied.pop() {
+            let object = object as *mut u8;
             let size: usize = *(object as *const usize) >> 1;
             let marked = size & 1 == 1;
             if marked {
@@ -315,9 +285,7 @@ impl SimpleGeneration {
             
             for datum in data.iter_mut() {
                 if BuiltInTypes::is_heap_pointer(*datum) {
-                    let untagged = BuiltInTypes::untag(*datum);
-                    let pointer = untagged as *mut u8;
-                    *datum = self.copy_using_cheneys_algorithm(*datum);
+                    *datum = self.copy(*datum);
                 }
             }
         }
@@ -327,12 +295,16 @@ impl SimpleGeneration {
     
 
     // TODO: Finish this
-    unsafe fn copy_using_cheneys_algorithm(&mut self, root: usize) -> usize {
+    unsafe fn copy(&mut self, root: usize) -> usize {
         // I could make this check the memory range.
         // In the original it does. But I don't think I have to?
 
         let untagged = BuiltInTypes::untag(root);
         let pointer = untagged as *mut u8;
+
+        if !self.young.contains(pointer) {
+            return root;
+        }
 
         // If it is marked, we have copied it already
         // the first 8 bytes are a tagged forward pointer
@@ -357,7 +329,8 @@ impl SimpleGeneration {
         let pointer = pointer.add(8);
         *pointer.cast::<usize>() = tagged_new;
         let size = *(untagged as *const usize) >> 1;
-        assert!(size % 8 == 0 && size < 100);
+        debug_assert!(size % 8 == 0 && size < 100);
+        self.copied.push(new_pointer as usize);
         tagged_new
     }
 
@@ -407,6 +380,8 @@ impl SimpleGeneration {
         
         roots
     }
+
+   
     
 }
 

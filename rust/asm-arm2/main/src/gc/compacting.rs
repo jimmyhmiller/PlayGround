@@ -91,15 +91,6 @@ impl Space {
         }
     }
 
-
-    fn object_iter_from_current(&self) -> impl Iterator<Item = *const u8> {
-        ObjectIterator {
-            space: self,
-            segment_index: self.segment_offset,
-            offset: self.segments[self.segment_offset].offset,
-        }
-    }
-
     fn contains(&self, pointer: *const u8) -> bool {
         for segment in self.segments.iter() {
             if segment.memory_range.contains(&pointer) {
@@ -242,6 +233,7 @@ impl Allocator for CompactingHeap {
 
 impl CompactingHeap {
 
+    #[allow(unused)]
     pub fn new() -> Self {
         let segment_size = MmapOptions::page_size() * 100;
         let from_space = Space::new(segment_size, 1);
@@ -282,7 +274,6 @@ impl CompactingHeap {
 
     // I really want to experiment more with gc, but it feels so bogged down in the implementation
     // details right now.
-    #[allow(unused)]
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
         // TODO: Is this vec the best way? Probably not
         // I could hand this the pointers to the stack location
@@ -305,8 +296,6 @@ impl CompactingHeap {
             
             for datum in data.iter_mut() {
                 if BuiltInTypes::is_heap_pointer(*datum) {
-                    let untagged = BuiltInTypes::untag(*datum);
-                    let pointer = untagged as *mut u8;
                     *datum = self.copy_using_cheneys_algorithm(*datum);
                 }
             }
