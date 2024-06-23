@@ -535,6 +535,17 @@ impl LowLevelArm {
         });
     }
 
+    pub fn load_from_heap_with_reg_offset(&mut self, destination: Register, source: Register, offset: Register) {
+        self.instructions.push(ArmAsm::LdrRegGen {
+            size: 0b11,
+            rm: offset,
+            option: 0b11,
+            s: 0b0,
+            rn: source,
+            rt: destination,
+        })
+    }
+
     pub fn store_on_heap(&mut self, destination: Register, source: Register, offset: i32) {
         self.instructions.push(ArmAsm::StrImmGen {
             size: 0b11,

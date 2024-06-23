@@ -564,16 +564,8 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
 
 
                     // TODO: I need to fix how these are stored on the stack
-                    ////
-                    /// //
-                    /// 
-                    /// 
-                    /// ///
-                    /// 
 
-
-
-                    let num_free_variables = self.ir.load_from_memory(closure_register, 8);
+                    let num_free_variables = self.ir.load_from_memory(closure_register, 1);
                     // for each variable I need to push them onto the stack after the prelude
                     let loop_start = self.ir.label("loop_start");
                     let counter = self.ir.volatile_register();
@@ -586,8 +578,12 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                         counter,
                         num_free_variables,
                     );
+
+                    let free_variable_offset = self.ir.add(counter, 2);
                     // TODO: This needs to change based on counter
-                    let free_variable = self.ir.load_from_memory(closure_register, 16);
+                    let free_variable = self.ir.heap_load_with_reg_offset(closure_register, free_variable_offset);
+
+
                     let offset = self.ir.volatile_register();
                     self.ir.assign(offset, counter);
                     let free_variable_offset = self.ir.sub(num_free_variables, offset);
