@@ -1328,7 +1328,7 @@ impl Ir {
         dest
     }
     
-    pub fn register_life(&mut self, register: Value) {
+    pub fn extend_register_life(&mut self, register: Value) {
         self.instructions.push(Instruction::ExtendLifeTime(register));
     }
 }
