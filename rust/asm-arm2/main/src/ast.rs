@@ -374,7 +374,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
 
                 // Shift size left one so we can use it to mark
                 let size_reg = self.ir.assign_new(struct_type.size() + 1);
-                let stack_pointer = self.ir.get_current_stack_position();
+                let stack_pointer = self.ir.get_stack_pointer_imm(0);
                 // TODO: I need store the struct type here, so I know things about what data is here.
 
                 let struct_ptr = self.ir.call_builtin(
@@ -564,11 +564,20 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
 
 
                     // TODO: I need to fix how these are stored on the stack
+                    ////
+                    /// //
+                    /// 
+                    /// 
+                    /// ///
+                    /// 
+
+
 
                     let num_free_variables = self.ir.load_from_memory(closure_register, 8);
                     // for each variable I need to push them onto the stack after the prelude
                     let loop_start = self.ir.label("loop_start");
                     let counter = self.ir.volatile_register();
+                    self.ir.breakpoint();
                     self.ir.assign(counter, Value::RawValue(0));
                     self.ir.write_label(loop_start);
                     self.ir.jump_if(
@@ -581,19 +590,19 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     let free_variable = self.ir.load_from_memory(closure_register, 16);
                     let offset = self.ir.volatile_register();
                     self.ir.assign(offset, counter);
-                    let free_variable_offset = self.ir.add(offset, 0);
+                    let free_variable_offset = self.ir.sub(num_free_variables, offset);
                     // TODO: Make this better
                     let free_variable_slot_pointer =
                         self.ir.get_stack_pointer(free_variable_offset);
                     // TODO: Hardcoded 4 for prelude. Need to actually figure out that value correctly
-                    let free_variable_slot_pointer = self.ir.sub(free_variable_slot_pointer, 2);
+                    let free_variable_slot_pointer = self.ir.sub(free_variable_slot_pointer, 4);
                     self.ir
                         .heap_store(free_variable_slot_pointer, free_variable);
                     let counter_increment = self.ir.add(Value::RawValue(1), counter);
                     self.ir.assign(counter, counter_increment);
                     self.ir.jump(loop_start);
-                    self.ir.register_life(num_free_variables);
-                    self.ir.register_life(counter.into());
+                    self.ir.extend_register_life(num_free_variables);
+                    self.ir.extend_register_life(counter.into());
                     self.ir.write_label(call_function);
                     self.ir.assign(function_register, &function);
                     self.ir.write_label(skip_load_function);

@@ -839,7 +839,7 @@ impl LowLevelArm {
     pub fn get_stack_pointer_imm(&mut self, destination: Register, offset: isize) {
         self.instructions.push(ArmAsm::SubAddsubImm {
             sf: destination.sf(),
-            rn: X29,
+            rn: SP,
             rd: destination,
             imm12: offset as i32 * 8,
             sh: 0,
@@ -867,8 +867,16 @@ impl LowLevelArm {
     }
 
     pub fn get_current_stack_position(&mut self, dest: Register) {
+
+        self.instructions.push(ArmAsm::SubAddsubImm {
+            sf: dest.sf(),
+            rn: X29,
+            rd: dest,
+            imm12: (self.max_locals + self.stack_size + 1) * 8,
+            sh: 0,
+        });
         // TODO: This seems 
-        self.get_stack_pointer_imm(dest, (self.max_locals + self.stack_size + 1) as isize)
+
     }
 
     pub fn set_all_locals_to_null(&mut self, null_register: Register) {

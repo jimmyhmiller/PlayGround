@@ -1,34 +1,34 @@
-// fn a() {
-//     b()
-// }
+fn a() {
+    b()
+}
 
-// fn b() {
-//     42
-// }
+fn b() {
+    42
+}
 
-// fn hello(x) {
-//     let array = allocate_array(16)
-//     array_store(array, 0, 42)
-//     array_store(array, x, "hello")
-//     let result = array_get(array, x)
-//     print(result)
-// }
+fn hello(x) {
+    let array = allocate_array(16)
+    array_store(array, 0, 42)
+    array_store(array, x, "hello")
+    let result = array_get(array, x)
+    print(result)
+}
 
-// fn count_down(x) {
-//     if x == 0 {
-//         0
-//     } else {
-//         count_down(x - 1)
-//     }
-// }
+fn count_down(x) {
+    if x == 0 {
+        0
+    } else {
+        count_down(x - 1)
+    }
+}
 
-// fn hello2() {
-//     let y = fn thing() {
-//         42
-//     }
-//     println(y)
-//     println(y())
-// }
+fn hello2() {
+    let y = fn thing() {
+        42
+    }
+    println(y)
+    println(y())
+}
 
 fn hello_closure() {
     let x = 42;
@@ -39,249 +39,249 @@ fn hello_closure() {
     println(y())
 }
 
-// struct Range {
-//     start
-//     end
-// }
+struct Range {
+    start
+    end
+}
 
-// struct OtherStruct {
-//     x
-//     y
-// }
+struct OtherStruct {
+    x
+    y
+}
 
-// fn range(start, end) {
-//     Range {
-//         start: start,
-//         end: end
-//     }
-// }
+fn range(start, end) {
+    Range {
+        start: start,
+        end: end
+    }
+}
 
-// fn other_struct(x, y) {
-//     OtherStruct {
-//         x: x,
-//         y: y
-//     }
-// }
-
-
-// fn get_range_start() {
-//     let range = range(0, 10);
-//     print(range.start)
-// }
-
-// struct TreeNode {
-//     left
-//     right
-// }
-
-// fn math_max(a, b) {
-//     if a > b {
-//         a
-//     } else {
-//         b
-//     }
-// }
-
-// fn math_pow(base, exp) {
-//     if exp == 0 {
-//         1
-//     } else {
-//         base * math_pow(base, exp - 1)
-//     }
-// }
-
-// fn mainThread(depth) {
-//     let maxDepth = math_max(6, depth)
-
-//     let stretchDepth = maxDepth + 1
-//     let check = itemCheck(bottomUpTree(stretchDepth))
-//     print("stretch tree of depth ")
-//     print(stretchDepth)
-//     print(" check: ")
-//     println(check)
-
-//     let longLivedTree = bottomUpTree(maxDepth)
-//     loopThroughDepths(4, maxDepth, longLivedTree)
-// }
-
-// fn loopThroughDepths(depth, maxDepth, longLivedTree) {
-//     if depth > maxDepth {
-//         print("long lived tree of depth ")
-//         print(maxDepth)
-//         print(" check: ")
-//         println(itemCheck(longLivedTree))
-//     } else {
-//         let iterations = math_pow(2, maxDepth - depth + 4)
-//         let check = doWork(iterations, depth)
-//         print(iterations)
-//         print(" trees of depth ")
-//         print(depth)
-//         print(" check: ")
-//         println(check)
-//         loopThroughDepths(depth + 2, maxDepth, longLivedTree)
-//     }
-// }
-
-// fn doWork(iterations, depth) {
-//     doWorkHelper(iterations, depth, 0, 0)
-// }
-
-// fn doWorkHelper(iterations, depth, i, accumCheck) {
-//     if i < iterations {
-//         let newCheck = accumCheck + itemCheck(bottomUpTree(depth))
-//         doWorkHelper(iterations, depth, i + 1, newCheck)
-//     } else {
-//         accumCheck
-//     }
-// }
+fn other_struct(x, y) {
+    OtherStruct {
+        x: x,
+        y: y
+    }
+}
 
 
+fn get_range_start() {
+    let range = range(0, 10);
+    print(range.start)
+}
 
-// fn itemCheck(node) {
-//     if node.left == null {
-//         1
-//     } else {
-//         1 + itemCheck(node.left) + itemCheck(node.right)
-//     }
-// }
+struct TreeNode {
+    left
+    right
+}
 
-// struct Pointless {
-//     x
-// }
+fn math_max(a, b) {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
 
-// fn simpleMakeTree() {
-//     println("simpleMakeTree")
-//     TreeNode {
-//         left: null,
-//         right: null
-//     }
-// }
+fn math_pow(base, exp) {
+    if exp == 0 {
+        1
+    } else {
+        base * math_pow(base, exp - 1)
+    }
+}
 
-// fn testMakeTree() {
-//     simpleMakeTree()
-//     TreeNode {
-//         left: simpleMakeTree(),
-//         right: simpleMakeTree()
-//     }
-// }
+fn mainThread(depth) {
+    let maxDepth = math_max(6, depth)
 
-// fn bottomUpTree(depth) {
-//     if depth > 0 {
-//         TreeNode {
-//             left: bottomUpTree(depth - 1),
-//             right: bottomUpTree(depth - 1)
-//         }
-//     } else {
-//         TreeNode {
-//             left: null,
-//             right: null
-//         }
-//     }
-// }
+    let stretchDepth = maxDepth + 1
+    let check = itemCheck(bottomUpTree(stretchDepth))
+    print("stretch tree of depth ")
+    print(stretchDepth)
+    print(" check: ")
+    println(check)
 
-// fn testGcWithTree(n) {
-//     // fails when gc right now
-//     bottomUpTree(n)
-// //     println("here")
-// //     println(bottomUpTree(n))
-// }
+    let longLivedTree = bottomUpTree(maxDepth)
+    loopThroughDepths(4, maxDepth, longLivedTree)
+}
 
-// fn testGcSimple(n) {
-//     println("Starting garbage")
-//     let garbage = TreeNode {
-//         left: null
-//         right: null
-//     }
-//     println("garbage")
+fn loopThroughDepths(depth, maxDepth, longLivedTree) {
+    if depth > maxDepth {
+        print("long lived tree of depth ")
+        print(maxDepth)
+        print(" check: ")
+        println(itemCheck(longLivedTree))
+    } else {
+        let iterations = math_pow(2, maxDepth - depth + 4)
+        let check = doWork(iterations, depth)
+        print(iterations)
+        print(" trees of depth ")
+        print(depth)
+        print(" check: ")
+        println(check)
+        loopThroughDepths(depth + 2, maxDepth, longLivedTree)
+    }
+}
 
-//     let x = TreeNode {
-//         left: null
-//         right: null
-//     }
+fn doWork(iterations, depth) {
+    doWorkHelper(iterations, depth, 0, 0)
+}
 
-//     println("x")
+fn doWorkHelper(iterations, depth, i, accumCheck) {
+    if i < iterations {
+        let newCheck = accumCheck + itemCheck(bottomUpTree(depth))
+        doWorkHelper(iterations, depth, i + 1, newCheck)
+    } else {
+        accumCheck
+    }
+}
 
-//     let y = TreeNode {
-//         left: x,
-//         right: x
-//     }
 
-//     println("y")
 
-//     let z = TreeNode {
-//         left: y,
-//         right: y,
-//     }
+fn itemCheck(node) {
+    if node.left == null {
+        1
+    } else {
+        1 + itemCheck(node.left) + itemCheck(node.right)
+    }
+}
 
-//     println("z")
-//     println(z)
-//     z
-// }
+struct Pointless {
+    x
+}
 
-// fn testGcNested(n) {
-//     let y = testGcSimple()
+fn simpleMakeTree() {
+    println("simpleMakeTree")
+    TreeNode {
+        left: null,
+        right: null
+    }
+}
 
-//     println("done with call")
+fn testMakeTree() {
+    simpleMakeTree()
+    TreeNode {
+        left: simpleMakeTree(),
+        right: simpleMakeTree()
+    }
+}
 
-//     let z = TreeNode {
-//         left: y
-//         right: y
-//     }
-//     println("z2")
+fn bottomUpTree(depth) {
+    if depth > 0 {
+        TreeNode {
+            left: bottomUpTree(depth - 1),
+            right: bottomUpTree(depth - 1)
+        }
+    } else {
+        TreeNode {
+            left: null,
+            right: null
+        }
+    }
+}
 
-//     let q = TreeNode {
-//         left: z
-//         right: z
-//     }
+fn testGcWithTree(n) {
+    // fails when gc right now
+    bottomUpTree(n)
+//     println("here")
+//     println(bottomUpTree(n))
+}
 
-//     println("q")
+fn testGcSimple(n) {
+    println("Starting garbage")
+    let garbage = TreeNode {
+        left: null
+        right: null
+    }
+    println("garbage")
 
-//     y
-// }
+    let x = TreeNode {
+        left: null
+        right: null
+    }
 
-// fn testGc(n) {
-//     if n > 10 {
-//         0
-//     } else {
-//         let x = TreeNode {
-//             left: null
-//             right: null
-//         }
-//         1 + testGc(n + 1)
+    println("x")
 
-//         let y = TreeNode {
-//             left: x,
-//             right: x
-//         }
+    let y = TreeNode {
+        left: x,
+        right: x
+    }
 
-//         1 + testGc(n + 1)
+    println("y")
 
-//         let z = TreeNode {
-//             left: y,
-//             right: y,
-//         }
-//         println(x)
-//         println(y)
-//         println(z)
-//         println(2)
-//         println(2)
-//         println(2)
-//         println(2)
-//         println(2)
+    let z = TreeNode {
+        left: y,
+        right: y,
+    }
 
-//     }
-// }
+    println("z")
+    println(z)
+    z
+}
 
-// fn simpleFunctionWithLocals() {
-//     let x = 2;
-//     let y = 3;
-//     x + y
-// }
+fn testGcNested(n) {
+    let y = testGcSimple()
 
-// fn fib(n) {
-//     if n <= 1 {
-//         n
-//     } else {
-//         fib(n - 1) + fib(n - 2)
-//     }
-// }
+    println("done with call")
+
+    let z = TreeNode {
+        left: y
+        right: y
+    }
+    println("z2")
+
+    let q = TreeNode {
+        left: z
+        right: z
+    }
+
+    println("q")
+
+    y
+}
+
+fn testGc(n) {
+    if n > 10 {
+        0
+    } else {
+        let x = TreeNode {
+            left: null
+            right: null
+        }
+        1 + testGc(n + 1)
+
+        let y = TreeNode {
+            left: x,
+            right: x
+        }
+
+        1 + testGc(n + 1)
+
+        let z = TreeNode {
+            left: y,
+            right: y,
+        }
+        println(x)
+        println(y)
+        println(z)
+        println(2)
+        println(2)
+        println(2)
+        println(2)
+        println(2)
+
+    }
+}
+
+fn simpleFunctionWithLocals() {
+    let x = 2;
+    let y = 3;
+    x + y
+}
+
+fn fib(n) {
+    if n <= 1 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
+}
