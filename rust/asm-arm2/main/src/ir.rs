@@ -909,8 +909,8 @@ impl Ir {
                         }
                     }
 
-                    for (index, register) in out_live_call_registers.iter().enumerate() {
-                        lang.push_to_stack(*register, index as i32);
+                    for register in out_live_call_registers.iter() {
+                        lang.push_to_stack(*register);
                     }
                     for (index, arg) in args.iter().enumerate().rev() {
                         let arg = arg.try_into().unwrap();
@@ -955,8 +955,8 @@ impl Ir {
 
                     // I only need to store on stack those things that live past the call
                     // I think this is part of the reason why I have too many registers live at a time
-                    for (index, register) in out_live_call_registers.iter().enumerate() {
-                        lang.push_to_stack(*register, index as i32);
+                    for register in out_live_call_registers.iter() {
+                        lang.push_to_stack(*register);
                     }
                     for (arg_index, arg) in args.iter().enumerate().rev() {
                         let arg = arg.try_into().unwrap();
@@ -1104,7 +1104,7 @@ impl Ir {
                 Instruction::PushStack(val) => {
                     let val = val.try_into().unwrap();
                     let val = alloc.allocate_register(index, val, &mut lang);
-                    lang.push_to_stack(val, 0);
+                    lang.push_to_stack(val);
                 }
                 Instruction::PopStack(val) => {
                     let val = val.try_into().unwrap();

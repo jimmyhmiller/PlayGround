@@ -498,9 +498,9 @@ impl LowLevelArm {
         })
     }
 
-    pub fn push_to_stack(&mut self, reg: Register, offset: i32) {
+    pub fn push_to_stack(&mut self, reg: Register) {
         self.increment_stack_size(1);
-        self.store_on_stack(reg, -(offset + self.max_locals + 1))
+        self.store_on_stack(reg, -(self.max_locals + self.stack_size))
     }
     pub fn store_local(&mut self, value: Register, offset: i32) {
         self.store_on_stack(value, -(offset + 1));
@@ -839,7 +839,7 @@ impl LowLevelArm {
     pub fn get_stack_pointer_imm(&mut self, destination: Register, offset: isize) {
         self.instructions.push(ArmAsm::SubAddsubImm {
             sf: destination.sf(),
-            rn: SP,
+            rn: X29,
             rd: destination,
             imm12: offset as i32 * 8,
             sh: 0,
@@ -867,8 +867,8 @@ impl LowLevelArm {
     }
 
     pub fn get_current_stack_position(&mut self, dest: Register) {
-        // TODO: Not sure if max_locals is calculated at this point or I need to patch or something later
-        self.get_stack_pointer_imm(dest, (self.max_locals + self.stack_size) as isize)
+        // TODO: This seems 
+        self.get_stack_pointer_imm(dest, (self.max_locals + self.stack_size + 1) as isize)
     }
 
     pub fn set_all_locals_to_null(&mut self, null_register: Register) {

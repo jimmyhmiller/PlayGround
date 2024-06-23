@@ -162,7 +162,7 @@ fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
 
     lang.mov_reg(X10, SP);
     lang.mov_reg(SP, X0);
-    lang.push_to_stack(X10, 0);
+    lang.push_to_stack(X10);
 
     lang.mov_reg(X10, X1);
     lang.mov_reg(X0, X2);
