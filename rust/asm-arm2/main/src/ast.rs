@@ -260,7 +260,12 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     // but maybe I just heap allocate all mutable variables?
                     // What about functions that change overtime?
                     // Not 100% sure about all of this
+                    let label = self.ir.label("closure");
 
+                    // get a pointer to the start of the free variables on the stack
+                    let free_variable_pointer = self.ir.get_current_stack_position();
+                    
+                    self.ir.write_label(label);
                     for free_variable in self.get_current_env().free_variables.clone().iter() {
                         let variable = self
                             .get_variable(free_variable)
@@ -280,40 +285,36 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                                 panic!("We are trying to find this variable concretely and found a free variable")
                             }
                         }
-                        // load count of free variables
-                        let num_free = self.get_current_env().free_variables.len();
-
-                        // get a pointer to the start of the free variables on the stack
-                        let free_variable_pointer =
-                            self.ir.get_stack_pointer_imm(num_free as isize + 1);
-
-                        let num_free = Value::SignedConstant(num_free as isize);
-                        let num_free_reg = self.ir.volatile_register();
-                        self.ir.assign(num_free_reg, num_free);
-                        // Call make_closure
-                        let make_closure = self.compiler.find_function("make_closure").unwrap();
-                        let make_closure =
-                            self.compiler.get_function_pointer(make_closure).unwrap();
-                        let make_closure_reg = self.ir.volatile_register();
-                        self.ir.assign(make_closure_reg, make_closure);
-                        let function_pointer_reg = self.ir.volatile_register();
-                        self.ir.assign(function_pointer_reg, function_pointer);
-
-                        let compiler_pointer_reg =
-                            self.ir.assign_new(self.compiler.get_compiler_ptr());
-
-                        let closure = self.ir.call(
-                            make_closure_reg.into(),
-                            vec![
-                                compiler_pointer_reg.into(),
-                                function_pointer_reg.into(),
-                                num_free_reg.into(),
-                                free_variable_pointer,
-                            ],
-                        );
-                        self.pop_environment();
-                        return closure;
                     }
+                    // load count of free variables
+                    let num_free = self.get_current_env().free_variables.len();
+
+                    let num_free = Value::SignedConstant(num_free as isize);
+                    let num_free_reg = self.ir.volatile_register();
+                    self.ir.assign(num_free_reg, num_free);
+                    // Call make_closure
+                    let make_closure = self.compiler.find_function("make_closure").unwrap();
+                    let make_closure =
+                        self.compiler.get_function_pointer(make_closure).unwrap();
+                    let make_closure_reg = self.ir.volatile_register();
+                    self.ir.assign(make_closure_reg, make_closure);
+                    let function_pointer_reg = self.ir.volatile_register();
+                    self.ir.assign(function_pointer_reg, function_pointer);
+
+                    let compiler_pointer_reg =
+                        self.ir.assign_new(self.compiler.get_compiler_ptr());
+
+                    let closure = self.ir.call(
+                        make_closure_reg.into(),
+                        vec![
+                            compiler_pointer_reg.into(),
+                            function_pointer_reg.into(),
+                            num_free_reg.into(),
+                            free_variable_pointer,
+                        ],
+                    );
+                    self.pop_environment();
+                    return closure;
                 }
 
                 let function = self.ir.function(Value::Function(function_pointer));
@@ -570,7 +571,6 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     let counter = self.ir.volatile_register();
                     self.ir.assign(counter, Value::RawValue(0));
                     self.ir.write_label(loop_start);
-                    self.ir.breakpoint();
                     self.ir.jump_if(
                         skip_load_function,
                         Condition::GreaterThanOrEqual,
@@ -582,10 +582,11 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     let offset = self.ir.volatile_register();
                     self.ir.assign(offset, counter);
                     let free_variable_offset = self.ir.add(offset, 0);
+                    // TODO: Make this better
                     let free_variable_slot_pointer =
                         self.ir.get_stack_pointer(free_variable_offset);
                     // TODO: Hardcoded 4 for prelude. Need to actually figure out that value correctly
-                    let free_variable_slot_pointer = self.ir.sub(free_variable_slot_pointer, 4);
+                    let free_variable_slot_pointer = self.ir.sub(free_variable_slot_pointer, 2);
                     self.ir
                         .heap_store(free_variable_slot_pointer, free_variable);
                     let counter_increment = self.ir.add(Value::RawValue(1), counter);
