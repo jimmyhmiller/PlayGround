@@ -220,7 +220,8 @@ pub enum Instruction {
     LoadConstant(Value, Value),
     // bool is builtin?
     Call(Value, Value, Vec<Value>, bool),
-    HeapLoad(Value, Value),
+    HeapLoad(Value, Value, i32),
+    HeapLoadReg(Value, Value, Value),
     HeapStore(Value, Value),
     LoadLocal(Value, Value),
     StoreLocal(Value, Value),
@@ -349,8 +350,11 @@ impl Instruction {
             Instruction::Tag(a, b, c) => {
                 get_registers!(a, b, c)
             }
-            Instruction::HeapLoad(a, b) => {
+            Instruction::HeapLoad(a, b, _) => {
                 get_registers!(a, b)
+            }
+            Instruction::HeapLoadReg(a, b, c) => {
+                get_registers!(a, b, c)
             }
             Instruction::HeapStore(a, b) => {
                 get_registers!(a, b)
@@ -1073,12 +1077,21 @@ impl Ir {
                         lang.jump(exit);
                     }
                 },
-                Instruction::HeapLoad(dest, ptr) => {
+                Instruction::HeapLoad(dest, ptr, offset) => {
                     let ptr = ptr.try_into().unwrap();
                     let ptr = alloc.allocate_register(index, ptr, &mut lang);
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, &mut lang);
-                    lang.load_from_heap(dest, ptr, 0);
+                    lang.load_from_heap(dest, ptr, *offset);
+                }
+                Instruction::HeapLoadReg(dest, ptr, offset) => {
+                    let ptr = ptr.try_into().unwrap();
+                    let ptr = alloc.allocate_register(index, ptr, &mut lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, &mut lang);
+                    let offset = offset.try_into().unwrap();
+                    let offset = alloc.allocate_register(index, offset, &mut lang);
+                    lang.load_from_heap_with_reg_offset(dest, ptr, offset);
                 }
                 Instruction::HeapStore(ptr, val) => {
                     let ptr = ptr.try_into().unwrap();
@@ -1206,7 +1219,16 @@ impl Ir {
         let source = self.assign_new(source);
         let dest = self.assign_new(dest);
         self.instructions
-            .push(Instruction::HeapLoad(dest.into(), source.into()));
+            .push(Instruction::HeapLoad(dest.into(), source.into(), 0));
+        dest.into()
+    }
+
+    pub fn heap_load_with_reg_offset(&mut self, source: Value, offset: Value) -> Value {
+        let dest = self.volatile_register();
+        let source = self.assign_new(source);
+        let offset = self.assign_new(offset);
+        self.instructions
+            .push(Instruction::HeapLoadReg(dest.into(), source.into(), offset.into()));
         dest.into()
     }
 
@@ -1286,13 +1308,11 @@ impl Ir {
         dest
     }
 
+    // TODO: Broken
     pub fn load_from_memory(&mut self, source: Value, offset: i32) -> Value {
-        let offset_reg: VirtualRegister = self.volatile_register();
-        self.assign(offset_reg, Value::RawValue(offset as usize));
-        let source = self.add(source, offset_reg);
         let dest = self.volatile_register();
         self.instructions
-            .push(Instruction::HeapLoad(dest.into(), source));
+            .push(Instruction::HeapLoad(dest.into(), source, offset));
         dest.into()
     }
 
