@@ -229,6 +229,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let hello_ast = Parser::from_file(
         "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/main/resources/examples.bg",
     )?;
+    println!("{:#?}", hello_ast);
     println!("Parse time {:?}", parse_time.elapsed());
     // println!("{:#?}", hello_ast);
 
@@ -252,7 +253,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // compiler.println(result as usize);
 
     let time = Instant::now();
-    let result = compiler.run_function("mainThread", vec![21]);
+    let result = compiler.run_function("hello_closure", vec![]);
     println!("Our time {:?}", time.elapsed());
     compiler.println(result as usize);
 

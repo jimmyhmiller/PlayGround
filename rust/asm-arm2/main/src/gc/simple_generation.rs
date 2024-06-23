@@ -194,10 +194,7 @@ impl Allocator for SimpleGeneration {
         } else {
             self.minor_gc(stack, stack_map, stack_pointer);
         }
-        // self.old.gc(stack, stack_map, stack_pointer);
-        let start = self.minor_gc(stack, stack_map, stack_pointer);
         self.gc_count += 1;
-        println!("GC took: {:?}", start.elapsed());
     }
     
 }
@@ -236,7 +233,7 @@ impl SimpleGeneration {
         self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, depth + 1)
     }
 
-    fn minor_gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) -> std::time::Instant {
+    fn minor_gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) {
         let start = std::time::Instant::now();
         let roots = self.gather_roots(stack, stack_map, stack_pointer);
         let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
@@ -246,7 +243,7 @@ impl SimpleGeneration {
             stack_buffer[*stack_offset] = new_roots[i];
         }
         self.young.clear();
-        start
+        println!("Minor GC took {:?}", start.elapsed());
     }
 
     fn full_gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) {

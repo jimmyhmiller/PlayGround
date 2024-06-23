@@ -234,6 +234,7 @@ pub enum Instruction {
     Untag(Value, Value),
     HeapStoreOffset(Value, Value, usize),
     CurrentStackPosition(Value),
+    ExtendLifeTime(Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -395,6 +396,9 @@ impl Instruction {
             }
             Instruction::Untag(a, b) => {
                 get_registers!(a, b)
+            }
+            Instruction::ExtendLifeTime(a) => {
+                get_register!(a)
             }
         }
     }
@@ -745,6 +749,9 @@ impl Ir {
             match instruction {
                 Instruction::Breakpoint => {
                     lang.breakpoint();
+                }
+                Instruction::ExtendLifeTime(_) => {
+
                 }
                 Instruction::Sub(dest, a, b) => {
                     // TODO: I need to guard here
@@ -1319,6 +1326,10 @@ impl Ir {
         self.instructions
             .push(Instruction::CurrentStackPosition(dest));
         dest
+    }
+    
+    pub fn register_life(&mut self, register: Value) {
+        self.instructions.push(Instruction::ExtendLifeTime(register));
     }
 }
 

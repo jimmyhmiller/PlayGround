@@ -336,7 +336,6 @@ impl SimpleMarkSweepHeap {
     }
 
     fn sweep(&mut self) {
-        // println!("Sweeping");
         let mut free_entries: Vec<FreeListEntry> = Vec::with_capacity(128);
         for (segment_index, segment) in self.space.segments.iter_mut().enumerate() {
             if segment.offset == 0 {

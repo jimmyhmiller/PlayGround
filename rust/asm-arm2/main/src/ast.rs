@@ -290,9 +290,6 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                         let num_free = Value::SignedConstant(num_free as isize);
                         let num_free_reg = self.ir.volatile_register();
                         self.ir.assign(num_free_reg, num_free);
-                        let num_free_reg = self
-                            .ir
-                            .tag(num_free_reg.into(), BuiltInTypes::Int.get_tag());
                         // Call make_closure
                         let make_closure = self.compiler.find_function("make_closure").unwrap();
                         let make_closure =
@@ -310,7 +307,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                             vec![
                                 compiler_pointer_reg.into(),
                                 function_pointer_reg.into(),
-                                num_free_reg,
+                                num_free_reg.into(),
                                 free_variable_pointer,
                             ],
                         );
@@ -563,12 +560,17 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     // probably should build a heap viewer
                     let function_pointer = self.ir.load_from_memory(closure_register, 0);
                     self.ir.assign(function_register, function_pointer);
+
+
+                    // TODO: I need to fix how these are stored on the stack
+
                     let num_free_variables = self.ir.load_from_memory(closure_register, 8);
                     // for each variable I need to push them onto the stack after the prelude
                     let loop_start = self.ir.label("loop_start");
                     let counter = self.ir.volatile_register();
-                    self.ir.assign(counter, Value::SignedConstant(0));
+                    self.ir.assign(counter, Value::RawValue(0));
                     self.ir.write_label(loop_start);
+                    self.ir.breakpoint();
                     self.ir.jump_if(
                         skip_load_function,
                         Condition::GreaterThanOrEqual,
@@ -586,13 +588,16 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     let free_variable_slot_pointer = self.ir.sub(free_variable_slot_pointer, 4);
                     self.ir
                         .heap_store(free_variable_slot_pointer, free_variable);
-                    let counter_increment = self.ir.add(1, counter);
+                    let counter_increment = self.ir.add(Value::RawValue(1), counter);
                     self.ir.assign(counter, counter_increment);
                     self.ir.jump(loop_start);
+                    self.ir.register_life(num_free_variables);
+                    self.ir.register_life(counter.into());
                     self.ir.write_label(call_function);
                     self.ir.assign(function_register, &function);
                     self.ir.write_label(skip_load_function);
                     self.ir.call(function_register.into(), args)
+
                 } else {
                     // TODO: I shouldn't just assume the function will exist
                     // unless I have a good plan for dealing with when it doesn't
