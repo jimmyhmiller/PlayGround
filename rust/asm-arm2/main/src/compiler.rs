@@ -704,6 +704,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
     // if it is a closure, grab the closure data
     // and put the free variables on the stack before the locals
 
+    // I broke closures :(
     pub fn make_closure(
         &mut self,
         function: usize,
