@@ -236,6 +236,7 @@ pub enum Instruction {
     HeapStoreOffset(Value, Value, usize),
     CurrentStackPosition(Value),
     ExtendLifeTime(Value),
+    HeapStoreOffsetReg(Value, Value, Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -362,6 +363,9 @@ impl Instruction {
             Instruction::HeapStoreOffset(a, b, _) => {
                 get_registers!(a, b)
             }
+            Instruction::HeapStoreOffsetReg(a, b, c) => {
+                get_registers!(a, b, c)
+            }
             Instruction::LoadTrue(a) => {
                 get_register!(a)
             }
@@ -455,7 +459,7 @@ pub struct Ir {
     labels: Vec<Label>,
     label_names: Vec<String>,
     label_locations: HashMap<usize, usize>,
-    num_locals: usize,
+    pub num_locals: usize,
 }
 
 impl Default for Ir {
@@ -861,7 +865,7 @@ impl Ir {
                         // The idea here is that I would store free variables after the locals on the stack
                         // Need to make sure I preserve that space
                         // and that at this point in the program I know how many locals there are.
-                        lang.load_from_stack(register, (*free_variable + self.num_locals) as i32);
+                        lang.load_from_stack(register, -((*free_variable + self.num_locals + 1) as i32));
                     }
                     Value::Null => {
                         let register = alloc.allocate_register(index, *dest, &mut lang);
@@ -1100,12 +1104,22 @@ impl Ir {
                     let val = alloc.allocate_register(index, val, &mut lang);
                     lang.store_on_heap(ptr, val, 0);
                 }
+                
                 Instruction::HeapStoreOffset(ptr, val, offset) => {
                     let ptr = ptr.try_into().unwrap();
                     let ptr = alloc.allocate_register(index, ptr, &mut lang);
                     let val = val.try_into().unwrap();
                     let val = alloc.allocate_register(index, val, &mut lang);
                     lang.store_on_heap(ptr, val, *offset as i32);
+                }
+                Instruction::HeapStoreOffsetReg(ptr,  val, offset,) => {
+                    let ptr = ptr.try_into().unwrap();
+                    let ptr = alloc.allocate_register(index, ptr, &mut lang);
+                    let val = val.try_into().unwrap();
+                    let val = alloc.allocate_register(index, val, &mut lang);
+                    let offset = offset.try_into().unwrap();
+                    let offset = alloc.allocate_register(index, offset, &mut lang);
+                    lang.store_to_heap_with_reg_offset(ptr, val, offset);
                 }
                 Instruction::RegisterArgument(arg) => {
                     // This doesn't actually compile into any code
@@ -1322,10 +1336,10 @@ impl Ir {
         dest
     }
 
-    pub fn untag(&mut self, closure_register: Value) -> Value {
+    pub fn untag(&mut self, val: Value) -> Value {
         let dest = self.volatile_register().into();
         self.instructions
-            .push(Instruction::Untag(dest, closure_register));
+            .push(Instruction::Untag(dest, val));
         dest
     }
 
@@ -1350,6 +1364,10 @@ impl Ir {
     
     pub fn extend_register_life(&mut self, register: Value) {
         self.instructions.push(Instruction::ExtendLifeTime(register));
+    }
+    
+    pub fn heap_store_with_reg_offset(&mut self, free_variable_slot_pointer: Value, free_variable: Value, free_variable_offset: Value,)  {
+        self.instructions.push(Instruction::HeapStoreOffsetReg(free_variable_slot_pointer, free_variable, free_variable_offset.try_into().unwrap()));
     }
 }
 

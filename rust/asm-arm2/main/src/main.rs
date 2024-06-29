@@ -135,7 +135,9 @@ extern "C" fn make_closure<Alloc: Allocator>(
 ) -> usize {
     let compiler = unsafe { &mut *compiler };
     let num_free = BuiltInTypes::untag(num_free);
-    let free_variables = unsafe { from_raw_parts(free_variable_pointer as *const usize, num_free) };
+    let free_variable_pointer = free_variable_pointer as *const usize;
+    let start = unsafe { free_variable_pointer.add(num_free) };
+    let free_variables = unsafe { from_raw_parts(start, num_free) };
     compiler.make_closure(function, free_variables).unwrap()
 }
 
@@ -186,7 +188,7 @@ fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
     lang.ret();
 
     compiler
-        .add_function("trampoline", &lang.compile_directly())
+        .add_function("trampoline", &lang.compile_directly(), 0)
         .unwrap();
     let function = compiler.get_function_by_name_mut("trampoline").unwrap();
     function.is_builtin = true;
