@@ -25,6 +25,7 @@ pub struct Function {
     is_foreign: bool,
     pub is_builtin: bool,
     is_defined: bool,
+    number_of_locals: usize,
 }
 
 #[derive(Debug)]
@@ -193,6 +194,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             is_foreign: true,
             is_builtin: false,
             is_defined: true,
+            number_of_locals: 0,
         });
         debugger(Message {
             kind: "foreign_function".to_string(),
@@ -220,6 +222,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             is_foreign: true,
             is_builtin: true,
             is_defined: true,
+            number_of_locals: 0,
         });
         debugger(Message {
             kind: "builtin_function".to_string(),
@@ -236,6 +239,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         &mut self,
         name: &str,
         code: &mut LowLevelArm,
+        number_of_locals: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let bytes = &(code.compile_to_bytes());
         for (index, function) in self.functions.iter_mut().enumerate() {
@@ -244,7 +248,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
                 break;
             }
         }
-        self.add_function(name, bytes)?;
+        self.add_function(name, bytes, number_of_locals)?;
 
         // TODO: Make this better
         let function = self.find_function(name).unwrap();
@@ -301,12 +305,13 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             is_foreign: false,
             is_builtin: false,
             is_defined: false,
+            number_of_locals: 0,
         };
         self.functions.push(function.clone());
         Ok(function)
     }
 
-    pub fn add_function(&mut self, name: &str, code: &[u8]) -> Result<usize, Box<dyn Error>> {
+    pub fn add_function(&mut self, name: &str, code: &[u8], number_of_locals: usize) -> Result<usize, Box<dyn Error>> {
         let offset = self.add_code(code)?;
         let index = self.functions.len();
         self.functions.push(Function {
@@ -316,6 +321,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             is_foreign: false,
             is_builtin: false,
             is_defined: true,
+            number_of_locals,
         });
         let function_pointer =
             Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
@@ -710,12 +716,20 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         function: usize,
         free_variables: &[usize],
     ) -> Result<usize, Box<dyn Error>> {
-        let len = 8 + 8 + free_variables.len() * 8;
+        let len = 8 + 8 + 8 + free_variables.len() * 8;
         // TODO: Stack pointer should be passed in
         let heap_pointer = self.allocate(len, 0, BuiltInTypes::Closure)?;
         let pointer = heap_pointer as *mut u8;
         let num_free = free_variables.len();
+        let function_definition =  self.get_function_by_pointer(BuiltInTypes::untag(function));
+        if function_definition.is_none() {
+            panic!("Function not found");
+        }
+        let function_definition = function_definition.unwrap();
+        let num_locals = function_definition.number_of_locals;
+
         let function = function.to_le_bytes();
+
         let free_variables = free_variables.iter().flat_map(|v| v.to_le_bytes());
         let buffer = unsafe { from_raw_parts_mut(pointer, len) };
         // write function pointer
@@ -727,9 +741,15 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         for (index, byte) in num_free.iter().enumerate() {
             buffer[8 + index] = *byte;
         }
+
+        let num_locals = num_locals.to_le_bytes();
+        // Write number of locals
+        for (index, byte) in num_locals.iter().enumerate() {
+            buffer[16 + index] = *byte;
+        }
         // write free variables
         for (index, byte) in free_variables.enumerate() {
-            buffer[16 + index] = byte;
+            buffer[24 + index] = byte;
         }
         Ok(BuiltInTypes::Closure.tag(heap_pointer as isize) as usize)
     }

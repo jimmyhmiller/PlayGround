@@ -242,7 +242,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 self.ir.ret(return_value);
 
                 let mut code = self.ir.compile(&name);
-                let function_pointer = self.compiler.upsert_function(&name, &mut code).unwrap();
+                let function_pointer = self.compiler.upsert_function(&name, &mut code, self.ir.num_locals).unwrap();
 
                 code.share_label_info_debug(function_pointer);
 
@@ -262,6 +262,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     // Not 100% sure about all of this
                     let label = self.ir.label("closure");
 
+                    // self.ir.breakpoint();
                     // get a pointer to the start of the free variables on the stack
                     let free_variable_pointer = self.ir.get_current_stack_position();
                     
@@ -532,7 +533,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
 
                 if let Some(function) = self.get_variable_current_env(&name) {
                     // TODO: Right now, this would only find variables in the current environment
-                    // I also need to deal wiht functions vs closures
+                    // I also need to deal with functions vs closures
                     let function_register = self.ir.volatile_register();
 
                     let closure_register = self.ir.volatile_register();
@@ -560,17 +561,19 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     // I'm currently not getting the correct data. Need to figure out why.
                     // probably should build a heap viewer
                     let function_pointer = self.ir.load_from_memory(closure_register, 0);
+                    
                     self.ir.assign(function_register, function_pointer);
 
 
                     // TODO: I need to fix how these are stored on the stack
 
                     let num_free_variables = self.ir.load_from_memory(closure_register, 1);
+                    let num_free_variables = self.ir.tag(num_free_variables.into(), BuiltInTypes::Int.get_tag());
                     // for each variable I need to push them onto the stack after the prelude
                     let loop_start = self.ir.label("loop_start");
                     let counter = self.ir.volatile_register();
-                    self.ir.breakpoint();
-                    self.ir.assign(counter, Value::RawValue(0));
+                    // self.ir.breakpoint();
+                    self.ir.assign(counter, Value::SignedConstant(0));
                     self.ir.write_label(loop_start);
                     self.ir.jump_if(
                         skip_load_function,
@@ -578,27 +581,34 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                         counter,
                         num_free_variables,
                     );
-
-                    let free_variable_offset = self.ir.add(counter, 2);
+                    let free_variable_offset = self.ir.add(counter, Value::SignedConstant(3));
+                    let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(8));
                     // TODO: This needs to change based on counter
+                    let free_variable_offset = self.ir.untag(free_variable_offset.into());
                     let free_variable = self.ir.heap_load_with_reg_offset(closure_register, free_variable_offset);
 
+                    let free_variable_offset = self.ir.sub(num_free_variables, counter);
+                    let num_local = self.ir.load_from_memory(closure_register, 2);
+                    let num_local = self.ir.tag(num_local.into(), BuiltInTypes::Int.get_tag());
+                    let free_variable_offset = self.ir.add(free_variable_offset, num_local);
+                    // // TODO: Make this better
+                    let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(-8));
+                    let free_variable_offset = self.ir.untag(free_variable_offset.into());
+                    let free_variable_slot_pointer = self.ir.get_stack_pointer_imm(2);
+                    self.ir.heap_store_with_reg_offset(free_variable_slot_pointer, free_variable, free_variable_offset);
 
-                    let offset = self.ir.volatile_register();
-                    self.ir.assign(offset, counter);
-                    let free_variable_offset = self.ir.sub(num_free_variables, offset);
-                    // TODO: Make this better
-                    let free_variable_slot_pointer =
-                        self.ir.get_stack_pointer(free_variable_offset);
-                    // TODO: Hardcoded 4 for prelude. Need to actually figure out that value correctly
-                    let free_variable_slot_pointer = self.ir.sub(free_variable_slot_pointer, 4);
-                    self.ir
-                        .heap_store(free_variable_slot_pointer, free_variable);
-                    let counter_increment = self.ir.add(Value::RawValue(1), counter);
+                    let label = self.ir.label("increment_counter");
+                    self.ir.write_label(label);
+                    let counter_increment = self.ir.add(Value::SignedConstant(1), counter);
                     self.ir.assign(counter, counter_increment);
+                   
+                   
+                   
+                   
                     self.ir.jump(loop_start);
                     self.ir.extend_register_life(num_free_variables);
                     self.ir.extend_register_life(counter.into());
+                    self.ir.extend_register_life(closure_register);
                     self.ir.write_label(call_function);
                     self.ir.assign(function_register, &function);
                     self.ir.write_label(skip_load_function);
