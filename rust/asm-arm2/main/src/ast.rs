@@ -236,8 +236,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 for ast in body[..body.len().saturating_sub(1)].iter() {
                     self.call_compile(&Box::new(ast));
                 }
-                // TODO: Need some concept of nil I think
-                let last = body.last().unwrap();
+                let last = body.last().unwrap_or(&Ast::Null);
                 let return_value = self.call_compile(&Box::new(last));
                 self.ir.ret(return_value);
 
@@ -501,10 +500,6 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     self.ir.recurse(args)
                 }
             }
-            // TODO: Have an idea of built in functions to call
-            // These functions should be passed as the first argument context
-            // (maybe the compiler struct), so they can do things with the system
-            // like heap allocate and such
             Ast::Call { name, args } => {
                 if name == self.name {
                     // TODO: I'm guessing I can have tail recursive closures that I will need to deal with
@@ -557,9 +552,6 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     //     ree_variables: *const Value,
                     // }
                     let closure_register = self.ir.untag(closure_register.into());
-                    // TODO:
-                    // I'm currently not getting the correct data. Need to figure out why.
-                    // probably should build a heap viewer
                     let function_pointer = self.ir.load_from_memory(closure_register, 0);
                     
                     self.ir.assign(function_register, function_pointer);
@@ -627,7 +619,6 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                         args.insert(0, pointer_reg.into());
                     }
 
-                    // TODO: Do an indirect call via jump table
                     let jump_table_pointer =
                         self.compiler.get_jump_table_pointer(function).unwrap();
                     let jump_table_point_reg = self

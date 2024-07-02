@@ -6,14 +6,6 @@ fn b() {
     42
 }
 
-fn hello(x) {
-    let array = allocate_array(16)
-    array_store(array, 0, 42)
-    array_store(array, x, "hello")
-    let result = array_get(array, x)
-    print(result)
-}
-
 fn count_down(x) {
     if x == 0 {
         0

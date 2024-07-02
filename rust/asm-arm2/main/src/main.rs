@@ -99,14 +99,6 @@ fn fib_rust(n: usize) -> usize {
 }
 
 
-extern "C" fn allocate_array<Alloc: Allocator>(compiler: *mut Compiler<Alloc>, value: usize) -> usize {
-    let value = BuiltInTypes::untag(value);
-    let compiler = unsafe { &mut *compiler };
-    // TODO: Stack pointer should be passed in
-    let pointer = compiler.allocate(value, 0, BuiltInTypes::Array).unwrap();
-
-    BuiltInTypes::Array.tag(pointer as isize) as usize
-}
 
 extern "C" fn allocate_struct<Alloc: Allocator>(compiler: *mut Compiler<Alloc>, value: usize, stack_pointer: usize) -> usize {
     let value = BuiltInTypes::untag(value);
@@ -115,16 +107,6 @@ extern "C" fn allocate_struct<Alloc: Allocator>(compiler: *mut Compiler<Alloc>, 
     compiler
         .allocate(value, stack_pointer, BuiltInTypes::Struct)
         .unwrap()
-}
-
-extern "C" fn array_store<Alloc: Allocator>(compiler: *mut Compiler<Alloc>, array: usize, index: usize, value: usize) -> usize {
-    let compiler = unsafe { &mut *compiler };
-    compiler.array_store(array, index, value).unwrap()
-}
-
-extern "C" fn array_get<Alloc: Allocator>(compiler: *mut Compiler<Alloc>, array: usize, index: usize) -> usize {
-    let compiler = unsafe { &mut *compiler };
-    compiler.array_get(array, index).unwrap()
 }
 
 extern "C" fn make_closure<Alloc: Allocator>(
@@ -154,8 +136,6 @@ fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
     lang.prelude(-2);
-
-    // set SP to equal the first argument
 
     // Should I store or push?
     for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
@@ -206,22 +186,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     compile_trampoline(&mut compiler);
 
-    // let heap_pointer = compiler.get_heap_pointer();
-
-    // debugger(Message {
-    //     kind: "HeapPointer".to_string(),
-    //     data: Data::HeapSegmentPointer {
-    //         pointer: heap_pointer,
-    //     },
-    // });
-    // Very inefficient way to do array stuff
-    // but working
     compiler.add_builtin_function("println", ir::println_value::<Alloc> as *const u8)?;
     compiler.add_builtin_function("print", ir::print_value::<Alloc> as *const u8)?;
-    compiler.add_builtin_function("allocate_array", allocate_array::<Alloc> as *const u8)?;
     compiler.add_builtin_function("allocate_struct", allocate_struct::<Alloc> as *const u8)?;
-    compiler.add_builtin_function("array_store", array_store::<Alloc> as *const u8)?;
-    compiler.add_builtin_function("array_get", array_get::<Alloc> as *const u8)?;
     compiler.add_builtin_function("make_closure", make_closure::<Alloc> as *const u8)?;
     compiler.add_builtin_function("property_access", property_access::<Alloc> as *const u8)?;
     // compiler.add_builtin_function("gc", gc as *const u8)?;
@@ -254,7 +221,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // compiler.println(result as usize);
 
     let time = Instant::now();
-    let result = compiler.run_function("hello_closure", vec![]);
+    let result = compiler.run_function("mainThread", vec![21]);
     println!("Our time {:?}", time.elapsed());
     compiler.println(result as usize);
 

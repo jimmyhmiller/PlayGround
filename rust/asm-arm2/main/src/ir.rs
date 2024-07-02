@@ -65,7 +65,6 @@ impl BuiltInTypes {
         value | tag
     }
 
-    // TODO: Given this scheme how do I represent null?
     pub fn get_tag(&self) -> isize {
         match self {
             BuiltInTypes::Int => 0b000,
@@ -738,11 +737,13 @@ impl Ir {
         // Self::draw_lifetimes(&lifetimes);
         let mut alloc = RegisterAllocator::new(lifetimes);
 
+        let mut lifetimes2: Vec<(VirtualRegister, (usize, usize))> = alloc.lifetimes.iter().map(|(r, v)| (*r, *v)).collect();
+        lifetimes2.sort_by_key(|(_, (start, _))| *start);
+
+
         for (index, instruction) in self.instructions.iter().enumerate() {
-            let mut lifetimes: Vec<(&VirtualRegister, &(usize, usize))> =
-                alloc.lifetimes.iter().collect();
-            lifetimes.sort_by_key(|(_, (start, _))| *start);
-            for (register, (_start, end)) in lifetimes {
+
+            for (register, (_start, end)) in lifetimes2.iter() {
                 if index == end + 1 {
                     if let Some(register) = alloc.allocated_registers.get(register) {
                         lang.free_register(*register);
@@ -971,8 +972,7 @@ impl Ir {
                         let arg = alloc.allocate_register(index, arg, &mut lang);
                         lang.mov_reg(lang.arg(arg_index as u8), arg);
                     }
-                    // TODO:
-                    // I am not actually checking any tags here
+                    // TODO: I am not actually checking any tags here
                     // or unmasking or anything. Just straight up calling it
                     let function =
                         alloc.allocate_register(index, function.try_into().unwrap(), &mut lang);
@@ -1322,7 +1322,6 @@ impl Ir {
         dest
     }
 
-    // TODO: Broken
     pub fn load_from_memory(&mut self, source: Value, offset: i32) -> Value {
         let dest = self.volatile_register();
         self.instructions
@@ -1437,5 +1436,3 @@ pub extern "C" fn print_value<Alloc: Allocator>(compiler: &Compiler<Alloc>, valu
     0b111
 }
 
-// TODO:
-// I need to properly tag every value

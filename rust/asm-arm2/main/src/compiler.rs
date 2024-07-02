@@ -118,7 +118,7 @@ pub struct Compiler<Alloc: Allocator> {
     code_memory: Option<Mmap>,
     // TODO: Think about the jump table more
     jump_table: Option<Mmap>,
-    // DO I need this offset?
+    // Do I need this offset?
     jump_table_offset: usize,
     structs: StructManager,
     functions: Vec<Function>,
@@ -581,70 +581,11 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         print!("{}", self.get_repr(value, 0).unwrap());
     }
 
-    pub fn array_store(
-        &mut self,
-        array: usize,
-        index: usize,
-        value: usize,
-    ) -> Result<usize, Box<dyn Error>> {
-        unsafe {
-            let tag = BuiltInTypes::get_kind(array);
-            match tag {
-                BuiltInTypes::Array => {
-                    // TODO: Bounds check
-                    let index = BuiltInTypes::untag(index);
-                    let index = index * 8;
-                    let array = BuiltInTypes::untag(array);
-                    let pointer = array as *mut u8;
-                    // get first 8 bytes as size
-                    let size = *(pointer as *const usize) >> 1;
-                    let pointer = pointer.add(8);
-                    let data = std::slice::from_raw_parts_mut(pointer, size);
-                    // store all 8 bytes of value in data
-                    for (offset, byte) in value.to_le_bytes().iter().enumerate() {
-                        data[index + offset] = *byte;
-                    }
-                    Ok(BuiltInTypes::Array.tag(array as isize) as usize)
-                }
-                _ => panic!("Not an array"),
-            }
-        }
-    }
-
-    pub(crate) fn array_get(
-        &mut self,
-        array: usize,
-        index: usize,
-    ) -> Result<usize, Box<dyn Error>> {
-        unsafe {
-            let tag = BuiltInTypes::get_kind(array);
-            match tag {
-                BuiltInTypes::Array => {
-                    let index = BuiltInTypes::untag(index);
-                    let array = BuiltInTypes::untag(array);
-                    let pointer = array as *mut u8;
-                    // get first 8 bytes as size
-                    let size = *(pointer as *const usize);
-                    let pointer = pointer.add(8);
-                    let data = std::slice::from_raw_parts_mut(pointer, size);
-                    // get next 8 bytes as usize
-                    let mut bytes = [0u8; 8];
-                    bytes.copy_from_slice(&data[index * 8..index * 8 + 8]);
-                    let data = usize::from_le_bytes(bytes);
-                    Ok(data)
-                }
-                _ => panic!("Not an array"),
-            }
-        }
-    }
-
     pub fn compile(&mut self, code: String) -> Result<(), Box<dyn Error>> {
         let mut parser = Parser::new(code);
         let ast = parser.parse();
         self.compile_ast(ast)
     }
-
-    // TODO: Strings disappear because I am holding on to them only in IR
 
     pub fn compile_ast(&mut self, ast: crate::ast::Ast) -> Result<(), Box<dyn Error>> {
         ast.compile(self);
@@ -697,20 +638,6 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             .find(|f| f.offset_or_pointer == offset)
     }
 
-    // TODO: Call this
-    // After I make a function, I need to check if there are free variables
-    // If so I need to grab those variables from the evironment
-    // pop them on the stack
-    // call this funciton with a pointer to the base of the stack
-    // and the number of variables
-    // then I need to pop the stack
-    // and get the closure
-    // When it comes to function calls
-    // if it is a function, do direct call.
-    // if it is a closure, grab the closure data
-    // and put the free variables on the stack before the locals
-
-    // I broke closures :(
     pub fn make_closure(
         &mut self,
         function: usize,
