@@ -2,7 +2,8 @@ use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
 use arm::LowLevelArm;
 use asm::arm::{SP, X0, X1, X10, X2, X3, X4};
 use bincode::{config::standard, Decode, Encode};
-use compiler::{Allocator, StackMapDetails};
+use clap::{command, Parser as ClapParser};
+use compiler::{Allocator, DefaultPrinter, Printer, StackMapDetails, TestPrinter};
 #[allow(unused)]
 use gc::{compacting::CompactingHeap, simple_generation::SimpleGeneration, simple_mark_and_sweep::SimpleMarkSweepHeap};
 use std::{error::Error, mem, slice::from_raw_parts, time::Instant};
@@ -174,15 +175,42 @@ fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
     function.is_builtin = true;
 }
 
+
+#[derive(ClapParser)] // requires `derive` feature
+#[command(version, about, long_about = None)]
+#[command(name = "beag")]
+#[command(bin_name = "beag")]
+struct Cli {
+    program: String,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    // TODO: Set this up to be a proper main where I can pass it a file
-    // maybe make a repl?
+
+    let args = Cli::parse();
+
+    let parse_time = Instant::now();
+    let source = std::fs::read_to_string(args.program.clone())?;
+    // TODO: This is very ad-hoc
+    // I should make it real functionality later
+    // but right now I just want something working
+    let has_expect = source.contains("// Expect");
+    let mut parser = Parser::new(source);
+    let ast = parser.parse();
+    println!("Parse time {:?}", parse_time.elapsed());
+
+    
+
     // type Alloc = CompactingHeap;
     // type Alloc = SimpleMarkSweepHeap;
     type Alloc = SimpleGeneration;
     let allocator = Alloc::new();
+    let printer: Box<dyn Printer> = if has_expect {
+        Box::new(TestPrinter::new(Box::new(DefaultPrinter)))
+    } else {
+        Box::new(DefaultPrinter)
+    };
 
-    let mut compiler = Compiler::new(allocator);
+    let mut compiler = Compiler::new(allocator, printer);
 
     compile_trampoline(&mut compiler);
 
@@ -191,67 +219,48 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("allocate_struct", allocate_struct::<Alloc> as *const u8)?;
     compiler.add_builtin_function("make_closure", make_closure::<Alloc> as *const u8)?;
     compiler.add_builtin_function("property_access", property_access::<Alloc> as *const u8)?;
-    // compiler.add_builtin_function("gc", gc as *const u8)?;
 
-    let parse_time = Instant::now();
-    // TODO: getting no free registers in MainThread!
-    let hello_ast = Parser::from_file(
-        "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/main/resources/examples.bg",
-    )?;
-    println!("Parse time {:?}", parse_time.elapsed());
-    // println!("{:#?}", hello_ast);
+
 
     let compile_time = Instant::now();
-    compiler.compile_ast(hello_ast)?;
+    compiler.compile_ast(ast)?;
 
     compiler.check_functions();
     println!("Compile time {:?}", compile_time.elapsed());
 
-    // let hello_result = compiler.run_function("hello", vec![1]);
-    // compiler.print(hello_result as usize);
-    // let countdown_result = compiler.run_function("count_down", vec![10000000]);
-    // compiler.print(countdown_result as usize);
-
-    // let hello2_result = compiler.run_function("hello2", vec![]);
-    // compiler.print(hello2_result as usize);
-
-    // let time = Instant::now();
-    // let result = compiler.run_function("mainThread", vec![10]);
-    // println!("Our time {:?}", time.elapsed());
-    // compiler.println(result as usize);
-
     let time = Instant::now();
-    let result = compiler.run_function("mainThread", vec![21]);
+    let result = compiler.run_function("main", vec![]);
     println!("Our time {:?}", time.elapsed());
     compiler.println(result as usize);
 
-    // let time = Instant::now();
-    // let result = compiler.run_function("mainThread", vec![21]);
-    // println!("Our time {:?}", time.elapsed());
-    // compiler.println(result as usize);
+    if has_expect {
+        let source = std::fs::read_to_string(args.program)?;
+        let expected = get_expect(&source);
+        let expected = expected.trim();
+        let printed = compiler.printer.get_output().join("\n").trim().to_string();
+        if printed != expected {
+            println!("Expected: \n{}\n", expected);
+            println!("Got: \n{}\n", printed);
+            panic!("Test failed");
+        }
+        println!("Test passed");
+    }
+    
 
-    // let result = compiler.run_function("simpleFunctionWithLocals", vec![]);
-    // println!("Our time {:?}", time.elapsed());
-    // compiler.println(result as usize);
-
-    // let time = Instant::now();
-    // let result = compiler.run_function("testGcNested", vec![]);
-    // println!("Our time {:?}", time.elapsed());
-    // compiler.println(result as usize);
-
-    // TODO: As I'm compiling an ast to ir,
-    // I need to separate out functions into their own units
-    // of code.
-
-    // let n = 32;
-    // let time = Instant::now();
-    // let result1 = compiler.run_function("fib", vec![n]);
-    // println!("Our time {:?}", time.elapsed());
-    // let time = Instant::now();
-    // let result2 = fib_rust(n as usize);
-    // println!("Rust time {:?}", time.elapsed());
-    // println!("{} {}", BuiltInTypes::untag(result1 as usize), result2);
     Ok(())
+}
+
+fn get_expect(source: &str) -> String {
+    let start = source.find("// Expect").unwrap();
+    // get each line as long as they start with //
+    let lines = source[start..]
+        .lines()
+        .skip(1)
+        .take_while(|line| line.starts_with("//"))
+        .map(|line| line.trim_start_matches("//").trim())
+        .collect::<Vec<_>>().join("\n");
+    lines
+    
 }
 
 // TODO:
