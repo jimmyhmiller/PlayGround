@@ -2,8 +2,7 @@ use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
 use crate::{
-    compiler::{Allocator, Compiler, Struct},
-    ir::{self, BuiltInTypes, Condition},
+    arm::LowLevelArm, compiler::{Allocator, Compiler, Struct}, ir::{self, BuiltInTypes, Condition}
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +78,7 @@ pub enum Ast {
 
 impl Ast {
     pub fn compile<Alloc: Allocator>(&self, compiler: &mut Compiler<Alloc>) -> Ir {
-        let mut compiler = AstCompiler {
+        let mut ast_compiler = AstCompiler {
             ast: self.clone(),
             ir: Ir::new(),
             name: "".to_string(),
@@ -97,7 +96,7 @@ impl Ast {
         };
 
         // println!("{:#?}", compiler);
-        compiler.compile()
+        ast_compiler.compile()
     }
 
     pub fn nodes(&self) -> &Vec<Ast> {
@@ -240,7 +239,15 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 let return_value = self.call_compile(&Box::new(last));
                 self.ir.ret(return_value);
 
-                let mut code = self.ir.compile(&name);
+                let lang = LowLevelArm::new();
+
+                let error_fn_pointer = self.compiler.find_function("throw_error").unwrap();
+                let error_fn_pointer = self.compiler.get_function_pointer(error_fn_pointer).unwrap();
+
+                let compiler_ptr = self.compiler.get_compiler_ptr() as usize;
+
+                let mut code = self.ir.compile(&name, lang, error_fn_pointer, compiler_ptr);
+
                 let function_pointer = self.compiler.upsert_function(&name, &mut code, self.ir.num_locals).unwrap();
 
                 code.share_label_info_debug(function_pointer);

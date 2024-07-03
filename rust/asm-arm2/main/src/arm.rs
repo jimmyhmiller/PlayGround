@@ -138,16 +138,99 @@ pub fn or(destination: Register, a: Register, b: Register) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
+
+// Too lazy to understand this. But great explanation here
+// https://kddnewton.com/2022/08/11/aarch64-bitmask-immediates.html
+// Code taken from there
+pub struct BitmaskImmediate {
+    n: u8,
+    imms: u8,
+    immr: u8
+}
+
+
+/// Is this number's binary representation all 1s?
+fn is_mask(imm: u64) -> bool {
+    ((imm + 1) & imm) == 0
+}
+
+/// Is this number's binary representation one or more 1s followed by
+/// one or more 0s?
+fn is_shifted_mask(imm: u64) -> bool {
+    is_mask((imm - 1) | imm)
+}
+
+impl TryFrom<u64> for BitmaskImmediate {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if value == 0 || value == u64::MAX {
+            return Err(());
+        }
+        let mut imm = value;
+        let mut size = 64;
+        
+        loop {
+            size >>= 1;
+            let mask = (1 << size) - 1;
+        
+            if (imm & mask) != ((imm >> size) & mask) {
+              size <<= 1;
+              break;
+            }
+        
+            if size <= 2 {
+                break;
+            }
+        }
+        let trailing_ones: u32;
+        let left_rotations: u32;
+
+        let mask = u64::MAX >> (64 - size);
+        imm &= mask;
+
+        if is_shifted_mask(imm) {
+            left_rotations = imm.trailing_zeros();
+            trailing_ones = (imm >> left_rotations).trailing_ones();
+        } else {
+            imm |= !mask;
+            if !is_shifted_mask(!imm) {
+                return Err(());
+            }
+
+            let leading_ones = imm.leading_ones();
+            left_rotations = 64 - leading_ones;
+            trailing_ones = leading_ones + imm.trailing_ones() - (64 - size);
+        }   
+
+        // immr is the number of right rotations it takes to get from the
+        // matching unrotated pattern to the target value.
+        let immr = (size - left_rotations) & (size - 1);
+
+        // imms is encoded as the size of the pattern, a 0, and then one less
+        // than the number of sequential 1s.
+        let imms = (!(size - 1) << 1) | (trailing_ones - 1);
+
+        // n is 1 if the element size is 64-bits, and 0 otherwise.
+        let n = ((imms >> 6) & 1) ^ 1;
+
+        Ok(BitmaskImmediate {
+            n: n as u8,
+            imms: (imms & 0x3f) as u8,
+            immr: (immr & 0x3f) as u8
+        })
+    }
+}
+
 pub fn and_imm(destination: Register, a: Register, b: i32) -> ArmAsm {
-    assert!(b == 1);
-    // Too lazy to understand this. But great explanation here
-    // https://kddnewton.com/2022/08/11/aarch64-bitmask-immediates.html
+    let immediate: Result<BitmaskImmediate, _> = (b as u64).try_into();
+    let immediate = immediate.unwrap();
+
     ArmAsm::AndLogImm {
         sf: destination.sf(),
-        n: 1,
-        immr: 0,
-        imms: 0,
+        n: immediate.n as i32,
+        immr: immediate.immr as i32,
+        imms: immediate.imms as i32,
         rn: a,
         rd: destination,
     }
@@ -445,6 +528,9 @@ impl LowLevelArm {
     }
     pub fn shift_left(&mut self, destination: Register, a: Register, b: i32) {
         self.instructions.push(shift_left(destination, a, b));
+    }
+    pub fn and(&mut self, destination: Register, a: Register, b: i32) {
+        self.instructions.push(and_imm(destination, a, b));
     }
     pub fn ret(&mut self) {
         self.instructions.push(ret());
@@ -875,7 +961,7 @@ impl LowLevelArm {
 
     pub fn share_label_info_debug(&self, function_pointer: usize) {
         for (label_index, label) in self.labels.iter().enumerate() {
-            let label_location = *self.label_locations.get(&label_index).unwrap() * 4;
+            let label_location = *self.label_locations.get(&label_index).expect(&format!("Could not find label {}", label)) * 4;
             debugger(Message {
                 kind: "label".to_string(),
                 data: Data::Label {

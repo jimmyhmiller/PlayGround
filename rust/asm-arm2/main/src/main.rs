@@ -133,6 +133,11 @@ pub extern "C" fn property_access<Alloc: Allocator>(
     compiler.property_access(struct_pointer, str_constant_ptr)
 }
 
+pub extern "C" fn throw_error<Alloc: Allocator>(_compiler: *mut Compiler<Alloc>, _stack_pointer: usize) -> usize {
+    // let compiler = unsafe { &mut *compiler };
+    panic!("Error!");
+}
+
 fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
@@ -193,6 +198,8 @@ pub struct CommandLineArguments {
     gc_always: bool,
     #[clap(short, long, default_value = "false")]
     all_tests: bool,
+    #[clap(short, long, default_value = "false")]
+    test: bool,
 }
 
 
@@ -222,6 +229,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             no_gc: args.no_gc,
             gc_always: args.gc_always,
             all_tests: false,
+            test: true,
         };
         main_inner(args)?;
     }
@@ -241,7 +249,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // TODO: This is very ad-hoc
     // I should make it real functionality later
     // but right now I just want something working
-    let has_expect = source.contains("// Expect");
+    let has_expect = args.test && source.contains("// Expect");
     let mut parser = Parser::new(source);
     let ast = parser.parse();
     if args.show_times {
@@ -267,6 +275,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("allocate_struct", allocate_struct::<Alloc> as *const u8)?;
     compiler.add_builtin_function("make_closure", make_closure::<Alloc> as *const u8)?;
     compiler.add_builtin_function("property_access", property_access::<Alloc> as *const u8)?;
+    compiler.add_builtin_function("throw_error", throw_error::<Alloc> as *const u8)?;
 
 
 
