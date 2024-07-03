@@ -108,6 +108,60 @@ impl StackMap {
 }
 
 
+pub trait Printer {
+    fn print(&mut self, value: String);
+    fn println(&mut self, value: String);
+    // Gross just for testing. I'll need to do better;
+    fn get_output(&self) -> Vec<String>;
+}
+
+pub struct DefaultPrinter;
+
+impl Printer for DefaultPrinter {
+    fn print(&mut self, value: String) {
+        print!("{}", value);
+    }
+
+    fn println(&mut self, value: String) {
+        println!("{}", value);
+    }
+
+    fn get_output(&self) -> Vec<String> {
+        unimplemented!("We don't store this in the default")
+    }
+}
+
+
+pub struct TestPrinter {
+    pub output: Vec<String>,
+    pub other_printer: Box<dyn Printer>,
+}
+
+impl TestPrinter {
+    pub fn new(other_printer: Box<dyn Printer>) -> Self {
+        Self { 
+            output: vec![],
+            other_printer: other_printer
+        }
+    }
+}
+
+impl Printer for TestPrinter {
+    fn print(&mut self, value: String) {
+        self.output.push(value.clone());
+        self.other_printer.print(value);
+    }
+
+    fn println(&mut self, value: String) {
+        self.output.push(value.clone());
+        self.other_printer.println(value);
+    }
+
+    fn get_output(&self) -> Vec<String> {
+        self.output.clone()
+    }
+}
+
 pub trait Allocator {
     fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize,  kind: BuiltInTypes) -> Result<usize, Box<dyn Error>>;
     fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize);
@@ -125,7 +179,8 @@ pub struct Compiler<Alloc: Allocator> {
     heap: Alloc,
     stack: MmapMut,
     string_constants: Vec<StringValue>,
-    stack_map: StackMap
+    stack_map: StackMap,
+    pub printer: Box<dyn Printer>,
 }
 
 impl<Alloc : Allocator> fmt::Debug for Compiler<Alloc> {
@@ -140,7 +195,7 @@ impl<Alloc : Allocator> fmt::Debug for Compiler<Alloc> {
 }
 
 impl<Alloc: Allocator> Compiler<Alloc> {
-    pub fn new(allocator: Alloc) -> Self {
+    pub fn new(allocator: Alloc, printer: Box<dyn Printer>) -> Self {
         Self {
             code_memory: Some(
                 MmapOptions::new(MmapOptions::page_size())
@@ -162,6 +217,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             stack: MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
             string_constants: vec![],
             stack_map: StackMap::new(),
+            printer,
         }
     }
 
@@ -573,14 +629,6 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         }
     }
 
-    pub fn println(&self, value: usize) {
-        println!("{}", self.get_repr(value, 0).unwrap());
-    }
-
-    pub fn print(&self, value: usize) {
-        print!("{}", self.get_repr(value, 0).unwrap());
-    }
-
     pub fn compile(&mut self, code: String) -> Result<(), Box<dyn Error>> {
         let mut parser = Parser::new(code);
         let ast = parser.parse();
@@ -762,5 +810,15 @@ impl<Alloc: Allocator> Compiler<Alloc> {
 
     pub fn get_function_by_name_mut(&mut self, name: &str) -> Option<&mut Function> {
         self.functions.iter_mut().find(|f| f.name == name)
+    }
+
+    pub fn print(&mut self, result: usize) {
+        let result = self.get_repr(result, 0).unwrap();
+        self.printer.println(result);
+    }
+    
+    pub fn println(&mut self, result: usize) {
+        let result = self.get_repr(result, 0).unwrap();
+        self.printer.println(result);
     }
 }

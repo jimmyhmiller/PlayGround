@@ -1426,12 +1426,12 @@ pub fn heap_test() -> Ir {
 //     ir
 // }
 
-pub extern "C" fn println_value<Alloc: Allocator>(compiler: &Compiler<Alloc>, value: usize) -> usize {
+pub extern "C" fn println_value<Alloc: Allocator>(compiler: &mut Compiler<Alloc>, value: usize) -> usize {
     compiler.println(value);
     0b111
 }
 
-pub extern "C" fn print_value<Alloc: Allocator>(compiler: &Compiler<Alloc>, value: usize) -> usize {
+pub extern "C" fn print_value<Alloc: Allocator>(compiler: &mut Compiler<Alloc>, value: usize) -> usize {
     compiler.print(value);
     0b111
 }
