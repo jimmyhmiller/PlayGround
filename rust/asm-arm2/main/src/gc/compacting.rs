@@ -4,7 +4,7 @@ use std::{error::Error, mem};
 
 use mmap_rs::{MmapMut, MmapOptions};
 
-use crate::{compiler::{Allocator, StackMap, GC_ALWAYS, GC_NEVER}, ir::BuiltInTypes};
+use crate::{compiler::{Allocator, AllocatorOptions, StackMap}, ir::BuiltInTypes};
 
 struct Segment {
     memory: MmapMut,
@@ -199,19 +199,19 @@ pub struct CompactingHeap {
 
 
 impl Allocator for CompactingHeap {
-    fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes) -> Result<usize, Box<dyn Error>> {
-        if GC_ALWAYS {
-            self.gc(stack, stack_map, stack_pointer);
+    fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes, options: AllocatorOptions) -> Result<usize, Box<dyn Error>> {
+        if options.gc_always {
+            self.gc(stack, stack_map, stack_pointer, options);
         }
-        let pointer = self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, 0)?;
+        let pointer = self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, 0, options)?;
         assert!(pointer % 8 == 0, "Pointer is not aligned");
         Ok(pointer)
     }
     
     // TODO: Still got bugs here
     // Simple cases work, but not all cases
-    fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) {
-        if GC_NEVER {
+    fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, options: AllocatorOptions) {
+        if !options.gc {
             return;
         }
         let start = std::time::Instant::now();
@@ -226,7 +226,9 @@ impl Allocator for CompactingHeap {
         
 
         self.to_space.clear();
-        println!("GC took: {:?}", start.elapsed());
+        if options.print_stats {
+            println!("GC took: {:?}", start.elapsed());
+        }
     }
     
 }
@@ -241,7 +243,7 @@ impl CompactingHeap {
         Self { from_space, to_space }
     }
 
-    fn allocate_inner(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes, depth: usize) ->  Result<usize, Box<dyn Error>> {
+    fn allocate_inner(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes, depth: usize, options: AllocatorOptions) ->  Result<usize, Box<dyn Error>> {
         if depth > 1 {
             // This might feel a bit dumb
             // But I do think it is reasonable to recurse
@@ -254,12 +256,12 @@ impl CompactingHeap {
         if self.from_space.can_allocate(bytes) {
             return self.from_space.allocate(bytes);
         } else {
-            self.gc(stack, stack_map, stack_pointer);
+            self.gc(stack, stack_map, stack_pointer, options);
         }
         if !self.from_space.can_allocate(bytes) {
             self.from_space.resize();
         }
-        self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, depth + 1)
+        self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, depth + 1, options)
     }
 
 

@@ -4,7 +4,7 @@ use std::error::Error;
 
 use mmap_rs::{MmapMut, MmapOptions};
 
-use crate::{compiler::{Allocator, StackMap, GC_ALWAYS, GC_NEVER}, ir::BuiltInTypes};
+use crate::{compiler::{Allocator, AllocatorOptions, StackMap}, ir::BuiltInTypes};
 
 use super::simple_mark_and_sweep::SimpleMarkSweepHeap;
 
@@ -175,24 +175,24 @@ pub struct SimpleGeneration {
 
 
 impl Allocator for SimpleGeneration {
-    fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes) -> Result<usize, Box<dyn Error>> {
-        if GC_ALWAYS {
-            self.gc(stack, stack_map, stack_pointer);
+    fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes, options: AllocatorOptions) -> Result<usize, Box<dyn Error>> {
+        if options.gc_always {
+            self.gc(stack, stack_map, stack_pointer, options);
         }
-        let pointer = self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, 0)?;
+        let pointer = self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, 0, options)?;
         assert!(pointer % 8 == 0, "Pointer is not aligned");
         Ok(pointer)
     }
     
-    fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) {
+    fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, options: AllocatorOptions) {
         // TODO: Need to figure out when to do a Major GC
-        if GC_NEVER {
+        if !options.gc {
             return;
         }
         if self.gc_count % self.full_gc_frequency == 0 {
-            self.full_gc(stack, stack_map, stack_pointer);
+            self.full_gc(stack, stack_map, stack_pointer, options);
         } else {
-            self.minor_gc(stack, stack_map, stack_pointer);
+            self.minor_gc(stack, stack_map, stack_pointer, options);
         }
         self.gc_count += 1;
     }
@@ -201,18 +201,19 @@ impl Allocator for SimpleGeneration {
 
 impl SimpleGeneration {
 
+    #[allow(unused)]
     pub fn new() -> Self {
         // TODO: Make these configurable and play with configurations
         let young_size = MmapOptions::page_size() * 10000;
         let young = Space::new(young_size);
-        let old = SimpleMarkSweepHeap::new(10);
+        let old = SimpleMarkSweepHeap::new_with_count(10);
         let copied = vec![];
         let gc_count = 0;
         let full_gc_frequency = 10;
         Self { young, old, copied, gc_count, full_gc_frequency }
     }
 
-    fn allocate_inner(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes, depth: usize) ->  Result<usize, Box<dyn Error>> {
+    fn allocate_inner(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, kind: BuiltInTypes, depth: usize, options: AllocatorOptions) ->  Result<usize, Box<dyn Error>> {
         if depth > 1 {
             // This might feel a bit dumb
             // But I do think it is reasonable to recurse
@@ -225,15 +226,16 @@ impl SimpleGeneration {
         if self.young.can_allocate(bytes) {
             return self.young.allocate(bytes);
         } else {
-            self.gc(stack, stack_map, stack_pointer);
+            self.gc(stack, stack_map, stack_pointer, options);
         }
+        // TODO: Fix to work with no-gc
         if !self.young.can_allocate(bytes) {
             panic!("Failed to allocate");
         }
-        self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, depth + 1)
+        self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, depth + 1, options)
     }
 
-    fn minor_gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) {
+    fn minor_gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, options: AllocatorOptions) {
         let start = std::time::Instant::now();
         let roots = self.gather_roots(stack, stack_map, stack_pointer);
         let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
@@ -243,12 +245,14 @@ impl SimpleGeneration {
             stack_buffer[*stack_offset] = new_roots[i];
         }
         self.young.clear();
-        println!("Minor GC took {:?}", start.elapsed());
+        if options.print_stats {
+            println!("Minor GC took {:?}", start.elapsed());
+        }
     }
 
-    fn full_gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) {
-        self.minor_gc(stack, stack_map, stack_pointer);
-        self.old.gc(stack, stack_map, stack_pointer);
+    fn full_gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, options: AllocatorOptions) {
+        self.minor_gc(stack, stack_map, stack_pointer, options);
+        self.old.gc(stack, stack_map, stack_pointer, options);
     }
 
 
