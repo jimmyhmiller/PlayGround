@@ -1,6 +1,6 @@
 use std::error::Error;
 use mmap_rs::{MmapMut, MmapOptions};
-use crate::{compiler::{Allocator, StackMap, GC_ALWAYS, GC_NEVER}, debugger, ir::BuiltInTypes, Data, Message};
+use crate::{compiler::{Allocator, AllocatorOptions, StackMap}, debugger, ir::BuiltInTypes, Data, Message};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct FreeListEntry {
@@ -72,16 +72,16 @@ pub struct SimpleMarkSweepHeap {
 }
 
 impl Allocator for SimpleMarkSweepHeap {
-    fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, _kind: BuiltInTypes) -> Result<usize, Box<dyn Error>> {
+    fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, _kind: BuiltInTypes, options: AllocatorOptions) -> Result<usize, Box<dyn Error>> {
 
-        if GC_ALWAYS {
-            self.gc(stack, stack_map, stack_pointer);
+        if options.gc_always {
+            self.gc(stack, stack_map, stack_pointer, options);
         }
 
         if self.can_allocate(bytes) {
             return self.allocate_inner(bytes, 0, None);
         } else {
-            self.gc(stack, stack_map, stack_pointer);
+            self.gc(stack, stack_map, stack_pointer, options);
             if self.can_allocate(bytes) {
                 return self.allocate_inner(bytes, 0, None);
             } else {
@@ -92,17 +92,21 @@ impl Allocator for SimpleMarkSweepHeap {
 
     }
 
-    fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize) {
-        if GC_NEVER {
+    fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, options: AllocatorOptions) {
+        if !options.gc {
             return;
         }
-        self.mark_and_sweep(stack, stack_map, stack_pointer);
+        self.mark_and_sweep(stack, stack_map, stack_pointer, options);
     }
 }
 
 impl SimpleMarkSweepHeap {
     #[allow(unused)]
-    pub fn new(initial_segment_count: usize) -> Self {
+    pub fn new() -> Self {
+       Self::new_with_count(1)
+    }
+
+    pub fn new_with_count(initial_segment_count: usize) -> Self {
         let segment_size = MmapOptions::page_size() * 100;
         let mut segments = vec![];
         for _ in 0..initial_segment_count {
@@ -254,11 +258,13 @@ impl SimpleMarkSweepHeap {
         );
     }
 
-    pub fn mark_and_sweep(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize) {
+    pub fn mark_and_sweep(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize, options: AllocatorOptions) {
         let start = std::time::Instant::now();
         self.mark(stack, stack_map, stack_pointer);
         self.sweep();
-        println!("Mark and sweep took {:?}", start.elapsed());
+        if options.print_stats {
+            println!("Mark and sweep took {:?}", start.elapsed());
+        }
     }
 
     pub fn mark(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize) {

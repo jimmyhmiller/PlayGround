@@ -176,29 +176,77 @@ fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
 }
 
 
-#[derive(ClapParser)] // requires `derive` feature
+#[derive(ClapParser)]
+#[derive(Debug, Clone)]
 #[command(version, about, long_about = None)]
 #[command(name = "beag")]
 #[command(bin_name = "beag")]
-struct Cli {
-    program: String,
+pub struct CommandLineArguments {
+    program: Option<String>,
+    #[clap(short, long, default_value = "false")]
+    show_times: bool,
+    #[clap(short, long, default_value = "false")]
+    show_gc_times: bool,
+    #[clap(short, long, default_value = "false")]
+    no_gc: bool,
+    #[clap(short, long, default_value = "false")]
+    gc_always: bool,
+    #[clap(short, long, default_value = "false")]
+    all_tests: bool,
 }
 
+
 fn main() -> Result<(), Box<dyn Error>> {
+    let args = CommandLineArguments::parse();
+    if args.all_tests {
+       return run_all_tests(args);
+    } else {
+        return main_inner(args);
+    }
+}
 
-    let args = Cli::parse();
+fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
+    for entry in std::fs::read_dir("resources")? {
+        let entry = entry?;
+        let path = entry.path();
+        let path = path.to_str().unwrap();
+        let source = std::fs::read_to_string(path)?;
+        if !source.contains("// Expect") {
+            continue;
+        }
+        println!("Running test: {}", path);
+        let args = CommandLineArguments {
+            program: Some(path.to_string()),
+            show_times: args.show_times,
+            show_gc_times: args.show_gc_times,
+            no_gc: args.no_gc,
+            gc_always: args.gc_always,
+            all_tests: false,
+        };
+        main_inner(args)?;
+    }
+    Ok(())
+}
 
+
+fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
+
+    if args.program.is_none() {
+        println!("No program provided");
+        return Ok(());
+    }
+    let program = args.program.clone().unwrap();
     let parse_time = Instant::now();
-    let source = std::fs::read_to_string(args.program.clone())?;
+    let source = std::fs::read_to_string(program.clone())?;
     // TODO: This is very ad-hoc
     // I should make it real functionality later
     // but right now I just want something working
     let has_expect = source.contains("// Expect");
     let mut parser = Parser::new(source);
     let ast = parser.parse();
-    println!("Parse time {:?}", parse_time.elapsed());
-
-    
+    if args.show_times {
+        println!("Parse time {:?}", parse_time.elapsed());
+    }
 
     // type Alloc = CompactingHeap;
     // type Alloc = SimpleMarkSweepHeap;
@@ -210,7 +258,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Box::new(DefaultPrinter)
     };
 
-    let mut compiler = Compiler::new(allocator, printer);
+    let mut compiler = Compiler::new(args.clone(), allocator, printer);
 
     compile_trampoline(&mut compiler);
 
@@ -226,18 +274,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     compiler.compile_ast(ast)?;
 
     compiler.check_functions();
-    println!("Compile time {:?}", compile_time.elapsed());
+    if args.show_times {
+        println!("Compile time {:?}", compile_time.elapsed());
+    }
 
     let time = Instant::now();
     let result = compiler.run_function("main", vec![]);
-    println!("Our time {:?}", time.elapsed());
+    if args.show_times {
+        println!("Time {:?}", time.elapsed());
+    }
     compiler.println(result as usize);
 
     if has_expect {
-        let source = std::fs::read_to_string(args.program)?;
+        let source = std::fs::read_to_string(program)?;
         let expected = get_expect(&source);
         let expected = expected.trim();
-        let printed = compiler.printer.get_output().join("\n").trim().to_string();
+        let printed = compiler.printer.get_output().join("").trim().to_string();
         if printed != expected {
             println!("Expected: \n{}\n", expected);
             println!("Got: \n{}\n", printed);

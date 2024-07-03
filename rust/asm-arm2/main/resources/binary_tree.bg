@@ -1,0 +1,105 @@
+fn math_max(a, b) {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn math_pow(base, exp) {
+    if exp == 0 {
+        1
+    } else {
+        base * math_pow(base, exp - 1)
+    }
+}
+
+
+struct TreeNode {
+    left
+    right
+}
+
+fn main() {
+    // TODO: Make it so I can take arguments from cli
+    let depth = 18
+    let maxDepth = math_max(6, depth)
+
+    let stretchDepth = maxDepth + 1
+    let check = itemCheck(bottomUpTree(stretchDepth))
+    print("stretch tree of depth ")
+    print(stretchDepth)
+    print(" check: ")
+    println(check)
+
+    let longLivedTree = bottomUpTree(maxDepth)
+    loopThroughDepths(4, maxDepth, longLivedTree)
+}
+
+fn loopThroughDepths(depth, maxDepth, longLivedTree) {
+    if depth > maxDepth {
+        print("long lived tree of depth ")
+        print(maxDepth)
+        print(" check: ")
+        println(itemCheck(longLivedTree))
+    } else {
+        let iterations = math_pow(2, maxDepth - depth + 4)
+        let check = doWork(iterations, depth)
+        print(iterations)
+        print(" trees of depth ")
+        print(depth)
+        print(" check: ")
+        println(check)
+        loopThroughDepths(depth + 2, maxDepth, longLivedTree)
+    }
+}
+
+fn doWork(iterations, depth) {
+    doWorkHelper(iterations, depth, 0, 0)
+}
+
+fn doWorkHelper(iterations, depth, i, accumCheck) {
+    if i < iterations {
+        let newCheck = accumCheck + itemCheck(bottomUpTree(depth))
+        doWorkHelper(iterations, depth, i + 1, newCheck)
+    } else {
+        accumCheck
+    }
+}
+
+
+
+fn itemCheck(node) {
+    if node.left == null {
+        1
+    } else {
+        1 + itemCheck(node.left) + itemCheck(node.right)
+    }
+}
+
+fn bottomUpTree(depth) {
+    if depth > 0 {
+        TreeNode {
+            left: bottomUpTree(depth - 1),
+            right: bottomUpTree(depth - 1)
+        }
+    } else {
+        TreeNode {
+            left: null,
+            right: null
+        }
+    }
+}
+
+// Expect
+// stretch tree of depth 19 check: 1048575
+// 262144 trees of depth 4 check: 8126464
+// 65536 trees of depth 6 check: 8323072
+// 16384 trees of depth 8 check: 8372224
+// 4096 trees of depth 10 check: 8384512
+// 1024 trees of depth 12 check: 8387584
+// 256 trees of depth 14 check: 8388352
+// 64 trees of depth 16 check: 8388544
+// 16 trees of depth 18 check: 8388592
+// long lived tree of depth 18 check: 524287
+// null
