@@ -205,6 +205,9 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
     }
 
     pub fn compile(&mut self) -> Ir {
+        // TODO: Get rid of clone
+        self.first_pass(&self.ast.clone());
+
         self.tail_position();
         self.call_compile(&Box::new(self.ast.clone()));
         let mut ir = Ir::new();
@@ -330,20 +333,9 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 function
             }
 
-            Ast::Struct { name, fields } => {
-                self.compiler.add_struct(Struct {
-                    name: name.clone(),
-                    fields: fields
-                        .iter()
-                        .map(|field| {
-                            if let Ast::Identifier(name) = field {
-                                name.clone()
-                            } else {
-                                panic!("Expected identifier got {:?}", field)
-                            }
-                        })
-                        .collect(),
-                });
+            Ast::Struct { name: _, fields: _ } => {
+                // TODO: This should probably return the struct value
+                // A concept I don't yet have
                 Value::Null
             }
             Ast::StructCreation { name, fields } => {
@@ -770,6 +762,37 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
         self.ir.assign(pointer_reg, pointer);
         args.insert(0, pointer_reg.into());
         self.ir.call(function.into(), args)
+    }
+    
+    fn first_pass(&mut self, ast: &Ast) {
+        match ast {
+            Ast::Program { elements } => {
+                for ast in elements.iter() {
+                    self.first_pass(ast);
+                }
+            }
+            Ast::Function { name, args: _, body: _ } => {
+                // TODO: Should probably reserve arg count as well
+                self.compiler.reserve_function(name.as_str()).unwrap();
+            }
+            Ast::Struct { name, fields } => {
+                self.compiler.add_struct(Struct {
+                    name: name.clone(),
+                    fields: fields
+                        .iter()
+                        .map(|field| {
+                            if let Ast::Identifier(name) = field {
+                                name.clone()
+                            } else {
+                                panic!("Expected identifier got {:?}", field)
+                            }
+                        })
+                        .collect(),
+                });
+            }
+            Ast::Let(_, _) => todo!(),
+            _ => {}
+        }
     }
 }
 

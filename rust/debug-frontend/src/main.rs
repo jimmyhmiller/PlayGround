@@ -192,6 +192,16 @@ impl App for Frontend {
     fn end_frame(&mut self) {}
 
     fn tick(&mut self) {
+        let process = &self.state.process.process;
+        if process.is_some() {
+            let process = process.as_ref().unwrap();
+            if let Some(out) = process.get_stdout_all() {
+                if !out.is_empty() {
+                    println!("{:?}", out);
+                }
+            }
+        }
+
         let start = std::time::Instant::now();
         let ms_threshold = 10;
         if self.should_step {
@@ -1263,6 +1273,7 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         target.enable_all_breakpoints();
 
         let launchinfo = SBLaunchInfo::new();
+        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/main/resources/binary_tree.bg"], false);
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);
         match target.launch(launchinfo) {
             Ok(process) => Some((target, process)),

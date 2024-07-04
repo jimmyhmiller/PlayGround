@@ -1,9 +1,4 @@
 
-struct TreeNode {
-    left
-    right
-}
-
 
 // TODO: Change this to an import once I have that
 fn bottomUpTree(depth) {
@@ -19,6 +14,14 @@ fn bottomUpTree(depth) {
         }
     }
 }
+
+// Intentionally after to make sure
+// declaration order doesn't matter
+struct TreeNode {
+    left
+    right
+}
+
 
 
 fn a() {

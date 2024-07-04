@@ -52,6 +52,7 @@ enum Data {
         name: String,
         stack_map: Vec<(usize, StackMapDetails)>,
     },
+    Allocate { bytes: usize, stack_pointer: usize, kind: String },
 }
 
 trait Serialize {
@@ -78,7 +79,6 @@ pub unsafe extern "C" fn debugger_info(buffer: *const u8, length: usize) {
 }
 
 pub fn debugger(message: Message) {
-    // println!("{:?}", message);
     let message = message.to_binary();
     let ptr = message.as_ptr();
     let length = message.len();
@@ -188,17 +188,17 @@ fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
 #[command(bin_name = "beag")]
 pub struct CommandLineArguments {
     program: Option<String>,
-    #[clap(short, long, default_value = "false")]
+    #[clap(long, default_value = "false")]
     show_times: bool,
-    #[clap(short, long, default_value = "false")]
+    #[clap(long, default_value = "false")]
     show_gc_times: bool,
-    #[clap(short, long, default_value = "false")]
+    #[clap(long, default_value = "false")]
     no_gc: bool,
-    #[clap(short, long, default_value = "false")]
+    #[clap(long, default_value = "false")]
     gc_always: bool,
-    #[clap(short, long, default_value = "false")]
+    #[clap(long, default_value = "false")]
     all_tests: bool,
-    #[clap(short, long, default_value = "false")]
+    #[clap(long, default_value = "false")]
     test: bool,
 }
 
