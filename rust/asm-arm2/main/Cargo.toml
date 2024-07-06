@@ -15,6 +15,12 @@ mmap-rs = "0.5.0"
 asm = { path = "../asm" }
 bincode =  { version = "2.0.0-rc.3", features = ["derive"] }
 clap = { version = "4.5.8", features = ["derive"] }
+cfg-if = "1.0.0"
 
 
 
+[features]
+default = ["simple-generation"]
+simple-mark-and-sweep = []
+compacting = []
+simple-generation = []
