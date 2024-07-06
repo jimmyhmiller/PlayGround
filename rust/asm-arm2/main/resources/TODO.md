@@ -8,3 +8,4 @@
 * import/export
 * Namespaces
 * Data structures
+* Decide if I want to support kabab-case

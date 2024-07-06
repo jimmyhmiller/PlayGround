@@ -8,7 +8,6 @@ use crate::{
     arm::LowLevelArm,
     debugger,
     ir::{BuiltInTypes, StringValue, Value},
-    parser::Parser,
     CommandLineArguments, Data, Message,
 };
 
@@ -265,14 +264,14 @@ impl<Alloc: Allocator> Compiler<Alloc> {
 
     pub fn add_foreign_function(
         &mut self,
-        name: &str,
+        name: Option<&str>,
         function: *const u8,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         let offset = function as usize;
         let jump_table_offset = self.add_jump_table_entry(index, offset)?;
         self.functions.push(Function {
-            name: name.to_string(),
+            name: name.unwrap_or("<Anonymous>").to_string(),
             offset_or_pointer: offset,
             jump_table_offset,
             is_foreign: true,
@@ -283,7 +282,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         debugger(Message {
             kind: "foreign_function".to_string(),
             data: Data::ForeignFunction {
-                name: name.to_string(),
+                name: name.unwrap_or("<Anonymous>").to_string(),
                 pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone())
                     .unwrap(),
             },
@@ -321,22 +320,26 @@ impl<Alloc: Allocator> Compiler<Alloc> {
 
     pub fn upsert_function(
         &mut self,
-        name: &str,
+        name: Option<&str>,
         code: &mut LowLevelArm,
         number_of_locals: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let bytes = &(code.compile_to_bytes());
-        for (index, function) in self.functions.iter_mut().enumerate() {
-            if function.name == name {
-                self.overwrite_function(index, bytes)?;
-                break;
+        let mut already_defined = false;
+        let mut function_pointer = 0;
+        if name.is_some() {
+            for (index, function) in self.functions.iter_mut().enumerate() {
+                if function.name == name.unwrap() {
+                    function_pointer = self.overwrite_function(index, bytes)?;
+                    already_defined = true;
+                    break;
+                }
             }
         }
-        self.add_function(name, bytes, number_of_locals)?;
-
-        // TODO: Make this better
-        let function = self.find_function(name).unwrap();
-        let function_pointer = Self::get_function_pointer(self, function.clone()).unwrap();
+        if !already_defined {
+            function_pointer = self.add_function(name, bytes, number_of_locals)?;
+        }
+        assert!(function_pointer != 0);
 
         let translated_stack_map = code.translate_stack_map(function_pointer);
         let translated_stack_map: Vec<(usize, StackMapDetails)> = translated_stack_map
@@ -357,7 +360,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             kind: "stack_map".to_string(),
             data: Data::StackMap {
                 pc: function_pointer,
-                name: name.to_string(),
+                name: name.unwrap_or("<Anonymous>").to_string(),
                 stack_map: translated_stack_map.clone(),
             },
         });
@@ -366,7 +369,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         debugger(Message {
             kind: "user_function".to_string(),
             data: Data::UserFunction {
-                name: name.to_string(),
+                name: name.unwrap_or("<Anonymous>").to_string(),
                 pointer: function_pointer,
                 len: bytes.len(),
             },
@@ -397,14 +400,14 @@ impl<Alloc: Allocator> Compiler<Alloc> {
 
     pub fn add_function(
         &mut self,
-        name: &str,
+        name: Option<&str>,
         code: &[u8],
         number_of_locals: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let offset = self.add_code(code)?;
         let index = self.functions.len();
         self.functions.push(Function {
-            name: name.to_string(),
+            name: name.unwrap_or("<Anonymous>").to_string(),
             offset_or_pointer: offset,
             jump_table_offset: 0,
             is_foreign: false,
@@ -417,7 +420,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
 
         self.functions[index].jump_table_offset = jump_table_offset;
-        Ok(jump_table_offset)
+        Ok(function_pointer)
     }
 
     pub fn overwrite_function(
@@ -434,7 +437,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         self.modify_jump_table_entry(jump_table_offset, function_pointer)?;
         let function = &mut self.functions[index];
         function.is_defined = true;
-        Ok(function.jump_table_offset)
+        Ok(function_pointer)
     }
 
     pub fn get_function_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
@@ -662,11 +665,6 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         }
     }
 
-    pub fn compile(&mut self, code: String) -> Result<(), Box<dyn Error>> {
-        let mut parser = Parser::new(code);
-        let ast = parser.parse();
-        self.compile_ast(ast)
-    }
 
     pub fn compile_ast(&mut self, ast: crate::ast::Ast) -> Result<(), Box<dyn Error>> {
         ast.compile(self);
@@ -674,23 +672,20 @@ impl<Alloc: Allocator> Compiler<Alloc> {
     }
 
     // TODO: Make less ugly
-    pub(crate) fn run_function(&self, arg: &str, vec: Vec<i32>) -> u64 {
+    pub(crate) fn run_function(&self, name: &str, vec: Vec<i32>) -> u64 {
+        let function = self
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .expect(&format!("Can't find function named {}", name));
         match vec.len() {
-            0 => {
-                let function = self.functions.iter().find(|f| f.name == arg).unwrap();
-                self.run(function.jump_table_offset).unwrap()
-            }
-            1 => {
-                let function = self.functions.iter().find(|f| f.name == arg).unwrap();
-
-                self.run1(function.jump_table_offset, vec[0] as u64)
-                    .unwrap()
-            }
-            2 => {
-                let function = self.functions.iter().find(|f| f.name == arg).unwrap();
-                self.run2(function.jump_table_offset, vec[0] as u64, vec[1] as u64)
-                    .unwrap()
-            }
+            0 => self.run(function.jump_table_offset).unwrap(),
+            1 => self
+                .run1(function.jump_table_offset, vec[0] as u64)
+                .unwrap(),
+            2 => self
+                .run2(function.jump_table_offset, vec[0] as u64, vec[1] as u64)
+                .unwrap(),
             _ => panic!("Too many arguments"),
         }
     }

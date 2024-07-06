@@ -473,7 +473,7 @@ impl Parser {
     fn parse_atom(&mut self, min_precedence: usize) -> Option<Ast> {
         match self.current_token() {
             Token::Fn => {
-                self.move_to_next_atom();
+                self.move_to_next_non_whitespace();
                 Some(self.parse_function())
             }
             Token::Struct => {
@@ -557,9 +557,9 @@ impl Parser {
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
                 // Gross
-                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+                Some(String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap())
             }
-            _ => panic!("Expected function name"),
+            _ => None
         };
         self.move_to_next_non_whitespace();
         self.expect_open_paren();
