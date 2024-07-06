@@ -2,7 +2,11 @@ use std::collections::HashMap;
 
 use asm::arm::{Register, X0, X1, ZERO_REGISTER};
 
-use crate::{arm::LowLevelArm, common::Label, compiler::{Allocator, Compiler}};
+use crate::{
+    arm::LowLevelArm,
+    common::Label,
+    compiler::{Allocator, Compiler},
+};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Condition {
@@ -31,7 +35,7 @@ pub enum Value {
 }
 
 impl Value {
-    fn to_local(&self) -> usize {
+    fn as_local(&self) -> usize {
         match self {
             Value::Local(local) => *local,
             _ => panic!("Expected local"),
@@ -702,7 +706,13 @@ impl Ir {
         }
     }
 
-    pub fn compile(&mut self, _name: &str, mut lang: LowLevelArm, error_fn_pointer: usize, compiler_ptr: usize) -> LowLevelArm {
+    pub fn compile(
+        &mut self,
+        _name: &str,
+        mut lang: LowLevelArm,
+        error_fn_pointer: usize,
+        compiler_ptr: usize,
+    ) -> LowLevelArm {
         // println!("{:#?}", self.instructions);
         lang.set_max_locals(self.num_locals);
         // lang.breakpoint();
@@ -738,11 +748,18 @@ impl Ir {
         lang.mov_64(X0, compiler_ptr as isize);
         lang.get_stack_pointer_imm(X1, 0);
         lang.call(register);
-        
+
         lang
     }
 
-    fn compile_instructions(&mut self, lang: &mut LowLevelArm, exit: Label, before_prelude: Label, after_prelude: Label, after_return: Label) {
+    fn compile_instructions(
+        &mut self,
+        lang: &mut LowLevelArm,
+        exit: Label,
+        before_prelude: Label,
+        after_prelude: Label,
+        after_return: Label,
+    ) {
         let mut ir_label_to_lang_label: HashMap<Label, Label> = HashMap::new();
         let mut labels: Vec<&Label> = self.labels.iter().collect();
         labels.sort_by_key(|label| label.index);
@@ -755,10 +772,10 @@ impl Ir {
         // Self::draw_lifetimes(&lifetimes);
         let mut alloc = RegisterAllocator::new(lifetimes);
 
-        let mut lifetimes2: Vec<(VirtualRegister, (usize, usize))> = alloc.lifetimes.iter().map(|(r, v)| (*r, *v)).collect();
+        let mut lifetimes2: Vec<(VirtualRegister, (usize, usize))> =
+            alloc.lifetimes.iter().map(|(r, v)| (*r, *v)).collect();
         lifetimes2.sort_by_key(|(_, (start, _))| *start);
         for (index, instruction) in self.instructions.iter().enumerate() {
-    
             for (register, (_start, end)) in lifetimes2.iter() {
                 if index == end + 1 {
                     if let Some(register) = alloc.allocated_registers.get(register) {
@@ -775,9 +792,7 @@ impl Ir {
                 Instruction::Breakpoint => {
                     lang.breakpoint();
                 }
-                Instruction::ExtendLifeTime(_) => {
-    
-                }
+                Instruction::ExtendLifeTime(_) => {}
                 Instruction::Sub(dest, a, b) => {
                     let a = a.try_into().unwrap();
                     let a = alloc.allocate_register(index, a, lang);
@@ -893,7 +908,10 @@ impl Ir {
                         // The idea here is that I would store free variables after the locals on the stack
                         // Need to make sure I preserve that space
                         // and that at this point in the program I know how many locals there are.
-                        lang.load_from_stack(register, -((*free_variable + self.num_locals + 1) as i32));
+                        lang.load_from_stack(
+                            register,
+                            -((*free_variable + self.num_locals + 1) as i32),
+                        );
                     }
                     Value::Null => {
                         let register = alloc.allocate_register(index, *dest, lang);
@@ -910,13 +928,13 @@ impl Ir {
                 Instruction::LoadLocal(dest, local) => {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, lang);
-                    let local = local.to_local();
+                    let local = local.as_local();
                     lang.load_local(dest, local as i32);
                 }
                 Instruction::StoreLocal(dest, value) => {
                     let value = value.try_into().unwrap();
                     let value = alloc.allocate_register(index, value, lang);
-                    lang.store_local(value, dest.to_local() as i32);
+                    lang.store_local(value, dest.as_local() as i32);
                 }
                 Instruction::LoadTrue(dest) => {
                     let dest = dest.try_into().unwrap();
@@ -944,7 +962,7 @@ impl Ir {
                             }
                         }
                     }
-    
+
                     for register in out_live_call_registers.iter() {
                         lang.push_to_stack(*register);
                     }
@@ -988,7 +1006,7 @@ impl Ir {
                             }
                         }
                     }
-    
+
                     // I only need to store on stack those things that live past the call
                     // I think this is part of the reason why I have too many registers live at a time
                     for register in out_live_call_registers.iter() {
@@ -1009,7 +1027,7 @@ impl Ir {
                     } else {
                         lang.call(function);
                     }
-    
+
                     let dest = dest.try_into().unwrap();
                     let register = alloc.allocate_register(index, dest, lang);
                     lang.mov_reg(register, lang.ret_reg());
@@ -1131,7 +1149,7 @@ impl Ir {
                     let val = alloc.allocate_register(index, val, lang);
                     lang.store_on_heap(ptr, val, 0);
                 }
-        
+
                 Instruction::HeapStoreOffset(ptr, val, offset) => {
                     let ptr = ptr.try_into().unwrap();
                     let ptr = alloc.allocate_register(index, ptr, lang);
@@ -1139,7 +1157,7 @@ impl Ir {
                     let val = alloc.allocate_register(index, val, lang);
                     lang.store_on_heap(ptr, val, *offset as i32);
                 }
-                Instruction::HeapStoreOffsetReg(ptr,  val, offset,) => {
+                Instruction::HeapStoreOffsetReg(ptr, val, offset) => {
                     let ptr = ptr.try_into().unwrap();
                     let ptr = alloc.allocate_register(index, ptr, lang);
                     let val = val.try_into().unwrap();
@@ -1151,7 +1169,7 @@ impl Ir {
                 Instruction::RegisterArgument(arg) => {
                     // This doesn't actually compile into any code
                     // it is here to say the argument is live from the beginning
-    
+
                     let arg = arg.try_into().unwrap();
                     alloc.allocate_register(index, arg, lang);
                 }
@@ -1204,7 +1222,7 @@ impl Ir {
             }
         }
     }
-    
+
     #[allow(dead_code)]
     pub fn breakpoint(&mut self) {
         self.instructions.push(Instruction::Breakpoint);
@@ -1261,8 +1279,11 @@ impl Ir {
         let dest = self.volatile_register();
         let source = self.assign_new(source);
         let offset = self.assign_new(offset);
-        self.instructions
-            .push(Instruction::HeapLoadReg(dest.into(), source.into(), offset.into()));
+        self.instructions.push(Instruction::HeapLoadReg(
+            dest.into(),
+            source.into(),
+            offset.into(),
+        ));
         dest.into()
     }
 
@@ -1357,8 +1378,7 @@ impl Ir {
 
     pub fn untag(&mut self, val: Value) -> Value {
         let dest = self.volatile_register().into();
-        self.instructions
-            .push(Instruction::Untag(dest, val));
+        self.instructions.push(Instruction::Untag(dest, val));
         dest
     }
 
@@ -1380,13 +1400,23 @@ impl Ir {
             .push(Instruction::CurrentStackPosition(dest));
         dest
     }
-    
+
     pub fn extend_register_life(&mut self, register: Value) {
-        self.instructions.push(Instruction::ExtendLifeTime(register));
+        self.instructions
+            .push(Instruction::ExtendLifeTime(register));
     }
-    
-    pub fn heap_store_with_reg_offset(&mut self, free_variable_slot_pointer: Value, free_variable: Value, free_variable_offset: Value,)  {
-        self.instructions.push(Instruction::HeapStoreOffsetReg(free_variable_slot_pointer, free_variable, free_variable_offset.try_into().unwrap()));
+
+    pub fn heap_store_with_reg_offset(
+        &mut self,
+        free_variable_slot_pointer: Value,
+        free_variable: Value,
+        free_variable_offset: Value,
+    ) {
+        self.instructions.push(Instruction::HeapStoreOffsetReg(
+            free_variable_slot_pointer,
+            free_variable,
+            free_variable_offset,
+        ));
     }
 }
 
@@ -1454,13 +1484,18 @@ pub fn heap_test() -> Ir {
 //     ir
 // }
 
-pub extern "C" fn println_value<Alloc: Allocator>(compiler: &mut Compiler<Alloc>, value: usize) -> usize {
+pub extern "C" fn println_value<Alloc: Allocator>(
+    compiler: &mut Compiler<Alloc>,
+    value: usize,
+) -> usize {
     compiler.println(value);
     0b111
 }
 
-pub extern "C" fn print_value<Alloc: Allocator>(compiler: &mut Compiler<Alloc>, value: usize) -> usize {
+pub extern "C" fn print_value<Alloc: Allocator>(
+    compiler: &mut Compiler<Alloc>,
+    value: usize,
+) -> usize {
     compiler.print(value);
     0b111
 }
-

@@ -2,7 +2,9 @@ use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
 use crate::{
-    arm::LowLevelArm, compiler::{Allocator, Compiler, Struct}, ir::{self, BuiltInTypes, Condition}
+    arm::LowLevelArm,
+    compiler::{Allocator, Compiler, Struct},
+    ir::{self, BuiltInTypes, Condition},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,13 +247,19 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 let lang = LowLevelArm::new();
 
                 let error_fn_pointer = self.compiler.find_function("throw_error").unwrap();
-                let error_fn_pointer = self.compiler.get_function_pointer(error_fn_pointer).unwrap();
+                let error_fn_pointer = self
+                    .compiler
+                    .get_function_pointer(error_fn_pointer)
+                    .unwrap();
 
                 let compiler_ptr = self.compiler.get_compiler_ptr() as usize;
 
                 let mut code = self.ir.compile(&name, lang, error_fn_pointer, compiler_ptr);
 
-                let function_pointer = self.compiler.upsert_function(&name, &mut code, self.ir.num_locals).unwrap();
+                let function_pointer = self
+                    .compiler
+                    .upsert_function(&name, &mut code, self.ir.num_locals)
+                    .unwrap();
 
                 code.share_label_info_debug(function_pointer);
 
@@ -274,7 +282,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     // self.ir.breakpoint();
                     // get a pointer to the start of the free variables on the stack
                     let free_variable_pointer = self.ir.get_current_stack_position();
-                    
+
                     self.ir.write_label(label);
                     for free_variable in self.get_current_env().free_variables.clone().iter() {
                         let variable = self
@@ -304,15 +312,13 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     self.ir.assign(num_free_reg, num_free);
                     // Call make_closure
                     let make_closure = self.compiler.find_function("make_closure").unwrap();
-                    let make_closure =
-                        self.compiler.get_function_pointer(make_closure).unwrap();
+                    let make_closure = self.compiler.get_function_pointer(make_closure).unwrap();
                     let make_closure_reg = self.ir.volatile_register();
                     self.ir.assign(make_closure_reg, make_closure);
                     let function_pointer_reg = self.ir.volatile_register();
                     self.ir.assign(function_pointer_reg, function_pointer);
 
-                    let compiler_pointer_reg =
-                        self.ir.assign_new(self.compiler.get_compiler_ptr());
+                    let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
 
                     let closure = self.ir.call(
                         make_closure_reg.into(),
@@ -552,14 +558,15 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     // }
                     let closure_register = self.ir.untag(closure_register.into());
                     let function_pointer = self.ir.load_from_memory(closure_register, 0);
-                    
-                    self.ir.assign(function_register, function_pointer);
 
+                    self.ir.assign(function_register, function_pointer);
 
                     // TODO: I need to fix how these are stored on the stack
 
                     let num_free_variables = self.ir.load_from_memory(closure_register, 1);
-                    let num_free_variables = self.ir.tag(num_free_variables.into(), BuiltInTypes::Int.get_tag());
+                    let num_free_variables = self
+                        .ir
+                        .tag(num_free_variables, BuiltInTypes::Int.get_tag());
                     // for each variable I need to push them onto the stack after the prelude
                     let loop_start = self.ir.label("loop_start");
                     let counter = self.ir.volatile_register();
@@ -573,29 +580,34 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                         num_free_variables,
                     );
                     let free_variable_offset = self.ir.add(counter, Value::SignedConstant(3));
-                    let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(8));
+                    let free_variable_offset =
+                        self.ir.mul(free_variable_offset, Value::SignedConstant(8));
                     // TODO: This needs to change based on counter
-                    let free_variable_offset = self.ir.untag(free_variable_offset.into());
-                    let free_variable = self.ir.heap_load_with_reg_offset(closure_register, free_variable_offset);
+                    let free_variable_offset = self.ir.untag(free_variable_offset);
+                    let free_variable = self
+                        .ir
+                        .heap_load_with_reg_offset(closure_register, free_variable_offset);
 
                     let free_variable_offset = self.ir.sub(num_free_variables, counter);
                     let num_local = self.ir.load_from_memory(closure_register, 2);
-                    let num_local = self.ir.tag(num_local.into(), BuiltInTypes::Int.get_tag());
+                    let num_local = self.ir.tag(num_local, BuiltInTypes::Int.get_tag());
                     let free_variable_offset = self.ir.add(free_variable_offset, num_local);
                     // // TODO: Make this better
-                    let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(-8));
-                    let free_variable_offset = self.ir.untag(free_variable_offset.into());
+                    let free_variable_offset =
+                        self.ir.mul(free_variable_offset, Value::SignedConstant(-8));
+                    let free_variable_offset = self.ir.untag(free_variable_offset);
                     let free_variable_slot_pointer = self.ir.get_stack_pointer_imm(2);
-                    self.ir.heap_store_with_reg_offset(free_variable_slot_pointer, free_variable, free_variable_offset);
+                    self.ir.heap_store_with_reg_offset(
+                        free_variable_slot_pointer,
+                        free_variable,
+                        free_variable_offset,
+                    );
 
                     let label = self.ir.label("increment_counter");
                     self.ir.write_label(label);
                     let counter_increment = self.ir.add(Value::SignedConstant(1), counter);
                     self.ir.assign(counter, counter_increment);
-                   
-                   
-                   
-                   
+
                     self.ir.jump(loop_start);
                     self.ir.extend_register_life(num_free_variables);
                     self.ir.extend_register_life(counter.into());
@@ -604,7 +616,6 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     self.ir.assign(function_register, &function);
                     self.ir.write_label(skip_load_function);
                     self.ir.call(function_register.into(), args)
-
                 } else {
                     // TODO: I shouldn't just assume the function will exist
                     // unless I have a good plan for dealing with when it doesn't
@@ -622,7 +633,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                         self.compiler.get_jump_table_pointer(function).unwrap();
                     let jump_table_point_reg = self
                         .ir
-                        .assign_new(Value::Pointer(jump_table_pointer.try_into().unwrap()));
+                        .assign_new(Value::Pointer(jump_table_pointer));
                     let function_pointer = self.ir.load_from_memory(jump_table_point_reg.into(), 0);
 
                     let function = self.ir.function(function_pointer);
@@ -763,7 +774,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
         args.insert(0, pointer_reg.into());
         self.ir.call(function.into(), args)
     }
-    
+
     fn first_pass(&mut self, ast: &Ast) {
         match ast {
             Ast::Program { elements } => {
@@ -771,7 +782,11 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     self.first_pass(ast);
                 }
             }
-            Ast::Function { name, args: _, body: _ } => {
+            Ast::Function {
+                name,
+                args: _,
+                body: _,
+            } => {
                 // TODO: Should probably reserve arg count as well
                 self.compiler.reserve_function(name.as_str()).unwrap();
             }

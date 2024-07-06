@@ -1,3 +1,4 @@
+#![allow(clippy::match_like_matches_macro)]
 use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
 use arm::LowLevelArm;
 use asm::arm::{SP, X0, X1, X10, X2, X3, X4};
@@ -5,16 +6,19 @@ use bincode::{config::standard, Decode, Encode};
 use clap::{command, Parser as ClapParser};
 use compiler::{Allocator, DefaultPrinter, Printer, StackMapDetails, TestPrinter};
 #[allow(unused)]
-use gc::{compacting::CompactingHeap, simple_generation::SimpleGeneration, simple_mark_and_sweep::SimpleMarkSweepHeap};
+use gc::{
+    compacting::CompactingHeap, simple_generation::SimpleGeneration,
+    simple_mark_and_sweep::SimpleMarkSweepHeap,
+};
 use std::{error::Error, mem, slice::from_raw_parts, time::Instant};
 
 mod arm;
 pub mod ast;
 pub mod common;
 pub mod compiler;
+mod gc;
 pub mod ir;
 pub mod parser;
-mod gc;
 
 #[derive(Debug, Encode, Decode)]
 pub struct Message {
@@ -52,7 +56,11 @@ enum Data {
         name: String,
         stack_map: Vec<(usize, StackMapDetails)>,
     },
-    Allocate { bytes: usize, stack_pointer: usize, kind: String },
+    Allocate {
+        bytes: usize,
+        stack_pointer: usize,
+        kind: String,
+    },
 }
 
 trait Serialize {
@@ -73,6 +81,9 @@ impl<T: Encode + Decode> Serialize for T {
 #[allow(unused)]
 #[no_mangle]
 #[inline(never)]
+/// # Safety
+/// 
+/// This does nothing
 pub unsafe extern "C" fn debugger_info(buffer: *const u8, length: usize) {
     // Hack to make sure this isn't inlined
     let x = 2;
@@ -99,9 +110,11 @@ fn fib_rust(n: usize) -> usize {
     fib_rust(n - 1) + fib_rust(n - 2)
 }
 
-
-
-extern "C" fn allocate_struct<Alloc: Allocator>(compiler: *mut Compiler<Alloc>, value: usize, stack_pointer: usize) -> usize {
+extern "C" fn allocate_struct<Alloc: Allocator>(
+    compiler: *mut Compiler<Alloc>,
+    value: usize,
+    stack_pointer: usize,
+) -> usize {
     let value = BuiltInTypes::untag(value);
     let compiler = unsafe { &mut *compiler };
 
@@ -124,7 +137,7 @@ extern "C" fn make_closure<Alloc: Allocator>(
     compiler.make_closure(function, free_variables).unwrap()
 }
 
-pub extern "C" fn property_access<Alloc: Allocator>(
+ extern "C" fn property_access<Alloc: Allocator>(
     compiler: *mut Compiler<Alloc>,
     struct_pointer: usize,
     str_constant_ptr: usize,
@@ -133,7 +146,10 @@ pub extern "C" fn property_access<Alloc: Allocator>(
     compiler.property_access(struct_pointer, str_constant_ptr)
 }
 
-pub extern "C" fn throw_error<Alloc: Allocator>(_compiler: *mut Compiler<Alloc>, _stack_pointer: usize) -> usize {
+pub extern "C" fn throw_error<Alloc: Allocator>(
+    _compiler: *mut Compiler<Alloc>,
+    _stack_pointer: usize,
+) -> usize {
     // let compiler = unsafe { &mut *compiler };
     panic!("Error!");
 }
@@ -180,9 +196,7 @@ fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
     function.is_builtin = true;
 }
 
-
-#[derive(ClapParser)]
-#[derive(Debug, Clone)]
+#[derive(ClapParser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 #[command(name = "beag")]
 #[command(bin_name = "beag")]
@@ -202,13 +216,12 @@ pub struct CommandLineArguments {
     test: bool,
 }
 
-
 fn main() -> Result<(), Box<dyn Error>> {
     let args = CommandLineArguments::parse();
     if args.all_tests {
-       return run_all_tests(args);
+        run_all_tests(args)
     } else {
-        return main_inner(args);
+        main_inner(args)
     }
 }
 
@@ -236,9 +249,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-
 fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
-
     if args.program.is_none() {
         println!("No program provided");
         return Ok(());
@@ -277,8 +288,6 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("property_access", property_access::<Alloc> as *const u8)?;
     compiler.add_builtin_function("throw_error", throw_error::<Alloc> as *const u8)?;
 
-
-
     let compile_time = Instant::now();
     compiler.compile_ast(ast)?;
 
@@ -306,7 +315,6 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
         println!("Test passed");
     }
-    
 
     Ok(())
 }
@@ -319,9 +327,9 @@ fn get_expect(source: &str) -> String {
         .skip(1)
         .take_while(|line| line.starts_with("//"))
         .map(|line| line.trim_start_matches("//").trim())
-        .collect::<Vec<_>>().join("\n");
+        .collect::<Vec<_>>()
+        .join("\n");
     lines
-    
 }
 
 // TODO:

@@ -138,16 +138,14 @@ pub fn or(destination: Register, a: Register, b: Register) -> ArmAsm {
     }
 }
 
-
 // Too lazy to understand this. But great explanation here
 // https://kddnewton.com/2022/08/11/aarch64-bitmask-immediates.html
 // Code taken from there
 pub struct BitmaskImmediate {
     n: u8,
     imms: u8,
-    immr: u8
+    immr: u8,
 }
-
 
 /// Is this number's binary representation all 1s?
 fn is_mask(imm: u64) -> bool {
@@ -169,16 +167,16 @@ impl TryFrom<u64> for BitmaskImmediate {
         }
         let mut imm = value;
         let mut size = 64;
-        
+
         loop {
             size >>= 1;
             let mask = (1 << size) - 1;
-        
+
             if (imm & mask) != ((imm >> size) & mask) {
-              size <<= 1;
-              break;
+                size <<= 1;
+                break;
             }
-        
+
             if size <= 2 {
                 break;
             }
@@ -201,7 +199,7 @@ impl TryFrom<u64> for BitmaskImmediate {
             let leading_ones = imm.leading_ones();
             left_rotations = 64 - leading_ones;
             trailing_ones = leading_ones + imm.trailing_ones() - (64 - size);
-        }   
+        }
 
         // immr is the number of right rotations it takes to get from the
         // matching unrotated pattern to the target value.
@@ -217,7 +215,7 @@ impl TryFrom<u64> for BitmaskImmediate {
         Ok(BitmaskImmediate {
             n: n as u8,
             imms: (imms & 0x3f) as u8,
-            immr: (immr & 0x3f) as u8
+            immr: (immr & 0x3f) as u8,
         })
     }
 }
@@ -266,7 +264,7 @@ pub fn compare(a: Register, b: Register) -> ArmAsm {
 
 impl Condition {
     #[allow(unused)]
-    fn to_arm_condition(&self) -> i32 {
+    fn arm_condition(&self) -> i32 {
         match self {
             Condition::Equal => 0,
             Condition::NotEqual => 1,
@@ -276,7 +274,7 @@ impl Condition {
             Condition::LessThanOrEqual => 13,
         }
     }
-    fn to_arm_inverted_condition(&self) -> i32 {
+    fn arm_inverted_condition(&self) -> i32 {
         match self {
             Condition::Equal => 1,
             Condition::NotEqual => 0,
@@ -306,7 +304,7 @@ pub fn compare_bool(
         ArmAsm::CsetCsinc {
             sf: destination.sf(),
             // For some reason these conditions are inverted
-            cond: condition.to_arm_inverted_condition(),
+            cond: condition.arm_inverted_condition(),
             rd: destination,
         },
     ]
@@ -621,7 +619,12 @@ impl LowLevelArm {
         });
     }
 
-    pub fn load_from_heap_with_reg_offset(&mut self, destination: Register, source: Register, offset: Register) {
+    pub fn load_from_heap_with_reg_offset(
+        &mut self,
+        destination: Register,
+        source: Register,
+        offset: Register,
+    ) {
         self.instructions.push(ArmAsm::LdrRegGen {
             size: 0b11,
             rm: offset,
@@ -632,7 +635,12 @@ impl LowLevelArm {
         })
     }
 
-    pub fn store_to_heap_with_reg_offset(&mut self, destination: Register, source: Register, offset: Register) {
+    pub fn store_to_heap_with_reg_offset(
+        &mut self,
+        destination: Register,
+        source: Register,
+        offset: Register,
+    ) {
         self.instructions.push(ArmAsm::StrRegGen {
             size: 0b11,
             rm: offset,
@@ -961,7 +969,11 @@ impl LowLevelArm {
 
     pub fn share_label_info_debug(&self, function_pointer: usize) {
         for (label_index, label) in self.labels.iter().enumerate() {
-            let label_location = *self.label_locations.get(&label_index).expect(&format!("Could not find label {}", label)) * 4;
+            let label_location = *self
+                .label_locations
+                .get(&label_index)
+                .unwrap_or_else(|| panic!("Could not find label {}", label))
+                * 4;
             debugger(Message {
                 kind: "label".to_string(),
                 data: Data::Label {
@@ -975,7 +987,6 @@ impl LowLevelArm {
     }
 
     pub fn get_current_stack_position(&mut self, dest: Register) {
-
         self.instructions.push(ArmAsm::SubAddsubImm {
             sf: dest.sf(),
             rn: X29,
@@ -983,8 +994,7 @@ impl LowLevelArm {
             imm12: (self.max_locals + self.stack_size + 1) * 8,
             sh: 0,
         });
-        // TODO: This seems 
-
+        // TODO: This seems
     }
 
     pub fn set_all_locals_to_null(&mut self, null_register: Register) {
