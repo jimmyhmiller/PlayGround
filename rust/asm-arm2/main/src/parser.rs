@@ -560,7 +560,7 @@ impl Parser {
                 // Gross
                 Some(String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap())
             }
-            _ => None
+            _ => None,
         };
         self.expect_open_paren();
         let args = self.parse_args();

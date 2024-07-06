@@ -82,7 +82,7 @@ impl<T: Encode + Decode> Serialize for T {
 #[no_mangle]
 #[inline(never)]
 /// # Safety
-/// 
+///
 /// This does nothing
 pub unsafe extern "C" fn debugger_info(buffer: *const u8, length: usize) {
     // Hack to make sure this isn't inlined
@@ -129,7 +129,7 @@ extern "C" fn make_closure<Alloc: Allocator>(
     compiler.make_closure(function, free_variables).unwrap()
 }
 
- extern "C" fn property_access<Alloc: Allocator>(
+extern "C" fn property_access<Alloc: Allocator>(
     compiler: *mut Compiler<Alloc>,
     struct_pointer: usize,
     str_constant_ptr: usize,
@@ -263,9 +263,18 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         println!("Parse time {:?}", parse_time.elapsed());
     }
 
-    // type Alloc = CompactingHeap;
-    // type Alloc = SimpleMarkSweepHeap;
-    type Alloc = SimpleGeneration;
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "compacting")] {
+            type Alloc = CompactingHeap;
+        } else if #[cfg(feature = "simple-mark-and-sweep")] {
+            type Alloc = SimpleMarkSweepHeap;
+        } else if #[cfg(feature = "simple-generation")] {
+            type Alloc = SimpleGeneration;
+        } else {
+            type Alloc = SimpleGeneration;
+        }
+    }
+
     let allocator = Alloc::new();
     let printer: Box<dyn Printer> = if has_expect {
         Box::new(TestPrinter::new(Box::new(DefaultPrinter)))
@@ -331,6 +340,21 @@ fn get_expect(source: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     lines
+}
+
+#[test]
+fn try_all_examples() -> Result<(), Box<dyn Error>> {
+    let args = CommandLineArguments {
+        program: None,
+        show_times: false,
+        show_gc_times: false,
+        no_gc: false,
+        gc_always: false,
+        all_tests: true,
+        test: false,
+    };
+    run_all_tests(args)?;
+    Ok(())
 }
 
 // TODO:

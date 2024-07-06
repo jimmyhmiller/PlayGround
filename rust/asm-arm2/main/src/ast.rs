@@ -253,7 +253,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
 
                 let compiler_ptr = self.compiler.get_compiler_ptr() as usize;
 
-                let mut code = self.ir.compile( lang, error_fn_pointer, compiler_ptr);
+                let mut code = self.ir.compile(lang, error_fn_pointer, compiler_ptr);
 
                 let function_pointer = self
                     .compiler
@@ -783,9 +783,10 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 args: _,
                 body: _,
             } => {
-
                 if name.is_some() {
-                    self.compiler.reserve_function(name.as_deref().unwrap()).unwrap();
+                    self.compiler
+                        .reserve_function(name.as_deref().unwrap())
+                        .unwrap();
                 } else {
                     panic!("Why do we have a top level function without a name? Is that allowed?");
                 }

@@ -665,7 +665,6 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         }
     }
 
-
     pub fn compile_ast(&mut self, ast: crate::ast::Ast) -> Result<(), Box<dyn Error>> {
         ast.compile(self);
         Ok(())
