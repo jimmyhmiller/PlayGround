@@ -556,12 +556,12 @@ impl Parser {
     fn parse_function(&mut self) -> Ast {
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
+                self.move_to_next_non_whitespace();
                 // Gross
                 Some(String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap())
             }
             _ => None
         };
-        self.move_to_next_non_whitespace();
         self.expect_open_paren();
         let args = self.parse_args();
         self.expect_close_paren();

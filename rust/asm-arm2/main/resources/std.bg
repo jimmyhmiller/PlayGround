@@ -29,6 +29,6 @@ fn main() {
     let atom = Atom { value: 0 }
     reset!(atom, 1)
     swap!(atom, fn(x) { x + 1 })
-    // let x = deref(atom)
-    // assert!(x == 2)
+    let x = deref(atom)
+    assert!(x == 2)
 }
