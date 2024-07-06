@@ -458,7 +458,7 @@ impl Parser {
                 precedence
             };
 
-            self.to_next_non_whitespace();
+            self.move_to_next_non_whitespace();
             let rhs = self.parse_expression(next_min_precedence)?;
             // println!("rhs {:?}", rhs);
 
@@ -473,22 +473,22 @@ impl Parser {
     fn parse_atom(&mut self, min_precedence: usize) -> Option<Ast> {
         match self.current_token() {
             Token::Fn => {
-                self.to_next_atom();
+                self.move_to_next_atom();
                 Some(self.parse_function())
             }
             Token::Struct => {
-                self.to_next_atom();
+                self.move_to_next_atom();
                 Some(self.parse_struct())
             }
             Token::If => {
-                self.to_next_non_whitespace();
+                self.move_to_next_non_whitespace();
                 Some(self.parse_if())
             }
             Token::Atom((start, end)) => {
                 // Gross
                 let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
                 // TODO: Make better
-                self.to_next_non_whitespace();
+                self.move_to_next_non_whitespace();
                 if self.is_open_paren() {
                     Some(self.parse_call(name))
                 }
@@ -527,7 +527,7 @@ impl Parser {
             }
             Token::Let => {
                 self.consume();
-                self.to_next_non_whitespace();
+                self.move_to_next_non_whitespace();
                 let name = match self.current_token() {
                     Token::Atom((start, end)) => {
                         // Gross
@@ -535,9 +535,9 @@ impl Parser {
                     }
                     _ => panic!("Expected variable name"),
                 };
-                self.to_next_non_whitespace();
+                self.move_to_next_non_whitespace();
                 self.expect_equal();
-                self.to_next_non_whitespace();
+                self.move_to_next_non_whitespace();
                 let value = self.parse_expression(0).unwrap();
                 Some(Ast::Let(Box::new(Ast::Variable(name)), Box::new(value)))
             }
@@ -561,7 +561,7 @@ impl Parser {
             }
             _ => panic!("Expected function name"),
         };
-        self.to_next_non_whitespace();
+        self.move_to_next_non_whitespace();
         self.expect_open_paren();
         let args = self.parse_args();
         self.expect_close_paren();
@@ -577,7 +577,7 @@ impl Parser {
             }
             _ => panic!("Expected struct name"),
         };
-        self.to_next_non_whitespace();
+        self.move_to_next_non_whitespace();
         self.expect_open_curly();
         let fields = self.parse_struct_fields();
         self.expect_close_curly();
@@ -591,14 +591,14 @@ impl Parser {
         self.position += 1;
     }
 
-    fn to_next_atom(&mut self) {
+    fn move_to_next_atom(&mut self) {
         self.consume();
         while !self.at_end() && !self.is_atom() {
             self.consume();
         }
     }
 
-    fn to_next_non_whitespace(&mut self) {
+    fn move_to_next_non_whitespace(&mut self) {
         self.consume();
         while !self.at_end() && self.is_whitespace() {
             self.consume();
@@ -826,7 +826,7 @@ impl Parser {
     fn parse_if(&mut self) -> Ast {
         let condition = Box::new(self.parse_expression(1).unwrap());
         let then = self.parse_block();
-        self.to_next_non_whitespace();
+        self.move_to_next_non_whitespace();
         if self.is_else() {
             self.consume();
             self.skip_whitespace();

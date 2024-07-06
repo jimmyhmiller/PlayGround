@@ -5,9 +5,12 @@ use bincode::{Decode, Encode};
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
 use crate::{
-    arm::LowLevelArm, debugger, ir::{BuiltInTypes, StringValue, Value}, parser::Parser, CommandLineArguments, Data, Message
+    arm::LowLevelArm,
+    debugger,
+    ir::{BuiltInTypes, StringValue, Value},
+    parser::Parser,
+    CommandLineArguments, Data, Message,
 };
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
@@ -93,12 +96,11 @@ impl StackMap {
         }
         None
     }
-    
+
     fn extend(&mut self, translated_stack_map: Vec<(usize, StackMapDetails)>) {
         self.details.extend(translated_stack_map);
     }
 }
-
 
 pub trait Printer {
     fn print(&mut self, value: String);
@@ -123,7 +125,6 @@ impl Printer for DefaultPrinter {
     }
 }
 
-
 pub struct TestPrinter {
     pub output: Vec<String>,
     pub other_printer: Box<dyn Printer>,
@@ -131,9 +132,9 @@ pub struct TestPrinter {
 
 impl TestPrinter {
     pub fn new(other_printer: Box<dyn Printer>) -> Self {
-        Self { 
+        Self {
             output: vec![],
-            other_printer: other_printer
+            other_printer,
         }
     }
 }
@@ -162,8 +163,22 @@ pub struct AllocatorOptions {
 }
 
 pub trait Allocator {
-    fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize,  kind: BuiltInTypes, options: AllocatorOptions) -> Result<usize, Box<dyn Error>>;
-    fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, options: AllocatorOptions);
+    fn allocate(
+        &mut self,
+        stack: &mut MmapMut,
+        stack_map: &StackMap,
+        stack_pointer: usize,
+        bytes: usize,
+        kind: BuiltInTypes,
+        options: AllocatorOptions,
+    ) -> Result<usize, Box<dyn Error>>;
+    fn gc(
+        &mut self,
+        stack: &mut MmapMut,
+        stack_map: &StackMap,
+        stack_pointer: usize,
+        options: AllocatorOptions,
+    );
 }
 
 pub struct Compiler<Alloc: Allocator> {
@@ -183,7 +198,7 @@ pub struct Compiler<Alloc: Allocator> {
     command_line_arguments: CommandLineArguments,
 }
 
-impl<Alloc : Allocator> fmt::Debug for Compiler<Alloc> {
+impl<Alloc: Allocator> fmt::Debug for Compiler<Alloc> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // TODO: Make this better
         f.debug_struct("Compiler")
@@ -195,7 +210,11 @@ impl<Alloc : Allocator> fmt::Debug for Compiler<Alloc> {
 }
 
 impl<Alloc: Allocator> Compiler<Alloc> {
-    pub fn new(command_line_arguments: CommandLineArguments, allocator: Alloc, printer: Box<dyn Printer>) -> Self {
+    pub fn new(
+        command_line_arguments: CommandLineArguments,
+        allocator: Alloc,
+        printer: Box<dyn Printer>,
+    ) -> Self {
         Self {
             code_memory: Some(
                 MmapOptions::new(MmapOptions::page_size())
@@ -213,7 +232,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             jump_table_offset: 0,
             structs: StructManager::new(),
             functions: Vec::new(),
-            heap: allocator, 
+            heap: allocator,
             stack: MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
             string_constants: vec![],
             stack_map: StackMap::new(),
@@ -228,8 +247,15 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         stack_pointer: usize,
         kind: BuiltInTypes,
     ) -> Result<usize, Box<dyn Error>> {
-        let options = self.get_allocate_options().clone();
-        self.heap.allocate(&mut self.stack, &self.stack_map, stack_pointer, bytes, kind, options)
+        let options = self.get_allocate_options();
+        self.heap.allocate(
+            &mut self.stack,
+            &self.stack_map,
+            stack_pointer,
+            bytes,
+            kind,
+            options,
+        )
     }
 
     fn get_stack_pointer(&self) -> usize {
@@ -369,7 +395,12 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         Ok(function)
     }
 
-    pub fn add_function(&mut self, name: &str, code: &[u8], number_of_locals: usize) -> Result<usize, Box<dyn Error>> {
+    pub fn add_function(
+        &mut self,
+        name: &str,
+        code: &[u8],
+        number_of_locals: usize,
+    ) -> Result<usize, Box<dyn Error>> {
         let offset = self.add_code(code)?;
         let index = self.functions.len();
         self.functions.push(Function {
@@ -698,7 +729,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         let heap_pointer = self.allocate(len, 0, BuiltInTypes::Closure)?;
         let pointer = heap_pointer as *mut u8;
         let num_free = free_variables.len();
-        let function_definition =  self.get_function_by_pointer(BuiltInTypes::untag(function));
+        let function_definition = self.get_function_by_pointer(BuiltInTypes::untag(function));
         if function_definition.is_none() {
             panic!("Function not found");
         }
@@ -733,7 +764,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
 
     pub fn property_access(&self, struct_pointer: usize, str_constant_ptr: usize) -> usize {
         unsafe {
-            if BuiltInTypes::untag(struct_pointer) as usize % 8 != 0 {
+            if BuiltInTypes::untag(struct_pointer) % 8 != 0 {
                 panic!("Not aligned");
             }
             let struct_pointer = BuiltInTypes::untag(struct_pointer);
@@ -818,13 +849,13 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         let result = self.get_repr(result, 0).unwrap();
         self.printer.print(result);
     }
-    
+
     pub fn println(&mut self, result: usize) {
         let result = self.get_repr(result, 0).unwrap();
         self.printer.println(result);
     }
-    
-    fn get_allocate_options<>(&self) -> AllocatorOptions {
+
+    fn get_allocate_options(&self) -> AllocatorOptions {
         AllocatorOptions {
             gc: !self.command_line_arguments.no_gc,
             print_stats: self.command_line_arguments.show_gc_times,

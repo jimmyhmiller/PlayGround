@@ -1,6 +1,11 @@
-use std::error::Error;
+use crate::{
+    compiler::{Allocator, AllocatorOptions, StackMap},
+    debugger,
+    ir::BuiltInTypes,
+    Data, Message,
+};
 use mmap_rs::{MmapMut, MmapOptions};
-use crate::{compiler::{Allocator, AllocatorOptions, StackMap}, debugger, ir::BuiltInTypes, Data, Message};
+use std::error::Error;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct FreeListEntry {
@@ -51,12 +56,10 @@ pub struct Space {
     scale_factor: usize,
 }
 
-
 impl Space {
     #[allow(unused)]
     fn new(segment_size: usize, scale_factor: usize) -> Self {
-        let mut space = vec![];
-        space.push(Segment::new(segment_size));
+        let mut space = vec![Segment::new(segment_size)];
         Self {
             segments: space,
             segment_offset: 0,
@@ -72,27 +75,39 @@ pub struct SimpleMarkSweepHeap {
 }
 
 impl Allocator for SimpleMarkSweepHeap {
-    fn allocate(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, bytes: usize, _kind: BuiltInTypes, options: AllocatorOptions) -> Result<usize, Box<dyn Error>> {
-
+    fn allocate(
+        &mut self,
+        stack: &mut MmapMut,
+        stack_map: &StackMap,
+        stack_pointer: usize,
+        bytes: usize,
+        _kind: BuiltInTypes,
+        options: AllocatorOptions,
+    ) -> Result<usize, Box<dyn Error>> {
         if options.gc_always {
             self.gc(stack, stack_map, stack_pointer, options);
         }
 
         if self.can_allocate(bytes) {
-            return self.allocate_inner(bytes, 0, None);
+            self.allocate_inner(bytes, 0, None)
         } else {
             self.gc(stack, stack_map, stack_pointer, options);
             if self.can_allocate(bytes) {
-                return self.allocate_inner(bytes, 0, None);
+                self.allocate_inner(bytes, 0, None)
             } else {
                 self.create_more_segments(bytes);
-                return self.allocate_inner(bytes, 0, None);
+                self.allocate_inner(bytes, 0, None)
             }
         }
-
     }
 
-    fn gc(&mut self, stack: &mut MmapMut, stack_map: &StackMap, stack_pointer: usize, options: AllocatorOptions) {
+    fn gc(
+        &mut self,
+        stack: &mut MmapMut,
+        stack_map: &StackMap,
+        stack_pointer: usize,
+        options: AllocatorOptions,
+    ) {
         if !options.gc {
             return;
         }
@@ -103,7 +118,7 @@ impl Allocator for SimpleMarkSweepHeap {
 impl SimpleMarkSweepHeap {
     #[allow(unused)]
     pub fn new() -> Self {
-       Self::new_with_count(1)
+        Self::new_with_count(1)
     }
 
     pub fn new_with_count(initial_segment_count: usize) -> Self {
@@ -139,7 +154,6 @@ impl SimpleMarkSweepHeap {
     }
 
     fn create_more_segments(&mut self, bytes: usize) -> SegmentAction {
-
         let size = (bytes + 1) * 8;
 
         if self.switch_to_available_segment(size) {
@@ -156,7 +170,9 @@ impl SimpleMarkSweepHeap {
         self.space.segment_offset = self.space.segments.len();
 
         for i in 0..self.space.scale_factor {
-            self.space.segments.push(Segment::new(self.space.segment_size));
+            self.space
+                .segments
+                .push(Segment::new(self.space.segment_size));
             let segment_pointer = self.segment_pointer(self.space.segment_offset + i);
             debugger(Message {
                 kind: "HeapSegmentPointer".to_string(),
@@ -171,7 +187,13 @@ impl SimpleMarkSweepHeap {
         SegmentAction::AllocateMore
     }
 
-    fn write_object(&mut self, segment_offset: usize, offset: usize, shifted_size: usize, data: Option<&[u8]>) -> usize {
+    fn write_object(
+        &mut self,
+        segment_offset: usize,
+        offset: usize,
+        shifted_size: usize,
+        data: Option<&[u8]>,
+    ) -> usize {
         let memory = &mut self.space.segments[segment_offset].memory;
         let unshifted_size = shifted_size >> 1;
         let buffer = &mut memory[offset..offset + unshifted_size + 8];
@@ -258,7 +280,13 @@ impl SimpleMarkSweepHeap {
         );
     }
 
-    pub fn mark_and_sweep(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize, options: AllocatorOptions) {
+    pub fn mark_and_sweep(
+        &mut self,
+        stack: &MmapMut,
+        stack_map: &StackMap,
+        stack_pointer: usize,
+        options: AllocatorOptions,
+    ) {
         let start = std::time::Instant::now();
         self.mark(stack, stack_map, stack_pointer);
         self.sweep();
@@ -297,14 +325,14 @@ impl SimpleMarkSweepHeap {
 
                 i = bottom_of_frame;
 
-                for j in (bottom_of_frame - active_frame)..bottom_of_frame {
-                    if BuiltInTypes::is_heap_pointer(stack[j]) {
-                        let untagged = BuiltInTypes::untag(stack[j]);
-                        if untagged as usize % 8 != 0 {
+                for slot in stack.iter().take(bottom_of_frame).skip(bottom_of_frame - active_frame){
+                    if BuiltInTypes::is_heap_pointer(*slot) {
+                        let untagged = BuiltInTypes::untag(*slot);
+                        if untagged % 8 != 0 {
                             println!("Not aligned");
                         }
                         // println!("Pushing mark 0x{:?}", stack[j]);
-                        to_mark.push(stack[j]);
+                        to_mark.push(*slot);
                     }
                 }
                 continue;
@@ -441,8 +469,12 @@ impl SimpleMarkSweepHeap {
         spot.is_some()
     }
 
-    fn allocate_inner(&mut self, bytes: usize, depth: usize, data: Option<&[u8]>) ->  Result<usize, Box<dyn Error>> {
-
+    fn allocate_inner(
+        &mut self,
+        bytes: usize,
+        depth: usize,
+        data: Option<&[u8]>,
+    ) -> Result<usize, Box<dyn Error>> {
         if depth > 1 {
             // This might feel a bit dumb
             // But I do think it is reasonable to recurse
@@ -508,18 +540,17 @@ impl SimpleMarkSweepHeap {
             self.free_list.remove(spot_index);
         }
 
-        let pointer = self
-            .write_object(spot_clone.segment, spot_clone.offset, shifted_size, data);
+        let pointer = self.write_object(spot_clone.segment, spot_clone.offset, shifted_size, data);
         Ok(pointer)
     }
 
     pub fn copy_data_to_offset(&mut self, data: &[u8]) -> isize {
         // TODO: I could amortize this by copying lazily and coalescing
         // the copies together if they are continuouss
-        let pointer = self.allocate_inner(data.len() / 8 - 1, 0, Some(data)).unwrap();
+        let pointer = self
+            .allocate_inner(data.len() / 8 - 1, 0, Some(data))
+            .unwrap();
         let pointer = pointer as *mut u8;
         pointer as isize
     }
-
-
 }
