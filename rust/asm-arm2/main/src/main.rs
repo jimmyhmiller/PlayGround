@@ -287,8 +287,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("primitive_swap!", placeholder as *const u8)?;
     compiler.add_builtin_function("primitive_reset!", placeholder as *const u8)?;
     compiler.add_builtin_function("primitive_compare_and_swap!", placeholder as *const u8)?;
-
-
+    compiler.add_builtin_function("assert!", placeholder as *const u8)?;
 
     let compile_time = Instant::now();
     compiler.compile_ast(ast)?;
