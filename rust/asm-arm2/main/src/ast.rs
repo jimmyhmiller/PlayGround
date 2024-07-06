@@ -13,7 +13,7 @@ pub enum Ast {
         elements: Vec<Ast>,
     },
     Function {
-        name: String,
+        name: Option<String>,
         // TODO: Change this to a Vec<Ast>
         args: Vec<String>,
         body: Vec<Ast>,
@@ -83,7 +83,7 @@ impl Ast {
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
             ir: Ir::new(),
-            name: "".to_string(),
+            name: None,
             compiler,
             context: vec![],
             current_context: Context {
@@ -108,9 +108,9 @@ impl Ast {
         }
     }
 
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> Option<String> {
         match self {
-            Ast::Function { name, .. } => name.as_str(),
+            Ast::Function { name, .. } => name.clone(),
             _ => panic!("Only works on function"),
         }
     }
@@ -169,7 +169,7 @@ impl Environment {
 pub struct AstCompiler<'a, Alloc: Allocator> {
     pub ast: Ast,
     pub ir: Ir,
-    pub name: String,
+    pub name: Option<String>,
     pub compiler: &'a mut Compiler<Alloc>,
     // This feels dumb and complicated. But my brain
     // won't let me think of a better way
@@ -229,7 +229,6 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
             Ast::Function { name, args, body } => {
                 self.create_new_environment();
                 let old_ir = std::mem::replace(&mut self.ir, Ir::new());
-                assert!(!name.is_empty());
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);
@@ -254,11 +253,11 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
 
                 let compiler_ptr = self.compiler.get_compiler_ptr() as usize;
 
-                let mut code = self.ir.compile(&name, lang, error_fn_pointer, compiler_ptr);
+                let mut code = self.ir.compile( lang, error_fn_pointer, compiler_ptr);
 
                 let function_pointer = self
                     .compiler
-                    .upsert_function(&name, &mut code, self.ir.num_locals)
+                    .upsert_function(name.as_deref(), &mut code, self.ir.num_locals)
                     .unwrap();
 
                 code.share_label_info_debug(function_pointer);
@@ -506,8 +505,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 }
             }
             Ast::Call { name, args } => {
-                if name == self.name {
-                    // TODO: I'm guessing I can have tail recursive closures that I will need to deal with
+                if Some(name.clone()) == self.name {
                     if self.is_tail_position() {
                         return self.call_compile(&Ast::TailRecurse { args });
                     } else {
@@ -785,8 +783,12 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 args: _,
                 body: _,
             } => {
-                // TODO: Should probably reserve arg count as well
-                self.compiler.reserve_function(name.as_str()).unwrap();
+
+                if name.is_some() {
+                    self.compiler.reserve_function(name.as_deref().unwrap()).unwrap();
+                } else {
+                    panic!("Why do we have a top level function without a name? Is that allowed?");
+                }
             }
             Ast::Struct { name, fields } => {
                 self.compiler.add_struct(Struct {

@@ -708,7 +708,6 @@ impl Ir {
 
     pub fn compile(
         &mut self,
-        _name: &str,
         mut lang: LowLevelArm,
         error_fn_pointer: usize,
         compiler_ptr: usize,

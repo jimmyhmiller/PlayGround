@@ -82,7 +82,7 @@ impl<T: Encode + Decode> Serialize for T {
 #[no_mangle]
 #[inline(never)]
 /// # Safety
-///
+/// 
 /// This does nothing
 pub unsafe extern "C" fn debugger_info(buffer: *const u8, length: usize) {
     // Hack to make sure this isn't inlined
@@ -100,14 +100,6 @@ pub fn debugger(message: Message) {
     #[allow(unused)]
     let message = unsafe { from_raw_parts(ptr, length) };
     // Should make it is so we clean up this memory
-}
-
-#[allow(unused)]
-fn fib_rust(n: usize) -> usize {
-    if n <= 1 {
-        return n;
-    }
-    fib_rust(n - 1) + fib_rust(n - 2)
 }
 
 extern "C" fn allocate_struct<Alloc: Allocator>(
@@ -137,7 +129,7 @@ extern "C" fn make_closure<Alloc: Allocator>(
     compiler.make_closure(function, free_variables).unwrap()
 }
 
-extern "C" fn property_access<Alloc: Allocator>(
+ extern "C" fn property_access<Alloc: Allocator>(
     compiler: *mut Compiler<Alloc>,
     struct_pointer: usize,
     str_constant_ptr: usize,
@@ -190,7 +182,7 @@ fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
     lang.ret();
 
     compiler
-        .add_function("trampoline", &lang.compile_directly(), 0)
+        .add_function(Some("trampoline"), &lang.compile_directly(), 0)
         .unwrap();
     let function = compiler.get_function_by_name_mut("trampoline").unwrap();
     function.is_builtin = true;
@@ -249,6 +241,10 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+extern "C" fn placeholder() -> usize {
+    BuiltInTypes::null_value() as usize
+}
+
 fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     if args.program.is_none() {
         println!("No program provided");
@@ -287,6 +283,12 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     compiler.add_builtin_function("make_closure", make_closure::<Alloc> as *const u8)?;
     compiler.add_builtin_function("property_access", property_access::<Alloc> as *const u8)?;
     compiler.add_builtin_function("throw_error", throw_error::<Alloc> as *const u8)?;
+    compiler.add_builtin_function("primitive_deref", placeholder as *const u8)?;
+    compiler.add_builtin_function("primitive_swap!", placeholder as *const u8)?;
+    compiler.add_builtin_function("primitive_reset!", placeholder as *const u8)?;
+    compiler.add_builtin_function("primitive_compare_and_swap!", placeholder as *const u8)?;
+
+
 
     let compile_time = Instant::now();
     compiler.compile_ast(ast)?;

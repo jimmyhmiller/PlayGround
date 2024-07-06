@@ -1,0 +1,34 @@
+struct Atom {
+    value
+}
+
+// TODO: When I have namespaces
+// these won't be prefix named
+
+fn deref(atom) {
+    // assert!(atom is Atom)
+    primitive_deref(atom)
+}
+
+fn swap!(atom, f) {
+    // assert!(atom is Atom)
+    primitive_swap!(atom, f)
+}
+
+fn reset!(atom, value) {
+    // assert!(atom is Atom)
+    primitive_reset!(atom, value)
+}
+
+fn compare_and_swap!(atom, old, new) {
+    // assert!(atom is Atom)
+    primitive_compare_and_swap!(atom, old, new)
+}
+
+fn main() {
+    let atom = Atom { value: 0 }
+    reset!(atom, 1)
+    swap!(atom, fn(x) { x + 1 })
+    // let x = deref(atom)
+    // assert!(x == 2)
+}
