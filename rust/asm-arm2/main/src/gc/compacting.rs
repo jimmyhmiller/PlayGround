@@ -406,10 +406,12 @@ impl CompactingHeap {
                     .take(bottom_of_frame)
                     .skip(bottom_of_frame - active_frame)
                 {
-                    roots.push((j, *slot));
-                    let untagged = BuiltInTypes::untag(*slot);
-                    debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
-                    to_mark.push(*slot);
+                    if BuiltInTypes::is_heap_pointer(*slot) {
+                        roots.push((j, *slot));
+                        let untagged = BuiltInTypes::untag(*slot);
+                        debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
+                        to_mark.push(*slot);
+                    }
                 }
                 continue;
             }
