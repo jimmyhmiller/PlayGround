@@ -26,9 +26,13 @@ fn compare_and_swap!(atom, old, new) {
 }
 
 fn main() {
-    let atom = Atom { value: 0 }
+    let atom = Atom { value: 42 }
+    println(atom)
     reset!(atom, 1)
+    println(atom)
     swap!(atom, fn(x) { x + 1 })
+    println(atom)
     let x = deref(atom)
-    assert!(x == 2)
+    println(x)
+    "done!"
 }

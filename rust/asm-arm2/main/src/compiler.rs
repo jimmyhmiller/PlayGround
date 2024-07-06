@@ -856,4 +856,11 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             gc_always: self.command_line_arguments.gc_always,
         }
     }
+    
+    pub fn is_inline_primitive_function(&self, name: &str) -> bool {
+        match name {
+            "primitive_deref" | "primitive_swap!" | "primitive_reset!" | "primitive_compare_and_swap!" => true,
+            _ => false,
+        }
+    }
 }
