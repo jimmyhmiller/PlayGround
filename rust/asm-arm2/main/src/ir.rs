@@ -240,6 +240,8 @@ pub enum Instruction {
     CurrentStackPosition(Value),
     ExtendLifeTime(Value),
     HeapStoreOffsetReg(Value, Value, Value),
+    AtomicLoad(Value, Value),
+    AtomicStore(Value, Value, Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -355,6 +357,12 @@ impl Instruction {
                 get_registers!(a, b, c)
             }
             Instruction::HeapLoad(a, b, _) => {
+                get_registers!(a, b)
+            }
+            Instruction::AtomicLoad(a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::AtomicStore(a, b, c) => {
                 get_registers!(a, b)
             }
             Instruction::HeapLoadReg(a, b, c) => {
@@ -1132,6 +1140,22 @@ impl Ir {
                     let dest = alloc.allocate_register(index, dest, lang);
                     lang.load_from_heap(dest, ptr, *offset);
                 }
+                Instruction::AtomicLoad(dest, ptr) => {
+                    let ptr = ptr.try_into().unwrap();
+                    let ptr = alloc.allocate_register(index, ptr, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+                    lang.atomic_load(dest, ptr);
+                }
+                Instruction::AtomicStore(result, ptr, val) => {
+                    let ptr = ptr.try_into().unwrap();
+                    let ptr = alloc.allocate_register(index, ptr, lang);
+                    let val = val.try_into().unwrap();
+                    let val = alloc.allocate_register(index, val, lang);
+                    let result = result.try_into().unwrap();
+                    let result = alloc.allocate_register(index, result, lang);
+                    lang.atomic_store(result, ptr, val);
+                }
                 Instruction::HeapLoadReg(dest, ptr, offset) => {
                     let ptr = ptr.try_into().unwrap();
                     let ptr = alloc.allocate_register(index, ptr, lang);
@@ -1272,6 +1296,22 @@ impl Ir {
         self.instructions
             .push(Instruction::HeapLoad(dest.into(), source.into(), 0));
         dest.into()
+    }
+
+    pub fn atomic_load(&mut self, dest: Value, source: Value) -> Value {
+        let source = self.assign_new(source);
+        let dest = self.assign_new(dest);
+        self.instructions
+            .push(Instruction::AtomicLoad(dest.into(), source.into()));
+        dest.into()
+    }
+    pub fn atomic_store(&mut self, dest: Value, source: Value) -> Value {
+        let source = self.assign_new(source);
+        let dest = self.assign_new(dest);
+        let result = self.volatile_register();
+        self.instructions
+            .push(Instruction::AtomicStore(result.into(), dest.into(), source.into()));
+        result.into()
     }
 
     pub fn heap_load_with_reg_offset(&mut self, source: Value, offset: Value) -> Value {
@@ -1417,6 +1457,9 @@ impl Ir {
             free_variable_offset,
         ));
     }
+    
+    
+   
 }
 
 fn guard_integer(lang: &mut LowLevelArm, dest: Register, a: Register, after_return: Label) {

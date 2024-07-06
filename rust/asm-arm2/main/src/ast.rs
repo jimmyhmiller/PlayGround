@@ -264,72 +264,8 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
 
                 self.ir = old_ir;
 
-                if self.has_free_variables() {
-                    // When I get those free variables, I'd need to
-                    // make sure that the variables they refer to are
-                    // heap allocated. How am I going to do that?
-                    // I actually probably need to think about this more
-                    // If they are already heap allocated, then I just
-                    // store the pointer. If they are immutable variables,
-                    // I just take the value
-                    // If they are mutable, then I'd need to heap allocate
-                    // but maybe I just heap allocate all mutable variables?
-                    // What about functions that change overtime?
-                    // Not 100% sure about all of this
-                    let label = self.ir.label("closure");
-
-                    // self.ir.breakpoint();
-                    // get a pointer to the start of the free variables on the stack
-                    let free_variable_pointer = self.ir.get_current_stack_position();
-
-                    self.ir.write_label(label);
-                    for free_variable in self.get_current_env().free_variables.clone().iter() {
-                        let variable = self
-                            .get_variable(free_variable)
-                            .unwrap_or_else(|| panic!("Can't find variable {}", free_variable));
-                        // we are now going to push these variables onto the stack
-
-                        match variable {
-                            VariableLocation::Register(reg) => {
-                                self.ir.push_to_stack(reg.into());
-                            }
-                            VariableLocation::Local(index) => {
-                                let reg = self.ir.volatile_register();
-                                self.ir.load_local(reg, index);
-                                self.ir.push_to_stack(reg.into());
-                            }
-                            VariableLocation::FreeVariable(_) => {
-                                panic!("We are trying to find this variable concretely and found a free variable")
-                            }
-                        }
-                    }
-                    // load count of free variables
-                    let num_free = self.get_current_env().free_variables.len();
-
-                    let num_free = Value::SignedConstant(num_free as isize);
-                    let num_free_reg = self.ir.volatile_register();
-                    self.ir.assign(num_free_reg, num_free);
-                    // Call make_closure
-                    let make_closure = self.compiler.find_function("make_closure").unwrap();
-                    let make_closure = self.compiler.get_function_pointer(make_closure).unwrap();
-                    let make_closure_reg = self.ir.volatile_register();
-                    self.ir.assign(make_closure_reg, make_closure);
-                    let function_pointer_reg = self.ir.volatile_register();
-                    self.ir.assign(function_pointer_reg, function_pointer);
-
-                    let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
-
-                    let closure = self.ir.call(
-                        make_closure_reg.into(),
-                        vec![
-                            compiler_pointer_reg.into(),
-                            function_pointer_reg.into(),
-                            num_free_reg.into(),
-                            free_variable_pointer,
-                        ],
-                    );
-                    self.pop_environment();
-                    return closure;
+                if let Some(value) = self.compile_closure(function_pointer) {
+                    return value;
                 }
 
                 let function = self.ir.function(Value::Function(function_pointer));
@@ -513,7 +449,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     }
                 }
 
-                let mut args: Vec<Value> = args
+                let args: Vec<Value> = args
                     .iter()
                     .map(|arg| {
                         self.not_tail_position();
@@ -529,116 +465,21 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     })
                     .collect();
 
+                
+                // TODO: Should the arguments be evaluated first?
+                // I think so, this will matter once I think about macros
+                // though
+                if self.compiler.is_inline_primitive_function(&name) {
+                    return self.compile_inline_primitive_function(&name, args);
+                }
+                
+                // TODO: This isn't they way to handle this
+                // I am activing as if all closures are assign to a variable when they aren't.
+                // Need to have negative test cases for this
                 if let Some(function) = self.get_variable_current_env(&name) {
-                    // TODO: Right now, this would only find variables in the current environment
-                    // I also need to deal with functions vs closures
-                    let function_register = self.ir.volatile_register();
-
-                    let closure_register = self.ir.volatile_register();
-                    self.ir.assign(closure_register, &function);
-                    // Check if the tag is a closure
-                    let tag = self.ir.get_tag(closure_register.into());
-                    let closure_tag = BuiltInTypes::Closure.get_tag();
-                    let closure_tag = Value::RawValue(closure_tag as usize);
-                    let call_function = self.ir.label("call_function");
-                    let skip_load_function = self.ir.label("skip_load_function");
-                    // TODO: It might be better to change the layout of these jumps
-                    // so that the non-closure case is the fall through
-                    // I just have to think about the correct way to do that
-                    self.ir
-                        .jump_if(call_function, Condition::NotEqual, tag, closure_tag);
-                    // I need to grab the function pointer
-                    // Closures are a pointer to a structure like this
-                    // struct Closure {
-                    //     function_pointer: *const u8,
-                    //     num_free_variables: usize,
-                    //     ree_variables: *const Value,
-                    // }
-                    let closure_register = self.ir.untag(closure_register.into());
-                    let function_pointer = self.ir.load_from_memory(closure_register, 0);
-
-                    self.ir.assign(function_register, function_pointer);
-
-                    // TODO: I need to fix how these are stored on the stack
-
-                    let num_free_variables = self.ir.load_from_memory(closure_register, 1);
-                    let num_free_variables =
-                        self.ir.tag(num_free_variables, BuiltInTypes::Int.get_tag());
-                    // for each variable I need to push them onto the stack after the prelude
-                    let loop_start = self.ir.label("loop_start");
-                    let counter = self.ir.volatile_register();
-                    // self.ir.breakpoint();
-                    self.ir.assign(counter, Value::SignedConstant(0));
-                    self.ir.write_label(loop_start);
-                    self.ir.jump_if(
-                        skip_load_function,
-                        Condition::GreaterThanOrEqual,
-                        counter,
-                        num_free_variables,
-                    );
-                    let free_variable_offset = self.ir.add(counter, Value::SignedConstant(3));
-                    let free_variable_offset =
-                        self.ir.mul(free_variable_offset, Value::SignedConstant(8));
-                    // TODO: This needs to change based on counter
-                    let free_variable_offset = self.ir.untag(free_variable_offset);
-                    let free_variable = self
-                        .ir
-                        .heap_load_with_reg_offset(closure_register, free_variable_offset);
-
-                    let free_variable_offset = self.ir.sub(num_free_variables, counter);
-                    let num_local = self.ir.load_from_memory(closure_register, 2);
-                    let num_local = self.ir.tag(num_local, BuiltInTypes::Int.get_tag());
-                    let free_variable_offset = self.ir.add(free_variable_offset, num_local);
-                    // // TODO: Make this better
-                    let free_variable_offset =
-                        self.ir.mul(free_variable_offset, Value::SignedConstant(-8));
-                    let free_variable_offset = self.ir.untag(free_variable_offset);
-                    let free_variable_slot_pointer = self.ir.get_stack_pointer_imm(2);
-                    self.ir.heap_store_with_reg_offset(
-                        free_variable_slot_pointer,
-                        free_variable,
-                        free_variable_offset,
-                    );
-
-                    let label = self.ir.label("increment_counter");
-                    self.ir.write_label(label);
-                    let counter_increment = self.ir.add(Value::SignedConstant(1), counter);
-                    self.ir.assign(counter, counter_increment);
-
-                    self.ir.jump(loop_start);
-                    self.ir.extend_register_life(num_free_variables);
-                    self.ir.extend_register_life(counter.into());
-                    self.ir.extend_register_life(closure_register);
-                    self.ir.write_label(call_function);
-                    self.ir.assign(function_register, &function);
-                    self.ir.write_label(skip_load_function);
-                    self.ir.call(function_register.into(), args)
+                    self.compile_closure_call(function, args)
                 } else {
-                    // TODO: I shouldn't just assume the function will exist
-                    // unless I have a good plan for dealing with when it doesn't
-                    let function = self.compiler.reserve_function(name.as_str()).unwrap();
-
-                    let builtin = function.is_builtin;
-                    if builtin {
-                        let pointer_reg = self.ir.volatile_register();
-                        let pointer: Value = self.compiler.get_compiler_ptr().into();
-                        self.ir.assign(pointer_reg, pointer);
-                        args.insert(0, pointer_reg.into());
-                    }
-
-                    let jump_table_pointer =
-                        self.compiler.get_jump_table_pointer(function).unwrap();
-                    let jump_table_point_reg =
-                        self.ir.assign_new(Value::Pointer(jump_table_pointer));
-                    let function_pointer = self.ir.load_from_memory(jump_table_point_reg.into(), 0);
-
-                    let function = self.ir.function(function_pointer);
-                    if builtin {
-                        // self.ir.breakpoint();
-                        self.ir.call_builtin(function, args)
-                    } else {
-                        self.ir.call(function, args)
-                    }
+                    self.compile_standard_function_call(name, args)
                 }
             }
             Ast::NumberLiteral(n) => Value::SignedConstant(n as isize),
@@ -685,6 +526,191 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
         }
     }
 
+    fn compile_standard_function_call(&mut self, name: String, mut args: Vec<Value>) -> Value {
+        // TODO: I shouldn't just assume the function will exist
+        // unless I have a good plan for dealing with when it doesn't
+        let function = self.compiler.reserve_function(name.as_str()).unwrap();
+    
+        let builtin = function.is_builtin;
+        if builtin {
+            let pointer_reg = self.ir.volatile_register();
+            let pointer: Value = self.compiler.get_compiler_ptr().into();
+            self.ir.assign(pointer_reg, pointer);
+            args.insert(0, pointer_reg.into());
+        }
+    
+        let jump_table_pointer =
+            self.compiler.get_jump_table_pointer(function).unwrap();
+        let jump_table_point_reg =
+            self.ir.assign_new(Value::Pointer(jump_table_pointer));
+        let function_pointer = self.ir.load_from_memory(jump_table_point_reg.into(), 0);
+    
+        let function = self.ir.function(function_pointer);
+        if builtin {
+            // self.ir.breakpoint();
+            self.ir.call_builtin(function, args)
+        } else {
+            self.ir.call(function, args)
+        }
+    }
+    
+    fn compile_closure_call(&mut self, function: VariableLocation, args: Vec<Value>) -> Value {
+        // TODO: Right now, this would only find variables in the current environment
+        // I also need to deal with functions vs closures
+        let function_register = self.ir.volatile_register();
+    
+        let closure_register = self.ir.volatile_register();
+        self.ir.assign(closure_register, &function);
+        // Check if the tag is a closure
+        let tag = self.ir.get_tag(closure_register.into());
+        let closure_tag = BuiltInTypes::Closure.get_tag();
+        let closure_tag = Value::RawValue(closure_tag as usize);
+        let call_function = self.ir.label("call_function");
+        let skip_load_function = self.ir.label("skip_load_function");
+        // TODO: It might be better to change the layout of these jumps
+        // so that the non-closure case is the fall through
+        // I just have to think about the correct way to do that
+        self.ir
+            .jump_if(call_function, Condition::NotEqual, tag, closure_tag);
+        // I need to grab the function pointer
+        // Closures are a pointer to a structure like this
+        // struct Closure {
+        //     function_pointer: *const u8,
+        //     num_free_variables: usize,
+        //     ree_variables: *const Value,
+        // }
+        let closure_register = self.ir.untag(closure_register.into());
+        let function_pointer = self.ir.load_from_memory(closure_register, 0);
+    
+        self.ir.assign(function_register, function_pointer);
+    
+        // TODO: I need to fix how these are stored on the stack
+    
+        let num_free_variables = self.ir.load_from_memory(closure_register, 1);
+        let num_free_variables =
+            self.ir.tag(num_free_variables, BuiltInTypes::Int.get_tag());
+        // for each variable I need to push them onto the stack after the prelude
+        let loop_start = self.ir.label("loop_start");
+        let counter = self.ir.volatile_register();
+        // self.ir.breakpoint();
+        self.ir.assign(counter, Value::SignedConstant(0));
+        self.ir.write_label(loop_start);
+        self.ir.jump_if(
+            skip_load_function,
+            Condition::GreaterThanOrEqual,
+            counter,
+            num_free_variables,
+        );
+        let free_variable_offset = self.ir.add(counter, Value::SignedConstant(3));
+        let free_variable_offset =
+            self.ir.mul(free_variable_offset, Value::SignedConstant(8));
+        // TODO: This needs to change based on counter
+        let free_variable_offset = self.ir.untag(free_variable_offset);
+        let free_variable = self
+            .ir
+            .heap_load_with_reg_offset(closure_register, free_variable_offset);
+    
+        let free_variable_offset = self.ir.sub(num_free_variables, counter);
+        let num_local = self.ir.load_from_memory(closure_register, 2);
+        let num_local = self.ir.tag(num_local, BuiltInTypes::Int.get_tag());
+        let free_variable_offset = self.ir.add(free_variable_offset, num_local);
+        // // TODO: Make this better
+        let free_variable_offset =
+            self.ir.mul(free_variable_offset, Value::SignedConstant(-8));
+        let free_variable_offset = self.ir.untag(free_variable_offset);
+        let free_variable_slot_pointer = self.ir.get_stack_pointer_imm(2);
+        self.ir.heap_store_with_reg_offset(
+            free_variable_slot_pointer,
+            free_variable,
+            free_variable_offset,
+        );
+    
+        let label = self.ir.label("increment_counter");
+        self.ir.write_label(label);
+        let counter_increment = self.ir.add(Value::SignedConstant(1), counter);
+        self.ir.assign(counter, counter_increment);
+    
+        self.ir.jump(loop_start);
+        self.ir.extend_register_life(num_free_variables);
+        self.ir.extend_register_life(counter.into());
+        self.ir.extend_register_life(closure_register);
+        self.ir.write_label(call_function);
+        self.ir.assign(function_register, &function);
+        self.ir.write_label(skip_load_function);
+        self.ir.call(function_register.into(), args)
+    }
+    
+    fn compile_closure(&mut self, function_pointer: usize) -> Option<Value> {
+        if self.has_free_variables() {
+            // When I get those free variables, I'd need to
+            // make sure that the variables they refer to are
+            // heap allocated. How am I going to do that?
+            // I actually probably need to think about this more
+            // If they are already heap allocated, then I just
+            // store the pointer. If they are immutable variables,
+            // I just take the value
+            // If they are mutable, then I'd need to heap allocate
+            // but maybe I just heap allocate all mutable variables?
+            // What about functions that change overtime?
+            // Not 100% sure about all of this
+            let label = self.ir.label("closure");
+    
+            // self.ir.breakpoint();
+            // get a pointer to the start of the free variables on the stack
+            let free_variable_pointer = self.ir.get_current_stack_position();
+    
+            self.ir.write_label(label);
+            for free_variable in self.get_current_env().free_variables.clone().iter() {
+                let variable = self
+                    .get_variable(free_variable)
+                    .unwrap_or_else(|| panic!("Can't find variable {}", free_variable));
+                // we are now going to push these variables onto the stack
+    
+                match variable {
+                    VariableLocation::Register(reg) => {
+                        self.ir.push_to_stack(reg.into());
+                    }
+                    VariableLocation::Local(index) => {
+                        let reg = self.ir.volatile_register();
+                        self.ir.load_local(reg, index);
+                        self.ir.push_to_stack(reg.into());
+                    }
+                    VariableLocation::FreeVariable(_) => {
+                        panic!("We are trying to find this variable concretely and found a free variable")
+                    }
+                }
+            }
+            // load count of free variables
+            let num_free = self.get_current_env().free_variables.len();
+    
+            let num_free = Value::SignedConstant(num_free as isize);
+            let num_free_reg = self.ir.volatile_register();
+            self.ir.assign(num_free_reg, num_free);
+            // Call make_closure
+            let make_closure = self.compiler.find_function("make_closure").unwrap();
+            let make_closure = self.compiler.get_function_pointer(make_closure).unwrap();
+            let make_closure_reg = self.ir.volatile_register();
+            self.ir.assign(make_closure_reg, make_closure);
+            let function_pointer_reg = self.ir.volatile_register();
+            self.ir.assign(function_pointer_reg, function_pointer);
+    
+            let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
+    
+            let closure = self.ir.call(
+                make_closure_reg.into(),
+                vec![
+                    compiler_pointer_reg.into(),
+                    function_pointer_reg.into(),
+                    num_free_reg.into(),
+                    free_variable_pointer,
+                ],
+            );
+            self.pop_environment();
+            return Some(closure);
+        }
+        None
+    }
+    
     fn find_or_insert_local(&mut self, name: &str) -> usize {
         let current_env = self.environment_stack.last_mut().unwrap();
         if let Some(index) = current_env.local_variables.iter().position(|n| n == name) {
@@ -810,6 +836,40 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
             _ => {}
         }
     }
+    
+    fn compile_inline_primitive_function<>(&mut self, name: &str, args: Vec<Value>) -> Value {
+        match name {
+            "primitive_deref" => {
+                // self.ir.breakpoint();
+                let pointer = args[0];
+                let untagged = self.ir.untag(pointer.into());
+                // TODO: I need a raw add that doesn't check for tags
+                let offset = self.ir.add(untagged, Value::RawValue(16));
+                let reg = self.ir.volatile_register();
+                self.ir.atomic_load(reg.into(), offset)
+            },
+            "primitive_swap!" => {
+                self.ir.assign_new(Value::Null).into()
+            }
+            "primitive_reset!" => {
+                let pointer = args[0];
+                let untagged = self.ir.untag(pointer.into());
+                // TODO: I need a raw add that doesn't check for tags
+                let offset = self.ir.add(untagged, Value::RawValue(16));
+                let value = args[1];
+                let temp = self.ir.volatile_register();
+                self.ir.atomic_load(temp.into(), offset);
+                let result = self.ir.atomic_store(offset, value.into());
+                // TODO: I need to check this result for failure
+                args[1]
+            },
+            "primitive_compare_and_swap!" => {
+                self.ir.assign_new(Value::Null).into()
+            }
+            _ => panic!("Unknown inline primitive function {}", name)
+        }
+    }
+    
 }
 
 impl From<i64> for Ast {

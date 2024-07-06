@@ -619,6 +619,22 @@ impl LowLevelArm {
         });
     }
 
+    pub fn atomic_load(&mut self, destination: Register, source: Register) {
+        self.instructions.push(ArmAsm::Ldxr {
+             size: 0b11,
+             rn: source,
+             rt: destination,
+        })
+    }
+    pub fn atomic_store(&mut self,  result: Register, ptr: Register, val: Register,) {
+        self.instructions.push(ArmAsm::Stxr {
+            size: 0b11,
+            rs: result,
+            rn: ptr,
+            rt: val,
+        });
+    }
+
     pub fn load_from_heap_with_reg_offset(
         &mut self,
         destination: Register,
@@ -1002,6 +1018,8 @@ impl LowLevelArm {
             self.store_local(null_register, local_offset)
         }
     }
+    
+    
 }
 
 #[allow(dead_code)]
