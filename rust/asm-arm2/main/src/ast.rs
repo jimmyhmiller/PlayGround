@@ -564,9 +564,8 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     // TODO: I need to fix how these are stored on the stack
 
                     let num_free_variables = self.ir.load_from_memory(closure_register, 1);
-                    let num_free_variables = self
-                        .ir
-                        .tag(num_free_variables, BuiltInTypes::Int.get_tag());
+                    let num_free_variables =
+                        self.ir.tag(num_free_variables, BuiltInTypes::Int.get_tag());
                     // for each variable I need to push them onto the stack after the prelude
                     let loop_start = self.ir.label("loop_start");
                     let counter = self.ir.volatile_register();
@@ -631,9 +630,8 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
 
                     let jump_table_pointer =
                         self.compiler.get_jump_table_pointer(function).unwrap();
-                    let jump_table_point_reg = self
-                        .ir
-                        .assign_new(Value::Pointer(jump_table_pointer));
+                    let jump_table_point_reg =
+                        self.ir.assign_new(Value::Pointer(jump_table_pointer));
                     let function_pointer = self.ir.load_from_memory(jump_table_point_reg.into(), 0);
 
                     let function = self.ir.function(function_pointer);

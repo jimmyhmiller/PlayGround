@@ -82,7 +82,7 @@ impl<T: Encode + Decode> Serialize for T {
 #[no_mangle]
 #[inline(never)]
 /// # Safety
-/// 
+///
 /// This does nothing
 pub unsafe extern "C" fn debugger_info(buffer: *const u8, length: usize) {
     // Hack to make sure this isn't inlined
@@ -137,7 +137,7 @@ extern "C" fn make_closure<Alloc: Allocator>(
     compiler.make_closure(function, free_variables).unwrap()
 }
 
- extern "C" fn property_access<Alloc: Allocator>(
+extern "C" fn property_access<Alloc: Allocator>(
     compiler: *mut Compiler<Alloc>,
     struct_pointer: usize,
     str_constant_ptr: usize,
