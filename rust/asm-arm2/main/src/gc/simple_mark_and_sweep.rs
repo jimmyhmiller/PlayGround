@@ -325,7 +325,11 @@ impl SimpleMarkSweepHeap {
 
                 i = bottom_of_frame;
 
-                for slot in stack.iter().take(bottom_of_frame).skip(bottom_of_frame - active_frame){
+                for slot in stack
+                    .iter()
+                    .take(bottom_of_frame)
+                    .skip(bottom_of_frame - active_frame)
+                {
                     if BuiltInTypes::is_heap_pointer(*slot) {
                         let untagged = BuiltInTypes::untag(*slot);
                         if untagged % 8 != 0 {

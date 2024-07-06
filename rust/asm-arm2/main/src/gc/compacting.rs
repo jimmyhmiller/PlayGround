@@ -400,7 +400,12 @@ impl CompactingHeap {
 
                 i = bottom_of_frame;
 
-                for (j, slot) in stack.iter().enumerate().take(bottom_of_frame).skip(bottom_of_frame - active_frame) {
+                for (j, slot) in stack
+                    .iter()
+                    .enumerate()
+                    .take(bottom_of_frame)
+                    .skip(bottom_of_frame - active_frame)
+                {
                     roots.push((j, *slot));
                     let untagged = BuiltInTypes::untag(*slot);
                     debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
@@ -423,7 +428,7 @@ fn get_live_stack(stack: &mut MmapMut, stack_pointer: usize) -> &mut [usize] {
     let stack = unsafe {
         std::slice::from_raw_parts_mut(stack.as_mut_ptr() as *mut usize, stack.size() / 8)
     };
-    
+
     (&mut stack[len - num_64_till_end..]) as _
 }
 
