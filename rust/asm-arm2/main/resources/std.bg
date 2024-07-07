@@ -14,7 +14,6 @@ fn swap!(atom, f) {
     let initial = deref(atom);
     let new = f(initial);
     let result = compare_and_swap!(atom, initial, new);
-    // TODO: Replace with if result when that works
     if result {
         new
     } else {
