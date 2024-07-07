@@ -146,6 +146,24 @@ pub extern "C" fn throw_error<Alloc: Allocator>(
     panic!("Error!");
 }
 
+pub extern "C" fn gc<Alloc: Allocator>(
+    compiler: *mut Compiler<Alloc>,
+    stack_pointer: usize,
+) -> usize {
+    let compiler = unsafe { &mut *compiler };
+    compiler.gc(stack_pointer);
+    BuiltInTypes::null_value() as usize
+}
+
+pub extern "C" fn gc_add_root<Alloc: Allocator>(
+    compiler: *mut Compiler<Alloc>,
+    value: usize,
+) -> usize {
+    let compiler = unsafe { &mut *compiler };
+    compiler.gc_add_root(value);
+    BuiltInTypes::null_value() as usize
+}
+
 fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
@@ -286,17 +304,16 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     compile_trampoline(&mut compiler);
 
-    compiler.add_builtin_function("println", ir::println_value::<Alloc> as *const u8)?;
-    compiler.add_builtin_function("print", ir::print_value::<Alloc> as *const u8)?;
-    compiler.add_builtin_function("allocate_struct", allocate_struct::<Alloc> as *const u8)?;
-    compiler.add_builtin_function("make_closure", make_closure::<Alloc> as *const u8)?;
-    compiler.add_builtin_function("property_access", property_access::<Alloc> as *const u8)?;
-    compiler.add_builtin_function("throw_error", throw_error::<Alloc> as *const u8)?;
-    compiler.add_builtin_function("primitive_deref", placeholder as *const u8)?;
-    compiler.add_builtin_function("primitive_swap!", placeholder as *const u8)?;
-    compiler.add_builtin_function("primitive_reset!", placeholder as *const u8)?;
-    compiler.add_builtin_function("primitive_compare_and_swap!", placeholder as *const u8)?;
-    compiler.add_builtin_function("assert!", placeholder as *const u8)?;
+    compiler.add_builtin_function("println", ir::println_value::<Alloc> as *const u8, false)?;
+    compiler.add_builtin_function("print", ir::print_value::<Alloc> as *const u8, false)?;
+    compiler.add_builtin_function("allocate_struct", allocate_struct::<Alloc> as *const u8, true)?;
+        // TODO: Probably needs true
+    compiler.add_builtin_function("make_closure", make_closure::<Alloc> as *const u8, false)?;
+    compiler.add_builtin_function("property_access", property_access::<Alloc> as *const u8, false)?;
+    compiler.add_builtin_function("throw_error", throw_error::<Alloc> as *const u8, false)?;
+    compiler.add_builtin_function("assert!", placeholder as *const u8, false)?;
+    compiler.add_builtin_function("gc", gc::<Alloc> as *const u8, true)?;
+    compiler.add_builtin_function("gc_add_root", gc_add_root::<Alloc> as *const u8, false)?;
 
     let compile_time = Instant::now();
     compiler.compile_ast(ast)?;

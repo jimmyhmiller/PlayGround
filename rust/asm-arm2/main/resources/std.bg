@@ -31,18 +31,40 @@ fn compare_and_swap!(atom, old, new) {
     primitive_compare_and_swap!(atom, old, new)
 }
 
+struct MyPointerStruct {
+    x
+    y
+}
+
 fn main() {
-    let atom = Atom { value: 42 }
-    println(atom)
-    reset!(atom, 1)
-    println(atom)
-    println(compare_and_swap!(atom, 1, 2))
-    println(compare_and_swap!(atom, 1, 2))
-    println(atom)
-    swap!(atom, fn(x) { x + 1 })
-    println(atom)
-    let x = deref(atom)
-    println(x)
+    // let atom = Atom { value: 42 }
+    // println(atom)
+    // reset!(atom, 1)
+    // println(atom)
+    // println(compare_and_swap!(atom, 1, 2))
+    // println(compare_and_swap!(atom, 1, 2))
+    // println(atom)
+    // swap!(atom, fn(x) { x + 1 })
+    // println(atom)
+    // let x = deref(atom)
+    // println(x)
+
+    let s = MyPointerStruct { x: 1, y: 2};
+    let new_atom = Atom { value: s };
+    println(new_atom);
+    gc();
+    println(new_atom);
+    let new_s = MyPointerStruct { x: 3, y: 4};
+    reset!(new_atom, new_s);
+    println(new_atom);
+    gc();
+    println(new_atom);
+    
+
+
+
+
+
     "done!"
 }
 
