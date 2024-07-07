@@ -18,6 +18,7 @@ pub struct Function {
     jump_table_offset: usize,
     is_foreign: bool,
     pub is_builtin: bool,
+    pub needs_stack_pointer: bool,
     is_defined: bool,
     number_of_locals: usize,
 }
@@ -178,6 +179,7 @@ pub trait Allocator {
         stack_pointer: usize,
         options: AllocatorOptions,
     );
+    fn gc_add_root(&mut self, root: usize);
 }
 
 pub struct Compiler<Alloc: Allocator> {
@@ -257,6 +259,18 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         )
     }
 
+    pub fn gc(&mut self, stack_pointer: usize) {
+        let options = self.get_allocate_options();
+        self.heap.gc(&mut self.stack, &self.stack_map, stack_pointer, options);
+    }
+
+    pub fn gc_add_root(&mut self, root: usize) {
+        self.println(root);
+        if BuiltInTypes::is_heap_pointer(root) {
+            self.heap.gc_add_root(root);
+        }
+    }
+
     fn get_stack_pointer(&self) -> usize {
         // I think I want the end of the stack
         (self.stack.as_ptr() as usize) + (STACK_SIZE)
@@ -276,6 +290,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             jump_table_offset,
             is_foreign: true,
             is_builtin: false,
+            needs_stack_pointer: false,
             is_defined: true,
             number_of_locals: 0,
         });
@@ -293,6 +308,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         &mut self,
         name: &str,
         function: *const u8,
+        needs_stack_pointer: bool,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         let offset = function as usize;
@@ -304,6 +320,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             jump_table_offset,
             is_foreign: true,
             is_builtin: true,
+            needs_stack_pointer,
             is_defined: true,
             number_of_locals: 0,
         });
@@ -391,6 +408,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             jump_table_offset,
             is_foreign: false,
             is_builtin: false,
+            needs_stack_pointer: false,
             is_defined: false,
             number_of_locals: 0,
         };
@@ -412,6 +430,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             jump_table_offset: 0,
             is_foreign: false,
             is_builtin: false,
+            needs_stack_pointer: false,
             is_defined: true,
             number_of_locals,
         });

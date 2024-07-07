@@ -522,11 +522,18 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
         let function = self.compiler.reserve_function(name.as_str()).unwrap();
     
         let builtin = function.is_builtin;
+        let needs_stack_pointer = function.needs_stack_pointer;
         if builtin {
             let pointer_reg = self.ir.volatile_register();
             let pointer: Value = self.compiler.get_compiler_ptr().into();
             self.ir.assign(pointer_reg, pointer);
             args.insert(0, pointer_reg.into());
+        }
+        if needs_stack_pointer {
+            let stack_pointer_reg = self.ir.volatile_register();
+            let stack_pointer = self.ir.get_stack_pointer_imm(0);
+            self.ir.assign(stack_pointer_reg, stack_pointer);
+            args.insert(1, stack_pointer);
         }
     
         let jump_table_pointer =
@@ -844,6 +851,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 // TODO: I need a raw add that doesn't check for tags
                 let offset = self.ir.add(untagged, Value::RawValue(16));
                 let value = args[1];
+                self.call_builtin("gc_add_root", vec![value]);
                 self.ir.atomic_store(offset, value.into());
                 args[1]
             },

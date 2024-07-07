@@ -242,6 +242,14 @@ impl Allocator for CompactingHeap {
             println!("GC took: {:?}", start.elapsed());
         }
     }
+    
+    fn gc_add_root(&mut self, root: usize) {
+        // We don't need to do anything because all roots are gathered
+        // from the stack. 
+        // Maybe we should do something though?
+        // I guess this could be useful for c stuff,
+        // but for right now I'm not going to do anything.
+    }
 }
 
 impl CompactingHeap {

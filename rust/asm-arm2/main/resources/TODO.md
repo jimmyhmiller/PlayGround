@@ -11,3 +11,6 @@
 * Decide if I want to support kabab-case
 * add `if x` working. Right now you have to compare something
 * Atomics will break with generational gc. Need to do write barriers there.
+* Continuations?
+* Move to another repo
+* Refactor way arm stuff works

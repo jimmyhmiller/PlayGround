@@ -164,6 +164,7 @@ pub struct SimpleGeneration {
     copied: Vec<usize>,
     gc_count: usize,
     full_gc_frequency: usize,
+    additional_roots: Vec<(usize, usize)>,
 }
 
 impl Allocator for SimpleGeneration {
@@ -203,6 +204,10 @@ impl Allocator for SimpleGeneration {
         }
         self.gc_count += 1;
     }
+
+    fn gc_add_root(&mut self, root: usize) {
+        self.additional_roots.push(root);
+    }
 }
 
 impl SimpleGeneration {
@@ -221,6 +226,7 @@ impl SimpleGeneration {
             copied,
             gc_count,
             full_gc_frequency,
+            additional_roots: vec![],
         }
     }
 
@@ -273,7 +279,9 @@ impl SimpleGeneration {
     ) {
         let start = std::time::Instant::now();
         let roots = self.gather_roots(stack, stack_map, stack_pointer);
-        let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
+        let new_roots : Vec<usize> = roots.iter().map(|x| x.1).collect();
+        let new_roots = new_roots.into_iter().chain(self.additional_roots.iter().copied()).collect();
+        let new_roots = unsafe { self.copy_all(new_roots)};
         let stack_buffer = get_live_stack(stack, stack_pointer);
         for (i, (stack_offset, _)) in roots.iter().enumerate() {
             debug_assert!(
@@ -386,7 +394,6 @@ impl SimpleGeneration {
         // til the current stack
         let stack = get_live_stack(stack, stack_pointer);
 
-        let mut to_mark: Vec<usize> = Vec::with_capacity(128);
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
 
         let mut i = 0;
@@ -419,7 +426,6 @@ impl SimpleGeneration {
                             continue;
                         }
                         roots.push((j, *slot));
-                        to_mark.push(*slot);
                     }
                 }
                 continue;
