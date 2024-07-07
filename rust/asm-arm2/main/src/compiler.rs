@@ -859,7 +859,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
     
     pub fn is_inline_primitive_function(&self, name: &str) -> bool {
         match name {
-            "primitive_deref" | "primitive_swap!" | "primitive_reset!" | "primitive_compare_and_swap!" => true,
+            "primitive_deref" | "primitive_swap!" | "primitive_reset!" | "primitive_compare_and_swap!" | "primitive_breakpoint!" => true,
             _ => false,
         }
     }

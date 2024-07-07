@@ -1,0 +1,85 @@
+fn main() {
+    // primitive_breakpoint!();
+    if true {
+        println("true")
+    } else {
+        println("error true")
+    }
+    if false {
+        println("error false")
+    } else {
+        println("false")
+    }
+    if 1 == 1 {
+        println("1 == 1")
+    } else {
+        println("error 1 == 1")
+    }
+    if 1 != 2 {
+        println("1 != 2")
+    } else {
+        println("error 1 != 2")
+    }
+    if 1 < 2 {
+        println("1 < 2")
+    } else {
+        println("error 1 < 2")
+    }
+    if 2 < 1 {
+        println("error 2 < 1")
+    } else {
+        println("2 < 1")
+    }
+    if 1 < 1 {
+        println("error 1 < 1")
+    } else {
+        println("1 < 1")
+    }
+    if 1 <= 1 {
+        println("1 <= 1")
+    } else {
+        println("error 1 <= 1")
+    }
+    if 1 <= 2 {
+        println("1 <= 2")
+    } else {
+        println("error 1 <= 2")
+    }
+    if 2 > 1 {
+        println("2 > 1")
+    } else {
+        println("error 2 > 1")
+    }
+    if 1 > 1 {
+        println("error 1 > 1")
+    } else {
+        println("1 > 1")
+    }
+    if 1 >= 1 {
+        println("1 >= 1")
+    } else {
+        println("error 1 >= 1")
+    }
+    if 2 >= 1 {
+        println("2 >= 1")
+    } else {
+        println("error 2 >= 1")
+    }
+    "done!"
+}
+
+// Expect
+// true
+// false
+// 1 == 1
+// 1 != 2
+// 1 < 2
+// 2 < 1
+// 1 < 1
+// 1 <= 1
+// 1 <= 2
+// 2 > 1
+// 1 > 1
+// 1 >= 1
+// 2 >= 1
+// done!

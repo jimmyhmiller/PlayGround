@@ -241,7 +241,8 @@ pub enum Instruction {
     ExtendLifeTime(Value),
     HeapStoreOffsetReg(Value, Value, Value),
     AtomicLoad(Value, Value),
-    AtomicStore(Value, Value, Value),
+    AtomicStore(Value, Value),
+    CompareAndSwap(Value, Value, Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -362,8 +363,11 @@ impl Instruction {
             Instruction::AtomicLoad(a, b) => {
                 get_registers!(a, b)
             }
-            Instruction::AtomicStore(a, b, c) => {
+            Instruction::AtomicStore(a, b) => {
                 get_registers!(a, b)
+            }
+            Instruction::CompareAndSwap(a, b, c) => {
+                get_registers!(a, b, c)
             }
             Instruction::HeapLoadReg(a, b, c) => {
                 get_registers!(a, b, c)
@@ -629,6 +633,19 @@ impl Ir {
     {
         self.instructions
             .push(Instruction::Assign(dest, val.into()));
+    }
+    
+    pub fn assign_new_force<A>(&mut self, val: A) -> VirtualRegister
+    where
+        A: Into<Value>,
+    {
+        // We want to always get a new register.
+        // This is useful if the register we are passing will be reassigned
+        // like it is for atomics
+        let val = val.into();
+        let register = self.next_register(None, false);
+        self.instructions.push(Instruction::Assign(register, val));
+        register
     }
 
     pub fn assign_new<A>(&mut self, val: A) -> VirtualRegister
@@ -1147,14 +1164,21 @@ impl Ir {
                     let dest = alloc.allocate_register(index, dest, lang);
                     lang.atomic_load(dest, ptr);
                 }
-                Instruction::AtomicStore(result, ptr, val) => {
+                Instruction::AtomicStore(ptr, val) => {
                     let ptr = ptr.try_into().unwrap();
                     let ptr = alloc.allocate_register(index, ptr, lang);
                     let val = val.try_into().unwrap();
                     let val = alloc.allocate_register(index, val, lang);
-                    let result = result.try_into().unwrap();
-                    let result = alloc.allocate_register(index, result, lang);
-                    lang.atomic_store(result, ptr, val);
+                    lang.atomic_store(ptr, val);
+                }
+                Instruction::CompareAndSwap(dest, ptr, val) => {
+                    let ptr = ptr.try_into().unwrap();
+                    let ptr = alloc.allocate_register(index, ptr, lang);
+                    let val = val.try_into().unwrap();
+                    let val = alloc.allocate_register(index, val, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+                    lang.compare_and_swap(dest, ptr, val);
                 }
                 Instruction::HeapLoadReg(dest, ptr, offset) => {
                     let ptr = ptr.try_into().unwrap();
@@ -1305,13 +1329,22 @@ impl Ir {
             .push(Instruction::AtomicLoad(dest.into(), source.into()));
         dest.into()
     }
-    pub fn atomic_store(&mut self, dest: Value, source: Value) -> Value {
+    pub fn atomic_store(&mut self, dest: Value, source: Value) {
         let source = self.assign_new(source);
         let dest = self.assign_new(dest);
-        let result = self.volatile_register();
         self.instructions
-            .push(Instruction::AtomicStore(result.into(), dest.into(), source.into()));
-        result.into()
+            .push(Instruction::AtomicStore(dest.into(), source.into()));
+    }
+
+    pub fn compare_and_swap(&mut self, expected: Value, new: Value, pointer: Value) {
+        let expected = self.assign_new(expected);
+        let new = self.assign_new(new);
+        let pointer = self.assign_new(pointer);
+        self.instructions.push(Instruction::CompareAndSwap(
+            expected.into(),
+            new.into(),
+            pointer.into(),
+        ));
     }
 
     pub fn heap_load_with_reg_offset(&mut self, source: Value, offset: Value) -> Value {
@@ -1457,6 +1490,7 @@ impl Ir {
             free_variable_offset,
         ));
     }
+
     
     
    
