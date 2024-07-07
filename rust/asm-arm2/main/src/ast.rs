@@ -851,7 +851,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 // TODO: I need a raw add that doesn't check for tags
                 let offset = self.ir.add(untagged, Value::RawValue(16));
                 let value = args[1];
-                self.call_builtin("gc_add_root", vec![value]);
+                self.call_builtin("gc_add_root", vec![pointer, value]);
                 self.ir.atomic_store(offset, value.into());
                 args[1]
             },

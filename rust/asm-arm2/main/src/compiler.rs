@@ -179,7 +179,7 @@ pub trait Allocator {
         stack_pointer: usize,
         options: AllocatorOptions,
     );
-    fn gc_add_root(&mut self, root: usize);
+    fn gc_add_root(&mut self, old: usize, young: usize);
 }
 
 pub struct Compiler<Alloc: Allocator> {
@@ -264,10 +264,9 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         self.heap.gc(&mut self.stack, &self.stack_map, stack_pointer, options);
     }
 
-    pub fn gc_add_root(&mut self, root: usize) {
-        self.println(root);
-        if BuiltInTypes::is_heap_pointer(root) {
-            self.heap.gc_add_root(root);
+    pub fn gc_add_root(&mut self, old: usize, young: usize) {
+        if BuiltInTypes::is_heap_pointer(young) {
+            self.heap.gc_add_root(old, young);
         }
     }
 

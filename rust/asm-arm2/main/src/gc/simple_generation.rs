@@ -164,6 +164,11 @@ pub struct SimpleGeneration {
     copied: Vec<usize>,
     gc_count: usize,
     full_gc_frequency: usize,
+    // TODO: This may not be the most efficient way
+    // but given the way I'm dealing with mutability
+    // right now it should work fine.
+    // There should be very few atoms
+    // But I will probably want to revist this
     additional_roots: Vec<(usize, usize)>,
 }
 
@@ -205,8 +210,8 @@ impl Allocator for SimpleGeneration {
         self.gc_count += 1;
     }
 
-    fn gc_add_root(&mut self, root: usize) {
-        self.additional_roots.push(root);
+    fn gc_add_root(&mut self, old: usize, young: usize) {
+        self.additional_roots.push((old, young));
     }
 }
 
@@ -280,7 +285,7 @@ impl SimpleGeneration {
         let start = std::time::Instant::now();
         let roots = self.gather_roots(stack, stack_map, stack_pointer);
         let new_roots : Vec<usize> = roots.iter().map(|x| x.1).collect();
-        let new_roots = new_roots.into_iter().chain(self.additional_roots.iter().copied()).collect();
+        let new_roots = new_roots.into_iter().chain(self.additional_roots.iter().map(|x| &x.1).copied()).collect();
         let new_roots = unsafe { self.copy_all(new_roots)};
         let stack_buffer = get_live_stack(stack, stack_pointer);
         for (i, (stack_offset, _)) in roots.iter().enumerate() {
@@ -366,6 +371,8 @@ impl SimpleGeneration {
                 return first_field;
             }
         }
+        
+
 
         let size = *(pointer as *const usize) >> 1;
         let data = std::slice::from_raw_parts(pointer as *const u8, size + 8);
@@ -373,6 +380,22 @@ impl SimpleGeneration {
         debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
         // update header of original object to now be the forwarding pointer
         let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
+
+        for (old, young) in self.additional_roots.iter() {
+            if root == *young {
+                let untagged = BuiltInTypes::untag(*old);
+                let object = untagged as *mut u8;
+                let size: usize = *(object as *const usize) >> 1;
+
+                let data = std::slice::from_raw_parts_mut(object.add(8) as *mut usize, size / 8);
+
+                for datum in data.iter_mut() {
+                    if datum == young {
+                        *datum = tagged_new;
+                    }
+                }
+            }
+        }
         let untagged = BuiltInTypes::untag(root);
         let pointer = untagged as *mut u8;
         let pointer = pointer.add(8);

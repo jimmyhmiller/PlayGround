@@ -157,10 +157,11 @@ pub extern "C" fn gc<Alloc: Allocator>(
 
 pub extern "C" fn gc_add_root<Alloc: Allocator>(
     compiler: *mut Compiler<Alloc>,
-    value: usize,
+    old: usize,
+    young: usize,
 ) -> usize {
     let compiler = unsafe { &mut *compiler };
-    compiler.gc_add_root(value);
+    compiler.gc_add_root(old, young);
     BuiltInTypes::null_value() as usize
 }
 

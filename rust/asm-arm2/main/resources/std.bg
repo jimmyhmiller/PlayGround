@@ -36,19 +36,7 @@ struct MyPointerStruct {
     y
 }
 
-fn main() {
-    // let atom = Atom { value: 42 }
-    // println(atom)
-    // reset!(atom, 1)
-    // println(atom)
-    // println(compare_and_swap!(atom, 1, 2))
-    // println(compare_and_swap!(atom, 1, 2))
-    // println(atom)
-    // swap!(atom, fn(x) { x + 1 })
-    // println(atom)
-    // let x = deref(atom)
-    // println(x)
-
+fn create_atom() {
     let s = MyPointerStruct { x: 1, y: 2};
     let new_atom = Atom { value: s };
     println(new_atom);
@@ -59,12 +47,30 @@ fn main() {
     println(new_atom);
     gc();
     println(new_atom);
+    gc();
+    new_atom
+}
+
+fn main() {
+    let atom = Atom { value: 42 }
+    println(atom)
+    reset!(atom, 1)
+    println(atom)
+    println(compare_and_swap!(atom, 1, 2))
+    println(compare_and_swap!(atom, 1, 2))
+    println(atom)
+    swap!(atom, fn(x) { x + 1 })
+    println(atom)
+    let x = deref(atom)
+    println(x)
     
-
-
-
-
-
+    let my_atom = create_atom();
+    println(my_atom);
+    gc();
+    println(my_atom);
+    reset!(my_atom, MyPointerStruct { x: 5, y: 6 });
+    gc();
+    println(my_atom);
     "done!"
 }
 
@@ -77,4 +83,11 @@ fn main() {
 // Atom { value: 2 }
 // Atom { value: 3 }
 // 3
+// Atom { value: MyPointerStruct { x: 1, y: 2 } }
+// Atom { value: MyPointerStruct { x: 1, y: 2 } }
+// Atom { value: MyPointerStruct { x: 3, y: 4 } }
+// Atom { value: MyPointerStruct { x: 3, y: 4 } }
+// Atom { value: MyPointerStruct { x: 3, y: 4 } }
+// Atom { value: MyPointerStruct { x: 3, y: 4 } }
+// Atom { value: MyPointerStruct { x: 5, y: 6 } }
 // done!
