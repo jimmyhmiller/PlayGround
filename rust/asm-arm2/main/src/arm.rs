@@ -268,20 +268,20 @@ impl Condition {
         match self {
             Condition::Equal => 0,
             Condition::NotEqual => 1,
-            Condition::GreaterThanOrEqual => 10,
             Condition::LessThan => 11,
-            Condition::GreaterThan => 12,
             Condition::LessThanOrEqual => 13,
+            Condition::GreaterThan => 12,
+            Condition::GreaterThanOrEqual => 10,
         }
     }
     fn arm_inverted_condition(&self) -> i32 {
         match self {
             Condition::Equal => 1,
             Condition::NotEqual => 0,
-            Condition::GreaterThanOrEqual => 11,
-            Condition::LessThan => 10,
-            Condition::GreaterThan => 13,
-            Condition::LessThanOrEqual => 12,
+            Condition::LessThan => 13,
+            Condition::LessThanOrEqual => 11,
+            Condition::GreaterThan => 10,
+            Condition::GreaterThanOrEqual => 12,
         }
     }
 }
@@ -317,7 +317,6 @@ pub fn jump_equal(destination: u32) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
 pub fn jump_not_equal(destination: u32) -> ArmAsm {
     ArmAsm::BCond {
         imm19: destination as i32,
@@ -325,7 +324,6 @@ pub fn jump_not_equal(destination: u32) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
 pub fn jump_greater_or_equal(destination: u32) -> ArmAsm {
     ArmAsm::BCond {
         imm19: destination as i32,
@@ -333,7 +331,6 @@ pub fn jump_greater_or_equal(destination: u32) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
 pub fn jump_less_than(destination: u32) -> ArmAsm {
     ArmAsm::BCond {
         imm19: destination as i32,
@@ -341,7 +338,6 @@ pub fn jump_less_than(destination: u32) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
 pub fn jump_greater(destination: u32) -> ArmAsm {
     ArmAsm::BCond {
         imm19: destination as i32,
@@ -349,7 +345,6 @@ pub fn jump_greater(destination: u32) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
 pub fn jump_less_or_equal(destination: u32) -> ArmAsm {
     ArmAsm::BCond {
         imm19: destination as i32,
@@ -620,18 +615,28 @@ impl LowLevelArm {
     }
 
     pub fn atomic_load(&mut self, destination: Register, source: Register) {
-        self.instructions.push(ArmAsm::Ldxr {
-             size: 0b11,
-             rn: source,
-             rt: destination,
+        self.instructions.push(ArmAsm::Ldar {
+            size: 0b11,
+            rn: source,
+            rt: destination,
         })
     }
-    pub fn atomic_store(&mut self,  result: Register, ptr: Register, val: Register,) {
-        self.instructions.push(ArmAsm::Stxr {
+    pub fn atomic_store(&mut self, ptr: Register, val: Register) {
+        self.instructions.push(ArmAsm::Stlr {
             size: 0b11,
-            rs: result,
             rn: ptr,
             rt: val,
+        });
+    }
+
+    pub fn compare_and_swap(&mut self, expected: Register, new: Register, ptr: Register) {
+        self.instructions.push(ArmAsm::Cas {
+            size: 0b11,
+            l: 1,
+            rs: expected,
+            o0: 1,
+            rn: ptr,
+            rt: new,
         });
     }
 
@@ -1018,8 +1023,6 @@ impl LowLevelArm {
             self.store_local(null_register, local_offset)
         }
     }
-    
-    
 }
 
 #[allow(dead_code)]

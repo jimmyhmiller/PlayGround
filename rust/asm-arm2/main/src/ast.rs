@@ -359,44 +359,34 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 then,
                 else_,
             } => {
-                // TODO: My condition system is a bit ugly
-                // Mostly because I don't have booleans
-                if let Ast::Condition {
-                    operator,
-                    left,
-                    right,
-                } = condition.as_ref()
-                {
-                    let a = self.call_compile(left);
-                    let b = self.call_compile(right);
-                    let end_if_label = self.ir.label("end_if");
+                
+                let condition = self.call_compile(&condition);
 
-                    let result_reg = self.ir.volatile_register();
+                let end_if_label = self.ir.label("end_if");
 
-                    let then_label = self.ir.label("then");
-                    self.ir.jump_if(then_label, *operator, a, b);
+                let result_reg = self.ir.volatile_register();
 
-                    let mut else_result = Value::SignedConstant(0);
-                    for ast in else_.iter() {
-                        else_result = self.call_compile(&Box::new(ast));
-                    }
-                    self.ir.assign(result_reg, else_result);
-                    self.ir.jump(end_if_label);
+                let then_label = self.ir.label("then");
+                self.ir.jump_if(then_label, Condition::Equal, condition, Value::True);
 
-                    self.ir.write_label(then_label);
-
-                    let mut then_result = Value::SignedConstant(0);
-                    for ast in then.iter() {
-                        then_result = self.call_compile(&Box::new(ast));
-                    }
-                    self.ir.assign(result_reg, then_result);
-
-                    self.ir.write_label(end_if_label);
-
-                    result_reg.into()
-                } else {
-                    panic!("Expected condition")
+                let mut else_result = Value::SignedConstant(0);
+                for ast in else_.iter() {
+                    else_result = self.call_compile(&Box::new(ast));
                 }
+                self.ir.assign(result_reg, else_result);
+                self.ir.jump(end_if_label);
+
+                self.ir.write_label(then_label);
+
+                let mut then_result = Value::SignedConstant(0);
+                for ast in then.iter() {
+                    then_result = self.call_compile(&Box::new(ast));
+                }
+                self.ir.assign(result_reg, then_result);
+
+                self.ir.write_label(end_if_label);
+
+                result_reg.into()
             }
             Ast::Add { left, right } => {
                 self.not_tail_position();
@@ -848,23 +838,35 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 let reg = self.ir.volatile_register();
                 self.ir.atomic_load(reg.into(), offset)
             },
-            "primitive_swap!" => {
-                self.ir.assign_new(Value::Null).into()
-            }
             "primitive_reset!" => {
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer.into());
                 // TODO: I need a raw add that doesn't check for tags
                 let offset = self.ir.add(untagged, Value::RawValue(16));
                 let value = args[1];
-                let temp = self.ir.volatile_register();
-                self.ir.atomic_load(temp.into(), offset);
-                let result = self.ir.atomic_store(offset, value.into());
-                // TODO: I need to check this result for failure
+                self.ir.atomic_store(offset, value.into());
                 args[1]
             },
             "primitive_compare_and_swap!" => {
-                self.ir.assign_new(Value::Null).into()
+                // self.ir.breakpoint();
+                let pointer = args[0];
+                let untagged = self.ir.untag(pointer.into());
+                let offset = self.ir.add(untagged, Value::RawValue(16));
+                let expected = args[1];
+                let new = args[2];
+                let expected_and_result = self.ir.assign_new_force(expected);
+                self.ir.compare_and_swap(expected_and_result.into(), new.into(), offset);
+                // TODO: I should do a conditional move here instead of a jump
+                let label = self.ir.label("compare_and_swap");
+                let result = self.ir.assign_new(Value::True);
+                self.ir.jump_if(label, Condition::Equal, expected_and_result, expected);
+                self.ir.assign(result, Value::False);
+                self.ir.write_label(label);
+                result.into()
+            }
+            "primitive_breakpoint!" => {
+                self.ir.breakpoint();
+                Value::Null
             }
             _ => panic!("Unknown inline primitive function {}", name)
         }

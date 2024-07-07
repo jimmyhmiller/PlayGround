@@ -11,8 +11,15 @@ fn deref(atom) {
 }
 
 fn swap!(atom, f) {
-    // assert!(atom is Atom)
-    primitive_swap!(atom, f)
+    let initial = deref(atom);
+    let new = f(initial);
+    let result = compare_and_swap!(atom, initial, new);
+    // TODO: Replace with if result when that works
+    if result {
+        new
+    } else {
+        swap!(atom, f)
+    }
 }
 
 fn reset!(atom, value) {
@@ -30,9 +37,23 @@ fn main() {
     println(atom)
     reset!(atom, 1)
     println(atom)
+    println(compare_and_swap!(atom, 1, 2))
+    println(compare_and_swap!(atom, 1, 2))
+    println(atom)
     swap!(atom, fn(x) { x + 1 })
     println(atom)
     let x = deref(atom)
     println(x)
     "done!"
 }
+
+
+// Expect
+// Atom { value: 42 }
+// Atom { value: 1 }
+// true
+// false
+// Atom { value: 2 }
+// Atom { value: 3 }
+// 3
+// done!

@@ -9,3 +9,4 @@
 * Namespaces
 * Data structures
 * Decide if I want to support kabab-case
+* add `if x` working. Right now you have to compare something
