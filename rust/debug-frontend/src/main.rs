@@ -1275,7 +1275,7 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         // TODO: Make all of this better
         // and configurable at runtime
         let launchinfo = SBLaunchInfo::new();
-        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/main/resources/std.bg"], false);
+        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/main/resources/closures.bg"], false);
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);
         match target.launch(launchinfo) {
             Ok(process) => Some((target, process)),

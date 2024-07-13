@@ -11,7 +11,6 @@ use gc::{
     simple_mark_and_sweep::SimpleMarkSweepHeap,
 };
 
-use core::borrow;
 use std::{error::Error, mem, slice::from_raw_parts, sync::RwLock, time::Instant};
 
 mod arm;
@@ -194,6 +193,16 @@ pub extern "C" fn gc_add_root<Alloc: Allocator>(
     BuiltInTypes::null_value() as usize
 }
 
+pub extern "C" fn new_thread<Alloc: Allocator>(
+    compiler: *const RwLock<Compiler<Alloc>>,
+    function: usize,
+) -> usize {
+    let compiler = unsafe { & *compiler };
+    let mut compiler = compiler.write().unwrap();
+    compiler.new_thread(function);
+    BuiltInTypes::null_value() as usize
+}
+
 fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
@@ -349,6 +358,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     borrowed_compiler.add_builtin_function("assert!", placeholder as *const u8, false)?;
     borrowed_compiler.add_builtin_function("gc", gc::<Alloc> as *const u8, true)?;
     borrowed_compiler.add_builtin_function("gc_add_root", gc_add_root::<Alloc> as *const u8, false)?;
+    borrowed_compiler.add_builtin_function("thread", new_thread::<Alloc> as *const u8, false)?;
 
     let compile_time = Instant::now();
     borrowed_compiler.compile_ast(ast)?;

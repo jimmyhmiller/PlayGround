@@ -3,7 +3,7 @@ use std::{error::Error, mem};
 use mmap_rs::{MmapMut, MmapOptions};
 
 use crate::{
-    compiler::{Allocator, AllocatorOptions, StackMap},
+    compiler::{Allocator, AllocatorOptions, StackMap, STACK_SIZE},
     ir::BuiltInTypes,
 };
 
@@ -196,7 +196,7 @@ pub struct CompactingHeap {
 impl Allocator for CompactingHeap {
     fn allocate(
         &mut self,
-        stack: &mut MmapMut,
+        stack_base: usize,
         stack_map: &StackMap,
         stack_pointer: usize,
         bytes: usize,
@@ -204,10 +204,10 @@ impl Allocator for CompactingHeap {
         options: AllocatorOptions,
     ) -> Result<usize, Box<dyn Error>> {
         if options.gc_always {
-            self.gc(stack, stack_map, stack_pointer, options);
+            self.gc(stack_base, stack_map, stack_pointer, options);
         }
         let pointer =
-            self.allocate_inner(stack, stack_map, stack_pointer, bytes, kind, 0, options)?;
+            self.allocate_inner(stack_base, stack_map, stack_pointer, bytes, kind, 0, options)?;
         assert!(pointer % 8 == 0, "Pointer is not aligned");
         Ok(pointer)
     }
@@ -216,7 +216,7 @@ impl Allocator for CompactingHeap {
     // Simple cases work, but not all cases
     fn gc(
         &mut self,
-        stack: &mut MmapMut,
+        stack_base: usize,
         stack_map: &StackMap,
         stack_pointer: usize,
         options: AllocatorOptions,
@@ -225,10 +225,10 @@ impl Allocator for CompactingHeap {
             return;
         }
         let start = std::time::Instant::now();
-        let roots = self.gather_roots(stack, stack_map, stack_pointer);
+        let roots = self.gather_roots(stack_base, stack_map, stack_pointer);
         let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
         mem::swap(&mut self.from_space, &mut self.to_space);
-        let stack_buffer = get_live_stack(stack, stack_pointer);
+        let stack_buffer = get_live_stack(stack_base, stack_pointer);
         for (i, (stack_offset, _)) in roots.iter().enumerate() {
             debug_assert!(
                 BuiltInTypes::untag(new_roots[i]) % 8 == 0,
@@ -267,7 +267,7 @@ impl CompactingHeap {
     #[allow(clippy::too_many_arguments)]
     fn allocate_inner(
         &mut self,
-        stack: &mut MmapMut,
+        stack_base: usize,
         stack_map: &StackMap,
         stack_pointer: usize,
         bytes: usize,
@@ -287,13 +287,13 @@ impl CompactingHeap {
         if self.from_space.can_allocate(bytes) {
             return self.from_space.allocate(bytes);
         } else {
-            self.gc(stack, stack_map, stack_pointer, options);
+            self.gc(stack_base, stack_map, stack_pointer, options);
         }
         if !self.from_space.can_allocate(bytes) {
             self.from_space.resize();
         }
         self.allocate_inner(
-            stack,
+            stack_base,
             stack_map,
             stack_pointer,
             bytes,
@@ -380,13 +380,13 @@ impl CompactingHeap {
     // Stolen from simple mark and sweep
     pub fn gather_roots(
         &mut self,
-        stack: &mut MmapMut,
+        stack_base: usize,
         stack_map: &StackMap,
         stack_pointer: usize,
     ) -> Vec<(usize, usize)> {
         // I'm adding to the end of the stack I've allocated so I only need to go from the end
         // til the current stack
-        let stack = get_live_stack(stack, stack_pointer);
+        let stack = get_live_stack(stack_base, stack_pointer);
 
         let mut to_mark: Vec<usize> = Vec::with_capacity(128);
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
@@ -429,14 +429,15 @@ impl CompactingHeap {
     }
 }
 
-fn get_live_stack(stack: &mut MmapMut, stack_pointer: usize) -> &mut [usize] {
-    let stack_end = stack.as_ptr() as usize + stack.size();
+fn get_live_stack<'a>(stack_base: usize, stack_pointer: usize) -> &'a mut [usize] {
+    let stack_end = stack_base;
     // let current_stack_pointer = current_stack_pointer & !0b111;
     let distance_till_end = stack_end - stack_pointer;
     let num_64_till_end = (distance_till_end / 8) + 1;
-    let len = stack.size() / 8;
+    let len = STACK_SIZE / 8;
+    let stack_begin = stack_end - STACK_SIZE;
     let stack = unsafe {
-        std::slice::from_raw_parts_mut(stack.as_mut_ptr() as *mut usize, stack.size() / 8)
+        std::slice::from_raw_parts_mut(stack_begin as *mut usize, STACK_SIZE / 8)
     };
 
     (&mut stack[len - num_64_till_end..]) as _

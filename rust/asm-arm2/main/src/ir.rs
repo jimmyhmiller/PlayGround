@@ -5,7 +5,6 @@ use asm::arm::{Register, X0, X1, ZERO_REGISTER};
 use crate::{
     arm::LowLevelArm,
     common::Label,
-    compiler::{Allocator, Compiler},
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -1145,7 +1144,7 @@ impl Ir {
                     Value::FreeVariable(free_variable) => {
                         lang.load_from_stack(
                             lang.ret_reg(),
-                            (*free_variable + self.num_locals) as i32,
+                            -((*free_variable + self.num_locals + 1) as i32),
                         );
                         lang.jump(exit);
                     }

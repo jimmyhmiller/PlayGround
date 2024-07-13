@@ -1,5 +1,5 @@
 use crate::{
-    compiler::{Allocator, AllocatorOptions, StackMap},
+    compiler::{Allocator, AllocatorOptions, StackMap, STACK_SIZE},
     debugger,
     ir::BuiltInTypes,
     Data, Message,
@@ -77,7 +77,7 @@ pub struct SimpleMarkSweepHeap {
 impl Allocator for SimpleMarkSweepHeap {
     fn allocate(
         &mut self,
-        stack: &mut MmapMut,
+        stack_base: usize,
         stack_map: &StackMap,
         stack_pointer: usize,
         bytes: usize,
@@ -85,13 +85,13 @@ impl Allocator for SimpleMarkSweepHeap {
         options: AllocatorOptions,
     ) -> Result<usize, Box<dyn Error>> {
         if options.gc_always {
-            self.gc(stack, stack_map, stack_pointer, options);
+            self.gc(stack_base, stack_map, stack_pointer, options);
         }
 
         if self.can_allocate(bytes) {
             self.allocate_inner(bytes, 0, None)
         } else {
-            self.gc(stack, stack_map, stack_pointer, options);
+            self.gc(stack_base, stack_map, stack_pointer, options);
             if self.can_allocate(bytes) {
                 self.allocate_inner(bytes, 0, None)
             } else {
@@ -103,7 +103,7 @@ impl Allocator for SimpleMarkSweepHeap {
 
     fn gc(
         &mut self,
-        stack: &mut MmapMut,
+        stack_base: usize,
         stack_map: &StackMap,
         stack_pointer: usize,
         options: AllocatorOptions,
@@ -111,7 +111,7 @@ impl Allocator for SimpleMarkSweepHeap {
         if !options.gc {
             return;
         }
-        self.mark_and_sweep(stack, stack_map, stack_pointer, options);
+        self.mark_and_sweep(stack_base, stack_map, stack_pointer, options);
     }
 
     fn gc_add_root(&mut self, _old: usize, _young: usize) {
@@ -290,28 +290,29 @@ impl SimpleMarkSweepHeap {
 
     pub fn mark_and_sweep(
         &mut self,
-        stack: &MmapMut,
+        stack_base: usize, 
         stack_map: &StackMap,
         stack_pointer: usize,
         options: AllocatorOptions,
     ) {
         let start = std::time::Instant::now();
-        self.mark(stack, stack_map, stack_pointer);
+        self.mark(stack_base, stack_map, stack_pointer);
         self.sweep();
         if options.print_stats {
             println!("Mark and sweep took {:?}", start.elapsed());
         }
     }
 
-    pub fn mark(&mut self, stack: &MmapMut, stack_map: &StackMap, stack_pointer: usize) {
+    pub fn mark(&mut self, stack_base: usize, stack_map: &StackMap, stack_pointer: usize) {
         // I'm adding to the end of the stack I've allocated so I only need to go from the end
         // til the current stack
-        let stack_end = stack.as_ptr() as usize + stack.size();
+        let stack_end = stack_base;
         // let current_stack_pointer = current_stack_pointer & !0b111;
         let distance_till_end = stack_end - stack_pointer;
         let num_64_till_end = (distance_till_end / 8) + 1;
+        let stack_begin = stack_end - STACK_SIZE;
         let stack =
-            unsafe { std::slice::from_raw_parts(stack.as_ptr() as *const usize, stack.size() / 8) };
+            unsafe { std::slice::from_raw_parts(stack_begin as *const usize, STACK_SIZE / 8) };
         let stack = &stack[stack.len() - num_64_till_end..];
 
         let mut to_mark: Vec<usize> = Vec::with_capacity(128);
