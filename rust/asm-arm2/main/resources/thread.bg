@@ -1,0 +1,14 @@
+struct Thing {
+    x
+}
+
+
+fn print_endlessly(message) {
+    println(message)
+    print_endlessly(message, x)
+}
+
+fn main() {
+    thread(fn() { print_endlessly("in thread") });
+    print_endlessly("in main")
+}

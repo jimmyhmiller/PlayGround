@@ -14,3 +14,5 @@
 * Continuations?
 * Move to another repo
 * Refactor way arm stuff works
+* Make closures better
+* Make closures start with size
