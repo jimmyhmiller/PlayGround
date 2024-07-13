@@ -844,6 +844,15 @@ impl LowLevelArm {
         X0
     }
 
+    pub fn padded_max_locals(&mut self) -> usize {
+        let mut max = self.max_locals as u64;
+        let remainder = max % 2;
+        if remainder != 0 {
+            max += 1;
+        }
+        max as usize
+    }
+
     pub fn patch_prelude_and_epilogue(&mut self) {
         let mut max = self.max_stack_size as u64 + self.max_locals as u64;
         let remainder = max % 2;

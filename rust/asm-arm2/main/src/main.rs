@@ -149,7 +149,7 @@ extern "C" fn make_closure<Alloc: Allocator>(
     let mut compiler = compiler.write().unwrap();
     let num_free = BuiltInTypes::untag(num_free);
     let free_variable_pointer = free_variable_pointer as *const usize;
-    let start = unsafe { free_variable_pointer.add(num_free) };
+    let start = unsafe { free_variable_pointer.sub(num_free - 1) };
     let free_variables = unsafe { from_raw_parts(start, num_free) };
     compiler.make_closure(function, free_variables).unwrap()
 }
@@ -395,6 +395,19 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         println!("Test passed");
     }
     drop(borrowed_compiler);
+
+    loop {
+       // take the list of threads so we are not holding a borrow on the compiler
+       // use mem::replace to swap out the threads with an empty vec
+       let threads = mem::replace(&mut compiler_with_lock.write().unwrap().threads, Vec::new());
+        if threads.is_empty() {
+            break;
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
+    
 
     Ok(())
 }

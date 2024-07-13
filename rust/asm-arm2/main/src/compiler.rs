@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{collections::HashMap, error::Error, slice::from_raw_parts_mut, sync::RwLock, thread::{self, ThreadId}};
+use std::{collections::HashMap, error::Error, slice::from_raw_parts_mut, sync::RwLock, thread::{self, JoinHandle, ThreadId}};
 
 use bincode::{Decode, Encode};
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
@@ -193,6 +193,7 @@ pub struct Compiler<Alloc: Allocator> {
     functions: Vec<Function>,
     heap: Alloc,
     stacks: Vec<(ThreadId, MmapMut)>,
+    pub threads: Vec<JoinHandle<u64>>,
     string_constants: Vec<StringValue>,
     stack_map: StackMap,
     pub printer: Box<dyn Printer>,
@@ -236,6 +237,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             functions: Vec::new(),
             heap: allocator,
             stacks: vec![(std::thread::current().id(), MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap())],
+            threads: vec![],
             string_constants: vec![],
             stack_map: StackMap::new(),
             printer,
@@ -289,7 +291,15 @@ impl<Alloc: Allocator> Compiler<Alloc> {
     // TODO: Allocate/gc need to change to work with this
     pub fn new_thread(&mut self, f: usize) {
         let trampoline = self.get_trampoline();
-        let f = BuiltInTypes::untag(f);
+        // TODO: Better way to do this
+        let f = if BuiltInTypes::get_kind(f) == BuiltInTypes::Closure {
+            let f = BuiltInTypes::untag(f);
+            let pointer = f as *const u8;
+            let function_pointer = unsafe { *(pointer as *const usize) };
+            BuiltInTypes::untag(function_pointer)
+        } else {
+            BuiltInTypes::untag(f)
+        };
         let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
         let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
         let thread = thread::spawn(move || {
@@ -298,6 +308,17 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         });
 
         self.stacks.push((thread.thread().id(), new_stack));
+        self.threads.push(thread);
+    }
+
+    pub fn wait_for_other_threads(&mut self) {
+        if self.threads.len() == 0 {
+            return;
+        }
+        for thread in self.threads.drain(..) {
+            thread.join().unwrap();
+        }
+        self.wait_for_other_threads();
     }
 
     pub fn add_foreign_function(

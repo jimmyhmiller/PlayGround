@@ -264,6 +264,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
 
                 self.ir = old_ir;
 
+                
                 if let Some(value) = self.compile_closure(function_pointer) {
                     return value;
                 }
