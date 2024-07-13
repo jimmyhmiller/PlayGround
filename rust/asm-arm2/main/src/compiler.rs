@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{collections::HashMap, error::Error, slice::from_raw_parts_mut};
+use std::{collections::HashMap, error::Error, slice::from_raw_parts_mut, sync::RwLock};
 
 use bincode::{Decode, Encode};
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
@@ -197,6 +197,7 @@ pub struct Compiler<Alloc: Allocator> {
     stack_map: StackMap,
     pub printer: Box<dyn Printer>,
     command_line_arguments: CommandLineArguments,
+    lock_pointer: Option<*const RwLock<Compiler<Alloc>>>,
 }
 
 impl<Alloc: Allocator> fmt::Debug for Compiler<Alloc> {
@@ -239,6 +240,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             stack_map: StackMap::new(),
             printer,
             command_line_arguments,
+            lock_pointer: None,
         }
     }
 
@@ -273,6 +275,10 @@ impl<Alloc: Allocator> Compiler<Alloc> {
     fn get_stack_pointer(&self) -> usize {
         // I think I want the end of the stack
         (self.stack.as_ptr() as usize) + (STACK_SIZE)
+    }
+
+    pub fn set_lock_pointer(&mut self, lock_pointer: *const RwLock<Compiler<Alloc>>) {
+        self.lock_pointer = Some(lock_pointer);
     }
 
     pub fn add_foreign_function(
@@ -540,8 +546,8 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         Ok(start)
     }
 
-    pub fn get_compiler_ptr(&self) -> *const Compiler<Alloc> {
-        self as *const Compiler<Alloc>
+    pub fn get_compiler_ptr(&self) -> *const RwLock<Compiler<Alloc>> {
+        self.lock_pointer.unwrap()
     }
 
     // TODO: Make this good
@@ -689,7 +695,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
     }
 
     // TODO: Make less ugly
-    pub(crate) fn run_function(&self, name: &str, vec: Vec<i32>) -> u64 {
+    pub fn run_function(&self, name: &str, vec: Vec<i32>) -> u64 {
         let function = self
             .functions
             .iter()
@@ -705,6 +711,53 @@ impl<Alloc: Allocator> Compiler<Alloc> {
                 .unwrap(),
             _ => panic!("Too many arguments"),
         }
+    }
+
+    pub fn get_function_base(&self, name: &str) -> (u64, u64, u64) {
+        let function = self
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .expect(&format!("Can't find function named {}", name));
+        let jump_table_offset = function.jump_table_offset;
+        let offset = &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(offset);
+        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
+
+        let trampoline = self
+            .functions
+            .iter()
+            .find(|f| f.name == "trampoline")
+            .unwrap();
+        let trampoline_jump_table_offset = trampoline.jump_table_offset;
+        let trampoline_offset = &self.jump_table.as_ref().unwrap()
+            [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
+
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(trampoline_offset);
+        let trampoline_start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
+        let stack_pointer = self.get_stack_pointer();
+
+        (stack_pointer as u64, start as u64, trampoline_start as u64)
+    }
+
+    pub fn get_function0(&self, name: &str) -> Box<dyn Fn() -> u64> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name);
+        let f: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
+        Box::new(move || f(stack_pointer as u64, start as u64))
+    }
+
+    fn get_function1(&self, name: &str) -> Box<dyn Fn(u64) -> u64> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name);
+        let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
+        Box::new(move |arg1| f(stack_pointer as u64, start as u64, arg1))
+    }
+
+    fn get_function2(&self, name: &str) -> Box<dyn Fn(u64, u64) -> u64> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name);
+        let f: fn(u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
+        Box::new(move |arg1, arg2| f(stack_pointer as u64, start as u64, arg1, arg2))
     }
 
     pub fn add_string(&mut self, string_value: StringValue) -> Value {
