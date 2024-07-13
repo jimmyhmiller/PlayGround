@@ -1550,28 +1550,3 @@ pub fn heap_test() -> Ir {
     ir
 }
 
-// pub fn hello_world() -> Ir {
-//     let mut ir = Ir::new();
-//     let print = ir.add_function("print", print_value as *const u8);
-//     let string_constant = ir.string_constant("Hello World!".to_string());
-//     let string_constant = ir.load_string_constant(string_constant);
-//     let print = ir.function(print);
-//     ir.call(print, vec![string_constant]);
-//     ir
-// }
-
-pub extern "C" fn println_value<Alloc: Allocator>(
-    compiler: &mut Compiler<Alloc>,
-    value: usize,
-) -> usize {
-    compiler.println(value);
-    0b111
-}
-
-pub extern "C" fn print_value<Alloc: Allocator>(
-    compiler: &mut Compiler<Alloc>,
-    value: usize,
-) -> usize {
-    compiler.print(value);
-    0b111
-}

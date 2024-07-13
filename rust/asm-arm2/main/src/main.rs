@@ -10,7 +10,9 @@ use gc::{
     compacting::CompactingHeap, simple_generation::SimpleGeneration,
     simple_mark_and_sweep::SimpleMarkSweepHeap,
 };
-use std::{error::Error, mem, slice::from_raw_parts, time::Instant};
+
+use core::borrow;
+use std::{error::Error, mem, slice::from_raw_parts, sync::RwLock, time::Instant};
 
 mod arm;
 pub mod ast;
@@ -102,13 +104,36 @@ pub fn debugger(message: Message) {
     // Should make it is so we clean up this memory
 }
 
+pub extern "C" fn println_value<Alloc: Allocator>(
+    compiler: *const RwLock<Compiler<Alloc>>,
+    value: usize,
+) -> usize {
+    let compiler = unsafe { & *compiler };
+    let mut compiler = compiler.write().unwrap();
+    compiler.println(value);
+    0b111
+}
+
+pub extern "C" fn print_value<Alloc: Allocator>(
+    compiler: *const RwLock<Compiler<Alloc>>,
+    value: usize,
+) -> usize {
+    let compiler = unsafe { & *compiler };
+    let mut compiler = compiler.write().unwrap();
+    compiler.print(value);
+    0b111
+}
+
+
 extern "C" fn allocate_struct<Alloc: Allocator>(
-    compiler: *mut Compiler<Alloc>,
+    compiler: *const RwLock<Compiler<Alloc>>,
     value: usize,
     stack_pointer: usize,
 ) -> usize {
     let value = BuiltInTypes::untag(value);
-    let compiler = unsafe { &mut *compiler };
+    let compiler = unsafe { & *compiler };
+
+    let mut compiler = compiler.write().unwrap();
 
     compiler
         .allocate(value, stack_pointer, BuiltInTypes::Struct)
@@ -116,12 +141,13 @@ extern "C" fn allocate_struct<Alloc: Allocator>(
 }
 
 extern "C" fn make_closure<Alloc: Allocator>(
-    compiler: *mut Compiler<Alloc>,
+    compiler: *const RwLock<Compiler<Alloc>>,
     function: usize,
     num_free: usize,
     free_variable_pointer: usize,
 ) -> usize {
-    let compiler = unsafe { &mut *compiler };
+    let compiler = unsafe { & *compiler };
+    let mut compiler = compiler.write().unwrap();
     let num_free = BuiltInTypes::untag(num_free);
     let free_variable_pointer = free_variable_pointer as *const usize;
     let start = unsafe { free_variable_pointer.add(num_free) };
@@ -130,16 +156,17 @@ extern "C" fn make_closure<Alloc: Allocator>(
 }
 
 extern "C" fn property_access<Alloc: Allocator>(
-    compiler: *mut Compiler<Alloc>,
+    compiler: *const RwLock<Compiler<Alloc>>,
     struct_pointer: usize,
     str_constant_ptr: usize,
 ) -> usize {
-    let compiler = unsafe { &mut *compiler };
+    let compiler = unsafe { & *compiler };
+    let compiler = compiler.read().unwrap();
     compiler.property_access(struct_pointer, str_constant_ptr)
 }
 
 pub extern "C" fn throw_error<Alloc: Allocator>(
-    _compiler: *mut Compiler<Alloc>,
+    _compiler: *const RwLock<Compiler<Alloc>>,
     _stack_pointer: usize,
 ) -> usize {
     // let compiler = unsafe { &mut *compiler };
@@ -147,20 +174,22 @@ pub extern "C" fn throw_error<Alloc: Allocator>(
 }
 
 pub extern "C" fn gc<Alloc: Allocator>(
-    compiler: *mut Compiler<Alloc>,
+    compiler: *const RwLock<Compiler<Alloc>>,
     stack_pointer: usize,
 ) -> usize {
-    let compiler = unsafe { &mut *compiler };
+    let compiler = unsafe { & *compiler };
+    let mut compiler = compiler.write().unwrap();
     compiler.gc(stack_pointer);
     BuiltInTypes::null_value() as usize
 }
 
 pub extern "C" fn gc_add_root<Alloc: Allocator>(
-    compiler: *mut Compiler<Alloc>,
+    compiler: *const RwLock<Compiler<Alloc>>,
     old: usize,
     young: usize,
 ) -> usize {
-    let compiler = unsafe { &mut *compiler };
+    let compiler = unsafe { & *compiler };
+    let mut compiler = compiler.write().unwrap();
     compiler.gc_add_root(old, young);
     BuiltInTypes::null_value() as usize
 }
@@ -301,41 +330,53 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         Box::new(DefaultPrinter)
     };
 
-    let mut compiler = Compiler::new(args.clone(), allocator, printer);
+    let compiler = Compiler::new(args.clone(), allocator, printer);
+    let compiler_with_lock = RwLock::new(compiler);
 
-    compile_trampoline(&mut compiler);
+    let mut borrowed_compiler = compiler_with_lock.write().unwrap();
 
-    compiler.add_builtin_function("println", ir::println_value::<Alloc> as *const u8, false)?;
-    compiler.add_builtin_function("print", ir::print_value::<Alloc> as *const u8, false)?;
-    compiler.add_builtin_function("allocate_struct", allocate_struct::<Alloc> as *const u8, true)?;
+    borrowed_compiler.set_lock_pointer(&compiler_with_lock as *const _);
+
+    compile_trampoline(&mut borrowed_compiler);
+
+    borrowed_compiler.add_builtin_function("println", println_value::<Alloc> as *const u8, false)?;
+    borrowed_compiler.add_builtin_function("print", print_value::<Alloc> as *const u8, false)?;
+    borrowed_compiler.add_builtin_function("allocate_struct", allocate_struct::<Alloc> as *const u8, true)?;
         // TODO: Probably needs true
-    compiler.add_builtin_function("make_closure", make_closure::<Alloc> as *const u8, false)?;
-    compiler.add_builtin_function("property_access", property_access::<Alloc> as *const u8, false)?;
-    compiler.add_builtin_function("throw_error", throw_error::<Alloc> as *const u8, false)?;
-    compiler.add_builtin_function("assert!", placeholder as *const u8, false)?;
-    compiler.add_builtin_function("gc", gc::<Alloc> as *const u8, true)?;
-    compiler.add_builtin_function("gc_add_root", gc_add_root::<Alloc> as *const u8, false)?;
+    borrowed_compiler.add_builtin_function("make_closure", make_closure::<Alloc> as *const u8, false)?;
+    borrowed_compiler.add_builtin_function("property_access", property_access::<Alloc> as *const u8, false)?;
+    borrowed_compiler.add_builtin_function("throw_error", throw_error::<Alloc> as *const u8, false)?;
+    borrowed_compiler.add_builtin_function("assert!", placeholder as *const u8, false)?;
+    borrowed_compiler.add_builtin_function("gc", gc::<Alloc> as *const u8, true)?;
+    borrowed_compiler.add_builtin_function("gc_add_root", gc_add_root::<Alloc> as *const u8, false)?;
 
     let compile_time = Instant::now();
-    compiler.compile_ast(ast)?;
+    borrowed_compiler.compile_ast(ast)?;
 
-    compiler.check_functions();
+    borrowed_compiler.check_functions();
     if args.show_times {
         println!("Compile time {:?}", compile_time.elapsed());
     }
 
+    drop(borrowed_compiler);
+    
+
     let time = Instant::now();
-    let result = compiler.run_function("main", vec![]);
+    let borrowed_compiler = compiler_with_lock.read().unwrap();
+    let f = borrowed_compiler.get_function0("main");
+    drop(borrowed_compiler);
+    let result = f();
     if args.show_times {
         println!("Time {:?}", time.elapsed());
     }
-    compiler.println(result as usize);
+    let mut borrowed_compiler = compiler_with_lock.write().unwrap();
+    borrowed_compiler.println(result as usize);
 
     if has_expect {
         let source = std::fs::read_to_string(program)?;
         let expected = get_expect(&source);
         let expected = expected.trim();
-        let printed = compiler.printer.get_output().join("").trim().to_string();
+        let printed = borrowed_compiler.printer.get_output().join("").trim().to_string();
         if printed != expected {
             println!("Expected: \n{}\n", expected);
             println!("Got: \n{}\n", printed);
@@ -343,6 +384,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
         println!("Test passed");
     }
+    drop(borrowed_compiler);
 
     Ok(())
 }
