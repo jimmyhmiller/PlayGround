@@ -3,12 +3,25 @@ struct Thing {
 }
 
 
-fn print_endlessly(message) {
-    println(message)
-    print_endlessly(message, x)
+fn print_endlessly(message, x) {
+    // println(message)
+    println(x)
+    // print_endlessly(message, x)
 }
 
 fn main() {
-    thread(fn() { print_endlessly("in thread") });
-    print_endlessly("in main")
+    let x = Thing { x: 42 };
+
+    // In thread, x is 0 instead of Struct
+    // I think this is because the closure is expecting the stack
+    // to already be setup. But I'm just calling the function
+    // I need to make a better way to call closures here.
+    // Maybe I just make call_closure into a function
+    // I can pointer to here
+    let f = fn() { print_endlessly("in thread", x) };
+    // f()
+    // println(f);
+    thread(f);
+    // print_endlessly("in main", y)
+    "done"
 }
