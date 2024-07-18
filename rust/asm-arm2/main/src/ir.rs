@@ -1486,16 +1486,4 @@ impl Ir {
         ));
     }
 
-    pub fn check_for_pause(
-        &mut self,
-        pause_function: Value,
-        compiler_ptr: Value,
-        pause_atomic_pointer: Value,
-    ) {
-        self.instructions.push(Instruction::CheckForPause(
-            pause_function,
-            compiler_ptr,
-            pause_atomic_pointer,
-        ));
-    }
 }
