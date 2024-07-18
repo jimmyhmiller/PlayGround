@@ -1035,18 +1035,4 @@ impl LowLevelArm {
         }
     }
 
-    pub fn check_for_pause(
-        &mut self,
-        function: Register,
-        compiler_pointer_reg: Register,
-        pause_atom: Register,
-    ) {
-        let pause_label = self.new_label("pause");
-        // Cheating. I think I know that X19 isn't used here
-        // because this is at the beginning of a function
-        self.atomic_load(X19, pause_atom);
-        self.compare(X19, ZERO_REGISTER);
-        self.jump_not_equal(pause_label);
-        self.call_builtin(function);
-    }
 }
