@@ -1,6 +1,6 @@
 use asm::arm::{
     ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector,
-    SP, X0, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X3, X30, ZERO_REGISTER,
+    SP, X0, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, ZERO_REGISTER,
 };
 
 use std::collections::HashMap;
@@ -419,7 +419,6 @@ pub struct LowLevelArm {
     pub stack_map: HashMap<usize, usize>,
 }
 
-#[allow(unused)]
 impl Default for LowLevelArm {
     fn default() -> Self {
         Self::new()
@@ -683,6 +682,14 @@ impl LowLevelArm {
         });
     }
 
+    pub fn guard_integer(&mut self, dest: Register, a: Register, after_return: Label) {
+        // TODO: I need to have some way of signaling
+        // that this is a type error;
+        self.and(dest, a, 0b111);
+        self.compare(dest, ZERO_REGISTER);
+        self.jump_not_equal(after_return);
+    }
+
     pub fn new_label(&mut self, name: &str) -> Label {
         self.labels.push(name.to_string());
         Label {
@@ -718,22 +725,6 @@ impl LowLevelArm {
         bytes
     }
 
-    pub fn call_rust_function(&mut self, register: Register, func: *const u8) {
-        self.mov_64(register, func as isize);
-        self.call(register)
-    }
-
-    pub fn call(&mut self, register: Register) {
-        self.instructions.push(branch_with_link_register(register));
-        // TODO: I could be smarter her and not to do leaf nodes
-        self.update_stack_map();
-    }
-
-    pub fn call_builtin(&mut self, register: Register) {
-        self.instructions.push(branch_with_link_register(register));
-        self.update_stack_map();
-    }
-
     // TODO: I should pass this information to my debugger
     // then I could visualize every stack frame
     // and do dynamic checking if the invariants I expect to hold
@@ -751,6 +742,17 @@ impl LowLevelArm {
             .iter()
             .map(|(key, value)| ((*key * 4) + pc, *value))
             .collect()
+    }
+
+    pub fn call(&mut self, register: Register) {
+        self.instructions.push(branch_with_link_register(register));
+        // TODO: I could be smarter here and not to do leaf nodes
+        self.update_stack_map();
+    }
+
+    pub fn call_builtin(&mut self, register: Register) {
+        self.instructions.push(branch_with_link_register(register));
+        self.update_stack_map();
     }
 
     pub fn recurse(&mut self, label: Label) {
@@ -1032,90 +1034,19 @@ impl LowLevelArm {
             self.store_local(null_register, local_offset)
         }
     }
-}
 
-#[allow(dead_code)]
-fn fib() -> LowLevelArm {
-    let mut lang = LowLevelArm::new();
-    // lang.breakpoint();
-    lang.prelude(-4);
-
-    let const_1 = lang.volatile_register();
-    lang.mov(const_1, 1);
-
-    let recursive_case = lang.new_label("recursive_case");
-    let return_label = lang.new_label("return");
-
-    lang.compare(lang.arg(0), const_1);
-    lang.jump_greater(recursive_case);
-    lang.jump(return_label);
-
-    lang.write_label(recursive_case);
-
-    let arg_0_minus_1 = lang.volatile_register();
-    lang.sub(arg_0_minus_1, lang.arg(0), const_1);
-
-    lang.store_on_stack(lang.arg(0), 2);
-    lang.mov_reg(lang.arg(0), arg_0_minus_1);
-
-    let first_recursive_result = lang.volatile_register();
-
-    lang.call(lang.arg(1));
-    lang.mov_reg(first_recursive_result, lang.ret_reg());
-
-    lang.load_from_stack(lang.arg(0), 2);
-
-    lang.sub(arg_0_minus_1, lang.arg(0), const_1);
-    lang.sub(arg_0_minus_1, arg_0_minus_1, const_1);
-    lang.mov_reg(lang.arg(0), arg_0_minus_1);
-
-    lang.store_on_stack(first_recursive_result, 2);
-
-    lang.call(lang.arg(1));
-
-    lang.load_from_stack(first_recursive_result, 2);
-
-    lang.add(lang.ret_reg(), lang.ret_reg(), first_recursive_result);
-
-    lang.write_label(return_label);
-
-    lang.epilogue(4);
-
-    lang.ret();
-    lang
-}
-
-#[no_mangle]
-extern "C" fn print_it(num: u64) -> u64 {
-    println!("{}", num);
-    num
-}
-
-#[allow(dead_code)]
-fn countdown_codegen() -> LowLevelArm {
-    let mut lang = LowLevelArm::new();
-
-    let loop_start = lang.new_label("loop_start");
-    let loop_exit = lang.new_label("loop_exit");
-
-    // lang.breakpoint();
-    lang.store_pair(X29, X30, SP, -2);
-    lang.mov_reg(X29, SP);
-    lang.mov(X22, 10);
-    lang.mov(X20, 0);
-    lang.mov(X21, 1);
-
-    lang.write_label(loop_start);
-
-    lang.compare(X20, X22);
-    lang.jump_equal(loop_exit);
-    lang.sub(X22, X22, X21);
-    lang.mov_reg(X0, X22);
-    lang.call_rust_function(X3, print_it as *const u8);
-
-    lang.jump(loop_start);
-    lang.write_label(loop_exit);
-    lang.load_pair(X29, X30, SP, 2);
-    lang.ret();
-    lang
+    pub fn check_for_pause(
+        &mut self,
+        function: Register,
+        compiler_pointer_reg: Register,
+        pause_atom: Register,
+    ) {
+        let pause_label = self.new_label("pause");
+        // Cheating. I think I know that X19 isn't used here
+        // because this is at the beginning of a function
+        self.atomic_load(X19, pause_atom);
+        self.compare(X19, ZERO_REGISTER);
+        self.jump_not_equal(pause_label);
+        self.call_builtin(function);
+    }
 }

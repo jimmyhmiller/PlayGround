@@ -206,8 +206,15 @@ impl Allocator for CompactingHeap {
         if options.gc_always {
             self.gc(stack_base, stack_map, stack_pointer, options);
         }
-        let pointer =
-            self.allocate_inner(stack_base, stack_map, stack_pointer, bytes, kind, 0, options)?;
+        let pointer = self.allocate_inner(
+            stack_base,
+            stack_map,
+            stack_pointer,
+            bytes,
+            kind,
+            0,
+            options,
+        )?;
         assert!(pointer % 8 == 0, "Pointer is not aligned");
         Ok(pointer)
     }
@@ -245,7 +252,7 @@ impl Allocator for CompactingHeap {
 
     fn gc_add_root(&mut self, _old: usize, _young: usize) {
         // We don't need to do anything because all roots are gathered
-        // from the stack. 
+        // from the stack.
         // Maybe we should do something though?
         // I guess this could be useful for c stuff,
         // but for right now I'm not going to do anything.
@@ -436,9 +443,8 @@ fn get_live_stack<'a>(stack_base: usize, stack_pointer: usize) -> &'a mut [usize
     let num_64_till_end = (distance_till_end / 8) + 1;
     let len = STACK_SIZE / 8;
     let stack_begin = stack_end - STACK_SIZE;
-    let stack = unsafe {
-        std::slice::from_raw_parts_mut(stack_begin as *mut usize, STACK_SIZE / 8)
-    };
+    let stack =
+        unsafe { std::slice::from_raw_parts_mut(stack_begin as *mut usize, STACK_SIZE / 8) };
 
     (&mut stack[len - num_64_till_end..]) as _
 }

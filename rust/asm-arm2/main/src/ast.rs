@@ -264,7 +264,6 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
 
                 self.ir = old_ir;
 
-                
                 if let Some(value) = self.compile_closure(function_pointer) {
                     return value;
                 }
@@ -360,7 +359,6 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 then,
                 else_,
             } => {
-                
                 let condition = self.call_compile(&condition);
 
                 let end_if_label = self.ir.label("end_if");
@@ -368,7 +366,8 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 let result_reg = self.ir.volatile_register();
 
                 let then_label = self.ir.label("then");
-                self.ir.jump_if(then_label, Condition::Equal, condition, Value::True);
+                self.ir
+                    .jump_if(then_label, Condition::Equal, condition, Value::True);
 
                 let mut else_result = Value::SignedConstant(0);
                 for ast in else_.iter() {
@@ -456,14 +455,13 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     })
                     .collect();
 
-                
                 // TODO: Should the arguments be evaluated first?
                 // I think so, this will matter once I think about macros
                 // though
                 if self.compiler.is_inline_primitive_function(&name) {
                     return self.compile_inline_primitive_function(&name, args);
                 }
-                
+
                 // TODO: This isn't they way to handle this
                 // I am activing as if all closures are assign to a variable when they aren't.
                 // Need to have negative test cases for this
@@ -521,7 +519,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
         // TODO: I shouldn't just assume the function will exist
         // unless I have a good plan for dealing with when it doesn't
         let function = self.compiler.reserve_function(name.as_str()).unwrap();
-    
+
         let builtin = function.is_builtin;
         let needs_stack_pointer = function.needs_stack_pointer;
         if builtin {
@@ -536,13 +534,11 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
             self.ir.assign(stack_pointer_reg, stack_pointer);
             args.insert(1, stack_pointer);
         }
-    
-        let jump_table_pointer =
-            self.compiler.get_jump_table_pointer(function).unwrap();
-        let jump_table_point_reg =
-            self.ir.assign_new(Value::Pointer(jump_table_pointer));
+
+        let jump_table_pointer = self.compiler.get_jump_table_pointer(function).unwrap();
+        let jump_table_point_reg = self.ir.assign_new(Value::Pointer(jump_table_pointer));
         let function_pointer = self.ir.load_from_memory(jump_table_point_reg.into(), 0);
-    
+
         let function = self.ir.function(function_pointer);
         if builtin {
             // self.ir.breakpoint();
@@ -551,10 +547,10 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
             self.ir.call(function, args)
         }
     }
-    
+
     fn compile_closure_call(&mut self, function: VariableLocation, args: Vec<Value>) -> Value {
         let function_register = self.ir.volatile_register();
-    
+
         let closure_register = self.ir.volatile_register();
         self.ir.assign(closure_register, &function);
         // Check if the tag is a closure
@@ -577,14 +573,13 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
         // }
         let closure_register = self.ir.untag(closure_register.into());
         let function_pointer = self.ir.load_from_memory(closure_register, 0);
-    
+
         self.ir.assign(function_register, function_pointer);
-    
+
         // TODO: I need to fix how these are stored on the stack
-    
+
         let num_free_variables = self.ir.load_from_memory(closure_register, 1);
-        let num_free_variables =
-            self.ir.tag(num_free_variables, BuiltInTypes::Int.get_tag());
+        let num_free_variables = self.ir.tag(num_free_variables, BuiltInTypes::Int.get_tag());
         // for each variable I need to push them onto the stack after the prelude
         let loop_start = self.ir.label("loop_start");
         let counter = self.ir.volatile_register();
@@ -598,21 +593,19 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
             num_free_variables,
         );
         let free_variable_offset = self.ir.add(counter, Value::SignedConstant(3));
-        let free_variable_offset =
-            self.ir.mul(free_variable_offset, Value::SignedConstant(8));
+        let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(8));
         // TODO: This needs to change based on counter
         let free_variable_offset = self.ir.untag(free_variable_offset);
         let free_variable = self
             .ir
             .heap_load_with_reg_offset(closure_register, free_variable_offset);
-    
+
         let free_variable_offset = self.ir.sub(num_free_variables, counter);
         let num_local = self.ir.load_from_memory(closure_register, 2);
         let num_local = self.ir.tag(num_local, BuiltInTypes::Int.get_tag());
         let free_variable_offset = self.ir.add(free_variable_offset, num_local);
         // // TODO: Make this better
-        let free_variable_offset =
-            self.ir.mul(free_variable_offset, Value::SignedConstant(-8));
+        let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(-8));
         let free_variable_offset = self.ir.untag(free_variable_offset);
         let free_variable_slot_pointer = self.ir.get_stack_pointer_imm(2);
         self.ir.heap_store_with_reg_offset(
@@ -620,12 +613,12 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
             free_variable,
             free_variable_offset,
         );
-    
+
         let label = self.ir.label("increment_counter");
         self.ir.write_label(label);
         let counter_increment = self.ir.add(Value::SignedConstant(1), counter);
         self.ir.assign(counter, counter_increment);
-    
+
         self.ir.jump(loop_start);
         self.ir.extend_register_life(num_free_variables);
         self.ir.extend_register_life(counter.into());
@@ -635,7 +628,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
         self.ir.write_label(skip_load_function);
         self.ir.call(function_register.into(), args)
     }
-    
+
     fn compile_closure(&mut self, function_pointer: usize) -> Option<Value> {
         if self.has_free_variables() {
             // When I get those free variables, I'd need to
@@ -650,18 +643,18 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
             // What about functions that change overtime?
             // Not 100% sure about all of this
             let label = self.ir.label("closure");
-    
+
             // self.ir.breakpoint();
             // get a pointer to the start of the free variables on the stack
             let free_variable_pointer = self.ir.get_current_stack_position();
-    
+
             self.ir.write_label(label);
             for free_variable in self.get_current_env().free_variables.clone().iter() {
                 let variable = self
                     .get_variable(free_variable)
                     .unwrap_or_else(|| panic!("Can't find variable {}", free_variable));
                 // we are now going to push these variables onto the stack
-    
+
                 match variable {
                     VariableLocation::Register(reg) => {
                         self.ir.push_to_stack(reg.into());
@@ -678,7 +671,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
             }
             // load count of free variables
             let num_free = self.get_current_env().free_variables.len();
-    
+
             let num_free = Value::SignedConstant(num_free as isize);
             let num_free_reg = self.ir.volatile_register();
             self.ir.assign(num_free_reg, num_free);
@@ -689,9 +682,9 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
             self.ir.assign(make_closure_reg, make_closure);
             let function_pointer_reg = self.ir.volatile_register();
             self.ir.assign(function_pointer_reg, function_pointer);
-    
+
             let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
-    
+
             let closure = self.ir.call(
                 make_closure_reg.into(),
                 vec![
@@ -706,7 +699,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
         }
         None
     }
-    
+
     fn find_or_insert_local(&mut self, name: &str) -> usize {
         let current_env = self.environment_stack.last_mut().unwrap();
         if let Some(index) = current_env.local_variables.iter().position(|n| n == name) {
@@ -832,8 +825,8 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
             _ => {}
         }
     }
-    
-    fn compile_inline_primitive_function<>(&mut self, name: &str, args: Vec<Value>) -> Value {
+
+    fn compile_inline_primitive_function(&mut self, name: &str, args: Vec<Value>) -> Value {
         match name {
             "primitive_deref" => {
                 // self.ir.breakpoint();
@@ -843,7 +836,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 let offset = self.ir.add(untagged, Value::RawValue(16));
                 let reg = self.ir.volatile_register();
                 self.ir.atomic_load(reg.into(), offset)
-            },
+            }
             "primitive_reset!" => {
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer.into());
@@ -853,7 +846,7 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 self.call_builtin("gc_add_root", vec![pointer, value]);
                 self.ir.atomic_store(offset, value.into());
                 args[1]
-            },
+            }
             "primitive_compare_and_swap!" => {
                 // self.ir.breakpoint();
                 let pointer = args[0];
@@ -862,11 +855,13 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 let expected = args[1];
                 let new = args[2];
                 let expected_and_result = self.ir.assign_new_force(expected);
-                self.ir.compare_and_swap(expected_and_result.into(), new.into(), offset);
+                self.ir
+                    .compare_and_swap(expected_and_result.into(), new.into(), offset);
                 // TODO: I should do a conditional move here instead of a jump
                 let label = self.ir.label("compare_and_swap");
                 let result = self.ir.assign_new(Value::True);
-                self.ir.jump_if(label, Condition::Equal, expected_and_result, expected);
+                self.ir
+                    .jump_if(label, Condition::Equal, expected_and_result, expected);
                 self.ir.assign(result, Value::False);
                 self.ir.write_label(label);
                 result.into()
@@ -875,10 +870,9 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 self.ir.breakpoint();
                 Value::Null
             }
-            _ => panic!("Unknown inline primitive function {}", name)
+            _ => panic!("Unknown inline primitive function {}", name),
         }
     }
-    
 }
 
 impl From<i64> for Ast {

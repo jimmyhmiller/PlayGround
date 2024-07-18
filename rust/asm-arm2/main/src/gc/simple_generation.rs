@@ -185,8 +185,15 @@ impl Allocator for SimpleGeneration {
         if options.gc_always {
             self.gc(stack_base, stack_map, stack_pointer, options);
         }
-        let pointer =
-            self.allocate_inner(stack_base, stack_map, stack_pointer, bytes, kind, 0, options)?;
+        let pointer = self.allocate_inner(
+            stack_base,
+            stack_map,
+            stack_pointer,
+            bytes,
+            kind,
+            0,
+            options,
+        )?;
         assert!(pointer % 8 == 0, "Pointer is not aligned");
         Ok(pointer)
     }
@@ -284,9 +291,12 @@ impl SimpleGeneration {
     ) {
         let start = std::time::Instant::now();
         let roots = self.gather_roots(stack_base, stack_map, stack_pointer);
-        let new_roots : Vec<usize> = roots.iter().map(|x| x.1).collect();
-        let new_roots = new_roots.into_iter().chain(self.additional_roots.iter().map(|x| &x.1).copied()).collect();
-        let new_roots = unsafe { self.copy_all(new_roots)};
+        let new_roots: Vec<usize> = roots.iter().map(|x| x.1).collect();
+        let new_roots = new_roots
+            .into_iter()
+            .chain(self.additional_roots.iter().map(|x| &x.1).copied())
+            .collect();
+        let new_roots = unsafe { self.copy_all(new_roots) };
         let stack_buffer = get_live_stack(stack_base, stack_pointer);
         for (i, (stack_offset, _)) in roots.iter().enumerate() {
             debug_assert!(
@@ -371,8 +381,6 @@ impl SimpleGeneration {
                 return first_field;
             }
         }
-        
-
 
         let size = *(pointer as *const usize) >> 1;
         let data = std::slice::from_raw_parts(pointer as *const u8, size + 8);
@@ -465,11 +473,10 @@ fn get_live_stack<'a>(stack_base: usize, stack_pointer: usize) -> &'a mut [usize
     // let current_stack_pointer = current_stack_pointer & !0b111;
     let distance_till_end = stack_end - stack_pointer;
     let num_64_till_end = (distance_till_end / 8) + 1;
-    let len = STACK_SIZE/ 8;
+    let len = STACK_SIZE / 8;
     let stack_begin = stack_end - STACK_SIZE;
-    let stack = unsafe {
-        std::slice::from_raw_parts_mut(stack_begin as *mut usize, STACK_SIZE/ 8)
-    };
+    let stack =
+        unsafe { std::slice::from_raw_parts_mut(stack_begin as *mut usize, STACK_SIZE / 8) };
 
     (&mut stack[len - num_64_till_end..]) as _
 }
