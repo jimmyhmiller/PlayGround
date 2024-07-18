@@ -3,25 +3,88 @@ struct Thing {
 }
 
 
-fn print_endlessly(message, x) {
-    // println(message)
-    println(x)
-    // print_endlessly(message, x)
+struct TreeNode {
+    left
+    right
 }
 
-fn main() {
-    let x = Thing { x: 42 };
+fn print_endlessly(message, x) {
+    println(message)
+    println(x)
+    print_endlessly(message, x)
+}
 
-    // In thread, x is 0 instead of Struct
-    // I think this is because the closure is expecting the stack
-    // to already be setup. But I'm just calling the function
-    // I need to make a better way to call closures here.
-    // Maybe I just make call_closure into a function
-    // I can pointer to here
+fn testGc(n) {
+    if n > 10 {
+        0
+    } else {
+        let x = TreeNode {
+            left: null
+            right: null
+        }
+        1 + testGc(n + 1)
+
+        let y = TreeNode {
+            left: x,
+            right: x
+        }
+
+        1 + testGc(n + 1)
+
+        let z = TreeNode {
+            left: y,
+            right: y,
+        }
+        println(x)
+        println(y)
+        println(z)
+        0
+    }
+}
+
+fn print_endlessly_gc(message, x) {
+    println(message)
+    println(x)
+    // TODO: This is causing gc issues
+    // Even without another thread
+    // gc()
+    print_endlessly_gc(message, x)
+}
+
+// TODO: Move this. I am using this inside of new_thread right now
+// It is clever, but needs to not exist in this file
+// Maybe I load std.bg always? And then I put something like this in there?
+// This is just apply without arguments
+fn call_closure(f) {
+    f()
+}
+
+fn call_function() {
+    // Doing this because locals live for the whole function
+     let x = Thing { x: 42 };
+
     let f = fn() { print_endlessly("in thread", x) };
-    // f()
-    // println(f);
     thread(f);
-    // print_endlessly("in main", y)
+}
+
+// You can see that thing get's replaced by one of these nodes
+// This is because the gc is not working correctly with concurrency
+fn main() {
+    call_function()
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    
     "done"
 }

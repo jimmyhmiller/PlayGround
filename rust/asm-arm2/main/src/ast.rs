@@ -553,8 +553,6 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
     }
     
     fn compile_closure_call(&mut self, function: VariableLocation, args: Vec<Value>) -> Value {
-        // TODO: Right now, this would only find variables in the current environment
-        // I also need to deal with functions vs closures
         let function_register = self.ir.volatile_register();
     
         let closure_register = self.ir.volatile_register();
