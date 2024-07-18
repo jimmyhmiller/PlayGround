@@ -291,19 +291,14 @@ impl<Alloc: Allocator> Compiler<Alloc> {
     // TODO: Allocate/gc need to change to work with this
     pub fn new_thread(&mut self, f: usize) {
         let trampoline = self.get_trampoline();
-        // TODO: Better way to do this
-        let f = if BuiltInTypes::get_kind(f) == BuiltInTypes::Closure {
-            let f = BuiltInTypes::untag(f);
-            let pointer = f as *const u8;
-            let function_pointer = unsafe { *(pointer as *const usize) };
-            BuiltInTypes::untag(function_pointer)
-        } else {
-            BuiltInTypes::untag(f)
-        };
+        let trampoline : fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
+        let call_closure = self.get_function_by_name("call_closure").unwrap();
+        let function_pointer = self.get_pointer(call_closure).unwrap();
+
         let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
         let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
         let thread = thread::spawn(move || {
-            let result = trampoline(stack_pointer as u64, f as u64);
+            let result = trampoline(stack_pointer as u64, function_pointer as u64, f as u64);
             result
         });
 
@@ -502,6 +497,14 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         let function = &mut self.functions[index];
         function.is_defined = true;
         Ok(function_pointer)
+    }
+
+    pub fn get_pointer(&self, function: &Function) -> Result<usize, Box<dyn Error>> {
+        if function.is_foreign {
+            Ok(function.offset_or_pointer)
+        } else {
+            Ok(function.offset_or_pointer + self.code_memory.as_ref().unwrap().as_ptr() as usize)
+        }
     }
 
     pub fn get_function_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
@@ -983,9 +986,14 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         }
     }
 
+    pub fn get_function_by_name(&self, name: &str) -> Option<&Function> {
+        self.functions.iter().find(|f| f.name == name)
+    }
+
     pub fn get_function_by_name_mut(&mut self, name: &str) -> Option<&mut Function> {
         self.functions.iter_mut().find(|f| f.name == name)
     }
+    
 
     pub fn print(&mut self, result: usize) {
         let result = self.get_repr(result, 0).unwrap();

@@ -245,6 +245,7 @@ fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
     function.is_builtin = true;
 }
 
+
 #[derive(ClapParser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 #[command(name = "beag")]
@@ -328,7 +329,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         } else if #[cfg(feature = "simple-generation")] {
             type Alloc = SimpleGeneration;
         } else {
-            type Alloc = SimpleGeneration;
+            type Alloc = SimpleMarkSweepHeap;
         }
     }
 
