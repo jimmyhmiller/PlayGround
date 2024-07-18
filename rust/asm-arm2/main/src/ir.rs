@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 
-use asm::arm::{Register, X0, X1, ZERO_REGISTER};
+use asm::arm::{Register, X0, X1};
 
-use crate::{
-    arm::LowLevelArm,
-    common::Label,
-};
+use crate::{arm::LowLevelArm, common::Label};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Condition {
@@ -201,7 +198,6 @@ pub struct StringValue {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum Instruction {
     Sub(Value, Value, Value),
     Add(Value, Value, Value),
@@ -633,7 +629,7 @@ impl Ir {
         self.instructions
             .push(Instruction::Assign(dest, val.into()));
     }
-    
+
     pub fn assign_new_force<A>(&mut self, val: A) -> VirtualRegister
     where
         A: Into<Value>,
@@ -824,8 +820,8 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, lang);
 
-                    guard_integer(lang, dest, a, after_return);
-                    guard_integer(lang, dest, b, after_return);
+                    lang.guard_integer(dest, a, after_return);
+                    lang.guard_integer(dest, b, after_return);
                     // TODO: I should instead use another register. But I can't mutate
                     // things here. The other option is to put this in the Ir.
                     // Which might be a good idea, but I don't love it.
@@ -844,8 +840,8 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, lang);
 
-                    guard_integer(lang, dest, a, after_return);
-                    guard_integer(lang, dest, b, after_return);
+                    lang.guard_integer(dest, a, after_return);
+                    lang.guard_integer(dest, b, after_return);
 
                     lang.add(dest, a, b)
                 }
@@ -857,8 +853,8 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, lang);
 
-                    guard_integer(lang, dest, a, after_return);
-                    guard_integer(lang, dest, b, after_return);
+                    lang.guard_integer(dest, a, after_return);
+                    lang.guard_integer(dest, b, after_return);
 
                     lang.shift_right(a, a, BuiltInTypes::tag_size());
                     lang.shift_right(b, b, BuiltInTypes::tag_size());
@@ -875,8 +871,8 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, lang);
 
-                    guard_integer(lang, dest, a, after_return);
-                    guard_integer(lang, dest, b, after_return);
+                    lang.guard_integer(dest, a, after_return);
+                    lang.guard_integer(dest, b, after_return);
 
                     lang.shift_right(a, a, BuiltInTypes::tag_size());
                     lang.shift_right(b, b, BuiltInTypes::tag_size());
@@ -1490,62 +1486,16 @@ impl Ir {
         ));
     }
 
-    
-    
-   
+    pub fn check_for_pause(
+        &mut self,
+        pause_function: Value,
+        compiler_ptr: Value,
+        pause_atomic_pointer: Value,
+    ) {
+        self.instructions.push(Instruction::CheckForPause(
+            pause_function,
+            compiler_ptr,
+            pause_atomic_pointer,
+        ));
+    }
 }
-
-fn guard_integer(lang: &mut LowLevelArm, dest: Register, a: Register, after_return: Label) {
-    // TODO: I need to have some way of signaling
-    // that this is a type error;
-    lang.and(dest, a, 0b111);
-    lang.compare(dest, ZERO_REGISTER);
-    lang.jump_not_equal(after_return);
-}
-
-#[allow(unused)]
-pub fn fib() -> Ir {
-    let mut ir = Ir::new();
-    ir.breakpoint();
-    let n = ir.arg(0);
-
-    let early_exit = ir.label("early_exit");
-
-    let result_reg = ir.volatile_register();
-    ir.jump_if(early_exit, Condition::LessThanOrEqual, n, 1);
-
-    let reg_0: Value = ir.sub(n, 1);
-    let reg_1 = ir.recurse(vec![reg_0]);
-
-    let reg_2 = ir.sub(n, 2);
-    let reg_3 = ir.recurse(vec![reg_2]);
-
-    let reg_4 = ir.add(reg_1, reg_3);
-    ir.assign(result_reg, reg_4);
-    let end_else = ir.label("end_else");
-    ir.jump(end_else);
-
-    ir.write_label(early_exit);
-    ir.assign(result_reg, n);
-    ir.write_label(end_else);
-
-    ir.ret(result_reg);
-
-    ir
-}
-
-#[allow(unused)]
-pub fn heap_test() -> Ir {
-    let mut ir = Ir::new();
-    ir.breakpoint();
-    let n = ir.arg(0);
-    let location = ir.arg(1);
-    ir.heap_store(n, location);
-    let temp_reg = ir.volatile_register();
-    let result = ir.heap_load(temp_reg.into(), location.into());
-    let result_reg = ir.volatile_register();
-    ir.assign(result_reg, result);
-    ir.ret(result_reg);
-    ir
-}
-

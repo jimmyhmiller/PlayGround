@@ -1,5 +1,11 @@
 use core::fmt;
-use std::{collections::HashMap, error::Error, slice::from_raw_parts_mut, sync::RwLock, thread::{self, JoinHandle, ThreadId}};
+use std::{
+    collections::HashMap,
+    error::Error,
+    slice::from_raw_parts_mut,
+    sync::RwLock,
+    thread::{self, JoinHandle, ThreadId},
+};
 
 use bincode::{Decode, Encode};
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
@@ -236,7 +242,10 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             structs: StructManager::new(),
             functions: Vec::new(),
             heap: allocator,
-            stacks: vec![(std::thread::current().id(), MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap())],
+            stacks: vec![(
+                std::thread::current().id(),
+                MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
+            )],
             threads: vec![],
             string_constants: vec![],
             stack_map: StackMap::new(),
@@ -265,7 +274,12 @@ impl<Alloc: Allocator> Compiler<Alloc> {
 
     pub fn gc(&mut self, stack_pointer: usize) {
         let options = self.get_allocate_options();
-        self.heap.gc(self.get_stack_base(), &self.stack_map, stack_pointer, options);
+        self.heap.gc(
+            self.get_stack_base(),
+            &self.stack_map,
+            stack_pointer,
+            options,
+        );
     }
 
     pub fn gc_add_root(&mut self, old: usize, young: usize) {
@@ -287,11 +301,10 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         self.lock_pointer = Some(lock_pointer);
     }
 
-
     // TODO: Allocate/gc need to change to work with this
     pub fn new_thread(&mut self, f: usize) {
         let trampoline = self.get_trampoline();
-        let trampoline : fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
+        let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
         let call_closure = self.get_function_by_name("call_closure").unwrap();
         let function_pointer = self.get_pointer(call_closure).unwrap();
 
@@ -787,7 +800,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         }
     }
 
-    pub fn get_trampoline(&self) -> fn(u64, u64) -> u64{
+    pub fn get_trampoline(&self) -> fn(u64, u64) -> u64 {
         let trampoline = self
             .functions
             .iter()
@@ -810,7 +823,8 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             .find(|f| f.name == name)
             .expect(&format!("Can't find function named {}", name));
         let jump_table_offset = function.jump_table_offset;
-        let offset = &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
+        let offset =
+            &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
         let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
@@ -993,7 +1007,6 @@ impl<Alloc: Allocator> Compiler<Alloc> {
     pub fn get_function_by_name_mut(&mut self, name: &str) -> Option<&mut Function> {
         self.functions.iter_mut().find(|f| f.name == name)
     }
-    
 
     pub fn print(&mut self, result: usize) {
         let result = self.get_repr(result, 0).unwrap();
@@ -1012,10 +1025,14 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             gc_always: self.command_line_arguments.gc_always,
         }
     }
-    
+
     pub fn is_inline_primitive_function(&self, name: &str) -> bool {
         match name {
-            "primitive_deref" | "primitive_swap!" | "primitive_reset!" | "primitive_compare_and_swap!" | "primitive_breakpoint!" => true,
+            "primitive_deref"
+            | "primitive_swap!"
+            | "primitive_reset!"
+            | "primitive_compare_and_swap!"
+            | "primitive_breakpoint!" => true,
             _ => false,
         }
     }

@@ -107,7 +107,7 @@ pub extern "C" fn println_value<Alloc: Allocator>(
     compiler: *const RwLock<Compiler<Alloc>>,
     value: usize,
 ) -> usize {
-    let compiler = unsafe { & *compiler };
+    let compiler = unsafe { &*compiler };
     let mut compiler = compiler.write().unwrap();
     compiler.println(value);
     0b111
@@ -117,12 +117,11 @@ pub extern "C" fn print_value<Alloc: Allocator>(
     compiler: *const RwLock<Compiler<Alloc>>,
     value: usize,
 ) -> usize {
-    let compiler = unsafe { & *compiler };
+    let compiler = unsafe { &*compiler };
     let mut compiler = compiler.write().unwrap();
     compiler.print(value);
     0b111
 }
-
 
 extern "C" fn allocate_struct<Alloc: Allocator>(
     compiler: *const RwLock<Compiler<Alloc>>,
@@ -130,7 +129,7 @@ extern "C" fn allocate_struct<Alloc: Allocator>(
     stack_pointer: usize,
 ) -> usize {
     let value = BuiltInTypes::untag(value);
-    let compiler = unsafe { & *compiler };
+    let compiler = unsafe { &*compiler };
 
     let mut compiler = compiler.write().unwrap();
 
@@ -145,7 +144,7 @@ extern "C" fn make_closure<Alloc: Allocator>(
     num_free: usize,
     free_variable_pointer: usize,
 ) -> usize {
-    let compiler = unsafe { & *compiler };
+    let compiler = unsafe { &*compiler };
     let mut compiler = compiler.write().unwrap();
     let num_free = BuiltInTypes::untag(num_free);
     let free_variable_pointer = free_variable_pointer as *const usize;
@@ -159,7 +158,7 @@ extern "C" fn property_access<Alloc: Allocator>(
     struct_pointer: usize,
     str_constant_ptr: usize,
 ) -> usize {
-    let compiler = unsafe { & *compiler };
+    let compiler = unsafe { &*compiler };
     let compiler = compiler.read().unwrap();
     compiler.property_access(struct_pointer, str_constant_ptr)
 }
@@ -176,7 +175,7 @@ pub extern "C" fn gc<Alloc: Allocator>(
     compiler: *const RwLock<Compiler<Alloc>>,
     stack_pointer: usize,
 ) -> usize {
-    let compiler = unsafe { & *compiler };
+    let compiler = unsafe { &*compiler };
     let mut compiler = compiler.write().unwrap();
     compiler.gc(stack_pointer);
     BuiltInTypes::null_value() as usize
@@ -187,7 +186,7 @@ pub extern "C" fn gc_add_root<Alloc: Allocator>(
     old: usize,
     young: usize,
 ) -> usize {
-    let compiler = unsafe { & *compiler };
+    let compiler = unsafe { &*compiler };
     let mut compiler = compiler.write().unwrap();
     compiler.gc_add_root(old, young);
     BuiltInTypes::null_value() as usize
@@ -197,7 +196,7 @@ pub extern "C" fn new_thread<Alloc: Allocator>(
     compiler: *const RwLock<Compiler<Alloc>>,
     function: usize,
 ) -> usize {
-    let compiler = unsafe { & *compiler };
+    let compiler = unsafe { &*compiler };
     let mut compiler = compiler.write().unwrap();
     compiler.new_thread(function);
     BuiltInTypes::null_value() as usize
@@ -244,7 +243,6 @@ fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
     let function = compiler.get_function_by_name_mut("trampoline").unwrap();
     function.is_builtin = true;
 }
-
 
 #[derive(ClapParser, Debug, Clone)]
 #[command(version, about, long_about = None)]
@@ -349,16 +347,40 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     compile_trampoline(&mut borrowed_compiler);
 
-    borrowed_compiler.add_builtin_function("println", println_value::<Alloc> as *const u8, false)?;
+    borrowed_compiler.add_builtin_function(
+        "println",
+        println_value::<Alloc> as *const u8,
+        false,
+    )?;
     borrowed_compiler.add_builtin_function("print", print_value::<Alloc> as *const u8, false)?;
-    borrowed_compiler.add_builtin_function("allocate_struct", allocate_struct::<Alloc> as *const u8, true)?;
-        // TODO: Probably needs true
-    borrowed_compiler.add_builtin_function("make_closure", make_closure::<Alloc> as *const u8, false)?;
-    borrowed_compiler.add_builtin_function("property_access", property_access::<Alloc> as *const u8, false)?;
-    borrowed_compiler.add_builtin_function("throw_error", throw_error::<Alloc> as *const u8, false)?;
+    borrowed_compiler.add_builtin_function(
+        "allocate_struct",
+        allocate_struct::<Alloc> as *const u8,
+        true,
+    )?;
+    // TODO: Probably needs true
+    borrowed_compiler.add_builtin_function(
+        "make_closure",
+        make_closure::<Alloc> as *const u8,
+        false,
+    )?;
+    borrowed_compiler.add_builtin_function(
+        "property_access",
+        property_access::<Alloc> as *const u8,
+        false,
+    )?;
+    borrowed_compiler.add_builtin_function(
+        "throw_error",
+        throw_error::<Alloc> as *const u8,
+        false,
+    )?;
     borrowed_compiler.add_builtin_function("assert!", placeholder as *const u8, false)?;
     borrowed_compiler.add_builtin_function("gc", gc::<Alloc> as *const u8, true)?;
-    borrowed_compiler.add_builtin_function("gc_add_root", gc_add_root::<Alloc> as *const u8, false)?;
+    borrowed_compiler.add_builtin_function(
+        "gc_add_root",
+        gc_add_root::<Alloc> as *const u8,
+        false,
+    )?;
     borrowed_compiler.add_builtin_function("thread", new_thread::<Alloc> as *const u8, false)?;
 
     let compile_time = Instant::now();
@@ -370,7 +392,6 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     }
 
     drop(borrowed_compiler);
-    
 
     let time = Instant::now();
     let borrowed_compiler = compiler_with_lock.read().unwrap();
@@ -387,7 +408,12 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         let source = std::fs::read_to_string(program)?;
         let expected = get_expect(&source);
         let expected = expected.trim();
-        let printed = borrowed_compiler.printer.get_output().join("").trim().to_string();
+        let printed = borrowed_compiler
+            .printer
+            .get_output()
+            .join("")
+            .trim()
+            .to_string();
         if printed != expected {
             println!("Expected: \n{}\n", expected);
             println!("Got: \n{}\n", printed);
@@ -398,9 +424,9 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     drop(borrowed_compiler);
 
     loop {
-       // take the list of threads so we are not holding a borrow on the compiler
-       // use mem::replace to swap out the threads with an empty vec
-       let threads = mem::replace(&mut compiler_with_lock.write().unwrap().threads, Vec::new());
+        // take the list of threads so we are not holding a borrow on the compiler
+        // use mem::replace to swap out the threads with an empty vec
+        let threads = mem::replace(&mut compiler_with_lock.write().unwrap().threads, Vec::new());
         if threads.is_empty() {
             break;
         }
@@ -408,7 +434,6 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             thread.join().unwrap();
         }
     }
-    
 
     Ok(())
 }

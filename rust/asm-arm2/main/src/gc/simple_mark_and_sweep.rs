@@ -116,7 +116,7 @@ impl Allocator for SimpleMarkSweepHeap {
 
     fn gc_add_root(&mut self, _old: usize, _young: usize) {
         // We don't need to do anything because all roots are gathered
-        // from the stack. 
+        // from the stack.
         // Maybe we should do something though?
         // I guess this could be useful for c stuff,
         // but for right now I'm not going to do anything.
@@ -290,7 +290,7 @@ impl SimpleMarkSweepHeap {
 
     pub fn mark_and_sweep(
         &mut self,
-        stack_base: usize, 
+        stack_base: usize,
         stack_map: &StackMap,
         stack_pointer: usize,
         options: AllocatorOptions,
