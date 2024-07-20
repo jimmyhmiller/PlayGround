@@ -203,9 +203,15 @@ pub extern "C" fn new_thread<Alloc: Allocator>(
 }
 
 pub extern "C" fn __pause<Alloc: Allocator>(
-    _compiler: *const RwLock<Compiler<Alloc>>,
-    _stack_pointer: usize,
+    compiler: *const RwLock<Compiler<Alloc>>,
+    stack_pointer: usize,
 ) -> usize {
+    let compiler = unsafe { &*compiler };
+    if let Ok(mut compiler) = compiler.try_write() {
+        compiler.register_parked_thread(stack_pointer)
+    } else {
+        println!("Already locked :(");
+    }
     thread::park();
     BuiltInTypes::null_value() as usize
 }

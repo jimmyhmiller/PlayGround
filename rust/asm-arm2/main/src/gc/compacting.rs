@@ -3,7 +3,7 @@ use std::{error::Error, mem};
 use mmap_rs::{MmapMut, MmapOptions};
 
 use crate::{
-    compiler::{Allocator, AllocatorOptions, StackMap, STACK_SIZE},
+    compiler::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
     ir::BuiltInTypes,
 };
 
@@ -196,26 +196,16 @@ pub struct CompactingHeap {
 impl Allocator for CompactingHeap {
     fn allocate(
         &mut self,
-        stack_base: usize,
-        stack_map: &StackMap,
-        stack_pointer: usize,
         bytes: usize,
         kind: BuiltInTypes,
         options: AllocatorOptions,
-    ) -> Result<usize, Box<dyn Error>> {
-        if options.gc_always {
-            self.gc(stack_base, stack_map, stack_pointer, options);
-        }
+    ) -> Result<AllocateAction, Box<dyn Error>> {
         let pointer = self.allocate_inner(
-            stack_base,
-            stack_map,
-            stack_pointer,
             bytes,
             kind,
-            0,
             options,
         )?;
-        assert!(pointer % 8 == 0, "Pointer is not aligned");
+        
         Ok(pointer)
     }
 
@@ -248,6 +238,7 @@ impl Allocator for CompactingHeap {
         if options.print_stats {
             println!("GC took: {:?}", start.elapsed());
         }
+
     }
 
     fn gc_add_root(&mut self, _old: usize, _young: usize) {
@@ -256,6 +247,10 @@ impl Allocator for CompactingHeap {
         // Maybe we should do something though?
         // I guess this could be useful for c stuff,
         // but for right now I'm not going to do anything.
+    }
+
+    fn grow(&mut self, _options: AllocatorOptions) {
+        self.from_space.resize();
     }
 }
 
@@ -274,53 +269,17 @@ impl CompactingHeap {
     #[allow(clippy::too_many_arguments)]
     fn allocate_inner(
         &mut self,
-        stack_base: usize,
-        stack_map: &StackMap,
-        stack_pointer: usize,
         bytes: usize,
         _kind: BuiltInTypes,
-        depth: usize,
-        options: AllocatorOptions,
-    ) -> Result<usize, Box<dyn Error>> {
-        if depth > 1 {
-            // This might feel a bit dumb
-            // But I do think it is reasonable to recurse
-            // to get to the state I want
-            // But I really should catch that depth.
-            // never exceeds 1
-            panic!("Recursed more than once in allocate")
-        }
-
+        _options: AllocatorOptions,
+    ) -> Result<AllocateAction, Box<dyn Error>> {
         if self.from_space.can_allocate(bytes) {
-            return self.from_space.allocate(bytes);
+            return Ok(AllocateAction::Allocated(self.from_space.allocate(bytes)?));
         } else {
-            self.gc(stack_base, stack_map, stack_pointer, options);
+            return Ok(AllocateAction::Gc);
         }
-        if !self.from_space.can_allocate(bytes) {
-            self.from_space.resize();
-        }
-        self.allocate_inner(
-            stack_base,
-            stack_map,
-            stack_pointer,
-            bytes,
-            _kind,
-            depth + 1,
-            options,
-        )
     }
 
-    // TODO: I need to change this into a copy from roots to heap
-    // not a segment.
-    // That means I need be able to capture the state before I start adding objects
-    // and then be able to iterate over the new ones added.
-    // Right now, this would cause problems, because the objects alive from the roots
-    // will probably not fit in one segment.
-
-    // I also should move this to a new struct
-
-    // I really want to experiment more with gc, but it feels so bogged down in the implementation
-    // details right now.
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
         // TODO: Is this vec the best way? Probably not
         // I could hand this the pointers to the stack location

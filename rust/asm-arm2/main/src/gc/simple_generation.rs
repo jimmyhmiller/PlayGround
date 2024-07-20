@@ -3,7 +3,7 @@ use std::error::Error;
 use mmap_rs::{MmapMut, MmapOptions};
 
 use crate::{
-    compiler::{Allocator, AllocatorOptions, StackMap, STACK_SIZE},
+    compiler::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
     ir::BuiltInTypes,
 };
 
@@ -170,31 +170,21 @@ pub struct SimpleGeneration {
     // There should be very few atoms
     // But I will probably want to revist this
     additional_roots: Vec<(usize, usize)>,
+    atomic_pause: [u8; 8],
 }
 
 impl Allocator for SimpleGeneration {
     fn allocate(
         &mut self,
-        stack_base: usize,
-        stack_map: &StackMap,
-        stack_pointer: usize,
         bytes: usize,
         kind: BuiltInTypes,
         options: AllocatorOptions,
-    ) -> Result<usize, Box<dyn Error>> {
-        if options.gc_always {
-            self.gc(stack_base, stack_map, stack_pointer, options);
-        }
+    ) -> Result<AllocateAction, Box<dyn Error>> {
         let pointer = self.allocate_inner(
-            stack_base,
-            stack_map,
-            stack_pointer,
             bytes,
             kind,
-            0,
             options,
         )?;
-        assert!(pointer % 8 == 0, "Pointer is not aligned");
         Ok(pointer)
     }
 
@@ -217,8 +207,16 @@ impl Allocator for SimpleGeneration {
         self.gc_count += 1;
     }
 
+    fn grow(&mut self, options: AllocatorOptions) {
+        self.old.grow(options);
+    }
+ 
     fn gc_add_root(&mut self, old: usize, young: usize) {
         self.additional_roots.push((old, young));
+    }
+
+    fn get_pause_pointer(&self) -> usize {
+        self.atomic_pause.as_ptr() as usize
     }
 }
 
@@ -239,47 +237,21 @@ impl SimpleGeneration {
             gc_count,
             full_gc_frequency,
             additional_roots: vec![],
+            atomic_pause: [0; 8],
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn allocate_inner(
         &mut self,
-        stack_base: usize,
-        stack_map: &StackMap,
-        stack_pointer: usize,
         bytes: usize,
         _kind: BuiltInTypes,
-        depth: usize,
-        options: AllocatorOptions,
-    ) -> Result<usize, Box<dyn Error>> {
-        if depth > 1 {
-            // This might feel a bit dumb
-            // But I do think it is reasonable to recurse
-            // to get to the state I want
-            // But I really should catch that depth.
-            // never exceeds 1
-            panic!("Recursed more than once in allocate")
-        }
-
+        _options: AllocatorOptions,
+    ) -> Result<AllocateAction, Box<dyn Error>> {
         if self.young.can_allocate(bytes) {
-            return self.young.allocate(bytes);
+            return Ok(AllocateAction::Allocated(self.young.allocate(bytes)?));
         } else {
-            self.gc(stack_base, stack_map, stack_pointer, options);
+            return Ok(AllocateAction::Gc);
         }
-        // TODO: Fix to work with no-gc
-        if !self.young.can_allocate(bytes) {
-            panic!("Failed to allocate");
-        }
-        self.allocate_inner(
-            stack_base,
-            stack_map,
-            stack_pointer,
-            bytes,
-            _kind,
-            depth + 1,
-            options,
-        )
     }
 
     fn minor_gc(
