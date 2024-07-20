@@ -11,7 +11,7 @@ use gc::{
     simple_mark_and_sweep::SimpleMarkSweepHeap,
 };
 
-use std::{error::Error, mem, slice::from_raw_parts, sync::RwLock, time::Instant};
+use std::{error::Error, mem, slice::from_raw_parts, sync::RwLock, thread, time::Instant};
 
 mod arm;
 pub mod ast;
@@ -202,6 +202,14 @@ pub extern "C" fn new_thread<Alloc: Allocator>(
     BuiltInTypes::null_value() as usize
 }
 
+pub extern "C" fn __pause<Alloc: Allocator>(
+    _compiler: *const RwLock<Compiler<Alloc>>,
+    _stack_pointer: usize,
+) -> usize {
+    thread::park();
+    BuiltInTypes::null_value() as usize
+}
+
 fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
@@ -382,6 +390,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         false,
     )?;
     borrowed_compiler.add_builtin_function("thread", new_thread::<Alloc> as *const u8, false)?;
+    borrowed_compiler.add_builtin_function("__pause", __pause::<Alloc> as *const u8, true)?;
 
     let compile_time = Instant::now();
     borrowed_compiler.compile_ast(ast)?;
