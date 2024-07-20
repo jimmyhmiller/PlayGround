@@ -168,16 +168,18 @@ pub struct AllocatorOptions {
     pub gc_always: bool,
 }
 
+pub enum AllocateAction {
+    Allocated(usize),
+    Gc,
+}
+
 pub trait Allocator {
     fn allocate(
         &mut self,
-        stack_base: usize,
-        stack_map: &StackMap,
-        stack_pointer: usize,
         bytes: usize,
         kind: BuiltInTypes,
         options: AllocatorOptions,
-    ) -> Result<usize, Box<dyn Error>>;
+    ) -> Result<AllocateAction, Box<dyn Error>>;
     fn gc(
         &mut self,
         stack_base: usize,
@@ -185,10 +187,22 @@ pub trait Allocator {
         stack_pointer: usize,
         options: AllocatorOptions,
     );
+
+    fn grow(&mut self, options: AllocatorOptions);
     fn gc_add_root(&mut self, old: usize, young: usize);
 
     fn get_pause_pointer(&self) -> usize {
         0
+    }
+
+    fn register_thread(&mut self, _thread_id: ThreadId) {
+        
+    }
+
+    // TODO: I think this won't work because of my read write lock
+    // I probably need to change that.
+    fn register_parked_thread(&mut self, _thread_id: ThreadId, _stack_pointer: usize) {
+        
     }
 }
 
@@ -265,21 +279,58 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         stack_pointer: usize,
         kind: BuiltInTypes,
     ) -> Result<usize, Box<dyn Error>> {
+
+
+        
         // TODO: I need to make it so that I can pass the ability to pause
         // to the allocator. Maybe the allocator should have the pause atom?
         // I need to think about how to abstract all these details out.
         let options = self.get_allocate_options();
-        self.heap.allocate(
-            self.get_stack_base(),
-            &self.stack_map,
-            stack_pointer,
+
+        if options.gc_always {
+            self.gc(stack_pointer);
+        }
+
+        let result = self.heap.allocate(
             bytes,
             kind,
             options,
-        )
+        );
+
+        match result {
+            Ok(AllocateAction::Allocated(value)) => Ok(value),
+            Ok(AllocateAction::Gc) => {
+                self.gc(stack_pointer);
+                let result = self.heap.allocate(
+                    bytes,
+                    kind,
+                    options,
+                );
+                if let Ok(AllocateAction::Allocated(result)) = result {
+                    Ok(result)
+                } else {
+                   self.heap.grow(options);
+                   // TODO: Detect loop here
+                   self.allocate(bytes, stack_pointer, kind)
+                }
+            }
+            Err(e) => Err(e),
+        }
+        
     }
 
     pub fn gc(&mut self, stack_pointer: usize) {
+
+
+        // TODO: Signal to all the threads that they need to pause
+        // Make sure we have all the stack pointers from the threads
+        // Then we can start the gc
+        // One trick I could do for the gc stuff is write the stack pointer
+        // as the first value in the stack. Seems a bit hacky. But I do need to 
+        // communicate where that stack pointer is.
+        // I think my RWLock will make that complicated right now.
+        // But there are plenty of places I could store that.
+
         let options = self.get_allocate_options();
         self.heap.gc(
             self.get_stack_base(),
@@ -293,6 +344,10 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         if BuiltInTypes::is_heap_pointer(young) {
             self.heap.gc_add_root(old, young);
         }
+    }
+
+    pub fn register_parked_thread(&mut self, stack_pointer: usize) {
+        self.heap.register_parked_thread(std::thread::current().id(), stack_pointer);
     }
 
     fn get_stack_base(&self) -> usize {
@@ -323,6 +378,7 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         });
 
         self.stacks.push((thread.thread().id(), new_stack));
+        self.heap.register_thread(thread.thread().id());
         self.threads.push(thread);
     }
 

@@ -1,5 +1,5 @@
 use crate::{
-    compiler::{Allocator, AllocatorOptions, StackMap, STACK_SIZE},
+    compiler::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
     debugger,
     ir::BuiltInTypes,
     Data, Message,
@@ -77,27 +77,15 @@ pub struct SimpleMarkSweepHeap {
 impl Allocator for SimpleMarkSweepHeap {
     fn allocate(
         &mut self,
-        stack_base: usize,
-        stack_map: &StackMap,
-        stack_pointer: usize,
         bytes: usize,
         _kind: BuiltInTypes,
-        options: AllocatorOptions,
-    ) -> Result<usize, Box<dyn Error>> {
-        if options.gc_always {
-            self.gc(stack_base, stack_map, stack_pointer, options);
-        }
+        _options: AllocatorOptions,
+    ) -> Result<AllocateAction, Box<dyn Error>> {
 
         if self.can_allocate(bytes) {
             self.allocate_inner(bytes, 0, None)
         } else {
-            self.gc(stack_base, stack_map, stack_pointer, options);
-            if self.can_allocate(bytes) {
-                self.allocate_inner(bytes, 0, None)
-            } else {
-                self.create_more_segments(bytes);
-                self.allocate_inner(bytes, 0, None)
-            }
+            return Ok(AllocateAction::Gc)
         }
     }
 
@@ -108,10 +96,16 @@ impl Allocator for SimpleMarkSweepHeap {
         stack_pointer: usize,
         options: AllocatorOptions,
     ) {
-        if !options.gc {
-            return;
-        }
         self.mark_and_sweep(stack_base, stack_map, stack_pointer, options);
+    }
+
+    fn grow(&mut self, _options: AllocatorOptions) {
+        // TODO: remove this bytes parameter placehodler
+        // It does too much right now
+        // It first tries to find a place to put the object
+        // only then does it add. So I'm using max so that it can
+        // never find a spot
+        self.create_more_segments();
     }
 
     fn gc_add_root(&mut self, _old: usize, _young: usize) {
@@ -161,9 +155,8 @@ impl SimpleMarkSweepHeap {
         false
     }
 
-    fn create_more_segments(&mut self, bytes: usize) -> SegmentAction {
+    fn switch_or_create_segments(&mut self, bytes: usize) -> SegmentAction {
         let size = (bytes + 1) * 8;
-
         if self.switch_to_available_segment(size) {
             return SegmentAction::Increment;
         }
@@ -174,6 +167,11 @@ impl SimpleMarkSweepHeap {
                 return SegmentAction::Increment;
             }
         }
+
+        self.create_more_segments()
+    }
+
+    fn create_more_segments(&mut self) -> SegmentAction {
 
         self.space.segment_offset = self.space.segments.len();
 
@@ -487,15 +485,7 @@ impl SimpleMarkSweepHeap {
         bytes: usize,
         depth: usize,
         data: Option<&[u8]>,
-    ) -> Result<usize, Box<dyn Error>> {
-        if depth > 1 {
-            // This might feel a bit dumb
-            // But I do think it is reasonable to recurse
-            // to get to the state I want
-            // But I really should catch that depth.
-            // never exceeds 1
-            panic!("Recursed more than once in allocate")
-        }
+    ) -> Result<AllocateAction, Box<dyn Error>> {
 
         let size = (bytes + 1) * 8;
         let shifted_size = (bytes * 8) << 1;
@@ -508,7 +498,7 @@ impl SimpleMarkSweepHeap {
                 data,
             );
             self.increment_current_offset(size);
-            return Ok(pointer);
+            return Ok(AllocateAction::Allocated(pointer));
         }
 
         if self.switch_to_available_segment(size) {
@@ -538,7 +528,8 @@ impl SimpleMarkSweepHeap {
                 .find(|(_, x)| x.size >= size);
 
             if spot.is_none() {
-                self.create_more_segments(size);
+                // TODO: I should consider gc rather than growing here
+                self.switch_or_create_segments(size);
                 return self.allocate_inner(bytes, depth + 1, data);
             }
         }
@@ -554,7 +545,7 @@ impl SimpleMarkSweepHeap {
         }
 
         let pointer = self.write_object(spot_clone.segment, spot_clone.offset, shifted_size, data);
-        Ok(pointer)
+        Ok(AllocateAction::Allocated(pointer))
     }
 
     pub fn copy_data_to_offset(&mut self, data: &[u8]) -> isize {
@@ -563,7 +554,11 @@ impl SimpleMarkSweepHeap {
         let pointer = self
             .allocate_inner(data.len() / 8 - 1, 0, Some(data))
             .unwrap();
-        let pointer = pointer as *mut u8;
-        pointer as isize
+
+        if let AllocateAction::Allocated(pointer) = pointer {
+            return pointer as isize;
+        } else {
+            panic!("Failed to allocate");
+        }
     }
 }
