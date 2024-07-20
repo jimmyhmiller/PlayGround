@@ -186,6 +186,10 @@ pub trait Allocator {
         options: AllocatorOptions,
     );
     fn gc_add_root(&mut self, old: usize, young: usize);
+
+    fn get_pause_pointer(&self) -> usize {
+        0
+    }
 }
 
 pub struct Compiler<Alloc: Allocator> {
@@ -261,6 +265,9 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         stack_pointer: usize,
         kind: BuiltInTypes,
     ) -> Result<usize, Box<dyn Error>> {
+        // TODO: I need to make it so that I can pass the ability to pause
+        // to the allocator. Maybe the allocator should have the pause atom?
+        // I need to think about how to abstract all these details out.
         let options = self.get_allocate_options();
         self.heap.allocate(
             self.get_stack_base(),
@@ -1035,5 +1042,9 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             | "primitive_breakpoint!" => true,
             _ => false,
         }
+    }
+    
+    pub fn get_pause_atom(&self) -> usize {
+        self.heap.get_pause_pointer()
     }
 }
