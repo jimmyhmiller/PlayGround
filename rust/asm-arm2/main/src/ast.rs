@@ -237,7 +237,9 @@ impl<'a> AstCompiler<'a> {
                 }
 
                 let should_pause_atom = self.compiler.get_pause_atom();
-                if should_pause_atom != 0 {
+
+                // TODO: This isn't working with atomicbool. Need to figure it out
+                if should_pause_atom != 0 && false {
                     let should_pause_atom = self.ir.assign_new(Value::RawValue(should_pause_atom));
                     let atomic_value = self.ir.volatile_register();
                     let should_pause_atom = self
@@ -248,7 +250,7 @@ impl<'a> AstCompiler<'a> {
                         pause_label,
                         Condition::Equal,
                         should_pause_atom,
-                        Value::RawValue(0),
+                        Value::RawValue(1),
                     );
                     let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
                     let stack_pointer = self.ir.get_stack_pointer_imm(0);

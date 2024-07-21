@@ -200,9 +200,26 @@ pub unsafe extern "C" fn __pause<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     _stack_pointer: usize,
 ) -> usize {
-    let _runtime = unsafe { &mut *runtime };
+    let runtime = unsafe { &mut *runtime };
     println!("PARKING!");
-    thread::park();
+
+    let thread_state = runtime.thread_state.clone();
+    let (lock, condvar) = &*thread_state;
+    let mut state = lock.lock().unwrap();
+    state.pause();
+    condvar.notify_one();
+    drop(state);
+
+    while runtime.is_paused() {
+        // Park can unpark itself even if I haven't called unpark
+        thread::park();
+    }
+
+    let thread_state = runtime.thread_state.clone();
+    let (lock, condvar) = &*thread_state;
+    let mut state = lock.lock().unwrap();
+    state.unpause();
+
     // Apparently, I can't count on this not unparking
     // I need some other mechanism to know that things are ready
     BuiltInTypes::null_value() as usize
@@ -352,6 +369,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     let mut borrowed_compiler = runtime.compiler.write().unwrap();
 
     borrowed_compiler.set_compiler_lock_pointer(&runtime.compiler as *const _);
+    borrowed_compiler.set_pause_atom_ptr(runtime.pause_atom_ptr());
 
     borrowed_compiler.add_builtin_function(
         "println",

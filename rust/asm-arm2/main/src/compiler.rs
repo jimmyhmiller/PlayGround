@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     error::Error,
     slice::from_raw_parts_mut,
-    sync::RwLock,
+    sync::{atomic::AtomicBool, Arc, Condvar, Mutex, RwLock},
     thread::{self, JoinHandle, ThreadId},
 };
 
@@ -203,11 +203,28 @@ pub trait Allocator {
     fn register_parked_thread(&mut self, _thread_id: ThreadId, _stack_pointer: usize) {}
 }
 
+
+pub struct ThreadState {
+    pub paused_threads: usize,
+}
+
+impl ThreadState {
+    pub fn pause(&mut self) {
+        self.paused_threads += 1;
+    }
+
+    pub fn unpause(&mut self) {
+        self.paused_threads -= 1;
+    }
+}
+
 pub struct Runtime<Alloc: Allocator> {
     pub compiler: RwLock<Compiler>,
     pub memory: Memory<Alloc>,
     command_line_arguments: CommandLineArguments,
     pub printer: Box<dyn Printer>,
+    pub is_paused: AtomicBool,
+    pub thread_state: Arc<(Mutex<ThreadState>, Condvar)>,
 }
 
 pub struct Memory<Alloc: Allocator> {
@@ -236,11 +253,16 @@ pub struct Compiler {
     // is there a better way?
     // Should I pass runtime to all the compiler stuff?
     pub stack_map: StackMap,
+    pub pause_atom_ptr: Option<usize>,
 }
 
 impl Compiler {
     pub fn get_pause_atom(&self) -> usize {
-        0
+        self.pause_atom_ptr.unwrap_or(0)
+    }
+
+    pub fn set_pause_atom_ptr(&mut self, pointer: usize) {
+        self.pause_atom_ptr = Some(pointer);
     }
 
     pub fn get_compiler_ptr(&self) -> *const RwLock<Compiler> {
@@ -814,6 +836,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 command_line_arguments: command_line_arguments.clone(),
                 compiler_lock_pointer: None,
                 stack_map: StackMap::new(),
+                pause_atom_ptr: None,
             }),
             memory: Memory {
                 heap: allocator,
@@ -825,6 +848,8 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 command_line_arguments,
                 stack_map: StackMap::new(),
             },
+            is_paused: AtomicBool::new(false),
+            thread_state: Arc::new((Mutex::new(ThreadState { paused_threads: 0 }), Condvar::new())),
         }
     }
 
@@ -846,6 +871,14 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let compiler = self.compiler.read().unwrap();
         let result = compiler.get_repr(result, 0).unwrap();
         self.printer.println(result);
+    }
+    
+    pub fn is_paused(&self) -> bool {
+        self.is_paused.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn pause_atom_ptr(&self) -> usize {
+        self.is_paused.as_ptr() as usize
     }
 
     pub fn allocate(
@@ -891,6 +924,16 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         // communicate where that stack pointer is.
         // I think my RWLock will make that complicated right now.
         // But there are plenty of places I could store that.
+
+        self.is_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+        let number_of_threads = self.memory.threads.len();
+        
+        let (lock, cvar) = &*self.thread_state;
+        let mut thread_state = lock.lock().unwrap();
+        while thread_state.paused_threads < number_of_threads {
+            thread_state = cvar.wait(thread_state).unwrap();
+        }
+
 
         let options = self.get_allocate_options();
         self.memory.heap.gc(
