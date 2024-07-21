@@ -216,7 +216,7 @@ pub unsafe extern "C" fn __pause<Alloc: Allocator>(
     }
 
     let thread_state = runtime.thread_state.clone();
-    let (lock, condvar) = &*thread_state;
+    let (lock, _condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
     state.unpause();
 
