@@ -1,17 +1,17 @@
 #![allow(clippy::match_like_matches_macro)]
-use crate::{compiler::Compiler, ir::BuiltInTypes, parser::Parser};
+use crate::{ir::BuiltInTypes, parser::Parser};
 use arm::LowLevelArm;
 use asm::arm::{SP, X0, X1, X10, X2, X3, X4};
 use bincode::{config::standard, Decode, Encode};
 use clap::{command, Parser as ClapParser};
-use compiler::{Allocator, DefaultPrinter, Printer, StackMapDetails, TestPrinter};
+use compiler::{Allocator, DefaultPrinter, Printer, Runtime, StackMapDetails, TestPrinter};
 #[allow(unused)]
 use gc::{
     compacting::CompactingHeap, simple_generation::SimpleGeneration,
     simple_mark_and_sweep::SimpleMarkSweepHeap,
 };
 
-use std::{error::Error, mem, slice::from_raw_parts, sync::RwLock, thread, time::Instant};
+use std::{error::Error, mem, slice::from_raw_parts, thread, time::Instant};
 
 mod arm;
 pub mod ast;
@@ -104,67 +104,63 @@ pub fn debugger(message: Message) {
 }
 
 pub extern "C" fn println_value<Alloc: Allocator>(
-    compiler: *const RwLock<Compiler<Alloc>>,
+    runtime: *mut Runtime<Alloc>,
     value: usize,
 ) -> usize {
-    let compiler = unsafe { &*compiler };
-    let mut compiler = compiler.write().unwrap();
-    compiler.println(value);
+    let runtime = unsafe { &mut *runtime };
+    runtime.println(value);
     0b111
 }
 
 pub extern "C" fn print_value<Alloc: Allocator>(
-    compiler: *const RwLock<Compiler<Alloc>>,
+    runtime: *mut Runtime<Alloc>,
     value: usize,
 ) -> usize {
-    let compiler = unsafe { &*compiler };
-    let mut compiler = compiler.write().unwrap();
-    compiler.print(value);
+    let runtime = unsafe { &mut *runtime };
+    runtime.print(value);
     0b111
 }
 
 extern "C" fn allocate_struct<Alloc: Allocator>(
-    compiler: *const RwLock<Compiler<Alloc>>,
+    runtime: *mut Runtime<Alloc>,
     value: usize,
     stack_pointer: usize,
 ) -> usize {
     let value = BuiltInTypes::untag(value);
-    let compiler = unsafe { &*compiler };
+    let runtime = unsafe { &mut *runtime };
 
-    let mut compiler = compiler.write().unwrap();
-
-    compiler
+    runtime
         .allocate(value, stack_pointer, BuiltInTypes::Struct)
         .unwrap()
 }
 
 extern "C" fn make_closure<Alloc: Allocator>(
-    compiler: *const RwLock<Compiler<Alloc>>,
+    runtime: *mut Runtime<Alloc>,
     function: usize,
     num_free: usize,
     free_variable_pointer: usize,
 ) -> usize {
-    let compiler = unsafe { &*compiler };
-    let mut compiler = compiler.write().unwrap();
+    let runtime = unsafe { &mut *runtime };
+
     let num_free = BuiltInTypes::untag(num_free);
     let free_variable_pointer = free_variable_pointer as *const usize;
     let start = unsafe { free_variable_pointer.sub(num_free - 1) };
     let free_variables = unsafe { from_raw_parts(start, num_free) };
-    compiler.make_closure(function, free_variables).unwrap()
+    runtime.make_closure(function, free_variables).unwrap()
 }
 
 extern "C" fn property_access<Alloc: Allocator>(
-    compiler: *const RwLock<Compiler<Alloc>>,
+    runtime: *mut Runtime<Alloc>,
     struct_pointer: usize,
     str_constant_ptr: usize,
 ) -> usize {
-    let compiler = unsafe { &*compiler };
-    let compiler = compiler.read().unwrap();
+    let runtime = unsafe { &mut *runtime };
+    let compiler = runtime.compiler.read().unwrap();
     compiler.property_access(struct_pointer, str_constant_ptr)
 }
 
 pub extern "C" fn throw_error<Alloc: Allocator>(
-    _compiler: *const RwLock<Compiler<Alloc>>,
+    _runtime: *mut Runtime<Alloc>,
     _stack_pointer: usize,
 ) -> usize {
     // let compiler = unsafe { &mut *compiler };
@@ -172,51 +168,47 @@ pub extern "C" fn throw_error<Alloc: Allocator>(
 }
 
 pub extern "C" fn gc<Alloc: Allocator>(
-    compiler: *const RwLock<Compiler<Alloc>>,
+    runtime: *mut Runtime<Alloc>,
     stack_pointer: usize,
 ) -> usize {
-    let compiler = unsafe { &*compiler };
-    let mut compiler = compiler.write().unwrap();
-    compiler.gc(stack_pointer);
+    let runtime = unsafe { &mut *runtime };
+    runtime.gc(stack_pointer);
     BuiltInTypes::null_value() as usize
 }
 
 pub extern "C" fn gc_add_root<Alloc: Allocator>(
-    compiler: *const RwLock<Compiler<Alloc>>,
+    runtime: *mut Runtime<Alloc>,
     old: usize,
     young: usize,
 ) -> usize {
-    let compiler = unsafe { &*compiler };
-    let mut compiler = compiler.write().unwrap();
-    compiler.gc_add_root(old, young);
+    let runtime = unsafe { &mut *runtime };
+    runtime.gc_add_root(old, young);
     BuiltInTypes::null_value() as usize
 }
 
 pub extern "C" fn new_thread<Alloc: Allocator>(
-    compiler: *const RwLock<Compiler<Alloc>>,
+    runtime: *mut Runtime<Alloc>,
     function: usize,
 ) -> usize {
-    let compiler = unsafe { &*compiler };
-    let mut compiler = compiler.write().unwrap();
-    compiler.new_thread(function);
+    let runtime = unsafe { &mut *runtime };
+    runtime.new_thread(function);
     BuiltInTypes::null_value() as usize
 }
 
 pub extern "C" fn __pause<Alloc: Allocator>(
-    compiler: *const RwLock<Compiler<Alloc>>,
-    stack_pointer: usize,
+    runtime: *mut Runtime<Alloc>,
+    _stack_pointer: usize,
 ) -> usize {
-    let compiler = unsafe { &*compiler };
-    if let Ok(mut compiler) = compiler.try_write() {
-        compiler.register_parked_thread(stack_pointer)
-    } else {
-        println!("Already locked :(");
-    }
+    let _runtime = unsafe { &mut *runtime };
+    println!("PARKING!");
     thread::park();
+    // Apparently, I can't count on this not unparking
+    // I need some other mechanism to know that things are ready
     BuiltInTypes::null_value() as usize
 }
 
-fn compile_trampoline<Alloc: Allocator>(compiler: &mut Compiler<Alloc>) {
+fn compile_trampoline<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
+    let mut compiler = runtime.compiler.write().unwrap();
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
     lang.prelude(-2);
@@ -352,14 +344,13 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         Box::new(DefaultPrinter)
     };
 
-    let compiler = Compiler::new(args.clone(), allocator, printer);
-    let compiler_with_lock = RwLock::new(compiler);
+    let mut runtime = Runtime::new(args.clone(), allocator, printer);
 
-    let mut borrowed_compiler = compiler_with_lock.write().unwrap();
+    compile_trampoline(&mut runtime);
 
-    borrowed_compiler.set_lock_pointer(&compiler_with_lock as *const _);
+    let mut borrowed_compiler = runtime.compiler.write().unwrap();
 
-    compile_trampoline(&mut borrowed_compiler);
+    borrowed_compiler.set_compiler_lock_pointer(&runtime.compiler as *const _);
 
     borrowed_compiler.add_builtin_function(
         "println",
@@ -406,29 +397,26 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         println!("Compile time {:?}", compile_time.elapsed());
     }
 
+    // TODO: Do better
+    // If I'm compiling on the fly I need this to happen when I compile
+    // not just here
+    runtime.memory.stack_map = borrowed_compiler.stack_map.clone();
+
     drop(borrowed_compiler);
 
     let time = Instant::now();
-    let borrowed_compiler = compiler_with_lock.read().unwrap();
-    let f = borrowed_compiler.get_function0("main");
-    drop(borrowed_compiler);
+    let f = runtime.get_function0("main");
     let result = f();
     if args.show_times {
         println!("Time {:?}", time.elapsed());
     }
-    let mut borrowed_compiler = compiler_with_lock.write().unwrap();
-    borrowed_compiler.println(result as usize);
+    runtime.println(result as usize);
 
     if has_expect {
         let source = std::fs::read_to_string(program)?;
         let expected = get_expect(&source);
         let expected = expected.trim();
-        let printed = borrowed_compiler
-            .printer
-            .get_output()
-            .join("")
-            .trim()
-            .to_string();
+        let printed = runtime.printer.get_output().join("").trim().to_string();
         if printed != expected {
             println!("Expected: \n{}\n", expected);
             println!("Got: \n{}\n", printed);
@@ -436,12 +424,11 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
         println!("Test passed");
     }
-    drop(borrowed_compiler);
 
     loop {
         // take the list of threads so we are not holding a borrow on the compiler
         // use mem::replace to swap out the threads with an empty vec
-        let threads = mem::replace(&mut compiler_with_lock.write().unwrap().threads, Vec::new());
+        let threads = mem::replace(&mut runtime.memory.threads, Vec::new());
         if threads.is_empty() {
             break;
         }

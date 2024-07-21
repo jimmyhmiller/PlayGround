@@ -85,6 +85,7 @@ pub struct StackMapDetails {
 
 pub const STACK_SIZE: usize = 1024 * 1024 * 32;
 
+#[derive(Debug, Clone)]
 pub struct StackMap {
     details: Vec<(usize, StackMapDetails)>,
 }
@@ -195,18 +196,30 @@ pub trait Allocator {
         0
     }
 
-    fn register_thread(&mut self, _thread_id: ThreadId) {
-        
-    }
+    fn register_thread(&mut self, _thread_id: ThreadId) {}
 
     // TODO: I think this won't work because of my read write lock
     // I probably need to change that.
-    fn register_parked_thread(&mut self, _thread_id: ThreadId, _stack_pointer: usize) {
-        
-    }
+    fn register_parked_thread(&mut self, _thread_id: ThreadId, _stack_pointer: usize) {}
 }
 
-pub struct Compiler<Alloc: Allocator> {
+pub struct Runtime<Alloc: Allocator> {
+    pub compiler: RwLock<Compiler>,
+    pub memory: Memory<Alloc>,
+    command_line_arguments: CommandLineArguments,
+    pub printer: Box<dyn Printer>,
+}
+
+pub struct Memory<Alloc: Allocator> {
+    heap: Alloc,
+    stacks: Vec<(ThreadId, MmapMut)>,
+    pub threads: Vec<JoinHandle<u64>>,
+    pub stack_map: StackMap,
+    #[allow(unused)]
+    command_line_arguments: CommandLineArguments,
+}
+
+pub struct Compiler {
     code_offset: usize,
     code_memory: Option<Mmap>,
     // TODO: Think about the jump table more
@@ -215,181 +228,27 @@ pub struct Compiler<Alloc: Allocator> {
     jump_table_offset: usize,
     structs: StructManager,
     functions: Vec<Function>,
-    heap: Alloc,
-    stacks: Vec<(ThreadId, MmapMut)>,
-    pub threads: Vec<JoinHandle<u64>>,
     string_constants: Vec<StringValue>,
-    stack_map: StackMap,
-    pub printer: Box<dyn Printer>,
+    #[allow(unused)]
     command_line_arguments: CommandLineArguments,
-    lock_pointer: Option<*const RwLock<Compiler<Alloc>>>,
+    pub compiler_lock_pointer: Option<*const RwLock<Compiler>>,
+    // TODO: Need to transfer these after I compiler to memory
+    // is there a better way?
+    // Should I pass runtime to all the compiler stuff?
+    pub stack_map: StackMap,
 }
 
-impl<Alloc: Allocator> fmt::Debug for Compiler<Alloc> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: Make this better
-        f.debug_struct("Compiler")
-            .field("code_offset", &self.code_offset)
-            .field("jump_table_offset", &self.jump_table_offset)
-            .field("functions", &self.functions)
-            .finish()
-    }
-}
-
-impl<Alloc: Allocator> Compiler<Alloc> {
-    pub fn new(
-        command_line_arguments: CommandLineArguments,
-        allocator: Alloc,
-        printer: Box<dyn Printer>,
-    ) -> Self {
-        Self {
-            code_memory: Some(
-                MmapOptions::new(MmapOptions::page_size())
-                    .unwrap()
-                    .map()
-                    .unwrap(),
-            ),
-            code_offset: 0,
-            jump_table: Some(
-                MmapOptions::new(MmapOptions::page_size())
-                    .unwrap()
-                    .map()
-                    .unwrap(),
-            ),
-            jump_table_offset: 0,
-            structs: StructManager::new(),
-            functions: Vec::new(),
-            heap: allocator,
-            stacks: vec![(
-                std::thread::current().id(),
-                MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
-            )],
-            threads: vec![],
-            string_constants: vec![],
-            stack_map: StackMap::new(),
-            printer,
-            command_line_arguments,
-            lock_pointer: None,
-        }
+impl Compiler {
+    pub fn get_pause_atom(&self) -> usize {
+        0
     }
 
-    pub fn allocate(
-        &mut self,
-        bytes: usize,
-        stack_pointer: usize,
-        kind: BuiltInTypes,
-    ) -> Result<usize, Box<dyn Error>> {
-
-
-        
-        // TODO: I need to make it so that I can pass the ability to pause
-        // to the allocator. Maybe the allocator should have the pause atom?
-        // I need to think about how to abstract all these details out.
-        let options = self.get_allocate_options();
-
-        if options.gc_always {
-            self.gc(stack_pointer);
-        }
-
-        let result = self.heap.allocate(
-            bytes,
-            kind,
-            options,
-        );
-
-        match result {
-            Ok(AllocateAction::Allocated(value)) => Ok(value),
-            Ok(AllocateAction::Gc) => {
-                self.gc(stack_pointer);
-                let result = self.heap.allocate(
-                    bytes,
-                    kind,
-                    options,
-                );
-                if let Ok(AllocateAction::Allocated(result)) = result {
-                    Ok(result)
-                } else {
-                   self.heap.grow(options);
-                   // TODO: Detect loop here
-                   self.allocate(bytes, stack_pointer, kind)
-                }
-            }
-            Err(e) => Err(e),
-        }
-        
+    pub fn get_compiler_ptr(&self) -> *const RwLock<Compiler> {
+        self.compiler_lock_pointer.unwrap()
     }
 
-    pub fn gc(&mut self, stack_pointer: usize) {
-
-
-        // TODO: Signal to all the threads that they need to pause
-        // Make sure we have all the stack pointers from the threads
-        // Then we can start the gc
-        // One trick I could do for the gc stuff is write the stack pointer
-        // as the first value in the stack. Seems a bit hacky. But I do need to 
-        // communicate where that stack pointer is.
-        // I think my RWLock will make that complicated right now.
-        // But there are plenty of places I could store that.
-
-        let options = self.get_allocate_options();
-        self.heap.gc(
-            self.get_stack_base(),
-            &self.stack_map,
-            stack_pointer,
-            options,
-        );
-    }
-
-    pub fn gc_add_root(&mut self, old: usize, young: usize) {
-        if BuiltInTypes::is_heap_pointer(young) {
-            self.heap.gc_add_root(old, young);
-        }
-    }
-
-    pub fn register_parked_thread(&mut self, stack_pointer: usize) {
-        self.heap.register_parked_thread(std::thread::current().id(), stack_pointer);
-    }
-
-    fn get_stack_base(&self) -> usize {
-        let current_thread = std::thread::current().id();
-        self.stacks
-            .iter()
-            .find(|(thread_id, _)| *thread_id == current_thread)
-            .map(|(_, stack)| stack.as_ptr() as usize + STACK_SIZE)
-            .unwrap()
-    }
-
-    pub fn set_lock_pointer(&mut self, lock_pointer: *const RwLock<Compiler<Alloc>>) {
-        self.lock_pointer = Some(lock_pointer);
-    }
-
-    // TODO: Allocate/gc need to change to work with this
-    pub fn new_thread(&mut self, f: usize) {
-        let trampoline = self.get_trampoline();
-        let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
-        let call_closure = self.get_function_by_name("call_closure").unwrap();
-        let function_pointer = self.get_pointer(call_closure).unwrap();
-
-        let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
-        let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
-        let thread = thread::spawn(move || {
-            let result = trampoline(stack_pointer as u64, function_pointer as u64, f as u64);
-            result
-        });
-
-        self.stacks.push((thread.thread().id(), new_stack));
-        self.heap.register_thread(thread.thread().id());
-        self.threads.push(thread);
-    }
-
-    pub fn wait_for_other_threads(&mut self) {
-        if self.threads.len() == 0 {
-            return;
-        }
-        for thread in self.threads.drain(..) {
-            thread.join().unwrap();
-        }
-        self.wait_for_other_threads();
+    pub fn set_compiler_lock_pointer(&mut self, pointer: *const RwLock<Compiler>) {
+        self.compiler_lock_pointer = Some(pointer);
     }
 
     pub fn add_foreign_function(
@@ -665,75 +524,6 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         Ok(start)
     }
 
-    pub fn get_compiler_ptr(&self) -> *const RwLock<Compiler<Alloc>> {
-        self.lock_pointer.unwrap()
-    }
-
-    // TODO: Make this good
-    pub fn run(&self, jump_table_offset: usize) -> Result<u64, Box<dyn Error>> {
-        // get offset stored in jump table as a usize
-        let offset =
-            &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(offset);
-        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-
-        let trampoline = self
-            .functions
-            .iter()
-            .find(|f| f.name == "trampoline")
-            .unwrap();
-        let trampoline_jump_table_offset = trampoline.jump_table_offset;
-        let trampoline_offset = &self.jump_table.as_ref().unwrap()
-            [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
-
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(trampoline_offset);
-        let trampoline_start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-
-        let f: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        let stack_pointer = self.get_stack_base();
-        let result = f(stack_pointer as u64, start as u64);
-        Ok(result)
-    }
-
-    pub fn run1(&self, jump_table_offset: usize, arg: u64) -> Result<u64, Box<dyn Error>> {
-        // get offset stored in jump table as a usize
-        let offset =
-            &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(offset);
-        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-
-        let trampoline = self
-            .functions
-            .iter()
-            .find(|f| f.name == "trampoline")
-            .unwrap();
-        let trampoline_jump_table_offset = trampoline.jump_table_offset;
-        let trampoline_offset = &self.jump_table.as_ref().unwrap()
-            [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
-
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(trampoline_offset);
-        let trampoline_start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-
-        let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        let arg = BuiltInTypes::Int.tag(arg as isize) as u64;
-        let stack_pointer = self.get_stack_base();
-        let result = f(stack_pointer as u64, start as u64, arg);
-        Ok(result)
-    }
-
-    pub fn run2(
-        &self,
-        _jump_table_offset: usize,
-        _arg1: u64,
-        _arg2: u64,
-    ) -> Result<u64, Box<dyn Error>> {
-        unimplemented!("Add trampoline");
-    }
-
     pub fn get_repr(&self, value: usize, depth: usize) -> Option<String> {
         if depth > 1000 {
             return Some("...".to_string());
@@ -844,25 +634,6 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         Ok(())
     }
 
-    // TODO: Make less ugly
-    pub fn run_function(&self, name: &str, vec: Vec<i32>) -> u64 {
-        let function = self
-            .functions
-            .iter()
-            .find(|f| f.name == name)
-            .expect(&format!("Can't find function named {}", name));
-        match vec.len() {
-            0 => self.run(function.jump_table_offset).unwrap(),
-            1 => self
-                .run1(function.jump_table_offset, vec[0] as u64)
-                .unwrap(),
-            2 => self
-                .run2(function.jump_table_offset, vec[0] as u64, vec[1] as u64)
-                .unwrap(),
-            _ => panic!("Too many arguments"),
-        }
-    }
-
     pub fn get_trampoline(&self) -> fn(u64, u64) -> u64 {
         let trampoline = self
             .functions
@@ -877,44 +648,6 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         bytes.copy_from_slice(trampoline_offset);
         let trampoline_start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
         unsafe { std::mem::transmute(trampoline_start) }
-    }
-
-    pub fn get_function_base(&self, name: &str) -> (u64, u64, fn(u64, u64) -> u64) {
-        let function = self
-            .functions
-            .iter()
-            .find(|f| f.name == name)
-            .expect(&format!("Can't find function named {}", name));
-        let jump_table_offset = function.jump_table_offset;
-        let offset =
-            &self.jump_table.as_ref().unwrap()[jump_table_offset * 8..jump_table_offset * 8 + 8];
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(offset);
-        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-
-        let trampoline = self.get_trampoline();
-        let stack_pointer = self.get_stack_base();
-
-        (stack_pointer as u64, start as u64, trampoline)
-    }
-
-    pub fn get_function0(&self, name: &str) -> Box<dyn Fn() -> u64> {
-        let (stack_pointer, start, trampoline) = self.get_function_base(name);
-        Box::new(move || trampoline(stack_pointer as u64, start as u64))
-    }
-
-    #[allow(unused)]
-    fn get_function1(&self, name: &str) -> Box<dyn Fn(u64) -> u64> {
-        let (stack_pointer, start, trampoline_start) = self.get_function_base(name);
-        let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        Box::new(move |arg1| f(stack_pointer as u64, start as u64, arg1))
-    }
-
-    #[allow(unused)]
-    fn get_function2(&self, name: &str) -> Box<dyn Fn(u64, u64) -> u64> {
-        let (stack_pointer, start, trampoline_start) = self.get_function_base(name);
-        let f: fn(u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        Box::new(move |arg1, arg2| f(stack_pointer as u64, start as u64, arg1, arg2))
     }
 
     pub fn add_string(&mut self, string_value: StringValue) -> Value {
@@ -939,49 +672,6 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         self.functions
             .iter_mut()
             .find(|f| f.offset_or_pointer == offset)
-    }
-
-    pub fn make_closure(
-        &mut self,
-        function: usize,
-        free_variables: &[usize],
-    ) -> Result<usize, Box<dyn Error>> {
-        let len = 8 + 8 + 8 + free_variables.len() * 8;
-        // TODO: Stack pointer should be passed in
-        let heap_pointer = self.allocate(len, 0, BuiltInTypes::Closure)?;
-        let pointer = heap_pointer as *mut u8;
-        let num_free = free_variables.len();
-        let function_definition = self.get_function_by_pointer(BuiltInTypes::untag(function));
-        if function_definition.is_none() {
-            panic!("Function not found");
-        }
-        let function_definition = function_definition.unwrap();
-        let num_locals = function_definition.number_of_locals;
-
-        let function = function.to_le_bytes();
-
-        let free_variables = free_variables.iter().flat_map(|v| v.to_le_bytes());
-        let buffer = unsafe { from_raw_parts_mut(pointer, len) };
-        // write function pointer
-        for (index, byte) in function.iter().enumerate() {
-            buffer[index] = *byte;
-        }
-        let num_free = num_free.to_le_bytes();
-        // Write number of free variables
-        for (index, byte) in num_free.iter().enumerate() {
-            buffer[8 + index] = *byte;
-        }
-
-        let num_locals = num_locals.to_le_bytes();
-        // Write number of locals
-        for (index, byte) in num_locals.iter().enumerate() {
-            buffer[16 + index] = *byte;
-        }
-        // write free variables
-        for (index, byte) in free_variables.enumerate() {
-            buffer[24 + index] = byte;
-        }
-        Ok(BuiltInTypes::Closure.tag(heap_pointer as isize) as usize)
     }
 
     pub fn property_access(&self, struct_pointer: usize, str_constant_ptr: usize) -> usize {
@@ -1071,24 +761,6 @@ impl<Alloc: Allocator> Compiler<Alloc> {
         self.functions.iter_mut().find(|f| f.name == name)
     }
 
-    pub fn print(&mut self, result: usize) {
-        let result = self.get_repr(result, 0).unwrap();
-        self.printer.print(result);
-    }
-
-    pub fn println(&mut self, result: usize) {
-        let result = self.get_repr(result, 0).unwrap();
-        self.printer.println(result);
-    }
-
-    fn get_allocate_options(&self) -> AllocatorOptions {
-        AllocatorOptions {
-            gc: !self.command_line_arguments.no_gc,
-            print_stats: self.command_line_arguments.show_gc_times,
-            gc_always: self.command_line_arguments.gc_always,
-        }
-    }
-
     pub fn is_inline_primitive_function(&self, name: &str) -> bool {
         match name {
             "primitive_deref"
@@ -1099,8 +771,359 @@ impl<Alloc: Allocator> Compiler<Alloc> {
             _ => false,
         }
     }
-    
+}
+
+impl fmt::Debug for Compiler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // TODO: Make this better
+        f.debug_struct("Compiler")
+            .field("code_offset", &self.code_offset)
+            .field("jump_table_offset", &self.jump_table_offset)
+            .field("functions", &self.functions)
+            .finish()
+    }
+}
+
+impl<Alloc: Allocator> Runtime<Alloc> {
+    pub fn new(
+        command_line_arguments: CommandLineArguments,
+        allocator: Alloc,
+        printer: Box<dyn Printer>,
+    ) -> Self {
+        Self {
+            printer,
+            command_line_arguments: command_line_arguments.clone(),
+            compiler: RwLock::new(Compiler {
+                code_memory: Some(
+                    MmapOptions::new(MmapOptions::page_size())
+                        .unwrap()
+                        .map()
+                        .unwrap(),
+                ),
+                code_offset: 0,
+                jump_table: Some(
+                    MmapOptions::new(MmapOptions::page_size())
+                        .unwrap()
+                        .map()
+                        .unwrap(),
+                ),
+                jump_table_offset: 0,
+                structs: StructManager::new(),
+                functions: Vec::new(),
+                string_constants: vec![],
+                command_line_arguments: command_line_arguments.clone(),
+                compiler_lock_pointer: None,
+                stack_map: StackMap::new(),
+            }),
+            memory: Memory {
+                heap: allocator,
+                stacks: vec![(
+                    std::thread::current().id(),
+                    MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
+                )],
+                threads: vec![],
+                command_line_arguments,
+                stack_map: StackMap::new(),
+            },
+        }
+    }
+
+    fn get_allocate_options(&self) -> AllocatorOptions {
+        AllocatorOptions {
+            gc: !self.command_line_arguments.no_gc,
+            print_stats: self.command_line_arguments.show_gc_times,
+            gc_always: self.command_line_arguments.gc_always,
+        }
+    }
+
+    pub fn print(&mut self, result: usize) {
+        let compiler = self.compiler.read().unwrap();
+        let result = compiler.get_repr(result, 0).unwrap();
+        self.printer.print(result);
+    }
+
+    pub fn println(&mut self, result: usize) {
+        let compiler = self.compiler.read().unwrap();
+        let result = compiler.get_repr(result, 0).unwrap();
+        self.printer.println(result);
+    }
+
+    pub fn allocate(
+        &mut self,
+        bytes: usize,
+        stack_pointer: usize,
+        kind: BuiltInTypes,
+    ) -> Result<usize, Box<dyn Error>> {
+        // TODO: I need to make it so that I can pass the ability to pause
+        // to the allocator. Maybe the allocator should have the pause atom?
+        // I need to think about how to abstract all these details out.
+        let options = self.get_allocate_options();
+
+        if options.gc_always {
+            self.gc(stack_pointer);
+        }
+
+        let result = self.memory.heap.allocate(bytes, kind, options);
+
+        match result {
+            Ok(AllocateAction::Allocated(value)) => Ok(value),
+            Ok(AllocateAction::Gc) => {
+                self.gc(stack_pointer);
+                let result = self.memory.heap.allocate(bytes, kind, options);
+                if let Ok(AllocateAction::Allocated(result)) = result {
+                    Ok(result)
+                } else {
+                    self.memory.heap.grow(options);
+                    // TODO: Detect loop here
+                    self.allocate(bytes, stack_pointer, kind)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn gc(&mut self, stack_pointer: usize) {
+        // TODO: Signal to all the threads that they need to pause
+        // Make sure we have all the stack pointers from the threads
+        // Then we can start the gc
+        // One trick I could do for the gc stuff is write the stack pointer
+        // as the first value in the stack. Seems a bit hacky. But I do need to
+        // communicate where that stack pointer is.
+        // I think my RWLock will make that complicated right now.
+        // But there are plenty of places I could store that.
+
+        let options = self.get_allocate_options();
+        self.memory.heap.gc(
+            self.get_stack_base(),
+            &self.memory.stack_map,
+            stack_pointer,
+            options,
+        );
+    }
+
+    pub fn gc_add_root(&mut self, old: usize, young: usize) {
+        if BuiltInTypes::is_heap_pointer(young) {
+            self.memory.heap.gc_add_root(old, young);
+        }
+    }
+
+    pub fn register_parked_thread(&mut self, stack_pointer: usize) {
+        self.memory
+            .heap
+            .register_parked_thread(std::thread::current().id(), stack_pointer);
+    }
+
+    fn get_stack_base(&self) -> usize {
+        let current_thread = std::thread::current().id();
+        self.memory
+            .stacks
+            .iter()
+            .find(|(thread_id, _)| *thread_id == current_thread)
+            .map(|(_, stack)| stack.as_ptr() as usize + STACK_SIZE)
+            .unwrap()
+    }
+
+    pub fn make_closure(
+        &mut self,
+        function: usize,
+        free_variables: &[usize],
+    ) -> Result<usize, Box<dyn Error>> {
+        let len = 8 + 8 + 8 + free_variables.len() * 8;
+        // TODO: Stack pointer should be passed in
+        let heap_pointer = self.allocate(len, 0, BuiltInTypes::Closure)?;
+        let pointer = heap_pointer as *mut u8;
+        let num_free = free_variables.len();
+        let compiler = self.compiler.read().unwrap();
+        let function_definition = compiler.get_function_by_pointer(BuiltInTypes::untag(function));
+        if function_definition.is_none() {
+            panic!("Function not found");
+        }
+        let function_definition = function_definition.unwrap();
+        let num_locals = function_definition.number_of_locals;
+
+        let function = function.to_le_bytes();
+
+        let free_variables = free_variables.iter().flat_map(|v| v.to_le_bytes());
+        let buffer = unsafe { from_raw_parts_mut(pointer, len) };
+        // write function pointer
+        for (index, byte) in function.iter().enumerate() {
+            buffer[index] = *byte;
+        }
+        let num_free = num_free.to_le_bytes();
+        // Write number of free variables
+        for (index, byte) in num_free.iter().enumerate() {
+            buffer[8 + index] = *byte;
+        }
+
+        let num_locals = num_locals.to_le_bytes();
+        // Write number of locals
+        for (index, byte) in num_locals.iter().enumerate() {
+            buffer[16 + index] = *byte;
+        }
+        // write free variables
+        for (index, byte) in free_variables.enumerate() {
+            buffer[24 + index] = byte;
+        }
+        Ok(BuiltInTypes::Closure.tag(heap_pointer as isize) as usize)
+    }
+
+    // TODO: Make this good
+    pub fn run(&self, jump_table_offset: usize) -> Result<u64, Box<dyn Error>> {
+        let compiler = self.compiler.read().unwrap();
+        // get offset stored in jump table as a usize
+        let offset = &compiler.jump_table.as_ref().unwrap()
+            [jump_table_offset * 8..jump_table_offset * 8 + 8];
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(offset);
+        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
+
+        let trampoline = compiler
+            .functions
+            .iter()
+            .find(|f| f.name == "trampoline")
+            .unwrap();
+        let trampoline_jump_table_offset = trampoline.jump_table_offset;
+        let trampoline_offset = &compiler.jump_table.as_ref().unwrap()
+            [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
+
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(trampoline_offset);
+        let trampoline_start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
+
+        let f: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
+        let stack_pointer = self.get_stack_base();
+        let result = f(stack_pointer as u64, start as u64);
+        Ok(result)
+    }
+
+    pub fn run1(&self, jump_table_offset: usize, arg: u64) -> Result<u64, Box<dyn Error>> {
+        let compiler = self.compiler.read().unwrap();
+        // get offset stored in jump table as a usize
+        let offset = &compiler.jump_table.as_ref().unwrap()
+            [jump_table_offset * 8..jump_table_offset * 8 + 8];
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(offset);
+        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
+
+        let trampoline = compiler
+            .functions
+            .iter()
+            .find(|f| f.name == "trampoline")
+            .unwrap();
+        let trampoline_jump_table_offset = trampoline.jump_table_offset;
+        let trampoline_offset = &compiler.jump_table.as_ref().unwrap()
+            [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
+
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(trampoline_offset);
+        let trampoline_start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
+
+        let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
+        let arg = BuiltInTypes::Int.tag(arg as isize) as u64;
+        let stack_pointer = self.get_stack_base();
+        let result = f(stack_pointer as u64, start as u64, arg);
+        Ok(result)
+    }
+
+    pub fn run2(
+        &self,
+        _jump_table_offset: usize,
+        _arg1: u64,
+        _arg2: u64,
+    ) -> Result<u64, Box<dyn Error>> {
+        unimplemented!("Add trampoline");
+    }
+
+    // TODO: Make less ugly
+    pub fn run_function(&self, name: &str, vec: Vec<i32>) -> u64 {
+        let compiler = self.compiler.read().unwrap();
+        let function = compiler
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .expect(&format!("Can't find function named {}", name));
+        match vec.len() {
+            0 => self.run(function.jump_table_offset).unwrap(),
+            1 => self
+                .run1(function.jump_table_offset, vec[0] as u64)
+                .unwrap(),
+            2 => self
+                .run2(function.jump_table_offset, vec[0] as u64, vec[1] as u64)
+                .unwrap(),
+            _ => panic!("Too many arguments"),
+        }
+    }
+
+    pub fn get_function_base(&self, name: &str) -> (u64, u64, fn(u64, u64) -> u64) {
+        let compiler = self.compiler.read().unwrap();
+        let function = compiler
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .expect(&format!("Can't find function named {}", name));
+        let jump_table_offset = function.jump_table_offset;
+        let offset = &compiler.jump_table.as_ref().unwrap()
+            [jump_table_offset * 8..jump_table_offset * 8 + 8];
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(offset);
+        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
+
+        let trampoline = compiler.get_trampoline();
+        let stack_pointer = self.get_stack_base();
+
+        (stack_pointer as u64, start as u64, trampoline)
+    }
+
+    pub fn get_function0(&self, name: &str) -> Box<dyn Fn() -> u64> {
+        let (stack_pointer, start, trampoline) = self.get_function_base(name);
+        Box::new(move || trampoline(stack_pointer as u64, start as u64))
+    }
+
+    #[allow(unused)]
+    fn get_function1(&self, name: &str) -> Box<dyn Fn(u64) -> u64> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name);
+        let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
+        Box::new(move |arg1| f(stack_pointer as u64, start as u64, arg1))
+    }
+
+    #[allow(unused)]
+    fn get_function2(&self, name: &str) -> Box<dyn Fn(u64, u64) -> u64> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name);
+        let f: fn(u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
+        Box::new(move |arg1, arg2| f(stack_pointer as u64, start as u64, arg1, arg2))
+    }
+
+    // TODO: Allocate/gc need to change to work with this
+    pub fn new_thread(&mut self, f: usize) {
+        let compiler = self.compiler.read().unwrap();
+        let trampoline = compiler.get_trampoline();
+        let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
+        let call_closure = compiler.get_function_by_name("call_closure").unwrap();
+        let function_pointer = compiler.get_pointer(call_closure).unwrap();
+
+        let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
+        let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
+        let thread = thread::spawn(move || {
+            let result = trampoline(stack_pointer as u64, function_pointer as u64, f as u64);
+            result
+        });
+
+        self.memory.stacks.push((thread.thread().id(), new_stack));
+        self.memory.heap.register_thread(thread.thread().id());
+        self.memory.threads.push(thread);
+    }
+
+    pub fn wait_for_other_threads(&mut self) {
+        if self.memory.threads.len() == 0 {
+            return;
+        }
+        for thread in self.memory.threads.drain(..) {
+            thread.join().unwrap();
+        }
+        self.wait_for_other_threads();
+    }
+
     pub fn get_pause_atom(&self) -> usize {
-        self.heap.get_pause_pointer()
+        self.memory.heap.get_pause_pointer()
     }
 }

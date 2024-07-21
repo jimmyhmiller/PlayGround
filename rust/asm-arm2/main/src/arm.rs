@@ -1034,5 +1034,4 @@ impl LowLevelArm {
             self.store_local(null_register, local_offset)
         }
     }
-
 }

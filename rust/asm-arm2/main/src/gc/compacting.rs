@@ -200,12 +200,8 @@ impl Allocator for CompactingHeap {
         kind: BuiltInTypes,
         options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        let pointer = self.allocate_inner(
-            bytes,
-            kind,
-            options,
-        )?;
-        
+        let pointer = self.allocate_inner(bytes, kind, options)?;
+
         Ok(pointer)
     }
 
@@ -238,7 +234,6 @@ impl Allocator for CompactingHeap {
         if options.print_stats {
             println!("GC took: {:?}", start.elapsed());
         }
-
     }
 
     fn gc_add_root(&mut self, _old: usize, _young: usize) {

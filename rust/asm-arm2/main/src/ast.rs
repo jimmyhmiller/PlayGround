@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::{
     arm::LowLevelArm,
-    compiler::{Allocator, Compiler, Struct},
+    compiler::{Compiler, Struct},
     ir::{self, BuiltInTypes, Condition},
 };
 
@@ -79,7 +79,7 @@ pub enum Ast {
 }
 
 impl Ast {
-    pub fn compile<Alloc: Allocator>(&self, compiler: &mut Compiler<Alloc>) -> Ir {
+    pub fn compile(&self, compiler: &mut Compiler) -> Ir {
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
             ir: Ir::new(),
@@ -166,11 +166,11 @@ impl Environment {
 }
 
 #[derive(Debug)]
-pub struct AstCompiler<'a, Alloc: Allocator> {
+pub struct AstCompiler<'a> {
     pub ast: Ast,
     pub ir: Ir,
     pub name: Option<String>,
-    pub compiler: &'a mut Compiler<Alloc>,
+    pub compiler: &'a mut Compiler,
     // This feels dumb and complicated. But my brain
     // won't let me think of a better way
     // I know there is one.
@@ -180,7 +180,7 @@ pub struct AstCompiler<'a, Alloc: Allocator> {
     pub environment_stack: Vec<Environment>,
 }
 
-impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
+impl<'a> AstCompiler<'a> {
     pub fn tail_position(&mut self) {
         self.next_context.tail_position = true;
     }
@@ -237,16 +237,26 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                 }
 
                 let should_pause_atom = self.compiler.get_pause_atom();
-                if should_pause_atom != 0  {
+                if should_pause_atom != 0 {
                     let should_pause_atom = self.ir.assign_new(Value::RawValue(should_pause_atom));
                     let atomic_value = self.ir.volatile_register();
-                    let should_pause_atom = self.ir.atomic_load(atomic_value.into(), should_pause_atom.into());
+                    let should_pause_atom = self
+                        .ir
+                        .atomic_load(atomic_value.into(), should_pause_atom.into());
                     let pause_label = self.ir.label("pause");
-                    self.ir.jump_if(pause_label, Condition::Equal, should_pause_atom, Value::RawValue(0));
+                    self.ir.jump_if(
+                        pause_label,
+                        Condition::Equal,
+                        should_pause_atom,
+                        Value::RawValue(0),
+                    );
                     let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
                     let stack_pointer = self.ir.get_stack_pointer_imm(0);
                     let pause_function = self.compiler.get_function_by_name("__pause").unwrap();
-                    let pause_function = self.compiler.get_function_pointer(pause_function.clone()).unwrap();
+                    let pause_function = self
+                        .compiler
+                        .get_function_pointer(pause_function.clone())
+                        .unwrap();
                     let pause_function = self.ir.assign_new(pause_function);
                     self.ir.call_builtin(
                         pause_function.into(),
@@ -254,7 +264,6 @@ impl<'a, Alloc: Allocator> AstCompiler<'a, Alloc> {
                     );
                     self.ir.write_label(pause_label);
                 }
-
 
                 for ast in body[..body.len().saturating_sub(1)].iter() {
                     self.call_compile(&Box::new(ast));

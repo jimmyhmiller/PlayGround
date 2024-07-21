@@ -180,11 +180,7 @@ impl Allocator for SimpleGeneration {
         kind: BuiltInTypes,
         options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        let pointer = self.allocate_inner(
-            bytes,
-            kind,
-            options,
-        )?;
+        let pointer = self.allocate_inner(bytes, kind, options)?;
         Ok(pointer)
     }
 
@@ -210,7 +206,7 @@ impl Allocator for SimpleGeneration {
     fn grow(&mut self, options: AllocatorOptions) {
         self.old.grow(options);
     }
- 
+
     fn gc_add_root(&mut self, old: usize, young: usize) {
         self.additional_roots.push((old, young));
     }
