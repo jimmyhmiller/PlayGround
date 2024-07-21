@@ -223,6 +223,8 @@ pub struct Runtime<Alloc: Allocator> {
     pub memory: Memory<Alloc>,
     command_line_arguments: CommandLineArguments,
     pub printer: Box<dyn Printer>,
+    // TODO: I don't have any code that looks at u8, just always u64
+    // so that's why I need usize
     pub is_paused: AtomicUsize,
     pub thread_state: Arc<(Mutex<ThreadState>, Condvar)>,
 }
