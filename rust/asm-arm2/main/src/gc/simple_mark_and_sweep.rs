@@ -81,11 +81,10 @@ impl Allocator for SimpleMarkSweepHeap {
         _kind: BuiltInTypes,
         _options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-
         if self.can_allocate(bytes) {
             self.allocate_inner(bytes, 0, None)
         } else {
-            return Ok(AllocateAction::Gc)
+            return Ok(AllocateAction::Gc);
         }
     }
 
@@ -172,7 +171,6 @@ impl SimpleMarkSweepHeap {
     }
 
     fn create_more_segments(&mut self) -> SegmentAction {
-
         self.space.segment_offset = self.space.segments.len();
 
         for i in 0..self.space.scale_factor {
@@ -486,7 +484,6 @@ impl SimpleMarkSweepHeap {
         depth: usize,
         data: Option<&[u8]>,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-
         let size = (bytes + 1) * 8;
         let shifted_size = (bytes * 8) << 1;
 
