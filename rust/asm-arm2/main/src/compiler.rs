@@ -1041,7 +1041,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             .functions
             .iter()
             .find(|f| f.name == name)
-            .expect(&format!("Can't find function named {}", name));
+            .unwrap_or_else(|| panic!("Can't find function named {}", name));
         match vec.len() {
             0 => self.run(function.jump_table_offset).unwrap(),
             1 => self
@@ -1060,7 +1060,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             .functions
             .iter()
             .find(|f| f.name == name)
-            .expect(&format!("Can't find function named {}", name));
+            .unwrap_or_else(|| panic!("Can't find function named {}", name));
         let jump_table_offset = function.jump_table_offset;
         let offset = &compiler.jump_table.as_ref().unwrap()
             [jump_table_offset * 8..jump_table_offset * 8 + 8];
@@ -1076,21 +1076,21 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
     pub fn get_function0(&self, name: &str) -> Box<dyn Fn() -> u64> {
         let (stack_pointer, start, trampoline) = self.get_function_base(name);
-        Box::new(move || trampoline(stack_pointer as u64, start as u64))
+        Box::new(move || trampoline(stack_pointer, start))
     }
 
     #[allow(unused)]
     fn get_function1(&self, name: &str) -> Box<dyn Fn(u64) -> u64> {
         let (stack_pointer, start, trampoline_start) = self.get_function_base(name);
         let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        Box::new(move |arg1| f(stack_pointer as u64, start as u64, arg1))
+        Box::new(move |arg1| f(stack_pointer, start, arg1))
     }
 
     #[allow(unused)]
     fn get_function2(&self, name: &str) -> Box<dyn Fn(u64, u64) -> u64> {
         let (stack_pointer, start, trampoline_start) = self.get_function_base(name);
         let f: fn(u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        Box::new(move |arg1, arg2| f(stack_pointer as u64, start as u64, arg1, arg2))
+        Box::new(move |arg1, arg2| f(stack_pointer, start, arg1, arg2))
     }
 
     // TODO: Allocate/gc need to change to work with this
@@ -1104,8 +1104,8 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
         let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
         let thread = thread::spawn(move || {
-            let result = trampoline(stack_pointer as u64, function_pointer as u64, f as u64);
-            result
+            
+            trampoline(stack_pointer as u64, function_pointer as u64, f as u64)
         });
 
         self.memory.stacks.push((thread.thread().id(), new_stack));
@@ -1114,7 +1114,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     }
 
     pub fn wait_for_other_threads(&mut self) {
-        if self.memory.threads.len() == 0 {
+        if self.memory.threads.is_empty() {
             return;
         }
         for thread in self.memory.threads.drain(..) {

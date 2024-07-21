@@ -1,4 +1,5 @@
 #![allow(clippy::match_like_matches_macro)]
+#![allow(clippy::missing_safety_doc)]
 use crate::{ir::BuiltInTypes, parser::Parser};
 use arm::LowLevelArm;
 use asm::arm::{SP, X0, X1, X10, X2, X3, X4};
@@ -103,7 +104,7 @@ pub fn debugger(message: Message) {
     // Should make it is so we clean up this memory
 }
 
-pub extern "C" fn println_value<Alloc: Allocator>(
+pub unsafe extern "C" fn println_value<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     value: usize,
 ) -> usize {
@@ -112,7 +113,7 @@ pub extern "C" fn println_value<Alloc: Allocator>(
     0b111
 }
 
-pub extern "C" fn print_value<Alloc: Allocator>(
+pub unsafe extern "C" fn print_value<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     value: usize,
 ) -> usize {
@@ -159,7 +160,7 @@ extern "C" fn property_access<Alloc: Allocator>(
     compiler.property_access(struct_pointer, str_constant_ptr)
 }
 
-pub extern "C" fn throw_error<Alloc: Allocator>(
+pub unsafe extern "C" fn throw_error<Alloc: Allocator>(
     _runtime: *mut Runtime<Alloc>,
     _stack_pointer: usize,
 ) -> usize {
@@ -167,7 +168,7 @@ pub extern "C" fn throw_error<Alloc: Allocator>(
     panic!("Error!");
 }
 
-pub extern "C" fn gc<Alloc: Allocator>(
+pub unsafe extern "C" fn gc<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     stack_pointer: usize,
 ) -> usize {
@@ -176,7 +177,7 @@ pub extern "C" fn gc<Alloc: Allocator>(
     BuiltInTypes::null_value() as usize
 }
 
-pub extern "C" fn gc_add_root<Alloc: Allocator>(
+pub unsafe extern "C" fn gc_add_root<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     old: usize,
     young: usize,
@@ -186,7 +187,7 @@ pub extern "C" fn gc_add_root<Alloc: Allocator>(
     BuiltInTypes::null_value() as usize
 }
 
-pub extern "C" fn new_thread<Alloc: Allocator>(
+pub unsafe extern "C" fn new_thread<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     function: usize,
 ) -> usize {
@@ -195,7 +196,7 @@ pub extern "C" fn new_thread<Alloc: Allocator>(
     BuiltInTypes::null_value() as usize
 }
 
-pub extern "C" fn __pause<Alloc: Allocator>(
+pub unsafe extern "C" fn __pause<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     _stack_pointer: usize,
 ) -> usize {
@@ -428,7 +429,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     loop {
         // take the list of threads so we are not holding a borrow on the compiler
         // use mem::replace to swap out the threads with an empty vec
-        let threads = mem::replace(&mut runtime.memory.threads, Vec::new());
+        let threads = std::mem::take(&mut runtime.memory.threads);
         if threads.is_empty() {
             break;
         }
