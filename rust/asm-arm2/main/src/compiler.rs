@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     error::Error,
     slice::from_raw_parts_mut,
-    sync::{atomic::AtomicBool, Arc, Condvar, Mutex, RwLock},
+    sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, RwLock},
     thread::{self, JoinHandle, ThreadId},
 };
 
@@ -223,7 +223,7 @@ pub struct Runtime<Alloc: Allocator> {
     pub memory: Memory<Alloc>,
     command_line_arguments: CommandLineArguments,
     pub printer: Box<dyn Printer>,
-    pub is_paused: AtomicBool,
+    pub is_paused: AtomicUsize,
     pub thread_state: Arc<(Mutex<ThreadState>, Condvar)>,
 }
 
@@ -848,7 +848,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 command_line_arguments,
                 stack_map: StackMap::new(),
             },
-            is_paused: AtomicBool::new(false),
+            is_paused: AtomicUsize::new(0),
             thread_state: Arc::new((Mutex::new(ThreadState { paused_threads: 0 }), Condvar::new())),
         }
     }
@@ -874,7 +874,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     }
     
     pub fn is_paused(&self) -> bool {
-        self.is_paused.load(std::sync::atomic::Ordering::Relaxed)
+        self.is_paused.load(std::sync::atomic::Ordering::Relaxed) == 1
     }
 
     pub fn pause_atom_ptr(&self) -> usize {
@@ -925,7 +925,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         // I think my RWLock will make that complicated right now.
         // But there are plenty of places I could store that.
 
-        self.is_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.is_paused.store(1, std::sync::atomic::Ordering::Relaxed);
         let number_of_threads = self.memory.threads.len();
         
         let (lock, cvar) = &*self.thread_state;
@@ -933,6 +933,9 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         while thread_state.paused_threads < number_of_threads {
             thread_state = cvar.wait(thread_state).unwrap();
         }
+
+        self.is_paused.store(0, std::sync::atomic::Ordering::Relaxed);
+
 
 
         let options = self.get_allocate_options();
