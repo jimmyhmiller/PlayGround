@@ -860,7 +860,7 @@ impl<'a> AstCompiler<'a> {
             "primitive_deref" => {
                 // self.ir.breakpoint();
                 let pointer = args[0];
-                let untagged = self.ir.untag(pointer.into());
+                let untagged = self.ir.untag(pointer);
                 // TODO: I need a raw add that doesn't check for tags
                 let offset = self.ir.add(untagged, Value::RawValue(16));
                 let reg = self.ir.volatile_register();
@@ -868,24 +868,24 @@ impl<'a> AstCompiler<'a> {
             }
             "primitive_reset!" => {
                 let pointer = args[0];
-                let untagged = self.ir.untag(pointer.into());
+                let untagged = self.ir.untag(pointer);
                 // TODO: I need a raw add that doesn't check for tags
                 let offset = self.ir.add(untagged, Value::RawValue(16));
                 let value = args[1];
                 self.call_builtin("gc_add_root", vec![pointer, value]);
-                self.ir.atomic_store(offset, value.into());
+                self.ir.atomic_store(offset, value);
                 args[1]
             }
             "primitive_compare_and_swap!" => {
                 // self.ir.breakpoint();
                 let pointer = args[0];
-                let untagged = self.ir.untag(pointer.into());
+                let untagged = self.ir.untag(pointer);
                 let offset = self.ir.add(untagged, Value::RawValue(16));
                 let expected = args[1];
                 let new = args[2];
                 let expected_and_result = self.ir.assign_new_force(expected);
                 self.ir
-                    .compare_and_swap(expected_and_result.into(), new.into(), offset);
+                    .compare_and_swap(expected_and_result.into(), new, offset);
                 // TODO: I should do a conditional move here instead of a jump
                 let label = self.ir.label("compare_and_swap");
                 let result = self.ir.assign_new(Value::True);

@@ -84,7 +84,7 @@ impl Allocator for SimpleMarkSweepHeap {
         if self.can_allocate(bytes) {
             self.allocate_inner(bytes, 0, None)
         } else {
-            return Ok(AllocateAction::Gc);
+            Ok(AllocateAction::Gc)
         }
     }
 
@@ -484,6 +484,11 @@ impl SimpleMarkSweepHeap {
         depth: usize,
         data: Option<&[u8]>,
     ) -> Result<AllocateAction, Box<dyn Error>> {
+
+        if depth > 1 {
+            panic!("Too deep");
+        }
+
         let size = (bytes + 1) * 8;
         let shifted_size = (bytes * 8) << 1;
 
@@ -553,7 +558,7 @@ impl SimpleMarkSweepHeap {
             .unwrap();
 
         if let AllocateAction::Allocated(pointer) = pointer {
-            return pointer as isize;
+            pointer as isize
         } else {
             panic!("Failed to allocate");
         }

@@ -269,9 +269,9 @@ impl CompactingHeap {
         _options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
         if self.from_space.can_allocate(bytes) {
-            return Ok(AllocateAction::Allocated(self.from_space.allocate(bytes)?));
+            Ok(AllocateAction::Allocated(self.from_space.allocate(bytes)?))
         } else {
-            return Ok(AllocateAction::Gc);
+            Ok(AllocateAction::Gc)
         }
     }
 

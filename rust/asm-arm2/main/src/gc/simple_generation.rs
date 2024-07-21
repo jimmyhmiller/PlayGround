@@ -244,9 +244,9 @@ impl SimpleGeneration {
         _options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
         if self.young.can_allocate(bytes) {
-            return Ok(AllocateAction::Allocated(self.young.allocate(bytes)?));
+            Ok(AllocateAction::Allocated(self.young.allocate(bytes)?))
         } else {
-            return Ok(AllocateAction::Gc);
+            Ok(AllocateAction::Gc)
         }
     }
 
