@@ -72,9 +72,16 @@ impl Space {
 pub struct SimpleMarkSweepHeap {
     space: Space,
     free_list: Vec<FreeListEntry>,
+    // TODO: This isn't thread safe
 }
 
 impl Allocator for SimpleMarkSweepHeap {
+
+
+    fn new() -> Self {
+        Self::new_with_count(1)
+    }
+
     fn allocate(
         &mut self,
         bytes: usize,
@@ -90,12 +97,11 @@ impl Allocator for SimpleMarkSweepHeap {
 
     fn gc(
         &mut self,
-        stack_base: usize,
         stack_map: &StackMap,
-        stack_pointer: usize,
+        stack_pointers: &Vec<(usize, usize)>,
         options: AllocatorOptions,
     ) {
-        self.mark_and_sweep(stack_base, stack_map, stack_pointer, options);
+        self.mark_and_sweep(stack_map, stack_pointers, options);
     }
 
     fn grow(&mut self, _options: AllocatorOptions) {
@@ -117,10 +123,6 @@ impl Allocator for SimpleMarkSweepHeap {
 }
 
 impl SimpleMarkSweepHeap {
-    #[allow(unused)]
-    pub fn new() -> Self {
-        Self::new_with_count(1)
-    }
 
     pub fn new_with_count(initial_segment_count: usize) -> Self {
         let segment_size = MmapOptions::page_size() * 100;
@@ -286,13 +288,14 @@ impl SimpleMarkSweepHeap {
 
     pub fn mark_and_sweep(
         &mut self,
-        stack_base: usize,
         stack_map: &StackMap,
-        stack_pointer: usize,
+        stack_pointers: &Vec<(usize, usize)>,
         options: AllocatorOptions,
     ) {
         let start = std::time::Instant::now();
-        self.mark(stack_base, stack_map, stack_pointer);
+        for (stack_base, stack_pointer) in stack_pointers {
+            self.mark(*stack_base, stack_map, *stack_pointer);
+        }
         self.sweep();
         if options.print_stats {
             println!("Mark and sweep took {:?}", start.elapsed());

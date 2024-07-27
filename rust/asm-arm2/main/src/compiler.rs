@@ -3,8 +3,8 @@ use std::{
     collections::HashMap,
     error::Error,
     slice::from_raw_parts_mut,
-    sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, RwLock},
-    thread::{self, JoinHandle, ThreadId},
+    sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, RwLock, TryLockError},
+    thread::{self, JoinHandle, Thread, ThreadId}, time::Duration, vec,
 };
 
 use bincode::{Decode, Encode};
@@ -14,7 +14,7 @@ use crate::{
     arm::LowLevelArm,
     debugger,
     ir::{BuiltInTypes, StringValue, Value},
-    CommandLineArguments, Data, Message,
+    CommandLineArguments, Data, Message, __pause, parser::Parser,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +175,8 @@ pub enum AllocateAction {
 }
 
 pub trait Allocator {
+    fn new() -> Self;
+
     fn allocate(
         &mut self,
         bytes: usize,
@@ -183,9 +185,8 @@ pub trait Allocator {
     ) -> Result<AllocateAction, Box<dyn Error>>;
     fn gc(
         &mut self,
-        stack_base: usize,
         stack_map: &StackMap,
-        stack_pointer: usize,
+        stack_pointers: &Vec<(usize, usize)>,
         options: AllocatorOptions,
     );
 
@@ -203,18 +204,23 @@ pub trait Allocator {
     fn register_parked_thread(&mut self, _thread_id: ThreadId, _stack_pointer: usize) {}
 }
 
-
 pub struct ThreadState {
     pub paused_threads: usize,
+    pub stack_pointers: Vec<(usize, usize)>,
 }
 
 impl ThreadState {
-    pub fn pause(&mut self) {
+    pub fn pause(&mut self, stack_pointer: (usize, usize)) {
         self.paused_threads += 1;
+        self.stack_pointers.push(stack_pointer);
     }
 
     pub fn unpause(&mut self) {
         self.paused_threads -= 1;
+    }
+
+    pub fn clear(&mut self) {
+        self.stack_pointers.clear();
     }
 }
 
@@ -227,15 +233,35 @@ pub struct Runtime<Alloc: Allocator> {
     // so that's why I need usize
     pub is_paused: AtomicUsize,
     pub thread_state: Arc<(Mutex<ThreadState>, Condvar)>,
+    pub gc_lock: Mutex<()>,
 }
 
 pub struct Memory<Alloc: Allocator> {
     heap: Alloc,
     stacks: Vec<(ThreadId, MmapMut)>,
-    pub threads: Vec<JoinHandle<u64>>,
+    pub join_handles: Vec<JoinHandle<u64>>,
+    pub threads: Vec<Thread>,
     pub stack_map: StackMap,
     #[allow(unused)]
     command_line_arguments: CommandLineArguments,
+}
+impl<Alloc: Allocator> Memory<Alloc> {
+    fn active_threads(&mut self) -> usize {
+        let mut completed_threads = vec![];
+        for (index, thread) in self.join_handles.iter().enumerate() {
+            if thread.is_finished() {
+                completed_threads.push(index);
+            }
+        }
+        for index in completed_threads.iter().rev() {
+            let thread_id = self.join_handles.get(*index).unwrap().thread().id();
+            self.stacks.retain(|(id, _)| *id != thread_id);
+            self.threads.retain(|t| t.id() != thread_id);
+            self.join_handles.remove(*index);
+        }
+
+        self.join_handles.len()
+    }
 }
 
 pub struct Compiler {
@@ -653,6 +679,13 @@ impl Compiler {
         }
     }
 
+    pub fn compile(&mut self, code: &str) -> Result<(), Box<dyn Error>> {
+        let mut parser = Parser::new(code.to_string());
+        let ast = parser.parse();
+        self.compile_ast(ast)?;
+        Ok(())
+    }
+
     pub fn compile_ast(&mut self, ast: crate::ast::Ast) -> Result<(), Box<dyn Error>> {
         ast.compile(self);
         Ok(())
@@ -814,6 +847,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         allocator: Alloc,
         printer: Box<dyn Printer>,
     ) -> Self {
+
         Self {
             printer,
             command_line_arguments: command_line_arguments.clone(),
@@ -846,12 +880,20 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                     std::thread::current().id(),
                     MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
                 )],
-                threads: vec![],
+                join_handles: vec![],
+                threads: vec![std::thread::current()],
                 command_line_arguments,
                 stack_map: StackMap::new(),
             },
             is_paused: AtomicUsize::new(0),
-            thread_state: Arc::new((Mutex::new(ThreadState { paused_threads: 0 }), Condvar::new())),
+            gc_lock: Mutex::new(()),
+            thread_state: Arc::new((
+                Mutex::new(ThreadState {
+                    paused_threads: 0,
+                    stack_pointers: vec![],
+                }),
+                Condvar::new(),
+            )),
         }
     }
 
@@ -874,7 +916,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let result = compiler.get_repr(result, 0).unwrap();
         self.printer.println(result);
     }
-    
+
     pub fn is_paused(&self) -> bool {
         self.is_paused.load(std::sync::atomic::Ordering::Relaxed) == 1
     }
@@ -927,26 +969,80 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         // I think my RWLock will make that complicated right now.
         // But there are plenty of places I could store that.
 
-        self.is_paused.store(1, std::sync::atomic::Ordering::Relaxed);
-        let number_of_threads = self.memory.threads.len();
-        
+
+        // Multiple threads might end up here at the same time.
+        // What do I do?
+
+        let locked = self.gc_lock.try_lock();
+
+        if locked.is_err() {
+
+            match locked.as_ref().unwrap_err() {
+                TryLockError::WouldBlock => {
+                    drop(locked);
+                    unsafe { __pause(self as *mut Runtime<Alloc>, stack_pointer) };
+                }
+                TryLockError::Poisoned(e) => {
+                    panic!("Poisoned lock {:?}", e);
+                }
+            }
+
+            return;
+        }
+        let result = self.is_paused.compare_exchange(0, 1, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed);
+        if result != Ok(0) {
+            drop(locked);
+            unsafe { __pause(self as *mut Runtime<Alloc>, stack_pointer) };
+            return;
+        }
+
+        let locked = locked.unwrap();
+
+
         let (lock, cvar) = &*self.thread_state;
         let mut thread_state = lock.lock().unwrap();
-        while thread_state.paused_threads < number_of_threads {
+        while thread_state.paused_threads < self.memory.active_threads() {
             thread_state = cvar.wait(thread_state).unwrap();
         }
 
-        self.is_paused.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut stack_pointers = thread_state.stack_pointers.clone();
+        stack_pointers.push((self.get_stack_base(), stack_pointer));
 
-
+        drop(thread_state);
 
         let options = self.get_allocate_options();
         self.memory.heap.gc(
-            self.get_stack_base(),
             &self.memory.stack_map,
-            stack_pointer,
+            &stack_pointers,
             options,
         );
+
+
+        self.is_paused
+            .store(0, std::sync::atomic::Ordering::Release);
+    
+        self.memory.active_threads();
+        for thread in self.memory.threads.iter() {
+            thread.unpark();
+        }
+
+        let mut thread_state = lock.lock().unwrap();
+        while thread_state.paused_threads > 0 {
+            let (state, timeout) = cvar.wait_timeout(thread_state, Duration::from_millis(1)).unwrap();
+            thread_state = state;
+
+            if timeout.timed_out() {
+                self.memory.active_threads();
+                for thread in self.memory.threads.iter() {
+                    // println!("Unparking thread {:?}", thread.thread().id());
+                    thread.unpark();
+                }        
+            }
+        }
+        thread_state.clear();
+
+        drop(locked);
+
     }
 
     pub fn gc_add_root(&mut self, old: usize, young: usize) {
@@ -961,7 +1057,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             .register_parked_thread(std::thread::current().id(), stack_pointer);
     }
 
-    fn get_stack_base(&self) -> usize {
+    pub fn get_stack_base(&self) -> usize {
         let current_thread = std::thread::current().id();
         self.memory
             .stacks
@@ -1146,26 +1242,32 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let compiler = self.compiler.read().unwrap();
         let trampoline = compiler.get_trampoline();
         let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
-        let call_closure = compiler.get_function_by_name("call_closure").unwrap();
-        let function_pointer = compiler.get_pointer(call_closure).unwrap();
+        let call_fn = compiler.get_function_by_name("__call_fn").unwrap();
+        let function_pointer = compiler.get_pointer(call_fn).unwrap();
 
         let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
         let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
+        let thread_state = self.thread_state.clone();
         let thread = thread::spawn(move || {
-            
-            trampoline(stack_pointer as u64, function_pointer as u64, f as u64)
+            let result = trampoline(stack_pointer as u64, function_pointer as u64, f as u64);
+            // If we end while another thread is waiting for us to pause
+            // we need to notify that waiter so they can see we are dead.
+            let (_lock, cvar) = &*thread_state;
+            cvar.notify_one();
+            result
         });
 
         self.memory.stacks.push((thread.thread().id(), new_stack));
         self.memory.heap.register_thread(thread.thread().id());
-        self.memory.threads.push(thread);
+        self.memory.threads.push(thread.thread().clone());
+        self.memory.join_handles.push(thread);
     }
 
     pub fn wait_for_other_threads(&mut self) {
-        if self.memory.threads.is_empty() {
+        if self.memory.join_handles.is_empty() {
             return;
         }
-        for thread in self.memory.threads.drain(..) {
+        for thread in self.memory.join_handles.drain(..) {
             thread.join().unwrap();
         }
         self.wait_for_other_threads();

@@ -82,12 +82,16 @@ impl Space {
         }
     }
 
-    fn object_iter(&self) -> impl Iterator<Item = *const u8> {
+    fn object_iter_from_position(&self, segment_index: usize, offset: usize) -> impl Iterator<Item = *const u8> {
         ObjectIterator {
             space: self,
-            segment_index: 0,
-            offset: 0,
+            segment_index,
+            offset,
         }
+    }
+
+    fn current_position(&self) -> (usize, usize) {
+        (self.segment_offset, self.segments[self.segment_offset].offset)
     }
 
     fn contains(&self, pointer: *const u8) -> bool {
@@ -194,6 +198,16 @@ pub struct CompactingHeap {
 }
 
 impl Allocator for CompactingHeap {
+    fn new() -> Self {
+        let segment_size = MmapOptions::page_size() * 100;
+        let from_space = Space::new(segment_size, 1);
+        let to_space = Space::new(segment_size, 1);
+        Self {
+            from_space,
+            to_space,
+        }
+    }
+    
     fn allocate(
         &mut self,
         bytes: usize,
@@ -209,31 +223,35 @@ impl Allocator for CompactingHeap {
     // Simple cases work, but not all cases
     fn gc(
         &mut self,
-        stack_base: usize,
         stack_map: &StackMap,
-        stack_pointer: usize,
+        stack_pointers: &Vec<(usize, usize)>,
         options: AllocatorOptions,
     ) {
         if !options.gc {
             return;
         }
         let start = std::time::Instant::now();
-        let roots = self.gather_roots(stack_base, stack_map, stack_pointer);
-        let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
-        mem::swap(&mut self.from_space, &mut self.to_space);
-        let stack_buffer = get_live_stack(stack_base, stack_pointer);
-        for (i, (stack_offset, _)) in roots.iter().enumerate() {
-            debug_assert!(
-                BuiltInTypes::untag(new_roots[i]) % 8 == 0,
-                "Pointer is not aligned"
-            );
-            stack_buffer[*stack_offset] = new_roots[i];
+        for (stack_base, stack_pointer) in stack_pointers.iter() {
+
+            let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);
+            let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
+
+            let stack_buffer = get_live_stack(*stack_base, *stack_pointer);
+            for (i, (stack_offset, _)) in roots.iter().enumerate() {
+                debug_assert!(
+                    BuiltInTypes::untag(new_roots[i]) % 8 == 0,
+                    "Pointer is not aligned"
+                );
+                stack_buffer[*stack_offset] = new_roots[i];
+            }
         }
+        mem::swap(&mut self.from_space, &mut self.to_space);
 
         self.to_space.clear();
         if options.print_stats {
             println!("GC took: {:?}", start.elapsed());
         }
+
     }
 
     fn gc_add_root(&mut self, _old: usize, _young: usize) {
@@ -250,16 +268,7 @@ impl Allocator for CompactingHeap {
 }
 
 impl CompactingHeap {
-    #[allow(unused)]
-    pub fn new() -> Self {
-        let segment_size = MmapOptions::page_size() * 100;
-        let from_space = Space::new(segment_size, 1);
-        let to_space = Space::new(segment_size, 1);
-        Self {
-            from_space,
-            to_space,
-        }
-    }
+
 
     #[allow(clippy::too_many_arguments)]
     fn allocate_inner(
@@ -276,6 +285,8 @@ impl CompactingHeap {
     }
 
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
+
+        let (start_segment, start_offset) = self.to_space.current_position();
         // TODO: Is this vec the best way? Probably not
         // I could hand this the pointers to the stack location
         // then resolve what they point to and update them?
@@ -285,7 +296,7 @@ impl CompactingHeap {
             new_roots.push(self.copy_using_cheneys_algorithm(*root));
         }
 
-        for object in self.to_space.object_iter() {
+        for object in self.to_space.object_iter_from_position(start_segment, start_offset) {
             let size: usize = *(object as *const usize) >> 1;
             let marked = size & 1 == 1;
             if marked {
