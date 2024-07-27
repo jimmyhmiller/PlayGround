@@ -157,8 +157,7 @@ extern "C" fn property_access<Alloc: Allocator>(
     str_constant_ptr: usize,
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
-    let compiler = runtime.compiler.read().unwrap();
-    compiler.property_access(struct_pointer, str_constant_ptr)
+    runtime.compiler.property_access(struct_pointer, str_constant_ptr)
 }
 
 pub unsafe extern "C" fn throw_error<Alloc: Allocator>(
@@ -228,7 +227,6 @@ pub unsafe extern "C" fn __pause<Alloc: Allocator>(
 }
 
 fn compile_trampoline<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
-    let mut compiler = runtime.compiler.write().unwrap();
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
     lang.prelude(-2);
@@ -263,10 +261,10 @@ fn compile_trampoline<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
     lang.epilogue(2);
     lang.ret();
 
-    compiler
+    runtime.compiler
         .add_function(Some("trampoline"), &lang.compile_directly(), 0)
         .unwrap();
-    let function = compiler.get_function_by_name_mut("trampoline").unwrap();
+    let function = runtime.compiler.get_function_by_name_mut("trampoline").unwrap();
     function.is_builtin = true;
 }
 
@@ -385,50 +383,49 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     compile_trampoline(&mut runtime);
 
-    let mut borrowed_compiler = runtime.compiler.write().unwrap();
 
-    borrowed_compiler.set_compiler_lock_pointer(&runtime.compiler as *const _);
-    borrowed_compiler.set_pause_atom_ptr(runtime.pause_atom_ptr());
+    runtime.compiler.set_compiler_lock_pointer(&runtime.compiler as *const _);
+    runtime.compiler.set_pause_atom_ptr(runtime.pause_atom_ptr());
 
-    borrowed_compiler.add_builtin_function(
+    runtime.compiler.add_builtin_function(
         "println",
         println_value::<Alloc> as *const u8,
         false,
     )?;
-    borrowed_compiler.add_builtin_function("print", print_value::<Alloc> as *const u8, false)?;
-    borrowed_compiler.add_builtin_function(
+    runtime.compiler.add_builtin_function("print", print_value::<Alloc> as *const u8, false)?;
+    runtime.compiler.add_builtin_function(
         "allocate_struct",
         allocate_struct::<Alloc> as *const u8,
         true,
     )?;
     // TODO: Probably needs true
-    borrowed_compiler.add_builtin_function(
+    runtime.compiler.add_builtin_function(
         "make_closure",
         make_closure::<Alloc> as *const u8,
         false,
     )?;
-    borrowed_compiler.add_builtin_function(
+    runtime.compiler.add_builtin_function(
         "property_access",
         property_access::<Alloc> as *const u8,
         false,
     )?;
-    borrowed_compiler.add_builtin_function(
+    runtime.compiler.add_builtin_function(
         "throw_error",
         throw_error::<Alloc> as *const u8,
         false,
     )?;
-    borrowed_compiler.add_builtin_function("assert!", placeholder as *const u8, false)?;
-    borrowed_compiler.add_builtin_function("gc", gc::<Alloc> as *const u8, true)?;
-    borrowed_compiler.add_builtin_function(
+    runtime.compiler.add_builtin_function("assert!", placeholder as *const u8, false)?;
+    runtime.compiler.add_builtin_function("gc", gc::<Alloc> as *const u8, true)?;
+    runtime.compiler.add_builtin_function(
         "gc_add_root",
         gc_add_root::<Alloc> as *const u8,
         false,
     )?;
-    borrowed_compiler.add_builtin_function("thread", new_thread::<Alloc> as *const u8, false)?;
-    borrowed_compiler.add_builtin_function("__pause", __pause::<Alloc> as *const u8, true)?;
+    runtime.compiler.add_builtin_function("thread", new_thread::<Alloc> as *const u8, false)?;
+    runtime.compiler.add_builtin_function("__pause", __pause::<Alloc> as *const u8, true)?;
 
     let beginnings_of_standard_library = include_str!("../resources/std.bg");
-    borrowed_compiler.compile(beginnings_of_standard_library)?;
+    runtime.compiler.compile(beginnings_of_standard_library)?;
     
 
     let mut parser = Parser::new(source);
@@ -439,9 +436,9 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     
 
     let compile_time = Instant::now();
-    borrowed_compiler.compile_ast(ast)?;
+    runtime.compiler.compile_ast(ast)?;
 
-    borrowed_compiler.check_functions();
+    runtime.compiler.check_functions();
     if args.show_times {
         println!("Compile time {:?}", compile_time.elapsed());
     }
@@ -449,9 +446,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // TODO: Do better
     // If I'm compiling on the fly I need this to happen when I compile
     // not just here
-    runtime.memory.stack_map = borrowed_compiler.stack_map.clone();
-
-    drop(borrowed_compiler);
+    runtime.memory.stack_map = runtime.compiler.stack_map.clone();
 
     let time = Instant::now();
     let f = runtime.get_function0("main");

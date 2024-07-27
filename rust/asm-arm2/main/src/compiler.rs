@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     error::Error,
     slice::from_raw_parts_mut,
-    sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, RwLock, TryLockError},
+    sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, TryLockError},
     thread::{self, JoinHandle, Thread, ThreadId}, time::Duration, vec,
 };
 
@@ -225,7 +225,7 @@ impl ThreadState {
 }
 
 pub struct Runtime<Alloc: Allocator> {
-    pub compiler: RwLock<Compiler>,
+    pub compiler: Compiler,
     pub memory: Memory<Alloc>,
     command_line_arguments: CommandLineArguments,
     pub printer: Box<dyn Printer>,
@@ -276,7 +276,7 @@ pub struct Compiler {
     string_constants: Vec<StringValue>,
     #[allow(unused)]
     command_line_arguments: CommandLineArguments,
-    pub compiler_lock_pointer: Option<*const RwLock<Compiler>>,
+    pub compiler_pointer: Option<*const Compiler>,
     // TODO: Need to transfer these after I compiler to memory
     // is there a better way?
     // Should I pass runtime to all the compiler stuff?
@@ -293,12 +293,12 @@ impl Compiler {
         self.pause_atom_ptr = Some(pointer);
     }
 
-    pub fn get_compiler_ptr(&self) -> *const RwLock<Compiler> {
-        self.compiler_lock_pointer.unwrap()
+    pub fn get_compiler_ptr(&self) -> *const Compiler {
+        self.compiler_pointer.unwrap()
     }
 
-    pub fn set_compiler_lock_pointer(&mut self, pointer: *const RwLock<Compiler>) {
-        self.compiler_lock_pointer = Some(pointer);
+    pub fn set_compiler_lock_pointer(&mut self, pointer: *const Compiler) {
+        self.compiler_pointer = Some(pointer);
     }
 
     pub fn add_foreign_function(
@@ -851,7 +851,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         Self {
             printer,
             command_line_arguments: command_line_arguments.clone(),
-            compiler: RwLock::new(Compiler {
+            compiler: Compiler {
                 code_memory: Some(
                     MmapOptions::new(MmapOptions::page_size())
                         .unwrap()
@@ -870,10 +870,10 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 functions: Vec::new(),
                 string_constants: vec![],
                 command_line_arguments: command_line_arguments.clone(),
-                compiler_lock_pointer: None,
+                compiler_pointer: None,
                 stack_map: StackMap::new(),
                 pause_atom_ptr: None,
-            }),
+            },
             memory: Memory {
                 heap: allocator,
                 stacks: vec![(
@@ -906,14 +906,12 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     }
 
     pub fn print(&mut self, result: usize) {
-        let compiler = self.compiler.read().unwrap();
-        let result = compiler.get_repr(result, 0).unwrap();
+        let result = self.compiler.get_repr(result, 0).unwrap();
         self.printer.print(result);
     }
 
     pub fn println(&mut self, result: usize) {
-        let compiler = self.compiler.read().unwrap();
-        let result = compiler.get_repr(result, 0).unwrap();
+        let result = self.compiler.get_repr(result, 0).unwrap();
         self.printer.println(result);
     }
 
@@ -1077,8 +1075,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let heap_pointer = self.allocate(len, 0, BuiltInTypes::Closure)?;
         let pointer = heap_pointer as *mut u8;
         let num_free = free_variables.len();
-        let compiler = self.compiler.read().unwrap();
-        let function_definition = compiler.get_function_by_pointer(BuiltInTypes::untag(function));
+        let function_definition = self.compiler.get_function_by_pointer(BuiltInTypes::untag(function));
         if function_definition.is_none() {
             panic!("Function not found");
         }
@@ -1113,21 +1110,20 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
     // TODO: Make this good
     pub fn run(&self, jump_table_offset: usize) -> Result<u64, Box<dyn Error>> {
-        let compiler = self.compiler.read().unwrap();
         // get offset stored in jump table as a usize
-        let offset = &compiler.jump_table.as_ref().unwrap()
+        let offset = &self.compiler.jump_table.as_ref().unwrap()
             [jump_table_offset * 8..jump_table_offset * 8 + 8];
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
         let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
 
-        let trampoline = compiler
+        let trampoline = self.compiler
             .functions
             .iter()
             .find(|f| f.name == "trampoline")
             .unwrap();
         let trampoline_jump_table_offset = trampoline.jump_table_offset;
-        let trampoline_offset = &compiler.jump_table.as_ref().unwrap()
+        let trampoline_offset = &self.compiler.jump_table.as_ref().unwrap()
             [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
 
         let mut bytes = [0u8; 8];
@@ -1141,21 +1137,20 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     }
 
     pub fn run1(&self, jump_table_offset: usize, arg: u64) -> Result<u64, Box<dyn Error>> {
-        let compiler = self.compiler.read().unwrap();
         // get offset stored in jump table as a usize
-        let offset = &compiler.jump_table.as_ref().unwrap()
+        let offset = &self.compiler.jump_table.as_ref().unwrap()
             [jump_table_offset * 8..jump_table_offset * 8 + 8];
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
         let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
 
-        let trampoline = compiler
+        let trampoline = self.compiler
             .functions
             .iter()
             .find(|f| f.name == "trampoline")
             .unwrap();
         let trampoline_jump_table_offset = trampoline.jump_table_offset;
-        let trampoline_offset = &compiler.jump_table.as_ref().unwrap()
+        let trampoline_offset = &self.compiler.jump_table.as_ref().unwrap()
             [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
 
         let mut bytes = [0u8; 8];
@@ -1180,8 +1175,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
     // TODO: Make less ugly
     pub fn run_function(&self, name: &str, vec: Vec<i32>) -> u64 {
-        let compiler = self.compiler.read().unwrap();
-        let function = compiler
+        let function = self.compiler
             .functions
             .iter()
             .find(|f| f.name == name)
@@ -1199,20 +1193,19 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     }
 
     pub fn get_function_base(&self, name: &str) -> (u64, u64, fn(u64, u64) -> u64) {
-        let compiler = self.compiler.read().unwrap();
-        let function = compiler
+        let function = self.compiler
             .functions
             .iter()
             .find(|f| f.name == name)
             .unwrap_or_else(|| panic!("Can't find function named {}", name));
         let jump_table_offset = function.jump_table_offset;
-        let offset = &compiler.jump_table.as_ref().unwrap()
+        let offset = &self.compiler.jump_table.as_ref().unwrap()
             [jump_table_offset * 8..jump_table_offset * 8 + 8];
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(offset);
         let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
 
-        let trampoline = compiler.get_trampoline();
+        let trampoline = self.compiler.get_trampoline();
         let stack_pointer = self.get_stack_base();
 
         (stack_pointer as u64, start as u64, trampoline)
@@ -1239,11 +1232,10 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
     // TODO: Allocate/gc need to change to work with this
     pub fn new_thread(&mut self, f: usize) {
-        let compiler = self.compiler.read().unwrap();
-        let trampoline = compiler.get_trampoline();
+        let trampoline = self.compiler.get_trampoline();
         let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
-        let call_fn = compiler.get_function_by_name("__call_fn").unwrap();
-        let function_pointer = compiler.get_pointer(call_fn).unwrap();
+        let call_fn = self.compiler.get_function_by_name("__call_fn").unwrap();
+        let function_pointer = self.compiler.get_pointer(call_fn).unwrap();
 
         let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
         let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
