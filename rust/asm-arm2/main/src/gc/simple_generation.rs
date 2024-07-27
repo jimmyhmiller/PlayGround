@@ -174,51 +174,9 @@ pub struct SimpleGeneration {
 }
 
 impl Allocator for SimpleGeneration {
-    fn allocate(
-        &mut self,
-        bytes: usize,
-        kind: BuiltInTypes,
-        options: AllocatorOptions,
-    ) -> Result<AllocateAction, Box<dyn Error>> {
-        let pointer = self.allocate_inner(bytes, kind, options)?;
-        Ok(pointer)
-    }
 
-    fn gc(
-        &mut self,
-        stack_base: usize,
-        stack_map: &StackMap,
-        stack_pointer: usize,
-        options: AllocatorOptions,
-    ) {
-        // TODO: Need to figure out when to do a Major GC
-        if !options.gc {
-            return;
-        }
-        if self.gc_count % self.full_gc_frequency == 0 {
-            self.full_gc(stack_base, stack_map, stack_pointer, options);
-        } else {
-            self.minor_gc(stack_base, stack_map, stack_pointer, options);
-        }
-        self.gc_count += 1;
-    }
-
-    fn grow(&mut self, options: AllocatorOptions) {
-        self.old.grow(options);
-    }
-
-    fn gc_add_root(&mut self, old: usize, young: usize) {
-        self.additional_roots.push((old, young));
-    }
-
-    fn get_pause_pointer(&self) -> usize {
-        self.atomic_pause.as_ptr() as usize
-    }
-}
-
-impl SimpleGeneration {
     #[allow(unused)]
-    pub fn new() -> Self {
+    fn new() -> Self {
         // TODO: Make these configurable and play with configurations
         let young_size = MmapOptions::page_size() * 10000;
         let young = Space::new(young_size);
@@ -237,6 +195,50 @@ impl SimpleGeneration {
         }
     }
 
+    fn allocate(
+        &mut self,
+        bytes: usize,
+        kind: BuiltInTypes,
+        options: AllocatorOptions,
+    ) -> Result<AllocateAction, Box<dyn Error>> {
+        let pointer = self.allocate_inner(bytes, kind, options)?;
+        Ok(pointer)
+    }
+
+    fn gc(
+        &mut self,
+        stack_map: &StackMap,
+        stack_pointers: &Vec<(usize, usize)>,
+        options: AllocatorOptions,
+    ) {
+        // TODO: Need to figure out when to do a Major GC
+        if !options.gc {
+            return;
+        }
+        if self.gc_count % self.full_gc_frequency == 0 {
+            self.full_gc(stack_map, stack_pointers, options);
+        } else {
+            self.minor_gc(stack_map, stack_pointers, options);
+        }
+        self.gc_count += 1;
+    }
+
+    fn grow(&mut self, options: AllocatorOptions) {
+        self.old.grow(options);
+    }
+
+    fn gc_add_root(&mut self, old: usize, young: usize) {
+        self.additional_roots.push((old, young));
+    }
+
+    fn get_pause_pointer(&self) -> usize {
+        self.atomic_pause.as_ptr() as usize
+    }
+}
+
+impl SimpleGeneration {
+   
+
     fn allocate_inner(
         &mut self,
         bytes: usize,
@@ -252,26 +254,27 @@ impl SimpleGeneration {
 
     fn minor_gc(
         &mut self,
-        stack_base: usize,
         stack_map: &StackMap,
-        stack_pointer: usize,
+        stack_pointers: &Vec<(usize, usize)>,
         options: AllocatorOptions,
     ) {
         let start = std::time::Instant::now();
-        let roots = self.gather_roots(stack_base, stack_map, stack_pointer);
-        let new_roots: Vec<usize> = roots.iter().map(|x| x.1).collect();
-        let new_roots = new_roots
-            .into_iter()
-            .chain(self.additional_roots.iter().map(|x| &x.1).copied())
-            .collect();
-        let new_roots = unsafe { self.copy_all(new_roots) };
-        let stack_buffer = get_live_stack(stack_base, stack_pointer);
-        for (i, (stack_offset, _)) in roots.iter().enumerate() {
-            debug_assert!(
-                BuiltInTypes::untag(new_roots[i]) % 8 == 0,
-                "Pointer is not aligned"
-            );
-            stack_buffer[*stack_offset] = new_roots[i];
+        for (stack_base, stack_pointer) in stack_pointers.iter() {
+            let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);
+            let new_roots: Vec<usize> = roots.iter().map(|x| x.1).collect();
+            let new_roots = new_roots
+                .into_iter()
+                .chain(self.additional_roots.iter().map(|x| &x.1).copied())
+                .collect();
+            let new_roots = unsafe { self.copy_all(new_roots) };
+            let stack_buffer = get_live_stack(*stack_base, *stack_pointer);
+            for (i, (stack_offset, _)) in roots.iter().enumerate() {
+                debug_assert!(
+                    BuiltInTypes::untag(new_roots[i]) % 8 == 0,
+                    "Pointer is not aligned"
+                );
+                stack_buffer[*stack_offset] = new_roots[i];
+            }
         }
         self.young.clear();
         if options.print_stats {
@@ -281,13 +284,12 @@ impl SimpleGeneration {
 
     fn full_gc(
         &mut self,
-        stack_base: usize,
         stack_map: &StackMap,
-        stack_pointer: usize,
+        stack_pointers: &Vec<(usize, usize)>,
         options: AllocatorOptions,
     ) {
-        self.minor_gc(stack_base, stack_map, stack_pointer, options);
-        self.old.gc(stack_base, stack_map, stack_pointer, options);
+        self.minor_gc(stack_map, stack_pointers, options);
+        self.old.gc(stack_map, stack_pointers, options);
     }
 
     // TODO: I need to change this into a copy from roots to heap

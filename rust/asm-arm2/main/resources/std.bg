@@ -1,3 +1,12 @@
+
+// This may seem weird
+// but we need our runtime to know
+// how to call a function if it is a closure
+// or a regular function
+// this makes that idea simple
+fn __call_fn(f) { f() }
+
+
 struct Atom {
     value
 }
@@ -31,63 +40,7 @@ fn compare_and_swap!(atom, old, new) {
     primitive_compare_and_swap!(atom, old, new)
 }
 
-struct MyPointerStruct {
-    x
-    y
+fn atom(value) {
+    // TODO: Allow punning
+    Atom { value: value }
 }
-
-fn create_atom() {
-    let s = MyPointerStruct { x: 1, y: 2};
-    let new_atom = Atom { value: s };
-    println(new_atom);
-    gc();
-    println(new_atom);
-    let new_s = MyPointerStruct { x: 3, y: 4};
-    reset!(new_atom, new_s);
-    println(new_atom);
-    gc();
-    println(new_atom);
-    gc();
-    new_atom
-}
-
-fn main() {
-    let atom = Atom { value: 42 }
-    println(atom)
-    reset!(atom, 1)
-    println(atom)
-    println(compare_and_swap!(atom, 1, 2))
-    println(compare_and_swap!(atom, 1, 2))
-    println(atom)
-    swap!(atom, fn(x) { x + 1 })
-    println(atom)
-    let x = deref(atom)
-    println(x)
-    
-    let my_atom = create_atom();
-    println(my_atom);
-    gc();
-    println(my_atom);
-    reset!(my_atom, MyPointerStruct { x: 5, y: 6 });
-    gc();
-    println(my_atom);
-    "done!"
-}
-
-
-// Expect
-// Atom { value: 42 }
-// Atom { value: 1 }
-// true
-// false
-// Atom { value: 2 }
-// Atom { value: 3 }
-// 3
-// Atom { value: MyPointerStruct { x: 1, y: 2 } }
-// Atom { value: MyPointerStruct { x: 1, y: 2 } }
-// Atom { value: MyPointerStruct { x: 3, y: 4 } }
-// Atom { value: MyPointerStruct { x: 3, y: 4 } }
-// Atom { value: MyPointerStruct { x: 3, y: 4 } }
-// Atom { value: MyPointerStruct { x: 3, y: 4 } }
-// Atom { value: MyPointerStruct { x: 5, y: 6 } }
-// done!

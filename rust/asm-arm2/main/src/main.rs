@@ -10,6 +10,7 @@ use compiler::{Allocator, DefaultPrinter, Printer, Runtime, StackMapDetails, Tes
 use gc::{
     compacting::CompactingHeap, simple_generation::SimpleGeneration,
     simple_mark_and_sweep::SimpleMarkSweepHeap,
+    mutex_allocator::MutexAllocator,
 };
 
 use std::{error::Error, mem, slice::from_raw_parts, thread, time::Instant};
@@ -198,15 +199,15 @@ pub unsafe extern "C" fn new_thread<Alloc: Allocator>(
 
 pub unsafe extern "C" fn __pause<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
-    _stack_pointer: usize,
+    stack_pointer: usize,
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
-    println!("PARKING!");
 
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
-    state.pause();
+    let stack_base = runtime.get_stack_base();
+    state.pause((stack_base, stack_pointer));
     condvar.notify_one();
     drop(state);
 
@@ -216,9 +217,10 @@ pub unsafe extern "C" fn __pause<Alloc: Allocator>(
     }
 
     let thread_state = runtime.thread_state.clone();
-    let (lock, _condvar) = &*thread_state;
+    let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
     state.unpause();
+    condvar.notify_one();
 
     // Apparently, I can't count on this not unparking
     // I need some other mechanism to know that things are ready
@@ -337,19 +339,36 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // I should make it real functionality later
     // but right now I just want something working
     let has_expect = args.test && source.contains("// Expect");
-    let mut parser = Parser::new(source);
-    let ast = parser.parse();
-    if args.show_times {
-        println!("Parse time {:?}", parse_time.elapsed());
-    }
 
+
+    
     cfg_if::cfg_if! {
         if #[cfg(feature = "compacting")] {
-            type Alloc = CompactingHeap;
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "thread-safe")] {
+                    type Alloc = MutexAllocator<CompactingHeap>;
+                } else {
+                    type Alloc = CompactingHeap;
+                }
+            }
         } else if #[cfg(feature = "simple-mark-and-sweep")] {
-            type Alloc = SimpleMarkSweepHeap;
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "thread-safe")] {
+                    type Alloc = MutexAllocator<SimpleMarkSweepHeap>;
+                } else {
+                    type Alloc = SimpleMarkSweepHeap;
+                }
+            }
         } else if #[cfg(feature = "simple-generation")] {
-            type Alloc = SimpleGeneration;
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "thread-safe")] {
+                    type Alloc = MutexAllocator<SimpleGeneration>;
+                } else {
+                    type Alloc = SimpleGeneration;
+                }
+            }
+        } else if #[cfg(feature = "thread-safe")] {
+            type Alloc = MutexAllocator<SimpleMarkSweepHeap>;
         } else {
             type Alloc = SimpleMarkSweepHeap;
         }
@@ -408,6 +427,17 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     borrowed_compiler.add_builtin_function("thread", new_thread::<Alloc> as *const u8, false)?;
     borrowed_compiler.add_builtin_function("__pause", __pause::<Alloc> as *const u8, true)?;
 
+    let beginnings_of_standard_library = include_str!("../resources/std.bg");
+    borrowed_compiler.compile(beginnings_of_standard_library)?;
+    
+
+    let mut parser = Parser::new(source);
+    let ast = parser.parse();
+    if args.show_times {
+        println!("Parse time {:?}", parse_time.elapsed());
+    }
+    
+
     let compile_time = Instant::now();
     borrowed_compiler.compile_ast(ast)?;
 
@@ -447,7 +477,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     loop {
         // take the list of threads so we are not holding a borrow on the compiler
         // use mem::replace to swap out the threads with an empty vec
-        let threads = std::mem::take(&mut runtime.memory.threads);
+        let threads = std::mem::take(&mut runtime.memory.join_handles);
         if threads.is_empty() {
             break;
         }
