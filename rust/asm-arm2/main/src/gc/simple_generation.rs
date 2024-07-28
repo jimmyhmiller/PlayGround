@@ -174,7 +174,6 @@ pub struct SimpleGeneration {
 }
 
 impl Allocator for SimpleGeneration {
-
     #[allow(unused)]
     fn new() -> Self {
         // TODO: Make these configurable and play with configurations
@@ -208,7 +207,7 @@ impl Allocator for SimpleGeneration {
     fn gc(
         &mut self,
         stack_map: &StackMap,
-        stack_pointers: &Vec<(usize, usize)>,
+        stack_pointers: &[(usize, usize)],
         options: AllocatorOptions,
     ) {
         // TODO: Need to figure out when to do a Major GC
@@ -237,8 +236,6 @@ impl Allocator for SimpleGeneration {
 }
 
 impl SimpleGeneration {
-   
-
     fn allocate_inner(
         &mut self,
         bytes: usize,
@@ -255,7 +252,7 @@ impl SimpleGeneration {
     fn minor_gc(
         &mut self,
         stack_map: &StackMap,
-        stack_pointers: &Vec<(usize, usize)>,
+        stack_pointers: &[(usize, usize)],
         options: AllocatorOptions,
     ) {
         let start = std::time::Instant::now();
@@ -285,7 +282,7 @@ impl SimpleGeneration {
     fn full_gc(
         &mut self,
         stack_map: &StackMap,
-        stack_pointers: &Vec<(usize, usize)>,
+        stack_pointers: &[(usize, usize)],
         options: AllocatorOptions,
     ) {
         self.minor_gc(stack_map, stack_pointers, options);

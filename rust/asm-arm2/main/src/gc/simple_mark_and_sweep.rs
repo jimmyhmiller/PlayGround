@@ -76,8 +76,6 @@ pub struct SimpleMarkSweepHeap {
 }
 
 impl Allocator for SimpleMarkSweepHeap {
-
-
     fn new() -> Self {
         Self::new_with_count(1)
     }
@@ -98,7 +96,7 @@ impl Allocator for SimpleMarkSweepHeap {
     fn gc(
         &mut self,
         stack_map: &StackMap,
-        stack_pointers: &Vec<(usize, usize)>,
+        stack_pointers: &[(usize, usize)],
         options: AllocatorOptions,
     ) {
         self.mark_and_sweep(stack_map, stack_pointers, options);
@@ -123,7 +121,6 @@ impl Allocator for SimpleMarkSweepHeap {
 }
 
 impl SimpleMarkSweepHeap {
-
     pub fn new_with_count(initial_segment_count: usize) -> Self {
         let segment_size = MmapOptions::page_size() * 100;
         let mut segments = vec![];
@@ -289,7 +286,7 @@ impl SimpleMarkSweepHeap {
     pub fn mark_and_sweep(
         &mut self,
         stack_map: &StackMap,
-        stack_pointers: &Vec<(usize, usize)>,
+        stack_pointers: &[(usize, usize)],
         options: AllocatorOptions,
     ) {
         let start = std::time::Instant::now();
@@ -487,7 +484,6 @@ impl SimpleMarkSweepHeap {
         depth: usize,
         data: Option<&[u8]>,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-
         if depth > 1 {
             panic!("Too deep");
         }

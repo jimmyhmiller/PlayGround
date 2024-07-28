@@ -82,7 +82,11 @@ impl Space {
         }
     }
 
-    fn object_iter_from_position(&self, segment_index: usize, offset: usize) -> impl Iterator<Item = *const u8> {
+    fn object_iter_from_position(
+        &self,
+        segment_index: usize,
+        offset: usize,
+    ) -> impl Iterator<Item = *const u8> {
         ObjectIterator {
             space: self,
             segment_index,
@@ -91,7 +95,10 @@ impl Space {
     }
 
     fn current_position(&self) -> (usize, usize) {
-        (self.segment_offset, self.segments[self.segment_offset].offset)
+        (
+            self.segment_offset,
+            self.segments[self.segment_offset].offset,
+        )
     }
 
     fn contains(&self, pointer: *const u8) -> bool {
@@ -207,7 +214,7 @@ impl Allocator for CompactingHeap {
             to_space,
         }
     }
-    
+
     fn allocate(
         &mut self,
         bytes: usize,
@@ -224,7 +231,7 @@ impl Allocator for CompactingHeap {
     fn gc(
         &mut self,
         stack_map: &StackMap,
-        stack_pointers: &Vec<(usize, usize)>,
+        stack_pointers: &[(usize, usize)],
         options: AllocatorOptions,
     ) {
         if !options.gc {
@@ -232,7 +239,6 @@ impl Allocator for CompactingHeap {
         }
         let start = std::time::Instant::now();
         for (stack_base, stack_pointer) in stack_pointers.iter() {
-
             let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);
             let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
 
@@ -251,7 +257,6 @@ impl Allocator for CompactingHeap {
         if options.print_stats {
             println!("GC took: {:?}", start.elapsed());
         }
-
     }
 
     fn gc_add_root(&mut self, _old: usize, _young: usize) {
@@ -268,8 +273,6 @@ impl Allocator for CompactingHeap {
 }
 
 impl CompactingHeap {
-
-
     #[allow(clippy::too_many_arguments)]
     fn allocate_inner(
         &mut self,
@@ -285,7 +288,6 @@ impl CompactingHeap {
     }
 
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
-
         let (start_segment, start_offset) = self.to_space.current_position();
         // TODO: Is this vec the best way? Probably not
         // I could hand this the pointers to the stack location
@@ -296,7 +298,10 @@ impl CompactingHeap {
             new_roots.push(self.copy_using_cheneys_algorithm(*root));
         }
 
-        for object in self.to_space.object_iter_from_position(start_segment, start_offset) {
+        for object in self
+            .to_space
+            .object_iter_from_position(start_segment, start_offset)
+        {
             let size: usize = *(object as *const usize) >> 1;
             let marked = size & 1 == 1;
             if marked {
