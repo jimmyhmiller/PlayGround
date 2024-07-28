@@ -8,9 +8,8 @@ use clap::{command, Parser as ClapParser};
 use compiler::{Allocator, DefaultPrinter, Printer, Runtime, StackMapDetails, TestPrinter};
 #[allow(unused)]
 use gc::{
-    compacting::CompactingHeap, simple_generation::SimpleGeneration,
-    simple_mark_and_sweep::SimpleMarkSweepHeap,
-    mutex_allocator::MutexAllocator,
+    compacting::CompactingHeap, mutex_allocator::MutexAllocator,
+    simple_generation::SimpleGeneration, simple_mark_and_sweep::SimpleMarkSweepHeap,
 };
 
 use std::{error::Error, mem, slice::from_raw_parts, thread, time::Instant};
@@ -157,7 +156,9 @@ extern "C" fn property_access<Alloc: Allocator>(
     str_constant_ptr: usize,
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
-    runtime.compiler.property_access(struct_pointer, str_constant_ptr)
+    runtime
+        .compiler
+        .property_access(struct_pointer, str_constant_ptr)
 }
 
 pub unsafe extern "C" fn throw_error<Alloc: Allocator>(
@@ -261,10 +262,14 @@ fn compile_trampoline<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
     lang.epilogue(2);
     lang.ret();
 
-    runtime.compiler
+    runtime
+        .compiler
         .add_function(Some("trampoline"), &lang.compile_directly(), 0)
         .unwrap();
-    let function = runtime.compiler.get_function_by_name_mut("trampoline").unwrap();
+    let function = runtime
+        .compiler
+        .get_function_by_name_mut("trampoline")
+        .unwrap();
     function.is_builtin = true;
 }
 
@@ -338,8 +343,6 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // but right now I just want something working
     let has_expect = args.test && source.contains("// Expect");
 
-
-    
     cfg_if::cfg_if! {
         if #[cfg(feature = "compacting")] {
             cfg_if::cfg_if! {
@@ -383,16 +386,19 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     compile_trampoline(&mut runtime);
 
+    runtime
+        .compiler
+        .set_compiler_lock_pointer(&runtime.compiler as *const _);
+    runtime
+        .compiler
+        .set_pause_atom_ptr(runtime.pause_atom_ptr());
 
-    runtime.compiler.set_compiler_lock_pointer(&runtime.compiler as *const _);
-    runtime.compiler.set_pause_atom_ptr(runtime.pause_atom_ptr());
-
-    runtime.compiler.add_builtin_function(
-        "println",
-        println_value::<Alloc> as *const u8,
-        false,
-    )?;
-    runtime.compiler.add_builtin_function("print", print_value::<Alloc> as *const u8, false)?;
+    runtime
+        .compiler
+        .add_builtin_function("println", println_value::<Alloc> as *const u8, false)?;
+    runtime
+        .compiler
+        .add_builtin_function("print", print_value::<Alloc> as *const u8, false)?;
     runtime.compiler.add_builtin_function(
         "allocate_struct",
         allocate_struct::<Alloc> as *const u8,
@@ -414,26 +420,32 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         throw_error::<Alloc> as *const u8,
         false,
     )?;
-    runtime.compiler.add_builtin_function("assert!", placeholder as *const u8, false)?;
-    runtime.compiler.add_builtin_function("gc", gc::<Alloc> as *const u8, true)?;
+    runtime
+        .compiler
+        .add_builtin_function("assert!", placeholder as *const u8, false)?;
+    runtime
+        .compiler
+        .add_builtin_function("gc", gc::<Alloc> as *const u8, true)?;
     runtime.compiler.add_builtin_function(
         "gc_add_root",
         gc_add_root::<Alloc> as *const u8,
         false,
     )?;
-    runtime.compiler.add_builtin_function("thread", new_thread::<Alloc> as *const u8, false)?;
-    runtime.compiler.add_builtin_function("__pause", __pause::<Alloc> as *const u8, true)?;
+    runtime
+        .compiler
+        .add_builtin_function("thread", new_thread::<Alloc> as *const u8, false)?;
+    runtime
+        .compiler
+        .add_builtin_function("__pause", __pause::<Alloc> as *const u8, true)?;
 
     let beginnings_of_standard_library = include_str!("../resources/std.bg");
     runtime.compiler.compile(beginnings_of_standard_library)?;
-    
 
     let mut parser = Parser::new(source);
     let ast = parser.parse();
     if args.show_times {
         println!("Parse time {:?}", parse_time.elapsed());
     }
-    
 
     let compile_time = Instant::now();
     runtime.compiler.compile_ast(ast)?;

@@ -4,7 +4,9 @@ use std::{
     error::Error,
     slice::from_raw_parts_mut,
     sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, TryLockError},
-    thread::{self, JoinHandle, Thread, ThreadId}, time::Duration, vec,
+    thread::{self, JoinHandle, Thread, ThreadId},
+    time::Duration,
+    vec,
 };
 
 use bincode::{Decode, Encode};
@@ -14,7 +16,8 @@ use crate::{
     arm::LowLevelArm,
     debugger,
     ir::{BuiltInTypes, StringValue, Value},
-    CommandLineArguments, Data, Message, __pause, parser::Parser,
+    CommandLineArguments, Data, Message, __pause,
+    parser::Parser,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,7 +189,7 @@ pub trait Allocator {
     fn gc(
         &mut self,
         stack_map: &StackMap,
-        stack_pointers: &Vec<(usize, usize)>,
+        stack_pointers: &[(usize, usize)],
         options: AllocatorOptions,
     );
 
@@ -847,7 +850,6 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         allocator: Alloc,
         printer: Box<dyn Printer>,
     ) -> Self {
-
         Self {
             printer,
             command_line_arguments: command_line_arguments.clone(),
@@ -958,23 +960,20 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     }
 
     pub fn gc(&mut self, stack_pointer: usize) {
-        // TODO: Signal to all the threads that they need to pause
-        // Make sure we have all the stack pointers from the threads
-        // Then we can start the gc
-        // One trick I could do for the gc stuff is write the stack pointer
-        // as the first value in the stack. Seems a bit hacky. But I do need to
-        // communicate where that stack pointer is.
-        // I think my RWLock will make that complicated right now.
-        // But there are plenty of places I could store that.
 
-
-        // Multiple threads might end up here at the same time.
-        // What do I do?
+        if self.memory.threads.len() == 1 {
+            // If there is only one thread, that is us
+            // that means nothing else could spin up a thread in the mean time
+            // so there is no need to lock anything
+            self.memory
+                .heap
+                .gc(&self.memory.stack_map, &[(self.get_stack_base(), stack_pointer)], self.get_allocate_options());
+            return;
+        }
 
         let locked = self.gc_lock.try_lock();
 
         if locked.is_err() {
-
             match locked.as_ref().unwrap_err() {
                 TryLockError::WouldBlock => {
                     drop(locked);
@@ -987,7 +986,12 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
             return;
         }
-        let result = self.is_paused.compare_exchange(0, 1, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed);
+        let result = self.is_paused.compare_exchange(
+            0,
+            1,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if result != Ok(0) {
             drop(locked);
             unsafe { __pause(self as *mut Runtime<Alloc>, stack_pointer) };
@@ -995,7 +999,6 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         }
 
         let locked = locked.unwrap();
-
 
         let (lock, cvar) = &*self.thread_state;
         let mut thread_state = lock.lock().unwrap();
@@ -1009,16 +1012,13 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         drop(thread_state);
 
         let options = self.get_allocate_options();
-        self.memory.heap.gc(
-            &self.memory.stack_map,
-            &stack_pointers,
-            options,
-        );
-
+        self.memory
+            .heap
+            .gc(&self.memory.stack_map, &stack_pointers, options);
 
         self.is_paused
             .store(0, std::sync::atomic::Ordering::Release);
-    
+
         self.memory.active_threads();
         for thread in self.memory.threads.iter() {
             thread.unpark();
@@ -1026,7 +1026,9 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
         let mut thread_state = lock.lock().unwrap();
         while thread_state.paused_threads > 0 {
-            let (state, timeout) = cvar.wait_timeout(thread_state, Duration::from_millis(1)).unwrap();
+            let (state, timeout) = cvar
+                .wait_timeout(thread_state, Duration::from_millis(1))
+                .unwrap();
             thread_state = state;
 
             if timeout.timed_out() {
@@ -1034,13 +1036,12 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 for thread in self.memory.threads.iter() {
                     // println!("Unparking thread {:?}", thread.thread().id());
                     thread.unpark();
-                }        
+                }
             }
         }
         thread_state.clear();
 
         drop(locked);
-
     }
 
     pub fn gc_add_root(&mut self, old: usize, young: usize) {
@@ -1075,7 +1076,9 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let heap_pointer = self.allocate(len, 0, BuiltInTypes::Closure)?;
         let pointer = heap_pointer as *mut u8;
         let num_free = free_variables.len();
-        let function_definition = self.compiler.get_function_by_pointer(BuiltInTypes::untag(function));
+        let function_definition = self
+            .compiler
+            .get_function_by_pointer(BuiltInTypes::untag(function));
         if function_definition.is_none() {
             panic!("Function not found");
         }
@@ -1117,7 +1120,8 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         bytes.copy_from_slice(offset);
         let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
 
-        let trampoline = self.compiler
+        let trampoline = self
+            .compiler
             .functions
             .iter()
             .find(|f| f.name == "trampoline")
@@ -1144,7 +1148,8 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         bytes.copy_from_slice(offset);
         let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
 
-        let trampoline = self.compiler
+        let trampoline = self
+            .compiler
             .functions
             .iter()
             .find(|f| f.name == "trampoline")
@@ -1175,7 +1180,8 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
     // TODO: Make less ugly
     pub fn run_function(&self, name: &str, vec: Vec<i32>) -> u64 {
-        let function = self.compiler
+        let function = self
+            .compiler
             .functions
             .iter()
             .find(|f| f.name == name)
@@ -1193,7 +1199,8 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     }
 
     pub fn get_function_base(&self, name: &str) -> (u64, u64, fn(u64, u64) -> u64) {
-        let function = self.compiler
+        let function = self
+            .compiler
             .functions
             .iter()
             .find(|f| f.name == name)

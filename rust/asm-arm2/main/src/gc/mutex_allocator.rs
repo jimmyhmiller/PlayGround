@@ -2,15 +2,12 @@ use std::sync::Mutex;
 
 use crate::compiler::Allocator;
 
-
 pub struct MutexAllocator<Alloc: Allocator> {
     alloc: Alloc,
     mutex: Mutex<()>,
 }
 
-
 impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
-
     fn new() -> Self {
         MutexAllocator {
             alloc: Alloc::new(),
@@ -32,7 +29,7 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
     fn gc(
         &mut self,
         stack_map: &crate::compiler::StackMap,
-        stack_pointers: &Vec<(usize, usize)>,
+        stack_pointers: &[(usize, usize)],
         options: crate::compiler::AllocatorOptions,
     ) {
         let lock = self.mutex.lock().unwrap();
