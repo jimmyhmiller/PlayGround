@@ -34,31 +34,21 @@ impl Message {
     }
 }
 
+#[derive(Debug, Encode, Decode, Clone)]
+pub struct StackMapDetails {
+    pub number_of_locals: usize,
+    pub current_stack_size: usize,
+}
+
 // TODO: This should really live on the debugger side of things
 #[derive(Debug, Encode, Decode, Clone)]
 enum Data {
-    ForeignFunction {
-        name: String,
-        pointer: usize,
-    },
-    BuiltinFunction {
-        name: String,
-        pointer: usize,
-    },
-    HeapPointer {
-        pointer: usize,
-    },
-    UserFunction {
-        name: String,
-        pointer: usize,
-        len: usize,
-    },
-    Label {
-        label: String,
-        function_pointer: usize,
-        label_index: usize,
-        label_location: usize,
-    },
+    ForeignFunction { name: String, pointer: usize },
+    BuiltinFunction {name: String, pointer: usize},
+    HeapSegmentPointer { pointer: usize },
+    UserFunction { name: String, pointer: usize, len: usize },
+    Label { label: String, function_pointer: usize, label_index: usize, label_location: usize },
+    StackMap { pc: usize, name: String, stack_map: Vec<(usize, StackMapDetails)> },
 }
 
 #[derive(Debug, Encode, Decode, Clone)]
@@ -78,7 +68,7 @@ impl Data {
             Data::BuiltinFunction { name, pointer } => {
                 format!("{}: 0x{:x}", name, pointer)
             }
-            Data::HeapPointer { pointer } => {
+            Data::HeapSegmentPointer { pointer } => {
                 format!("0x{:x}", pointer)
             }
             Data::UserFunction { name, pointer, len } => {
@@ -94,6 +84,13 @@ impl Data {
                     "{}: 0x{:x} 0x{:x} 0x{:x}",
                     label, function_pointer, label_index, label_location
                 )
+            }
+            Data::StackMap { pc, name, stack_map } => {
+
+                let stack_map_details_string = stack_map.iter().map(|(key, details)| {
+                    format!("0x{:x}: size: {}, locals: {}", key, details.current_stack_size, details.number_of_locals)
+                }).collect::<Vec<String>>().join(" | ");
+                format!("{}, 0x{:x}, {}", name, pc, stack_map_details_string)
             }
         }
     }
@@ -139,6 +136,10 @@ impl App for Frontend {
                         PhysicalKey::Code(KeyCode::ArrowDown) => {
                             self.is_continuing = false;
                             self.step_over();
+                        }
+                        PhysicalKey::Code(KeyCode::KeyI) => {
+                            self.is_continuing = false;
+                            self.step_in();
                         }
                         PhysicalKey::Code(KeyCode::ArrowRight) => {
                             self.is_continuing = false;
@@ -191,6 +192,16 @@ impl App for Frontend {
     fn end_frame(&mut self) {}
 
     fn tick(&mut self) {
+        let process = &self.state.process.process;
+        if process.is_some() {
+            let process = process.as_ref().unwrap();
+            if let Some(out) = process.get_stdout_all() {
+                if !out.is_empty() {
+                    println!("{:?}", out);
+                }
+            }
+        }
+
         let start = std::time::Instant::now();
         let ms_threshold = 10;
         if self.should_step {
@@ -228,12 +239,20 @@ impl App for Frontend {
 }
 
 impl Frontend {
-    fn step_over(&mut self) {
+    fn step(&mut self, force_in: bool) {
         if let Some(process) = self.state.process.process.clone() {
             if let Some(thread) = process.thread_by_index_id(1) {
                 let _was_debugger_info = self.state.check_debugger_info(&thread, &process, true);
                 let pc_before = thread.selected_frame().pc();
-                thread.step_instruction(true).unwrap();
+
+                let current_instruction = self.state.disasm.disasm_values.iter().find(|x| x.address == pc_before);
+                let step_over = if current_instruction.map(|x| format!("{} {}", x.instruction, x.arguments.join(" "))) == Some("mov x29 sp".to_string()) {
+                    false    
+                } else {
+                    true
+                };
+                let step_over = if force_in { false } else { step_over };
+                thread.step_instruction(step_over).unwrap();
                 let pc_after = thread.selected_frame().pc();
                 if pc_before == pc_after {
                     thread.selected_frame().set_pc(pc_after + 4);
@@ -241,6 +260,14 @@ impl Frontend {
                 self.state.update_process_state(true);
             }
         }
+    }
+
+    fn step_over(&mut self) {
+        self.step(false)
+    }
+
+    fn step_in(&mut self) {
+        self.step(true);
     }
 
     fn keep_stepping(&mut self) {
@@ -295,11 +322,11 @@ fn main() {
             },
         },
     };
-    frontend.create_window("Debug", 1600, 1600, Options { vsync: false });
+    frontend.create_window("Debug", Options { vsync: false, width: 2400, height: 1800, title: "Debugger".to_string(), position: (0, 0)});
 }
 
 // Stolen from compiler
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltInTypes {
     Int,
     Float,
@@ -309,16 +336,23 @@ pub enum BuiltInTypes {
     Closure,
     Struct,
     Array,
+    Null,
     None,
 }
 
 impl BuiltInTypes {
+
+    pub fn null_value() -> isize {
+        0b111
+    }
+
     pub fn tag(&self, value: isize) -> isize {
         let value = value << 3;
         let tag = self.get_tag();
         value | tag
     }
 
+    // TODO: Given this scheme how do I represent null?
     pub fn get_tag(&self) -> isize {
         match self {
             BuiltInTypes::Int => 0b000,
@@ -329,7 +363,8 @@ impl BuiltInTypes {
             BuiltInTypes::Closure => 0b101,
             BuiltInTypes::Struct => 0b110,
             BuiltInTypes::Array => 0b111,
-            BuiltInTypes::None => panic!("None has no tag"),
+            BuiltInTypes::Null => 0b111,
+            BuiltInTypes::None => 0,
         }
     }
 
@@ -337,7 +372,12 @@ impl BuiltInTypes {
         pointer >> 3
     }
 
+    
+
     pub fn get_kind(pointer: usize) -> Self {
+        if pointer == Self::null_value() as usize {
+            return BuiltInTypes::Null;
+        }
         match pointer & 0b111 {
             0b000 => BuiltInTypes::Int,
             0b001 => BuiltInTypes::Float,
@@ -361,6 +401,7 @@ impl BuiltInTypes {
             BuiltInTypes::Struct => false,
             BuiltInTypes::Array => false,
             BuiltInTypes::Closure => false,
+            BuiltInTypes::Null => true,
             BuiltInTypes::None => false,
         }
     }
@@ -384,6 +425,21 @@ impl BuiltInTypes {
     pub fn tag_size() -> i32 {
         3
     }
+    
+    pub fn is_heap_pointer(value: usize) -> bool {
+        match BuiltInTypes::get_kind(value) {
+            BuiltInTypes::Int => false,
+            BuiltInTypes::Float => false,
+            BuiltInTypes::String => false,
+            BuiltInTypes::Bool => false,
+            BuiltInTypes::Function => false,
+            BuiltInTypes::Closure => true,
+            BuiltInTypes::Struct => true,
+            BuiltInTypes::Array => true,
+            BuiltInTypes::Null => false,
+            BuiltInTypes::None => false,
+        }
+    }
     pub fn to_string(&self) -> String {
         match self {
             BuiltInTypes::Int => "Int".to_string(),
@@ -394,6 +450,7 @@ impl BuiltInTypes {
             BuiltInTypes::Closure => "Closure".to_string(),
             BuiltInTypes::Struct => "Struct".to_string(),
             BuiltInTypes::Array => "Array".to_string(),
+            BuiltInTypes::Null => "Null".to_string(),
             BuiltInTypes::None => "None".to_string(),
         }
     }
@@ -485,15 +542,10 @@ impl State {
                     .map(|v| v.address)
                     .any(|v| v == self.pc);
 
-                // TODO: Make this actually correct
-                // Consider when we have later addresses, but gaps
-                let last = self
-                    .disasm
-                    .disasm_values
-                    .last()
-                    .map(|v| v.address)
-                    .unwrap_or(0);
-                let remaining = last.saturating_sub(self.pc) / 4;
+                // make sure the address 8 instructions ahead exists in disasm
+                let n = 30;
+                let n_ahead = self.disasm.disasm_values.iter().find(|x| x.address == self.pc + n * 4).is_some();
+
 
                 self.sp = frame.sp();
                 self.fp = frame.fp();
@@ -528,28 +580,9 @@ impl State {
                         .collect();
                 }
 
-                if !pc_in_instructions || remaining < 30 {
+                if !pc_in_instructions || !n_ahead {
                     let instructions = process.get_instructions(&frame, &target);
-                    self.process.instructions = Some(instructions.clone());
-                    for instruction in &instructions {
-                        let instruction = ParsedDisasm {
-                            address: instruction.address().load_address(&target),
-                            // I think this is data, but not sure
-                            hex: "".to_string(),
-                            instruction: instruction.mnemonic(&target).to_string(),
-                            arguments: instruction
-                                .operands(&target)
-                                .to_string()
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .collect(),
-                            comment: instruction.comment(&target).to_string(),
-                        };
-                        if instruction.instruction == "udf" {
-                            continue;
-                        }
-                        self.disasm.disasm_values.push(instruction);
-                    }
+                    self.process_instructions(instructions, target);
                 }
                 self.disasm
                     .disasm_values
@@ -559,38 +592,68 @@ impl State {
                     .dedup_by(|a, b| a.address == b.address);
                 self.registers.registers.clear();
                 frame.registers().iter().for_each(|register| {
-                    if register.name().contains("General") {
-                        register.children().for_each(|child| {
-                            if child.name().contains("x")
-                                || child.name() == "pc"
-                                || child.name() == "sp"
-                                || child.name() == "fp"
-                            {
-                                self.registers.registers.push(Register {
-                                    name: child.name().to_string(),
-                                    value: Value::String(child.value().to_string()),
-                                    kind: BuiltInTypes::get_kind(
-                                        usize::from_str_radix(
-                                            child.value().trim_start_matches("0x"),
-                                            16,
-                                        )
-                                        .unwrap(),
-                                    ),
-                                });
-                            }
-                        });
+                    if let Some(name) = register.name() {
+                        if name.contains("General") {
+                            register.children().for_each(|child| {
+                                if let Some(child_name) = child.name() {
+                                    if child_name.contains("x")
+                                    || child_name == "pc"
+                                    || child_name == "sp"
+                                    || child_name == "fp"
+                                {
+                                    self.registers.registers.push(Register {
+                                        name: child_name.to_string(),
+                                        value: Value::String(child.value().unwrap_or("no-value").to_string()),
+                                        kind: BuiltInTypes::get_kind(
+                                            usize::from_str_radix(
+                                                child.value().unwrap_or("no-value").trim_start_matches("0x"),
+                                                16,
+                                            )
+                                            .unwrap(),
+                                        ),
+                                    });
+                                }
+                                }
+                                
+                            })
+                        };
                     }
                 });
             }
         }
     }
 
+    fn process_instructions(&mut self, instructions: SBInstructionList, target: SBTarget) {
+        self.process.instructions = Some(instructions.clone());
+        for instruction in &instructions {
+            let instruction = ParsedDisasm {
+                address: instruction.address().load_address(&target),
+                // I think this is data, but not sure
+                hex: "".to_string(),
+                instruction: instruction.mnemonic(&target).to_string(),
+                arguments: instruction
+                    .operands(&target)
+                    .to_string()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect(),
+                comment: instruction.comment(&target).to_string(),
+            };
+            if instruction.instruction == "udf" {
+                continue;
+            }
+            self.disasm.disasm_values.push(instruction);
+            self.disasm.disasm_values.sort_by(|a, b| a.address.cmp(&b.address));
+        }
+    }
+    
     fn check_debugger_info(
         &mut self,
         thread: &lldb::SBThread,
         process: &SBProcess,
         is_stepping: bool,
     ) -> bool {
+        // println!("{:?}", thread.selected_frame().function_name());
         if thread.selected_frame().function_name() == Some("debugger_info") {
             let x0 = thread
                 .selected_frame()
@@ -625,7 +688,7 @@ impl State {
                         },
                     );
                 }
-                Data::HeapPointer { pointer } => {
+                Data::HeapSegmentPointer { pointer } => {
                     self.heap.heap_pointers.push(pointer);
                 }
                 Data::UserFunction { name, pointer, len } => {
@@ -634,6 +697,16 @@ impl State {
                         .as_mut()
                         .unwrap()
                         .breakpoint_create_by_address(pointer as u64);
+
+                    if let (Some(process), Some(target)) =
+                        (self.process.process.clone(), self.process.target.clone())
+                    {
+                        let frame = thread.selected_frame();
+                        let instructions = process.get_instructions(&frame, &target);
+                        // self.process_instructions(instructions, target);
+                    }
+
+
                     self.functions.insert(
                         pointer,
                         Function::User {
@@ -641,6 +714,10 @@ impl State {
                             address_range: (pointer, pointer + len),
                         },
                     );
+                }
+                Data::StackMap { pc, name, stack_map } => {
+                    // TODO: do something here
+                    println!("{}", message.data.to_string());
                 }
             }
             self.messages.push(message);
@@ -958,10 +1035,25 @@ fn disasm(state: &State) -> impl Node {
         }
     }
     let disasm = &state.disasm.disasm_values[start..];
+    let mut contiguous_disasm = vec![];
+    let mut last_address = 0;
+    for disasm in disasm.iter() {
+        if disasm.address == last_address + 4 || last_address == 0 {
+            contiguous_disasm.push(disasm);
+        } else {
+            if disasm.address > state.pc {
+                break;
+            }
+        }
+        last_address = disasm.address;
+    }
+
+    let disasm = contiguous_disasm;
 
     lines(
         &disasm
             .iter()
+            .take(40)
             .map(|disasm| {
                 let prefix = if disasm.address == state.pc {
                     "> "
@@ -1086,11 +1178,11 @@ trait FrameExentions {
 impl FrameExentions for SBFrame {
     fn get_register(&self, name: &str) -> Option<SBValue> {
         for register in self.registers().into_iter() {
-            if register.name() == name {
+            if matches!(register.name(), Some(n) if n == name) {
                 return Some(register);
             }
             for child in register.children().into_iter() {
-                if child.name() == name {
+                if matches!(child.name(), Some(n) if n == name){
                     return Some(child);
                 }
             }
@@ -1180,7 +1272,10 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         breakpoint.set_enabled(true);
         target.enable_all_breakpoints();
 
+        // TODO: Make all of this better
+        // and configurable at runtime
         let launchinfo = SBLaunchInfo::new();
+        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/PlayGround/rust/asm-arm2/main/resources/closures.bg"], false);
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);
         match target.launch(launchinfo) {
             Ok(process) => Some((target, process)),

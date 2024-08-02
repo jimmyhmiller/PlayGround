@@ -1,0 +1,240 @@
+
+
+// TODO: Change this to an import once I have that
+fn bottomUpTree(depth) {
+    if depth > 0 {
+        TreeNode {
+            left: bottomUpTree(depth - 1),
+            right: bottomUpTree(depth - 1)
+        }
+    } else {
+        TreeNode {
+            left: null,
+            right: null
+        }
+    }
+}
+
+// Intentionally after to make sure
+// declaration order doesn't matter
+struct TreeNode {
+    left
+    right
+}
+
+
+
+fn a() {
+    b()
+}
+
+fn b() {
+    42
+}
+
+
+struct Range {
+    start
+    end
+}
+
+struct OtherStruct {
+    x
+    y
+}
+
+fn range(start, end) {
+    Range {
+        start: start,
+        end: end
+    }
+}
+
+fn other_struct(x, y) {
+    OtherStruct {
+        x: x,
+        y: y
+    }
+}
+
+
+fn get_range_start() {
+    let range = range(0, 10);
+    range.start
+}
+
+fn simpleMakeTree() {
+    println("simpleMakeTree")
+    TreeNode {
+        left: null,
+        right: null
+    }
+}
+
+fn testMakeTree() {
+    simpleMakeTree()
+    TreeNode {
+        left: simpleMakeTree(),
+        right: simpleMakeTree()
+    }
+}
+
+fn testGcWithTree(n) {
+    // fails when gc right now
+    bottomUpTree(n)
+//     println("here")
+//     println(bottomUpTree(n))
+}
+
+fn testGcSimple(n) {
+    println("Starting garbage")
+    let garbage = TreeNode {
+        left: null
+        right: null
+    }
+    println("garbage")
+
+    let x = TreeNode {
+        left: null
+        right: null
+    }
+
+    println("x")
+
+    let y = TreeNode {
+        left: x,
+        right: x
+    }
+
+    println("y")
+
+    let z = TreeNode {
+        left: y,
+        right: y,
+    }
+
+    println("z")
+    println(z)
+    z
+}
+
+fn testGcNested(n) {
+    let y = testGcSimple()
+
+    println("done with call")
+
+    let z = TreeNode {
+        left: y
+        right: y
+    }
+    println("z2")
+
+    let q = TreeNode {
+        left: z
+        right: z
+    }
+
+    println("q")
+
+    y
+}
+
+fn testGc(n) {
+    if n > 10 {
+        0
+    } else {
+        let x = TreeNode {
+            left: null
+            right: null
+        }
+        1 + testGc(n + 1)
+
+        let y = TreeNode {
+            left: x,
+            right: x
+        }
+
+        1 + testGc(n + 1)
+
+        let z = TreeNode {
+            left: y,
+            right: y,
+        }
+        println(x)
+        println(y)
+        println(z)
+        0
+    }
+}
+
+fn simpleFunctionWithLocals() {
+    let x = 2;
+    let y = 3;
+    x + y
+}
+
+fn main() {
+    println(simpleFunctionWithLocals())
+    println(testGc(8))
+    println(testGcSimple(3))
+    println(testGcNested(3))
+    println(testGcWithTree(3))
+    println(testMakeTree())
+    println(get_range_start())
+    println(range(0, 10))
+    println(a())
+    println(b())
+}
+
+
+// Expect
+// 5
+// TreeNode { left: null, right: null }
+// TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }
+// TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } }
+// TreeNode { left: null, right: null }
+// TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }
+// TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } }
+// TreeNode { left: null, right: null }
+// TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }
+// TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } }
+// TreeNode { left: null, right: null }
+// TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }
+// TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } }
+// TreeNode { left: null, right: null }
+// TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }
+// TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } }
+// TreeNode { left: null, right: null }
+// TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }
+// TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } }
+// TreeNode { left: null, right: null }
+// TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }
+// TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } }
+// 0
+// Starting garbage
+// garbage
+// x
+// y
+// z
+// TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } }
+// TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } }
+// Starting garbage
+// garbage
+// x
+// y
+// z
+// TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } }
+// done with call
+// z2
+// q
+// TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } }
+// TreeNode { left: TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } }, right: TreeNode { left: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }, right: TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } } } }
+// simpleMakeTree
+// simpleMakeTree
+// simpleMakeTree
+// TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }
+// 0
+// Range { start: 0, end: 10 }
+// 42
+// 42
+// null

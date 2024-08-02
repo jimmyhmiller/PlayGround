@@ -1,12 +1,15 @@
 use asm::arm::{
     ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector, StrImmGenSelector,
-    SP, X0, X19, X20, X21, X22, X23, X24, X29, X3, X30, ZERO_REGISTER,
+    SP, X0, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, ZERO_REGISTER,
 };
 
 use std::collections::HashMap;
 
 use crate::{
-    common::Label, debugger, ir::{BuiltInTypes, Condition}, Data, Message
+    common::Label,
+    debugger,
+    ir::{BuiltInTypes, Condition},
+    Data, Message,
 };
 
 pub fn _print_u32_hex_le(value: u32) {
@@ -50,7 +53,6 @@ pub fn mov_sp(destination: Register, source: Register) -> ArmAsm {
         rd: destination,
     }
 }
-
 
 pub fn add(destination: Register, a: Register, b: Register) -> ArmAsm {
     ArmAsm::AddAddsubShift {
@@ -136,16 +138,97 @@ pub fn or(destination: Register, a: Register, b: Register) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
+// Too lazy to understand this. But great explanation here
+// https://kddnewton.com/2022/08/11/aarch64-bitmask-immediates.html
+// Code taken from there
+pub struct BitmaskImmediate {
+    n: u8,
+    imms: u8,
+    immr: u8,
+}
+
+/// Is this number's binary representation all 1s?
+fn is_mask(imm: u64) -> bool {
+    ((imm + 1) & imm) == 0
+}
+
+/// Is this number's binary representation one or more 1s followed by
+/// one or more 0s?
+fn is_shifted_mask(imm: u64) -> bool {
+    is_mask((imm - 1) | imm)
+}
+
+impl TryFrom<u64> for BitmaskImmediate {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if value == 0 || value == u64::MAX {
+            return Err(());
+        }
+        let mut imm = value;
+        let mut size = 64;
+
+        loop {
+            size >>= 1;
+            let mask = (1 << size) - 1;
+
+            if (imm & mask) != ((imm >> size) & mask) {
+                size <<= 1;
+                break;
+            }
+
+            if size <= 2 {
+                break;
+            }
+        }
+        let trailing_ones: u32;
+        let left_rotations: u32;
+
+        let mask = u64::MAX >> (64 - size);
+        imm &= mask;
+
+        if is_shifted_mask(imm) {
+            left_rotations = imm.trailing_zeros();
+            trailing_ones = (imm >> left_rotations).trailing_ones();
+        } else {
+            imm |= !mask;
+            if !is_shifted_mask(!imm) {
+                return Err(());
+            }
+
+            let leading_ones = imm.leading_ones();
+            left_rotations = 64 - leading_ones;
+            trailing_ones = leading_ones + imm.trailing_ones() - (64 - size);
+        }
+
+        // immr is the number of right rotations it takes to get from the
+        // matching unrotated pattern to the target value.
+        let immr = (size - left_rotations) & (size - 1);
+
+        // imms is encoded as the size of the pattern, a 0, and then one less
+        // than the number of sequential 1s.
+        let imms = (!(size - 1) << 1) | (trailing_ones - 1);
+
+        // n is 1 if the element size is 64-bits, and 0 otherwise.
+        let n = ((imms >> 6) & 1) ^ 1;
+
+        Ok(BitmaskImmediate {
+            n: n as u8,
+            imms: (imms & 0x3f) as u8,
+            immr: (immr & 0x3f) as u8,
+        })
+    }
+}
+
 pub fn and_imm(destination: Register, a: Register, b: i32) -> ArmAsm {
-    assert!(b == 1);
-    // Too lazy to understand this. But great explanation here
-    // https://kddnewton.com/2022/08/11/aarch64-bitmask-immediates.html
+    let immediate: Result<BitmaskImmediate, _> = (b as u64).try_into();
+    let immediate = immediate.unwrap();
+
     ArmAsm::AndLogImm {
         sf: destination.sf(),
-        n: 1,
-        immr: 0,
-        imms: 0,
+        n: immediate.n as i32,
+        immr: immediate.immr as i32,
+        imms: immediate.imms as i32,
         rn: a,
         rd: destination,
     }
@@ -181,24 +264,24 @@ pub fn compare(a: Register, b: Register) -> ArmAsm {
 
 impl Condition {
     #[allow(unused)]
-    fn to_arm_condition(&self) -> i32 {
+    fn arm_condition(&self) -> i32 {
         match self {
             Condition::Equal => 0,
             Condition::NotEqual => 1,
-            Condition::GreaterThanOrEqual => 10,
             Condition::LessThan => 11,
-            Condition::GreaterThan => 12,
             Condition::LessThanOrEqual => 13,
+            Condition::GreaterThan => 12,
+            Condition::GreaterThanOrEqual => 10,
         }
     }
-    fn to_arm_inverted_condition(&self) -> i32 {
+    fn arm_inverted_condition(&self) -> i32 {
         match self {
             Condition::Equal => 1,
             Condition::NotEqual => 0,
-            Condition::GreaterThanOrEqual => 11,
-            Condition::LessThan => 10,
-            Condition::GreaterThan => 13,
-            Condition::LessThanOrEqual => 12,
+            Condition::LessThan => 13,
+            Condition::LessThanOrEqual => 11,
+            Condition::GreaterThan => 10,
+            Condition::GreaterThanOrEqual => 12,
         }
     }
 }
@@ -221,7 +304,7 @@ pub fn compare_bool(
         ArmAsm::CsetCsinc {
             sf: destination.sf(),
             // For some reason these conditions are inverted
-            cond: condition.to_arm_inverted_condition(),
+            cond: condition.arm_inverted_condition(),
             rd: destination,
         },
     ]
@@ -234,7 +317,6 @@ pub fn jump_equal(destination: u32) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
 pub fn jump_not_equal(destination: u32) -> ArmAsm {
     ArmAsm::BCond {
         imm19: destination as i32,
@@ -242,7 +324,6 @@ pub fn jump_not_equal(destination: u32) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
 pub fn jump_greater_or_equal(destination: u32) -> ArmAsm {
     ArmAsm::BCond {
         imm19: destination as i32,
@@ -250,7 +331,6 @@ pub fn jump_greater_or_equal(destination: u32) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
 pub fn jump_less_than(destination: u32) -> ArmAsm {
     ArmAsm::BCond {
         imm19: destination as i32,
@@ -258,7 +338,6 @@ pub fn jump_less_than(destination: u32) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
 pub fn jump_greater(destination: u32) -> ArmAsm {
     ArmAsm::BCond {
         imm19: destination as i32,
@@ -266,7 +345,6 @@ pub fn jump_greater(destination: u32) -> ArmAsm {
     }
 }
 
-#[allow(unused)]
 pub fn jump_less_or_equal(destination: u32) -> ArmAsm {
     ArmAsm::BCond {
         imm19: destination as i32,
@@ -285,7 +363,7 @@ pub fn store_pair(reg1: Register, reg2: Register, destination: Register, offset:
     ArmAsm::StpGen {
         // TODO: Make this better/document this is about 64 bit or not
         opc: 0b10,
-        class_selector: StpGenSelector::SignedOffset,
+        class_selector: StpGenSelector::PreIndex,
         imm7: offset,
         rt2: reg2,
         rt: reg1,
@@ -296,7 +374,7 @@ pub fn store_pair(reg1: Register, reg2: Register, destination: Register, offset:
 pub fn load_pair(reg1: Register, reg2: Register, destination: Register, offset: i32) -> ArmAsm {
     ArmAsm::LdpGen {
         opc: 0b10,
-        class_selector: LdpGenSelector::SignedOffset,
+        class_selector: LdpGenSelector::PostIndex,
         // TODO: Truncate
         imm7: offset,
         rt2: reg2,
@@ -329,9 +407,18 @@ pub struct LowLevelArm {
     pub max_stack_size: i32,
     pub max_locals: i32,
     pub canonical_volatile_registers: Vec<Register>,
+    // The goal right now is that everytime we
+    // make a "built-in" call, we keep a map
+    // of code offset to max stack value at a point.
+    // (We could change this to be discrete places rather than
+    //  a threshold if needed)
+    // Then when we compile, we can map to pc and lookup
+    // the locations based on that pc
+    // This means, we should be able to walk the stack
+    // and figure out where to look for potential roots
+    pub stack_map: HashMap<usize, usize>,
 }
 
-#[allow(unused)]
 impl Default for LowLevelArm {
     fn default() -> Self {
         Self::new()
@@ -340,7 +427,8 @@ impl Default for LowLevelArm {
 
 impl LowLevelArm {
     pub fn new() -> Self {
-        let canonical_volatile_registers = vec![X24, X23, X22, X21, X20, X19];
+        // https://github.com/apple/swift/blob/main/docs/ABI/CallConvSummary.rst#arm64
+        let canonical_volatile_registers = vec![X19, X20, X21, X22, X23, X24, X25, X26, X27, X28];
         LowLevelArm {
             instructions: vec![],
             label_locations: HashMap::new(),
@@ -352,6 +440,7 @@ impl LowLevelArm {
             stack_size: 0,
             max_stack_size: 0,
             max_locals: 0,
+            stack_map: HashMap::new(),
         }
     }
 
@@ -365,14 +454,15 @@ impl LowLevelArm {
     pub fn prelude(&mut self, offset: i32) {
         // self.breakpoint();
         // 0 is a placeholder we will patch later
-        self.sub_stack_pointer(-self.max_locals);
+        // TODO: make better/faster/fewer instructions
         self.store_pair(X29, X30, SP, offset);
         self.mov_reg(X29, SP);
+        self.sub_stack_pointer(-self.max_locals);
     }
 
     pub fn epilogue(&mut self, offset: i32) {
-        self.load_pair(X29, X30, SP, offset);
         self.add_stack_pointer(self.max_locals);
+        self.load_pair(X29, X30, SP, offset);
     }
 
     pub fn get_label_index(&mut self) -> usize {
@@ -400,7 +490,6 @@ impl LowLevelArm {
         destination: Register,
         offset: i32,
     ) {
-        self.increment_stack_size(2);
         self.instructions
             .push(store_pair(reg1, reg2, destination, offset));
     }
@@ -411,7 +500,6 @@ impl LowLevelArm {
         destination: Register,
         offset: i32,
     ) {
-        self.increment_stack_size(-2);
         self.instructions
             .push(load_pair(reg1, reg2, destination, offset));
     }
@@ -432,6 +520,9 @@ impl LowLevelArm {
     }
     pub fn shift_left(&mut self, destination: Register, a: Register, b: i32) {
         self.instructions.push(shift_left(destination, a, b));
+    }
+    pub fn and(&mut self, destination: Register, a: Register, b: i32) {
+        self.instructions.push(and_imm(destination, a, b));
     }
     pub fn ret(&mut self) {
         self.instructions.push(ret());
@@ -477,48 +568,38 @@ impl LowLevelArm {
     }
 
     pub fn store_on_stack(&mut self, reg: Register, offset: i32) {
-        if offset < 0 {
-            println!("Got it");
-        }
-        self.instructions.push(ArmAsm::StrImmGen {
+        self.instructions.push(ArmAsm::SturGen {
             size: 0b11,
-            imm9: 0, // not used
-            rn: SP,
+            imm9: offset * 8,
+            rn: X29,
             rt: reg,
-            imm12: offset,
-            class_selector: StrImmGenSelector::UnsignedOffset,
-        });
+        })
     }
 
-    pub fn push_to_stack(&mut self, reg: Register, offset: i32) {
+    pub fn push_to_stack(&mut self, reg: Register) {
         self.increment_stack_size(1);
-        self.store_on_stack(reg, offset + self.max_locals)
+        self.store_on_stack(reg, -(self.max_locals + self.stack_size))
     }
     pub fn store_local(&mut self, value: Register, offset: i32) {
-        self.store_on_stack(value, offset);
+        self.store_on_stack(value, -(offset + 1));
     }
 
     pub fn load_from_stack(&mut self, destination: Register, offset: i32) {
-        if offset < 0 {
-            println!("Got it");
-        }
-        self.instructions.push(ArmAsm::LdrImmGen {
+        self.instructions.push(ArmAsm::LdurGen {
             size: 0b11,
-            imm9: 0, // not used
-            rn: SP,
+            imm9: offset * 8,
+            rn: X29,
             rt: destination,
-            imm12: offset,
-            class_selector: LdrImmGenSelector::UnsignedOffset,
         });
     }
 
     pub fn pop_from_stack(&mut self, reg: Register, offset: i32) {
         self.increment_stack_size(-1);
-        self.load_from_stack(reg, offset + self.max_locals)
+        self.load_from_stack(reg, -(offset + self.max_locals + 1))
     }
 
     pub fn load_local(&mut self, destination: Register, offset: i32) {
-        self.load_from_stack(destination, offset);
+        self.load_from_stack(destination, -(offset + 1));
     }
 
     pub fn load_from_heap(&mut self, destination: Register, source: Register, offset: i32) {
@@ -532,7 +613,65 @@ impl LowLevelArm {
         });
     }
 
-    pub fn store_on_heap(&mut self, destination: Register,  source: Register,  offset: i32) {
+    pub fn atomic_load(&mut self, destination: Register, source: Register) {
+        self.instructions.push(ArmAsm::Ldar {
+            size: 0b11,
+            rn: source,
+            rt: destination,
+        })
+    }
+    pub fn atomic_store(&mut self, ptr: Register, val: Register) {
+        self.instructions.push(ArmAsm::Stlr {
+            size: 0b11,
+            rn: ptr,
+            rt: val,
+        });
+    }
+
+    pub fn compare_and_swap(&mut self, expected: Register, new: Register, ptr: Register) {
+        self.instructions.push(ArmAsm::Cas {
+            size: 0b11,
+            l: 1,
+            rs: expected,
+            o0: 1,
+            rn: ptr,
+            rt: new,
+        });
+    }
+
+    pub fn load_from_heap_with_reg_offset(
+        &mut self,
+        destination: Register,
+        source: Register,
+        offset: Register,
+    ) {
+        self.instructions.push(ArmAsm::LdrRegGen {
+            size: 0b11,
+            rm: offset,
+            option: 0b11,
+            s: 0b0,
+            rn: source,
+            rt: destination,
+        })
+    }
+
+    pub fn store_to_heap_with_reg_offset(
+        &mut self,
+        destination: Register,
+        source: Register,
+        offset: Register,
+    ) {
+        self.instructions.push(ArmAsm::StrRegGen {
+            size: 0b11,
+            rm: offset,
+            option: 0b11,
+            s: 0b0,
+            rn: destination,
+            rt: source,
+        })
+    }
+
+    pub fn store_on_heap(&mut self, destination: Register, source: Register, offset: i32) {
         self.instructions.push(ArmAsm::StrImmGen {
             size: 0b11,
             imm9: 0, // not used
@@ -541,6 +680,14 @@ impl LowLevelArm {
             imm12: offset,
             class_selector: StrImmGenSelector::UnsignedOffset,
         });
+    }
+
+    pub fn guard_integer(&mut self, dest: Register, a: Register, after_return: Label) {
+        // TODO: I need to have some way of signaling
+        // that this is a type error;
+        self.and(dest, a, 0b111);
+        self.compare(dest, ZERO_REGISTER);
+        self.jump_not_equal(after_return);
     }
 
     pub fn new_label(&mut self, name: &str) -> Label {
@@ -560,6 +707,15 @@ impl LowLevelArm {
         &self.instructions
     }
 
+    pub fn compile_directly(&mut self) -> Vec<u8> {
+        let bytes = self
+            .instructions
+            .iter()
+            .flat_map(|x| x.encode().to_le_bytes())
+            .collect();
+        bytes
+    }
+
     pub fn compile_to_bytes(&mut self) -> Vec<u8> {
         let instructions = self.compile();
         let bytes = instructions
@@ -569,17 +725,39 @@ impl LowLevelArm {
         bytes
     }
 
-    pub fn call_rust_function(&mut self, register: Register, func: *const u8) {
-        self.mov_64(register, func as isize);
-        self.call(register)
+    // TODO: I should pass this information to my debugger
+    // then I could visualize every stack frame
+    // and do dynamic checking if the invariants I expect to hold
+    // do in fact hold.
+    fn update_stack_map(&mut self) {
+        let offset = self.instructions.len() - 1;
+        let stack_size = self.stack_size as usize;
+        // TODO: Should I keep track of locals here?
+        // Right now I null them out, so it would never matter
+        self.stack_map.insert(offset, stack_size);
+    }
+
+    pub fn translate_stack_map(&self, pc: usize) -> Vec<(usize, usize)> {
+        self.stack_map
+            .iter()
+            .map(|(key, value)| ((*key * 4) + pc, *value))
+            .collect()
     }
 
     pub fn call(&mut self, register: Register) {
         self.instructions.push(branch_with_link_register(register));
+        // TODO: I could be smarter here and not to do leaf nodes
+        self.update_stack_map();
+    }
+
+    pub fn call_builtin(&mut self, register: Register) {
+        self.instructions.push(branch_with_link_register(register));
+        self.update_stack_map();
     }
 
     pub fn recurse(&mut self, label: Label) {
         self.instructions.push(branch_with_link(label.index as i32));
+        self.update_stack_map();
     }
 
     pub fn patch_labels(&mut self) {
@@ -668,19 +846,35 @@ impl LowLevelArm {
         X0
     }
 
+    pub fn padded_max_locals(&mut self) -> usize {
+        let mut max = self.max_locals as u64;
+        let remainder = max % 2;
+        if remainder != 0 {
+            max += 1;
+        }
+        max as usize
+    }
+
     pub fn patch_prelude_and_epilogue(&mut self) {
-        let max = self.max_stack_size as u64 + self.max_locals as u64;
-        let max = max.next_power_of_two();
+        let mut max = self.max_stack_size as u64 + self.max_locals as u64;
+        let remainder = max % 2;
+        if remainder != 0 {
+            max += 1;
+        }
+
+        // Does this need to be aligned somehow? Next power of two was causing issues
+        // where I was having values on the stack from native code.
+        // I don't think getting rid of it was the right answer.
         let max = max as i32;
-        // Find the first store pair and patch it based
-        // on the max stack size
+
+        // TODO: I don't need to patch because it is no longer based on max
         if let Some(ArmAsm::StpGen { imm7, .. }) = self
             .instructions
             .iter_mut()
             .position(|instruction| matches!(instruction, ArmAsm::StpGen { .. }))
             .map(|i| &mut self.instructions[i])
         {
-            *imm7 = max;
+            *imm7 = -2
         } else {
             unreachable!();
         }
@@ -691,7 +885,7 @@ impl LowLevelArm {
             .position(|instruction| matches!(instruction, ArmAsm::SubAddsubImm { .. }))
             .map(|i| &mut self.instructions[i])
         {
-            *imm12 = (max + 2) * 8;
+            *imm12 = max * 8;
         } else {
             unreachable!();
         }
@@ -702,7 +896,7 @@ impl LowLevelArm {
             .rposition(|instruction| matches!(instruction, ArmAsm::AddAddsubImm { .. }))
             .map(|i| &mut self.instructions[i])
         {
-            *imm12 = (max + 2) * 8;
+            *imm12 = max * 8;
         } else {
             unreachable!();
         }
@@ -715,12 +909,11 @@ impl LowLevelArm {
             .rposition(|instruction| matches!(instruction, ArmAsm::LdpGen { .. }))
             .map(|i| &mut self.instructions[i])
         {
-            *imm7 = max;
+            *imm7 = 2;
         } else {
             unreachable!();
         }
     }
-
 
     pub fn mov_64_bit_num(register: Register, num: isize) -> Vec<ArmAsm> {
         // TODO: This is not optimal, but it works
@@ -767,7 +960,7 @@ impl LowLevelArm {
         result
     }
 
-    fn add_stack_pointer(&mut self, bytes: i32) {
+    pub fn add_stack_pointer(&mut self, bytes: i32) {
         self.instructions.push(ArmAsm::AddAddsubImm {
             sf: SP.sf(),
             rn: SP,
@@ -777,7 +970,7 @@ impl LowLevelArm {
         });
     }
 
-    fn sub_stack_pointer(&mut self, bytes: i32) {
+    pub fn sub_stack_pointer(&mut self, bytes: i32) {
         self.instructions.push(ArmAsm::SubAddsubImm {
             sf: SP.sf(),
             rn: SP,
@@ -792,7 +985,7 @@ impl LowLevelArm {
     }
 
     pub fn get_stack_pointer_imm(&mut self, destination: Register, offset: isize) {
-        self.instructions.push(ArmAsm::AddAddsubImm {
+        self.instructions.push(ArmAsm::SubAddsubImm {
             sf: destination.sf(),
             rn: SP,
             rd: destination,
@@ -802,108 +995,43 @@ impl LowLevelArm {
     }
     pub fn get_stack_pointer(&mut self, destination: Register, offset: Register) {
         self.get_stack_pointer_imm(destination, 0);
-        self.instructions.push(add(destination, destination, offset));
+        self.instructions
+            .push(add(destination, destination, offset));
     }
 
     pub fn share_label_info_debug(&self, function_pointer: usize) {
         for (label_index, label) in self.labels.iter().enumerate() {
-            let label_location = *self.label_locations.get(&label_index).unwrap() * 4;
-            debugger(Message { 
-                kind: "label".to_string(), 
+            let label_location = *self
+                .label_locations
+                .get(&label_index)
+                .unwrap_or_else(|| panic!("Could not find label {}", label))
+                * 4;
+            debugger(Message {
+                kind: "label".to_string(),
                 data: Data::Label {
                     label: label.to_string(),
                     function_pointer,
                     label_index,
-                    label_location
-                }
+                    label_location,
+                },
             });
         }
     }
-}
 
+    pub fn get_current_stack_position(&mut self, dest: Register) {
+        self.instructions.push(ArmAsm::SubAddsubImm {
+            sf: dest.sf(),
+            rn: X29,
+            rd: dest,
+            imm12: (self.max_locals + self.stack_size + 1) * 8,
+            sh: 0,
+        });
+        // TODO: This seems
+    }
 
-#[allow(dead_code)]
-fn fib() -> LowLevelArm {
-    let mut lang = LowLevelArm::new();
-    // lang.breakpoint();
-    lang.prelude(-4);
-
-    let const_1 = lang.volatile_register();
-    lang.mov(const_1, 1);
-
-    let recursive_case = lang.new_label("recursive_case");
-    let return_label = lang.new_label("return");
-
-    lang.compare(lang.arg(0), const_1);
-    lang.jump_greater(recursive_case);
-    lang.jump(return_label);
-
-    lang.write_label(recursive_case);
-
-    let arg_0_minus_1 = lang.volatile_register();
-    lang.sub(arg_0_minus_1, lang.arg(0), const_1);
-
-    lang.store_on_stack(lang.arg(0), 2);
-    lang.mov_reg(lang.arg(0), arg_0_minus_1);
-
-    let first_recursive_result = lang.volatile_register();
-
-    lang.call(lang.arg(1));
-    lang.mov_reg(first_recursive_result, lang.ret_reg());
-
-    lang.load_from_stack(lang.arg(0), 2);
-
-    lang.sub(arg_0_minus_1, lang.arg(0), const_1);
-    lang.sub(arg_0_minus_1, arg_0_minus_1, const_1);
-    lang.mov_reg(lang.arg(0), arg_0_minus_1);
-
-    lang.store_on_stack(first_recursive_result, 2);
-
-    lang.call(lang.arg(1));
-
-    lang.load_from_stack(first_recursive_result, 2);
-
-    lang.add(lang.ret_reg(), lang.ret_reg(), first_recursive_result);
-
-    lang.write_label(return_label);
-
-    lang.epilogue(4);
-
-    lang.ret();
-    lang
-}
-
-#[no_mangle]
-extern "C" fn print_it(num: u64) -> u64 {
-    println!("{}", num);
-    num
-}
-
-#[allow(dead_code)]
-fn countdown_codegen() -> LowLevelArm {
-    let mut lang = LowLevelArm::new();
-
-    let loop_start = lang.new_label("loop_start");
-    let loop_exit = lang.new_label("loop_exit");
-
-    // lang.breakpoint();
-    lang.store_pair(X29, X30, SP, -2);
-    lang.mov_reg(X29, SP);
-    lang.mov(X22, 10);
-    lang.mov(X20, 0);
-    lang.mov(X21, 1);
-
-    lang.write_label(loop_start);
-
-    lang.compare(X20, X22);
-    lang.jump_equal(loop_exit);
-    lang.sub(X22, X22, X21);
-    lang.mov_reg(X0, X22);
-    lang.call_rust_function(X3, print_it as *const u8);
-
-    lang.jump(loop_start);
-    lang.write_label(loop_exit);
-    lang.load_pair(X29, X30, SP, 2);
-    lang.ret();
-    lang
+    pub fn set_all_locals_to_null(&mut self, null_register: Register) {
+        for local_offset in 0..self.max_locals {
+            self.store_local(null_register, local_offset)
+        }
+    }
 }

@@ -238,7 +238,7 @@ impl Bits {
             Bits::AllNums(nums) => Some(nums.to_string()),
             Bits::HasVariable(bits) => Some("0".repeat(bits.len())),
             Bits::Constraint(bits) => Some("0".repeat(bits.len())),
-            Bits::Unknown(_) => None,
+            Bits::Unknown(bits) => panic!("Unknown bits: {}", bits),
         }
     }
 
@@ -293,12 +293,15 @@ impl ArmBox {
             .filter_map(|child| {
                 let text = child.text().unwrap_or_default().trim();
                 if !text.is_empty() {
-                    Some(text.to_string())
+                    // TODO: Is it correct to replace these parentheses?
+                    // No idea
+                    Some(text.to_string().replace("(", "").replace(")", ""))
                 } else {
                     None
                 }
             })
             .collect();
+
         let bits = if bits.is_empty() {
             Bits::Empty(width)
         } else if bits.iter().any(|x| x.contains("!=")) {

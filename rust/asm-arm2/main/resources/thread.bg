@@ -1,0 +1,123 @@
+struct Thing {
+    x
+}
+
+struct TreeNode {
+    left
+    right
+}
+
+fn print_endlessly(message, x) {
+    // println(message)
+    // println(x)
+    print_endlessly(message, x)
+}
+
+fn testGc(n) {
+    if n > 10 {
+        0
+    } else {
+        let x = TreeNode {
+            left: null
+            right: null
+        }
+        1 + testGc(n + 1)
+
+        let y = TreeNode {
+            left: x,
+            right: x
+        }
+
+        1 + testGc(n + 1)
+
+        let z = TreeNode {
+            left: y,
+            right: y,
+        }
+        // println(x)
+        // println(y)
+        // println(z)
+        0
+    }
+}
+
+fn print_endlessly_gc(message, x) {
+    // println(message)
+    // println(x)
+    // TODO: This is causing gc issues
+    // Even without another thread
+    // gc()
+    print_endlessly_gc(message, x)
+}
+
+fn call_function() {
+    // Doing this because locals live for the whole function
+     let x = Thing { x: 42 };
+
+    let f = fn() {     
+        testGc(0)
+        testGc(0)
+        testGc(0)
+        testGc(0)
+    };
+    thread(f);
+}
+
+fn swap_counter_in_many_threads(counter, n) {
+    let f = fn() {
+        let y = counter;
+    };
+
+    // TODO: This errors out because n is no longer a number
+    // it is somehow counter.
+    // It seems to have something to do with the closure capturing
+    // the counter variable
+    println(n)
+    println(n - 1)
+}
+
+// You can see that thing get's replaced by one of these nodes
+// This is because the gc is not working correctly with concurrency
+fn main() {
+
+    let counter = atom(0);
+    // swap_counter_in_many_threads(counter, 10)
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    testGc(0)
+    gc()
+    testGc(0)
+    gc()
+    testGc(0)
+    gc()
+    testGc(0)
+    gc()
+    testGc(0)
+    testGc(0)
+    swap!(counter, fn(x) { x + 1 })
+    println(deref(counter))
+    
+    "done"
+}
+
+// TODO: This breaks with compacting gc

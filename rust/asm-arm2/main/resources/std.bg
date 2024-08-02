@@ -1,0 +1,46 @@
+
+// This may seem weird
+// but we need our runtime to know
+// how to call a function if it is a closure
+// or a regular function
+// this makes that idea simple
+fn __call_fn(f) { f() }
+
+
+struct Atom {
+    value
+}
+
+// TODO: When I have namespaces
+// these won't be prefix named
+
+fn deref(atom) {
+    // assert!(atom is Atom)
+    primitive_deref(atom)
+}
+
+fn swap!(atom, f) {
+    let initial = deref(atom);
+    let new = f(initial);
+    let result = compare_and_swap!(atom, initial, new);
+    if result {
+        new
+    } else {
+        swap!(atom, f)
+    }
+}
+
+fn reset!(atom, value) {
+    // assert!(atom is Atom)
+    primitive_reset!(atom, value)
+}
+
+fn compare_and_swap!(atom, old, new) {
+    // assert!(atom is Atom)
+    primitive_compare_and_swap!(atom, old, new)
+}
+
+fn atom(value) {
+    // TODO: Allow punning
+    Atom { value: value }
+}

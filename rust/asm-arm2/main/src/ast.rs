@@ -2,7 +2,8 @@ use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
 use crate::{
-    compiler::Compiler,
+    arm::LowLevelArm,
+    compiler::{Compiler, Struct},
     ir::{self, BuiltInTypes, Condition},
 };
 
@@ -12,10 +13,14 @@ pub enum Ast {
         elements: Vec<Ast>,
     },
     Function {
-        name: String,
+        name: Option<String>,
         // TODO: Change this to a Vec<Ast>
         args: Vec<String>,
         body: Vec<Ast>,
+    },
+    Struct {
+        name: String,
+        fields: Vec<Ast>,
     },
     If {
         condition: Box<Ast>,
@@ -55,18 +60,30 @@ pub enum Ast {
     },
     Let(Box<Ast>, Box<Ast>),
     NumberLiteral(i64),
+    // TODO: Should I have both identifier and variable?
+    // When should I have them?
+    Identifier(String),
     Variable(String),
     String(String),
     True,
     False,
+    StructCreation {
+        name: String,
+        fields: Vec<(String, Ast)>,
+    },
+    PropertyAccess {
+        object: Box<Ast>,
+        property: Box<Ast>,
+    },
+    Null,
 }
 
 impl Ast {
     pub fn compile(&self, compiler: &mut Compiler) -> Ir {
-        let mut compiler = AstCompiler {
+        let mut ast_compiler = AstCompiler {
             ast: self.clone(),
             ir: Ir::new(),
-            name: "".to_string(),
+            name: None,
             compiler,
             context: vec![],
             current_context: Context {
@@ -79,7 +96,9 @@ impl Ast {
             },
             environment_stack: vec![Environment::new()],
         };
-        compiler.compile()
+
+        // println!("{:#?}", compiler);
+        ast_compiler.compile()
     }
 
     pub fn nodes(&self) -> &Vec<Ast> {
@@ -89,9 +108,9 @@ impl Ast {
         }
     }
 
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> Option<String> {
         match self {
-            Ast::Function { name, .. } => name.as_str(),
+            Ast::Function { name, .. } => name.clone(),
             _ => panic!("Only works on function"),
         }
     }
@@ -110,7 +129,6 @@ impl From<&VariableLocation> for Value {
             VariableLocation::Register(reg) => Value::Register(*reg),
             VariableLocation::Local(index) => Value::Local(*index),
             VariableLocation::FreeVariable(index) => Value::FreeVariable(*index),
-
         }
     }
 }
@@ -121,6 +139,15 @@ pub struct Context {
     pub in_function: bool,
 }
 
+// TODO: I have a global kind of compiler thing with functions
+// I think structs should maybe go there?
+// I also need to deal with namespacing
+// Or maybe I should just put everything in this environment and then
+// things in the top level are global/namespaced
+// in fact, I don't think I will have "global",
+// just namesapces
+// With "core" being included by default
+
 #[derive(Debug, Clone)]
 pub struct Environment {
     pub local_variables: Vec<String>,
@@ -130,18 +157,19 @@ pub struct Environment {
 
 impl Environment {
     fn new() -> Self {
-        Environment { 
+        Environment {
             local_variables: vec![],
             variables: HashMap::new(),
             free_variables: vec![],
-         }
+        }
     }
 }
 
+#[derive(Debug)]
 pub struct AstCompiler<'a> {
     pub ast: Ast,
     pub ir: Ir,
-    pub name: String,
+    pub name: Option<String>,
     pub compiler: &'a mut Compiler,
     // This feels dumb and complicated. But my brain
     // won't let me think of a better way
@@ -153,7 +181,6 @@ pub struct AstCompiler<'a> {
 }
 
 impl<'a> AstCompiler<'a> {
-
     pub fn tail_position(&mut self) {
         self.next_context.tail_position = true;
     }
@@ -171,7 +198,6 @@ impl<'a> AstCompiler<'a> {
     }
 
     pub fn call_compile(&mut self, ast: &Ast) -> Value {
-        // Does this even work?
         self.context.push(self.current_context.clone());
         self.current_context = self.next_context.clone();
         let result = self.compile_to_ir(ast);
@@ -181,6 +207,9 @@ impl<'a> AstCompiler<'a> {
     }
 
     pub fn compile(&mut self) -> Ir {
+        // TODO: Get rid of clone
+        self.first_pass(&self.ast.clone());
+
         self.tail_position();
         self.call_compile(&Box::new(self.ast.clone()));
         let mut ir = Ir::new();
@@ -200,8 +229,6 @@ impl<'a> AstCompiler<'a> {
             Ast::Function { name, args, body } => {
                 self.create_new_environment();
                 let old_ir = std::mem::replace(&mut self.ir, Ir::new());
-                assert!(!name.is_empty());
-                // self.ir.breakpoint();
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);
@@ -209,140 +236,188 @@ impl<'a> AstCompiler<'a> {
                     self.insert_variable(arg.clone(), VariableLocation::Register(reg));
                 }
 
+                let should_pause_atom = self.compiler.get_pause_atom();
+
+                // TODO: This isn't working with atomicbool. Need to figure it out
+                if should_pause_atom != 0 {
+                    let should_pause_atom = self.ir.assign_new(Value::RawValue(should_pause_atom));
+                    let atomic_value = self.ir.volatile_register();
+                    let should_pause_atom = self
+                        .ir
+                        .atomic_load(atomic_value.into(), should_pause_atom.into());
+                    let skip_pause = self.ir.label("pause");
+                    self.ir.jump_if(
+                        skip_pause,
+                        Condition::Equal,
+                        should_pause_atom,
+                        Value::RawValue(0),
+                    );
+                    let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
+                    let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                    let pause_function = self.compiler.get_function_by_name("__pause").unwrap();
+                    let pause_function = self
+                        .compiler
+                        .get_function_pointer(pause_function.clone())
+                        .unwrap();
+                    let pause_function = self.ir.assign_new(pause_function);
+                    self.ir.call_builtin(
+                        pause_function.into(),
+                        vec![compiler_pointer_reg.into(), stack_pointer],
+                    );
+                    self.ir.write_label(skip_pause);
+                }
+
                 for ast in body[..body.len().saturating_sub(1)].iter() {
                     self.call_compile(&Box::new(ast));
                 }
-                // TODO: Need some concept of nil I think
-                let last = body.last().unwrap();
+                let last = body.last().unwrap_or(&Ast::Null);
                 let return_value = self.call_compile(&Box::new(last));
                 self.ir.ret(return_value);
 
+                let lang = LowLevelArm::new();
 
-                let mut code = self.ir.compile();
-                let function_pointer = self.compiler.upsert_function(&name, &code.compile_to_bytes()).unwrap();
+                let error_fn_pointer = self.compiler.find_function("throw_error").unwrap();
+                let error_fn_pointer = self
+                    .compiler
+                    .get_function_pointer(error_fn_pointer)
+                    .unwrap();
+
+                let compiler_ptr = self.compiler.get_compiler_ptr() as usize;
+
+                let mut code = self.ir.compile(lang, error_fn_pointer, compiler_ptr);
+
+                let function_pointer = self
+                    .compiler
+                    .upsert_function(name.as_deref(), &mut code, self.ir.num_locals)
+                    .unwrap();
 
                 code.share_label_info_debug(function_pointer);
 
                 self.ir = old_ir;
 
-                if self.has_free_variables() {
-                    // When I get those free variables, I'd need to 
-                    // make sure that the variables they refer to are
-                    // heap allocated. How am I going to do that?
-                    // I actually probably need to think about this more
-                    // If they are already heap allocated, then I just 
-                    // store the pointer. If they are immutable variables,
-                    // I just take the value
-                    // If they are mutable, then I'd need to heap allocate
-                    // but maybe I just heap allocate all mutable variables?
-                    // What about functions that change overtime?
-                    // Not 100% sure about all of this
-
-                    for free_variable in self.get_current_env().free_variables.clone().iter(){
-                        let variable = self.get_variable(free_variable).unwrap();
-                        // we are now going to push these variables onto the stack
-                        
-                        match variable {
-                            VariableLocation::Register(reg) => {
-                                let reg = self.ir.volatile_register();
-                                self.ir.assign(reg, reg);
-                                self.ir.push_to_stack(reg);
-                            }
-                            VariableLocation::Local(index) => {
-                                let reg = self.ir.volatile_register();
-                                self.ir.load_local(reg, index);
-                                self.ir.push_to_stack(reg);
-                            }
-                            VariableLocation::FreeVariable(index) => {
-                                panic!("We are trying to find this variable concretely and found a free variable")
-                            }
-                        }
-                        // load count of free variables
-                        let num_free = self.get_current_env().free_variables.len();
-
-                        // get a pointer to the start of the free variables on the stack
-                        let free_variable_pointer = self.ir.get_stack_pointer_imm(num_free as isize + 1);
-                        
-
-                        let num_free = Value::SignedConstant(num_free as isize);
-                        let num_free_reg = self.ir.volatile_register();
-                        self.ir.assign(num_free_reg, num_free);
-                        let num_free_reg = self.ir.tag(num_free_reg.into(), BuiltInTypes::Int.get_tag());
-                        // Call make_closure
-                        let make_closure = self.compiler.find_function("make_closure").unwrap();
-                        let make_closure = self.compiler.get_function_pointer(make_closure).unwrap();
-                        let make_closure_reg = self.ir.volatile_register();
-                        self.ir.assign(make_closure_reg, make_closure);
-                        let function_pointer_reg = self.ir.volatile_register();
-                        self.ir.assign(function_pointer_reg, function_pointer);
-
-                        let compiler_pointer_reg = self.ir.volatile_register();
-                        let compiler_pointer: Value = self.compiler.get_compiler_ptr().into();
-                        self.ir.assign(compiler_pointer_reg, compiler_pointer);
-
-                        let closure = self.ir.call(
-                            make_closure_reg.into(),
-                            vec![
-                                compiler_pointer_reg.into(),
-                                function_pointer_reg.into(),
-                                num_free_reg.into(),
-                                free_variable_pointer.into(),
-                            ]
-                        );
-                        self.pop_environment();
-                        return closure;
-                        
-                    }
+                if let Some(value) = self.compile_closure(function_pointer) {
+                    return value;
                 }
 
-                let function = self.ir.function(function_pointer);
+                let function = self.ir.function(Value::Function(function_pointer));
 
                 self.pop_environment();
                 function
+            }
+
+            Ast::Struct { name: _, fields: _ } => {
+                // TODO: This should probably return the struct value
+                // A concept I don't yet have
+                Value::Null
+            }
+            Ast::StructCreation { name, fields } => {
+                let field_results = fields
+                    .iter()
+                    .map(|field| {
+                        self.not_tail_position();
+                        self.call_compile(&field.1)
+                    })
+                    .collect::<Vec<_>>();
+
+                let (struct_id, struct_type) = self
+                    .compiler
+                    .get_struct(&name)
+                    .unwrap_or_else(|| panic!("Struct not found {}", name));
+
+                for field in fields.iter() {
+                    let mut found = false;
+                    for defined_field in struct_type.fields.iter() {
+                        if &field.0 == defined_field {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        panic!("Struct field not defined {}", field.0);
+                    }
+                }
+
+                let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
+
+                let allocate_struct = self.compiler.find_function("allocate_struct").unwrap();
+                let allocate_struct = self.compiler.get_function_pointer(allocate_struct).unwrap();
+                let allocate_struct = self.ir.assign_new(allocate_struct);
+
+                // Shift size left one so we can use it to mark
+                let size_reg = self.ir.assign_new(struct_type.size() + 1);
+                let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                // TODO: I need store the struct type here, so I know things about what data is here.
+
+                let struct_ptr = self.ir.call_builtin(
+                    allocate_struct.into(),
+                    vec![compiler_pointer_reg.into(), size_reg.into(), stack_pointer],
+                );
+
+                // TODO: I want a better way to make clear the structure here.
+                // Maybe I just make a struct and have a way of generating code
+                // based on that struct?
+
+                let struct_ptr = self.ir.assign_new(struct_ptr);
+                let mut offset = 1;
+                self.ir.heap_store_offset(
+                    struct_ptr,
+                    Value::SignedConstant(struct_id as isize),
+                    offset,
+                );
+                offset += 1;
+
+                for (i, reg) in field_results.iter().enumerate() {
+                    self.ir.heap_store_offset(struct_ptr, *reg, offset + i);
+                }
+
+                self.ir
+                    .tag(struct_ptr.into(), BuiltInTypes::Struct.get_tag())
+            }
+            Ast::PropertyAccess { object, property } => {
+                let object = self.call_compile(object.as_ref());
+                let object = self.ir.assign_new(object);
+                let property = if let Ast::Identifier(name) = property.as_ref() {
+                    name.clone()
+                } else {
+                    panic!("Expected identifier")
+                };
+                let constant_ptr = self.string_constant(property);
+                let constant_ptr = self.ir.assign_new(constant_ptr);
+                self.call_builtin("property_access", vec![object.into(), constant_ptr.into()])
             }
             Ast::If {
                 condition,
                 then,
                 else_,
             } => {
-                // TODO: My condition system is a bit ugly
-                // Mostly because I don't have booleans
-                if let Ast::Condition {
-                    operator,
-                    left,
-                    right,
-                } = condition.as_ref()
-                {
-                    let a = self.call_compile(left);
-                    let b = self.call_compile(right);
-                    let end_if_label = self.ir.label("end_if");
+                let condition = self.call_compile(&condition);
 
-                    let result_reg = self.ir.volatile_register();
+                let end_if_label = self.ir.label("end_if");
 
-                    let then_label = self.ir.label("then");
-                    self.ir.jump_if(then_label, *operator, a, b);
+                let result_reg = self.ir.volatile_register();
 
-                    let mut else_result = Value::SignedConstant(0);
-                    for ast in else_.iter() {
-                        else_result = self.call_compile(&Box::new(ast));
-                    }
-                    self.ir.assign(result_reg, else_result);
-                    self.ir.jump(end_if_label);
+                let then_label = self.ir.label("then");
+                self.ir
+                    .jump_if(then_label, Condition::Equal, condition, Value::True);
 
-                    self.ir.write_label(then_label);
-
-                    let mut then_result = Value::SignedConstant(0);
-                    for ast in then.iter() {
-                        then_result = self.call_compile(&Box::new(ast));
-                    }
-                    self.ir.assign(result_reg, then_result);
-
-                    self.ir.write_label(end_if_label);
-
-                    result_reg.into()
-                } else {
-                    panic!("Expected condition")
+                let mut else_result = Value::SignedConstant(0);
+                for ast in else_.iter() {
+                    else_result = self.call_compile(&Box::new(ast));
                 }
+                self.ir.assign(result_reg, else_result);
+                self.ir.jump(end_if_label);
+
+                self.ir.write_label(then_label);
+
+                let mut then_result = Value::SignedConstant(0);
+                for ast in then.iter() {
+                    then_result = self.call_compile(&Box::new(ast));
+                }
+                self.ir.assign(result_reg, then_result);
+
+                self.ir.write_label(end_if_label);
+
+                result_reg.into()
             }
             Ast::Add { left, right } => {
                 self.not_tail_position();
@@ -386,13 +461,8 @@ impl<'a> AstCompiler<'a> {
                     self.ir.recurse(args)
                 }
             }
-            // TODO: Have an idea of built in functions to call
-            // These functions should be passed as the first argument context
-            // (maybe the compiler struct), so they can do things with the system
-            // like heap allocate and such
             Ast::Call { name, args } => {
-                if name == self.name {
-                    // TODO: I'm guessing I can have tail recursive closures that I will need to deal with
+                if Some(name.clone()) == self.name {
                     if self.is_tail_position() {
                         return self.call_compile(&Ast::TailRecurse { args });
                     } else {
@@ -400,7 +470,7 @@ impl<'a> AstCompiler<'a> {
                     }
                 }
 
-                let mut args: Vec<Value> = args
+                let args: Vec<Value> = args
                     .iter()
                     .map(|arg| {
                         self.not_tail_position();
@@ -416,83 +486,29 @@ impl<'a> AstCompiler<'a> {
                     })
                     .collect();
 
-                if let Some(function) = self.get_variable_current_env(&name) {
-                    // TODO: Right now, this would only find variables in the current environment
-                    // I also need to deal wiht functions vs closures
-                    let function_register = self.ir.volatile_register();
-
-
-                    let closure_register = self.ir.volatile_register();
-                    self.ir.assign(closure_register, &function);
-                    // Check if the tag is a closure
-                    let tag = self.ir.get_tag(closure_register.into());
-                    let closure_tag = BuiltInTypes::Closure.get_tag();
-                    let closure_tag = Value::RawValue(closure_tag as usize);
-                    let call_function = self.ir.label("call_function");
-                    let skip_load_function = self.ir.label("skip_load_function");
-                    // TODO: It might be better to change the layout of these jumps
-                    // so that the non-closure case is the fall through
-                    // I just have to think about the correct way to do that
-                    self.ir.jump_if(call_function, Condition::NotEqual, tag, closure_tag);
-                    // I need to grab the function pointer
-                    // Closures are a pointer to a structure like this
-                    // struct Closure {
-                    //     function_pointer: *const u8,
-                    //     num_free_variables: usize,
-                    //     ree_variables: *const Value,
-                    // }
-                    let closure_register = self.ir.untag(closure_register.into());
-                    // TODO:
-                    // I'm currently not getting the correct data. Need to figure out why.
-                    // probably should build a heap viewer
-                    let function_pointer = self.ir.load_from_memory(closure_register, 0);
-                    self.ir.assign(function_register, function_pointer);
-                    let num_free_variables = self.ir.load_from_memory(closure_register, 8);
-                    // for each variable I need to push them onto the stack after the prelude
-                    let loop_start = self.ir.label("loop_start");
-                    let counter = self.ir.volatile_register();
-                    self.ir.assign(counter, Value::SignedConstant(0));
-                    self.ir.write_label(loop_start);
-                    self.ir.jump_if(skip_load_function, Condition::GreaterThanOrEqual, counter, num_free_variables);
-                    // TODO: This needs to change based on counter
-                    let free_variable = self.ir.load_from_memory(closure_register, 16);
-                    let offset = self.ir.volatile_register();
-                    self.ir.assign(offset, counter);
-                    let free_variable_offset = self.ir.add(offset, 0);
-                    let free_variable_slot_pointer = self.ir.get_stack_pointer(free_variable_offset);
-                    // TODO: Hardcoded 4 for prelude. Need to actually figure out that value correctly
-                    let free_variable_slot_pointer = self.ir.sub(free_variable_slot_pointer, 4);
-                    self.ir.heap_store(free_variable_slot_pointer, free_variable);
-                    let counter_increment = self.ir.add(1, counter);
-                    self.ir.assign(counter, counter_increment);
-                    self.ir.jump(loop_start);
-                    self.ir.write_label(call_function);
-                    self.ir.assign(function_register, &function);
-                    self.ir.write_label(skip_load_function);
-                    self.ir.call(function_register.into(), args)
-                } else {
-                    // TODO: I shouldn't just assume the function will exist
-                    // unless I have a good plan for dealing with when it doesn't
-                    let function = self.compiler.reserve_function(name.as_str()).unwrap();
-
-                    if function.is_builtin {
-                        let pointer_reg = self.ir.volatile_register();
-                        let pointer: Value = self.compiler.get_compiler_ptr().into();
-                        self.ir.assign(pointer_reg, pointer);
-                        args.insert(0, pointer_reg.into());
-                    }
-                    // TODO: Do an indirect call via jump table
-                    let function_pointer = self.compiler.get_function_pointer(function).unwrap();
-    
-                    let function = self.ir.function(function_pointer);
-                    self.ir.call(function, args)
+                // TODO: Should the arguments be evaluated first?
+                // I think so, this will matter once I think about macros
+                // though
+                if self.compiler.is_inline_primitive_function(&name) {
+                    return self.compile_inline_primitive_function(&name, args);
                 }
-               
+
+                // TODO: This isn't they way to handle this
+                // I am activing as if all closures are assign to a variable when they aren't.
+                // Need to have negative test cases for this
+                if let Some(function) = self.get_variable_current_env(&name) {
+                    self.compile_closure_call(function, args)
+                } else {
+                    self.compile_standard_function_call(name, args)
+                }
             }
             Ast::NumberLiteral(n) => Value::SignedConstant(n as isize),
             Ast::Variable(name) => {
                 let reg = &self.get_variable_alloc_free_variable(&name);
                 reg.into()
+            }
+            Ast::Identifier(_) => {
+                todo!()
             }
             Ast::Let(name, value) => {
                 if let Ast::Variable(name) = name.as_ref() {
@@ -514,7 +530,6 @@ impl<'a> AstCompiler<'a> {
                 left,
                 right,
             } => {
-
                 self.not_tail_position();
                 let a = self.call_compile(&left);
                 self.not_tail_position();
@@ -527,7 +542,193 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::True => Value::True,
             Ast::False => Value::False,
+            Ast::Null => Value::Null,
         }
+    }
+
+    fn compile_standard_function_call(&mut self, name: String, mut args: Vec<Value>) -> Value {
+        // TODO: I shouldn't just assume the function will exist
+        // unless I have a good plan for dealing with when it doesn't
+        let function = self.compiler.reserve_function(name.as_str()).unwrap();
+
+        let builtin = function.is_builtin;
+        let needs_stack_pointer = function.needs_stack_pointer;
+        if builtin {
+            let pointer_reg = self.ir.volatile_register();
+            let pointer: Value = self.compiler.get_compiler_ptr().into();
+            self.ir.assign(pointer_reg, pointer);
+            args.insert(0, pointer_reg.into());
+        }
+        if needs_stack_pointer {
+            let stack_pointer_reg = self.ir.volatile_register();
+            let stack_pointer = self.ir.get_stack_pointer_imm(0);
+            self.ir.assign(stack_pointer_reg, stack_pointer);
+            args.insert(1, stack_pointer);
+        }
+
+        let jump_table_pointer = self.compiler.get_jump_table_pointer(function).unwrap();
+        let jump_table_point_reg = self.ir.assign_new(Value::Pointer(jump_table_pointer));
+        let function_pointer = self.ir.load_from_memory(jump_table_point_reg.into(), 0);
+
+        let function = self.ir.function(function_pointer);
+        if builtin {
+            // self.ir.breakpoint();
+            self.ir.call_builtin(function, args)
+        } else {
+            self.ir.call(function, args)
+        }
+    }
+
+    fn compile_closure_call(&mut self, function: VariableLocation, args: Vec<Value>) -> Value {
+        let function_register = self.ir.volatile_register();
+
+        let closure_register = self.ir.volatile_register();
+        self.ir.assign(closure_register, &function);
+        // Check if the tag is a closure
+        let tag = self.ir.get_tag(closure_register.into());
+        let closure_tag = BuiltInTypes::Closure.get_tag();
+        let closure_tag = Value::RawValue(closure_tag as usize);
+        let call_function = self.ir.label("call_function");
+        let skip_load_function = self.ir.label("skip_load_function");
+        // TODO: It might be better to change the layout of these jumps
+        // so that the non-closure case is the fall through
+        // I just have to think about the correct way to do that
+        self.ir
+            .jump_if(call_function, Condition::NotEqual, tag, closure_tag);
+        // I need to grab the function pointer
+        // Closures are a pointer to a structure like this
+        // struct Closure {
+        //     function_pointer: *const u8,
+        //     num_free_variables: usize,
+        //     ree_variables: *const Value,
+        // }
+        let closure_register = self.ir.untag(closure_register.into());
+        let function_pointer = self.ir.load_from_memory(closure_register, 0);
+
+        self.ir.assign(function_register, function_pointer);
+
+        // TODO: I need to fix how these are stored on the stack
+
+        let num_free_variables = self.ir.load_from_memory(closure_register, 1);
+        let num_free_variables = self.ir.tag(num_free_variables, BuiltInTypes::Int.get_tag());
+        // for each variable I need to push them onto the stack after the prelude
+        let loop_start = self.ir.label("loop_start");
+        let counter = self.ir.volatile_register();
+        // self.ir.breakpoint();
+        self.ir.assign(counter, Value::SignedConstant(0));
+        self.ir.write_label(loop_start);
+        self.ir.jump_if(
+            skip_load_function,
+            Condition::GreaterThanOrEqual,
+            counter,
+            num_free_variables,
+        );
+        let free_variable_offset = self.ir.add(counter, Value::SignedConstant(3));
+        let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(8));
+        // TODO: This needs to change based on counter
+        let free_variable_offset = self.ir.untag(free_variable_offset);
+        let free_variable = self
+            .ir
+            .heap_load_with_reg_offset(closure_register, free_variable_offset);
+
+        let free_variable_offset = self.ir.sub(num_free_variables, counter);
+        let num_local = self.ir.load_from_memory(closure_register, 2);
+        let num_local = self.ir.tag(num_local, BuiltInTypes::Int.get_tag());
+        let free_variable_offset = self.ir.add(free_variable_offset, num_local);
+        // // TODO: Make this better
+        let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(-8));
+        let free_variable_offset = self.ir.untag(free_variable_offset);
+        let free_variable_slot_pointer = self.ir.get_stack_pointer_imm(2);
+        self.ir.heap_store_with_reg_offset(
+            free_variable_slot_pointer,
+            free_variable,
+            free_variable_offset,
+        );
+
+        let label = self.ir.label("increment_counter");
+        self.ir.write_label(label);
+        let counter_increment = self.ir.add(Value::SignedConstant(1), counter);
+        self.ir.assign(counter, counter_increment);
+
+        self.ir.jump(loop_start);
+        self.ir.extend_register_life(num_free_variables);
+        self.ir.extend_register_life(counter.into());
+        self.ir.extend_register_life(closure_register);
+        self.ir.write_label(call_function);
+        self.ir.assign(function_register, &function);
+        self.ir.write_label(skip_load_function);
+        self.ir.call(function_register.into(), args)
+    }
+
+    fn compile_closure(&mut self, function_pointer: usize) -> Option<Value> {
+        if self.has_free_variables() {
+            // When I get those free variables, I'd need to
+            // make sure that the variables they refer to are
+            // heap allocated. How am I going to do that?
+            // I actually probably need to think about this more
+            // If they are already heap allocated, then I just
+            // store the pointer. If they are immutable variables,
+            // I just take the value
+            // If they are mutable, then I'd need to heap allocate
+            // but maybe I just heap allocate all mutable variables?
+            // What about functions that change overtime?
+            // Not 100% sure about all of this
+            let label = self.ir.label("closure");
+
+            // self.ir.breakpoint();
+            // get a pointer to the start of the free variables on the stack
+            let free_variable_pointer = self.ir.get_current_stack_position();
+
+            self.ir.write_label(label);
+            for free_variable in self.get_current_env().free_variables.clone().iter() {
+                let variable = self
+                    .get_variable(free_variable)
+                    .unwrap_or_else(|| panic!("Can't find variable {}", free_variable));
+                // we are now going to push these variables onto the stack
+
+                match variable {
+                    VariableLocation::Register(reg) => {
+                        self.ir.push_to_stack(reg.into());
+                    }
+                    VariableLocation::Local(index) => {
+                        let reg = self.ir.volatile_register();
+                        self.ir.load_local(reg, index);
+                        self.ir.push_to_stack(reg.into());
+                    }
+                    VariableLocation::FreeVariable(_) => {
+                        panic!("We are trying to find this variable concretely and found a free variable")
+                    }
+                }
+            }
+            // load count of free variables
+            let num_free = self.get_current_env().free_variables.len();
+
+            let num_free = Value::SignedConstant(num_free as isize);
+            let num_free_reg = self.ir.volatile_register();
+            self.ir.assign(num_free_reg, num_free);
+            // Call make_closure
+            let make_closure = self.compiler.find_function("make_closure").unwrap();
+            let make_closure = self.compiler.get_function_pointer(make_closure).unwrap();
+            let make_closure_reg = self.ir.volatile_register();
+            self.ir.assign(make_closure_reg, make_closure);
+            let function_pointer_reg = self.ir.volatile_register();
+            self.ir.assign(function_pointer_reg, function_pointer);
+
+            let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
+
+            let closure = self.ir.call(
+                make_closure_reg.into(),
+                vec![
+                    compiler_pointer_reg.into(),
+                    function_pointer_reg.into(),
+                    num_free_reg.into(),
+                    free_variable_pointer,
+                ],
+            );
+            self.pop_environment();
+            return Some(closure);
+        }
+        None
     }
 
     fn find_or_insert_local(&mut self, name: &str) -> usize {
@@ -547,7 +748,12 @@ impl<'a> AstCompiler<'a> {
 
     // TODO: Need to walk the environment stack
     fn get_variable_current_env(&self, name: &str) -> Option<VariableLocation> {
-        self.environment_stack.last().unwrap().variables.get(name).cloned()
+        self.environment_stack
+            .last()
+            .unwrap()
+            .variables
+            .get(name)
+            .cloned()
     }
 
     fn get_variable_alloc_free_variable(&mut self, name: &str) -> VariableLocation {
@@ -558,7 +764,9 @@ impl<'a> AstCompiler<'a> {
             let current_env = self.environment_stack.last_mut().unwrap();
             current_env.free_variables.push(name.to_string());
             let index = current_env.free_variables.len() - 1;
-            current_env.variables.insert(name.to_string(), VariableLocation::FreeVariable(index));
+            current_env
+                .variables
+                .insert(name.to_string(), VariableLocation::FreeVariable(index));
             let current_env = self.environment_stack.last().unwrap();
             current_env.variables.get(name).unwrap().clone()
         }
@@ -596,7 +804,106 @@ impl<'a> AstCompiler<'a> {
         !current_env.free_variables.is_empty()
     }
 
-   
+    fn call_builtin(&mut self, arg: &str, args: Vec<Value>) -> Value {
+        let mut args = args;
+        let function = self.compiler.find_function(arg).unwrap();
+        assert!(function.is_builtin);
+        let function = self.compiler.get_function_pointer(function).unwrap();
+        let function = self.ir.assign_new(function);
+        let pointer_reg = self.ir.volatile_register();
+        let pointer: Value = self.compiler.get_compiler_ptr().into();
+        self.ir.assign(pointer_reg, pointer);
+        args.insert(0, pointer_reg.into());
+        self.ir.call(function.into(), args)
+    }
+
+    fn first_pass(&mut self, ast: &Ast) {
+        match ast {
+            Ast::Program { elements } => {
+                for ast in elements.iter() {
+                    self.first_pass(ast);
+                }
+            }
+            Ast::Function {
+                name,
+                args: _,
+                body: _,
+            } => {
+                if name.is_some() {
+                    self.compiler
+                        .reserve_function(name.as_deref().unwrap())
+                        .unwrap();
+                } else {
+                    panic!("Why do we have a top level function without a name? Is that allowed?");
+                }
+            }
+            Ast::Struct { name, fields } => {
+                self.compiler.add_struct(Struct {
+                    name: name.clone(),
+                    fields: fields
+                        .iter()
+                        .map(|field| {
+                            if let Ast::Identifier(name) = field {
+                                name.clone()
+                            } else {
+                                panic!("Expected identifier got {:?}", field)
+                            }
+                        })
+                        .collect(),
+                });
+            }
+            Ast::Let(_, _) => todo!(),
+            _ => {}
+        }
+    }
+
+    fn compile_inline_primitive_function(&mut self, name: &str, args: Vec<Value>) -> Value {
+        match name {
+            "primitive_deref" => {
+                // self.ir.breakpoint();
+                let pointer = args[0];
+                let untagged = self.ir.untag(pointer);
+                // TODO: I need a raw add that doesn't check for tags
+                let offset = self.ir.add(untagged, Value::RawValue(16));
+                let reg = self.ir.volatile_register();
+                self.ir.atomic_load(reg.into(), offset)
+            }
+            "primitive_reset!" => {
+                let pointer = args[0];
+                let untagged = self.ir.untag(pointer);
+                // TODO: I need a raw add that doesn't check for tags
+                let offset = self.ir.add(untagged, Value::RawValue(16));
+                let value = args[1];
+                self.call_builtin("gc_add_root", vec![pointer, value]);
+                self.ir.atomic_store(offset, value);
+                args[1]
+            }
+            "primitive_compare_and_swap!" => {
+                // self.ir.breakpoint();
+                let pointer = args[0];
+                let untagged = self.ir.untag(pointer);
+                let offset = self.ir.add(untagged, Value::RawValue(16));
+                let expected = args[1];
+                let new = args[2];
+                let expected_and_result = self.ir.assign_new_force(expected);
+                self.ir
+                    .compare_and_swap(expected_and_result.into(), new, offset);
+                // TODO: I should do a conditional move here instead of a jump
+                let label = self.ir.label("compare_and_swap");
+                let result = self.ir.assign_new(Value::True);
+                self.ir
+                    .jump_if(label, Condition::Equal, expected_and_result, expected);
+                self.ir.assign(result, Value::False);
+                self.ir.write_label(label);
+                result.into()
+            }
+            "primitive_breakpoint!" => {
+                self.ir.breakpoint();
+                Value::Null
+            }
+            _ => panic!("Unknown inline primitive function {}", name),
+        }
+    }
 }
 
 impl From<i64> for Ast {
@@ -609,231 +916,4 @@ impl From<&'static str> for Ast {
     fn from(val: &'static str) -> Self {
         Ast::String(val.to_string())
     }
-}
-
-#[macro_export]
-macro_rules! ast {
-    ((fn $name:ident[]
-        $body:tt
-     )) => {
-        Ast::Function {
-            name: stringify!($name).to_string(),
-            args: vec![],
-            body: vec![ast!($body)]
-        }
-    };
-    ((fn $name:ident[$arg:ident]
-        $body:tt
-     )) => {
-        Ast::Function {
-            name: stringify!($name).to_string(),
-            args: vec![stringify!($arg).to_string()],
-            body: vec![ast!($body)]
-        }
-    };
-    ((fn $name:ident[$arg1:ident $arg2:ident]
-        $body:tt
-     )) => {
-        Ast::Function {
-            name: stringify!($name).to_string(),
-            args: vec![stringify!($arg1).to_string(), stringify!($arg2).to_string()],
-            body: vec![ast!($body)]
-        }
-    };
-    ((fn $name:ident[$arg1:ident $arg2:ident $arg3:ident]
-        $body:tt
-     )) => {
-        Ast::Function {
-            name: stringify!($name).to_string(),
-            args: vec![stringify!($arg1).to_string(), stringify!($arg2).to_string(), stringify!($arg3).to_string()],
-            body: vec![ast!($body)]
-        }
-    };
-    ((let [$name:tt $val:tt]
-        $body:tt
-    )) => {
-        Ast::Do(vec![
-            Ast::Let(stringify!($name).to_string(), Box::new(ast!($val))),
-            ast!($body)]);
-    };
-    ((if ($cond:tt $arg:tt $val:tt)
-        $result1:tt
-        $result2:tt
-    )) => {
-        Ast::If {
-            condition: Box::new(Ast::Condition {
-                operator: ast!($cond),
-                left: Box::new(ast!($arg)),
-                right: Box::new(ast!($val))
-            }),
-            then: vec![ast!($result1)],
-            else_: vec![ast!($result2)]
-        }
-    };
-    ((+ $arg1:tt $arg2:tt)) => {
-        Ast::Add {
-            left: Box::new(ast!($arg1)),
-            right: Box::new(ast!($arg2))
-        }
-    };
-    ((+ $arg1:tt $arg2:tt $($args:tt)+)) => {
-            Ast::Add(Box::new(ast!($arg1)),
-                     Box::new(ast!((+ $arg2 $($args)+))))
-    };
-    ((- $arg1:tt $arg2:tt)) => {
-        Ast::Sub {
-            left: Box::new(ast!($arg1)),
-            right: Box::new(ast!($arg2))
-        }
-    };
-
-    ((do $($arg1:tt)+)) => {
-        Ast::Do(vec![$(ast!($arg1)),+])
-    };
-    ((return $arg:tt)) => {
-        Ast::Return(Box::new(ast!($arg)))
-    };
-    (($f:ident)) => {
-        Ast::Call {
-            name: stringify!($f).to_string(),
-            args: vec![]
-        }
-    };
-    (($f:ident $arg:tt)) => {
-        Ast::Call {
-            name: stringify!($f).to_string(),
-            args: vec![ast!($arg)]
-        }
-    };
-    (($f:ident $($arg:tt)+)) => {
-        Ast::Call {
-            name: stringify!($f).to_string(),
-            args: vec![$(ast!($arg)),+]
-        }
-    };
-    (<=) => {
-        Condition::LessThanOrEqual
-    };
-    (=) => {
-        Condition::Equal
-    };
-    // (($f:ident $arg1:tt $arg2:tt)) => {
-    //     Ast::Call2(stringify!($f).to_string(), Box::new(ast!($arg1)), Box::new(ast!($arg2)))
-    // };
-    // (($f:ident $arg1:tt $arg2:tt $arg3:tt)) => {
-    //     Ast::Call3(stringify!($f).to_string(), Box::new(ast!($arg1)), Box::new(ast!($arg2)), Box::new(ast!($arg3)))
-    // };
-    ($lit:literal) => {
-        $lit.into()
-    };
-    ($var:ident) => {
-        Ast::Variable(stringify!($var).to_string())
-    }
-}
-
-pub fn fib() -> Ast {
-    ast! {
-        (fn fib [n]
-            (if (<= n 1)
-                n
-                (+ (fib (- n 1)) (fib (- n 2)))))
-    }
-}
-
-pub fn fib2() -> Ast {
-    ast! {
-        (fn fib [n]
-            (if (= n 0)
-                0
-                (if (= n 1)
-                    1
-                    (+ (fib (- n 1)) (fib (- n 2))))))
-    }
-}
-
-pub fn hello_world() -> Ast {
-    ast! {
-        (fn hello []
-            (print "Hello World!"))
-    }
-}
-
-pub fn hello_world2() -> Ast {
-    ast! {
-        (fn hello []
-            (test))
-    }
-}
-
-
-
-
-#[cfg(test)]
-fn check_tail_recursion(ast: Ast) -> bool {
-    let ir = ast.compile(&mut Compiler::new());
-    ir.instructions.iter().any(|instruction| {
-        matches!(instruction, ir::Instruction::TailRecurse { .. })
-    })
-}
-
-#[test]
-fn tail_position() {
-    
-
-    // simple case
-    let my_ast = ast! {
-        (fn tail_recursive [n]
-            (tail_recursive (- n 1)))
-    };
-
-    assert!(check_tail_recursion(my_ast));
-
-    let my_ast = ast! {
-        (fn tail_recursive [n]
-            (if (= n 0)
-                0
-                (tail_recursive (- n 1))))
-    };
-
-    assert!(check_tail_recursion(my_ast));
-
-    let my_ast = ast! {
-        (fn tail_recursive [n]
-            (if (= n 0)
-                0
-                (if (= n 1)
-                    1
-                    (tail_recursive (- n 1)))))
-    };
-
-    assert!(check_tail_recursion(my_ast));
-
-    // my ast macro didn't let me write this correctly
-    // but I just want the check the general syntactic form
-    let reduce = ast! {
-        (fn reduce [f acc list]
-            (if (= list list)
-                acc
-                (reduce f (f acc (head list)) (tail list))))
-    };
-
-    assert!(check_tail_recursion(reduce));
-    
-
-    // not tail recursive
-    let my_ast = ast! {
-        (fn not_tail_recursive [n]
-            (if (= n 0)
-                0
-                (if (= n 1)
-                    1
-                    (+ (not_tail_recursive (- n 1)) (not_tail_recursive (- n 2))))))
-
-    };
-
-    assert!(!check_tail_recursion(my_ast));
-
-    // fib is not tail
-    let my_ast = fib();
-    assert!(!check_tail_recursion(my_ast));
 }

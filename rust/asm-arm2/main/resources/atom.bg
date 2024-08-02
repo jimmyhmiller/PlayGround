@@ -1,0 +1,61 @@
+struct MyPointerStruct {
+    x
+    y
+}
+
+fn create_atom() {
+    let s = MyPointerStruct { x: 1, y: 2};
+    // TODO: Don't create atoms this way
+    let new_atom = atom(s)
+    println(new_atom);
+    gc();
+    println(new_atom);
+    let new_s = MyPointerStruct { x: 3, y: 4};
+    reset!(new_atom, new_s);
+    println(new_atom);
+    gc();
+    println(new_atom);
+    gc();
+    new_atom
+}
+
+fn main() {
+    let new_atom = atom(42)
+    println(new_atom)
+    reset!(new_atom, 1)
+    println(new_atom)
+    println(compare_and_swap!(new_atom, 1, 2))
+    println(compare_and_swap!(new_atom, 1, 2))
+    println(new_atom)
+    swap!(new_atom, fn(x) { x + 1 })
+    println(new_atom)
+    let x = deref(new_atom)
+    println(x)
+    
+    let my_atom = create_atom();
+    println(my_atom);
+    gc();
+    println(my_atom);
+    reset!(my_atom, MyPointerStruct { x: 5, y: 6 });
+    gc();
+    println(my_atom);
+    "done!"
+}
+
+
+// Expect
+// Atom { value: 42 }
+// Atom { value: 1 }
+// true
+// false
+// Atom { value: 2 }
+// Atom { value: 3 }
+// 3
+// Atom { value: MyPointerStruct { x: 1, y: 2 } }
+// Atom { value: MyPointerStruct { x: 1, y: 2 } }
+// Atom { value: MyPointerStruct { x: 3, y: 4 } }
+// Atom { value: MyPointerStruct { x: 3, y: 4 } }
+// Atom { value: MyPointerStruct { x: 3, y: 4 } }
+// Atom { value: MyPointerStruct { x: 3, y: 4 } }
+// Atom { value: MyPointerStruct { x: 5, y: 6 } }
+// done!
