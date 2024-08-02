@@ -1,0 +1,71 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"name": "beagle",
+	"patterns": [
+		{
+            "name": "comment.line.double-slash.beagle",
+            "begin": "//",
+            "end": "$",
+            "patterns": []
+        },
+        {
+            "name": "keyword.control.beagle",
+            "match": "\\b(if|else|let|struct|fn)\\b"
+        },
+        {
+            "name": "keyword.other.beagle",
+            "match": "\\b(null)\\b"
+        },
+        {
+            "name": "variable.language.beagle",
+            "match": "\\b(true|false)\\b"
+        },
+        {
+            "name": "storage.type.beagle",
+            "match": "\\b(int|float|double|char|bool|string|void)\\b"
+        },
+        {
+            "name": "entity.name.function.beagle",
+            "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\s*(?=\\()"
+        },
+        {
+            "name": "entity.name.struct.beagle",
+            "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\s*(?=\\{)"
+        },
+        {
+            "name": "string.quoted.double.beagle",
+            "begin": "\"",
+            "end": "\"",
+            "patterns": [
+                {
+                    "name": "constant.character.escape.beagle",
+                    "match": "\\\\."
+                }
+            ]
+        },
+        {
+            "name": "constant.numeric.beagle",
+            "match": "\\b[0-9]+\\b"
+        }
+    ],
+	"repository": {
+		"keywords": {
+			"patterns": [{
+				"name": "keyword.control.beagle",
+				"match": "\\b(if|while|for|return)\\b"
+			}]
+		},
+		"strings": {
+			"name": "string.quoted.double.beagle",
+			"begin": "\"",
+			"end": "\"",
+			"patterns": [
+				{
+					"name": "constant.character.escape.beagle",
+					"match": "\\\\."
+				}
+			]
+		}
+	},
+	"scopeName": "source.beagle"
+}

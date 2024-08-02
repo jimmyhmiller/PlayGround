@@ -1,0 +1,41 @@
+fn closure_1() {
+    let y = fn thing() {
+        42
+    }
+    println(y)
+    println(y())
+}
+
+fn closure_2() {
+    let x = 42;
+    let z = 2;
+    let y = fn closure_fn() {
+        let q = 1
+        let y = 5
+        x + z + q + y
+    }
+    println(y())
+}
+
+
+fn closure_3() {
+    let x = 42;
+    let f = fn() {
+        x
+    }
+    println(f())
+    null
+}
+
+fn main() {
+    closure_1()
+    closure_2()
+    closure_3()
+}
+
+// Expected output:
+// function
+// 42
+// 50
+// 42
+// null

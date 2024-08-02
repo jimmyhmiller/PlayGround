@@ -1,6 +1,8 @@
 // Stolen from my edtior, so probably not great
 // Need to deal with failure?
-// Maybe not at the token level?
+// Maybe not at the token level?\
+
+// TODO: Fix parsing parentheses for precedence
 
 use crate::ast::Ast;
 
@@ -15,6 +17,7 @@ pub enum Token {
     SemiColon,
     Colon,
     Comma,
+    Dot,
     NewLine,
     If,
     Fn,
@@ -32,7 +35,9 @@ pub enum Token {
     Div,
     True,
     False,
+    Null,
     Let,
+    Struct,
     Comment((usize, usize)),
     Spaces((usize, usize)),
     String((usize, usize)),
@@ -55,7 +60,8 @@ impl Token {
             | Token::Plus
             | Token::Minus
             | Token::Mul
-            | Token::Div => true,
+            | Token::Div
+            | Token::Dot => true,
             _ => false,
         }
     }
@@ -81,13 +87,13 @@ pub struct Tokenizer {
     pub position: usize,
 }
 
-impl<'a> Default for Tokenizer {
+impl Default for Tokenizer {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a> Tokenizer {
+impl Tokenizer {
     pub fn new() -> Tokenizer {
         Tokenizer { position: 0 }
     }
@@ -216,6 +222,7 @@ impl<'a> Tokenizer {
             && !self.is_comma(input_bytes)
             && !self.is_newline(input_bytes)
             && !self.is_quote(input_bytes)
+            && !self.is_dot(input_bytes)
         {
             self.consume();
         }
@@ -236,7 +243,10 @@ impl<'a> Tokenizer {
             b"/" => Token::Div,
             b"true" => Token::True,
             b"false" => Token::False,
+            b"null" => Token::Null,
             b"let" => Token::Let,
+            b"struct" => Token::Struct,
+            b"." => Token::Dot,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -283,6 +293,9 @@ impl<'a> Tokenizer {
         } else if self.is_close_bracket(input_bytes) {
             self.consume();
             Token::CloseBracket
+        } else if self.is_dot(input_bytes) {
+            self.consume();
+            Token::Dot
         } else {
             // println!("identifier");
             self.parse_identifier(input_bytes)
@@ -304,6 +317,10 @@ impl<'a> Tokenizer {
 
     pub fn is_comma(&self, input_bytes: &[u8]) -> bool {
         self.current_byte(input_bytes) == b','
+    }
+
+    pub fn is_dot(&self, input_bytes: &[u8]) -> bool {
+        self.current_byte(input_bytes) == b'.'
     }
 
     pub fn get_line(&mut self, input_bytes: &[u8]) -> Vec<Token> {
@@ -360,6 +377,7 @@ pub struct Parser {
     tokenizer: Tokenizer,
     position: usize,
     tokens: Vec<Token>,
+    current_line: usize,
 }
 
 impl Parser {
@@ -373,6 +391,7 @@ impl Parser {
             tokenizer,
             position: 0,
             tokens,
+            current_line: 1,
         }
     }
 
@@ -408,6 +427,8 @@ impl Parser {
             | Token::GreaterThanOrEqual => (10, Associativity::Left),
             Token::Plus | Token::Minus => (20, Associativity::Left),
             Token::Mul | Token::Div => (30, Associativity::Left),
+            // TODO: No idea what this should be
+            Token::Dot => (40, Associativity::Left),
             _ => (0, Associativity::Left),
         }
     }
@@ -416,7 +437,7 @@ impl Parser {
     // https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing
     fn parse_expression(&mut self, min_precedence: usize) -> Option<Ast> {
         self.skip_whitespace();
-        let mut lhs = self.parse_atom()?;
+        let mut lhs = self.parse_atom(min_precedence)?;
         self.skip_whitespace();
         // println!("lhs {:?}", lhs);
         // println!("current_token {:?}", self.get_token_repr());
@@ -437,7 +458,7 @@ impl Parser {
                 precedence
             };
 
-            self.to_next_non_whitespace();
+            self.move_to_next_non_whitespace();
             let rhs = self.parse_expression(next_min_precedence)?;
             // println!("rhs {:?}", rhs);
 
@@ -449,23 +470,32 @@ impl Parser {
         Some(lhs)
     }
 
-    fn parse_atom(&mut self) -> Option<Ast> {
+    fn parse_atom(&mut self, min_precedence: usize) -> Option<Ast> {
         match self.current_token() {
             Token::Fn => {
-                self.to_next_atom();
+                self.move_to_next_non_whitespace();
                 Some(self.parse_function())
             }
+            Token::Struct => {
+                self.move_to_next_atom();
+                Some(self.parse_struct())
+            }
             Token::If => {
-                self.to_next_non_whitespace();
+                self.move_to_next_non_whitespace();
                 Some(self.parse_if())
             }
             Token::Atom((start, end)) => {
                 // Gross
                 let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
                 // TODO: Make better
-                self.to_next_non_whitespace();
+                self.move_to_next_non_whitespace();
                 if self.is_open_paren() {
                     Some(self.parse_call(name))
+                }
+                // TODO: Hack to try and let struct creation work in ambiguous contexts
+                // like if. Need a better way.
+                else if self.is_open_curly() && min_precedence == 0 {
+                    Some(self.parse_struct_creation(name))
                 } else {
                     Some(Ast::Variable(name))
                 }
@@ -491,9 +521,13 @@ impl Parser {
                 self.consume();
                 Some(Ast::False)
             }
+            Token::Null => {
+                self.consume();
+                Some(Ast::Null)
+            }
             Token::Let => {
                 self.consume();
-                self.to_next_non_whitespace();
+                self.move_to_next_non_whitespace();
                 let name = match self.current_token() {
                     Token::Atom((start, end)) => {
                         // Gross
@@ -501,29 +535,33 @@ impl Parser {
                     }
                     _ => panic!("Expected variable name"),
                 };
-                self.to_next_non_whitespace();
+                self.move_to_next_non_whitespace();
                 self.expect_equal();
-                self.to_next_non_whitespace();
+                self.move_to_next_non_whitespace();
                 let value = self.parse_expression(0).unwrap();
                 Some(Ast::Let(Box::new(Ast::Variable(name)), Box::new(value)))
             }
             Token::NewLine | Token::Spaces(_) | Token::Comment(_) => {
                 self.consume();
-                self.parse_atom()
+                self.parse_atom(min_precedence)
             }
-            _ => panic!("Expected atom {}", self.get_token_repr()),
+            _ => panic!(
+                "Expected atom {} at line {}",
+                self.get_token_repr(),
+                self.current_line
+            ),
         }
     }
 
     fn parse_function(&mut self) -> Ast {
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
+                self.move_to_next_non_whitespace();
                 // Gross
-                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+                Some(String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap())
             }
-            _ => panic!("Expected function name"),
+            _ => None,
         };
-        self.to_next_non_whitespace();
         self.expect_open_paren();
         let args = self.parse_args();
         self.expect_close_paren();
@@ -531,18 +569,36 @@ impl Parser {
         Ast::Function { name, args, body }
     }
 
+    fn parse_struct(&mut self) -> Ast {
+        let name = match self.current_token() {
+            Token::Atom((start, end)) => {
+                // Gross
+                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+            }
+            _ => panic!("Expected struct name"),
+        };
+        self.move_to_next_non_whitespace();
+        self.expect_open_curly();
+        let fields = self.parse_struct_fields();
+        self.expect_close_curly();
+        Ast::Struct { name, fields }
+    }
+
     fn consume(&mut self) {
+        if self.is_newline() {
+            self.increment_line();
+        }
         self.position += 1;
     }
 
-    fn to_next_atom(&mut self) {
+    fn move_to_next_atom(&mut self) {
         self.consume();
         while !self.at_end() && !self.is_atom() {
             self.consume();
         }
     }
 
-    fn to_next_non_whitespace(&mut self) {
+    fn move_to_next_non_whitespace(&mut self) {
         self.consume();
         while !self.at_end() && self.is_whitespace() {
             self.consume();
@@ -570,10 +626,34 @@ impl Parser {
 
     fn parse_args(&mut self) -> Vec<String> {
         let mut result = Vec::new();
+        self.skip_whitespace();
         while !self.at_end() && !self.is_close_paren() {
             result.push(self.parse_arg());
+            self.skip_whitespace();
         }
         result
+    }
+
+    fn parse_struct_fields(&mut self) -> Vec<Ast> {
+        let mut result = Vec::new();
+        self.skip_whitespace();
+        while !self.at_end() && !self.is_close_curly() {
+            result.push(self.parse_struct_field());
+            self.skip_whitespace();
+        }
+        result
+    }
+
+    fn parse_struct_field(&mut self) -> Ast {
+        match self.current_token() {
+            Token::Atom((start, end)) => {
+                // Gross
+                let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
+                self.consume();
+                Ast::Identifier(name)
+            }
+            _ => panic!("Expected field name got {:?}", self.current_token()),
+        }
     }
 
     fn parse_arg(&mut self) -> String {
@@ -584,7 +664,7 @@ impl Parser {
                 self.consume();
                 name
             }
-            _ => panic!("Expected arg"),
+            _ => panic!("Expected arg got {:?}", self.current_token()),
         }
     }
 
@@ -638,7 +718,11 @@ impl Parser {
         if self.is_close_curly() {
             self.consume();
         } else {
-            panic!("Expected close curly");
+            panic!(
+                "Expected close curly got {:?} at line {}",
+                self.get_token_repr(),
+                self.current_line
+            );
         }
     }
 
@@ -678,6 +762,38 @@ impl Parser {
         Ast::Call { name, args }
     }
 
+    fn parse_struct_creation(&mut self, name: String) -> Ast {
+        self.expect_open_curly();
+        let mut fields = Vec::new();
+        while !self.at_end() && !self.is_close_curly() {
+            if let Some(field) = self.parse_struct_field_creation() {
+                fields.push(field);
+            } else {
+                break;
+            }
+        }
+
+        self.expect_close_curly();
+        Ast::StructCreation { name, fields }
+    }
+
+    fn parse_struct_field_creation(&mut self) -> Option<(String, Ast)> {
+        self.skip_whitespace();
+        match self.current_token() {
+            Token::Atom((start, end)) => {
+                // Gross
+                let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
+                self.consume();
+                self.skip_whitespace();
+                self.expect_colon();
+                self.skip_whitespace();
+                let value = self.parse_expression(0).unwrap();
+                Some((name, value))
+            }
+            _ => None,
+        }
+    }
+
     fn get_token_repr(&self) -> String {
         match self.current_token() {
             Token::Atom((start, end)) => {
@@ -708,9 +824,9 @@ impl Parser {
     // but it's an expression
 
     fn parse_if(&mut self) -> Ast {
-        let condition = Box::new(self.parse_expression(0).unwrap());
+        let condition = Box::new(self.parse_expression(1).unwrap());
         let then = self.parse_block();
-        self.to_next_non_whitespace();
+        self.move_to_next_non_whitespace();
         if self.is_else() {
             self.consume();
             self.skip_whitespace();
@@ -784,6 +900,17 @@ impl Parser {
                 left: Box::new(lhs),
                 right: Box::new(rhs),
             },
+            Token::Dot => {
+                assert!(matches!(rhs, Ast::Variable(_)));
+                let rhs = match rhs {
+                    Ast::Variable(name) => Ast::Identifier(name),
+                    _ => panic!("Not a variable"),
+                };
+                Ast::PropertyAccess {
+                    object: Box::new(lhs),
+                    property: Box::new(rhs),
+                }
+            }
             _ => panic!("Not a binary operator"),
         }
     }
@@ -799,6 +926,37 @@ impl Parser {
 
     fn is_equal(&self) -> bool {
         self.current_token() == Token::Equal
+    }
+
+    fn expect_colon(&mut self) {
+        self.skip_whitespace();
+        if self.is_colon() {
+            self.consume();
+        } else {
+            panic!(
+                "Expected colon got {} at line {}",
+                self.get_token_repr(),
+                self.current_line
+            );
+        }
+    }
+
+    fn is_colon(&self) -> bool {
+        self.current_token() == Token::Colon
+    }
+
+    fn increment_line(&mut self) {
+        self.current_line += 1;
+    }
+
+    fn is_newline(&self) -> bool {
+        self.current_token() == Token::NewLine
+    }
+
+    pub fn from_file(arg: &str) -> Result<Ast, std::io::Error> {
+        let source = std::fs::read_to_string(arg)?;
+        let mut parser = Parser::new(source);
+        Ok(parser.parse())
     }
 }
 

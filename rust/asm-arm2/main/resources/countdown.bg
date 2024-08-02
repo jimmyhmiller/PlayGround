@@ -1,0 +1,27 @@
+fn count_down(x) {
+    println(x)
+    if x == 0 {
+        0
+    } else {
+        count_down(x - 1)
+    }
+}
+
+// TODO: Allow top level
+fn main() {
+    count_down(10)
+}
+
+// Expect
+// 10
+// 9
+// 8
+// 7
+// 6
+// 5
+// 4
+// 3
+// 2
+// 1
+// 0
+// 0
