@@ -176,8 +176,10 @@ async fn wait_for_board_to_be_correct(
     desired_position: BoardBuilder,
 ) -> Result<BoardBuilder, Box<dyn Error>> {
     loop {
-        let current_chessnut_board = chessnut_board_position.lock().await;
-        if let Some(chessnut_board_state) = &*current_chessnut_board {
+        //sleep 100 ms
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let current_chessnut_board = chessnut_board_position.lock().await.clone();
+        if let Some(chessnut_board_state) = current_chessnut_board {
             let incorrect = chessnut_board_state.find_incorrect_squares(&desired_position);
 
             let mut number_of_queens = 0;
@@ -916,6 +918,9 @@ async fn wait_for_bot_move(
                 ponder: _,
             } => {
                 println!("Best move: {:?}", best_move);
+
+                let random_sleep_time = rand::thread_rng().gen_range(1..10);
+                tokio::time::sleep(tokio::time::Duration::from_secs(random_sleep_time)).await;
                 let from = best_move.from.to_string();
                 let to = best_move.to.to_string();
                 let message = encode_leds(vec![
