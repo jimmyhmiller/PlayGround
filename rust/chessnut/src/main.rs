@@ -920,7 +920,11 @@ async fn wait_for_bot_move(
                 println!("Best move: {:?}", best_move);
 
                 let random_sleep_time = rand::thread_rng().gen_range(1..10);
+                println!("Sleeping for {} seconds", random_sleep_time);
                 tokio::time::sleep(tokio::time::Duration::from_secs(random_sleep_time)).await;
+
+                
+
                 let from = best_move.from.to_string();
                 let to = best_move.to.to_string();
                 let message = encode_leds(vec![
