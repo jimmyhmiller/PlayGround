@@ -1,8 +1,8 @@
 {
-	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
-	"name": "beagle",
-	"patterns": [
-		{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "beagle",
+    "patterns": [
+        {
             "name": "comment.line.double-slash.beagle",
             "begin": "//",
             "end": "$",
@@ -10,7 +10,7 @@
         },
         {
             "name": "keyword.control.beagle",
-            "match": "\\b(if|else|let|struct|fn)\\b"
+            "match": "\\b(if|else|let|struct|fn|namespace|enum)\\b"
         },
         {
             "name": "keyword.other.beagle",
@@ -33,6 +33,10 @@
             "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\s*(?=\\{)"
         },
         {
+            "name": "entity.name.namespace.beagle",
+            "match": "(?<=namespace\\s)[A-Za-z_][A-Za-z0-9_\\.]*"
+        },
+        {
             "name": "string.quoted.double.beagle",
             "begin": "\"",
             "end": "\"",
@@ -48,24 +52,24 @@
             "match": "\\b[0-9]+\\b"
         }
     ],
-	"repository": {
-		"keywords": {
-			"patterns": [{
-				"name": "keyword.control.beagle",
-				"match": "\\b(if|while|for|return)\\b"
-			}]
-		},
-		"strings": {
-			"name": "string.quoted.double.beagle",
-			"begin": "\"",
-			"end": "\"",
-			"patterns": [
-				{
-					"name": "constant.character.escape.beagle",
-					"match": "\\\\."
-				}
-			]
-		}
-	},
-	"scopeName": "source.beagle"
+    "repository": {
+        "keywords": {
+            "patterns": [{
+                "name": "keyword.control.beagle",
+                "match": "\\b(if|while|for|return|namespace)\\b"
+            }]
+        },
+        "strings": {
+            "name": "string.quoted.double.beagle",
+            "begin": "\"",
+            "end": "\"",
+            "patterns": [
+                {
+                    "name": "constant.character.escape.beagle",
+                    "match": "\\\\."
+                }
+            ]
+        }
+    },
+    "scopeName": "source.beagle"
 }
