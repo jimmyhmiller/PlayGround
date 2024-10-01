@@ -1026,7 +1026,7 @@ fn empty() -> impl Node {
 }
 
 fn disasm(state: &State) -> impl Node {
-    let window_around_pc = 10;
+    let window_around_pc = 5;
     let mut start = 0;
     for (i, disasm) in state.disasm.disasm_values.iter().enumerate() {
         if disasm.address == state.pc {
@@ -1144,6 +1144,20 @@ fn stack(state: &State) -> impl Node {
     )
 }
 
+fn current_function(state: &State) -> impl Node {
+    let mut root = Root::new(horizontal());
+    let mut function_name = Paragraph::new("No function");
+    for function in state.functions.values() {
+        if let Function::User { name, address_range } = function {
+            if state.pc as usize >= address_range.0 && state.pc as usize <= address_range.1 {
+                function_name = Paragraph::new(name);
+            }
+        }
+    }
+    root.add(function_name);
+    root
+}
+
 fn debug(state: &State) -> impl Node {
     let mut outer = Root::new(vertical().with_child_spacing(30.0));
     let mut row1 = Root::new(horizontal());
@@ -1153,7 +1167,7 @@ fn debug(state: &State) -> impl Node {
     // root.add(memory(state));
     row1.add(stack(state));
 
-    row2.add(meta(state));
+    row2.add(current_function(state));
     row2.add(memory(state));
 
     outer.add(row1);
@@ -1275,7 +1289,7 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         // TODO: Make all of this better
         // and configurable at runtime
         let launchinfo = SBLaunchInfo::new();
-        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/closures.bg"], false);
+        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/binary_tree_benchmark.bg"], false);
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);
         match target.launch(launchinfo) {
             Ok(process) => Some((target, process)),

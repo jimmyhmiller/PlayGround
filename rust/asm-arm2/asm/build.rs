@@ -138,7 +138,7 @@ pub fn get_files<'a>(xml: &'a Document<'a>) -> Vec<Node<'a, 'a>> {
         .filter(|x| {
             let title = x.attribute("title").unwrap_or("");
             title.contains("Base Instructions")
-            // || title.contains("SIMD and Floating-point Instructions")
+                || title.contains("SIMD and Floating-point Instructions")
         })
         .flat_map(|x| x.descendants())
         .filter(|x| x.has_tag_name("iform"))
@@ -318,7 +318,7 @@ impl ArmBox {
             Bits::Unknown(bits.join("sep"))
         };
 
-        let name = node.attribute("name").unwrap_or("").to_ascii_lowercase();
+        let name = node.attribute("name").unwrap_or("").to_string();
 
         ArmBox {
             hibit,
@@ -333,7 +333,7 @@ impl ArmBox {
     }
 
     fn kind(&self) -> Kind {
-        if self.name.starts_with('r') {
+        if self.name.starts_with('R') {
             Kind::Register
         } else if self.name.starts_with("imm") {
             let num = &self.name[3..];
@@ -360,7 +360,7 @@ impl Instruction {
         for diagram in self.diagrams.iter() {
             for arm_box in diagram.boxes.iter() {
                 let field = Field {
-                    name: arm_box.name.clone(),
+                    name: arm_box.name.to_ascii_lowercase().clone(),
                     shift: arm_box.shift(),
                     bits: arm_box.bits.render(),
                     width: arm_box.width,
@@ -471,17 +471,25 @@ fn generate_encoding_instructions(instructions: &[Instruction]) -> String {
                 }
                 match armbox.kind() {
                     Kind::Register => {
-                        function.line(format!("| {} << {}", armbox.name, armbox.shift()));
+                        function.line(format!(
+                            "| {} << {}",
+                            armbox.name.to_ascii_lowercase(),
+                            armbox.shift()
+                        ));
                     }
                     Kind::Immediate => {
-                        function.line(format!("| (*{} as u32) << {}", armbox.name, armbox.shift()));
+                        function.line(format!(
+                            "| (*{} as u32) << {}",
+                            armbox.name.to_ascii_lowercase(),
+                            armbox.shift()
+                        ));
                     }
                     Kind::ClassSelector(_) => {}
                     Kind::NonPowerOfTwoImm(n) => {
                         function.line(format!(
                             "| truncate_imm::<_, {}>(*{}) << {}",
                             n,
-                            armbox.name,
+                            armbox.name.to_ascii_lowercase(),
                             armbox.shift()
                         ));
                     }
@@ -508,12 +516,16 @@ fn generate_encoding_instructions(instructions: &[Instruction]) -> String {
                     }
                     match armbox.kind() {
                         Kind::Register => {
-                            function.line(format!("| {} << {}", armbox.name, armbox.shift()));
+                            function.line(format!(
+                                "| {} << {}",
+                                armbox.name.to_ascii_lowercase(),
+                                armbox.shift()
+                            ));
                         }
                         Kind::Immediate => {
                             function.line(format!(
                                 "| (*{} as u32) << {}",
-                                armbox.name,
+                                armbox.name.to_ascii_lowercase(),
                                 armbox.shift()
                             ));
                         }
@@ -522,7 +534,7 @@ fn generate_encoding_instructions(instructions: &[Instruction]) -> String {
                             function.line(format!(
                                 "| truncate_imm::<_, {}>(*{}) << {}",
                                 n,
-                                armbox.name,
+                                armbox.name.to_ascii_lowercase(),
                                 armbox.shift()
                             ));
                         }
