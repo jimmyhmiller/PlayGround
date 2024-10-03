@@ -44,7 +44,7 @@ pub enum PerFrame {
     ProcessOutput { process_id: usize },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 struct SavedOutput {
     widgets: serde_json::Value,
     values: HashMap<String, Value>,
@@ -622,8 +622,9 @@ impl Editor {
             .unwrap(),
             values: self.values.clone(),
         };
+ 
         let result = serde_json::ser::to_string_pretty(&saved).unwrap();
-        let mut file = File::create("widgets.json").unwrap();
+        let mut file = File::create(self.widget_config_path.clone()).unwrap();
         file.write_all(result.as_bytes()).unwrap();
     }
 

@@ -115,7 +115,7 @@ impl Widget {
         self.start().unwrap();
     }
 
-    pub fn save(&mut self, wasm_messenger: &mut WasmMessenger) {
+    pub fn save(&mut self, wasm_messenger: &mut WasmMessenger)  {
         // TODO: Change this
         if self.data.typetag_name() == "Ephemeral" {
             return;
@@ -132,7 +132,7 @@ impl Widget {
                 wasm_messenger::SaveState::Empty => {
                     break;
                 }
-                wasm_messenger::SaveState::Saved(_) => {
+                wasm_messenger::SaveState::Saved(value) => {
                     break;
                 }
             }

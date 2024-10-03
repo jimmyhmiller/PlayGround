@@ -10,7 +10,7 @@ use std::{
     time::Instant,
 };
 
-use framework::{KeyboardInput, Position, Size, Value, WidgetMeta};
+use framework::{KeyState, KeyboardInput, Position, Size, Value, WidgetMeta};
 use futures::channel::{mpsc::Sender, oneshot};
 use itertools::Itertools;
 use rand::Rng;
@@ -23,9 +23,7 @@ use skia_safe::{
 };
 
 use crate::{
-    color::Color,
-    event::Event,
-    wasm_messenger::{Commands, DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState},
+    color::Color, event::Event, wasm_messenger::{Commands, DrawCommands, Message, OutMessage, OutPayload, Payload, SaveState}
 };
 
 #[allow(unused)]
@@ -1248,8 +1246,11 @@ impl Widget for RandomText {
         self.text.on_move(x, y)
     }
 
-    fn on_key(&mut self, _input: KeyboardInput) -> Result<(), Box<dyn Error>> {
-        self.show_font = !self.show_font;
+    fn on_key(&mut self, input: KeyboardInput) -> Result<(), Box<dyn Error>> {
+        if matches!(input.state, KeyState::Pressed) {
+            self.show_font = !self.show_font;
+        }
+
         Ok(())
     }
 }
