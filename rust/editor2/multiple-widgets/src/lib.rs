@@ -226,11 +226,11 @@ impl App for MultipleWidgets {
             let mut changed = false;
             if x % 100.0 != 0.0 {
                 changed = true;
-                meta.position.x = (x / 100.0).round() * 100.0 + 50.0;
+                meta.position.x = (x / 30.0).round() * 30.0 + 50.0;
             }
             if y % 100.0 != 0.0 {
                 changed = true;
-                meta.position.y = (y / 100.0).round() * 100.0 + 50.0;
+                meta.position.y = (y / 30.0).round() * 30.0 + 50.0;
             }
             if changed {
                 self.provide_value::<Vec<WidgetMeta>>("widgets", vec![meta]);

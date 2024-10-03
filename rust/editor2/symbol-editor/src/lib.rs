@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, str::from_utf8};
 
 use code_editor::CodeEditor;
 use framework::{app, App, Canvas, Color, KeyboardInput, Position, Rect, Size, WidgetData};
 use itertools::Itertools;
-use lsp_types::WorkspaceSymbol;
+use lsp_types::{SemanticTokenType, SemanticTokensLegend, SymbolKind, WorkspaceSymbol};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -14,6 +14,11 @@ struct SymbolEditor {
     opened: HashSet<String>,
     clicked: bool,
     mouse_location: Option<(f32, f32)>,
+    color_mapping: HashMap<usize, String>,
+    token_legend: Option<SemanticTokensLegend>,
+    y_scroll_offset: f32,
+    x_scroll_offset: f32,
+    max_y_draw: f32,
 }
 
 // TODO: If I want projects, I need to look at cargo.toml files
@@ -41,13 +46,32 @@ impl App for SymbolEditor {
 
     fn start(&mut self) {
         self.subscribe("workspace/symbols");
+        self.subscribe("color_mapping_changed");
+        if let Some(color_mappings) = self.try_get_value::<HashMap<usize, String>>("color_mappings")
+        {
+            self.color_mapping = color_mappings;
+        }
+
+        if let Some(token_legend) = self.try_get_value::<SemanticTokensLegend>("token_legend") {
+            // println!("Got token legend {:?}", token_legend);
+            self.token_legend = Some(token_legend);
+        } else {
+            println!("No token legend");
+        }
     }
 
     fn draw(&mut self) {
+
+        if let Some(token_legend) = self.try_get_value::<SemanticTokensLegend>("token_legend") {
+            // println!("Got token legend {:?}", token_legend);
+            self.token_legend = Some(token_legend);
+        } else {
+            // println!("No token legend");
+        }
         let external_id = self.get_external_id();
         if external_id.is_none() {
             let mut canvas = Canvas::new();
-            let foreground = Color::parse_hex("#dc9941");
+            let foreground = Color::parse_hex("#df9941");
             let background = Color::parse_hex("#353f38");
             canvas.set_color(&background);
 
@@ -62,6 +86,10 @@ impl App for SymbolEditor {
             canvas.set_color(&foreground);
             canvas.save();
             canvas.translate(40.0, 60.0);
+            // set scoll offset
+            canvas.translate(self.x_scroll_offset, self.y_scroll_offset);
+            
+            let position_before_draw = canvas.get_current_position();
 
             if self.symbols.is_empty() {
                 canvas.draw_str("Loading...", 30.0, 30.0);
@@ -88,7 +116,11 @@ impl App for SymbolEditor {
                 let groups = symbols.iter().group_by(|x| &x.container_name);
                 let project = project.unwrap();
 
-                if self.mouse_in_bounds(&canvas, -30.0, 200.0, 30.0) {
+                let width = (project.len() * 16 + 20) as f32;
+                if self.mouse_in_bounds(&canvas, -30.0, width, 30.0) {
+                    canvas.set_color(&foreground.with_alpha(0.3));
+                    canvas.draw_rect(-5.0, -25.0, width, 30.0);
+                    canvas.set_color(&foreground);
                     if self.clicked {
                         if self.opened.contains(&project) {
                             self.opened.remove(&project);
@@ -104,27 +136,43 @@ impl App for SymbolEditor {
                     continue;
                 }
                 for (group, symbols) in groups.into_iter() {
+
                     let group = group.clone().unwrap_or("Top Level".to_string());
-                    if self.mouse_in_bounds(&canvas, -30.0, 200.0, 30.0) {
+                    let qualified_group = format!("{}:{}", project, group);
+                    let width = (group.len() * 16 + 20) as f32;
+                    if self.mouse_in_bounds(&canvas, -30.0, width, 30.0) {
+                        canvas.set_color(&foreground.with_alpha(0.3));
+                        canvas.draw_rect(-5.0, -25.0, width, 30.0);
+                        canvas.set_color(&foreground);
                         if self.clicked {
-                            if self.opened.contains(&group) {
-                                self.opened.remove(&group);
+                            if self.opened.contains(&qualified_group) {
+                                self.opened.remove(&qualified_group);
                             } else {
-                                self.opened.insert(group.clone());
+                                self.opened.insert(qualified_group.clone());
                             }
                         }
                     }
 
                     canvas.draw_str(&group, 0.0, 0.0);
                     canvas.translate(30.0, 30.0);
-                    if !self.opened.contains(&group) {
+                    if !self.opened.contains(&qualified_group) {
                         canvas.translate(-30.0, 0.0);
                         continue;
-                    }
+                    }                        
                     for symbol in symbols.into_iter() {
+                        let mut color = Color::parse_hex("#ffffff");
+                        if let Some(id) = self.symbol_kind_to_id(symbol.kind) {
+                            if let Some(mapped_color) = self.color_mapping.get(&id) {
+                                color = Color::parse_hex(mapped_color);
+                            } 
+                        }
+                        let width: f32 = (symbol.name.len() * 16 + 20) as f32;
+                        canvas.set_color(&color);
+
                         canvas.draw_str(&symbol.name, 0.0, 0.0);
-                        if self.mouse_in_bounds(&canvas, -30.0, 200.0, 30.0) {
-                            canvas.draw_rect(0.0, -20.0, 200.0, 30.0);
+                        if self.mouse_in_bounds(&canvas, -30.0, width, 30.0) {
+                            canvas.set_color(&color.with_alpha(0.3));
+                            canvas.draw_rect(-5.0, -25.0, width, 30.0);
                             if self.clicked {
                                 let mut editor = CodeEditor::init();
                                 editor.alive = true;
@@ -147,12 +195,16 @@ impl App for SymbolEditor {
                                 self.editors.insert(external_id, editor);
                             }
                         }
+                        canvas.set_color(&foreground);
                         canvas.translate(0.0, 30.0);
                     }
                     canvas.translate(-30.0, 30.0);
                 }
                 canvas.translate(-30.0, 30.0);
             }
+            let position_after_draw = canvas.get_current_position();
+            let max_draw = position_after_draw.1 - position_before_draw.1;
+            self.max_y_draw = max_draw;
             canvas.restore();
 
             if self.symbols.is_empty() {
@@ -195,6 +247,14 @@ impl App for SymbolEditor {
             self.symbols
                 .sort_by_key(|x| (get_project(x), x.container_name.clone()));
         }
+
+        if kind == "color_mapping_changed" {
+            if let Ok(mapping) =
+                serde_json::from_str::<HashMap<usize, String>>(from_utf8(event.as_bytes()).unwrap())
+            {
+                self.color_mapping = mapping;
+            }
+        }
     }
 
     fn on_key(&mut self, input: KeyboardInput) {
@@ -211,6 +271,23 @@ impl App for SymbolEditor {
             self.editors.get_mut(&external_id).unwrap().on_scroll(x, y);
             return;
         }
+
+       // don't scoll above zero
+        self.y_scroll_offset += y as f32;
+        if self.y_scroll_offset > 0.0 {
+            self.y_scroll_offset = 0.0;
+        }
+
+        // rounded max_draw
+        let max_draw = self.max_y_draw.round();
+        println!("max_draw: {}", max_draw);
+
+
+        // don't scroll past max_draw
+        if self.y_scroll_offset.abs() + self.data.size.height > max_draw {
+            self.y_scroll_offset = -(max_draw - self.data.size.height);
+        }
+
     }
 
     fn on_size_change(&mut self, width: f32, height: f32) {
@@ -275,6 +352,11 @@ impl App for SymbolEditor {
             opened: HashSet::new(),
             clicked: false,
             mouse_location: None,
+            color_mapping: HashMap::new(),
+            token_legend: None,
+            x_scroll_offset: 0.0,
+            y_scroll_offset: 0.0,
+            max_y_draw: 0.0,
         })
         .unwrap()
     }
@@ -315,6 +397,7 @@ impl App for SymbolEditor {
 impl SymbolEditor {
     #[allow(dead_code)]
     fn init() -> Self {
+        
         Self {
             data: Default::default(),
             editors: HashMap::new(),
@@ -322,7 +405,38 @@ impl SymbolEditor {
             opened: HashSet::new(),
             clicked: false,
             mouse_location: None,
+            color_mapping: HashMap::new(),
+            token_legend: None,
+            y_scroll_offset: 0.0,
+            x_scroll_offset: 0.0,
+            max_y_draw: 0.0,
         }
+    }
+
+    fn symbol_kind_to_id(&self, kind: SymbolKind) -> Option<usize> {
+        // println!("{:?}", self.token_legend);
+        let legend = self.token_legend.as_ref()?;
+        for (i, token) in legend.token_types.iter().enumerate() {
+            match (token.as_str(), kind) {
+                ("namespace", SymbolKind::NAMESPACE) => return Some(i),
+                ("function", SymbolKind::FUNCTION) => return Some(i),
+                ("method", SymbolKind::METHOD) => return Some(i),
+                ("class", SymbolKind::CLASS) => return Some(i),
+                ("enum", SymbolKind::ENUM) => return Some(i),
+                ("interface", SymbolKind::INTERFACE) => return Some(i),
+                ("struct", SymbolKind::STRUCT) => return Some(i),
+                ("typeParameter", SymbolKind::TYPE_PARAMETER) => return Some(i),
+                ("variable", SymbolKind::VARIABLE) => return Some(i),
+                ("property", SymbolKind::PROPERTY) => return Some(i),
+                ("enumMember", SymbolKind::ENUM_MEMBER) => return Some(i),
+                ("event", SymbolKind::EVENT) => return Some(i),
+                ("string", SymbolKind::STRING) => return Some(i),
+                ("number", SymbolKind::NUMBER) => return Some(i),
+                ("operator", SymbolKind::OPERATOR) => return Some(i),
+                _ => {}
+            }
+        }
+        None
     }
 
     fn mouse_in_bounds(&self, canvas: &Canvas, offset: f32, width: f32, height: f32) -> bool {

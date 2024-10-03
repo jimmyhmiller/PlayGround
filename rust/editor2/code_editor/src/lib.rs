@@ -288,6 +288,7 @@ impl App for CodeEditor {
         {
             self.text_pane.color_mapping = color_mappings;
         }
+        
 
         self.send_event(
             "lith/token_request",
