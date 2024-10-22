@@ -169,6 +169,16 @@ impl App for Frontend {
                                 .continue_execution()
                                 .unwrap();
                         }
+                        PhysicalKey::Code(KeyCode::KeyR) => {
+                            if let Some(process) = &self.state.process.process {
+                                process.kill().unwrap();
+                                self.state = get_initial_state();
+                                if let Some((target, process)) = start_process() {
+                                    self.state.process.process = Some(process);
+                                    self.state.process.target = Some(target);
+                                }
+                            }
+                        }
                         _ => {}
                     },
                     _ => {}
@@ -279,48 +289,52 @@ impl Frontend {
     }
 }
 
+fn get_initial_state() -> State {
+    State {
+        disasm: Disasm {
+            disasm_values: vec![],
+            show_address: true,
+            show_hex: false,
+        },
+        registers: Registers {
+            registers: vec![
+                Register {
+                    name: "x0".to_string(),
+                    value: Value::Integer(0),
+                    kind: BuiltInTypes::Int,
+                },
+                Register {
+                    name: "x1".to_string(),
+                    value: Value::Integer(1),
+                    kind: BuiltInTypes::Int,
+                },
+            ],
+        },
+        process: Process {
+            process: None,
+            target: None,
+            instructions: None,
+        },
+        pc: 0,
+        sp: 0,
+        fp: 0,
+        stack: Stack { stack: vec![] },
+        messages: vec![],
+        functions: HashMap::new(),
+        labels: HashMap::new(),
+        heap: Heap {
+            memory: vec![],
+            heap_pointers: vec![],
+        },
+    }
+}
+
 fn main() {
     let mut frontend = Frontend {
         should_step: false,
         should_step_hyper: false,
         is_continuing: false,
-        state: State {
-            disasm: Disasm {
-                disasm_values: vec![],
-                show_address: true,
-                show_hex: false,
-            },
-            registers: Registers {
-                registers: vec![
-                    Register {
-                        name: "x0".to_string(),
-                        value: Value::Integer(0),
-                        kind: BuiltInTypes::Int,
-                    },
-                    Register {
-                        name: "x1".to_string(),
-                        value: Value::Integer(1),
-                        kind: BuiltInTypes::Int,
-                    },
-                ],
-            },
-            process: Process {
-                process: None,
-                target: None,
-                instructions: None,
-            },
-            pc: 0,
-            sp: 0,
-            fp: 0,
-            stack: Stack { stack: vec![] },
-            messages: vec![],
-            functions: HashMap::new(),
-            labels: HashMap::new(),
-            heap: Heap {
-                memory: vec![],
-                heap_pointers: vec![],
-            },
-        },
+        state: get_initial_state(),
     };
     frontend.create_window("Debug", Options { vsync: false, width: 2400, height: 1800, title: "Debugger".to_string(), position: (0, 0)});
 }
@@ -653,8 +667,14 @@ impl State {
         process: &SBProcess,
         is_stepping: bool,
     ) -> bool {
-        // println!("{:?}", thread.selected_frame().function_name());
-        if thread.selected_frame().function_name() == Some("debugger_info") {
+        let function_name = thread.selected_frame().function_name().unwrap_or("").to_string();
+        if function_name.contains("black_box") {
+            thread.step_instruction(false).unwrap();
+            thread.step_instruction(false).unwrap();
+        }
+
+        let function_name = thread.selected_frame().function_name().unwrap_or("").to_string();
+        if function_name == "debugger_info" {
             let x0 = thread
                 .selected_frame()
                 .get_register("x0")
@@ -717,7 +737,7 @@ impl State {
                 }
                 Data::StackMap { pc, name, stack_map } => {
                     // TODO: do something here
-                    println!("{}", message.data.to_string());
+                    // println!("{}", message.data.to_string());
                 }
             }
             self.messages.push(message);
@@ -1026,7 +1046,7 @@ fn empty() -> impl Node {
 }
 
 fn disasm(state: &State) -> impl Node {
-    let window_around_pc = 5;
+    let window_around_pc = 25;
     let mut start = 0;
     for (i, disasm) in state.disasm.disasm_values.iter().enumerate() {
         if disasm.address == state.pc {
@@ -1053,7 +1073,7 @@ fn disasm(state: &State) -> impl Node {
     lines(
         &disasm
             .iter()
-            .take(40)
+            .take(100)
             .map(|disasm| {
                 let prefix = if disasm.address == state.pc {
                     "> "
@@ -1248,7 +1268,7 @@ impl ProcessExtensions for SBProcess {
         unsafe { lldb_sys::SBProcessReadMemory(self.raw, address, ptr, count, error.raw) }
     }
     fn get_instructions(&self, frame: &SBFrame, target: &SBTarget) -> SBInstructionList {
-        let mut buffer = [0u8; 128];
+        let mut buffer = [0u8; 1024];
         self.read_memory(frame.pc_address().load_address(&target), &mut buffer);
         let base_addr = frame.pc_address();
         let ptr: *mut c_void = buffer.as_mut_ptr() as *mut c_void;
@@ -1289,7 +1309,7 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         // TODO: Make all of this better
         // and configurable at runtime
         let launchinfo = SBLaunchInfo::new();
-        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/binary_tree_benchmark.bg"], false);
+        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/property_access_test.bg"], false);
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);
         match target.launch(launchinfo) {
             Ok(process) => Some((target, process)),
