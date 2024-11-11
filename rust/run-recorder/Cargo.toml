@@ -1,0 +1,11 @@
+[package]
+name = "run-recorder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed" }
+lldb = { git = "https://github.com/endoli/lldb.rs.git", rev = "6186d7770e1b14f48dab05e48319348abb80b7cb" }
+lldb-sys = "0.0.30"
+bincode =  { version = "2.0.0-rc.3", features = ["derive"] }
+itertools = "0.13.0"
