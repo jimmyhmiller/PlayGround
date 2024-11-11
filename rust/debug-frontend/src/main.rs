@@ -519,7 +519,7 @@ struct Process {
     instructions: Option<SBInstructionList>,
 }
 
-fn convert_to_u64_array(input: &[u8; 256]) -> Vec<u64> {
+fn convert_to_u64_array(input: &[u8; 512]) -> Vec<u64> {
     input
         .chunks(8)
         .map(|chunk| {
@@ -563,8 +563,8 @@ impl State {
 
                 self.sp = frame.sp();
                 self.fp = frame.fp();
-                let stack_root = frame.sp() - 128;
-                let stack = &mut [0u8; 256];
+                let stack_root = frame.sp() - 256;
+                let stack = &mut [0u8; 512];
                 process.read_memory(stack_root, stack);
                 let stack = convert_to_u64_array(stack);
                 self.stack.stack = stack
@@ -580,7 +580,7 @@ impl State {
                 // TODO: Handle more complex heap
                 if let Some(heap_pointer) = self.heap.heap_pointers.get(0) {
                     let heap_root = *heap_pointer as u64;
-                    let heap = &mut [0u8; 256];
+                    let heap = &mut [0u8; 512];
                     process.read_memory(heap_root, heap);
                     let heap = convert_to_u64_array(heap);
                     self.heap.memory = heap
@@ -712,11 +712,11 @@ impl State {
                     self.heap.heap_pointers.push(pointer);
                 }
                 Data::UserFunction { name, pointer, len } => {
-                    self.process
-                        .target
-                        .as_mut()
-                        .unwrap()
-                        .breakpoint_create_by_address(pointer as u64);
+                    // self.process
+                    //     .target
+                    //     .as_mut()
+                    //     .unwrap()
+                    //     .breakpoint_create_by_address(pointer as u64);
 
                     if let (Some(process), Some(target)) =
                         (self.process.process.clone(), self.process.target.clone())
@@ -1073,7 +1073,7 @@ fn disasm(state: &State) -> impl Node {
     lines(
         &disasm
             .iter()
-            .take(100)
+            .take(50)
             .map(|disasm| {
                 let prefix = if disasm.address == state.pc {
                     "> "
@@ -1296,7 +1296,7 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
     debugger.set_asynchronous(false);
 
     if let Some(target) = debugger.create_target_simple(
-        "/Users/jimmyhmiller/Documents/Code/beagle/target/debug/main",
+        "/Users/jimmyhmiller/Documents/Code/beagle/target/release-with-debug/main",
     ) {
         let symbol_list = target.find_functions("debugger_info", 2);
         let symbol = symbol_list.into_iter().next().unwrap();
@@ -1309,7 +1309,7 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         // TODO: Make all of this better
         // and configurable at runtime
         let launchinfo = SBLaunchInfo::new();
-        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/property_access_test.bg"], false);
+        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/atom.bg"], false);
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);
         match target.launch(launchinfo) {
             Ok(process) => Some((target, process)),

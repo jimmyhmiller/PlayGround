@@ -857,7 +857,7 @@ fn infer_move(before: &Board, after: &Board) -> Option<(Board, ChessMove)> {
             }
             let move_ = ChessMove::new(from_square, to_square, promotion);
             let after_move = before.make_move_new(move_);
-
+        
             if before.legal(move_)
                 && are_same_board(
                     &Some(BoardBuilder::from(after_move)),
@@ -948,6 +948,7 @@ async fn wait_for_bot_move(
                     }),
                 );
                 let new_board = board.make_move_new(move_);
+                println!("{:?}", new_board);
                 let mut new_board = BoardBuilder::try_from(new_board).unwrap();
                 new_board.next_side();
 
