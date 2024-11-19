@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 btleplug = { version = "0.10", features = ["serde"] }
-chess = { path = "/Users/jimmyhmiller/Documents/Code/open-source/chess" }
+chess = { git = "https://github.com/jimmyhmiller/chess.git", rev = "3d2eef221154cf155e1fe267070d64351439ac42" }
 clipboard = "0.5.0"
 futures = "0.3.30"
 pgn-reader = "0.25.0"
