@@ -47,7 +47,6 @@ async fn get_chessnut_board() -> Result<platform::Peripheral, Box<dyn Error>> {
             let result = adapter.start_scan(ScanFilter::default()).await;
             if result.is_err() {
                 eprintln!("Failed to start scan");
-                continue;
             }
             let peripherals = adapter.peripherals().await?;
 
