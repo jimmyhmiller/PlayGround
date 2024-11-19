@@ -1296,7 +1296,7 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
     debugger.set_asynchronous(false);
 
     if let Some(target) = debugger.create_target_simple(
-        "/Users/jimmyhmiller/Documents/Code/beagle/target/release-with-debug/main",
+        "/Users/jimmyhmiller/Documents/Code/beagle/target/debug/main",
     ) {
         let symbol_list = target.find_functions("debugger_info", 2);
         let symbol = symbol_list.into_iter().next().unwrap();
@@ -1309,7 +1309,7 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         // TODO: Make all of this better
         // and configurable at runtime
         let launchinfo = SBLaunchInfo::new();
-        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/atom.bg"], false);
+        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/ffi_test.bg"], false);
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);
         match target.launch(launchinfo) {
             Ok(process) => Some((target, process)),
