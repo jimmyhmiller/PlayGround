@@ -44,10 +44,11 @@ async fn get_chessnut_board() -> Result<platform::Peripheral, Box<dyn Error>> {
     }
     loop {
         for adapter in adapter_list.iter() {
-            adapter
-                .start_scan(ScanFilter::default())
-                .await
-                .expect("Can't scan BLE adapter for connected devices...");
+            let result = adapter.start_scan(ScanFilter::default()).await;
+            if result.is_err() {
+                eprintln!("Failed to start scan");
+                continue;
+            }
             let peripherals = adapter.peripherals().await?;
 
             for peripheral in peripherals.iter() {
@@ -857,7 +858,7 @@ fn infer_move(before: &Board, after: &Board) -> Option<(Board, ChessMove)> {
             }
             let move_ = ChessMove::new(from_square, to_square, promotion);
             let after_move = before.make_move_new(move_);
-        
+
             if before.legal(move_)
                 && are_same_board(
                     &Some(BoardBuilder::from(after_move)),
@@ -922,8 +923,6 @@ async fn wait_for_bot_move(
                 let random_sleep_time = rand::thread_rng().gen_range(1..10);
                 println!("Sleeping for {} seconds", random_sleep_time);
                 tokio::time::sleep(tokio::time::Duration::from_secs(random_sleep_time)).await;
-
-                
 
                 let from = best_move.from.to_string();
                 let to = best_move.to.to_string();
