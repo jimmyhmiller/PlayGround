@@ -365,11 +365,14 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
 
     let writer = chessnut.characteristics();
     let writer = writer.iter().find(|x| x.uuid.to_string() == WRITE).unwrap();
+    let lc0_weights_env = std::env::var("LC0_WEIGHTS").unwrap_or_else(|_| {
+        "/opt/homebrew/Cellar/lc0/0.30.0/libexec/maia-1100.pb.gz".to_string()
+    });
 
     // run the maia1100 command so we can get our chessbot going
     let mut start_maia = Command::new("lc0")
         .arg("-w")
-        .arg("/opt/homebrew/Cellar/lc0/0.30.0/libexec/maia-1100.pb.gz")
+        .arg(lc0_weights_env)
         .stdout(std::process::Stdio::piped())
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
