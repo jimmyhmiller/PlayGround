@@ -385,6 +385,10 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
     let mut lines = reader.lines();
 
     loop {
+        if !(chessnut.is_connected().await?) {
+            println!("Chessnut disconnected");
+            return Ok(());
+        };
         let mut board_state = BoardBuilder::default();
         init_game(&mut stdin, &mut lines).await?;
 
