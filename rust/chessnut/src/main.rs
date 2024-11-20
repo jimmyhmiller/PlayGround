@@ -394,6 +394,7 @@ async fn process_chessnut(
 ) -> Result<(), String> {
     let mut notification_stream = chessnut.notifications().await;
     while let Some(notification) = notification_stream.next().await {
+        println!("got notifcation");
         if notification.uuid.to_string() != BOARD_DATA {
             continue;
         }
@@ -509,11 +510,11 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
         }
 
         let color =
-            wait_for_color_chosen(&chessnut.clone(), chessnut_board_position.clone()).await?;
+            wait_for_color_chosen(chessnut_board_position.clone()).await?;
 
         if !is_initial_position {
             let color =
-                wait_for_color_chosen(&chessnut.clone(), chessnut_board_position.clone()).await?;
+                wait_for_color_chosen(chessnut_board_position.clone()).await?;
             board_state.side_to_move(color);
         }
 
@@ -630,7 +631,6 @@ async fn wait_for_two_queens(
 }
 
 async fn wait_for_color_chosen(
-    _chessnut: &Arc<Box<Chessnut>>,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> Result<Color, Box<dyn Error>> {
     // TODO: Make lights be all fancy
