@@ -429,6 +429,15 @@ async fn process_chessnut(
         } else {
             chessnut.try_to_connect().await;
             println!("reconnected");
+            let result = timeout(Duration::from_secs(30), chessnut.notifications()).await;
+            match result {
+                Ok(stream) => {
+                    notification_stream = stream;
+                }
+                Err(_) => {
+                    println!("Failed to get notifications");
+                }
+            }
         }
     }
 }
