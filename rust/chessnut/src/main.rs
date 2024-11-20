@@ -51,6 +51,9 @@ impl Chessnut {
     }
 
     async fn try_to_connect(&self) {
+        if self.peripheral.is_connected().await.unwrap_or(false) {
+            return;
+        }
         let mut try_connect = self.peripheral.connect().await;
         loop {
             if try_connect.is_ok() {
@@ -575,7 +578,7 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
         }
 
         loop {
-            let next_state = wait_for_next_move(board_state, chessnut_board_position.clone()).await;
+            let next_state = wait_for_next_move(&chessnut, board_state, chessnut_board_position.clone()).await;
 
             if next_state.is_err() {
                 // TODO: Print this properly with different starting positions and all that
@@ -794,12 +797,14 @@ fn are_same_board(board1: &Option<BoardBuilder>, board2: &Option<BoardBuilder>) 
 }
 
 async fn wait_for_next_move(
+    chessnut: &Arc<Box<Chessnut>>,
     board_state: BoardBuilder,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> Result<(BoardBuilder, ChessMove), GameState> {
     let original_board_position = Some(board_state.clone());
     let mut has_sent_error = false;
     loop {
+        chessnut.try_to_connect().await;
         println!("Waiting for next move");
         let new_position = chessnut_board_position.lock().await;
         let mut new_position = new_position.clone();
