@@ -398,7 +398,7 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
     let mut lines = reader.lines();
 
     loop {
-        if !(chessnut.is_connected().await?) {
+        if !chessnut.is_connected().await.unwrap_or(false) {
             println!("Chessnut disconnected");
             return Ok(());
         };
