@@ -1,16 +1,18 @@
 mod pgn_processor;
+use std::collections::BTreeSet;
+use std::pin::Pin;
 use std::time::Duration;
 use std::{error::Error, str::FromStr, sync::Arc};
 
 use crate::pgn_processor::OpeningBook;
-use btleplug::api::{Central, Characteristic, Manager as _, Peripheral, ScanFilter};
+use btleplug::api::{Central, Characteristic, Manager as _, Peripheral, ScanFilter, ValueNotification};
 use btleplug::platform::{self, Manager};
 use chess::{
     Board, BoardBuilder, BoardStatus, ChessMove, Color, File, Piece, Rank, Square, ALL_FILES,
     ALL_SQUARES,
 };
 use clipboard::{ClipboardContext, ClipboardProvider};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use rand::Rng;
 use tokio::time::sleep;
 use tokio::{
@@ -38,7 +40,87 @@ fn turn_off_all_leds() -> [u8; 10] {
     create_led_control_message([0; 8])
 }
 
-async fn get_chessnut_board() -> Result<platform::Peripheral, Box<dyn Error>> {
+
+struct Chessnut {
+    peripheral: platform::Peripheral,
+}
+
+impl Chessnut {
+    fn new(peripheral: platform::Peripheral) -> Self {
+        Self { peripheral }
+    }
+
+    async fn try_to_connect(&self) {
+        let mut try_connect = self.peripheral.connect().await;
+        loop {
+            if try_connect.is_ok() {
+                break;
+            }
+            println!("Failed to connect, trying again");
+            try_connect = self.peripheral.connect().await;
+            sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    async fn notifications(&self) -> Pin<Box<dyn Stream<Item = ValueNotification> + std::marker::Send>> {
+        loop {
+            match self.peripheral.notifications().await {
+                Ok(stream) => {
+                    return Box::pin(stream)
+                }
+                Err(err) => {
+                    match err {
+                        btleplug::Error::PermissionDenied |
+                        btleplug::Error::DeviceNotFound |
+                        btleplug::Error::NotConnected |
+                        btleplug::Error::NotSupported(_) |
+                        btleplug::Error::TimedOut(_) |
+                        btleplug::Error::Uuid(_) |
+                        btleplug::Error::InvalidBDAddr(_) |
+                        btleplug::Error::Other(_) => {
+                            self.try_to_connect().await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    async fn write(
+        &self,
+        characteristic: &Characteristic,
+        data: &[u8],
+        write_type: btleplug::api::WriteType,
+    ) -> Result<(), Box<dyn Error>> {
+        loop {
+            match self.peripheral.write(characteristic, data, write_type).await {
+                Ok(_) => {
+                    return Ok(());
+                }
+                Err(err) => {
+                    match err {
+                        btleplug::Error::PermissionDenied |
+                        btleplug::Error::DeviceNotFound |
+                        btleplug::Error::NotConnected |
+                        btleplug::Error::NotSupported(_) |
+                        btleplug::Error::TimedOut(_) |
+                        btleplug::Error::Uuid(_) |
+                        btleplug::Error::InvalidBDAddr(_) |
+                        btleplug::Error::Other(_) => {
+                            self.try_to_connect().await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn characteristics(&self) -> BTreeSet<Characteristic> {
+        self.peripheral.characteristics()
+    }
+}
+
+async fn get_chessnut_board() -> Result<Chessnut, Box<dyn Error>> {
     let manager = Manager::new().await?;
     let adapter_list = manager.adapters().await?;
     if adapter_list.is_empty() {
@@ -46,10 +128,7 @@ async fn get_chessnut_board() -> Result<platform::Peripheral, Box<dyn Error>> {
     }
     loop {
         for adapter in adapter_list.iter() {
-            let result = adapter.start_scan(ScanFilter::default()).await;
-            // if result.is_err() {
-            //     eprintln!("Failed to start scan");
-            // }
+            let _ = adapter.start_scan(ScanFilter::default()).await;
             let peripherals = adapter.peripherals().await?;
 
             for peripheral in peripherals.iter() {
@@ -96,7 +175,7 @@ async fn get_chessnut_board() -> Result<platform::Peripheral, Box<dyn Error>> {
                         }
                     }
                 }
-                return Ok(peripheral.clone());
+                return Ok(Chessnut::new(peripheral.clone()));
             }
         }
     }
@@ -183,7 +262,7 @@ fn encode_leds(positions: Vec<Square>) -> [u8; 10] {
 
 async fn wait_for_board_to_be_correct(
     writer: &Characteristic,
-    chessnut: &Arc<Box<platform::Peripheral>>,
+    chessnut: &Arc<Box<Chessnut>>,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
     desired_position: BoardBuilder,
 ) -> Result<BoardBuilder, Box<dyn Error>> {
@@ -278,7 +357,7 @@ fn board_state_as_square_and_piece(board_state: &[u8]) -> BoardBuilder {
 
         let square = 63 - i * 2;
 
-        let square = unsafe { Square::new(square) };
+        let square =  Square::new(square);
         if let Some(piece) = convert_num_to_piece(left) {
             if let Some(color) = convert_num_to_color(left) {
                 board_builder.piece(square, piece, color);
@@ -286,7 +365,7 @@ fn board_state_as_square_and_piece(board_state: &[u8]) -> BoardBuilder {
         }
 
         let square = 63 - (i * 2 + 1);
-        let square = unsafe { Square::new(square) };
+        let square = Square::new(square);
         if let Some(piece) = convert_num_to_piece(right) {
             if let Some(color) = convert_num_to_color(right) {
                 board_builder.piece(square, piece, color);
@@ -310,11 +389,11 @@ fn test_board_state_as_square_and_piece() {
 }
 
 async fn process_chessnut(
-    chessnut: Arc<Box<platform::Peripheral>>,
+    chessnut: Arc<Box<Chessnut>>,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> Result<(), String> {
-    let mut notifaction_stream = chessnut.notifications().await.expect("error");
-    while let Some(notification) = notifaction_stream.next().await {
+    let mut notification_stream = chessnut.notifications().await;
+    while let Some(notification) = notification_stream.next().await {
         if notification.uuid.to_string() != BOARD_DATA {
             continue;
         }
@@ -398,10 +477,7 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
     let mut lines = reader.lines();
 
     loop {
-        if !chessnut.is_connected().await.unwrap_or(false) {
-            println!("Chessnut disconnected");
-            return Ok(());
-        };
+        chessnut.try_to_connect().await;
         let mut board_state = BoardBuilder::default();
         init_game(&mut stdin, &mut lines).await?;
 
@@ -534,7 +610,7 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
 }
 
 async fn wait_for_two_queens(
-    _chessnut: &Arc<Box<platform::Peripheral>>,
+    _chessnut: &Arc<Box<Chessnut>>,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> BoardBuilder {
     loop {
@@ -554,7 +630,7 @@ async fn wait_for_two_queens(
 }
 
 async fn wait_for_color_chosen(
-    _chessnut: &Arc<Box<platform::Peripheral>>,
+    _chessnut: &Arc<Box<Chessnut>>,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> Result<Color, Box<dyn Error>> {
     // TODO: Make lights be all fancy
@@ -899,7 +975,7 @@ async fn wait_for_bot_move(
     played_moves: &Vec<ChessMove>,
     board_state: BoardBuilder,
     writer: &Characteristic,
-    chessnut: &Arc<Box<platform::Peripheral>>,
+    chessnut: &Arc<Box<Chessnut>>,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> Result<(BoardBuilder, ChessMove), Box<dyn Error>> {
     if how_many_openings_from_book > 0 && (played_moves.len() / 2) <= how_many_openings_from_book {
