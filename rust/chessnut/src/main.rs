@@ -58,6 +58,46 @@ impl Chessnut {
         loop {
             if try_connect.is_ok() && try_connect.unwrap().is_ok() {
                 println!("Connected");
+
+                self.peripheral.discover_services().await.unwrap();
+                for service in self.peripheral.services() {
+                    for characteristic in service.characteristics {
+                        let characterist_uuid = characteristic.uuid.to_string();
+                        if characterist_uuid == WRITE {
+                            self.peripheral
+                                .write(
+                                    &characteristic,
+                                    &[0x21, 0x01, 0x00],
+                                    btleplug::api::WriteType::WithResponse,
+                                )
+                                .await.unwrap();
+                        }
+                        if characterist_uuid == BOARD_DATA {
+                            loop {
+                                let result = self.peripheral.subscribe(&characteristic).await;
+                                if result.is_ok() {
+                                    break;
+                                }
+                            }
+                        }
+                        if characterist_uuid == OTB_DATA {
+                            loop {
+                                let result = self.peripheral.subscribe(&characteristic).await;
+                                if result.is_ok() {
+                                    break;
+                                }
+                            }
+                        }
+                        if characterist_uuid == MISC_DATA {
+                            loop {
+                                let result = self.peripheral.subscribe(&characteristic).await;
+                                if result.is_ok() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
                 break;
             }
             println!("Failed to connect, trying again");
