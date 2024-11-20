@@ -428,6 +428,7 @@ async fn process_chessnut(
             *chessnut_board_position = Some(board_state);
         } else {
             chessnut.try_to_connect().await;
+            println!("reconnected");
         }
     }
 }
