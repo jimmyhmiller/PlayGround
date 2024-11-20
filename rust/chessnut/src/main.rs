@@ -56,7 +56,7 @@ impl Chessnut {
         }
         let mut try_connect = timeout(Duration::from_secs(20), self.peripheral.connect()).await;
         loop {
-            if try_connect.is_ok() {
+            if try_connect.is_ok() && try_connect.unwrap().is_ok() {
                 println!("Connected");
                 break;
             }
