@@ -1,4 +1,5 @@
 mod pgn_processor;
+use std::time::Duration;
 use std::{error::Error, str::FromStr, sync::Arc};
 
 use crate::pgn_processor::OpeningBook;
@@ -11,6 +12,7 @@ use chess::{
 use clipboard::{ClipboardContext, ClipboardProvider};
 use futures::StreamExt;
 use rand::Rng;
+use tokio::time::sleep;
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
     process::{ChildStdin, ChildStdout, Command},
@@ -60,7 +62,15 @@ async fn get_chessnut_board() -> Result<platform::Peripheral, Box<dyn Error>> {
                     continue;
                 }
                 println!("connecting to {}", local_name);
-                peripheral.connect().await?;
+                let mut try_connect = peripheral.connect().await;
+                loop {
+                    if try_connect.is_ok() {
+                        break;
+                    }
+                    println!("Failed to connect to {} trying again", local_name);
+                    try_connect = peripheral.connect().await;
+                    sleep(Duration::from_millis(500)).await;
+                }
                 println!("connected to {}", local_name);
                 peripheral.discover_services().await?;
                 for service in peripheral.services() {
