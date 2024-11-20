@@ -14,7 +14,7 @@ use chess::{
 use clipboard::{ClipboardContext, ClipboardProvider};
 use futures::{Stream, StreamExt};
 use rand::Rng;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
     process::{ChildStdin, ChildStdout, Command},
@@ -415,17 +415,21 @@ async fn process_chessnut(
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> Result<(), String> {
     let mut notification_stream = chessnut.notifications().await;
-    while let Some(notification) = notification_stream.next().await {
-        println!("got notifcation");
-        if notification.uuid.to_string() != BOARD_DATA {
-            continue;
+    loop {
+        if let Ok(Some(notification)) = timeout(Duration::from_secs(1), notification_stream.next()).await {
+            println!("got notifcation");
+            if notification.uuid.to_string() != BOARD_DATA {
+                continue;
+            }
+            let data = notification.value;
+            let board_state = board_state_as_square_and_piece(&data[2..34]);
+            let mut chessnut_board_position = chessnut_board_position.lock().await;
+            *chessnut_board_position = Some(board_state);
+        } else {
+            chessnut.try_to_connect().await;
+            notification_stream = chessnut.notifications().await;
         }
-        let data = notification.value;
-        let board_state = board_state_as_square_and_piece(&data[2..34]);
-        let mut chessnut_board_position = chessnut_board_position.lock().await;
-        *chessnut_board_position = Some(board_state);
     }
-    Ok(())
 }
 
 #[allow(dead_code)]
@@ -803,9 +807,9 @@ async fn wait_for_next_move(
 ) -> Result<(BoardBuilder, ChessMove), GameState> {
     let original_board_position = Some(board_state.clone());
     let mut has_sent_error = false;
+    println!("Waiting for next move");
     loop {
         chessnut.try_to_connect().await;
-        println!("Waiting for next move");
         let new_position = chessnut_board_position.lock().await;
         let mut new_position = new_position.clone();
         // The new position is one where the current side has moved
