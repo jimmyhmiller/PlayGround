@@ -45,9 +45,9 @@ async fn get_chessnut_board() -> Result<platform::Peripheral, Box<dyn Error>> {
     loop {
         for adapter in adapter_list.iter() {
             let result = adapter.start_scan(ScanFilter::default()).await;
-            if result.is_err() {
-                eprintln!("Failed to start scan");
-            }
+            // if result.is_err() {
+            //     eprintln!("Failed to start scan");
+            // }
             let peripherals = adapter.peripherals().await?;
 
             for peripheral in peripherals.iter() {
@@ -59,7 +59,9 @@ async fn get_chessnut_board() -> Result<platform::Peripheral, Box<dyn Error>> {
                 if !local_name.contains("Chessnut") {
                     continue;
                 }
+                println!("connecting to {}", local_name);
                 peripheral.connect().await?;
+                println!("connected to {}", local_name);
                 peripheral.discover_services().await?;
                 for service in peripheral.services() {
                     for characteristic in service.characteristics {
@@ -354,6 +356,7 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
     let chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>> = Arc::new(Mutex::new(None));
 
     let chessnut = Arc::new(Box::new(get_chessnut_board().await?));
+    println!("Got chessnut board");
 
     let cloned_chessnut = chessnut.clone();
     let cloned_chessnut_board_position = chessnut_board_position.clone();
@@ -721,7 +724,7 @@ async fn wait_for_next_move(
                     Err(e) => {
                         if !has_sent_error {
                             has_sent_error = true;
-                            println!("Error: {}", e);
+                            println!("Error getting: {}", e);
                         }
                     }
                 }
