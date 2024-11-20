@@ -286,7 +286,7 @@ async fn wait_for_board_to_be_correct(
     desired_position: BoardBuilder,
 ) -> Result<BoardBuilder, Box<dyn Error>> {
     loop {
-        //sleep 100 ms
+        println!("Waiting for board to be correct");
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         let current_chessnut_board = chessnut_board_position.lock().await.clone();
         if let Some(chessnut_board_state) = current_chessnut_board {
@@ -800,6 +800,7 @@ async fn wait_for_next_move(
     let original_board_position = Some(board_state.clone());
     let mut has_sent_error = false;
     loop {
+        println!("Waiting for next move");
         let new_position = chessnut_board_position.lock().await;
         let mut new_position = new_position.clone();
         // The new position is one where the current side has moved
