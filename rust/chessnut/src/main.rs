@@ -132,7 +132,11 @@ async fn get_chessnut_board() -> Result<Chessnut, Box<dyn Error>> {
             let peripherals = adapter.peripherals().await?;
 
             for peripheral in peripherals.iter() {
-                let properties = peripheral.properties().await?;
+                let properties = peripheral.properties().await;
+                if properties.is_err() {
+                    continue;
+                }
+                let properties = properties.unwrap();
                 let local_name = properties
                     .unwrap()
                     .local_name
@@ -165,13 +169,28 @@ async fn get_chessnut_board() -> Result<Chessnut, Box<dyn Error>> {
                                 .await?;
                         }
                         if characterist_uuid == BOARD_DATA {
-                            peripheral.subscribe(&characteristic).await?;
+                            loop {
+                                let result = peripheral.subscribe(&characteristic).await;
+                                if result.is_ok() {
+                                    break;
+                                }
+                            }
                         }
                         if characterist_uuid == OTB_DATA {
-                            peripheral.subscribe(&characteristic).await?;
+                            loop {
+                                let result = peripheral.subscribe(&characteristic).await;
+                                if result.is_ok() {
+                                    break;
+                                }
+                            }
                         }
                         if characterist_uuid == MISC_DATA {
-                            peripheral.subscribe(&characteristic).await?;
+                            loop {
+                                let result = peripheral.subscribe(&characteristic).await;
+                                if result.is_ok() {
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
