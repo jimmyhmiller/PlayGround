@@ -1,11 +1,14 @@
 mod pgn_processor;
 use std::collections::BTreeSet;
 use std::pin::Pin;
+use std::thread;
 use std::time::Duration;
 use std::{error::Error, str::FromStr, sync::Arc};
 
 use crate::pgn_processor::OpeningBook;
-use btleplug::api::{Central, Characteristic, Manager as _, Peripheral, ScanFilter, ValueNotification};
+use btleplug::api::{
+    Central, Characteristic, Manager as _, Peripheral, ScanFilter, ValueNotification,
+};
 use btleplug::platform::{self, Manager};
 use chess::{
     Board, BoardBuilder, BoardStatus, ChessMove, Color, File, Piece, Rank, Square, ALL_FILES,
@@ -40,88 +43,153 @@ fn turn_off_all_leds() -> [u8; 10] {
     create_led_control_message([0; 8])
 }
 
-
 struct Chessnut {
-    peripheral: platform::Peripheral,
+    peripheral: Arc<Mutex<platform::Peripheral>>,
 }
 
+
+// TODO: I think I'm going to have to rewrite this with simplicity and without tokio
+// I need to be able to understand everything that is happening and not have these random hangs
+
 impl Chessnut {
-    fn new(peripheral: platform::Peripheral) -> Self {
-        Self { peripheral }
-    }
-
-    async fn try_to_connect(&self) {
-        if self.peripheral.is_connected().await.unwrap_or(false) {
-            return;
-        }
-        let mut try_connect = timeout(Duration::from_secs(20), self.peripheral.connect()).await;
+    async fn new(peripheral: platform::Peripheral) -> Self {
+        let this = Self { peripheral: Arc::new(Mutex::new(peripheral)) };
         loop {
-            if try_connect.is_ok() && try_connect.unwrap().is_ok() {
-                println!("Connected");
-                // TODO: After I'm connected, there are no notifcations
-                break;
+            let result = this.subscribe().await;
+            if result.is_ok() {
+                return this;
             }
-            println!("Failed to connect, trying again");
-            try_connect = timeout(Duration::from_secs(20),self.peripheral.connect()).await;
-            sleep(Duration::from_millis(500)).await;
         }
     }
 
-    async fn notifications(&self) -> Pin<Box<dyn Stream<Item = ValueNotification> + std::marker::Send>> {
-        loop {
-            match self.peripheral.notifications().await {
-                Ok(stream) => {
-                    return Box::pin(stream)
+    async fn subscribe(&self) -> Result<(), Box<dyn Error>> {
+        let peripheral = self.peripheral.try_lock()?;
+        peripheral.discover_services().await?;
+        for service in peripheral.services() {
+            for characteristic in service.characteristics {
+                let characterist_uuid = characteristic.uuid.to_string();
+                if characterist_uuid == WRITE {
+                    peripheral
+                        .write(
+                            &characteristic,
+                            &[0x21, 0x01, 0x00],
+                            btleplug::api::WriteType::WithResponse,
+                        )
+                        .await?;
                 }
-                Err(err) => {
-                    match err {
-                        btleplug::Error::PermissionDenied |
-                        btleplug::Error::DeviceNotFound |
-                        btleplug::Error::NotConnected |
-                        btleplug::Error::NotSupported(_) |
-                        btleplug::Error::TimedOut(_) |
-                        btleplug::Error::Uuid(_) |
-                        btleplug::Error::InvalidBDAddr(_) |
-                        btleplug::Error::Other(_) => {
-                            self.try_to_connect().await;
+                if characterist_uuid == BOARD_DATA {
+                    loop {
+                        let result = peripheral.subscribe(&characteristic).await;
+                        if result.is_ok() {
+                            break;
+                        }
+                    }
+                }
+                if characterist_uuid == OTB_DATA {
+                    loop {
+                        let result = peripheral.subscribe(&characteristic).await;
+                        if result.is_ok() {
+                            break;
+                        }
+                    }
+                }
+                if characterist_uuid == MISC_DATA {
+                    loop {
+                        let result = peripheral.subscribe(&characteristic).await;
+                        if result.is_ok() {
+                            break;
                         }
                     }
                 }
             }
         }
+        Ok(())
     }
-    
+
+    async fn try_to_connect(&mut self) -> Result<(), Box<dyn Error>> {
+        sleep(Duration::from_secs(10)).await;
+        let peripheral = self.peripheral.try_lock();
+        if peripheral.is_ok() && peripheral.as_ref().unwrap().is_connected().await.unwrap_or(false) {
+            println!("is connected");
+            return Ok(());
+        }
+
+        println!("Not connected, trying to connect");
+
+        drop(peripheral);
+        let chessnut = get_chessnut_board().await;
+        if chessnut.is_err() {
+            println!("Failed to connect to chessnut");
+            return Ok(())
+        }
+        let chessnut = chessnut.unwrap();
+        *self = chessnut;
+        Ok(())
+    }
+
+    async fn notifications(
+        &mut self,
+    ) -> Pin<Box<dyn Stream<Item = ValueNotification> + std::marker::Send>> {
+        loop {
+            let peripheral = self.peripheral.try_lock();
+            if peripheral.is_err() {
+                continue;
+            }
+            let peripheral = peripheral.unwrap();
+            match peripheral.notifications().await {
+                Ok(stream) => return Box::pin(stream),
+                Err(err) => match err {
+                    btleplug::Error::PermissionDenied
+                    | btleplug::Error::DeviceNotFound
+                    | btleplug::Error::NotConnected
+                    | btleplug::Error::NotSupported(_)
+                    | btleplug::Error::TimedOut(_)
+                    | btleplug::Error::Uuid(_)
+                    | btleplug::Error::InvalidBDAddr(_)
+                    | btleplug::Error::Other(_) => {
+                        drop(peripheral);
+                        self.try_to_connect().await.unwrap();
+                    }
+                },
+            }
+        }
+    }
+
     async fn write(
-        &self,
+        &mut self,
         characteristic: &Characteristic,
         data: &[u8],
         write_type: btleplug::api::WriteType,
     ) -> Result<(), Box<dyn Error>> {
         loop {
-            match self.peripheral.write(characteristic, data, write_type).await {
+            let peripheral = self.peripheral.try_lock()?;
+            match peripheral
+                .write(characteristic, data, write_type)
+                .await
+            {
                 Ok(_) => {
                     return Ok(());
                 }
-                Err(err) => {
-                    match err {
-                        btleplug::Error::PermissionDenied |
-                        btleplug::Error::DeviceNotFound |
-                        btleplug::Error::NotConnected |
-                        btleplug::Error::NotSupported(_) |
-                        btleplug::Error::TimedOut(_) |
-                        btleplug::Error::Uuid(_) |
-                        btleplug::Error::InvalidBDAddr(_) |
-                        btleplug::Error::Other(_) => {
-                            self.try_to_connect().await;
-                        }
+                Err(err) => match err {
+                    btleplug::Error::PermissionDenied
+                    | btleplug::Error::DeviceNotFound
+                    | btleplug::Error::NotConnected
+                    | btleplug::Error::NotSupported(_)
+                    | btleplug::Error::TimedOut(_)
+                    | btleplug::Error::Uuid(_)
+                    | btleplug::Error::InvalidBDAddr(_)
+                    | btleplug::Error::Other(_) => {
+                        drop(peripheral);
+                        self.try_to_connect().await.unwrap();
                     }
-                }
+                },
             }
         }
     }
 
     fn characteristics(&self) -> BTreeSet<Characteristic> {
-        self.peripheral.characteristics()
+        let peripheral = self.peripheral.try_lock().unwrap();
+        peripheral.characteristics()
     }
 }
 
@@ -150,56 +218,30 @@ async fn get_chessnut_board() -> Result<Chessnut, Box<dyn Error>> {
                     continue;
                 }
                 println!("connecting to {}", local_name);
-                let mut try_connect = peripheral.connect().await;
+                let mut try_connect = timeout(Duration::from_secs(2), peripheral.connect()).await;
+                let mut attempts = 0;
+                let mut connected = false;
                 loop {
-                    if try_connect.is_ok() {
+                    if attempts > 5 {
                         break;
                     }
-                    println!("Failed to connect to {} trying again", local_name);
-                    try_connect = peripheral.connect().await;
-                    sleep(Duration::from_millis(500)).await;
-                }
-                println!("connected to {}", local_name);
-                peripheral.discover_services().await?;
-                for service in peripheral.services() {
-                    for characteristic in service.characteristics {
-                        let characterist_uuid = characteristic.uuid.to_string();
-                        if characterist_uuid == WRITE {
-                            peripheral
-                                .write(
-                                    &characteristic,
-                                    &[0x21, 0x01, 0x00],
-                                    btleplug::api::WriteType::WithResponse,
-                                )
-                                .await?;
-                        }
-                        if characterist_uuid == BOARD_DATA {
-                            loop {
-                                let result = peripheral.subscribe(&characteristic).await;
-                                if result.is_ok() {
-                                    break;
-                                }
-                            }
-                        }
-                        if characterist_uuid == OTB_DATA {
-                            loop {
-                                let result = peripheral.subscribe(&characteristic).await;
-                                if result.is_ok() {
-                                    break;
-                                }
-                            }
-                        }
-                        if characterist_uuid == MISC_DATA {
-                            loop {
-                                let result = peripheral.subscribe(&characteristic).await;
-                                if result.is_ok() {
-                                    break;
-                                }
-                            }
+                    if try_connect.is_ok() {
+                        if try_connect.unwrap().is_ok() {
+                            connected = true;
+                            break;
                         }
                     }
+                    println!("Failed to connect to {} trying again", local_name);
+                    try_connect = timeout(Duration::from_secs(2), peripheral.connect()).await;
+                    sleep(Duration::from_millis(500)).await;
+                    attempts += 1
                 }
-                return Ok(Chessnut::new(peripheral.clone()));
+                if !connected {
+                    continue;
+                }
+                println!("connected to {}", local_name);
+
+                return Ok(Chessnut::new(peripheral.clone()).await);
             }
         }
     }
@@ -286,7 +328,7 @@ fn encode_leds(positions: Vec<Square>) -> [u8; 10] {
 
 async fn wait_for_board_to_be_correct(
     writer: &Characteristic,
-    chessnut: &Arc<Box<Chessnut>>,
+    chessnut: &Arc<Mutex<Chessnut>>,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
     desired_position: BoardBuilder,
 ) -> Result<BoardBuilder, Box<dyn Error>> {
@@ -308,6 +350,8 @@ async fn wait_for_board_to_be_correct(
                 let desired_position = chessnut_board_state.clone();
                 let message = turn_off_all_leds();
                 chessnut
+                    .lock()
+                    .await
                     .write(&writer, &message, btleplug::api::WriteType::WithResponse)
                     .await?;
                 return Ok(desired_position);
@@ -316,12 +360,16 @@ async fn wait_for_board_to_be_correct(
             if incorrect.is_empty() {
                 let message = turn_off_all_leds();
                 chessnut
+                    .lock()
+                    .await
                     .write(&writer, &message, btleplug::api::WriteType::WithResponse)
                     .await?;
                 return Ok(desired_position);
             }
             let message = encode_leds(incorrect);
             chessnut
+                .lock()
+                .await
                 .write(&writer, &message, btleplug::api::WriteType::WithResponse)
                 .await?;
         }
@@ -381,7 +429,7 @@ fn board_state_as_square_and_piece(board_state: &[u8]) -> BoardBuilder {
 
         let square = 63 - i * 2;
 
-        let square =  Square::new(square);
+        let square = Square::new(square);
         if let Some(piece) = convert_num_to_piece(left) {
             if let Some(color) = convert_num_to_color(left) {
                 board_builder.piece(square, piece, color);
@@ -413,32 +461,34 @@ fn test_board_state_as_square_and_piece() {
 }
 
 async fn process_chessnut(
-    chessnut: Arc<Box<Chessnut>>,
+    chessnut: Arc<Mutex<Chessnut>>,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> Result<(), String> {
-    let mut notification_stream = chessnut.notifications().await;
     loop {
-        if let Ok(Some(notification)) = timeout(Duration::from_secs(1), notification_stream.next()).await {
-            println!("got notification");
-            if notification.uuid.to_string() != BOARD_DATA {
+        println!("looping");
+        if let Ok(mut unlocked_chessnut) = chessnut.try_lock() {
+            let notifications = timeout(Duration::from_secs(1), unlocked_chessnut.notifications()).await;
+            if notifications.is_err() {
+                unlocked_chessnut.try_to_connect().await.unwrap();
                 continue;
             }
-            let data = notification.value;
-            let board_state = board_state_as_square_and_piece(&data[2..34]);
-            let mut chessnut_board_position = chessnut_board_position.lock().await;
-            *chessnut_board_position = Some(board_state);
-        } else {
-            chessnut.try_to_connect().await;
-            println!("reconnected");
-            let result = timeout(Duration::from_secs(30), chessnut.notifications()).await;
-            match result {
-                Ok(stream) => {
-                    notification_stream = stream;
+            let mut notifications = notifications.unwrap();
+            if let Ok(Some(notification)) = timeout(Duration::from_secs(1), notifications.next()).await {
+                if notification.uuid.to_string() != BOARD_DATA {
+                    continue;
                 }
-                Err(_) => {
-                    println!("Failed to get notifications");
+                let data = notification.value;
+                let board_state = board_state_as_square_and_piece(&data[2..34]);
+                if let Ok(mut chessnut_board_position) = chessnut_board_position.try_lock() {
+                    *chessnut_board_position = Some(board_state);
+                } else {
+                    println!("Failed to get lock");
                 }
+            } else {
+                let _  = unlocked_chessnut.try_to_connect().await;
             }
+        } else {
+            println!("Failed to get lock on chessnut");
         }
     }
 }
@@ -482,22 +532,28 @@ fn draw_board_ascii(board_builder: &BoardBuilder) {
 pub async fn start_process() -> Result<(), Box<dyn Error>> {
     let chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>> = Arc::new(Mutex::new(None));
 
-    let chessnut = Arc::new(Box::new(get_chessnut_board().await?));
+    let chessnut = Arc::new(Mutex::new(get_chessnut_board().await?));
     println!("Got chessnut board");
 
     let cloned_chessnut = chessnut.clone();
     let cloned_chessnut_board_position = chessnut_board_position.clone();
-    task::spawn(
+    let my_task = task::spawn(
         async move { process_chessnut(cloned_chessnut, cloned_chessnut_board_position).await },
     );
-
+    thread::spawn(move || {
+       loop {
+            if my_task.is_finished() {
+                println!("Task is finished");
+            }
+       }
+    });
+    
     let openings_book = OpeningBook::open("trie3.txt")?;
 
-    let writer = chessnut.characteristics();
+    let writer = chessnut.lock().await.characteristics();
     let writer = writer.iter().find(|x| x.uuid.to_string() == WRITE).unwrap();
-    let lc0_weights_env = std::env::var("LC0_WEIGHTS").unwrap_or_else(|_| {
-        "/opt/homebrew/Cellar/lc0/0.30.0/libexec/maia-1100.pb.gz".to_string()
-    });
+    let lc0_weights_env = std::env::var("LC0_WEIGHTS")
+        .unwrap_or_else(|_| "/opt/homebrew/Cellar/lc0/0.30.0/libexec/maia-1100.pb.gz".to_string());
 
     // run the maia1100 command so we can get our chessbot going
     let mut start_maia = Command::new("lc0")
@@ -515,7 +571,7 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
     let mut lines = reader.lines();
 
     loop {
-        chessnut.try_to_connect().await;
+        // chessnut.lock().await.try_to_connect().await;
         let mut board_state = BoardBuilder::default();
         init_game(&mut stdin, &mut lines).await?;
 
@@ -546,12 +602,10 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
             board_state = desired_position.clone();
         }
 
-        let color =
-            wait_for_color_chosen(chessnut_board_position.clone()).await?;
+        let color = wait_for_color_chosen(chessnut_board_position.clone()).await?;
 
         if !is_initial_position {
-            let color =
-                wait_for_color_chosen(chessnut_board_position.clone()).await?;
+            let color = wait_for_color_chosen(chessnut_board_position.clone()).await?;
             board_state.side_to_move(color);
         }
 
@@ -593,7 +647,7 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
         }
 
         loop {
-            let next_state = wait_for_next_move(&chessnut, board_state, chessnut_board_position.clone()).await;
+            let next_state = wait_for_next_move(board_state, chessnut_board_position.clone()).await;
 
             if next_state.is_err() {
                 // TODO: Print this properly with different starting positions and all that
@@ -641,6 +695,8 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
 
             let clear_leds = turn_off_all_leds();
             chessnut
+                .lock()
+                .await
                 .write(&writer, &clear_leds, btleplug::api::WriteType::WithResponse)
                 .await?;
         }
@@ -648,7 +704,7 @@ pub async fn start_process() -> Result<(), Box<dyn Error>> {
 }
 
 async fn wait_for_two_queens(
-    _chessnut: &Arc<Box<Chessnut>>,
+    _chessnut: &Arc<Mutex<Chessnut>>,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> BoardBuilder {
     loop {
@@ -672,6 +728,7 @@ async fn wait_for_color_chosen(
 ) -> Result<Color, Box<dyn Error>> {
     // TODO: Make lights be all fancy
     loop {
+        sleep(Duration::from_millis(100)).await;
         let new_position = chessnut_board_position.lock().await;
         let mut found_white_king = false;
         let mut found_black_king = false;
@@ -812,7 +869,6 @@ fn are_same_board(board1: &Option<BoardBuilder>, board2: &Option<BoardBuilder>) 
 }
 
 async fn wait_for_next_move(
-    chessnut: &Arc<Box<Chessnut>>,
     board_state: BoardBuilder,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> Result<(BoardBuilder, ChessMove), GameState> {
@@ -820,7 +876,8 @@ async fn wait_for_next_move(
     let mut has_sent_error = false;
     println!("Waiting for next move");
     loop {
-        chessnut.try_to_connect().await;
+        sleep(Duration::from_millis(100)).await;
+        // chessnut.lock().await.try_to_connect().await;
         let new_position = chessnut_board_position.lock().await;
         let mut new_position = new_position.clone();
         // The new position is one where the current side has moved
@@ -1015,7 +1072,7 @@ async fn wait_for_bot_move(
     played_moves: &Vec<ChessMove>,
     board_state: BoardBuilder,
     writer: &Characteristic,
-    chessnut: &Arc<Box<Chessnut>>,
+    chessnut: &Arc<Mutex<Chessnut>>,
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> Result<(BoardBuilder, ChessMove), Box<dyn Error>> {
     if how_many_openings_from_book > 0 && (played_moves.len() / 2) <= how_many_openings_from_book {
@@ -1055,9 +1112,9 @@ async fn wait_for_bot_move(
             } => {
                 println!("Best move: {:?}", best_move);
 
-                let random_sleep_time = rand::thread_rng().gen_range(1..10);
-                println!("Sleeping for {} seconds", random_sleep_time);
-                tokio::time::sleep(tokio::time::Duration::from_secs(random_sleep_time)).await;
+                // let random_sleep_time = rand::thread_rng().gen_range(1..10);
+                // println!("Sleeping for {} seconds", random_sleep_time);
+                // tokio::time::sleep(tokio::time::Duration::from_secs(random_sleep_time)).await;
 
                 let from = best_move.from.to_string();
                 let to = best_move.to.to_string();
@@ -1066,6 +1123,8 @@ async fn wait_for_bot_move(
                     Square::from_str(&to).unwrap(),
                 ]);
                 chessnut
+                    .lock()
+                    .await
                     .write(&writer, &message, btleplug::api::WriteType::WithResponse)
                     .await?;
                 let board = Board::try_from(board_state.clone()).unwrap();
@@ -1095,9 +1154,9 @@ async fn wait_for_bot_move(
                 )
                 .await?;
                 // sleep random time between 5 and 30 seconds
-                let mut rng = rand::thread_rng();
-                let sleep_time = rng.gen_range(5..30);
-                tokio::time::sleep(tokio::time::Duration::from_secs(sleep_time)).await;
+                // let mut rng = rand::thread_rng();
+                // let sleep_time = rng.gen_range(5..30);
+                // tokio::time::sleep(tokio::time::Duration::from_secs(sleep_time)).await;
                 return Ok((new_board, move_));
             }
             _ => {
