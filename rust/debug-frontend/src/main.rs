@@ -712,11 +712,11 @@ impl State {
                     self.heap.heap_pointers.push(pointer);
                 }
                 Data::UserFunction { name, pointer, len } => {
-                    // self.process
-                    //     .target
-                    //     .as_mut()
-                    //     .unwrap()
-                    //     .breakpoint_create_by_address(pointer as u64);
+                    self.process
+                        .target
+                        .as_mut()
+                        .unwrap()
+                        .breakpoint_create_by_address(pointer as u64);
 
                     if let (Some(process), Some(target)) =
                         (self.process.process.clone(), self.process.target.clone())
@@ -1188,6 +1188,7 @@ fn debug(state: &State) -> impl Node {
     row1.add(stack(state));
 
     row2.add(current_function(state));
+    // row2.add(meta(state));
     row2.add(memory(state));
 
     outer.add(row1);
@@ -1309,7 +1310,7 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         // TODO: Make all of this better
         // and configurable at runtime
         let launchinfo = SBLaunchInfo::new();
-        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/ffi_test.bg"], false);
+        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/math_test.bg"], false);
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);
         match target.launch(launchinfo) {
             Ok(process) => Some((target, process)),
