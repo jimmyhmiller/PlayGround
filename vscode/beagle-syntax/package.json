@@ -1,25 +1,37 @@
 {
-  "name": "beagle-syntax",
-  "displayName": "beagle-syntax",
-  "description": "",
-  "version": "0.0.1",
-  "engines": {
-    "vscode": "^1.91.0"
-  },
-  "categories": [
-    "Programming Languages"
-  ],
-  "contributes": {
-    "languages": [{
-      "id": "beagle",
-      "aliases": ["beagle", "beagle"],
-      "extensions": [".bg"],
-      "configuration": "./language-configuration.json"
-    }],
-    "grammars": [{
-      "language": "beagle",
-      "scopeName": "source.beagle",
-      "path": "./syntaxes/beagle.tmLanguage.json"
-    }]
-  }
+	"name": "beagle-syntax",
+	"displayName": "beagle-syntax",
+	"description": "",
+	"version": "0.0.1",
+	"engines": {
+		"vscode": "^1.91.0"
+	},
+	"categories": [
+		"Programming Languages"
+	],
+	"contributes": {
+		"languages": [
+			{
+				"id": "beagle",
+				"aliases": [
+					"beagle",
+					"beagle"
+				],
+				"extensions": [
+					".bg"
+				],
+				"configuration": "./language-configuration.json"
+			}
+		],
+		"grammars": [
+			{
+				"language": "beagle",
+				"scopeName": "source.beagle",
+				"path": "./syntaxes/beagle.tmLanguage.json"
+			}
+		]
+	},
+	"__metadata": {
+		"size": 7809
+	}
 }

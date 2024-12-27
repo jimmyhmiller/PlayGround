@@ -301,6 +301,8 @@ impl Editor {
                     }
                 }
                 Event::StartProcess(process_id, widget_id, process_command) => {
+
+                    println!("Starting process {}", process_command);
                     let mut process = std::process::Command::new(process_command)
                         .stdout(std::process::Stdio::piped())
                         .stdin(std::process::Stdio::piped())
