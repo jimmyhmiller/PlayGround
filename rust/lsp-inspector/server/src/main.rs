@@ -47,7 +47,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("stderr: {:?}", String::from_utf8_lossy(&available_stderr_data));
         }
 
-
         stdout.read_available(&mut available_message_data).unwrap();
         if !available_message_data.is_empty() {
             let data = String::from_utf8(available_message_data.clone()).unwrap();
@@ -64,14 +63,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut body = String::new();
                     body_reader.read_to_string(&mut body).unwrap();
                     requests.push(body.clone());
-                    stdin.write_all(format!("Content-Length: {}\r\n\r\n{}", body.len(), body.clone()).as_bytes()).unwrap();
-                    // println!("received request! method: {:?}, url: {:?}, headers: {:?} body: {:?}",
-                    //     request.method(),
-                    //     request.url(),
-                    //     request.headers(),
-                    //     body,
-                    // );
-            
+                    eprintln!("received message: {}", body);
+                    stdin.write_all(body.as_bytes()).unwrap();
                     let response = Response::empty(204);
                     let _ = request.respond(response);
                 }
@@ -81,7 +74,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = request.respond(response);
                         continue;
                     }
-                    let response = Response::from_string(responses.join(""));
+                    let response = responses.join("");
+                    eprintln!("responding with: {}", response);
+                    let response = Response::from_string(response);
                     let _ = request.respond(response);
                     responses.clear();
                 }
