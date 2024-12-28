@@ -1,54 +1,7 @@
 use matchit::Router;
 use nonblock::NonBlockingReader;
-use serde_json::Value;
 use tiny_http::{Server, Response};
-use std::{collections::HashMap, io::Write};
-
-
-fn parse_message(data: String) -> Result<(String, String), String> {
-    let split = data.split_once("\r\n\r\n");
-    if split.is_none() {
-        return Err(data);
-    }
-    let (headers, content) = split.unwrap();
-    let split_headers = headers.split("\r\n").collect::<Vec<&str>>();
-    let header_map = split_headers.iter().map(|header| {
-        let split = header.split(":").collect::<Vec<&str>>();
-        (split[0].trim().to_ascii_lowercase(), split[1].trim())
-    }).collect::<HashMap<String, &str>>();
-    if let Some(content_length) = header_map.get("content-length") {
-        let content_length = content_length.parse::<usize>().unwrap();
-        if content.len() < content_length {
-            return Err(data);
-        }
-        let rest = content[content_length..].to_string();
-        let content = content[..content_length].to_string();
-        return Ok((content, rest));
-    } else {
-        return Err(data);
-    }
-
-}
-
-fn parse_messages(data: String) -> Result<(Vec<String>, String), String> {
-    let mut messages = Vec::new();
-    let mut rest = data;
-    loop {
-        match parse_message(rest) {
-            Ok((message, r)) => {
-                messages.push(message);
-                rest = r;
-            }
-            Err(data) => {
-                if messages.is_empty() {
-                    return Err(data);
-                } else {
-                    return Ok((messages, data));
-                }
-            }
-        }
-    }
-}
+use std::io::Write;
 
 enum Routes {
     SendRequest,
@@ -96,28 +49,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
         stdout.read_available(&mut available_message_data).unwrap();
-        let cloned_data = available_message_data.clone();
-        let string_data = String::from_utf8(cloned_data).unwrap();
-
-        match parse_messages(string_data) {
-            Ok((message, rest)) => {
-                if !rest.is_empty() {
-                    available_message_data.clear();
-                    available_message_data.extend(rest.as_bytes());
-                }
-                for m in message {
-                    let response = format!("Content-Length: {}\r\n\r\n{}", m.len(), m);
-                    responses.push(response);
-                }
-            }
-            Err(data) => {
-                if !data.is_empty() {
-                    available_message_data.clear();
-                    available_message_data.extend(data.as_bytes());
-                }
-            }
+        if !available_message_data.is_empty() {
+            let data = String::from_utf8(available_message_data.clone()).unwrap();
+            println!("stdout: {:?}", data);
+            responses.push(data);
+            available_message_data.clear();
         }
-    
 
         if let Ok(Some(mut request)) = server.try_recv() {
             let route = matcher.at(request.url()).ok();
@@ -144,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = request.respond(response);
                         continue;
                     }
-                    let response = Response::from_string(responses.join("\n"));
+                    let response = Response::from_string(responses.join(""));
                     let _ = request.respond(response);
                     responses.clear();
                 }
