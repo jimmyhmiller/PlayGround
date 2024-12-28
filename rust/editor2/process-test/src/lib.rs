@@ -788,8 +788,8 @@ fn find_rust_analyzer() -> String {
     //     .unwrap();
 
     // format!("{}/server/rust-analyzer", folder.to_str().unwrap())
-    "/Users/jimmyhmiller/Documents/Code/open-source/rust-analyzer/target/release/rust-analyzer"
-        .to_string()
+    // "/Users/jimmyhmiller/.vscode/extensions/rust-lang.rust-analyzer-0.3.2228-darwin-arm64/server/rust-analyzer".to_string()
+    "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/lsp-inspector/target/debug/client".to_string()
 }
 
 fn get_slice(s: &str, range: std::ops::Range<usize>) -> Option<&str> {

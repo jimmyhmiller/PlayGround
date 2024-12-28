@@ -2,50 +2,50 @@ use matchit::Router;
 use nonblock::NonBlockingReader;
 use serde_json::Value;
 use tiny_http::{Server, Response};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::{collections::HashMap, io::Write};
 
 
-fn parse_message<T: Read>(reader: &mut BufReader<T>) -> Result<Value, Box<dyn std::error::Error>> {
-    loop {
-        let mut headers = String::new();
-
-        // Read headers until an empty line (\r\n)
-        loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).unwrap() == 0 {
-                // EOF reached
-                return Err("EOF reached".into());
-            }
-
-            if line == "\r\n" {
-                break;
-            }
-            headers.push_str(&line);
+fn parse_message(data: String) -> Result<(String, String), String> {
+    let split = data.split_once("\r\n\r\n");
+    if split.is_none() {
+        return Err(data);
+    }
+    let (headers, content) = split.unwrap();
+    let split_headers = headers.split("\r\n").collect::<Vec<&str>>();
+    let header_map = split_headers.iter().map(|header| {
+        let split = header.split(":").collect::<Vec<&str>>();
+        (split[0].trim().to_ascii_lowercase(), split[1].trim())
+    }).collect::<HashMap<String, &str>>();
+    if let Some(content_length) = header_map.get("content-length") {
+        let content_length = content_length.parse::<usize>().unwrap();
+        if content.len() < content_length {
+            return Err(data);
         }
+        let rest = content[content_length..].to_string();
+        let content = content[..content_length].to_string();
+        return Ok((content, rest));
+    } else {
+        return Err(data);
+    }
 
-        // Parse Content-Length from headers
-        let content_length = headers
-            .lines()
-            .find_map(|line| {
-                if line.to_lowercase().starts_with("content-length:") {
-                    line.split_once(':').map(|(_, v)| v.trim().parse::<usize>().ok()).flatten()
-                } else {
-                    None
-                }
-            })
-            .expect("Content-Length header is missing");
+}
 
-        // Read the content part of the message
-        let mut content = vec![0; content_length];
-        reader.read_exact(&mut content)?;
-        let content = String::from_utf8(content)?;
-
-        // Parse the JSON content
-        match serde_json::from_str::<Value>(&content) {
-            Ok(json) => {
-                return Ok(json);
+fn parse_messages(data: String) -> Result<(Vec<String>, String), String> {
+    let mut messages = Vec::new();
+    let mut rest = data;
+    loop {
+        match parse_message(rest) {
+            Ok((message, r)) => {
+                messages.push(message);
+                rest = r;
             }
-            Err(e) => eprintln!("Invalid JSON content: {}", e),
+            Err(data) => {
+                if messages.is_empty() {
+                    return Err(data);
+                } else {
+                    return Ok((messages, data));
+                }
+            }
         }
     }
 }
@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut available_message_data = Vec::new();
 
-    let mut process = std::process::Command::new("/Users/jimmyhmiller/.vscode/extensions/rust-lang.rust-analyzer-0.3.2196-darwin-arm64/server/rust-analyzer")
+    let mut process = std::process::Command::new("/Users/jimmyhmiller/.vscode/extensions/rust-lang.rust-analyzer-0.3.2228-darwin-arm64/server/rust-analyzer")
         .stdout(std::process::Stdio::piped())
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -90,23 +90,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut available_stderr_data = Vec::new();
         stderr.read_available(&mut available_stderr_data).unwrap();
-        if !available_message_data.is_empty() {
+        if !available_stderr_data.is_empty() {
             println!("stderr: {:?}", String::from_utf8_lossy(&available_stderr_data));
         }
 
 
         stdout.read_available(&mut available_message_data).unwrap();
         let cloned_data = available_message_data.clone();
-        let mut reader = BufReader::new(cloned_data.as_slice());
+        let string_data = String::from_utf8(cloned_data).unwrap();
 
-        if let Ok(message) = parse_message(&mut reader) {
-            println!("message: {:?}", message);
-            available_message_data.clear();
-            reader.read_to_end(&mut available_message_data).unwrap();
-            let message = message.to_string();
-            let message = format!("Content-Length: {}\r\n\r\n{}", message.len(), message);
-            responses.push(message.clone());
+        match parse_messages(string_data) {
+            Ok((message, rest)) => {
+                if !rest.is_empty() {
+                    available_message_data.clear();
+                    available_message_data.extend(rest.as_bytes());
+                }
+                for m in message {
+                    let response = format!("Content-Length: {}\r\n\r\n{}", m.len(), m);
+                    responses.push(response);
+                }
+            }
+            Err(data) => {
+                if !data.is_empty() {
+                    available_message_data.clear();
+                    available_message_data.extend(data.as_bytes());
+                }
+            }
         }
+    
 
         if let Ok(Some(mut request)) = server.try_recv() {
             let route = matcher.at(request.url()).ok();
