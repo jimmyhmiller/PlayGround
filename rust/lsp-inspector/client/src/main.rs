@@ -2,6 +2,8 @@ use std::io::{self, BufRead, BufReader, Read};
 use nonblock::NonBlockingReader;
 use reqwest::blocking::Client;
 use serde_json::Value;
+
+// TODO: FIx this because its wrong
 fn parse_message<T: Read>(reader: &mut BufReader<T>) -> Result<Value, Box<dyn std::error::Error>> {
     loop {
         let mut headers = String::new();
