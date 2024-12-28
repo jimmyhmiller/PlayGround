@@ -49,7 +49,6 @@ fn parse_message<T: Read>(reader: &mut BufReader<T>) -> Result<Value, Box<dyn st
 
 
 fn main() {
-    println!("Hello, world!");
     let client = Client::new();
     let request_url = "http://localhost:8000/request"; // Replace with your actual HTTP server URL
     let stdin = io::stdin();
