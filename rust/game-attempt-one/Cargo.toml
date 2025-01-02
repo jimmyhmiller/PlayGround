@@ -1,0 +1,10 @@
+[package]
+name = "game-attempt-one"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wgpu = "23.0.1"
+winit = "0.30.7"
+pollster = "0.4.0"
+bytemuck = {version = "1.21.0", features = [ "derive" ] }
