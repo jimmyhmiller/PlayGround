@@ -1260,7 +1260,6 @@ impl ArmAsm {
     }
 }
 
-
 pub enum FmovDirection {
     FromGeneralToFloat,
     FromFloatToGeneral,
@@ -1423,7 +1422,6 @@ pub fn or(destination: Register, a: Register, b: Register) -> ArmAsm {
         imm6: 0,
     }
 }
-
 
 pub fn jump_equal(destination: u32) -> ArmAsm {
     ArmAsm::BCond {
