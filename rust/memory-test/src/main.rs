@@ -54,7 +54,6 @@ extern "C" fn handle_sigbus(signal: libc::c_int, info: *mut libc::siginfo_t, con
     }
 }
 
-// Shared synchronization primitives for signaling
 lazy_static::lazy_static! {
     static ref SIGNAL_PAIR: Arc<(Mutex<bool>, Condvar)> = Arc::new((Mutex::new(false), Condvar::new()));
 }
@@ -70,7 +69,7 @@ fn main() {
             0,
         );
     }
-    // Set up the SIGBUS handler
+
     let sigbus_action = SigAction::new(
         SigHandler::SigAction(handle_sigbus),
         SaFlags::SA_RESTART,
@@ -116,7 +115,6 @@ fn main() {
         f() // This will trigger SIGBUS
     });
 
-    // Simulate resumption
     thread::sleep(Duration::from_secs(1)); // Allow thread to trigger SIGBUS
 
     println!("Marking memory non-executable...");
@@ -128,7 +126,6 @@ fn main() {
         mprotect(memory as *mut libc::c_void, page_size, PROT_READ | PROT_EXEC);
     }
 
-    // Signal the SIGBUS handler to resume execution
     {
         let signal_pair = SIGNAL_PAIR.clone();
         let (lock, cvar) = &*signal_pair;
