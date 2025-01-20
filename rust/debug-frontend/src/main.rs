@@ -22,7 +22,9 @@ use winit::{
     window::CursorIcon,
 };
 
-#[derive(Debug, Encode, Decode)]
+mod websocket;
+
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct Message {
     kind: String,
     data: Data,
@@ -38,17 +40,62 @@ impl Message {
 pub struct StackMapDetails {
     pub number_of_locals: usize,
     pub current_stack_size: usize,
+    pub max_stack_size: usize,
 }
+
 
 // TODO: This should really live on the debugger side of things
 #[derive(Debug, Encode, Decode, Clone)]
 enum Data {
-    ForeignFunction { name: String, pointer: usize },
-    BuiltinFunction {name: String, pointer: usize},
-    HeapSegmentPointer { pointer: usize },
-    UserFunction { name: String, pointer: usize, len: usize },
-    Label { label: String, function_pointer: usize, label_index: usize, label_location: usize },
-    StackMap { pc: usize, name: String, stack_map: Vec<(usize, StackMapDetails)> },
+    ForeignFunction {
+        name: String,
+        pointer: usize,
+    },
+    BuiltinFunction {
+        name: String,
+        pointer: usize,
+    },
+    HeapSegmentPointer {
+        pointer: usize,
+    },
+    UserFunction {
+        name: String,
+        pointer: usize,
+        len: usize,
+    },
+    Label {
+        label: String,
+        function_pointer: usize,
+        label_index: usize,
+        label_location: usize,
+    },
+    StackMap {
+        pc: usize,
+        name: String,
+        stack_map: Vec<(usize, StackMapDetails)>,
+    },
+    Allocate {
+        bytes: usize,
+        stack_pointer: usize,
+        kind: String,
+    },
+    Tokens {
+        file_name: String,
+        tokens: Vec<String>,
+        token_line_column_map: Vec<(usize, usize)>,
+    },
+    Ir {
+        function_pointer: usize,
+        file_name: String,
+        instructions: Vec<String>,
+        token_range_to_ir_range: Vec<((usize, usize), (usize, usize))>,
+    },
+    Arm {
+        function_pointer: usize,
+        file_name: String,
+        instructions: Vec<String>,
+        ir_to_machine_code_range: Vec<(usize, (usize, usize))>,
+    }
 }
 
 #[derive(Debug, Encode, Decode, Clone)]
@@ -91,6 +138,58 @@ impl Data {
                     format!("0x{:x}: size: {}, locals: {}", key, details.current_stack_size, details.number_of_locals)
                 }).collect::<Vec<String>>().join(" | ");
                 format!("{}, 0x{:x}, {}", name, pc, stack_map_details_string)
+            }
+            Data::Allocate {
+                bytes,
+                stack_pointer,
+                kind,
+            } => {
+                format!("{}: {} 0x{:x}", kind, bytes, stack_pointer)
+            }
+            Data::Tokens {
+                file_name,
+                tokens,
+                token_line_column_map,
+            } => {
+                let tokens = tokens.join(" ");
+                let token_line_column_map = token_line_column_map
+                    .iter()
+                    .map(|(line, column)| format!("{}:{}", line, column))
+                    .collect::<Vec<String>>()
+                    .join(" ");
+                format!("{}: {} {}", file_name, tokens, token_line_column_map)
+            }
+            Data::Ir {
+                function_pointer,
+                file_name,
+                instructions,
+                token_range_to_ir_range,
+            } => {
+                let instructions = instructions.join(" ");
+                let token_range_to_ir_range = token_range_to_ir_range
+                    .iter()
+                    .map(|((start, end), (start_ir, end_ir))| {
+                        format!("{}-{}:{}-{}", start, end, start_ir, end_ir)
+                    })
+                    .collect::<Vec<String>>()
+                    .join(" ");
+                format!("{}: {} {}", file_name, instructions, token_range_to_ir_range)
+            }
+            Data::Arm {
+                function_pointer,
+                file_name,
+                instructions,
+                ir_to_machine_code_range,
+            } => {
+                let instructions = instructions.join(" ");
+                let ir_to_machine_code_range = ir_to_machine_code_range
+                    .iter()
+                    .map(|(ir, (start, end))| {
+                        format!("{}:{}-{}", ir, start, end)
+                    })
+                    .collect::<Vec<String>>()
+                    .join(" ");
+                format!("{}: {} {}", file_name, instructions, ir_to_machine_code_range)
             }
         }
     }
@@ -172,7 +271,7 @@ impl App for Frontend {
                         PhysicalKey::Code(KeyCode::KeyR) => {
                             if let Some(process) = &self.state.process.process {
                                 process.kill().unwrap();
-                                self.state = get_initial_state();
+                                self.state = get_initial_state(self.state.websocket_sender.clone());
                                 if let Some((target, process)) = start_process() {
                                     self.state.process.process = Some(process);
                                     self.state.process.target = Some(target);
@@ -289,7 +388,7 @@ impl Frontend {
     }
 }
 
-fn get_initial_state() -> State {
+fn get_initial_state(websocket_sender: std::sync::mpsc::Sender<Message>) -> State {
     State {
         disasm: Disasm {
             disasm_values: vec![],
@@ -326,15 +425,22 @@ fn get_initial_state() -> State {
             memory: vec![],
             heap_pointers: vec![],
         },
+        websocket_sender,
     }
 }
 
 fn main() {
+
+
+    let (websocket_sender, wait_for_client) = websocket::start_websocket_thread().unwrap();
+    // wait_for_client.recv().unwrap();
+
+
     let mut frontend = Frontend {
         should_step: false,
         should_step_hyper: false,
         is_continuing: false,
-        state: get_initial_state(),
+        state: get_initial_state(websocket_sender),
     };
     frontend.create_window("Debug", Options { vsync: false, width: 2400, height: 1800, title: "Debugger".to_string(), position: (0, 0)});
 }
@@ -539,6 +645,19 @@ impl State {
             if !process.is_stopped() {
                 return;
             }
+
+           
+            loop {
+                let mut all_false = true;
+                for thread in process.threads() {
+                    let result = self.check_debugger_info(&thread, &process, is_stepping);
+                    all_false = all_false && !result;
+                }
+                if all_false {
+                    break;
+                }
+            }
+
             if let Some(thread) = process.thread_by_index_id(1) {
                 let was_debugger_info = self.check_debugger_info(&thread, &process, is_stepping);
 
@@ -689,6 +808,7 @@ impl State {
             let mut buffer: Vec<u8> = vec![0; x1];
             process.read_memory(x0 as u64, &mut buffer);
             let message = Message::from_binary(&buffer);
+            self.websocket_sender.send(message.clone()).unwrap();
             match message.data.clone() {
                 Data::ForeignFunction { name, pointer } => {}
                 Data::BuiltinFunction { name, pointer } => {}
@@ -717,6 +837,7 @@ impl State {
                         .as_mut()
                         .unwrap()
                         .breakpoint_create_by_address(pointer as u64);
+                    
 
                     if let (Some(process), Some(target)) =
                         (self.process.process.clone(), self.process.target.clone())
@@ -737,6 +858,36 @@ impl State {
                 }
                 Data::StackMap { pc, name, stack_map } => {
                     // TODO: do something here
+                    // println!("{}", message.data.to_string());
+                }
+                Data::Allocate {
+                    bytes,
+                    stack_pointer,
+                    kind,
+                } => {
+                    // println!("{}", message.data.to_string());
+                }
+                Data::Tokens {
+                    file_name,
+                    tokens,
+                    token_line_column_map,
+                } => {
+                    // println!("{}", message.data.to_string());
+                }
+                Data::Ir {
+                    function_pointer,
+                    file_name,
+                    instructions,
+                    token_range_to_ir_range,
+                } => {
+                    // println!("{}", message.data.to_string());
+                }
+                Data::Arm {
+                    function_pointer,
+                    file_name,
+                    instructions,
+                    ir_to_machine_code_range,
+                } => {
                     // println!("{}", message.data.to_string());
                 }
             }
@@ -818,6 +969,7 @@ struct State {
     functions: HashMap<Address, Function>,
     labels: HashMap<Address, Label>,
     heap: Heap,
+    websocket_sender: std::sync::mpsc::Sender<Message>,
 }
 
 #[derive(Debug)]
@@ -1310,7 +1462,7 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         // TODO: Make all of this better
         // and configurable at runtime
         let launchinfo = SBLaunchInfo::new();
-        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/math_test.bg"], false);
+        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/lldb_wrapper.bg"], false);
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);
         match target.launch(launchinfo) {
             Ok(process) => Some((target, process)),

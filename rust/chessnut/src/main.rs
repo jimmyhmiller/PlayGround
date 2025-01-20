@@ -465,7 +465,6 @@ async fn process_chessnut(
     chessnut_board_position: Arc<Mutex<Option<BoardBuilder>>>,
 ) -> Result<(), String> {
     loop {
-        println!("looping");
         if let Ok(mut unlocked_chessnut) = chessnut.try_lock() {
             let notifications = timeout(Duration::from_secs(1), unlocked_chessnut.notifications()).await;
             if notifications.is_err() {
@@ -488,7 +487,7 @@ async fn process_chessnut(
                 let _  = unlocked_chessnut.try_to_connect().await;
             }
         } else {
-            println!("Failed to get lock on chessnut");
+            // println!("Failed to get lock on chessnut");
         }
     }
 }
