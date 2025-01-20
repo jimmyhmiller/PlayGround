@@ -1,0 +1,10 @@
+[package]
+name = "bolt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-tungstenite = { version = "0.28.2", features = ["tokio-rustls-webpki-roots"] }
+iced = { version = "0.13.1", features = ["tokio"] }
+tokio = { version = "1.43.0", features = ["time"] }
+bincode =  { version = "2.0.0-rc.3", features = ["derive"] }
