@@ -42,6 +42,7 @@ pub enum Data {
         name: String,
         pointer: usize,
         len: usize,
+        number_of_arguments: usize,
     },
     Label {
         label: String,
