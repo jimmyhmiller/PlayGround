@@ -9,6 +9,7 @@ use lldb::{
     SBTarget, SBValue,
 };
 use lldb_sys::{RunMode, SBTargetBreakpointCreateByName, SBValueGetValueAsUnsigned2};
+use mapping::BreakpointMapper;
 use skia_safe::{
     paint,
     textlayout::{FontCollection, ParagraphBuilder, ParagraphStyle, TextStyle},
@@ -22,6 +23,7 @@ use winit::{
     window::CursorIcon,
 };
 
+mod mapping;
 mod websocket;
 
 #[derive(Debug, Clone, Encode, Decode)]
@@ -30,6 +32,7 @@ pub struct Message {
     data: Data,
 }
 
+#[allow(unused)]
 impl Message {
     fn to_string(&self) -> String {
         format!("{} {}", self.kind, self.data.to_string())
@@ -42,7 +45,6 @@ pub struct StackMapDetails {
     pub current_stack_size: usize,
     pub max_stack_size: usize,
 }
-
 
 // TODO: This should really live on the debugger side of things
 #[derive(Debug, Encode, Decode, Clone)]
@@ -62,6 +64,7 @@ enum Data {
         name: String,
         pointer: usize,
         len: usize,
+        number_of_arguments: usize,
     },
     Label {
         label: String,
@@ -95,7 +98,7 @@ enum Data {
         file_name: String,
         instructions: Vec<String>,
         ir_to_machine_code_range: Vec<(usize, (usize, usize))>,
-    }
+    },
 }
 
 #[derive(Debug, Encode, Decode, Clone)]
@@ -118,7 +121,12 @@ impl Data {
             Data::HeapSegmentPointer { pointer } => {
                 format!("0x{:x}", pointer)
             }
-            Data::UserFunction { name, pointer, len } => {
+            Data::UserFunction {
+                name,
+                pointer,
+                len,
+                number_of_arguments: _,
+            } => {
                 format!("{}: 0x{:x} 0x{:x}", name, pointer, (pointer + len))
             }
             Data::Label {
@@ -132,11 +140,21 @@ impl Data {
                     label, function_pointer, label_index, label_location
                 )
             }
-            Data::StackMap { pc, name, stack_map } => {
-
-                let stack_map_details_string = stack_map.iter().map(|(key, details)| {
-                    format!("0x{:x}: size: {}, locals: {}", key, details.current_stack_size, details.number_of_locals)
-                }).collect::<Vec<String>>().join(" | ");
+            Data::StackMap {
+                pc,
+                name,
+                stack_map,
+            } => {
+                let stack_map_details_string = stack_map
+                    .iter()
+                    .map(|(key, details)| {
+                        format!(
+                            "0x{:x}: size: {}, locals: {}",
+                            key, details.current_stack_size, details.number_of_locals
+                        )
+                    })
+                    .collect::<Vec<String>>()
+                    .join(" | ");
                 format!("{}, 0x{:x}, {}", name, pc, stack_map_details_string)
             }
             Data::Allocate {
@@ -160,7 +178,7 @@ impl Data {
                 format!("{}: {} {}", file_name, tokens, token_line_column_map)
             }
             Data::Ir {
-                function_pointer,
+                function_pointer: _,
                 file_name,
                 instructions,
                 token_range_to_ir_range,
@@ -173,10 +191,13 @@ impl Data {
                     })
                     .collect::<Vec<String>>()
                     .join(" ");
-                format!("{}: {} {}", file_name, instructions, token_range_to_ir_range)
+                format!(
+                    "{}: {} {}",
+                    file_name, instructions, token_range_to_ir_range
+                )
             }
             Data::Arm {
-                function_pointer,
+                function_pointer: _,
                 file_name,
                 instructions,
                 ir_to_machine_code_range,
@@ -184,12 +205,13 @@ impl Data {
                 let instructions = instructions.join(" ");
                 let ir_to_machine_code_range = ir_to_machine_code_range
                     .iter()
-                    .map(|(ir, (start, end))| {
-                        format!("{}:{}-{}", ir, start, end)
-                    })
+                    .map(|(ir, (start, end))| format!("{}:{}-{}", ir, start, end))
                     .collect::<Vec<String>>()
                     .join(" ");
-                format!("{}: {} {}", file_name, instructions, ir_to_machine_code_range)
+                format!(
+                    "{}: {} {}",
+                    file_name, instructions, ir_to_machine_code_range
+                )
             }
         }
     }
@@ -260,6 +282,7 @@ impl App for Frontend {
                             self.is_continuing = true;
                             self.should_step = false;
                             self.should_step_hyper = false;
+                            self.step_over();
                             self.state
                                 .process
                                 .process
@@ -354,9 +377,17 @@ impl Frontend {
                 let _was_debugger_info = self.state.check_debugger_info(&thread, &process, true);
                 let pc_before = thread.selected_frame().pc();
 
-                let current_instruction = self.state.disasm.disasm_values.iter().find(|x| x.address == pc_before);
-                let step_over = if current_instruction.map(|x| format!("{} {}", x.instruction, x.arguments.join(" "))) == Some("mov x29 sp".to_string()) {
-                    false    
+                let current_instruction = self
+                    .state
+                    .disasm
+                    .disasm_values
+                    .iter()
+                    .find(|x| x.address == pc_before);
+                let step_over = if current_instruction
+                    .map(|x| format!("{} {}", x.instruction, x.arguments.join(" ")))
+                    == Some("mov x29 sp".to_string())
+                {
+                    false
                 } else {
                     true
                 };
@@ -426,15 +457,13 @@ fn get_initial_state(websocket_sender: std::sync::mpsc::Sender<Message>) -> Stat
             heap_pointers: vec![],
         },
         websocket_sender,
+        breakpoint_mapper: BreakpointMapper::new(),
     }
 }
 
 fn main() {
-
-
-    let (websocket_sender, wait_for_client) = websocket::start_websocket_thread().unwrap();
+    let (websocket_sender, _wait_for_client) = websocket::start_websocket_thread().unwrap();
     // wait_for_client.recv().unwrap();
-
 
     let mut frontend = Frontend {
         should_step: false,
@@ -442,7 +471,16 @@ fn main() {
         is_continuing: false,
         state: get_initial_state(websocket_sender),
     };
-    frontend.create_window("Debug", Options { vsync: false, width: 2400, height: 1800, title: "Debugger".to_string(), position: (0, 0)});
+    frontend.create_window(
+        "Debug",
+        Options {
+            vsync: false,
+            width: 2400,
+            height: 1800,
+            title: "Debugger".to_string(),
+            position: (0, 0),
+        },
+    );
 }
 
 // Stolen from compiler
@@ -461,7 +499,6 @@ pub enum BuiltInTypes {
 }
 
 impl BuiltInTypes {
-
     pub fn null_value() -> isize {
         0b111
     }
@@ -491,8 +528,6 @@ impl BuiltInTypes {
     pub fn untag(pointer: usize) -> usize {
         pointer >> 3
     }
-
-    
 
     pub fn get_kind(pointer: usize) -> Self {
         if pointer == Self::null_value() as usize {
@@ -545,7 +580,7 @@ impl BuiltInTypes {
     pub fn tag_size() -> i32 {
         3
     }
-    
+
     pub fn is_heap_pointer(value: usize) -> bool {
         match BuiltInTypes::get_kind(value) {
             BuiltInTypes::Int => false,
@@ -639,6 +674,33 @@ fn convert_to_u64_array(input: &[u8; 512]) -> Vec<u64> {
 
 impl State {
     fn update_process_state(&mut self, is_stepping: bool) {
+        // TODO: remove this and let the websocket set the breakpoints
+        for ((_, _), address) in self
+            .breakpoint_mapper
+            .file_line_to_address
+            .iter()
+            .filter(|x| {
+                x.0.0 == "/Users/jimmyhmiller/Documents/Code/beagle/target/debug/resources/register_allocation_test.bg"
+            })
+        {
+            // print address as hex
+            self.labels.insert(
+                *address as usize,
+                Label {
+                    label: "breakpoint".to_string(),
+                    function_pointer: 0,
+                    label_index: 0,
+                    label_location: 0,
+                },
+            );
+            let breakpoint = self
+                .process
+                .target
+                .as_mut()
+                .unwrap()
+                .breakpoint_create_by_address(*address);
+            breakpoint.set_enabled(true);
+        }
         if let (Some(process), Some(target)) =
             (self.process.process.clone(), self.process.target.clone())
         {
@@ -646,7 +708,6 @@ impl State {
                 return;
             }
 
-           
             loop {
                 let mut all_false = true;
                 for thread in process.threads() {
@@ -677,8 +738,12 @@ impl State {
 
                 // make sure the address 8 instructions ahead exists in disasm
                 let n = 30;
-                let n_ahead = self.disasm.disasm_values.iter().find(|x| x.address == self.pc + n * 4).is_some();
-
+                let n_ahead = self
+                    .disasm
+                    .disasm_values
+                    .iter()
+                    .find(|x| x.address == self.pc + n * 4)
+                    .is_some();
 
                 self.sp = frame.sp();
                 self.fp = frame.fp();
@@ -730,24 +795,28 @@ impl State {
                             register.children().for_each(|child| {
                                 if let Some(child_name) = child.name() {
                                     if child_name.contains("x")
-                                    || child_name == "pc"
-                                    || child_name == "sp"
-                                    || child_name == "fp"
-                                {
-                                    self.registers.registers.push(Register {
-                                        name: child_name.to_string(),
-                                        value: Value::String(child.value().unwrap_or("no-value").to_string()),
-                                        kind: BuiltInTypes::get_kind(
-                                            usize::from_str_radix(
-                                                child.value().unwrap_or("no-value").trim_start_matches("0x"),
-                                                16,
-                                            )
-                                            .unwrap(),
-                                        ),
-                                    });
+                                        || child_name == "pc"
+                                        || child_name == "sp"
+                                        || child_name == "fp"
+                                    {
+                                        self.registers.registers.push(Register {
+                                            name: child_name.to_string(),
+                                            value: Value::String(
+                                                child.value().unwrap_or("no-value").to_string(),
+                                            ),
+                                            kind: BuiltInTypes::get_kind(
+                                                usize::from_str_radix(
+                                                    child
+                                                        .value()
+                                                        .unwrap_or("no-value")
+                                                        .trim_start_matches("0x"),
+                                                    16,
+                                                )
+                                                .unwrap(),
+                                            ),
+                                        });
+                                    }
                                 }
-                                }
-                                
                             })
                         };
                     }
@@ -776,23 +845,33 @@ impl State {
                 continue;
             }
             self.disasm.disasm_values.push(instruction);
-            self.disasm.disasm_values.sort_by(|a, b| a.address.cmp(&b.address));
+            self.disasm
+                .disasm_values
+                .sort_by(|a, b| a.address.cmp(&b.address));
         }
     }
-    
+
     fn check_debugger_info(
         &mut self,
         thread: &lldb::SBThread,
         process: &SBProcess,
         is_stepping: bool,
     ) -> bool {
-        let function_name = thread.selected_frame().function_name().unwrap_or("").to_string();
+        let function_name = thread
+            .selected_frame()
+            .function_name()
+            .unwrap_or("")
+            .to_string();
         if function_name.contains("black_box") {
             thread.step_instruction(false).unwrap();
             thread.step_instruction(false).unwrap();
         }
 
-        let function_name = thread.selected_frame().function_name().unwrap_or("").to_string();
+        let function_name = thread
+            .selected_frame()
+            .function_name()
+            .unwrap_or("")
+            .to_string();
         if function_name == "debugger_info" {
             let x0 = thread
                 .selected_frame()
@@ -809,9 +888,16 @@ impl State {
             process.read_memory(x0 as u64, &mut buffer);
             let message = Message::from_binary(&buffer);
             self.websocket_sender.send(message.clone()).unwrap();
+            self.breakpoint_mapper.process_message(&message);
             match message.data.clone() {
-                Data::ForeignFunction { name, pointer } => {}
-                Data::BuiltinFunction { name, pointer } => {}
+                Data::ForeignFunction {
+                    name: _,
+                    pointer: _,
+                } => {}
+                Data::BuiltinFunction {
+                    name: _,
+                    pointer: _,
+                } => {}
                 Data::Label {
                     label,
                     function_pointer,
@@ -831,62 +917,70 @@ impl State {
                 Data::HeapSegmentPointer { pointer } => {
                     self.heap.heap_pointers.push(pointer);
                 }
-                Data::UserFunction { name, pointer, len } => {
+                Data::UserFunction {
+                    name,
+                    pointer,
+                    len,
+                    number_of_arguments,
+                } => {
                     self.process
                         .target
                         .as_mut()
                         .unwrap()
                         .breakpoint_create_by_address(pointer as u64);
-                    
 
-                    if let (Some(process), Some(target)) =
-                        (self.process.process.clone(), self.process.target.clone())
-                    {
-                        let frame = thread.selected_frame();
-                        let instructions = process.get_instructions(&frame, &target);
-                        // self.process_instructions(instructions, target);
-                    }
-
+                    // if let (Some(process), Some(target)) =
+                    //     (self.process.process.clone(), self.process.target.clone())
+                    // {
+                    //     // let frame = thread.selected_frame();
+                    //     // let instructions = process.get_instructions(&frame, &target);
+                    //     // self.process_instructions(instructions, target);
+                    // }
 
                     self.functions.insert(
                         pointer,
                         Function::User {
                             name,
                             address_range: (pointer, pointer + len),
+                            number_of_arguments,
                         },
                     );
                 }
-                Data::StackMap { pc, name, stack_map } => {
+                Data::StackMap {
+                    pc: _,
+                    name: _,
+                    stack_map: _,
+                } => {
                     // TODO: do something here
                     // println!("{}", message.data.to_string());
                 }
                 Data::Allocate {
-                    bytes,
-                    stack_pointer,
-                    kind,
+                    bytes: _,
+                    stack_pointer: _,
+                    kind: _,
                 } => {
                     // println!("{}", message.data.to_string());
                 }
                 Data::Tokens {
-                    file_name,
-                    tokens,
-                    token_line_column_map,
+                    file_name: _,
+                    tokens: _,
+                    token_line_column_map: _,
                 } => {
                     // println!("{}", message.data.to_string());
                 }
                 Data::Ir {
-                    function_pointer,
-                    file_name,
-                    instructions,
-                    token_range_to_ir_range,
+                    function_pointer: _,
+                    file_name: _,
+                    instructions: _,
+                    token_range_to_ir_range: _,
                 } => {
                     // println!("{}", message.data.to_string());
                 }
                 Data::Arm {
-                    function_pointer,
-                    file_name,
-                    instructions,
-                    ir_to_machine_code_range,
+                    function_pointer: _,
+                    file_name: _,
+                    instructions: _,
+                    ir_to_machine_code_range: _,
                 } => {
                     // println!("{}", message.data.to_string());
                 }
@@ -922,6 +1016,7 @@ struct Stack {
     stack: Vec<Memory>,
 }
 
+#[allow(unused)]
 enum Function {
     Foreign {
         name: String,
@@ -934,6 +1029,7 @@ enum Function {
     User {
         name: String,
         address_range: (usize, usize),
+        number_of_arguments: usize,
     },
 }
 
@@ -945,6 +1041,7 @@ impl Function {
             Function::User {
                 name,
                 address_range: _,
+                number_of_arguments: _,
             } => name.to_string(),
         }
     }
@@ -970,6 +1067,7 @@ struct State {
     labels: HashMap<Address, Label>,
     heap: Heap,
     websocket_sender: std::sync::mpsc::Sender<Message>,
+    breakpoint_mapper: BreakpointMapper,
 }
 
 #[derive(Debug)]
@@ -1023,6 +1121,7 @@ struct Layout {
     child_spacing: f32,
 }
 
+#[allow(unused)]
 impl Layout {
     fn with_margin(self, margin: f32) -> Self {
         Self { margin, ..self }
@@ -1109,7 +1208,7 @@ impl Paragraph {
         let mut builder = ParagraphBuilder::new(&paragraph_style, &font_collection);
         builder.push_style(&text_style);
         builder.add_text(&self.text);
-        let mut paragraph = builder.build();
+        let paragraph = builder.build();
         paragraph
     }
 }
@@ -1181,10 +1280,11 @@ fn lines(lines: &Vec<String>) -> impl Node {
     root
 }
 
+#[allow(unused)]
 struct Empty {}
 
 impl Node for Empty {
-    fn draw(&self, canvas: &skia_safe::Canvas) {}
+    fn draw(&self, _canvas: &skia_safe::Canvas) {}
     fn height(&self) -> f32 {
         0.0
     }
@@ -1193,6 +1293,7 @@ impl Node for Empty {
     }
 }
 
+#[allow(unused)]
 fn empty() -> impl Node {
     Empty {}
 }
@@ -1318,15 +1419,32 @@ fn stack(state: &State) -> impl Node {
 
 fn current_function(state: &State) -> impl Node {
     let mut root = Root::new(horizontal());
-    let mut function_name = Paragraph::new("No function");
+    let mut function_name = "No Function".to_string();
+    let function_look_up = state.breakpoint_mapper.file_line_by_address(state.pc);
+    let mut file_line = None;
+    if let Some((file, line)) = function_look_up {
+        // file is a path and we want the last segment
+        let file = file.split('/').last().unwrap();
+        file_line = Some((file.to_string(), line));
+    }
     for function in state.functions.values() {
-        if let Function::User { name, address_range } = function {
+        if let Function::User {
+            name,
+            address_range,
+            number_of_arguments: _,
+        } = function
+        {
             if state.pc as usize >= address_range.0 && state.pc as usize <= address_range.1 {
-                function_name = Paragraph::new(name);
+                function_name = name.clone();
             }
         }
     }
-    root.add(function_name);
+    let result = if let Some((file, file_line)) = file_line {
+        format!("{}:{} {}", file, file_line, function_name)
+    } else {
+        format!("{}", function_name)
+    };
+    root.add(Paragraph::new(&result));
     root
 }
 
@@ -1348,6 +1466,7 @@ fn debug(state: &State) -> impl Node {
     outer
 }
 
+#[allow(unused)]
 fn meta(state: &State) -> impl Node {
     lines(
         &state
@@ -1369,7 +1488,7 @@ impl FrameExentions for SBFrame {
                 return Some(register);
             }
             for child in register.children().into_iter() {
-                if matches!(child.name(), Some(n) if n == name){
+                if matches!(child.name(), Some(n) if n == name) {
                     return Some(child);
                 }
             }
@@ -1417,7 +1536,7 @@ impl ProcessExtensions for SBProcess {
     fn read_memory(&self, address: u64, buffer: &mut [u8]) -> usize {
         let ptr: *mut c_void = buffer.as_mut_ptr() as *mut c_void;
         let count = buffer.len();
-        let mut error = SBError::default();
+        let error = SBError::default();
         unsafe { lldb_sys::SBProcessReadMemory(self.raw, address, ptr, count, error.raw) }
     }
     fn get_instructions(&self, frame: &SBFrame, target: &SBTarget) -> SBInstructionList {
@@ -1448,11 +1567,11 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
     let debugger = SBDebugger::create(false);
     debugger.set_asynchronous(false);
 
-    if let Some(target) = debugger.create_target_simple(
-        "/Users/jimmyhmiller/Documents/Code/beagle/target/debug/main",
-    ) {
+    if let Some(target) =
+        debugger.create_target_simple("/Users/jimmyhmiller/Documents/Code/beagle/target/debug/main")
+    {
         let symbol_list = target.find_functions("debugger_info", 2);
-        let symbol = symbol_list.into_iter().next().unwrap();
+        let _ = symbol_list.into_iter().next().unwrap();
         let breakpoint = target
             .create_breakpoint_by_name("debugger_info", "main")
             .unwrap();
@@ -1462,7 +1581,10 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         // TODO: Make all of this better
         // and configurable at runtime
         let launchinfo = SBLaunchInfo::new();
-        launchinfo.set_arguments(vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/lldb_wrapper.bg"], false);
+        launchinfo.set_arguments(
+            vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/many_args_test.bg"],
+            false,
+        );
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);
         match target.launch(launchinfo) {
             Ok(process) => Some((target, process)),

@@ -205,6 +205,7 @@ impl State {
                             name,
                             pointer,
                             len,
+                            number_of_arguments,
                         } => {
                             self.add_function(FunctionInfo {
                                 name,
