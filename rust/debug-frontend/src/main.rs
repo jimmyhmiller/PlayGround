@@ -675,32 +675,6 @@ fn convert_to_u64_array(input: &[u8; 512]) -> Vec<u64> {
 impl State {
     fn update_process_state(&mut self, is_stepping: bool) {
         // TODO: remove this and let the websocket set the breakpoints
-        for ((_, _), address) in self
-            .breakpoint_mapper
-            .file_line_to_address
-            .iter()
-            .filter(|x| {
-                x.0.0 == "/Users/jimmyhmiller/Documents/Code/beagle/target/debug/resources/register_allocation_test.bg"
-            })
-        {
-            // print address as hex
-            self.labels.insert(
-                *address as usize,
-                Label {
-                    label: "breakpoint".to_string(),
-                    function_pointer: 0,
-                    label_index: 0,
-                    label_location: 0,
-                },
-            );
-            let breakpoint = self
-                .process
-                .target
-                .as_mut()
-                .unwrap()
-                .breakpoint_create_by_address(*address);
-            breakpoint.set_enabled(true);
-        }
         if let (Some(process), Some(target)) =
             (self.process.process.clone(), self.process.target.clone())
         {
@@ -711,6 +685,7 @@ impl State {
             loop {
                 let mut all_false = true;
                 for thread in process.threads() {
+                    println!("{:?}", thread.stop_reason());
                     let result = self.check_debugger_info(&thread, &process, is_stepping);
                     all_false = all_false && !result;
                 }
@@ -889,6 +864,33 @@ impl State {
             let message = Message::from_binary(&buffer);
             self.websocket_sender.send(message.clone()).unwrap();
             self.breakpoint_mapper.process_message(&message);
+            // TODO: Do better
+            for ((_, _), address) in self
+                .breakpoint_mapper
+                .file_line_to_address
+                .iter()
+                .filter(|x| {
+                    x.0.0 == "/Users/jimmyhmiller/Documents/Code/beagle/target/debug/resources/register_allocation_test.bg"
+                })
+                {
+                    // print address as hex
+                    self.labels.insert(
+                        *address as usize,
+                        Label {
+                            label: "breakpoint".to_string(),
+                            function_pointer: 0,
+                            label_index: 0,
+                            label_location: 0,
+                        },
+                    );
+                    let breakpoint = self
+                        .process
+                        .target
+                        .as_mut()
+                        .unwrap()
+                        .breakpoint_create_by_address(*address);
+                    breakpoint.set_enabled(true);
+                }
             match message.data.clone() {
                 Data::ForeignFunction {
                     name: _,
@@ -1570,19 +1572,22 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
     if let Some(target) =
         debugger.create_target_simple("/Users/jimmyhmiller/Documents/Code/beagle/target/debug/main")
     {
-        let symbol_list = target.find_functions("debugger_info", 2);
-        let _ = symbol_list.into_iter().next().unwrap();
+        // let symbol_list = target.find_functions("debugger_info", 2);
+        // let _ = symbol_list.into_iter().next().unwrap();
         let breakpoint = target
             .create_breakpoint_by_name("debugger_info", "main")
             .unwrap();
         breakpoint.set_enabled(true);
         target.enable_all_breakpoints();
+        target.breakpoints().for_each(|breakpoint| {
+            println!("{:?}", breakpoint);
+        });
 
         // TODO: Make all of this better
         // and configurable at runtime
         let launchinfo = SBLaunchInfo::new();
         launchinfo.set_arguments(
-            vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/many_args_test.bg"],
+            vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/slow_json_parser.bg"],
             false,
         );
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);
