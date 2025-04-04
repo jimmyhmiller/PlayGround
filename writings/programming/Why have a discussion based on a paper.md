@@ -14,9 +14,11 @@ I actually can't remember exactly what I read that made me start questioning tho
 
 ## Being Explicit
 
-Because Fatal Flaws turned my indoctrinated belief from vague ideas into explicit statements of "facts", I was able to be convinced that I was wrong. I believe that for many in programming beliefs, we are all in the state I once was with respect evolution. We are stuck. Now let me be clear. I don't mean we believe nonsense like creationism. I mean that we are in state where we couldn't even change our mind, because our beliefs haven't been made explicit.
+Because Fatal Flaws turned my indoctrinated belief from vague ideas into explicit statements of "facts", I was able to be convinced that I was wrong. I believe that for many of us, when it comes to programming beliefs, we are stuck in the state I once was with respect evolution before I read Fatal Flaws. Not that we believe some nonsense like creationism. But that our beliefs are held for implicit, rather than explicit reasons. That if we happen to have good, true, belief, we have it by accident. Beliefs that form in this implicit manner are hard to shake.
 
-What is at the root of the disagreement around static and dynamic types? Why do some people deeply believe in the 10x programmer and others deeply believe they don't exist? Why does the idea of visual programming cause some many disgust while others delight? There are countless beliefs for which we cannot move until, we make our beliefs explicit.
+What is at the root of the disagreement around static and dynamic types? Why do some people deeply believe in the 10x programmer and others deeply believe they don't exist? Why does the idea of visual programming cause some many disgust while others delight? There are countless beliefs from which we cannot move until we make our beliefs explicit.
+
+// TODO Rewrite this section
 
 I believe this is the fundamental role the paper plays in our discussion. The paper is the artifact, that by its objective nature, let's us be explicit. When you have a freeform discussion (especially with three or more people), it is very easy to stay with generalizations. Being vague is a wonderful defense mechanism. It is hard to be wrong when you are vague. It is easy to defend your position when you don't need to state it clearly. The paper is the means by which we break these tendencies.
 

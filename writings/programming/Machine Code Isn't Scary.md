@@ -1,6 +1,6 @@
 # Machine Code Isn't Scary
 
-The first programming language I ever learned was ActionScript. Writing code for Macromedia's flash might be the furthest away from "Bare Metal" as you can possibly get. As I continued learning new languages, this starting heritage stuck with me. I was mostly interested in high level, "web languages". Low level languages felt impenetrable. Over time, I learned a bit more about them here and there, but for some reason this notion stuck with me. Low level things are scary and Machine Code epitomized that most directly. When I google things asking about writing in straight machine code, I was met with discouraging messages rather than learning. 
+The first programming language I ever learned was ActionScript. Writing code for Macromedia's flash might be the furthest away from "Bare Metal" as you can possibly get. As I continued learning new languages, this starting heritage stuck with me. I was mostly interested in high level, "web languages". Low level languages felt impenetrable. Over time, I learned a bit more about them here and there, but for some reason this notion stuck with me. Low level things are scary and Machine Code epitomized that most directly. When I googled things asking about writing in straight machine code, I was met with discouraging messages rather than learning. 
 
 Eventually, I decided I needed to overcome this belief if I was going to achieve my goals. In doing so, I learned something I didn't expect.
 
