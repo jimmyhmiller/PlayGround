@@ -1587,7 +1587,7 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         // and configurable at runtime
         let launchinfo = SBLaunchInfo::new();
         launchinfo.set_arguments(
-            vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/slow_json_parser.bg"],
+            vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/binary_tree_benchmark.bg"],
             false,
         );
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);
