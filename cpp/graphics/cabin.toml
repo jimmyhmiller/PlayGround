@@ -1,0 +1,21 @@
+[package]
+name = "graphics"
+version = "0.1.0"
+authors = ["Jimmy Miller <jimmyhmiller@gmail.com>"]
+edition = "20"
+
+[profile]
+ldflags = [
+    "-framework", "Metal",
+    "-framework", "MetalKit",
+    "-framework", "AppKit",
+    "-framework", "Foundation",
+    "-framework", "QuartzCore",
+    "-fmodules"
+]
+
+[dependencies]
+raylib = {version = "5.5", system = true}
+
+
+
