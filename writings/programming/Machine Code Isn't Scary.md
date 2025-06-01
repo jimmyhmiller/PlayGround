@@ -8,7 +8,7 @@ Eventually, I decided I needed to overcome this belief if I was going to achieve
 
 ### Which Machine Code?
 
-One problem with machine code is that there isn't simply one standard. There are many different "instruction sets" depending on the processor. Most modern PCs use x86-64 machine code, but newer Macs, Raspberry Pis and most mobile devices use Arm. There are other architectures out there especially as you go back in time. The goal for this article won't be to give you a deep understanding of all any particular instructions set, but instead give you enough information about how machine code typically works so you to can be not afraid of machine code. So we will start by having our examples be in Arm 64 bit (also written as aarch64). Once we have a decent understanding of that, we will talk a bit about x86-64.
+One problem with machine code is that there isn't simply one standard. There are many different "instruction sets" depending on the processor. Most modern PCs use x86-64 machine code, but newer Macs, Raspberry Pis and most mobile devices use Arm. There are other architectures out there especially as you go back in time. The goal for this article won't be to give you a deep understanding of all any particular instructions set, but instead give you enough information about how machine code typically works so you to can be not afraid of machine code. So we will start by having our examples be in Arm 64-bit (also written as aarch64). Once we have a decent understanding of that, we will talk a bit about x86-64.
 
 ## Machine Code Basics
 
@@ -80,7 +80,7 @@ Here is an example of the instruction `add immediate`.
    </tbody>
 </table>
 
-Now this might look a bit confusing, but once you've seen these tables long enough, they start to be fairly straight forward. Each column in this table represents a single bit in a 32-bit number. If the value is a 0 or 1 that just means it is already filled in. If it is a word, it is variable that needs to be filled in. `sf` tells us whether the registers we are going to use are 64-bit or 32-bit registers (more on that later). `sh` stands for shift. `sh` goes in conjunction with imm12 which stands for a 12-bit immediate (constant).  So if we want to add `42` to something we would put `000000101010` in for `imm12` and set sh to 0 (meaning we aren't shifting the number). But what if we want to represent a number larger than 12 bits, well, this add instruction doesn't let us represent all such numbers but `sh` set to 1 lets us shift our number by 12. So if we want to represent `172032` we leave our 42 alone, but set `sh` to 1. Finally we get to Rn and Rd. R variables mean that these are registers. Rn is our argument to add and Rd is our destination.
+Now this might look a bit confusing, but once you've seen these tables long enough, they start to be fairly straight forward. Each column in this table represents a single bit in a 32-bit number. If the value is a 0 or 1 that just means it is already filled in. If it has a label, it is variable that needs to be filled in. `sf` tells us whether the registers we are going to use are 64-bit or 32-bit registers. `sh` stands for shift. `sh` goes in conjunction with imm12 which stands for a 12-bit immediate (constant).  So if we want to add `42` to something we would put `000000101010` in for `imm12` and set sh to 0 (meaning we aren't shifting the number). But what if we want to represent a number larger than 12 bits, well, this add instruction doesn't let us represent all such numbers but `sh` set to 1 lets us shift our number by 12. So if we want to represent `172032` we leave our 42 alone, but set `sh` to 1. Finally we get to Rn and Rd. R variables mean that these are registers. Rn is our argument to add and Rd is our destination.
 
 So the above instruction can be thought of like this:
 
@@ -148,7 +148,7 @@ Registers are small places to store values. Every instruction set will have a di
       </tr>
    </tbody>
 </table>
-To encode our registers into our instruction, we just use their number. So register X0 would be 00000 and register X18 would be `10010`. Registers are simply places we can store values. But by convention different registers can be used for different things, in a little bit we explore this concept in more detail. For right now just consider all registers to be more or less the same. 
+To encode our registers into our instruction, we just use their number. So register X0 would be 00000 and register X18 would be `10010`. Registers are simply places we can store values. But by convention different registers can be used for different things. These are called calling conventions and they are how "higher" level languages like C encode function calls.
 
 Writing out all these binary numbers all the time (or even converting them to hex) can often be tedious. So instead we usually talk about instructions in a simple text format called assembly.
 
@@ -217,7 +217,7 @@ The last piece we have to understand for machine code is memory. To understand w
       </tr>
    </tbody>
 </table>
-Using this instruction, we are going to store some value (RT) into the address (RN) + some offset (imm12). So if we think about memory as a big array, this instruction is like writing into that array. `array[offset] = value`. The x here is like our sf before, it controls whether we are using 64bit values or not. If we want to make this concrete, let's say we have a value in X2, we have an address of memory in X1 and we want to store a value 2 bytes offset from that. We would get this structure:
+Using this instruction, we are going to store some value (RT) into the address (RN) + some offset (imm12). So if we think about memory as a big array, this instruction is like writing into that array. `array[offset] = value`. The x here is like our sf before, it controls whether we are using 64-bit values or not. If we want to make this concrete, let's say we have a value in X2, we have an address of memory in X1 and we want to store a value 2 bytes offset from that. We would get this structure:
 
 <table>
    <thead>
@@ -271,7 +271,7 @@ Using this instruction, we are going to store some value (RT) into the address (
       </tr>
    </tbody>
 </table>
-And of course since writing that all out is tedious, in assembly notion we instead say this.
+And of course since writing that all out is tedious, in assembly notion we instead say this. Here, our destination is second. We are storing the value in x2 based on the address stored in x1.
 
 ```assembly
 str x2, [x1, #0x2]
@@ -292,9 +292,7 @@ X86 encoding is a bit different, but more or less has the same parts. We are sti
   </tr>
 </table>
 
-The first part is called the REX. This is a prefix that we can use to help us with 64 bit operations. Not sure if there is a offical justification for the name REX, but my understanding is that it is the "Register Extension Prefix". Unfortunately, why the REX is a prefix, it only makes sense with what comes later. REX is a backwards compatability hack. The W in rex let's us signal that we are using 64 bit or not for certain operations. The R, B and X will "extend" our registers in certain operations. In otherwords, we can access more registers than you used to be able to (These are those r8-r15 registers with the different naming convention). 
-
-If this seems confusing, don't worry, it is in fact confusing. We will get back to it though in a second when we look at one more structure.
+The first part is called the REX. This is a prefix that we can use to help us with 64-bit operations. Not sure if there is a offical justification for the name REX, but my understanding is that it is the "Register Extension Prefix". Unfortunately, because the REX is a prefix, it will only make sense when we see what comes later. REX is a backwards compatability hack. The W in rex let's us signal that we are using 64-bit or not for certain operations. The R, B and X will "extend" our registers in certain operations. In otherwords, we can access more registers than you used to be able to (These are those r8-r15 registers with the different naming convention). We need these because before 64-bit x86, we had fewer registers and our instructions only had 3-bits to refer to them. With 16 registers, we need an extra bit.
 
 ### ModR/M
 
@@ -327,7 +325,7 @@ Op code is simple, it just a number. It can be 1-3 bytes long.
 
 ## Putting It Together
 
-There are other parts, but now with these parts, we can build up an instruction. Let's say we want to move a 64 bit number to a 64 bit register. We can consult [a table of instruction encodings](https://www.felixcloutier.com/x86/mov) and we will get this:
+There are other parts, but we won't cover them here. With just these parts, we can build up an instruction. Let's say we want to move a 32 bit number to a 64 bit register. We can consult [a table of instruction encodings](https://www.felixcloutier.com/x86/mov) and we will get this:
 
 ```
 REX.W + C7 /0 id
@@ -349,4 +347,6 @@ Why is RBX 011? Well, because [the table](https://wiki.osdev.org/X86-64_Instruct
 
 ## The Rest of It
 
-I won't pretend that this is all you need. But I will say that starting here can get you further than you think. There are some other things to learn, like various flags for things like overflow, there's also calling conventions, which is just which registers you use when for things like function calls. We haven't really talked about the stack here, but that's just memory that you write to to keep track of things. Once you've gotten the basics, you can hop on [compiler explorer](https://godbolt.org/) put in some simple code and try to figure out what it is doing.
+I won't pretend that this is all you need. But I will say that starting here can get you further than you think. There are some other things to learn, like various flags for things like overflow, there's also calling conventions, which is just which registers you use when for things like function calls. We haven't really talked about the stack here, but that's just memory that you write to to keep track of things. We haven't talked about jumps, how to encode larger immediates in arm. But you've gotten the basics, it's easier than you would think to hop on [compiler explorer](https://godbolt.org/) and learn how things are done.
+
+Learning machine code and writing things at this low-level has unlocked so many things that were mental blocks for me before. Relying on libraries made by others to do these low-level things always left a gap in my knowledge that made me doubt my understanding. Even if I intellectually could explain things, actually doing has made a huge difference for me. So if you, like me, find low-level things intimidating, I can't recommend enough starting from scratch, at the lowest level you can.
