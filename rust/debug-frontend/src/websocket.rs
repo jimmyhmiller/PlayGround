@@ -13,11 +13,16 @@ pub fn start_websocket_thread() -> Result<(Sender<Message>, Receiver<()>), Box<d
     Ok((sender, output_receiver))
 }
     
-fn handler(receiver: Receiver<Message>, output_sender: Sender<()>) -> ! {
+fn handler(receiver: Receiver<Message>, output_sender: Sender<()>) {
     let mut any_client_has_connected = false;
-    // listen for WebSockets on port 8080:
-    let event_hub = simple_websockets::launch(3030)
-        .expect("failed to listen on port 3030");
+    // attempt to listen for WebSockets on port 3030
+    let event_hub = match simple_websockets::launch(3030) {
+        Ok(hub) => hub,
+        Err(e) => {
+            eprintln!("Failed to listen on websocket port 3030: {:?}", e);
+            return; // exit thread gracefully
+        }
+    };
     // map between client ids and the client's `Responder`:
     let mut clients: HashMap<u64, Responder> = HashMap::new();
     
