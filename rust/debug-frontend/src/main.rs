@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    env,
     ffi::{c_void, CString},
 };
 
@@ -10,6 +11,7 @@ use lldb::{
 };
 use lldb_sys::{RunMode, SBTargetBreakpointCreateByName, SBValueGetValueAsUnsigned2};
 use mapping::BreakpointMapper;
+use regex::Regex;
 use skia_safe::{
     paint,
     textlayout::{FontCollection, ParagraphBuilder, ParagraphStyle, TextStyle},
@@ -41,6 +43,7 @@ impl Message {
 
 #[derive(Debug, Encode, Decode, Clone)]
 pub struct StackMapDetails {
+    pub function_name: Option<String>,
     pub number_of_locals: usize,
     pub current_stack_size: usize,
     pub max_stack_size: usize,
@@ -242,7 +245,7 @@ struct Frontend {
 #[allow(unused_variables)]
 impl App for Frontend {
     fn on_window_create(&mut self, event_loop_proxy: EventLoopProxy<()>, size: skia_window::Size) {
-        if let Some((target, process)) = start_process() {
+        if let Some((target, process)) = start_process(&self.state.beagle_program_path) {
             self.state.process.process = Some(process);
             self.state.process.target = Some(target);
         }
@@ -294,8 +297,10 @@ impl App for Frontend {
                         PhysicalKey::Code(KeyCode::KeyR) => {
                             if let Some(process) = &self.state.process.process {
                                 process.kill().unwrap();
-                                self.state = get_initial_state(self.state.websocket_sender.clone());
-                                if let Some((target, process)) = start_process() {
+                                let beagle_program_path = self.state.beagle_program_path.clone();
+                                let function_regex = self.state.function_regex.clone();
+                                self.state = get_initial_state(self.state.websocket_sender.clone(), beagle_program_path.clone(), function_regex.clone());
+                                if let Some((target, process)) = start_process(&beagle_program_path) {
                                     self.state.process.process = Some(process);
                                     self.state.process.target = Some(target);
                                 }
@@ -419,7 +424,7 @@ impl Frontend {
     }
 }
 
-fn get_initial_state(websocket_sender: std::sync::mpsc::Sender<Message>) -> State {
+fn get_initial_state(websocket_sender: std::sync::mpsc::Sender<Message>, beagle_program_path: String, function_regex: Regex) -> State {
     State {
         disasm: Disasm {
             disasm_values: vec![],
@@ -458,18 +463,39 @@ fn get_initial_state(websocket_sender: std::sync::mpsc::Sender<Message>) -> Stat
         },
         websocket_sender,
         breakpoint_mapper: BreakpointMapper::new(),
+        beagle_program_path,
+        function_regex,
     }
 }
 
 fn main() {
-    let (websocket_sender, _wait_for_client) = websocket::start_websocket_thread().unwrap();
-    // wait_for_client.recv().unwrap();
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} <beagle_program_path> [function_regex]", args[0]);
+        std::process::exit(1);
+    }
 
+    let beagle_program_path = if args[1].starts_with('/') {
+        args[1].clone()
+    } else {
+        format!("/Users/jimmyhmiller/Documents/Code/beagle/resources/{}", args[1])
+    };
+
+    // Optional function name regex (default: match all)
+    let function_pattern = if args.len() > 2 {
+        args[2].clone()
+    } else {
+        ".*".to_string()
+    };
+    let function_regex = Regex::new(&function_pattern).unwrap();
+
+    let (websocket_sender, _wait_for_client) = websocket::start_websocket_thread().unwrap();
+    
     let mut frontend = Frontend {
         should_step: false,
         should_step_hyper: false,
         is_continuing: false,
-        state: get_initial_state(websocket_sender),
+        state: get_initial_state(websocket_sender, beagle_program_path, function_regex.clone()),
     };
     frontend.create_window(
         "Debug",
@@ -862,7 +888,7 @@ impl State {
             let mut buffer: Vec<u8> = vec![0; x1];
             process.read_memory(x0 as u64, &mut buffer);
             let message = Message::from_binary(&buffer);
-            self.websocket_sender.send(message.clone()).unwrap();
+            let _ = self.websocket_sender.send(message.clone());
             self.breakpoint_mapper.process_message(&message);
             // TODO: Do better
             for ((_, _), address) in self
@@ -925,19 +951,16 @@ impl State {
                     len,
                     number_of_arguments,
                 } => {
-                    self.process
-                        .target
-                        .as_mut()
-                        .unwrap()
-                        .breakpoint_create_by_address(pointer as u64);
-
-                    // if let (Some(process), Some(target)) =
-                    //     (self.process.process.clone(), self.process.target.clone())
-                    // {
-                    //     // let frame = thread.selected_frame();
-                    //     // let instructions = process.get_instructions(&frame, &target);
-                    //     // self.process_instructions(instructions, target);
-                    // }
+                    // Only set breakpoints for functions matching the provided regex
+                    if self.function_regex.is_match(&name) {
+                        let mut bp = self
+                            .process
+                            .target
+                            .as_mut()
+                            .unwrap()
+                            .breakpoint_create_by_address(pointer as u64);
+                        bp.set_enabled(true);
+                    }
 
                     self.functions.insert(
                         pointer,
@@ -1070,6 +1093,8 @@ struct State {
     heap: Heap,
     websocket_sender: std::sync::mpsc::Sender<Message>,
     breakpoint_mapper: BreakpointMapper,
+    beagle_program_path: String,
+    function_regex: Regex,
 }
 
 #[derive(Debug)]
@@ -1563,7 +1588,7 @@ impl ProcessExtensions for SBProcess {
     }
 }
 
-fn start_process() -> Option<(SBTarget, SBProcess)> {
+fn start_process(beagle_program_path: &str) -> Option<(SBTarget, SBProcess)> {
     SBDebugger::initialize();
 
     let debugger = SBDebugger::create(false);
@@ -1587,7 +1612,7 @@ fn start_process() -> Option<(SBTarget, SBProcess)> {
         // and configurable at runtime
         let launchinfo = SBLaunchInfo::new();
         launchinfo.set_arguments(
-            vec!["/Users/jimmyhmiller/Documents/Code/beagle/resources/binary_tree_benchmark.bg"],
+            vec![beagle_program_path],
             false,
         );
         // launchinfo.set_launch_flags(LaunchFlags::STOP_AT_ENTRY);

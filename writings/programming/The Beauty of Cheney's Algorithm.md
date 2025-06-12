@@ -12,7 +12,7 @@ Fundamentally garbage collection is trying to give the illusion that we have unl
 2. Scan memory and find which objects are dead
 3. Reuse the space the dead objects took up
 
-If we add in some details, what we have is called a mark and sweep algorithm for garbage collection. But there are some tradeoffs that we have to make here. FIrst, there is the idea of fragmentation. As we allocate more and more object, the free spaces will get spread out. In fact, we can end up with free space that is too small for any object. Secondly, in order to mark all the objects that aren't alive, we need to actually walk over all the memory and mark them as dead. This can take a long time.
+If we add in some details, what we have is called a mark and sweep algorithm for garbage collection. But there are some tradeoffs that we have to make here. FIrst, there is the idea of fragmentation. As we allocate more and more objects, the free spaces will get spread out. In fact, we can end up with free space that is too small for any object. Secondly, in order to mark all the objects that aren't alive, we need to actually walk over all the memory and mark them as dead. This can take a long time.
 
 What a semi-space collector does instead is actually rather simple. Rather than keeping objects in place, it moves those objects. Given that we know which objects are still live, we can copy those live objects over to new memory, allocating them in a nice contiguous fashion. Once everything is moved, we can throw away the old memory. This is the key to our "compacting garbage collector". But the beauty comes from how we achieve this efficiently.
 
@@ -72,40 +72,5 @@ Now that we've copied the live objects, we are left with some extra space to all
 
 ### How to Copy Objects With No Extra Space Requirements
 
-Naively, if I were writing this code, I'd do something like this
+If you start trying to write this yourself, you quickly realize one tricky requirement is to not copy things multiple times. Consider the third object in our little diagram. There are two things that point to it. This means that as we are walking our reference we will encounter this object twice and rather than copy it twice, we want to record where we copied it and make use of that reference. This means we are going to need to something to do our book keeping. Maybe this is a list we do a linear lookup or a hashmap of address to forwarding address. These options though require extra memory. This is where the beauty of Cheney's algorithm comes in. Rather than utilizing more memory to track this process, we will cleverly reuse what we already have to keep track of all our state.
 
-```rust
-fn copy_all(roots) {
-    let worklist = []
-    let forwarded = {}
-
-    for root in roots {
-        let new_ptr = forward_or_copy(root, forwarded, worklist)
-        root = new_ptr
-    }
-
-    while not worklist.is_empty() {
-        let obj = worklist.pop()
-        let count = obj.slot_count()
-        for slot in obj.slots() {
-            let new_ptr = forward_or_copy(slot, forwarded, worklist)
-            slot.set(new_ptr)
-        }
-    }
-}
-
-fn forward_or_copy(ptr, forwarded, worklist) {
-    if forwarded.contains(ptr) {
-        return forwarded[ptr]
-    }
-
-    let copy = copy_object(ptr)
-    forwarded[ptr] = copy
-    worklist.push(copy)
-    return copy
-}
-```
-
-Essentially, we keep a stack of things we need to copy and we keep a map of forwarded address. This means we need to allocate extra memory in order to garbage collect. Cheney's algorithm does the exact same process, but it requires no extra memory. Here is how:
-
-```
