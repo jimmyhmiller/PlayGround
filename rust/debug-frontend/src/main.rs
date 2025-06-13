@@ -1595,7 +1595,7 @@ fn start_process(beagle_program_path: &str) -> Option<(SBTarget, SBProcess)> {
     debugger.set_asynchronous(false);
 
     if let Some(target) =
-        debugger.create_target_simple("/Users/jimmyhmiller/Documents/Code/beagle/target/debug/main")
+        debugger.create_target_simple("/Users/jimmyhmiller/Documents/Code/beagle/target/release/main")
     {
         // let symbol_list = target.find_functions("debugger_info", 2);
         // let _ = symbol_list.into_iter().next().unwrap();
