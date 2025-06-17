@@ -1,0 +1,25 @@
+[package]
+name = "cli-tools"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "debugger-disasm"
+path = "src/disasm.rs"
+
+[[bin]]
+name = "debugger-memory"
+path = "src/memory.rs"
+
+[[bin]]
+name = "debugger-breakpoints"
+path = "src/breakpoints.rs"
+
+[[bin]]
+name = "debugger-run"
+path = "src/run.rs"
+
+[dependencies]
+debugger-frontend-claude = { path = ".." }
+clap = { version = "4.0", features = ["derive"] }
+anyhow = "1.0"
