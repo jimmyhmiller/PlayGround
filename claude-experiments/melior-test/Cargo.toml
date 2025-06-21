@@ -1,0 +1,13 @@
+[package]
+name = "melior-test"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "simple_test"
+path = "src/simple_test.rs"
+
+[dependencies]
+melior = "0.19"
+mlir-sys = "0.3"
+inkwell = { version = "0.4", features = ["llvm15-0"] }
