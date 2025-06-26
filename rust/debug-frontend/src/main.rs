@@ -711,7 +711,7 @@ impl State {
             loop {
                 let mut all_false = true;
                 for thread in process.threads() {
-                    println!("{:?}", thread.stop_reason());
+                    // println!("{:?}", thread.stop_reason());
                     let result = self.check_debugger_info(&thread, &process, is_stepping);
                     all_false = all_false && !result;
                 }
@@ -799,6 +799,7 @@ impl State {
                                         || child_name == "pc"
                                         || child_name == "sp"
                                         || child_name == "fp"
+                                        || child_name == "lr"
                                     {
                                         self.registers.registers.push(Register {
                                             name: child_name.to_string(),
@@ -1400,6 +1401,7 @@ fn registers(state: &State) -> impl Node {
     mentioned_registers.insert("pc".to_string());
     mentioned_registers.insert("sp".to_string());
     mentioned_registers.insert("fp".to_string());
+    mentioned_registers.insert("lr".to_string());
 
     lines(
         &state
