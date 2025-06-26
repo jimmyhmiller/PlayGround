@@ -1,9 +1,10 @@
 use melior::{
     dialect::{arith, func, DialectRegistry},
     ir::{
-        attribute::{IntegerAttribute, StringAttribute, TypeAttribute},
+        attribute::{IntegerAttribute, StringAttribute, TypeAttribute, DenseElementsAttribute, Attribute},
         r#type::{FunctionType, IntegerType},
-        Block, BlockLike, Location, Module, Region, RegionLike, Value,
+        operation::OperationBuilder,
+        Block, BlockLike, Location, Module, Region, RegionLike, Value, Type,
     },
     pass::{self, PassManager},
     utility::register_all_dialects,
@@ -14,11 +15,16 @@ use melior::{
 pub enum Expr {
     Number(i64),
     Add(Box<Expr>, Box<Expr>),
+    VectorAdd(Vec<i64>, Vec<i64>),
 }
 
-fn parse_simple() -> Expr {
-    // Simple hardcoded 2+2 expression
-    Expr::Add(Box::new(Expr::Number(2)), Box::new(Expr::Number(2)))
+fn parse_simple() -> Vec<Expr> {
+    vec![
+        // Scalar addition: 2+2
+        Expr::Add(Box::new(Expr::Number(2)), Box::new(Expr::Number(2))),
+        // Vector addition: [1,2,3,4] + [5,6,7,8]
+        Expr::VectorAdd(vec![1, 2, 3, 4], vec![5, 6, 7, 8]),
+    ]
 }
 
 fn compile_to_mlir(context: &MeliorContext) -> Result<Module, Box<dyn std::error::Error>> {
@@ -51,12 +57,61 @@ fn compile_to_mlir(context: &MeliorContext) -> Result<Module, Box<dyn std::error
     // Get the first block from the region
     let entry_block = region.first_block().unwrap();
 
-    // Compile expression: 2 + 2
-    let expr = parse_simple();
-    let result = compile_expr(context, &entry_block, &expr, location)?;
+    // Compile expressions
+    let exprs = parse_simple();
+    let mut last_result = None;
+    
+    for expr in &exprs {
+        let result = compile_expr(context, &entry_block, expr, location)?;
+        last_result = Some(result);
+        
+        // Print each result for demonstration
+        match expr {
+            Expr::Add(_, _) => {
+                // For scalar, just keep the result
+            }
+            Expr::VectorAdd(_, _) => {
+                // For vector, extract the first element to return as scalar using raw operation
+                let zero = entry_block
+                    .append_operation(arith::constant(
+                        context,
+                        IntegerAttribute::new(IntegerType::new(context, 64).into(), 0).into(),
+                        location,
+                    ))
+                    .result(0)?
+                    .into();
+                    
+                // Create vector.extractelement operation manually
+                let extract_op = OperationBuilder::new("vector.extractelement", location)
+                    .add_operands(&[result, zero])
+                    .add_results(&[IntegerType::new(context, 64).into()])
+                    .build()?;
+                    
+                last_result = Some(
+                    entry_block
+                        .append_operation(extract_op)
+                        .result(0)?
+                        .into()
+                );
+            }
+            _ => {}
+        }
+    }
 
-    // Return the result
-    let return_op = func::r#return(&[result], location);
+    // Return the last result (or 0 if no expressions)
+    let return_value = last_result.unwrap_or_else(|| {
+        entry_block
+            .append_operation(arith::constant(
+                context,
+                IntegerAttribute::new(i64_type, 0).into(),
+                location,
+            ))
+            .result(0)
+            .unwrap()
+            .into()
+    });
+
+    let return_op = func::r#return(&[return_value], location);
     entry_block.append_operation(return_op);
 
     // Add function to module
@@ -90,6 +145,49 @@ fn compile_expr<'c>(
                 .into();
             Ok(result)
         }
+        Expr::VectorAdd(left_vec, right_vec) => {
+            if left_vec.len() != right_vec.len() {
+                return Err("Vector length mismatch".into());
+            }
+            
+            let vector_len = left_vec.len();
+            let i64_type = IntegerType::new(context, 64).into();
+            
+            // Create vector type using raw MLIR type parsing
+            let vector_type_str = format!("vector<{}xi64>", vector_len);
+            let vector_type = Type::parse(context, &vector_type_str)
+                .ok_or("Failed to parse vector type")?;
+            
+            // Convert integer attributes to generic attributes
+            let left_elements: Vec<Attribute> = left_vec.iter()
+                .map(|&n| IntegerAttribute::new(i64_type, n).into())
+                .collect();
+            let right_elements: Vec<Attribute> = right_vec.iter()
+                .map(|&n| IntegerAttribute::new(i64_type, n).into())
+                .collect();
+            
+            let left_attr = DenseElementsAttribute::new(vector_type, &left_elements)?.into();
+            let right_attr = DenseElementsAttribute::new(vector_type, &right_elements)?.into();
+            
+            // Create vector constants
+            let left_vector = block
+                .append_operation(arith::constant(context, left_attr, location))
+                .result(0)?
+                .into();
+                
+            let right_vector = block
+                .append_operation(arith::constant(context, right_attr, location))
+                .result(0)?
+                .into();
+            
+            // Perform vector addition
+            let result = block
+                .append_operation(arith::addi(left_vector, right_vector, location))
+                .result(0)?
+                .into();
+                
+            Ok(result)
+        }
     }
 }
 
@@ -112,6 +210,7 @@ fn run_passes(
     let pass_manager = PassManager::new(context);
 
     // Add conversion passes to lower to LLVM dialect
+    pass_manager.add_pass(pass::conversion::create_vector_to_llvm());
     pass_manager.add_pass(pass::conversion::create_arith_to_llvm());
     pass_manager.add_pass(pass::conversion::create_func_to_llvm());
 
