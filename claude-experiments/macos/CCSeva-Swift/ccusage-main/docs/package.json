@@ -1,0 +1,29 @@
+{
+  "name": "@ccusage/docs",
+  "version": "15.0.0",
+  "private": true,
+  "description": "Documentation for ccusage",
+  "type": "module",
+  "scripts": {
+    "build": "bun run docs:api && ROLLDOWN_OPTIONS_VALIDATION=loose vitepress build",
+    "deploy": "wrangler deploy",
+    "dev": "bun run docs:api && ROLLDOWN_OPTIONS_VALIDATION=loose vitepress dev",
+    "docs:api": "./update-api-index.ts",
+    "preview": "vitepress preview"
+  },
+  "overrides": {
+    "vite": "npm:rolldown-vite@latest"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.17",
+    "tinyglobby": "^0.2.14",
+    "typedoc": "^0.28.5",
+    "typedoc-plugin-markdown": "^4.7.0",
+    "typedoc-vitepress-theme": "^1.1.2",
+    "vitepress": "^1.6.3",
+    "vitepress-plugin-group-icons": "^1.6.0",
+    "vitepress-plugin-llms": "^1.5.1",
+    "vitepress-plugin-mermaid": "^2.0.17",
+    "wrangler": "^4.22.0"
+  }
+}

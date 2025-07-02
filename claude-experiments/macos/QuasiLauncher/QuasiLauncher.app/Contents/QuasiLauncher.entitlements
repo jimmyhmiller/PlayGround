@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Disable App Sandbox - required for CGEventTapCreate -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+    
+    <!-- Input Monitoring permission -->
+    <key>com.apple.security.device.input-monitoring</key>
+    <true/>
+    
+    <!-- Apple Events automation -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+    
+    <!-- Temporary exception for Apple Events -->
+    <key>com.apple.security.temporary-exception.apple-events</key>
+    <array>
+        <string>com.apple.systemevents</string>
+        <string>com.apple.finder</string>
+        <string>com.apple.systempreferences</string>
+    </array>
+</dict>
+</plist>
