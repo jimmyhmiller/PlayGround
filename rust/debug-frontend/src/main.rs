@@ -485,7 +485,7 @@ fn main() {
     let function_pattern = if args.len() > 2 {
         args[2].clone()
     } else {
-        ".*".to_string()
+        "a^".to_string()
     };
     let function_regex = Regex::new(&function_pattern).unwrap();
 
@@ -756,7 +756,7 @@ impl State {
                     .iter()
                     .enumerate()
                     .map(|(i, value)| Memory {
-                        address: stack_root + (i as u64 * 8),
+                        address: stack_root.saturating_add(i as u64 * 8),
                         value: *value,
                         kind: BuiltInTypes::get_kind(*value as usize),
                     })
