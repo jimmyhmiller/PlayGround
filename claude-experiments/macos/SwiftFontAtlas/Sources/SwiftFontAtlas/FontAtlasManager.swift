@@ -26,6 +26,9 @@ public class FontAtlasManager {
     /// Calculated font metrics
     public let metrics: FontMetrics
     
+    /// Coordinate system origin
+    public let coordinateOrigin: CoordinateOrigin
+    
     /// Cell size for grid-based layouts
     public var cellSize: CGSize {
         CGSize(width: metrics.cellWidth, height: metrics.cellHeight)
@@ -36,7 +39,8 @@ public class FontAtlasManager {
     ///   - fontName: Name of the font to use
     ///   - fontSize: Size of the font in points
     ///   - atlasSize: Initial size of the atlas (default: 512)
-    public init(fontName: String, fontSize: Float, atlasSize: UInt32 = 512) throws {
+    ///   - coordinateOrigin: Coordinate system origin (default: .bottomLeft for CoreGraphics compatibility)
+    public init(fontName: String, fontSize: Float, atlasSize: UInt32 = 512, coordinateOrigin: CoordinateOrigin = .bottomLeft) throws {
         // Validate font size
         guard fontSize > 0 else {
             throw FontAtlasError.fontCreationFailed
@@ -44,6 +48,7 @@ public class FontAtlasManager {
         
         self.fontName = fontName
         self.fontSize = fontSize
+        self.coordinateOrigin = coordinateOrigin
         
         // Create CTFont with fallback
         let font: CTFont
@@ -199,11 +204,13 @@ public class FontAtlasManager {
         grayscaleAtlas.set(region: region, data: bitmapData)
         
         // Create rendered glyph
+        // Always use the raw offsetY from CoreGraphics - coordinate conversion 
+        // is handled at the rendering level for simplicity
         let glyph = RenderedGlyph(
             width: metrics.width,
             height: metrics.height,
             offsetX: metrics.offsetX,
-            offsetY: metrics.offsetY,
+            offsetY: metrics.offsetY,  // Use raw offsetY
             atlasX: region.x,
             atlasY: region.y,
             advanceX: metrics.advanceX
@@ -272,7 +279,18 @@ extension FontAtlasManager {
     /// - Returns: (x, y) coordinates where the glyph should be drawn
     public func glyphPosition(for glyph: RenderedGlyph, baselineX: CGFloat, baselineY: CGFloat) -> (x: CGFloat, y: CGFloat) {
         let x = baselineX + CGFloat(glyph.offsetX)
-        let y = baselineY + CGFloat(glyph.offsetY)
+        let y: CGFloat
+        
+        if coordinateOrigin == .topLeft {
+            // For top-left origin, offsetY is from baseline to top of glyph
+            // So we subtract it from baseline to get the top position
+            y = baselineY - CGFloat(glyph.offsetY)
+        } else {
+            // For bottom-left origin, offsetY is from baseline to bottom of glyph
+            // So we add it to baseline to get the bottom position
+            y = baselineY + CGFloat(glyph.offsetY)
+        }
+        
         return (x: x, y: y)
     }
     

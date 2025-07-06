@@ -172,58 +172,182 @@ extension FontAtlasManager {
 
 ## API Design
 
-### Simple Initialization
+### Coordinate System Support
+
+The library now supports both top-left (Metal/screen) and bottom-left (CoreGraphics) coordinate systems:
+
 ```swift
+// For Metal rendering (top-left origin)
 let fontManager = try FontAtlasManager(
-    font: "SF Mono",
-    size: 14.0,
-    atlasSize: 512
+    fontName: "SF Mono",
+    fontSize: 14.0,
+    coordinateOrigin: .topLeft
+)
+
+// For CoreGraphics (bottom-left origin) 
+let fontManager = try FontAtlasManager(
+    fontName: "SF Mono",
+    fontSize: 14.0,
+    coordinateOrigin: .bottomLeft  // default
 )
 ```
 
-### Rendering Text
+### High-Level API (Recommended)
+
+The new `TextRenderer` class provides a simple, high-level API that handles all Metal setup:
+
 ```swift
-for char in "Hello, World!" {
-    if let glyph = fontManager.renderGlyph(char) {
-        // Use glyph data for vertex generation
-        let quad = generateQuad(
-            position: cellPosition,
-            glyph: glyph,
-            cellSize: fontManager.cellSize
-        )
+// Create text renderer
+let textRenderer = try TextRenderer(
+    device: metalDevice,
+    fontName: "SF Mono",
+    fontSize: 16.0,
+    coordinateOrigin: .topLeft  // Metal coordinates
+)
+
+// In your render loop
+textRenderer.setProjectionMatrix(using: renderEncoder, viewportSize: view.bounds.size)
+
+// Draw text - one line!
+textRenderer.drawText(
+    "Hello, World!",
+    at: CGPoint(x: 20, y: 50),
+    color: simd_float4(1, 1, 1, 1),
+    using: renderEncoder
+)
+
+// Draw multiline text with alignment
+textRenderer.drawText(
+    "Line 1\nLine 2\nLine 3",
+    in: CGRect(x: 20, y: 100, width: 300, height: 100),
+    alignment: .center,
+    using: renderEncoder
+)
+
+// Draw wrapped text
+textRenderer.drawWrappedText(
+    "This is a long text that will be automatically wrapped to fit within the specified rectangle.",
+    in: CGRect(x: 20, y: 200, width: 200, height: 100),
+    wrapMode: .word,
+    alignment: .left,
+    using: renderEncoder
+)
+```
+
+### Simple Metal Integration
+
+Use the `MetalTextHelper` for even simpler setup:
+
+```swift
+// Create a text view
+let textView = MetalTextHelper.createTextView(
+    frame: view.bounds,
+    device: metalDevice
+)
+
+// Use the simple delegate
+let delegate = ExampleTextDelegate(metalKitView: textView)
+textView.delegate = delegate
+
+// Or create your own delegate
+class MyTextDelegate: MetalTextHelper.SimpleTextDelegate {
+    override var textToRender: String {
+        return "Custom text here"
+    }
+    
+    override var textPosition: CGPoint {
+        return CGPoint(x: 50, y: 100)
+    }
+    
+    override var textColor: simd_float4 {
+        return simd_float4(1, 0, 0, 1)  // Red
     }
 }
 ```
 
-### Metal Integration
+### Low-Level API (Advanced)
+
+For fine-grained control, use the FontAtlasManager directly:
+
 ```swift
-// In your Metal renderer
-let texture = fontAtlas.texture(device: metalDevice)
-if fontAtlas.needsTextureUpdate {
-    fontAtlas.updateTexture(texture)
+let fontManager = try FontAtlasManager(
+    fontName: "SF Mono",
+    fontSize: 14.0,
+    atlasSize: 512,
+    coordinateOrigin: .topLeft
+)
+
+// Render individual characters
+for char in "Hello, World!" {
+    if let glyph = fontManager.renderCharacter(char) {
+        // Use glyph data for custom vertex generation
+        let position = fontManager.glyphPosition(
+            for: glyph,
+            baselineX: currentX,
+            baselineY: baselineY
+        )
+        // Generate vertices...
+    }
 }
 
-// Pass to shader
-renderEncoder.setFragmentTexture(texture, index: 0)
+// Manual texture management
+let texture = fontManager.createManagedTexture(device: metalDevice)
+if fontManager.isModified(since: lastModCount) {
+    fontManager.updateTexture(texture)
+}
+```
+
+### Text Layout
+
+The `TextLayout` helper provides advanced text layout features:
+
+```swift
+let layout = TextLayout(fontManager: fontManager)
+
+// Layout text with word wrapping
+let lines = layout.layoutText(
+    "Long text that needs wrapping",
+    maxWidth: 300,
+    wrapMode: .word
+)
+
+// Calculate text bounds
+let bounds = layout.textBounds(
+    "Measure this text",
+    maxWidth: 200,
+    wrapMode: .character
+)
+
+// Process laid out lines
+for line in lines {
+    print("Line: \(line.text), width: \(line.width)")
+    for (char, glyph) in line.glyphs {
+        // Process each glyph
+    }
+}
 ```
 
 ## Implementation Phases
 
-### Phase 1: Core Atlas (MVP)
+### Phase 1: Core Atlas (MVP) ✅
 - [x] Study Ghostty implementation
-- [ ] Implement rectangle bin packing algorithm
-- [ ] Create FontAtlas class with basic operations
-- [ ] Add CoreText glyph rendering
-- [ ] Support ASCII characters only
-- [ ] Basic Metal texture creation
+- [x] Implement rectangle bin packing algorithm
+- [x] Create FontAtlas class with basic operations
+- [x] Add CoreText glyph rendering
+- [x] Support ASCII characters only
+- [x] Basic Metal texture creation
 
-### Phase 2: Enhanced Features
-- [ ] Add Unicode support
-- [ ] Implement automatic atlas resizing
-- [ ] Add thread-safe caching system
-- [ ] Optimize Metal texture updates
-- [ ] Add font metrics calculation
-- [ ] Support monospaced fonts properly
+### Phase 2: Enhanced Features ✅
+- [x] Add Unicode support
+- [x] Implement automatic atlas resizing
+- [x] Add thread-safe caching system
+- [x] Optimize Metal texture updates
+- [x] Add font metrics calculation
+- [x] Support monospaced fonts properly
+- [x] Add coordinate system configuration (topLeft/bottomLeft)
+- [x] Create high-level TextRenderer API
+- [x] Add text layout and wrapping support
+- [x] Create Metal helper utilities
 
 ### Phase 3: Advanced Features
 - [ ] Color emoji support (separate BGRA atlas)
@@ -231,6 +355,8 @@ renderEncoder.setFragmentTexture(texture, index: 0)
 - [ ] Font fallback system
 - [ ] Performance optimizations
 - [ ] Comprehensive test suite
+- [ ] Signed distance field rendering
+- [ ] Custom shader effects support
 
 ## Key Insights from Ghostty
 
