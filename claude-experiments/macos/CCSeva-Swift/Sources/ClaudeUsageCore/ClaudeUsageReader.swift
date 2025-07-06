@@ -125,11 +125,22 @@ struct UsageEntry {
     }
 }
 
+// MARK: - File Cache
+struct FileCache {
+    var entries: [UsageEntry]
+    var modificationDate: Date
+    var fileSize: Int64
+}
+
 // MARK: - Claude Usage Reader
 public class ClaudeUsageReader {
     private let claudeDirectory: URL
     private let calendar = Calendar.current
     private let dateFormatter: DateFormatter
+    
+    // File caching for incremental parsing
+    private var fileCache: [String: FileCache] = [:]
+    private let cacheQueue = DispatchQueue(label: "com.ccseva.cache", qos: .utility)
     
     public init() {
         self.claudeDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
@@ -148,24 +159,71 @@ public class ClaudeUsageReader {
         }
         
         var allEntries: [UsageEntry] = []
+        let fileManager = FileManager.default
         
         // Scan all JSONL files in projects directory
-        let projectDirs = try FileManager.default.contentsOfDirectory(at: projectsDir, includingPropertiesForKeys: nil)
+        let projectDirs = try fileManager.contentsOfDirectory(at: projectsDir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey])
         
         for projectDir in projectDirs {
             guard projectDir.hasDirectoryPath else { continue }
             
-            let jsonlFiles = try FileManager.default.contentsOfDirectory(at: projectDir, includingPropertiesForKeys: nil)
-                .filter { $0.pathExtension == "jsonl" }
+            let jsonlFiles = try fileManager.contentsOfDirectory(
+                at: projectDir, 
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
+            ).filter { $0.pathExtension == "jsonl" }
             
             for jsonlFile in jsonlFiles {
-                let entries = try parseJSONLFile(jsonlFile)
+                let entries = try parseJSONLFileWithCache(jsonlFile)
                 allEntries.append(contentsOf: entries)
             }
         }
         
         // Sort by timestamp
         return allEntries.sorted { $0.timestamp < $1.timestamp }
+    }
+    
+    private func parseJSONLFileWithCache(_ fileURL: URL) throws -> [UsageEntry] {
+        let filePath = fileURL.path
+        let fileManager = FileManager.default
+        
+        // Get file attributes for modification date and size
+        let attributes = try fileManager.attributesOfItem(atPath: filePath)
+        guard let modificationDate = attributes[.modificationDate] as? Date,
+              let fileSize = attributes[.size] as? Int64 else {
+            print("⚠️ Could not get file attributes for \(filePath), falling back to direct parsing")
+            return try parseJSONLFile(fileURL)
+        }
+        
+        // Check cache in a thread-safe manner
+        let cachedEntries: [UsageEntry]? = cacheQueue.sync {
+            if let cached = fileCache[filePath],
+               cached.modificationDate == modificationDate,
+               cached.fileSize == fileSize {
+                // File hasn't changed, return cached entries
+                print("✅ Using cached data for \(fileURL.lastPathComponent)")
+                return cached.entries
+            }
+            return nil
+        }
+        
+        if let entries = cachedEntries {
+            return entries
+        }
+        
+        // File has changed or not cached, parse it fresh
+        print("🔄 Parsing file \(fileURL.lastPathComponent) (modified: \(modificationDate))")
+        let entries = try parseJSONLFile(fileURL)
+        
+        // Cache the results in a thread-safe manner
+        cacheQueue.sync {
+            fileCache[filePath] = FileCache(
+                entries: entries,
+                modificationDate: modificationDate,
+                fileSize: fileSize
+            )
+        }
+        
+        return entries
     }
     
     private func parseJSONLFile(_ fileURL: URL) throws -> [UsageEntry] {
@@ -504,6 +562,24 @@ public class ClaudeUsageReader {
             recommendedDailyLimit: recommendedDailyLimit,
             onTrackForReset: onTrackForReset
         )
+    }
+    
+    // MARK: - Cache Management
+    
+    /// Clear all cached file data - useful for testing or when cache becomes stale
+    public func clearCache() {
+        cacheQueue.sync {
+            fileCache.removeAll()
+            print("🗑️ File cache cleared")
+        }
+    }
+    
+    /// Get cache statistics for debugging
+    public func getCacheStats() -> (filesInCache: Int, totalEntries: Int) {
+        return cacheQueue.sync {
+            let totalEntries = fileCache.values.reduce(0) { $0 + $1.entries.count }
+            return (filesInCache: fileCache.count, totalEntries: totalEntries)
+        }
     }
 }
 

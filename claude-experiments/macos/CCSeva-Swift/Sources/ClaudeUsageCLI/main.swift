@@ -136,7 +136,15 @@ func showDebugInfo() throws {
     let reader = ClaudeUsageReader()
     
     // This will print debug info due to our debug prints in the reader
+    let startTime = CFAbsoluteTimeGetCurrent()
     let _ = try reader.generateUsageStats()
+    let timeElapsed = CFAbsoluteTimeGetCurrent() - startTime
+    
+    print("")
+    print("⏱️ Total processing time: \(String(format: "%.3f", timeElapsed))s")
+    
+    let cacheStats = reader.getCacheStats()
+    print("💾 Cache stats: \(cacheStats.filesInCache) files cached, \(cacheStats.totalEntries) total entries")
 }
 
 func formatNumber(_ number: Int) -> String {

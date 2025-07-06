@@ -53,11 +53,10 @@ class InlineTextEditor: NSTextField {
         originalBounds = bounds
         frame = bounds
         
-        // Ensure editor is visible above PDF content
-        backgroundColor = NSColor.white.withAlphaComponent(0.95)
-        layer?.borderColor = color.cgColor
-        layer?.borderWidth = 1.0
-        layer?.cornerRadius = 4.0
+        // Keep editor completely invisible - no background, no border
+        backgroundColor = NSColor.clear
+        layer?.borderWidth = 0
+        layer?.cornerRadius = 0
         
         // Make sure the field is focused and text is selected
         window?.makeFirstResponder(self)
