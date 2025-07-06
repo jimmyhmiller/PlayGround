@@ -8,9 +8,15 @@ use mlir_sys::*;
 use std::ffi::CString;
 use std::ptr;
 
+mod tensor_ops_dialect;
+mod tensor_ops_lowering;
+
+use tensor_ops_dialect::TensorOpsDialect;
+use tensor_ops_lowering::{TensorOpsLowering, TensorOpsPassManager};
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🚀 MLIR Compiler with Proper In-Memory Lowering");
-    println!("===============================================");
+    println!("🚀 MLIR Compiler with Custom TensorOps Dialect");
+    println!("==============================================");
     
     // Step 1: Create MLIR context with necessary dialects
     println!("\n1️⃣ Setting up MLIR context and dialects...");
@@ -25,6 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mlirRegisterAllPasses();
     }
     
+    // Register our custom TensorOps dialect
+    TensorOpsDialect::register(&registry);
+    
     let context = Context::new();
     context.append_dialect_registry(&registry);
     context.load_all_available_dialects();
@@ -32,16 +41,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let location = Location::unknown(&context);
     let mut module = Module::new(location);
     
-    // Step 2: Create hello function with func dialect
-    println!("\n2️⃣ Creating func dialect MLIR...");
-    create_hello_function(&context, &module)?;
+    // Step 2: Create functions using our custom dialect
+    println!("\n2️⃣ Creating TensorOps dialect MLIR...");
+    tensor_ops_dialect::create_example_tensor_computation(&context, &module)?;
     
-    println!("Generated func dialect MLIR:");
+    println!("Generated TensorOps dialect MLIR:");
     println!("{}", module.as_operation());
     
-    // Step 3: Apply lowering passes using melior's PassManager
-    println!("\n3️⃣ Applying lowering passes (func → LLVM dialect)...");
-    apply_lowering_passes(&context, &mut module)?;
+    // Step 3: Create interop example
+    println!("\n3️⃣ Creating interop example (TensorOps + Standard dialects)...");
+    tensor_ops_lowering::create_interop_example(&context, &module)?;
+    
+    println!("Module with mixed dialects:");
+    println!("{}", module.as_operation());
+    
+    // Step 4: Apply custom lowering pipeline
+    println!("\n4️⃣ Applying complete lowering pipeline (TensorOps → Standard → LLVM)...");
+    TensorOpsPassManager::apply_full_lowering_pipeline(&context, &mut module)?;
     
     println!("After lowering to LLVM dialect:");
     println!("{}", module.as_operation());
@@ -234,4 +250,14 @@ fn create_llvm_function_type<'a>(context: &'a Context, _args: &[melior::ir::Type
     
     // For now, create a basic function type
     FunctionType::new(context, &[], &[]).into()
+}
+
+/// Apply standard dialect to LLVM lowering (reused from original implementation)
+pub fn apply_standard_to_llvm_lowering(context: &Context, module: &mut Module) -> Result<(), Box<dyn std::error::Error>> {
+    println!("🔄 Applying standard dialect to LLVM lowering...");
+    
+    // Reuse the existing lowering logic
+    apply_lowering_passes(context, module)?;
+    
+    Ok(())
 }

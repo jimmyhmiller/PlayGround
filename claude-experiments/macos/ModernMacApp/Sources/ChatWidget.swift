@@ -38,6 +38,11 @@ struct ChatWidget: View {
                                 .id(message.id)
                         }
                         
+                        // Show typing indicator when request starts and no content yet
+                        if isTyping && streamingMessage.isEmpty {
+                            TypingIndicator(agentName: selectedAgent)
+                        }
+                        
                         // Show streaming message if one is in progress
                         if let streamingId = currentStreamingMessageId, !streamingMessage.isEmpty {
                             StreamingMessageView(
@@ -45,10 +50,6 @@ struct ChatWidget: View {
                                 agentName: selectedAgent
                             )
                             .id(streamingId)
-                        }
-                        
-                        if isTyping && currentStreamingMessageId == nil {
-                            TypingIndicator(agentName: selectedAgent)
                         }
                     }
                     .padding(.horizontal, 16)
@@ -105,10 +106,8 @@ struct ChatWidget: View {
         let messageToSend = newMessage
         newMessage = ""
         
-        // Start typing indicator
-        withAnimation(.easeInOut(duration: 0.2)) {
-            isTyping = true
-        }
+        // Start typing indicator immediately
+        isTyping = true
         
         // Create streaming message
         let streamingId = UUID()
@@ -121,6 +120,10 @@ struct ChatWidget: View {
                 messageToSend,
                 conversationHistory: messages,
                 onDelta: { delta in
+                    // Hide typing indicator when first content arrives
+                    if isTyping {
+                        isTyping = false
+                    }
                     // Update streaming message with each delta
                     streamingMessage += delta
                 },
@@ -172,6 +175,10 @@ struct ChatWidget: View {
                 messageToSend,
                 conversationHistory: messages,
                 onDelta: { delta in
+                    // Hide typing indicator when first content arrives
+                    if isTyping {
+                        isTyping = false
+                    }
                     // Update streaming message with each delta
                     streamingMessage += delta
                 },

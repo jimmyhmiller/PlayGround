@@ -20,6 +20,12 @@ struct ImageCanvasView: NSViewRepresentable {
         view.selectedTool = selectedTool
         view.pdfImages = pdfImages
         view.delegate = context.coordinator
+        
+        // Scroll to top when first created with PDF images
+        if !pdfImages.isEmpty {
+            view.scrollToTop()
+        }
+        
         return view
     }
     
@@ -122,11 +128,11 @@ class ImageDrawingView: NSView {
     
     func updateContent() {
         contentView?.updateLayout()
-        
-        // Scroll to top when content is updated
+    }
+    
+    func scrollToTop() {
         if let scrollView = scrollView,
-           let contentView = contentView,
-           !pdfImages.isEmpty {
+           let contentView = contentView {
             DispatchQueue.main.async {
                 scrollView.documentView?.scroll(NSPoint(x: 0, y: contentView.bounds.maxY))
             }
@@ -222,10 +228,12 @@ class ImageContentView: NSView {
     private func pageInfo(for point: CGPoint) -> (pageIndex: Int, pagePoint: CGPoint, pageRect: CGRect)? {
         guard let drawingView = drawingView else { return nil }
         
-        var currentY: CGFloat = pageMargin
+        var currentY: CGFloat = bounds.height - pageMargin
         
         for (index, pageImage) in drawingView.pdfImages.enumerated() {
             let imageSize = pageImage.image.size
+            currentY -= imageSize.height
+            
             let pageRect = CGRect(
                 x: pageMargin,
                 y: currentY,
@@ -241,7 +249,7 @@ class ImageContentView: NSView {
                 return (index, pagePoint, pageRect)
             }
             
-            currentY += imageSize.height + pageSpacing
+            currentY -= pageSpacing
         }
         
         return nil

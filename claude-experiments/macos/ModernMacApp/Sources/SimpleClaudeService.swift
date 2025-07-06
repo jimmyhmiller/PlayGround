@@ -12,15 +12,13 @@ class SimpleClaudeService: ObservableObject, ChatServiceProtocol {
     ) {
         Task {
             do {
-                let response = try await executeClaudeCommand(message: message)
+                print("🚀 Starting Claude command...")
                 
-                // Simulate streaming
-                await simulateStreaming(text: response, onDelta: onDelta)
+                // Stream the response directly as it comes in
+                try await streamClaudeCommand(message: message, onDelta: onDelta, onComplete: onComplete)
                 
-                await MainActor.run {
-                    onComplete(response)
-                }
             } catch {
+                print("❌ Claude command failed: \(error)")
                 await MainActor.run {
                     onError(error)
                 }
@@ -28,10 +26,14 @@ class SimpleClaudeService: ObservableObject, ChatServiceProtocol {
         }
     }
     
-    private func executeClaudeCommand(message: String) async throws -> String {
+    private func streamClaudeCommand(
+        message: String,
+        onDelta: @escaping (String) -> Void,
+        onComplete: @escaping (String) -> Void
+    ) async throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/claude")
-        process.arguments = ["--print", message]
+        process.arguments = ["--print", "--output-format", "stream-json", "--verbose", message]
         
         let outputPipe = Pipe()
         let errorPipe = Pipe()
@@ -39,38 +41,119 @@ class SimpleClaudeService: ObservableObject, ChatServiceProtocol {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
         
+        let outputHandle = outputPipe.fileHandleForReading
+        
+        // Start the process
         try process.run()
+        
+        var fullResponse = ""
+        var buffer = ""
+        
+        // Read output as it streams in
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { [self] in
+                // Read streaming output
+                while process.isRunning {
+                    let data = outputHandle.availableData
+                    if !data.isEmpty {
+                        if let chunk = String(data: data, encoding: .utf8) {
+                            buffer += chunk
+                            
+                            // Process complete JSON lines
+                            let lines = buffer.components(separatedBy: "\n")
+                            buffer = lines.last ?? "" // Keep incomplete line in buffer
+                            
+                            for line in lines.dropLast() {
+                                if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    if let content = parseStreamingJSON(line) {
+                                        fullResponse += content
+                                        await MainActor.run {
+                                            onDelta(content)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    try? await Task.sleep(nanoseconds: 10_000_000) // 10ms check interval
+                }
+                
+                // Read any remaining data
+                let remainingData = outputHandle.readDataToEndOfFile()
+                if !remainingData.isEmpty {
+                    if let chunk = String(data: remainingData, encoding: .utf8) {
+                        buffer += chunk
+                        
+                        // Process any remaining complete lines
+                        let lines = buffer.components(separatedBy: "\n")
+                        for line in lines {
+                            if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                if let content = parseStreamingJSON(line) {
+                                    fullResponse += content
+                                    await MainActor.run {
+                                        onDelta(content)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Wait for process to complete
         process.waitUntilExit()
         
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        
         if process.terminationStatus != 0 {
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
             let errorString = String(data: errorData, encoding: .utf8) ?? "Unknown error"
             throw SimpleClaudeError.commandFailed("Claude command failed: \(errorString)")
         }
         
-        guard let output = String(data: outputData, encoding: .utf8), !output.isEmpty else {
-            throw SimpleClaudeError.noResponse
+        await MainActor.run {
+            onComplete(fullResponse.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
-    private func simulateStreaming(text: String, onDelta: @escaping (String) -> Void) async {
-        // Break text into word chunks for simulated streaming
-        let words = text.components(separatedBy: " ")
+    private func parseStreamingJSON(_ line: String) -> String? {
+        guard let data = line.data(using: .utf8) else { return nil }
         
-        for (index, word) in words.enumerated() {
-            let chunk = index == 0 ? word : " " + word
+        do {
+            let json = try JSONSerialization.jsonObject(with: data, options: [])
             
-            await MainActor.run {
-                onDelta(chunk)
+            if let dict = json as? [String: Any] {
+                // Handle different streaming JSON event types
+                if let type = dict["type"] as? String {
+                    switch type {
+                    case "assistant":
+                        // Extract text from assistant messages
+                        if let message = dict["message"] as? [String: Any],
+                           let content = message["content"] as? [[String: Any]] {
+                            
+                            for contentBlock in content {
+                                if let contentType = contentBlock["type"] as? String,
+                                   contentType == "text",
+                                   let text = contentBlock["text"] as? String {
+                                    return text
+                                }
+                            }
+                        }
+                        return nil
+                    case "system", "user", "result":
+                        // Control events, no content to extract
+                        return nil
+                    default:
+                        print("Unknown event type: \(type)")
+                        return nil
+                    }
+                }
             }
-            
-            // Small delay between words to simulate streaming
-            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        } catch {
+            print("Failed to parse JSON line: \(error)")
+            print("Line: \(line)")
         }
+        
+        return nil
     }
 }
 

@@ -19,7 +19,14 @@ path = "src/breakpoints.rs"
 name = "debugger-run"
 path = "src/run.rs"
 
+[[bin]]
+name = "debugger-stack-trace"
+path = "src/stack_trace.rs"
+
 [dependencies]
 debugger-frontend-claude = { path = ".." }
 clap = { version = "4.0", features = ["derive"] }
 anyhow = "1.0"
+lldb = { git = "https://github.com/endoli/lldb.rs.git", rev = "6186d7770e1b14f48dab05e48319348abb80b7cb" }
+lldb-sys = "0.0.30"
+bincode = { version = "2.0.0-rc.3", features = ["derive"] }

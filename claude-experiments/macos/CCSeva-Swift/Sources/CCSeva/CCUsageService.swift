@@ -8,6 +8,7 @@
 
 import Foundation
 import ClaudeUsageCore
+import Dispatch
 
 // MARK: - Notification Names
 extension Notification.Name {
@@ -25,14 +26,34 @@ class CCUsageService: ObservableObject {
     private let refreshInterval: TimeInterval = 30 // 30 seconds like original
     private let usageReader = ClaudeUsageReader()
     
+    // File system watcher components
+    private var fileWatcher: DispatchSourceFileSystemObject?
+    private let watcherQueue = DispatchQueue(label: "com.ccseva.filewatcher", qos: .utility)
+    private var claudeProjectsURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude")
+            .appendingPathComponent("projects")
+    }
+    
     private init() {}
     
     func startMonitoring() {
         print("🔄 Starting usage monitoring...")
         fetchUsageData()
         
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { _ in
-            self.fetchUsageData()
+        // Try to start file system watcher first, fall back to timer if needed
+        if startFileSystemWatcher() {
+            print("✅ File system watcher started successfully")
+            // Still use a timer as backup for initial load and periodic checks
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval * 4, repeats: true) { _ in
+                self.fetchUsageData()
+            }
+        } else {
+            print("⚠️ File system watcher failed, using timer-only mode")
+            // Fall back to original timer-based approach
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { _ in
+                self.fetchUsageData()
+            }
         }
     }
     
@@ -40,12 +61,17 @@ class CCUsageService: ObservableObject {
         print("⏹️ Stopping usage monitoring...")
         refreshTimer?.invalidate()
         refreshTimer = nil
+        
+        stopFileSystemWatcher()
     }
     
     func fetchUsageData() {
         lastError = nil
         
-        Task {
+        // Use Task.detached for better concurrency and to avoid inheriting task priorities
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self = self else { return }
+            
             do {
                 let stats = try await self.readClaudeUsageData()
                 
@@ -53,6 +79,12 @@ class CCUsageService: ObservableObject {
                     self.currentStats = stats
                     self.isLoading = false
                     print("✅ Usage data updated: \(stats.percentageUsed)% used, \(stats.tokensUsed)/\(stats.tokenLimit) tokens")
+                    
+                    // Log cache performance
+                    let cacheStats = self.usageReader.getCacheStats()
+                    if cacheStats.filesInCache > 0 {
+                        print("💾 Cache stats: \(cacheStats.filesInCache) files cached, \(cacheStats.totalEntries) total entries")
+                    }
                     
                     // Notify observers
                     NotificationCenter.default.post(name: .usageDataUpdated, object: nil)
@@ -74,10 +106,14 @@ class CCUsageService: ObservableObject {
     }
     
     private func readClaudeUsageData() async throws -> UsageStats {
+        // Use the existing concurrency pattern but optimize the priority
         return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
+            DispatchQueue.global(qos: .utility).async {
                 do {
+                    let startTime = CFAbsoluteTimeGetCurrent()
                     let stats = try self.usageReader.generateUsageStats()
+                    let timeElapsed = CFAbsoluteTimeGetCurrent() - startTime
+                    print("⏱️ Usage stats generation took \(String(format: "%.3f", timeElapsed))s")
                     continuation.resume(returning: stats)
                 } catch {
                     continuation.resume(throwing: error)
@@ -116,6 +152,65 @@ class CCUsageService: ObservableObject {
             cost: stats.today.totalCost,
             timeUntilReset: stats.resetInfo.timeUntilReset
         )
+    }
+    
+    // MARK: - Cache Management
+    
+    func clearCache() {
+        usageReader.clearCache()
+    }
+    
+    func getCacheStats() -> (filesInCache: Int, totalEntries: Int) {
+        return usageReader.getCacheStats()
+    }
+    
+    // MARK: - File System Watcher
+    
+    private func startFileSystemWatcher() -> Bool {
+        guard FileManager.default.fileExists(atPath: claudeProjectsURL.path) else {
+            print("❌ Claude projects directory not found: \(claudeProjectsURL.path)")
+            return false
+        }
+        
+        let fileDescriptor = open(claudeProjectsURL.path, O_EVTONLY)
+        guard fileDescriptor >= 0 else {
+            print("❌ Failed to open file descriptor for: \(claudeProjectsURL.path)")
+            return false
+        }
+        
+        fileWatcher = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fileDescriptor,
+            eventMask: [.write, .extend, .attrib, .link, .rename, .revoke],
+            queue: watcherQueue
+        )
+        
+        guard let watcher = fileWatcher else {
+            close(fileDescriptor)
+            return false
+        }
+        
+        watcher.setEventHandler { [weak self] in
+            print("📁 File system change detected in Claude projects directory")
+            
+            // Debounce rapid file changes by adding a small delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self?.fetchUsageData()
+            }
+        }
+        
+        watcher.setCancelHandler {
+            close(fileDescriptor)
+            print("🔒 File system watcher file descriptor closed")
+        }
+        
+        watcher.resume()
+        return true
+    }
+    
+    private func stopFileSystemWatcher() {
+        fileWatcher?.cancel()
+        fileWatcher = nil
+        print("⏹️ File system watcher stopped")
     }
 }
 
