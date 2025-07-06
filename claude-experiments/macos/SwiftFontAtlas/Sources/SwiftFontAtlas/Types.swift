@@ -1,6 +1,14 @@
 import Foundation
 import CoreGraphics
 
+/// Coordinate system origin for the atlas
+public enum CoordinateOrigin {
+    /// Y=0 at top, Y increases downward (typical screen/Metal coordinates)
+    case topLeft
+    /// Y=0 at bottom, Y increases upward (CoreGraphics coordinates)
+    case bottomLeft
+}
+
 /// Pixel formats supported by the atlas
 public enum PixelFormat: UInt8 {
     /// 1 byte per pixel grayscale
@@ -46,7 +54,9 @@ public struct RenderedGlyph: Equatable {
     /// Left bearing (horizontal offset from origin)
     public let offsetX: Int32
     
-    /// Top bearing (vertical offset from baseline to top)
+    /// Vertical bearing offset. The interpretation depends on the coordinate system:
+    /// - For bottomLeft origin: offset from baseline to bottom of glyph bbox
+    /// - For topLeft origin: offset from baseline to top of glyph bbox
     public let offsetY: Int32
     
     /// Position in atlas

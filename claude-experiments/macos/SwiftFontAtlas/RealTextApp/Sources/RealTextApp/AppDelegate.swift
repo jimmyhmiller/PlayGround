@@ -18,7 +18,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "SwiftFontAtlas - Real Text Rendering"
         window.center()
         
-        let contentView = NSHostingView(rootView: RealTextView())
+        // Use the simplified view with high-level API
+        let contentView = NSHostingView(rootView: RealTextViewSimplified())
         window.contentView = contentView
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
