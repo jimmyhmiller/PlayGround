@@ -242,6 +242,13 @@ class SimplifiedTextViewModel: NSObject, ObservableObject, MTKViewDelegate {
             color: simd_float4(0, 0, 0, 1),  // Black text
             using: renderEncoder
         )
+
+        renderer.drawText(
+            currentInputText,
+            at: CGPoint(x: 30, y: 380),  // More margin from left edge, higher up
+            color: simd_float4(0, 0, 0, 1),  // Black text
+            using: renderEncoder
+        )
         
         // Example of wrapped text - positioned lower to avoid overlap
         let wrappedText = "This text is automatically wrapped to fit within a 300-point wide area. The TextRenderer handles all the complexity of word wrapping, line breaking, and vertex generation."

@@ -25,6 +25,9 @@ public class TextRenderer {
     /// Last known modification count
     private var lastModificationCount: UInt64 = 0
     
+    /// Current vertex buffer offset for multiple draw calls within a frame
+    private var currentVertexOffset: Int = 0
+    
     /// Vertex structure for text rendering
     public struct TextVertex {
         public var position: simd_float2
@@ -113,28 +116,37 @@ public class TextRenderer {
         
         guard !allVertices.isEmpty else { return }
         
-        // Check if vertices exceed buffer capacity
+        // Check if vertices exceed remaining buffer capacity
         let maxVertices = maxCharacters * 6
-        if allVertices.count > maxVertices {
-            print("⚠️ Warning: Too many vertices (\(allVertices.count)) for buffer capacity (\(maxVertices)). Truncating.")
+        let remainingCapacity = maxVertices - currentVertexOffset
+        
+        if allVertices.count > remainingCapacity {
+            print("⚠️ Warning: Not enough buffer space. Vertices: \(allVertices.count), remaining: \(remainingCapacity). Resetting buffer.")
+            // Reset buffer for this frame if we exceed capacity
+            currentVertexOffset = 0
         }
         
-        // Update vertex buffer with bounds checking
+        let vertexCount = min(allVertices.count, maxVertices - currentVertexOffset)
+        guard vertexCount > 0 else { return }
+        
+        // Update vertex buffer at current offset
         guard let vertexBuffer = vertexBuffer else { return }
-        let vertexCount = min(allVertices.count, maxVertices)
         let bufferPointer = vertexBuffer.contents().bindMemory(to: TextVertex.self, capacity: maxVertices)
         
         for index in 0..<vertexCount {
-            bufferPointer[index] = allVertices[index]
+            bufferPointer[currentVertexOffset + index] = allVertices[index]
         }
         
         // Set render state
         renderEncoder.setRenderPipelineState(renderPipeline!)
-        renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+        renderEncoder.setVertexBuffer(vertexBuffer, offset: currentVertexOffset * MemoryLayout<TextVertex>.stride, index: 0)
         renderEncoder.setFragmentTexture(atlasTexture, index: 0)
         
         // Draw
         renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertexCount)
+        
+        // Advance offset for next draw call
+        currentVertexOffset += vertexCount
     }
     
     /// Draw multiline text with optional alignment
@@ -180,6 +192,9 @@ public class TextRenderer {
     ///   - renderEncoder: Metal render command encoder
     ///   - viewportSize: Size of the viewport
     public func setProjectionMatrix(using renderEncoder: MTLRenderCommandEncoder, viewportSize: CGSize) {
+        // Reset vertex buffer offset at the start of each frame
+        currentVertexOffset = 0
+        
         var projection = orthographicProjection(
             left: 0,
             right: Float(viewportSize.width),
@@ -296,23 +311,17 @@ public class TextRenderer {
         for character in text {
             guard let glyph = fontManager.renderCharacter(character) else { continue }
             
-            // Skip empty glyphs
-            if glyph.width == 0 || glyph.height == 0 {
-                currentX += glyph.advanceX
-                continue
-            }
+            // // Skip empty glyphs
+            // if glyph.width == 0 || glyph.height == 0 {
+            //     currentX += glyph.advanceX
+            //     continue
+            // }
             
             // Calculate glyph position using simple approach that works
             let left = currentX + Float(glyph.offsetX)
             let top = baselineY - Float(glyph.height) - Float(glyph.offsetY)
             let right = left + Float(glyph.width)
             let bottom = top + Float(glyph.height)
-            
-            // Skip glyphs that would be positioned off-screen (negative coordinates)
-            if right < 0 {
-                currentX += glyph.advanceX
-                continue
-            }
             
             // Calculate texture coordinates
             let u1 = Float(glyph.atlasX) / atlasSize
