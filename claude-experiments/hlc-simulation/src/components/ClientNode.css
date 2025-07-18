@@ -1,0 +1,189 @@
+.client-node {
+  position: absolute;
+  width: 260px;
+  background: white;
+  border: 2px solid #333;
+  border-radius: 8px;
+  padding: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  transition: opacity 0.3s;
+  font-size: 14px;
+  z-index: 10;
+}
+
+.client-node.offline {
+  opacity: 0.5;
+}
+
+.client-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.client-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.status-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0;
+}
+
+.clock-info {
+  font-size: 11px;
+  font-family: monospace;
+  margin-bottom: 10px;
+  padding: 5px;
+  background: #f5f5f5;
+  border-radius: 4px;
+  word-break: break-all;
+}
+
+.clock-skew {
+  margin-top: 5px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.clock-skew input {
+  width: 50px;
+  padding: 2px 4px;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  margin-right: 4px;
+}
+
+.clock-skew select {
+  padding: 2px 4px;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.message-controls {
+  margin-bottom: 10px;
+}
+
+.broadcast-btn {
+  width: 100%;
+  padding: 6px 12px;
+  background: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.broadcast-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+.broadcast-btn:hover:not(:disabled) {
+  background: #0056b3;
+}
+
+.logs-section button {
+  width: 100%;
+  padding: 4px;
+  background: #f0f0f0;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  cursor: pointer;
+  margin-bottom: 5px;
+}
+
+.message-logs {
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  padding: 5px;
+  font-size: 11px;
+}
+
+.log-entry {
+  margin-bottom: 8px;
+  padding: 4px;
+  border-radius: 3px;
+}
+
+.log-entry.sent {
+  background: #e3f2fd;
+}
+
+.log-entry.received {
+  background: #f3e5f5;
+}
+
+.log-header {
+  font-weight: bold;
+  margin-bottom: 2px;
+}
+
+.log-timestamp {
+  font-family: monospace;
+  font-size: 10px;
+  color: #666;
+}
+
+.entity-section {
+  margin-bottom: 10px;
+  padding: 8px;
+  background: #f9f9f9;
+  border-radius: 4px;
+  border: 1px solid #e0e0e0;
+}
+
+.entity-state h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  color: #333;
+}
+
+.entity-field {
+  font-size: 11px;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.field-label {
+  font-weight: bold;
+  min-width: 40px;
+}
+
+.field-value {
+  flex: 1;
+  color: #0066cc;
+}
+
+.field-meta {
+  font-size: 9px;
+  color: #999;
+}
+
+.entity-inputs {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.entity-inputs input {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  font-size: 11px;
+  box-sizing: border-box;
+}
