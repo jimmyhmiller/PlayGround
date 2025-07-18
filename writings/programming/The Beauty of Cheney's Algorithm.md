@@ -70,7 +70,56 @@ Here rather than all the live obejcts being colored green, I've colored our root
 </details>
 Now that we've copied the live objects, we are left with some extra space to allocate objects. But our structure is completely preserved. So how do we accomplish this? 
 
-### How to Copy Objects With No Extra Space Requirements
+### Bookkeeping
 
-If you start trying to write this yourself, you quickly realize one tricky requirement is to not copy things multiple times. Consider the third object in our little diagram. There are two things that point to it. This means that as we are walking our reference we will encounter this object twice and rather than copy it twice, we want to record where we copied it and make use of that reference. This means we are going to need to something to do our book keeping. Maybe this is a list we do a linear lookup or a hashmap of address to forwarding address. These options though require extra memory. This is where the beauty of Cheney's algorithm comes in. Rather than utilizing more memory to track this process, we will cleverly reuse what we already have to keep track of all our state.
+If you start trying to write this yourself, you quickly realize one tricky requirement is to not copy things multiple times. Consider the third object in our little diagram. There are two things that point to it. This means that as we are walking our reference we will encounter this object twice and rather than copy it twice, we want to record where we copied it and make use of that reference. This means we are going to need to something to do our book keeping.
+
+Typically book keeping comes with some sort of memory overhead. We need to store our data somewhere. That could be a list or a hashmap or a set or whatever structure makes sense for our use case. But Cheney's algorithm gives us a way to solve this without using any extra space.
+
+## Cheney's Algorithm
+
+The key trick to Cheney's algorithm is to realize one key feature: Once we've copied our data, we don't need it anymore. But to understand how to efficiently take advantage of this fact, we need to dive one step deeper into how languages represent objects.
+
+Here is a fairly simple model of how a language might represent objects in memory:
+
+![Screenshot 2025-07-17 at 5.35.51 PM](/Users/jimmyhmiller/Library/Application Support/typora-user-images/Screenshot 2025-07-17 at 5.35.51 PM.png)
+
+The header here records data about our object. It typically will be broken up into some different fields.
+
+![Screenshot 2025-07-17 at 5.40.10 PM](/Users/jimmyhmiller/Library/Application Support/typora-user-images/Screenshot 2025-07-17 at 5.40.10 PM.png)
+
+Here we have a made up example. The only important part for us here is this forward bit. This is a bit saved specifically for our GC. This bit and small detail about how machines allocate memory are all we need to do all the book keeping without any extra storage.
+
+## The actual algorithm
+
+```python
+def cheney_gc(roots, from_space, to_space):
+    for i, root in enumerate(roots):
+        roots[i] = forward(root, to_space)
+
+    scan = to_space.base_ptr
+    while scan < to_space.cursor:
+        header = read_header(to_space.data, scan)
+        size = get_size(header)
+        fields = get_pointer_fields(to_space.data, scan, size)
+        for i, field in enumerate(fields):
+            new_ptr = forward(field, from_space, to_space)
+            write_pointer_field(to_space.data, scan, i, new_ptr)
+        scan += size
+
+def forward(ptr, to_space):
+    if ptr is None:
+        return None
+
+    header = read_header(ptr)
+    if is_forwarded(header):
+        return header
+
+    size = get_size(header)
+    new_ptr = to_space.alloc(size)
+    copy_bytes(ptr, new_ptr, size)
+
+    write_header(ptr, new_ptr | 1)
+    return new_ptr
+```
 
