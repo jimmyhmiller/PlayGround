@@ -1,0 +1,20 @@
+{
+  "name": "podcast-upload",
+  "version": "1.0.0",
+  "description": "Upload latest file with 'jimmy' in filename to S3 and copy public URL to clipboard",
+  "main": "index.js",
+  "bin": {
+    "podcast-upload": "./index.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0",
+    "clipboardy": "^4.0.0",
+    "glob": "^10.0.0"
+  },
+  "keywords": ["s3", "upload", "clipboard", "utility"],
+  "author": "Jimmy Miller",
+  "license": "MIT"
+}

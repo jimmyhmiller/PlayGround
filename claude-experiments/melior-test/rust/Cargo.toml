@@ -1,0 +1,36 @@
+[package]
+name = "melior-test"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "melior-test"
+path = "src/main.rs"
+
+[[bin]]
+name = "simple-test"
+path = "src/main_simple.rs"
+
+[[bin]]
+name = "simple_test"
+path = "src/simple_test.rs"
+
+[[bin]]
+name = "minimal_jit"
+path = "src/minimal_jit.rs"
+
+[[bin]]
+name = "minimal_working"
+path = "src/minimal_working.rs"
+
+[[bin]]
+name = "jit-test"
+path = "src/main_jit_test.rs"
+
+[[bin]]
+name = "simple-jit"
+path = "src/main_simple_jit.rs"
+
+[dependencies]
+melior = "0.19"
+mlir-sys = "0.3"

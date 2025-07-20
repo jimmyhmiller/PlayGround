@@ -1,0 +1,18 @@
+[package]
+name = "ping-utility"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+clap = { version = "4.0", features = ["derive"] }
+daemonize = "0.5"
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+tokio-stream = "0.1"
+libc = "0.2"
+surge-ping = "0.8"
+rand = "0.8"
+regex = "1.0"

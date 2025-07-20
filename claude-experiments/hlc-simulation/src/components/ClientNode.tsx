@@ -32,6 +32,10 @@ export const ClientNode: React.FC<ClientNodeProps> = ({
   const [entityState, setEntityState] = useState<Entity>(lwwEntity.getEntity());
   const [nameInput, setNameInput] = useState('');
   const [foodInput, setFoodInput] = useState('');
+  const [queuedMessages, setQueuedMessages] = useState<Array<{
+    updates: Partial<Entity>;
+    timestamp: HLCTimestamp;
+  }>>([]);
   
   const convertToMs = (value: number, unit: 'ms' | 's' | 'm' | 'h' | 'd'): number => {
     switch (unit) {
@@ -69,8 +73,6 @@ export const ClientNode: React.FC<ClientNodeProps> = ({
   }, [hlc]);
 
   const handleSendMessage = () => {
-    if (!client.isOnline) return;
-    
     const timestamp = hlc.tick();
     setCurrentTime(timestamp);
     
@@ -98,7 +100,17 @@ export const ClientNode: React.FC<ClientNodeProps> = ({
     setEntityState(lwwEntity.getEntity());
     
     if (Object.keys(updates).length > 0) {
-      onSendMessage(client.id, 'broadcast', timestamp, updates);
+      if (client.isOnline) {
+        // Send immediately if online
+        onSendMessage(client.id, 'broadcast', timestamp, updates);
+      } else {
+        // Queue the message if offline
+        setQueuedMessages(prev => [...prev, { updates, timestamp }]);
+      }
+      
+      // Clear the input fields after creating message
+      setNameInput('');
+      setFoodInput('');
     }
   };
 
@@ -145,7 +157,7 @@ export const ClientNode: React.FC<ClientNodeProps> = ({
     if (message.type !== 'sync-request') {
       onReceiveMessage(client.id, { ...message, receivedAt: newTimestamp });
     }
-  }, [client.isOnline, client.id, client.messages, hlc, onReceiveMessage, lwwEntity, onSendMessage]);
+  }, [client.isOnline, client.id, client.messages, hlc, onReceiveMessage, lwwEntity, onSendMessage, queuedMessages]);
 
   useEffect(() => {
     const handleMessage = (event: CustomEvent<{ message: Message }>) => {
@@ -156,6 +168,12 @@ export const ClientNode: React.FC<ClientNodeProps> = ({
     
     const handleSyncRequest = () => {
       if (client.isOnline) {
+        // Send any queued messages first
+        queuedMessages.forEach(({ updates, timestamp }) => {
+          onSendMessage(client.id, 'broadcast', timestamp, updates);
+        });
+        setQueuedMessages([]);
+        
         // Send sync request to all other nodes
         const syncTimestamp = hlc.tick();
         setCurrentTime(syncTimestamp);
@@ -178,13 +196,7 @@ export const ClientNode: React.FC<ClientNodeProps> = ({
   };
 
   const formatPhysicalTime = (time: number) => {
-    return new Date(time).toLocaleTimeString('en-US', { 
-      hour12: false, 
-      hour: '2-digit', 
-      minute: '2-digit', 
-      second: '2-digit',
-      fractionalSecondDigits: 3
-    });
+    return new Date(time).toISOString();
   };
 
   return (
@@ -203,8 +215,14 @@ export const ClientNode: React.FC<ClientNodeProps> = ({
       </div>
       
       <div className="clock-info">
-        <div>Physical: {formatPhysicalTime(physicalTime)}</div>
-        <div>HLC: {formatTimestamp(currentTime)}</div>
+        <div className="clock-row">
+          <span className="clock-label">Physical:</span>
+          <span className="clock-value">{formatPhysicalTime(physicalTime)}</span>
+        </div>
+        <div className="clock-row">
+          <span className="clock-label">HLC:</span>
+          <span className="clock-value">{formatTimestamp(currentTime)}</span>
+        </div>
         <div className="clock-skew">
           <label>Skew: </label>
           <input
@@ -256,14 +274,12 @@ export const ClientNode: React.FC<ClientNodeProps> = ({
             placeholder="Name"
             value={nameInput}
             onChange={(e) => setNameInput(e.target.value)}
-            disabled={!client.isOnline}
           />
           <input
             type="text"
             placeholder="Favorite Food"
             value={foodInput}
             onChange={(e) => setFoodInput(e.target.value)}
-            disabled={!client.isOnline}
           />
         </div>
       </div>
@@ -271,16 +287,17 @@ export const ClientNode: React.FC<ClientNodeProps> = ({
       <div className="message-controls">
         <button 
           onClick={handleSendMessage} 
-          disabled={!client.isOnline || (!nameInput.trim() && !foodInput.trim())}
+          disabled={!nameInput.trim() && !foodInput.trim()}
           className="broadcast-btn"
         >
-          Broadcast Updates
+          {client.isOnline ? 'Broadcast Updates' : 'Queue Message'}
         </button>
       </div>
 
       <div className="logs-section">
         <button onClick={() => setShowLogs(!showLogs)}>
           {showLogs ? 'Hide' : 'Show'} Logs ({client.messages.length})
+          {queuedMessages.length > 0 && ` | Queued: ${queuedMessages.length}`}
         </button>
         
         {showLogs && (

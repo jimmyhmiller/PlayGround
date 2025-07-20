@@ -66,7 +66,9 @@ public struct AnyNote: Codable, Hashable {
             self.wrapped = try container.decode(StickyNote.self, forKey: .data)
         case .folder:
             self.wrapped = try container.decode(FolderNote.self, forKey: .data)
-        case .pdf, .file:
+        case .pdf:
+            self.wrapped = try container.decode(PDFNote.self, forKey: .data)
+        case .file:
             fatalError("Not implemented yet")
         }
     }
@@ -86,6 +88,9 @@ public struct AnyNote: Codable, Hashable {
             try container.encode(note, forKey: .data)
         case let note as FolderNote:
             try container.encode(NoteType.folder, forKey: .type)
+            try container.encode(note, forKey: .data)
+        case let note as PDFNote:
+            try container.encode(NoteType.pdf, forKey: .type)
             try container.encode(note, forKey: .data)
         default:
             fatalError("Unknown note type")

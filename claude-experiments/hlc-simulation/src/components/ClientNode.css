@@ -45,6 +45,23 @@
   word-break: break-all;
 }
 
+.clock-row {
+  display: flex;
+  margin-bottom: 2px;
+  gap: 8px;
+}
+
+.clock-label {
+  width: 60px;
+  flex-shrink: 0;
+  text-align: left;
+}
+
+.clock-value {
+  flex: 1;
+  text-align: left;
+}
+
 .clock-skew {
   margin-top: 5px;
   display: flex;
