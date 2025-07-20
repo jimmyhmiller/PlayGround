@@ -22,13 +22,7 @@ class ModernContentViewController: NSViewController, SidebarViewControllerDelega
     override func loadView() {
         view = NSView()
         view.wantsLayer = true
-        
-        // Use system background color that adapts to appearance
-        if #available(macOS 10.14, *) {
-            view.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        } else {
-            view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        }
+        view.layer?.backgroundColor = DesignSystem.Colors.background.cgColor
         
         setupViews()
         setupConstraints()
@@ -132,21 +126,17 @@ class HeroSectionView: NSView {
     }
     
     private func setupViews() {
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        layer?.cornerRadius = 8
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.borderWidth = 1
+        addModernCardStyling()
         
-        nameLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
-        nameLabel.textColor = .labelColor
+        nameLabel.font = DesignSystem.Typography.title2
+        nameLabel.textColor = DesignSystem.Colors.textPrimary
         nameLabel.isEditable = false
         nameLabel.isSelectable = false
         nameLabel.backgroundColor = .clear
         nameLabel.isBordered = false
         
-        pathLabel.font = NSFont.systemFont(ofSize: 13, weight: .regular)
-        pathLabel.textColor = .secondaryLabelColor
+        pathLabel.font = DesignSystem.Typography.subheadline
+        pathLabel.textColor = DesignSystem.Colors.textSecondary
         pathLabel.lineBreakMode = .byTruncatingMiddle
         pathLabel.isEditable = false
         pathLabel.isSelectable = false
@@ -176,10 +166,10 @@ class HeroSectionView: NSView {
         rightStack.translatesAutoresizingMaskIntoConstraints = false
         
         NSLayoutConstraint.activate([
-            containerView.topAnchor.constraint(equalTo: topAnchor, constant: 16),
-            containerView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            containerView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            containerView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
+            containerView.topAnchor.constraint(equalTo: topAnchor, constant: DesignSystem.Spacing.cardPadding),
+            containerView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: DesignSystem.Spacing.cardPadding),
+            containerView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -DesignSystem.Spacing.cardPadding),
+            containerView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -DesignSystem.Spacing.cardPadding),
             
             leftStack.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
             leftStack.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
@@ -226,14 +216,10 @@ class StatusCardView: NSView {
     }
     
     private func setupViews() {
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.controlColor.cgColor
-        layer?.cornerRadius = 6
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.borderWidth = 1
+        addSubtleCardStyling()
         
-        statusLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.font = DesignSystem.Typography.captionEmphasized
+        statusLabel.textColor = DesignSystem.Colors.textSecondary
         statusLabel.isEditable = false
         statusLabel.isSelectable = false
         statusLabel.backgroundColor = .clear
@@ -281,15 +267,11 @@ class ModernContentEmptyStateView: NSView {
     }
     
     private func setupViews() {
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        layer?.cornerRadius = 8
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.borderWidth = 1
+        addModernCardStyling()
         
         let titleLabel = NSTextField(labelWithString: "Select a workspace")
-        titleLabel.font = NSFont.systemFont(ofSize: 18, weight: .medium)
-        titleLabel.textColor = .labelColor
+        titleLabel.font = DesignSystem.Typography.title2
+        titleLabel.textColor = DesignSystem.Colors.textPrimary
         titleLabel.alignment = .center
         titleLabel.isEditable = false
         titleLabel.isSelectable = false
@@ -297,8 +279,8 @@ class ModernContentEmptyStateView: NSView {
         titleLabel.isBordered = false
         
         let subtitleLabel = NSTextField(labelWithString: "Choose a workspace from the sidebar to start managing your Claude Code sessions")
-        subtitleLabel.font = NSFont.systemFont(ofSize: 13, weight: .regular)
-        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.font = DesignSystem.Typography.body
+        subtitleLabel.textColor = DesignSystem.Colors.textSecondary
         subtitleLabel.alignment = .center
         subtitleLabel.lineBreakMode = .byWordWrapping
         subtitleLabel.maximumNumberOfLines = 0

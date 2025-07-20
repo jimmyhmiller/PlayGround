@@ -18,7 +18,7 @@ class ModernTodoSectionView: NSView {
     }
     
     private func setupViews() {
-        addGlassmorphismEffect()
+        addModernCardStyling(elevated: true)
         
         headerView.onAddPressed = { [weak self] in
             self?.saveTodoFile()
@@ -29,28 +29,36 @@ class ModernTodoSectionView: NSView {
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = false
         scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
         
         // Setup text view for markdown editing
-        textView.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        textView.font = DesignSystem.Typography.codeBody
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
-        textView.backgroundColor = NSColor.textBackgroundColor
-        textView.textColor = NSColor.textColor
+        textView.backgroundColor = DesignSystem.Colors.surfaceSecondary
+        textView.textColor = DesignSystem.Colors.textPrimary
         textView.isEditable = true
         textView.isSelectable = true
-        textView.insertionPointColor = NSColor.textColor
-        textView.textContainerInset = NSSize(width: 10, height: 10)
+        textView.insertionPointColor = DesignSystem.Colors.accent
+        textView.textContainerInset = NSSize(width: DesignSystem.Spacing.lg, height: DesignSystem.Spacing.lg)
         
-        // Configure text container for proper scrolling
+        // Add subtle border radius to text view
+        textView.wantsLayer = true
+        textView.layer?.cornerRadius = DesignSystem.CornerRadius.md
+        textView.layer?.borderColor = DesignSystem.Colors.borderSubtle.cgColor
+        textView.layer?.borderWidth = 0.5
+        
+        
+        // Configure text container to expand properly
         if let textContainer = textView.textContainer {
             textContainer.widthTracksTextView = true
             textContainer.heightTracksTextView = false
             textContainer.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         }
         
-        // Configure text view sizing
+        // Set proper sizing constraints
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
@@ -64,6 +72,7 @@ class ModernTodoSectionView: NSView {
         
         headerView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        textView.translatesAutoresizingMaskIntoConstraints = false
         
         NSLayoutConstraint.activate([
             headerView.topAnchor.constraint(equalTo: topAnchor, constant: DesignSystem.Spacing.xxl),
@@ -74,24 +83,23 @@ class ModernTodoSectionView: NSView {
             scrollView.topAnchor.constraint(equalTo: headerView.bottomAnchor, constant: DesignSystem.Spacing.lg),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: DesignSystem.Spacing.xxl),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -DesignSystem.Spacing.xxl),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -DesignSystem.Spacing.xxl)
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -DesignSystem.Spacing.xxl),
+            
+            // Essential width constraint but allow height to be flexible
+            textView.widthAnchor.constraint(equalTo: scrollView.widthAnchor, constant: -20)
         ])
     }
     
     func configure(with session: WorkspaceSession, sessionManager: SessionManager) {
         self.session = session
         self.sessionManager = sessionManager
-        print("DEBUG: Configure called, loading todo file...")
         loadTodoFile()
     }
     
     private func loadTodoFile() {
         guard let session = session else { 
-            print("DEBUG: No session available")
             return 
         }
-        
-        print("DEBUG: Loading todo file for session path: \(session.path)")
         
         let basePath = URL(fileURLWithPath: session.path)
         let possiblePaths = [
@@ -116,15 +124,15 @@ class ModernTodoSectionView: NSView {
         
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            print("DEBUG: Loading content with \(content.count) characters: \(content.prefix(50))...")
             self.textView.string = content
             
-            // Force layout update
-            self.textView.sizeToFit()
-            self.textView.needsLayout = true
-            self.textView.layoutSubtreeIfNeeded()
-            self.scrollView.needsLayout = true
-            self.scrollView.layoutSubtreeIfNeeded()
+            // Force the text view to recalculate its size
+            if let textContainer = self.textView.textContainer,
+               let layoutManager = self.textView.layoutManager {
+                layoutManager.ensureLayout(for: textContainer)
+                let usedRect = layoutManager.usedRect(for: textContainer)
+                self.textView.frame = NSRect(x: 0, y: 0, width: self.textView.frame.width, height: max(usedRect.height + 20, self.scrollView.frame.height))
+            }
             
             // Force scroll to top to see the content
             self.textView.scrollToBeginningOfDocument(nil)
@@ -173,7 +181,7 @@ class ModernTodoHeaderView: NSView {
     }
     
     private func setupViews() {
-        titleLabel.font = DesignSystem.Typography.title2
+        titleLabel.font = DesignSystem.Typography.headlineEmphasized
         titleLabel.textColor = DesignSystem.Colors.textPrimary
         
         saveButton.onPressed = { [weak self] in

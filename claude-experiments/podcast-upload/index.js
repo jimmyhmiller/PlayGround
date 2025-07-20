@@ -50,25 +50,23 @@ async function uploadToS3(filePath) {
   const fileName = path.basename(filePath);
   const bucketName = process.env.S3_BUCKET_NAME || 'jimmyhmiller-bucket';
   
+  const fileContent = fs.readFileSync(filePath);
+  const key = `jimmy-uploads/${fileName}`;
+  
   // Check if file already exists in S3
-  const existingKey = `jimmy-uploads/${fileName}`;
   try {
     await s3.send(new HeadObjectCommand({
       Bucket: bucketName,
-      Key: existingKey
+      Key: key
     }));
     
     // File exists, return existing URL
-    const existingUrl = `https://${bucketName}.s3.amazonaws.com/${existingKey}`;
+    const existingUrl = `https://${bucketName}.s3.amazonaws.com/${key}`;
     console.log('File already exists in S3, using existing URL');
     return existingUrl;
   } catch (error) {
     // File doesn't exist, proceed with upload
   }
-  
-  const fileContent = fs.readFileSync(filePath);
-  const timestamp = Date.now();
-  const key = `jimmy-uploads/${timestamp}-${fileName}`;
   
   try {
     await s3.send(new PutObjectCommand({

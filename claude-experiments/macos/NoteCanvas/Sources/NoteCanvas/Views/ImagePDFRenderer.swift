@@ -1,15 +1,193 @@
 import AppKit
 import PDFKit
+import Foundation
+
+// MARK: - Notification Names
+
+extension Notification.Name {
+    static let pdfAnnotationsDidUpdate = Notification.Name("pdfAnnotationsDidUpdate")
+}
+
+// MARK: - Serializable Annotation Models
+
+struct SerializableAnnotation: Codable {
+    let points: [CGPoint]
+    let color: SerializableColor
+    let lineWidth: CGFloat
+    let tool: String
+    let timestamp: Date
+    
+    init(from drawnPath: DrawingCanvasView.DrawnPath) {
+        // Extract points from NSBezierPath
+        var pathPoints: [CGPoint] = []
+        let path = drawnPath.path
+        
+        for i in 0..<path.elementCount {
+            var points = [NSPoint](repeating: NSPoint.zero, count: 3)
+            let elementType = path.element(at: i, associatedPoints: &points)
+            
+            switch elementType {
+            case .moveTo, .lineTo:
+                pathPoints.append(points[0])
+            case .curveTo, .cubicCurveTo:
+                pathPoints.append(points[0])
+                pathPoints.append(points[1])
+                pathPoints.append(points[2])
+            case .quadraticCurveTo:
+                pathPoints.append(points[0])
+                pathPoints.append(points[1])
+            case .closePath:
+                break
+            @unknown default:
+                break
+            }
+        }
+        
+        self.points = pathPoints
+        self.color = SerializableColor(from: drawnPath.color)
+        self.lineWidth = drawnPath.lineWidth
+        self.tool = String(describing: drawnPath.tool)
+        self.timestamp = Date()
+    }
+    
+    func toDrawnPath() -> DrawingCanvasView.DrawnPath {
+        let path = NSBezierPath()
+        
+        if !points.isEmpty {
+            path.move(to: points[0])
+            for point in points.dropFirst() {
+                path.line(to: point)
+            }
+        }
+        
+        return DrawingCanvasView.DrawnPath(
+            path: path,
+            color: color.toNSColor(),
+            lineWidth: lineWidth,
+            tool: ImagePDFRenderer.Tool.from(string: tool)
+        )
+    }
+}
+
+struct SerializableColor: Codable {
+    let red: CGFloat
+    let green: CGFloat
+    let blue: CGFloat
+    let alpha: CGFloat
+    
+    init(from nsColor: NSColor) {
+        let rgbColor = nsColor.usingColorSpace(.deviceRGB) ?? nsColor
+        self.red = rgbColor.redComponent
+        self.green = rgbColor.greenComponent
+        self.blue = rgbColor.blueComponent
+        self.alpha = rgbColor.alphaComponent
+    }
+    
+    func toNSColor() -> NSColor {
+        return NSColor(red: red, green: green, blue: blue, alpha: alpha)
+    }
+}
+
+struct PDFAnnotations: Codable {
+    let pdfPath: String
+    let annotations: [SerializableAnnotation]
+    let lastModified: Date
+}
+
+// MARK: - Annotation Persistence Manager
+
+class AnnotationPersistenceManager {
+    private static let annotationsDirectory = "PDF_Annotations"
+    
+    static func saveAnnotations(_ annotations: [DrawingCanvasView.DrawnPath], for pdfPath: URL) {
+        let serializableAnnotations = annotations.map { SerializableAnnotation(from: $0) }
+        let pdfAnnotations = PDFAnnotations(
+            pdfPath: pdfPath.absoluteString,
+            annotations: serializableAnnotations,
+            lastModified: Date()
+        )
+        
+        guard let data = try? JSONEncoder().encode(pdfAnnotations) else {
+            print("Failed to encode annotations")
+            return
+        }
+        
+        let filename = annotationFilename(for: pdfPath)
+        let annotationsDir = getAnnotationsDirectory()
+        let filePath = annotationsDir.appendingPathComponent(filename)
+        
+        do {
+            try data.write(to: filePath)
+            print("Saved annotations for: \(pdfPath.lastPathComponent)")
+            
+            // Post notification that annotations were updated
+            NotificationCenter.default.post(
+                name: .pdfAnnotationsDidUpdate,
+                object: nil,
+                userInfo: ["pdfPath": pdfPath]
+            )
+        } catch {
+            print("Failed to save annotations: \(error)")
+        }
+    }
+    
+    static func loadAnnotations(for pdfPath: URL) -> [DrawingCanvasView.DrawnPath] {
+        let filename = annotationFilename(for: pdfPath)
+        let annotationsDir = getAnnotationsDirectory()
+        let filePath = annotationsDir.appendingPathComponent(filename)
+        
+        guard let data = try? Data(contentsOf: filePath),
+              let pdfAnnotations = try? JSONDecoder().decode(PDFAnnotations.self, from: data) else {
+            print("No saved annotations found for: \(pdfPath.lastPathComponent)")
+            return []
+        }
+        
+        print("Loaded \(pdfAnnotations.annotations.count) annotations for: \(pdfPath.lastPathComponent)")
+        return pdfAnnotations.annotations.map { $0.toDrawnPath() }
+    }
+    
+    private static func annotationFilename(for pdfPath: URL) -> String {
+        let hash = String(pdfPath.absoluteString.hash)
+        return "annotations_\(hash).json"
+    }
+    
+    private static func getAnnotationsDirectory() -> URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appDir = appSupport.appendingPathComponent("NoteCanvas")
+        let annotationsDir = appDir.appendingPathComponent(annotationsDirectory)
+        
+        // Create directory if it doesn't exist
+        try? FileManager.default.createDirectory(at: annotationsDir, withIntermediateDirectories: true)
+        
+        return annotationsDir
+    }
+}
+
+// MARK: - Tool Extension for Serialization
+
+extension ImagePDFRenderer.Tool {
+    static func from(string: String) -> ImagePDFRenderer.Tool {
+        switch string {
+        case "highlightYellow": return .highlightYellow
+        case "highlightGreen": return .highlightGreen
+        case "highlightRed": return .highlightRed
+        case "highlightBlue": return .highlightBlue
+        case "draw": return .draw
+        case "eraser": return .eraser
+        default: return .none
+        }
+    }
+}
 
 // MARK: - Image-based PDF Renderer
 class ImagePDFRenderer: NSView {
-    private let pdfNote: PDFNote
+    internal let pdfNote: PDFNote
     private var pdfDocument: PDFDocument?
     private var currentPageIndex: Int = 0
     private var scrollView: NSScrollView!
-    private var documentView: NSView!
+    internal var documentView: NSView!
     private var pageImageView: NSImageView!
-    private var drawingCanvas: DrawingCanvasView!
+    internal var drawingCanvas: DrawingCanvasView!
     
     // Tool state
     enum Tool {
@@ -67,6 +245,9 @@ class ImagePDFRenderer: NSView {
         drawingCanvas.delegate = self
         
         documentView.addSubview(drawingCanvas)
+        
+        // Load saved annotations
+        loadAnnotations()
         
         scrollView.documentView = documentView
         addSubview(scrollView)
@@ -246,12 +427,25 @@ class ImagePDFRenderer: NSView {
         scrollView.frame = bounds
         renderCurrentPage()
     }
+    
+    // MARK: - Annotation Persistence
+    
+    private func loadAnnotations() {
+        let savedAnnotations = AnnotationPersistenceManager.loadAnnotations(for: pdfNote.pdfPath)
+        drawingCanvas.loadAnnotations(savedAnnotations)
+    }
+    
+    private func saveAnnotations() {
+        let currentAnnotations = drawingCanvas.getAnnotations()
+        AnnotationPersistenceManager.saveAnnotations(currentAnnotations, for: pdfNote.pdfPath)
+    }
 }
 
 // MARK: - Drawing Canvas Delegate
 extension ImagePDFRenderer: DrawingCanvasDelegate {
     func drawingCanvasDidUpdate(_ canvas: DrawingCanvasView) {
-        // Handle drawing updates if needed
+        // Save annotations whenever they're updated
+        saveAnnotations()
     }
 }
 
@@ -457,5 +651,16 @@ class DrawingCanvasView: NSView {
         isDrawing = false
         currentPath = nil
         needsDisplay = true
+    }
+    
+    // MARK: - Annotation Persistence
+    
+    func loadAnnotations(_ savedDrawings: [DrawnPath]) {
+        drawings = savedDrawings
+        needsDisplay = true
+    }
+    
+    func getAnnotations() -> [DrawnPath] {
+        return drawings
     }
 }

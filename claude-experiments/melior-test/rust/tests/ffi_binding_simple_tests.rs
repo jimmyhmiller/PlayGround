@@ -8,7 +8,6 @@ fn test_ffi_module_compiles() {
 }
 
 #[test]
-#[ignore = "ProperTensorOpsDialect disabled until C++ library is built"]
 fn test_proper_dialect_class_exists() {
     // Test that the ProperTensorOpsDialect class is accessible
     // Disabled because ProperTensorOpsDialect requires C++ FFI
