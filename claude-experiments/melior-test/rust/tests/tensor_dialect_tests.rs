@@ -49,7 +49,6 @@ fn test_dialect_registration() {
 
 /// Test that tensor_ops operations are properly verified
 #[test]
-#[ignore = "Operation verification requires properly registered dialect"]
 fn test_operation_verification() {
     let context = setup_context_with_tensor_ops();
     let location = Location::unknown(&context);
@@ -81,7 +80,6 @@ fn test_operation_verification() {
 
 /// Test that lowering preserves semantics
 #[test]
-#[ignore = "Creating tensor_ops operations with invalid attributes causes crashes"]
 fn test_lowering_preserves_semantics() {
     let context = setup_context_with_tensor_ops();
     let location = Location::unknown(&context);
@@ -118,7 +116,6 @@ fn test_lowering_preserves_semantics() {
 
 /// Test that conversion patterns work correctly
 #[test]
-#[ignore = "Creating tensor_ops operations with invalid attributes causes crashes"]
 fn test_conversion_patterns() {
     let context = setup_context_with_tensor_ops();
     let location = Location::unknown(&context);
@@ -138,7 +135,6 @@ fn test_conversion_patterns() {
 
 /// Test that the dialect can be used with standard MLIR passes
 #[test]
-#[ignore = "Canonicalization pass crashes with unregistered tensor_ops operations"]
 fn test_dialect_with_standard_passes() {
     let context = setup_context_with_tensor_ops();
     let location = Location::unknown(&context);
@@ -181,7 +177,6 @@ fn test_dialect_types() {
 
 /// Test round-trip: create -> print -> parse
 #[test]
-#[ignore = "Printing module with tensor_ops causes segfault"]
 fn test_round_trip() {
     let context = setup_context_with_tensor_ops();
     let location = Location::unknown(&context);

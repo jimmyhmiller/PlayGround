@@ -16,6 +16,7 @@ class PDFNoteView: BaseNoteView, NoteViewProtocol {
         super.init(frame: CGRect(origin: note.position, size: note.size))
         setupViews()
         updateAppearance()
+        setupNotificationObserver()
     }
     
     required init?(coder: NSCoder) {
@@ -97,6 +98,7 @@ class PDFNoteView: BaseNoteView, NoteViewProtocol {
         )
     }
     
+    
     func updateSelection() {
         animateSelection(note.isSelected)
     }
@@ -117,6 +119,40 @@ class PDFNoteView: BaseNoteView, NoteViewProtocol {
         super.layout()
         thumbnailImageView.frame = bounds
         layoutPageLabel()
+    }
+    
+    private func setupNotificationObserver() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(annotationsDidUpdate(_:)),
+            name: .pdfAnnotationsDidUpdate,
+            object: nil
+        )
+    }
+    
+    @objc private func annotationsDidUpdate(_ notification: Notification) {
+        // Check if this notification is for our PDF
+        guard let notificationPDFPath = notification.userInfo?["pdfPath"] as? URL,
+              notificationPDFPath.absoluteString == note.pdfPath.absoluteString else {
+            return
+        }
+        
+        // Update thumbnail on main queue since UI update
+        DispatchQueue.main.async { [weak self] in
+            self?.updateThumbnail()
+        }
+    }
+    
+    public func updateThumbnail() {
+        // Regenerate thumbnail with latest annotations
+        if let updatedThumbnail = note.generateThumbnailImage() {
+            thumbnailImageView.image = updatedThumbnail
+            thumbnailImageView.needsDisplay = true
+        }
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
     
 }
