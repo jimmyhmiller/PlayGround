@@ -8,17 +8,37 @@ public class Canvas: ObservableObject {
     @Published public var zoomLevel: CGFloat = 1.0
     
     private var nextZIndex = 0
+    public let undoManager = UndoManager()
     
-    public init() {}
+    public init() {
+        undoManager.levelsOfUndo = 50
+    }
     
     public func addNote(_ note: any NoteItem) {
         var mutableNote = note
         mutableNote.zIndex = nextZIndex
         nextZIndex += 1
-        notes.append(AnyNote(mutableNote))
+        let anyNote = AnyNote(mutableNote)
+        
+        // Register undo action
+        undoManager.registerUndo(withTarget: self) { canvas in
+            canvas.removeNote(id: mutableNote.id)
+        }
+        undoManager.setActionName("Add Note")
+        
+        notes.append(anyNote)
     }
     
     func removeNote(id: UUID) {
+        // Find the note before removing it for undo
+        guard let noteToRemove = notes.first(where: { $0.note.id == id }) else { return }
+        
+        // Register undo action
+        undoManager.registerUndo(withTarget: self) { canvas in
+            canvas.addNote(noteToRemove.note)
+        }
+        undoManager.setActionName("Delete Note")
+        
         notes.removeAll { $0.note.id == id }
         selectedNotes.remove(id)
     }
@@ -41,9 +61,41 @@ public class Canvas: ObservableObject {
         updateSelectionState()
     }
     
+    public func deleteSelectedNotes() {
+        let notesToDelete = notes.filter { selectedNotes.contains($0.note.id) }
+        
+        if notesToDelete.isEmpty { return }
+        
+        // Register undo action for all deleted notes
+        undoManager.registerUndo(withTarget: self) { canvas in
+            // Restore all deleted notes
+            for anyNote in notesToDelete {
+                canvas.notes.append(anyNote)
+            }
+            // Restore selection
+            canvas.selectedNotes = Set(notesToDelete.map { $0.note.id })
+            canvas.updateSelectionState()
+        }
+        undoManager.setActionName("Delete \(notesToDelete.count) Note\(notesToDelete.count == 1 ? "" : "s")")
+        
+        // Remove the notes
+        notes.removeAll { selectedNotes.contains($0.note.id) }
+        selectedNotes.removeAll()
+    }
+    
     func moveNote(id: UUID, to position: CGPoint) {
         guard let index = notes.firstIndex(where: { $0.note.id == id }) else { return }
         var note = notes[index].note
+        let oldPosition = note.position
+        
+        // Register undo action
+        undoManager.registerUndo(withTarget: self) { canvas in
+            canvas.moveNote(id: id, to: oldPosition)
+        }
+        if !undoManager.isUndoing && !undoManager.isRedoing {
+            undoManager.setActionName("Move Note")
+        }
+        
         note.position = position
         note.modifiedAt = Date()
         notes[index] = AnyNote(note)

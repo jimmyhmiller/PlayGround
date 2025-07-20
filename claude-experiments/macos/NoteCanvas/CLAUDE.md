@@ -7,37 +7,52 @@ A note-taking canvas app for macOS built with AppKit in Swift. The goal is to re
 
 ## Current Status
 
-### ✅ Completed Foundation
+### ✅ Completed Features
 - **Core Data Models**: Protocol-oriented design with `NoteItem` protocol, `TextNote`, `StickyNote`, `ImageNote`, and `Canvas` models
 - **Base View System**: `BaseNoteView` with layer-based rendering (shadows, selection, rounded corners)
 - **Visual Effects Library**: Reusable components for shadows, animations, and visual styling
 - **Project Structure**: Proper Swift Package with library and executable targets
 - **Build System**: App compiles and runs successfully
+- **Individual Note Dragging**: Notes can be clicked and dragged to new positions
+- **Multi-Note Dragging**: Selected notes move together maintaining relative positions
+- **Selection System**: Click to select, Shift+Click for multi-select
+- **Selection Rectangle**: Click and drag on empty canvas creates selection rectangle
+- **Z-order Management**: Clicking a note brings it to front
+- **Image Drag-and-Drop**: Drag images from Finder or web browsers onto canvas
+- **Image Rendering**: Images display with rounded corners and proper scaling
+- **Delete Functionality**: Delete key removes selected notes
+- **Undo/Redo System**: Full undo/redo support with NSUndoManager (Cmd+Z, Cmd+Shift+Z)
+- **Keyboard Event Handling**: App properly captures keyboard input with activation policy
 
-### ⚠️ Partially Implemented (Needs Testing/Fixing)
-- **CanvasView**: Has mouse/keyboard handling code but interactions may not work properly
-- **Note Views**: `TextNoteView`, `ImageNoteView`, `StickyNoteView` exist but dragging/editing may be broken
-- **Selection System**: Visual feedback code exists but hit testing likely needs fixes
-- **Pan/Zoom**: Code exists but viewport updates may not work correctly
+### ⚠️ Partially Implemented (Needs Fixing)
+- **Canvas Pan with Spacebar**: Code exists but spacebar+drag does not actually pan the canvas
+- **Zoom with Trackpad**: Gesture recognizer exists but zoom transforms not applied to view
+- **Text Note Content**: TextNoteView shows only rectangles, needs actual text rendering
+- **Sticky Note Appearance**: StickyNoteView needs yellow paper background and tape effect
+- **Text Editing**: TextNoteView has no text editing capability implemented
 
 ### ❌ Not Yet Implemented
-- Individual note dragging (mouse events not properly wired)
-- Working pan/zoom with spacebar
-- Functional multi-selection with drag rectangles
+- Working canvas pan with spacebar (event handling exists but doesn't update viewport)
+- Functional zoom that scales the canvas content  
 - Folder view with expand/collapse animations
-- Resize handles and context menus
-- Animation system for smooth transitions
+- Resize handles on selected notes
+- Context menus for notes
+- Smooth animations for transitions
 - Layout engine for snap-to-grid
 - Theme system for consistent styling
+- File/PDF note types
+- Export functionality
+- Save/Load canvas state
 
 ## Todo List
 
 ### High Priority
-- [ ] **Fix note dragging** - Debug and fix individual note movement
-- [ ] **Fix canvas pan/zoom** - Ensure spacebar panning and trackpad zoom work
-- [ ] **Fix selection system** - Debug multi-select drag rectangles and hit testing
+- [ ] **Fix spacebar canvas panning** - Spacebar detection works but viewport offset not updating view
+- [ ] **Fix trackpad zoom** - Gesture recognizer exists but transforms not applied
+- [ ] **Implement text note rendering** - Add actual text display in TextNoteView
+- [ ] **Implement sticky note appearance** - Yellow background and tape effect
+- [ ] **Add text editing** - Make TextNoteView editable with NSTextView
 - [ ] **Build animation system** - Smooth transitions for note movement and selection
-- [ ] **Write unit tests** - Test data model and business logic
 
 ### Medium Priority
 - [ ] **Create FolderView** - iPhone-style app groups with expand/collapse
@@ -63,17 +78,26 @@ A note-taking canvas app for macOS built with AppKit in Swift. The goal is to re
 - Public API design for library/app separation
 
 ## Known Issues
-1. **Mouse Event Handling**: Note dragging likely broken due to event handling conflicts
-2. **Coordinate Systems**: Viewport transformations may not be applied correctly
-3. **Hit Testing**: Multi-selection rectangle intersection logic needs verification
-4. **Text Editing**: Text note editing may not work properly
-5. **Performance**: No optimization for large numbers of notes
+1. **Spacebar Panning**: Spacebar is detected but viewport offset changes don't update contentView position
+2. **Zoom Transforms**: Magnification gesture captured but scale transform not applied to contentView
+3. **Text Note Rendering**: TextNoteView shows only colored rectangles, no actual text content
+4. **Sticky Note Appearance**: StickyNoteView lacks yellow paper background and tape effect
+5. **Text Editing**: TextNoteView has no NSTextView or editing capability
+6. **Performance**: No optimization for large numbers of notes
+
+## Recently Added Features
+- **Image Support**: Full drag-and-drop from Finder and web browsers with rounded corners
+- **Delete Operations**: Delete key removes selected notes with proper undo support
+- **Undo/Redo System**: Complete NSUndoManager integration for all operations
+- **Keyboard Handling**: Proper app activation and first responder management
 
 ## Next Steps
-1. **Debug interactive features** - Test and fix mouse handling, dragging, selection
-2. **Implement missing core features** - Folders, animations, resize handles
-3. **Polish and optimize** - Smooth animations, performance improvements
-4. **Add tests** - Ensure reliability and prevent regressions
+1. **Fix viewport transforms** - Apply pan offset and zoom scale to contentView
+2. **Implement text note rendering** - Add actual text display in TextNoteView
+3. **Implement sticky note appearance** - Yellow background with tape effect
+4. **Add text editing** - Integrate NSTextView for editable text notes
+5. **Polish and optimize** - Smooth animations, performance improvements
+6. **Add tests** - Ensure reliability and prevent regressions
 
 ## Build Instructions
 ```bash
@@ -125,21 +149,22 @@ NoteCanvas/
 
 ## Critical Issues to Fix First
 
-### 1. Mouse Event Handling (`CanvasView.swift:201-258`)
-The canvas intercepts all mouse events, preventing individual notes from receiving them. Need to:
-- Fix event routing between canvas and note views
-- Ensure note dragging works alongside canvas panning
-- Test hit testing logic for multi-selection
+### 1. Viewport Transform Application (`CanvasView.swift:updateViewport`)
+The viewport offset is tracked but not applied to contentView's position. Need to:
+- Apply CGAffineTransform or update frame origin when viewport offset changes
+- Ensure zoom transforms are combined with pan transforms
+- Update contentView bounds for proper clipping
 
-### 2. Coordinate System Issues
-- Viewport offset updates may not properly transform `contentView`
-- Zoom transforms need to be applied correctly
-- Note positioning relative to canvas viewport needs verification
+### 2. Note Content Rendering
+- Note views only show colored rectangles via BaseNoteView
+- TextNoteView needs NSTextView integration for text display/editing
+- StickyNoteView needs yellow paper background and tape effect
+- ImageNoteView needs NSImageView for image display
 
-### 3. Note View Integration
-- Note views exist but may not be properly wired to canvas delegates
-- Text editing in `TextNoteView` needs testing
-- Selection visual feedback may not trigger
+### 3. Spacebar Pan Implementation
+- Spacebar detection works but viewport updates don't move contentView
+- Need to connect pan deltas to actual view transformation
+- Consider using CGAffineTransform for smooth panning
 
 ## Design Patterns Used
 

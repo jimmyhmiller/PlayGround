@@ -22,7 +22,10 @@ class ImageNoteView: BaseNoteView, NoteViewProtocol {
     }
     
     private func setupImageView() {
-        imageView = NSImageView(frame: bounds.insetBy(dx: 1, dy: 1))
+        // Hide the white background from BaseNoteView for images
+        contentLayer.backgroundColor = NSColor.clear.cgColor
+        
+        imageView = NSImageView(frame: bounds)
         imageView.autoresizingMask = [.width, .height]
         imageView.imageFrameStyle = .none
         imageView.imageScaling = .scaleProportionallyUpOrDown
@@ -31,6 +34,11 @@ class ImageNoteView: BaseNoteView, NoteViewProtocol {
         imageLayer = imageView.layer!
         imageLayer.cornerRadius = note.cornerRadius
         imageLayer.masksToBounds = true
+        imageLayer.backgroundColor = NSColor.clear.cgColor
+        
+        // Ensure contentLayer also has rounded corners
+        contentLayer.cornerRadius = note.cornerRadius
+        contentLayer.masksToBounds = true
         
         addSubview(imageView)
     }
@@ -77,5 +85,11 @@ class ImageNoteView: BaseNoteView, NoteViewProtocol {
     
     override func getNoteItem() -> (any NoteItem)? {
         return note
+    }
+    
+    override func layout() {
+        super.layout()
+        // Ensure imageView fills the entire bounds
+        imageView.frame = bounds
     }
 }

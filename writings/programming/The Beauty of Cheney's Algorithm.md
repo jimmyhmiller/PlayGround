@@ -123,3 +123,6 @@ def forward(ptr, to_space):
     return new_ptr
 ```
 
+I know when I read blog posts about code, I almost never read the whole code listing. So let me pull out the key insight: we can reuse our header to store the forwarded pointer. This means we know 1) if we have copied an object already and 2) where we copied it to. 
+
+Finally, one fairly surprising feature of this algorithm is how it only requires us to first copy our roots, and
