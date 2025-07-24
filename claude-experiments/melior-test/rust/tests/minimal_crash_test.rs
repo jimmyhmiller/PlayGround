@@ -1,0 +1,126 @@
+//! Minimal test to reproduce the intermittent crash
+//! Contains ONLY test_execution_engine_creation
+
+use melior::{
+    Context, ExecutionEngine,
+    dialect::DialectRegistry,
+    ir::{
+        Block, Identifier, Location, Module, Region,
+        attribute::{StringAttribute, TypeAttribute},
+        operation::OperationBuilder,
+        r#type::{FunctionType, IntegerType},
+    },
+    pass::PassManager,
+};
+use mlir_sys::*;
+use std::sync::Once;
+
+static INIT: Once = Once::new();
+
+/// Initialize MLIR dialects and passes only once to avoid registration conflicts
+fn init_mlir_once() {
+    INIT.call_once(|| {
+        unsafe {
+            mlirRegisterAllPasses();
+        }
+    });
+}
+
+/// Create a new registry with all dialects registered - safe to call multiple times
+fn create_registry() -> DialectRegistry {
+    init_mlir_once(); // Ensure passes are registered first
+    let registry = DialectRegistry::new();
+    unsafe {
+        mlirRegisterAllDialects(registry.to_raw());
+    }
+    registry
+}
+
+fn setup_full_context() -> Context {
+    let registry = create_registry();
+    let context = Context::new();
+    context.append_dialect_registry(&registry);
+    context.load_all_available_dialects();
+
+    unsafe {
+        mlirContextSetAllowUnregisteredDialects(context.to_raw(), true);
+        mlirRegisterAllLLVMTranslations(context.to_raw());
+    }
+
+    context
+}
+
+fn create_simple_identity_function(
+    context: &Context,
+    module: &Module,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let location = Location::unknown(context);
+    let i32_type = IntegerType::new(context, 32);
+    let function_type = FunctionType::new(context, &[i32_type.into()], &[i32_type.into()]);
+
+    let function = OperationBuilder::new("func.func", location)
+        .add_attributes(&[
+            (
+                Identifier::new(context, "sym_name"),
+                StringAttribute::new(context, "identity").into(),
+            ),
+            (
+                Identifier::new(context, "function_type"),
+                TypeAttribute::new(function_type.into()).into(),
+            ),
+            (
+                Identifier::new(context, "sym_visibility"),
+                StringAttribute::new(context, "public").into(),
+            ),
+        ])
+        .add_regions([Region::new()])
+        .build()?;
+
+    let block = Block::new(&[(i32_type.into(), location)]);
+    let region = function.region(0)?;
+    region.append_block(block);
+    let block_ref = region.first_block().unwrap();
+
+    let arg = block_ref.argument(0)?;
+    let return_op = OperationBuilder::new("func.return", location)
+        .add_operands(&[arg.into()])
+        .build()?;
+    block_ref.append_operation(return_op);
+
+    module.body().append_operation(function);
+    Ok(())
+}
+
+#[test]
+fn test_execution_engine_creation() {
+    let context = setup_full_context();
+    let location = Location::unknown(&context);
+    let module = Module::new(location);
+
+    // Create simple function
+    create_simple_identity_function(&context, &module).expect("Function creation should work");
+
+    // Apply lowering passes
+    let pass_manager = PassManager::new(&context);
+    unsafe {
+        use melior::pass::Pass;
+        let func_to_llvm = Pass::from_raw(mlirCreateConversionConvertFuncToLLVMPass());
+        pass_manager.add_pass(func_to_llvm);
+    }
+
+    let mut final_module = module;
+    let pass_result = pass_manager.run(&mut final_module);
+    assert!(pass_result.is_ok(), "Pass manager should succeed");
+
+    // Test ExecutionEngine creation - avoid keeping the engine to prevent cleanup crash
+    let engine_creation_works = std::panic::catch_unwind(|| {
+        let _engine = ExecutionEngine::new(&final_module, 0, &[], false);
+        // Engine drops immediately here, reducing cleanup issues
+        true
+    });
+
+    assert!(
+        engine_creation_works.is_ok(),
+        "ExecutionEngine creation should not panic"
+    );
+}

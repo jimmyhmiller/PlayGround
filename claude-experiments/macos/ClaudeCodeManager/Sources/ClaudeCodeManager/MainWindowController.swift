@@ -34,24 +34,18 @@ class MainWindowController: NSWindowController {
     private func setupWindow() {
         guard let window = window else { return }
         
-        // Modern window appearance
+        // Modern transparent titlebar
         window.titleVisibility = .visible
         window.titlebarAppearsTransparent = true
-        window.backgroundColor = DesignSystem.Colors.background
+        window.backgroundColor = NSColor.windowBackgroundColor
         
-        // Enable vibrancy for modern look
-        if #available(macOS 10.14, *) {
-            window.appearance = NSAppearance(named: .aqua)
-        }
-        
-        // Set window properties for better visual hierarchy
-        window.isOpaque = false
-        window.hasShadow = true
-        
-        // Configure toolbar appearance
+        // Configure toolbar for integrated look
         if #available(macOS 11.0, *) {
-            window.toolbarStyle = .unifiedCompact
+            window.toolbarStyle = .unified
         }
+        
+        // Enable full size content view for seamless integration
+        window.styleMask.insert(.fullSizeContentView)
     }
     
     private func setupSessionManager() {

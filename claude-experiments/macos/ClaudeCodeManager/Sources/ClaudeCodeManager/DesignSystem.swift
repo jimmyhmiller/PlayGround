@@ -5,47 +5,43 @@ enum DesignSystem {
     
     // MARK: - Colors
     enum Colors {
-        // Adaptive colors that work with system appearance
-        static let background = NSColor.name("AppBackground") ?? NSColor.windowBackgroundColor
-        static let surfacePrimary = NSColor.name("SurfacePrimary") ?? NSColor.controlBackgroundColor
-        static let surfaceSecondary = NSColor.name("SurfaceSecondary") ?? NSColor.controlColor
-        static let surfaceElevated = NSColor.name("SurfaceElevated") ?? NSColor.quaternaryLabelColor.withAlphaComponent(0.1)
+        // Base colors that properly adapt to system appearance
+        static let background = NSColor.windowBackgroundColor
+        static let surfacePrimary = NSColor.controlBackgroundColor
+        static let surfaceSecondary = NSColor.unemphasizedSelectedContentBackgroundColor
+        static let surfaceElevated = NSColor.controlBackgroundColor
         
-        // Modern accent colors with vibrancy
-        static let accent = NSColor.systemBlue
-        static let accentHover = NSColor.systemBlue.withSystemEffect(.pressed)
-        static let accentSecondary = NSColor.systemBlue.withAlphaComponent(0.15)
-        static let accentTertiary = NSColor.systemBlue.withAlphaComponent(0.08)
+        // Accent colors using system blue consistently
+        static let accent = NSColor.controlAccentColor
+        static let accentHover = NSColor.controlAccentColor
+        static let accentSecondary = NSColor.controlAccentColor.withAlphaComponent(0.15)
+        static let accentTertiary = NSColor.controlAccentColor.withAlphaComponent(0.08)
         
-        // Status colors
+        // Status colors using system colors
         static let success = NSColor.systemGreen
         static let warning = NSColor.systemOrange
         static let error = NSColor.systemRed
-        static let info = NSColor.systemPurple
+        static let info = NSColor.systemBlue
         
-        // Text colors that adapt to appearance
+        // Text colors that properly adapt
         static let textPrimary = NSColor.labelColor
         static let textSecondary = NSColor.secondaryLabelColor
         static let textTertiary = NSColor.tertiaryLabelColor
         static let textPlaceholder = NSColor.placeholderTextColor
         
-        // Border and separator colors
+        // Borders and separators
         static let border = NSColor.separatorColor
-        static let borderSubtle = NSColor.separatorColor.withAlphaComponent(0.5)
-        static let borderStrong = NSColor.separatorColor.withAlphaComponent(0.8)
-        
-        // Glass morphism effects
-        static let glassFill = NSColor.controlBackgroundColor.withAlphaComponent(0.8)
-        static let glassStroke = NSColor.separatorColor.withAlphaComponent(0.3)
+        static let borderSubtle = NSColor.separatorColor.withAlphaComponent(0.3)
+        static let borderStrong = NSColor.separatorColor
         
         // Interactive states
-        static let hoverBackground = NSColor.controlAccentColor.withAlphaComponent(0.05)
-        static let pressedBackground = NSColor.controlAccentColor.withAlphaComponent(0.1)
+        static let hoverBackground = NSColor.controlAccentColor.withAlphaComponent(0.1)
+        static let pressedBackground = NSColor.controlAccentColor.withAlphaComponent(0.2)
         static let selectedBackground = NSColor.selectedContentBackgroundColor
         
-        // Card and surface shadows
-        static let shadowColor = NSColor.black.withAlphaComponent(0.15)
-        static let shadowColorStrong = NSColor.black.withAlphaComponent(0.25)
+        // Consistent shadow colors
+        static let shadowColor = NSColor.shadowColor.withAlphaComponent(0.1)
+        static let shadowColorStrong = NSColor.shadowColor.withAlphaComponent(0.2)
     }
     
     // MARK: - Typography
@@ -145,13 +141,11 @@ extension NSView {
     func addModernCardStyling(elevated: Bool = false) {
         wantsLayer = true
         layer?.backgroundColor = DesignSystem.Colors.surfacePrimary.cgColor
-        layer?.cornerRadius = DesignSystem.CornerRadius.card
+        layer?.cornerRadius = DesignSystem.CornerRadius.md
         layer?.borderColor = DesignSystem.Colors.borderSubtle.cgColor
         layer?.borderWidth = 0.5
         
         if elevated {
-            shadow = DesignSystem.Shadows.elevatedShadow()
-        } else {
             shadow = DesignSystem.Shadows.cardShadow()
         }
     }
@@ -159,19 +153,9 @@ extension NSView {
     func addSubtleCardStyling() {
         wantsLayer = true
         layer?.backgroundColor = DesignSystem.Colors.surfaceSecondary.cgColor
-        layer?.cornerRadius = DesignSystem.CornerRadius.md
+        layer?.cornerRadius = DesignSystem.CornerRadius.sm
         layer?.borderColor = DesignSystem.Colors.borderSubtle.cgColor
         layer?.borderWidth = 0.5
-        shadow = DesignSystem.Shadows.subtleShadow()
-    }
-    
-    func addGlassmorphismEffect() {
-        wantsLayer = true
-        layer?.backgroundColor = DesignSystem.Colors.glassFill.cgColor
-        layer?.borderColor = DesignSystem.Colors.glassStroke.cgColor
-        layer?.borderWidth = 1
-        layer?.cornerRadius = DesignSystem.CornerRadius.lg
-        shadow = DesignSystem.Shadows.subtleShadow()
     }
     
     func addHoverEffect(target: Any?, action: Selector?) {
@@ -182,32 +166,5 @@ extension NSView {
             userInfo: nil
         )
         addTrackingArea(trackingArea)
-    }
-    
-    func animateHover(isHovered: Bool) {
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.2
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            
-            if isHovered {
-                layer?.backgroundColor = DesignSystem.Colors.hoverBackground.cgColor
-                layer?.transform = CATransform3DMakeScale(1.02, 1.02, 1)
-            } else {
-                layer?.backgroundColor = DesignSystem.Colors.surfacePrimary.cgColor
-                layer?.transform = CATransform3DIdentity
-            }
-        })
-    }
-    
-    func addPressedEffect() {
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.1
-            layer?.transform = CATransform3DMakeScale(0.98, 0.98, 1)
-        }) {
-            NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.1
-                self.layer?.transform = CATransform3DIdentity
-            })
-        }
     }
 }

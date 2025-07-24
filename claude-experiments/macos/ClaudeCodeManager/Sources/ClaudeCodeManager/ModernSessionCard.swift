@@ -34,9 +34,9 @@ class ModernSessionCard: NSView {
     
     private func setupViews() {
         wantsLayer = true
-        addCardStyling()
+        addModernCardStyling()
         
-        nameLabel.font = DesignSystem.Typography.bodyMedium
+        nameLabel.font = DesignSystem.Typography.bodyEmphasized
         nameLabel.textColor = DesignSystem.Colors.textPrimary
         nameLabel.lineBreakMode = .byTruncatingTail
         
@@ -151,7 +151,7 @@ class ModernSessionCard: NSView {
                 layer?.borderWidth = 1
             } else {
                 layer?.backgroundColor = DesignSystem.Colors.surfaceElevated.cgColor
-                layer?.borderColor = DesignSystem.Colors.borderLight.cgColor
+                layer?.borderColor = DesignSystem.Colors.borderSubtle.cgColor
                 layer?.borderWidth = 1
             }
         })

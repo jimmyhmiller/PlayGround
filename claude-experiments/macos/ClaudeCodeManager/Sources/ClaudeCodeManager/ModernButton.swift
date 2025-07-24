@@ -37,7 +37,7 @@ class ModernButton: NSView {
         titleLabel.isBordered = false
         titleLabel.backgroundColor = .clear
         titleLabel.alignment = .center
-        titleLabel.font = DesignSystem.Typography.captionMedium
+        titleLabel.font = DesignSystem.Typography.footnoteEmphasized
         
         iconLabel.isEditable = false
         iconLabel.isBordered = false
@@ -60,7 +60,7 @@ class ModernButton: NSView {
     }
     
     private func setupStyling() {
-        layer?.cornerRadius = DesignSystem.CornerRadius.sm
+        layer?.cornerRadius = DesignSystem.CornerRadius.button
         updateAppearance()
     }
     
@@ -148,47 +148,47 @@ class ModernButton: NSView {
         switch style {
         case .primary:
             if isPressed {
-                return (DesignSystem.Colors.accent.withAlphaComponent(0.8), DesignSystem.Colors.textPrimary, nil)
+                return (DesignSystem.Colors.pressedBackground, NSColor.white, nil)
             } else if isHovered {
-                return (DesignSystem.Colors.accentHover, DesignSystem.Colors.textPrimary, nil)
+                return (DesignSystem.Colors.accentHover, NSColor.white, nil)
             } else {
-                return (DesignSystem.Colors.accent, DesignSystem.Colors.textPrimary, nil)
+                return (DesignSystem.Colors.accent, NSColor.white, nil)
             }
             
         case .secondary:
             if isPressed {
-                return (DesignSystem.Colors.surfaceElevated.withAlphaComponent(0.8), DesignSystem.Colors.textPrimary, DesignSystem.Colors.border)
+                return (DesignSystem.Colors.pressedBackground, DesignSystem.Colors.textPrimary, DesignSystem.Colors.borderStrong)
             } else if isHovered {
-                return (DesignSystem.Colors.surfaceElevated, DesignSystem.Colors.textPrimary, DesignSystem.Colors.accent)
+                return (DesignSystem.Colors.hoverBackground, DesignSystem.Colors.textPrimary, DesignSystem.Colors.accent)
             } else {
                 return (DesignSystem.Colors.surfaceSecondary, DesignSystem.Colors.textSecondary, DesignSystem.Colors.border)
             }
             
         case .accent:
             if isPressed {
-                return (DesignSystem.Colors.accentSecondary.withAlphaComponent(0.8), DesignSystem.Colors.accent, DesignSystem.Colors.accent)
+                return (DesignSystem.Colors.pressedBackground, DesignSystem.Colors.accent, DesignSystem.Colors.accent)
             } else if isHovered {
                 return (DesignSystem.Colors.accentSecondary, DesignSystem.Colors.accent, DesignSystem.Colors.accent)
             } else {
-                return (.clear, DesignSystem.Colors.accent, DesignSystem.Colors.accent)
+                return (DesignSystem.Colors.accentTertiary, DesignSystem.Colors.accent, DesignSystem.Colors.accent)
             }
             
         case .ghost:
             if isPressed {
-                return (DesignSystem.Colors.surfaceSecondary.withAlphaComponent(0.5), DesignSystem.Colors.textSecondary, nil)
+                return (DesignSystem.Colors.pressedBackground, DesignSystem.Colors.textSecondary, nil)
             } else if isHovered {
-                return (DesignSystem.Colors.surfaceSecondary.withAlphaComponent(0.3), DesignSystem.Colors.textPrimary, nil)
+                return (DesignSystem.Colors.hoverBackground, DesignSystem.Colors.textPrimary, nil)
             } else {
                 return (.clear, DesignSystem.Colors.textTertiary, nil)
             }
             
         case .danger:
             if isPressed {
-                return (DesignSystem.Colors.error.withAlphaComponent(0.8), DesignSystem.Colors.textPrimary, nil)
+                return (DesignSystem.Colors.error.withSystemEffect(.pressed), NSColor.white, nil)
             } else if isHovered {
-                return (DesignSystem.Colors.error.withAlphaComponent(0.9), DesignSystem.Colors.textPrimary, nil)
+                return (DesignSystem.Colors.error.withSystemEffect(.rollover), NSColor.white, nil)
             } else {
-                return (DesignSystem.Colors.error, DesignSystem.Colors.textPrimary, nil)
+                return (DesignSystem.Colors.error, NSColor.white, nil)
             }
         }
     }

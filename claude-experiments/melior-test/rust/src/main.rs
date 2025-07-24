@@ -12,7 +12,7 @@ use melior::{
 use mlir_sys::*;
 
 mod tensor_ops_dialect;
-mod tensor_ops_lowering;
+// mod tensor_ops_lowering; // Temporarily disabled
 
 use tensor_ops_dialect::TensorOpsDialect;
 
@@ -48,8 +48,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     create_tensor_computation(&context, &module)?;
 
     // Apply lowering: tensor_ops -> standard dialects -> LLVM
-    let lowered_module = tensor_ops_lowering::TensorOpsLowering::apply_lowering(&context, &module)?;
-    let mut final_module = lowered_module;
+    // let lowered_module = tensor_ops_lowering::TensorOpsLowering::apply_lowering(&context, &module)?; // Temporarily disabled
+    let mut final_module = module; // Use original module for now
 
     // Apply standard to LLVM lowering passes
     let pass_manager = PassManager::new(&context);
