@@ -233,7 +233,7 @@ class ModernEmptyStateView: NSView {
         wantsLayer = true
         layer?.backgroundColor = DesignSystem.Colors.surfaceSecondary.withAlphaComponent(0.3).cgColor
         layer?.cornerRadius = DesignSystem.CornerRadius.lg
-        layer?.borderColor = DesignSystem.Colors.borderLight.cgColor
+        layer?.borderColor = DesignSystem.Colors.borderSubtle.cgColor
         layer?.borderWidth = 1
         
         let iconLabel = NSTextField(labelWithString: "📁")

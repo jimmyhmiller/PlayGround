@@ -18,7 +18,10 @@ class ModernTodoSectionView: NSView {
     }
     
     private func setupViews() {
-        addModernCardStyling(elevated: true)
+        // Keep it simple - just a clean background
+        wantsLayer = true
+        layer?.backgroundColor = DesignSystem.Colors.surfacePrimary.cgColor
+        layer?.cornerRadius = DesignSystem.CornerRadius.md
         
         headerView.onAddPressed = { [weak self] in
             self?.saveTodoFile()
@@ -37,18 +40,12 @@ class ModernTodoSectionView: NSView {
         textView.isAutomaticTextReplacementEnabled = false
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
-        textView.backgroundColor = DesignSystem.Colors.surfaceSecondary
-        textView.textColor = DesignSystem.Colors.textPrimary
+        textView.backgroundColor = NSColor.textBackgroundColor
+        textView.textColor = NSColor.textColor
         textView.isEditable = true
         textView.isSelectable = true
         textView.insertionPointColor = DesignSystem.Colors.accent
         textView.textContainerInset = NSSize(width: DesignSystem.Spacing.lg, height: DesignSystem.Spacing.lg)
-        
-        // Add subtle border radius to text view
-        textView.wantsLayer = true
-        textView.layer?.cornerRadius = DesignSystem.CornerRadius.md
-        textView.layer?.borderColor = DesignSystem.Colors.borderSubtle.cgColor
-        textView.layer?.borderWidth = 0.5
         
         
         // Configure text container to expand properly

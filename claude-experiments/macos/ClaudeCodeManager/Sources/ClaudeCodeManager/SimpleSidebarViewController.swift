@@ -39,8 +39,8 @@ class SimpleSidebarViewController: NSViewController {
         headerView.wantsLayer = true
         
         let titleLabel = NSTextField(labelWithString: "WORKSPACES")
-        titleLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.font = DesignSystem.Typography.captionEmphasized
+        titleLabel.textColor = NSColor.tertiaryLabelColor
         titleLabel.isEditable = false
         titleLabel.isSelectable = false
         titleLabel.backgroundColor = .clear
@@ -53,7 +53,9 @@ class SimpleSidebarViewController: NSViewController {
         addButton.imageScaling = .scaleProportionallyDown
         addButton.target = self
         addButton.action = #selector(addWorkspacePressed)
-        addButton.alphaValue = 0.7
+        
+        // Style the add button simply
+        addButton.contentTintColor = NSColor.controlAccentColor
         
         headerView.addSubview(titleLabel)
         headerView.addSubview(addButton)
@@ -64,7 +66,7 @@ class SimpleSidebarViewController: NSViewController {
         addButton.translatesAutoresizingMaskIntoConstraints = false
         
         NSLayoutConstraint.activate([
-            headerView.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
+            headerView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 16),
             headerView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             headerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             headerView.heightAnchor.constraint(equalToConstant: 24),
@@ -181,8 +183,8 @@ extension SimpleSidebarViewController: NSTableViewDelegate {
         
         // Workspace name
         let textField = NSTextField(labelWithString: session.name)
-        textField.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        textField.textColor = .labelColor
+        textField.font = DesignSystem.Typography.bodyEmphasized
+        textField.textColor = NSColor.labelColor
         textField.isEditable = false
         textField.isSelectable = false
         textField.backgroundColor = .clear

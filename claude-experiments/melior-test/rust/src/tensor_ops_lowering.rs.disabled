@@ -1,5 +1,4 @@
 use melior::{
-    Context,
     ir::{
         Block, Identifier, Location, Module, Region,
         attribute::{StringAttribute, TypeAttribute},
@@ -7,6 +6,7 @@ use melior::{
         r#type::{FunctionType, IntegerType},
     },
 };
+use crate::Context;
 
 /// Lowering patterns for TensorOps dialect to standard dialects
 pub struct TensorOpsLowering;
@@ -21,7 +21,8 @@ impl TensorOpsLowering {
         context: &'c Context,
         _original_module: &Module,
     ) -> Result<Module<'c>, Box<dyn std::error::Error>> {
-        let location = Location::unknown(context);
+        let melior_context = context.melior_context();
+        let location = Location::unknown(melior_context);
         let lowered_module = Module::new(location);
 
         // In a real implementation, this would:
@@ -49,26 +50,27 @@ impl TensorOpsLowering {
         context: &'c Context,
         module: &Module<'c>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let location = Location::unknown(context);
+        let melior_context = context.melior_context();
+        let location = Location::unknown(melior_context);
 
         // Example: tensor_add(i32, i32) -> i32
         // This would be the result of lowering tensor_ops.add
-        let i32_type = IntegerType::new(context, 32).into();
-        let function_type = FunctionType::new(context, &[i32_type, i32_type], &[i32_type]).into();
+        let i32_type = IntegerType::new(melior_context, 32).into();
+        let function_type = FunctionType::new(melior_context, &[i32_type, i32_type], &[i32_type]).into();
 
         let function = OperationBuilder::new("func.func", location)
             .add_attributes(&[
                 (
-                    Identifier::new(context, "sym_name"),
-                    StringAttribute::new(context, "tensor_add").into(),
+                    Identifier::new(melior_context, "sym_name"),
+                    StringAttribute::new(melior_context, "tensor_add").into(),
                 ),
                 (
-                    Identifier::new(context, "function_type"),
+                    Identifier::new(melior_context, "function_type"),
                     TypeAttribute::new(function_type).into(),
                 ),
                 (
-                    Identifier::new(context, "sym_visibility"),
-                    StringAttribute::new(context, "public").into(),
+                    Identifier::new(melior_context, "sym_visibility"),
+                    StringAttribute::new(melior_context, "public").into(),
                 ),
             ])
             .add_regions([Region::new()])
@@ -95,26 +97,27 @@ impl TensorOpsLowering {
         context: &'c Context,
         module: &Module<'c>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let location = Location::unknown(context);
+        let melior_context = context.melior_context();
+        let location = Location::unknown(melior_context);
 
         // Example: tensor_mul(i32, i32) -> i32
         // This would be the result of lowering tensor_ops.mul
-        let i32_type = IntegerType::new(context, 32).into();
-        let function_type = FunctionType::new(context, &[i32_type, i32_type], &[i32_type]).into();
+        let i32_type = IntegerType::new(melior_context, 32).into();
+        let function_type = FunctionType::new(melior_context, &[i32_type, i32_type], &[i32_type]).into();
 
         let function = OperationBuilder::new("func.func", location)
             .add_attributes(&[
                 (
-                    Identifier::new(context, "sym_name"),
-                    StringAttribute::new(context, "tensor_mul").into(),
+                    Identifier::new(melior_context, "sym_name"),
+                    StringAttribute::new(melior_context, "tensor_mul").into(),
                 ),
                 (
-                    Identifier::new(context, "function_type"),
+                    Identifier::new(melior_context, "function_type"),
                     TypeAttribute::new(function_type).into(),
                 ),
                 (
-                    Identifier::new(context, "sym_visibility"),
-                    StringAttribute::new(context, "public").into(),
+                    Identifier::new(melior_context, "sym_visibility"),
+                    StringAttribute::new(melior_context, "public").into(),
                 ),
             ])
             .add_regions([Region::new()])
@@ -140,7 +143,7 @@ impl TensorOpsLowering {
     /// Individual lowering functions that would be used by conversion patterns
     #[allow(dead_code)]
     pub fn lower_tensor_constant<'c>(
-        _context: &'c Context,
+        _context: &'c melior::Context,
         _op: &Operation<'c>,
     ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
         // In a real implementation:
@@ -152,7 +155,7 @@ impl TensorOpsLowering {
 
     #[allow(dead_code)]
     pub fn lower_tensor_add<'c>(
-        _context: &'c Context,
+        _context: &'c melior::Context,
         _op: &Operation<'c>,
     ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
         // In a real implementation:
@@ -164,7 +167,7 @@ impl TensorOpsLowering {
 
     #[allow(dead_code)]
     pub fn lower_tensor_mul<'c>(
-        _context: &'c Context,
+        _context: &'c melior::Context,
         _op: &Operation<'c>,
     ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
         // In a real implementation:
