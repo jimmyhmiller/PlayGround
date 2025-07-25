@@ -6,11 +6,11 @@ edition = "20"
 
 [profile]
 ldflags = [
-    "-framework", "Metal",
-    "-framework", "MetalKit",
-    "-framework", "AppKit",
-    "-framework", "Foundation",
-    "-framework", "QuartzCore",
+    "-framework Metal",
+    "-framework MetalKit",
+    "-framework AppKit",
+    "-framework Foundation",
+    "-framework QuartzCore",
     "-fmodules"
 ]
 
