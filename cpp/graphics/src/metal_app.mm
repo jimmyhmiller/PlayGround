@@ -109,7 +109,7 @@ class MyAppDelegate : public NS::ApplicationDelegate
 #pragma endregion Declarations }
 
 
-int main( int argc, char* argv[] )
+void runMetalApp()
 {
     NS::AutoreleasePool* pAutoreleasePool = NS::AutoreleasePool::alloc()->init();
 
@@ -120,8 +120,6 @@ int main( int argc, char* argv[] )
     pSharedApplication->run();
 
     pAutoreleasePool->release();
-
-    return 0;
 }
 
 
