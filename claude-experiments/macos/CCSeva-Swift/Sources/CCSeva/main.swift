@@ -13,6 +13,27 @@ import SwiftUI
 // Application delegate class
 class AppDelegate: NSObject, NSApplicationDelegate {
     
+    private func formatTokenCount(_ tokens: Int) -> String {
+        switch tokens {
+        case ..<1000:
+            return "\(tokens)"
+        case 1000..<1_000_000:
+            let k = Double(tokens) / 1000.0
+            if k < 10 {
+                return String(format: "%.1fk", k)
+            } else {
+                return String(format: "%.0fk", k)
+            }
+        default:
+            let m = Double(tokens) / 1_000_000.0
+            if m < 10 {
+                return String(format: "%.1fm", m)
+            } else {
+                return String(format: "%.0fm", m)
+            }
+        }
+    }
+    
     private var statusBarItem: NSStatusItem!
     private var popover: NSPopover!
     private var usageService = CCUsageService.shared
@@ -29,7 +50,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         // Configure the button
-        button.title = "0%"
+        button.title = "0"
         button.action = #selector(togglePopover(_:))
         button.target = self
         
@@ -87,11 +108,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if self.usageService.isLoading {
                 button.title = "..."
             } else if let stats = self.usageService.currentStats {
-                button.title = String(format: "%.0f%%", stats.percentageUsed)
+                button.title = self.formatTokenCount(stats.today.totalTokens)
             } else if self.usageService.lastError != nil {
                 button.title = "Error"
             } else {
-                button.title = "0%"
+                button.title = "0"
             }
         }
     }

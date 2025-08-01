@@ -125,7 +125,7 @@ struct DashboardView: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                             Spacer()
-                            Text("Resets at \(stats.resetInfo.timezone)")
+                            Text("5-hour rolling limit")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -435,7 +435,7 @@ struct AnalyticsView: View {
                                     .font(.subheadline)
                                     .fontWeight(.medium)
                                 
-                                Text("Claude \(stats.currentPlan) uses session-based rate limiting (5-hour blocks) rather than hard daily limits. Usage resets at \(stats.resetInfo.timezone) and you can continue using Claude normally.")
+                                Text("Claude \(stats.currentPlan) uses a 5-hour rolling window for rate limiting. You can send about 45 messages per 5-hour period, depending on message length and model usage.")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -445,31 +445,19 @@ struct AnalyticsView: View {
                         .background(Color(.controlBackgroundColor))
                         .cornerRadius(12)
                         
-                        // Reset Info
+                        // Rate Limit Info
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Reset Information")
+                            Text("Rate Limit Information")
                                 .font(.headline)
                             
-                            HStack {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Time Until Reset")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    Text(stats.resetInfo.timeUntilReset)
-                                        .font(.title3)
-                                        .fontWeight(.semibold)
-                                }
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Claude uses a 5-hour rolling window for rate limiting. Your usage is tracked over the most recent 5-hour period.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                                 
-                                Spacer()
-                                
-                                VStack(alignment: .trailing, spacing: 4) {
-                                    Text("Resets At")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    Text(stats.resetInfo.timezone)
-                                        .font(.title3)
-                                        .fontWeight(.semibold)
-                                }
+                                Text("Note: The exact reset time depends on when you started your usage session and cannot be precisely calculated from usage logs alone.")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary.opacity(0.7))
                             }
                         }
                         .padding()
