@@ -487,31 +487,17 @@ public class ClaudeUsageReader {
     }
     
     private func calculateResetInfo() -> ResetTimeInfo {
-        // Claude resets at midnight PST/PDT, but show time in user's timezone
-        let claudeTimeZone = TimeZone(identifier: "America/Los_Angeles")!
-        let userTimeZone = TimeZone.current
+        // Claude uses a 5-hour rolling window for rate limits
+        // This is a simplified representation since we don't track the actual window start
+        let fiveHours: TimeInterval = 5 * 60 * 60
         
-        // Calculate reset time in Claude's timezone (PST/PDT)
-        var claudeCalendar = Calendar.current
-        claudeCalendar.timeZone = claudeTimeZone
-        
-        let now = Date()
-        let tomorrow = claudeCalendar.date(byAdding: .day, value: 1, to: claudeCalendar.startOfDay(for: now))!
-        let timeUntilReset = tomorrow.timeIntervalSince(now)
-        let hoursUntilReset = timeUntilReset / 3600
-        
-        // Format reset time in user's timezone - just show the time it happens
-        let userFormatter = DateFormatter()
-        userFormatter.timeZone = userTimeZone
-        userFormatter.dateFormat = "h:mm a"  // e.g., "3:00 AM"
-        
-        let resetTimeString = userFormatter.string(from: tomorrow)
-        
+        // Since we don't have the actual rate limit window start time,
+        // we'll show a generic message about the 5-hour window
         return ResetTimeInfo(
-            timeUntilReset: String(format: "%.0fh %.0fm", floor(hoursUntilReset), (hoursUntilReset.truncatingRemainder(dividingBy: 1) * 60)),
-            nextResetDate: resetTimeString,
-            hoursUntilReset: hoursUntilReset,
-            timezone: resetTimeString  // Use the reset time as the "timezone" field
+            timeUntilReset: "5-hour window",
+            nextResetDate: "Rolling 5-hour window",
+            hoursUntilReset: 5.0,
+            timezone: "5-hour rolling limit"
         )
     }
     
