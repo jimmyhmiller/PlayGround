@@ -246,8 +246,13 @@ struct Frontend {
 impl App for Frontend {
     fn on_window_create(&mut self, event_loop_proxy: EventLoopProxy<()>, size: skia_window::Size) {
         if let Some((target, process)) = start_process(&self.state.beagle_program_path) {
-            self.state.process.process = Some(process);
+            self.state.process.process = Some(process.clone());
             self.state.process.target = Some(target);
+            
+            // If we're starting in continuing mode, start execution
+            if self.is_continuing {
+                process.continue_execution().unwrap();
+            }
         }
     }
 
@@ -355,8 +360,18 @@ impl App for Frontend {
                 i += 1;
             }
         }
+        self.state.update_process_state(false);
         if self.is_continuing {
-            self.state.update_process_state(false);
+            // Only update if the process is actually stopped
+            let mut is_stopped = false;
+            if let Some(process) = &self.state.process.process {
+                if process.is_stopped() {
+                    is_stopped = true;
+                }
+            }
+            if is_stopped {
+                self.is_continuing = false;
+            }
         }
         if self.state.process.instructions.is_some() {
             return;
@@ -705,19 +720,30 @@ impl State {
             (self.process.process.clone(), self.process.target.clone())
         {
             if !process.is_stopped() {
+                println!("Process is not stopped, returning");
                 return;
             }
+            println!("Process is stopped, checking threads...");
 
             loop {
                 let mut all_false = true;
+
                 for thread in process.threads() {
-                    // println!("{:?}", thread.stop_reason());
+                    let stop_reason = thread.stop_reason();
+                    if stop_reason != lldb::StopReason::None {
+                        println!("{:?}", stop_reason);
+                    }
+                    
                     let result = self.check_debugger_info(&thread, &process, is_stepping);
+                    if !result && stop_reason != lldb::StopReason::None {
+                        println!("UYAYU - stopped but not debugger_info");
+                    }
                     all_false = all_false && !result;
                 }
                 if all_false {
                     break;
                 }
+
             }
 
             if let Some(thread) = process.thread_by_index_id(1) {
@@ -726,6 +752,7 @@ impl State {
                 if was_debugger_info {
                     return;
                 }
+
 
                 let frame = thread.selected_frame();
 

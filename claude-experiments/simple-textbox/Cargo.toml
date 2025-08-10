@@ -1,0 +1,45 @@
+[package]
+name = "simple-textbox"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+reedline = "0.35"
+nu-ansi-term = "0.50"
+crossterm = "0.28"
+rustyline = "14.0"
+minime = { path = "/Users/jimmyhmiller/Documents/Code/open-source/mini-me" }
+
+[dev-dependencies]
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[example]]
+name = "reedline"
+path = "examples/reedline.rs"
+
+[[example]]
+name = "positioned"
+path = "examples/positioned.rs"
+
+[[example]]
+name = "centered"
+path = "examples/centered.rs"
+
+[[example]]
+name = "rustyline"
+path = "examples/rustyline.rs"
+
+[[example]]
+name = "simple"
+path = "examples/simple.rs"
+
+[[example]]
+name = "minime"
+path = "examples/minime.rs"
+
+[[example]]
+name = "minime_placeholder"
+path = "examples/minime_placeholder.rs"

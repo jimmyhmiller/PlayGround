@@ -1,0 +1,15 @@
+[package]
+name = "crossterm-textinput"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossterm = "0.28"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[example]]
+name = "inline"
+path = "examples/resize.rs"
