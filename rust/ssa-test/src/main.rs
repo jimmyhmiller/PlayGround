@@ -13,7 +13,7 @@ pub struct SSATranslator {
     pub incomplete_phis: HashMap<BlockId, HashMap<String, Phi>>,
     pub blocks: Vec<Block>,
     pub next_variable_id: usize,
-    pub current_block: BlockId, // The current block being processed
+    pub current_block: BlockId, 
 }
 
 impl Default for SSATranslator {
@@ -30,9 +30,9 @@ impl SSATranslator {
             incomplete_phis: HashMap::new(),
             blocks: Vec::new(),
             next_variable_id: 0,
-            current_block: BlockId(0), // Will be set properly after creating first block
+            current_block: BlockId(0), 
         };
-        // Create the initial block
+        
         let initial_block = translator.create_block();
         translator.current_block = initial_block;
         translator
@@ -150,9 +150,7 @@ impl SSATranslator {
         let current_block = self.current_block;
         match ast {
             Ast::Literal(value) => {
-                // Create a temporary variable for the literal value
                 let temp_var = self.get_temp_variable("lit");
-                // add the assignment instruction
                 self.blocks[current_block.0].add_instruction(Instruction::Assign {
                     dest: temp_var.clone(),
                     value: Value::Literal(*value),
@@ -160,7 +158,6 @@ impl SSATranslator {
                 Value::Var(temp_var)
             }
             Ast::Variable(name) => {
-                // Read the variable's value from the current block
                 self.read_variable(name.clone(), current_block)
             }
             Ast::Block(statements) => {
@@ -193,10 +190,8 @@ impl SSATranslator {
                 then_branch,
                 else_branch,
             } => {
-                // Evaluate the condition in the current block
                 let condition_value = self.translate(condition);
 
-                // Create blocks for then, else, and merge
                 let then_block = self.create_block();
                 let else_block = self.create_block();
 
@@ -213,7 +208,6 @@ impl SSATranslator {
                 self.seal_block(then_block);
                 self.seal_block(else_block);
 
-                // Add conditional jump to current block
                 self.blocks[current_block.0].add_instruction(Instruction::ConditionalJump {
                     condition: condition_value,
                     true_target: then_block,
@@ -221,7 +215,6 @@ impl SSATranslator {
                 });
 
                 let merge_block = self.create_block();
-                // Process then branch
                 self.current_block = then_block;
                 for stmt in then_branch {
                     self.translate(stmt);
@@ -231,12 +224,10 @@ impl SSATranslator {
                     .predecessors
                     .push(self.current_block);
 
-                // Add jump from then block to merge block
                 self.blocks[self.current_block.0].add_instruction(Instruction::Jump {
                     target: merge_block,
                 });
 
-                // Process else branch
                 self.current_block = else_block;
                 if let Some(else_stmts) = else_branch {
                     for stmt in else_stmts {
@@ -246,17 +237,14 @@ impl SSATranslator {
                 self.blocks[merge_block.0]
                     .predecessors
                     .push(self.current_block);
-                // Add jump from else block to merge block
+
                 self.blocks[self.current_block.0].add_instruction(Instruction::Jump {
                     target: merge_block,
                 });
 
                 self.seal_block(merge_block);
 
-                // Set current block to merge block for subsequent statements
                 self.current_block = merge_block;
-
-                // The merge block will be sealed when its containing block is done
                 Value::Undefined
             }
             Ast::Print(value) => {
@@ -305,15 +293,15 @@ fn main() {
 
     println!("{:#?}", program_lisp);
 
-    // Visualize the SSA graph
+    
     let visualizer = visualizer::SSAVisualizer::new(&ssa_translator);
 
-    // Generate dot file for inspection
+    
     if let Err(e) = visualizer.render_to_file("ssa_graph.dot") {
         eprintln!("Failed to write dot file: {}", e);
     }
 
-    // Generate and open PNG
+    
     if let Err(e) = visualizer.render_and_open("ssa_graph.png") {
         eprintln!("Failed to visualize SSA: {}", e);
     }
