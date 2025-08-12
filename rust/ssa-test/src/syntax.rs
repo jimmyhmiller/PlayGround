@@ -1,91 +1,88 @@
 #[macro_export]
-macro_rules! expr {
+macro_rules! ast {
     // Binary operations
-    ((+ $left:tt $right:tt)) => { 
-        crate::ast::Expr::binary_op(expr!($left), crate::ast::BinaryOperator::Add, expr!($right)) 
+    ((+ $left:tt $right:tt)) => {
+        $crate::ast::Ast::binary_op(ast!($left), $crate::ast::BinaryOperator::Add, ast!($right))
     };
-    ((- $left:tt $right:tt)) => { 
-        crate::ast::Expr::binary_op(expr!($left), crate::ast::BinaryOperator::Subtract, expr!($right)) 
+    ((- $left:tt $right:tt)) => {
+        crate::ast::Ast::binary_op(ast!($left), crate::ast::BinaryOperator::Subtract, ast!($right))
     };
-    ((* $left:tt $right:tt)) => { 
-        crate::ast::Expr::binary_op(expr!($left), crate::ast::BinaryOperator::Multiply, expr!($right)) 
+    ((* $left:tt $right:tt)) => {
+        crate::ast::Ast::binary_op(ast!($left), crate::ast::BinaryOperator::Multiply, ast!($right))
     };
-    ((/ $left:tt $right:tt)) => { 
-        crate::ast::Expr::binary_op(expr!($left), crate::ast::BinaryOperator::Divide, expr!($right)) 
+    ((/ $left:tt $right:tt)) => {
+        crate::ast::Ast::binary_op(ast!($left), crate::ast::BinaryOperator::Divide, ast!($right))
     };
-    
-    ((== $left:tt $right:tt)) => { 
-        crate::ast::Expr::binary_op(expr!($left), crate::ast::BinaryOperator::Equal, expr!($right)) 
-    };
-    ((!= $left:tt $right:tt)) => { 
-        crate::ast::Expr::binary_op(expr!($left), crate::ast::BinaryOperator::NotEqual, expr!($right)) 
-    };
-    ((< $left:tt $right:tt)) => { 
-        crate::ast::Expr::binary_op(expr!($left), crate::ast::BinaryOperator::LessThan, expr!($right)) 
-    };
-    ((<= $left:tt $right:tt)) => { 
-        crate::ast::Expr::binary_op(expr!($left), crate::ast::BinaryOperator::LessThanOrEqual, expr!($right)) 
-    };
-    ((> $left:tt $right:tt)) => { 
-        crate::ast::Expr::binary_op(expr!($left), crate::ast::BinaryOperator::GreaterThan, expr!($right)) 
-    };
-    ((>= $left:tt $right:tt)) => { 
-        crate::ast::Expr::binary_op(expr!($left), crate::ast::BinaryOperator::GreaterThanOrEqual, expr!($right)) 
-    };
-    
-    // Unary operations
-    ((neg $operand:tt)) => { 
-        crate::ast::Expr::unary_op(crate::ast::UnaryOperator::Negate, expr!($operand)) 
-    };
-    ((not $operand:tt)) => { 
-        crate::ast::Expr::unary_op(crate::ast::UnaryOperator::Not, expr!($operand)) 
-    };
-    
-    // Variables
-    ((var $name:ident)) => { 
-        crate::ast::Expr::variable(stringify!($name)) 
-    };
-    
-    // Literals
-    ($int:literal) => { crate::ast::Expr::literal($int) };
-}
 
-#[macro_export]
-macro_rules! stmt {
+    ((== $left:tt $right:tt)) => {
+        crate::ast::Ast::binary_op(ast!($left), crate::ast::BinaryOperator::Equal, ast!($right))
+    };
+    ((!= $left:tt $right:tt)) => {
+        crate::ast::Ast::binary_op(ast!($left), crate::ast::BinaryOperator::NotEqual, ast!($right))
+    };
+    ((< $left:tt $right:tt)) => {
+        crate::ast::Ast::binary_op(ast!($left), crate::ast::BinaryOperator::LessThan, ast!($right))
+    };
+    ((<= $left:tt $right:tt)) => {
+        crate::ast::Ast::binary_op(ast!($left), crate::ast::BinaryOperator::LessThanOrEqual, ast!($right))
+    };
+    ((> $left:tt $right:tt)) => {
+        crate::ast::Ast::binary_op(ast!($left), crate::ast::BinaryOperator::GreaterThan, ast!($right))
+    };
+    ((>= $left:tt $right:tt)) => {
+        crate::ast::Ast::binary_op(ast!($left), crate::ast::BinaryOperator::GreaterThanOrEqual, ast!($right))
+    };
+
+    // Unary operations
+    ((neg $operand:tt)) => {
+        crate::ast::Ast::unary_op(crate::ast::UnaryOperator::Negate, ast!($operand))
+    };
+    ((not $operand:tt)) => {
+        crate::ast::Ast::unary_op(crate::ast::UnaryOperator::Not, ast!($operand))
+    };
+
+    // Variables
+    ((var $name:ident)) => {
+        crate::ast::Ast::variable(stringify!($name))
+    };
+
+    // Literals
+    ($int:literal) => { crate::ast::Ast::literal($int) };
+
+    // Statements
     ((set $var:ident $value:tt)) => {
-        crate::ast::Stmt::assignment(stringify!($var), expr!($value))
+        crate::ast::Ast::assignment(stringify!($var), ast!($value))
     };
-    
+
     ((if $condition:tt $then_branch:tt)) => {
-        crate::ast::Stmt::if_stmt(expr!($condition), vec![stmt!($then_branch)], None)
+        crate::ast::Ast::if_stmt(ast!($condition), vec![ast!($then_branch)], None)
     };
-    
+
     ((if $condition:tt $then_branch:tt $else_branch:tt)) => {
-        crate::ast::Stmt::if_stmt(
-            expr!($condition), 
-            vec![stmt!($then_branch)], 
-            Some(vec![stmt!($else_branch)])
+        crate::ast::Ast::if_stmt(
+            ast!($condition),
+            vec![ast!($then_branch)],
+            Some(vec![ast!($else_branch)])
         )
     };
-    
+
     ((while $condition:tt $body:tt)) => {
-        crate::ast::Stmt::while_stmt(expr!($condition), vec![stmt!($body)])
+        crate::ast::Ast::while_stmt(ast!($condition), vec![ast!($body)])
     };
-    
+
     ((begin $($stmts:tt)*)) => {
-        vec![$(stmt!($stmts)),*]
+        crate::ast::Ast::block(vec![$(ast!($stmts)),*])
     };
-    
-    ($expr:tt) => {
-        crate::ast::Stmt::expression(expr!($expr))
+
+    // Print statement
+    ((print $value:tt)) => {
+        crate::ast::Ast::print(ast!($value))
     };
 }
 
 #[macro_export]
 macro_rules! program {
     ($($stmt:tt)*) => {
-        crate::ast::Program {
-            statements: vec![$(stmt!($stmt)),*]
-        }
+        $crate::ast::Ast::Block(vec![$(ast!($stmt)),*])
     };
 }
