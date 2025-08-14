@@ -8,7 +8,12 @@ const isFunctionType = (x) => x && Array.isArray(x)
 const isFunctionApplication = (x) => x && x.function && x.arg
 const isArithmeticOp = (x) => x && x.op && (x.op === "+" || x.op === "-" || x.op === "*" || x.op === "/") && x.left && x.right
 const isIfExpression = (x) => x && x.condition && x.then && x.else !== undefined
+const isConstructor = (x) => x && x.constructor && x.args
+const isMatch = (x) => x && x.match && x.expr && Array.isArray(x.cases)
 const isTypeVariable = (x) => typeof(x) === "string" && x.startsWith("'") && x.length > 1
+
+// Global type environment for user-defined types
+const typeEnv = {};
 
 const collectTypeVars = (type) => {
   if (isTypeVariable(type)) {
@@ -135,6 +140,104 @@ const synthesize = ({ val, context }) => {
       throw Error(`If branches must have same type, got ${thenType} and ${elseType}`)
     }
     return thenType;
+  } else if (isConstructor(val)) {
+    // Find the constructor in the type environment
+    let constructorType = null;
+    let parentType = null;
+    let typeInfo = null;
+    
+    for (const [typeName, info] of Object.entries(typeEnv)) {
+      if (info.constructors[val.constructor]) {
+        constructorType = info.constructors[val.constructor];
+        parentType = typeName;
+        typeInfo = info;
+        break;
+      }
+    }
+    
+    if (!constructorType) {
+      throw Error(`Unknown constructor: ${val.constructor}`);
+    }
+    
+    // Check argument types match constructor signature
+    if (val.args.length !== constructorType.length) {
+      throw Error(`Constructor ${val.constructor} expects ${constructorType.length} args, got ${val.args.length}`);
+    }
+    
+    // For generic types, infer type parameters from arguments
+    let typeSubstitutions = {};
+    
+    for (let i = 0; i < val.args.length; i++) {
+      const argType = synthesize({ val: val.args[i], context: context });
+      const expectedType = constructorType[i];
+      
+      if (isTypeVariable(expectedType)) {
+        // Type variable - infer from argument
+        typeSubstitutions[expectedType] = argType;
+      } else if (argType !== expectedType) {
+        throw Error(`Constructor ${val.constructor} arg ${i}: expected ${expectedType}, got ${argType}`);
+      }
+    }
+    
+    // If this is a generic type, create an instantiated type name
+    if (typeInfo.params.length > 0) {
+      const instantiatedTypes = typeInfo.params.map(param => typeSubstitutions[param] || param);
+      return `${parentType}<${instantiatedTypes.join(',')}>`;
+    }
+    
+    return parentType;
+  } else if (isMatch(val)) {
+    const exprType = synthesize({ val: val.expr, context: context });
+    
+    // Extract base type and type parameters from instantiated type
+    let baseType = exprType;
+    let typeParams = [];
+    
+    if (exprType.includes('<')) {
+      const match = exprType.match(/^([^<]+)<(.+)>$/);
+      if (match) {
+        baseType = match[1];
+        typeParams = match[2].split(',').map(s => s.trim());
+      }
+    }
+    
+    // All case bodies must have the same type
+    let resultType = null;
+    
+    for (const case_ of val.cases) {
+      // For now, simple pattern matching - extend context with pattern variables
+      let caseContext = { ...context };
+      const [constructorName, ...patternVars] = case_.pattern;
+      
+      // Add pattern variables to context with their types
+      if (typeEnv[baseType] && typeEnv[baseType].constructors[constructorName]) {
+        const constructorTypes = typeEnv[baseType].constructors[constructorName];
+        
+        for (let i = 0; i < patternVars.length; i++) {
+          let variableType = constructorTypes[i];
+          
+          // Substitute type parameters with concrete types
+          if (isTypeVariable(variableType) && typeEnv[baseType].params) {
+            const paramIndex = typeEnv[baseType].params.indexOf(variableType);
+            if (paramIndex >= 0 && typeParams[paramIndex]) {
+              variableType = typeParams[paramIndex];
+            }
+          }
+          
+          caseContext[patternVars[i]] = variableType;
+        }
+      }
+      
+      const caseType = synthesize({ val: case_.body, context: caseContext });
+      
+      if (resultType === null) {
+        resultType = caseType;
+      } else if (resultType !== caseType) {
+        throw Error(`Match cases must have same type, got ${resultType} and ${caseType}`);
+      }
+    }
+    
+    return resultType;
   } else {
     throw Error("Unimplemented")
   }
@@ -199,6 +302,20 @@ const check = (expr) => {
     check({ val: val.condition, type: "boolean", context: context });
     check({ val: val.then, type: type, context: context });
     check({ val: val.else, type: type, context: context });
+    return context;
+  } else if (isConstructor(val)) {
+    // Check constructor creates value of expected type
+    const constructorType = synthesize({ val: val, context: context });
+    if (constructorType !== type) {
+      throw Error(`Constructor creates ${constructorType}, expected ${type}`);
+    }
+    return context;
+  } else if (isMatch(val)) {
+    // Check match expression produces expected type
+    const matchType = synthesize({ val: val, context: context });
+    if (matchType !== type) {
+      throw Error(`Match produces ${matchType}, expected ${type}`);
+    }
     return context;
   } else {
     const synthType = synthesize({ val, context });
@@ -595,6 +712,51 @@ const lispToAst = (expr) => {
       };
     }
     
+    if (op === 'type') {
+      // (type Maybe ['a] [Some 'a] [None])
+      const [typeName, typeParams, ...constructors] = args;
+      const typeInfo = {
+        params: typeParams || [],
+        constructors: {}
+      };
+      
+      constructors.forEach(constructor => {
+        const [name, ...argTypes] = constructor;
+        typeInfo.constructors[name] = argTypes;
+      });
+      
+      typeEnv[typeName] = typeInfo;
+      return { typeDefinition: typeName }; // Just a marker
+    }
+    
+    if (op === 'make') {
+      // (make Some 42)
+      const [constructor, ...constructorArgs] = args;
+      return {
+        constructor: constructor,
+        args: constructorArgs.map(lispToAst)
+      };
+    }
+    
+    if (op === 'match') {
+      // (match expr [Some x] x [None] 0)
+      const [expr, ...casesFlat] = args;
+      const cases = [];
+      for (let i = 0; i < casesFlat.length; i += 2) {
+        const pattern = casesFlat[i];
+        const body = casesFlat[i + 1];
+        cases.push({
+          pattern: pattern,
+          body: lispToAst(body)
+        });
+      }
+      return {
+        match: true,
+        expr: lispToAst(expr),
+        cases: cases
+      };
+    }
+    
     if (['+', '-', '*', '/'].includes(op)) {
       const [left, right] = args;
       return {
@@ -730,6 +892,108 @@ runFail(() => synthesize({
 // Test if branch type mismatch fails  
 runFail(() => synthesize({
   val: evalLisp(`(if true 42 "hello")`),
+  context: {}
+}))
+
+// User-defined types tests
+
+// Define a simple Bool type first  
+evalLisp(`(type Bool [] [True] [False])`)
+
+// Test constructor creation
+assertEquals(synthesize({
+  val: evalLisp(`(make True)`),
+  context: {}
+}), "Bool", "Constructor creates Bool type")
+
+assertEquals(synthesize({
+  val: evalLisp(`(make False)`),
+  context: {}
+}), "Bool", "False constructor creates Bool type")
+
+// Test match on Bool
+assertEquals(synthesize({
+  val: evalLisp(`(match (make True) [True] 1 [False] 0)`),
+  context: {}
+}), "int", "Match on Bool type")
+
+// Define a simple Option type with concrete int
+evalLisp(`(type IntOption [] [SomeInt int] [NoneInt])`)
+
+// Test constructor creation
+assertEquals(synthesize({
+  val: evalLisp(`(make SomeInt 42)`),
+  context: {}
+}), "IntOption", "Constructor creates IntOption type")
+
+assertEquals(synthesize({
+  val: evalLisp(`(make NoneInt)`),
+  context: {}
+}), "IntOption", "NoneInt constructor creates IntOption type")
+
+// Test match expression  
+assertEquals(synthesize({
+  val: evalLisp(`(match (make SomeInt 42) [SomeInt x] x [NoneInt] 0)`),
+  context: {}
+}), "int", "Match expression extracts value")
+
+assertEquals(synthesize({
+  val: evalLisp(`(match (make NoneInt) [SomeInt x] x [NoneInt] 0)`),
+  context: {}
+}), "int", "Match expression handles None case")
+
+// Function that works with IntOption
+assertEquals(synthesize({
+  val: evalLisp(`(fn [m: IntOption] (match m [SomeInt x] (+ x 1) [NoneInt] 0))`),
+  context: {}
+}), ["IntOption", "int"], "Function using IntOption type")
+
+// Now test GENERIC ADTs!
+
+// Define a generic Maybe type
+evalLisp(`(type Maybe ['a] [Some 'a] [None])`)
+
+// Test generic constructor creation
+assertEquals(synthesize({
+  val: evalLisp(`(make Some 42)`),
+  context: {}
+}), "Maybe<int>", "Generic constructor creates Maybe<int>")
+
+assertEquals(synthesize({
+  val: evalLisp(`(make Some "hello")`),
+  context: {}
+}), "Maybe<string>", "Generic constructor creates Maybe<string>")
+
+assertEquals(synthesize({
+  val: evalLisp(`(make None)`),
+  context: {}
+}), "Maybe<'a>", "None constructor creates Maybe<'a>")
+
+// Test generic match expression
+assertEquals(synthesize({
+  val: evalLisp(`(match (make Some 42) [Some x] x [None] 0)`),
+  context: {}
+}), "int", "Generic match extracts correct type")
+
+assertEquals(synthesize({
+  val: evalLisp(`(match (make Some "test") [Some x] x [None] "default")`),
+  context: {}
+}), "string", "Generic match with strings")
+
+// Test the problematic case: (λ b . if b then false else true) true
+// This should fail because the lambda has no type annotation
+runFail(() => synthesize({
+  val: {
+    function: {
+      arg: {name: 'b'}, // Note: no type annotation
+      body: {
+        condition: {name: 'b'},
+        then: 'false',
+        else: 'true'
+      }
+    },
+    arg: 'true'
+  },
   context: {}
 }))
 

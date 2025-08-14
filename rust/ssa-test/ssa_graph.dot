@@ -2,19 +2,19 @@ digraph SSA {
     rankdir=TB;
     node [shape=box, style=rounded];
     
-    block_0 [label="Block 0\n─────────────\nv0 := 10\nv1 := 5\nv2 := v0 + v1\nv3 := 10\nv4 := v2 > v3\nif v4 then block_1 else block_2\n"];
-    block_1 [label="Block 1\n─────────────\nv5 := 0\nv6 := v1 > v5\nif v6 then block_4 else block_5\n─────────────\n[SEALED]\n"];
-    block_2 [label="Block 2\n─────────────\nv9 := 0\njump block_3\n─────────────\n[SEALED]\n"];
-    block_3 [label="Block 3\n─────────────\nv10 := Φ(Φ(v7,v8),v9)\nprint v10\n─────────────\n[SEALED]\n"];
-    block_4 [label="Block 4\n─────────────\nv7 := 1\njump block_6\n─────────────\n[SEALED]\n"];
-    block_5 [label="Block 5\n─────────────\nv8 := 2\njump block_6\n─────────────\n[SEALED]\n"];
-    block_6 [label="Block 6\n─────────────\njump block_3\n─────────────\n[SEALED]\n"];
+    block_0 [label="Block 0\n─────────────\nΦ(result) = \n─────────────\nv0 := 10\nv1 := 5\nv2 := v0 + v1\nv3 := 10\nv4 := v2 > v3\nif v4 then block_1 else block_2\n"];
+    block_1 [label="Block 1\n─────────────\nv5 := 0\njump block_3\n─────────────\n[SEALED]\n"];
+    block_2 [label="Block 2\n─────────────\nv6 := 0\njump block_3\n─────────────\n[SEALED]\n"];
+    block_3 [label="Block 3\n─────────────\nv7 := Φ0(v5,Φ1)\nprint v7\n─────────────\n[SEALED]\n"];
     block_0 -> block_1;
     block_0 -> block_2;
-    block_6 -> block_3;
+    block_1 -> block_3;
     block_2 -> block_3;
-    block_1 -> block_4;
-    block_1 -> block_5;
-    block_4 -> block_6;
-    block_5 -> block_6;
+
+    // Legend
+    subgraph cluster_legend {
+        label="Legend";
+        style=dotted;
+        "Φ = Phi function" [shape=plaintext];
+    }
 }

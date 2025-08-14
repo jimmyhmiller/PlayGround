@@ -3,37 +3,49 @@ use crate::ast::{BinaryOperator, UnaryOperator};
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct Variable(pub String);
 
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Hash, Eq)]
+pub struct PhiId(pub usize);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhiReference {
+    pub block_id: BlockId,
+    pub instruction_offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Phi {
+    pub id: PhiId,
     pub block_id: BlockId,
     pub operands: Vec<Value>,
+    pub uses: Vec<PhiReference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub enum Value {
     Literal(i32),
     Var(Variable),
-    PhiValue(Box<Phi>),
+    Phi(PhiId),
     Undefined,
 }
 impl Value {
-    pub fn new_phi(block_id: BlockId) -> Self {
-        Value::PhiValue(Box::new(Phi {
-            block_id,
-            operands: vec![],
-        }))
+    pub fn new_phi(phi_id: PhiId) -> Self {
+        Value::Phi(phi_id)
     }
 
-    pub fn get_phi(&self) -> Phi {
+    pub fn get_phi_id(&self) -> PhiId {
         match self {
-            Value::PhiValue(boxed_phi) => *boxed_phi.clone(),
+            Value::Phi(phi_id) => *phi_id,
             _ => panic!("Value is not a Phi"),
         }
     }
 
-    pub fn is_same_phi(&self, phi: &Phi) -> bool {
+    pub fn is_phi(&self) -> bool {
+        matches!(self, Value::Phi(_))
+    }
+
+    pub fn is_same_phi(&self, phi_id: PhiId) -> bool {
         match self {
-            Value::PhiValue(boxed_phi) => boxed_phi.as_ref() == phi,
+            Value::Phi(id) => *id == phi_id,
             _ => false,
         }
     }
