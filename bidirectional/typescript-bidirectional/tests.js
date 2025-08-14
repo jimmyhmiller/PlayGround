@@ -2,7 +2,6 @@ import {
   parseTypeScript, 
   synthesize, 
   check, 
-  TypeContext, 
   getExpression,
   runTest,
   runFail, 
@@ -14,14 +13,14 @@ import {
 } from './index.js';
 
 // Helper to test synthesize with TypeScript code
-const testSynthesize = (code, context = new TypeContext()) => {
+const testSynthesize = (code, context = {}) => {
   const sourceFile = parseTypeScript(code);
   const expression = getExpression(sourceFile);
   return synthesize(expression, context);
 };
 
 // Helper to test check with TypeScript code
-const testCheck = (code, expectedType, context = new TypeContext()) => {
+const testCheck = (code, expectedType, context = {}) => {
   const sourceFile = parseTypeScript(code);
   const expression = getExpression(sourceFile);
   return check(expression, expectedType, context);
@@ -36,24 +35,37 @@ assertEquals(testSynthesize('42'), NUMBER_TYPE, 'number literal');
 assertEquals(testSynthesize('"hello"'), STRING_TYPE, 'string literal');
 
 // Variable tests
-const contextWithVar = new TypeContext().extend('x', BOOL_TYPE);
+const contextWithVar = { x: BOOL_TYPE };
 assertEquals(testSynthesize('x', contextWithVar), BOOL_TYPE, 'boolean variable');
 
 // Function tests - with type annotations
 assertEquals(
   testSynthesize('(x: number) => x'),
-  createFunctionType(NUMBER_TYPE, NUMBER_TYPE),
+  createFunctionType([NUMBER_TYPE], NUMBER_TYPE),
   'identity function with annotation'
 );
 
 assertEquals(
   testSynthesize('(x: number) => true'),
-  createFunctionType(NUMBER_TYPE, BOOL_TYPE),
+  createFunctionType([NUMBER_TYPE], BOOL_TYPE),
   'function number -> boolean'
 );
 
+// Multi-parameter function tests
+assertEquals(
+  testSynthesize('(x: number, y: string) => x + 42'),
+  createFunctionType([NUMBER_TYPE, STRING_TYPE], NUMBER_TYPE),
+  'two-parameter function'
+);
+
+assertEquals(
+  testSynthesize('(a: number, b: number, c: string) => a + b'),
+  createFunctionType([NUMBER_TYPE, NUMBER_TYPE, STRING_TYPE], NUMBER_TYPE),
+  'three-parameter function'
+);
+
 // Function application tests
-const contextWithIdentity = new TypeContext().extend('identity', createFunctionType(NUMBER_TYPE, NUMBER_TYPE));
+const contextWithIdentity = { identity: createFunctionType([NUMBER_TYPE], NUMBER_TYPE) };
 assertEquals(
   testSynthesize('identity(42)', contextWithIdentity),
   NUMBER_TYPE,
@@ -90,7 +102,7 @@ runTest(() => {
 });
 
 runTest(() => {
-  testCheck('(x: number) => x + 1', createFunctionType(NUMBER_TYPE, NUMBER_TYPE));
+  testCheck('(x: number) => x + 1', createFunctionType([NUMBER_TYPE], NUMBER_TYPE));
   return 'check function type';
 });
 
@@ -102,7 +114,7 @@ runFail(() => testSynthesize('true ? 10 : "hello"')); // conditional branch type
 runFail(() => testSynthesize('"hello" ? 1 : 2')); // non-boolean condition
 
 // Test the problematic case: unannotated lambda in function application
-console.log('\\nTesting the problematic case from the original question:');
+console.log('\nTesting the problematic case from the original question:');
 runFail(() => testSynthesize('((b) => b ? false : true)(true)'));
 
 // But it works with type annotation:
@@ -112,12 +124,34 @@ assertEquals(
   'annotated lambda in application works'
 );
 
+// Multi-parameter function applications
+const contextWithAdd = { add: createFunctionType([NUMBER_TYPE, NUMBER_TYPE], NUMBER_TYPE) };
+assertEquals(
+  testSynthesize('add(10, 20)', contextWithAdd),
+  NUMBER_TYPE,
+  'two-argument function application'
+);
+
+const contextWithThreeParam = { fn: createFunctionType([NUMBER_TYPE, STRING_TYPE, BOOL_TYPE], NUMBER_TYPE) };
+assertEquals(
+  testSynthesize('fn(42, "hello", true)', contextWithThreeParam),
+  NUMBER_TYPE,
+  'three-argument function application'
+);
+
+// Inline multi-parameter function application
+assertEquals(
+  testSynthesize('((x: number, y: number) => x + y)(10, 20)'),
+  NUMBER_TYPE,
+  'inline two-parameter function application'
+);
+
 // Higher-order functions
 assertEquals(
   testSynthesize('(f: (x: number) => number) => (x: number) => f(x)'),
   createFunctionType(
-    createFunctionType(NUMBER_TYPE, NUMBER_TYPE),
-    createFunctionType(NUMBER_TYPE, NUMBER_TYPE)
+    [createFunctionType([NUMBER_TYPE], NUMBER_TYPE)],
+    createFunctionType([NUMBER_TYPE], NUMBER_TYPE)
   ),
   'higher-order function'
 );
@@ -129,4 +163,9 @@ assertEquals(
   'complex nested function application'
 );
 
-console.log('\\n✅ All tests passed!');
+// Test error cases for multi-parameter functions
+runFail(() => testSynthesize('add(10)', contextWithAdd)); // too few arguments
+runFail(() => testSynthesize('add(10, 20, 30)', contextWithAdd)); // too many arguments
+runFail(() => testSynthesize('add(10, "hello")', contextWithAdd)); // wrong argument type
+
+console.log('\n✅ All tests passed!');

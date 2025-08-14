@@ -18,43 +18,25 @@ const isLiteralExpression = (node) => {
          node.kind === ts.SyntaxKind.FalseKeyword;
 };
 
-const isIdentifier = (node) => ts.isIdentifier(node);
-const isArrowFunction = (node) => ts.isArrowFunction(node);
-const isFunctionExpression = (node) => ts.isFunctionExpression(node);
-const isCallExpression = (node) => ts.isCallExpression(node);
-const isBinaryExpression = (node) => ts.isBinaryExpression(node);
-const isConditionalExpression = (node) => ts.isConditionalExpression(node);
-
-// Type environment for variables
-class TypeContext {
-  constructor(parent = null) {
-    this.parent = parent;
-    this.bindings = new Map();
-  }
-
-  lookup(name) {
-    if (this.bindings.has(name)) {
-      return this.bindings.get(name);
-    }
-    if (this.parent) {
-      return this.parent.lookup(name);
-    }
+// Simple context helpers
+const lookupVariable = (context, name) => {
+  if (context[name] === undefined) {
     throw new Error(`Variable ${name} not found in context`);
   }
-
-  extend(name, type) {
-    const newContext = new TypeContext(this);
-    newContext.bindings.set(name, type);
-    return newContext;
-  }
-}
+  return context[name];
+};
 
 // Type representation
-const createFunctionType = (paramType, returnType) => ({
-  kind: 'function',
-  paramType,
-  returnType
-});
+const createFunctionType = (paramTypes, returnType) => {
+  if (!Array.isArray(paramTypes)) {
+    throw new Error('paramTypes must be an array');
+  }
+  return {
+    kind: 'function',
+    paramTypes,
+    returnType
+  };
+};
 
 const createPrimitiveType = (name) => ({
   kind: 'primitive',
@@ -73,7 +55,8 @@ const typesEqual = (type1, type2) => {
     case 'primitive':
       return type1.name === type2.name;
     case 'function':
-      return typesEqual(type1.paramType, type2.paramType) && 
+      if (type1.paramTypes.length !== type2.paramTypes.length) return false;
+      return type1.paramTypes.every((param1, i) => typesEqual(param1, type2.paramTypes[i])) &&
              typesEqual(type1.returnType, type2.returnType);
     default:
       return false;
@@ -92,9 +75,9 @@ const convertTypeAnnotation = (typeNode) => {
     case ts.SyntaxKind.StringKeyword:
       return STRING_TYPE;
     case ts.SyntaxKind.FunctionType:
-      const paramType = convertTypeAnnotation(typeNode.parameters[0]?.type);
+      const paramTypes = typeNode.parameters.map(param => convertTypeAnnotation(param.type));
       const returnType = convertTypeAnnotation(typeNode.type);
-      return createFunctionType(paramType, returnType);
+      return createFunctionType(paramTypes, returnType);
     default:
       throw new Error(`Unsupported type annotation: ${ts.SyntaxKind[typeNode.kind]}`);
   }
@@ -114,20 +97,24 @@ const synthesize = (node, context) => {
       return STRING_TYPE;
       
     case ts.SyntaxKind.Identifier:
-      return context.lookup(node.text);
+      return lookupVariable(context, node.text);
       
     case ts.SyntaxKind.ArrowFunction:
     case ts.SyntaxKind.FunctionExpression:
-      const param = node.parameters[0];
-      if (!param || !param.type) {
+      if (node.parameters.some(param => !param.type)) {
         throw new Error("Can't determine type. Please add type annotation to function parameter");
       }
       
-      const paramType = convertTypeAnnotation(param.type);
-      const extendedContext = context.extend(param.name.text, paramType);
+      const paramTypes = node.parameters.map(param => convertTypeAnnotation(param.type));
+      let extendedContext = { ...context };
+      
+      node.parameters.forEach((param, i) => {
+        extendedContext[param.name.text] = paramTypes[i];
+      });
+      
       const bodyType = synthesize(node.body, extendedContext);
       
-      return createFunctionType(paramType, bodyType);
+      return createFunctionType(paramTypes, bodyType);
       
     case ts.SyntaxKind.CallExpression:
       const functionType = synthesize(node.expression, context);
@@ -135,9 +122,15 @@ const synthesize = (node, context) => {
         throw new Error(`Expected function type, got ${functionType.kind}`);
       }
       
-      const argType = synthesize(node.arguments[0], context);
-      if (!typesEqual(functionType.paramType, argType)) {
-        throw new Error(`Expected argument of type ${JSON.stringify(functionType.paramType)}, got ${JSON.stringify(argType)}`);
+      if (node.arguments.length !== functionType.paramTypes.length) {
+        throw new Error(`Expected ${functionType.paramTypes.length} arguments, got ${node.arguments.length}`);
+      }
+      
+      for (let i = 0; i < node.arguments.length; i++) {
+        const argType = synthesize(node.arguments[i], context);
+        if (!typesEqual(functionType.paramTypes[i], argType)) {
+          throw new Error(`Expected argument ${i} of type ${JSON.stringify(functionType.paramTypes[i])}, got ${JSON.stringify(argType)}`);
+        }
       }
       
       return functionType.returnType;
@@ -200,14 +193,23 @@ const check = (node, expectedType, context) => {
         throw new Error(`Expected function type, got ${expectedType.kind}`);
       }
       
-      const param = node.parameters[0];
-      const paramType = param.type ? convertTypeAnnotation(param.type) : expectedType.paramType;
-      
-      if (!typesEqual(paramType, expectedType.paramType)) {
-        throw new Error(`Parameter type mismatch`);
+      if (node.parameters.length !== expectedType.paramTypes.length) {
+        throw new Error(`Expected ${expectedType.paramTypes.length} parameters, got ${node.parameters.length}`);
       }
       
-      const extendedContext = context.extend(param.name.text, paramType);
+      let extendedContext = { ...context };
+      
+      for (let i = 0; i < node.parameters.length; i++) {
+        const param = node.parameters[i];
+        const paramType = param.type ? convertTypeAnnotation(param.type) : expectedType.paramTypes[i];
+        
+        if (!typesEqual(paramType, expectedType.paramTypes[i])) {
+          throw new Error(`Parameter ${i} type mismatch`);
+        }
+        
+        extendedContext[param.name.text] = paramType;
+      }
+      
       check(node.body, expectedType.returnType, extendedContext);
       return;
       
@@ -270,7 +272,6 @@ export {
   parseTypeScript, 
   synthesize, 
   check, 
-  TypeContext, 
   getExpression,
   runTest,
   runFail, 
