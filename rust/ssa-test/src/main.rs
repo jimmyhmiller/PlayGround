@@ -98,14 +98,12 @@ impl SSATranslator {
         
         for predecessor in block.predecessors.clone() {
             let value = self.read_variable(variable.clone(), predecessor);
-            println!("value {:?}", value);
             if let Some(phi) = self.phis.get_mut(&phi_id) {
-                phi.operands.push(value);
+                phi.operands.push(value.clone());
             }
-        }
-        
-        if let Some(phi) = self.phis.get(&phi_id) {
-            println!("phi {:?}", phi);
+            if let Value::Phi(id) = value {
+                self.add_phi_phi_use(phi_id, id);
+            }
         }
         
         self.try_remove_trivial_phi(phi_id)
@@ -113,90 +111,37 @@ impl SSATranslator {
 
     fn try_remove_trivial_phi(&mut self, phi_id: PhiId) -> Value {
         let mut same: Option<Value> = None;
-        
-        println!("Trying to remove trivial phi: {:?}", phi_id);
-        
-        // First pass: check if phi is trivial
-        if let Some(phi) = self.phis.get(&phi_id) {
-            println!("Phi operands: {:?}", phi.operands);
-            
-            // Debug: print all phis
-            println!("All phis:");
-            for (id, phi) in &self.phis {
-                println!("  {:?}: {:?}", id, phi);
+        let phi = self.phis.get(&phi_id).expect("Phi not found").clone();
+        for op in phi.operands.iter() {
+            println!("{:?}", op);
+            if Some(op) == same.as_ref() || op == &Value::Phi(phi_id) {
+                continue;
             }
-            for operand in phi.operands.iter() {
-                println!("Checking operand: {:?}", operand);
-                
-                // Resolve phi operands recursively
-                let resolved_operand = if let Value::Phi(op_phi_id) = operand {
-                    if *op_phi_id == phi_id {
-                        // Self-reference, skip
-                        println!("Skipping self-reference");
-                        continue;
-                    }
-                    // Recursively resolve the phi operand
-                    let resolved = self.try_remove_trivial_phi(*op_phi_id);
-                    println!("Resolved phi operand {:?} to {:?}", op_phi_id, resolved);
-                    resolved
-                } else {
-                    operand.clone()
-                };
-                
-                println!("Resolved operand: {:?}", resolved_operand);
-                println!("same.as_ref(): {:?}", same.as_ref());
-                
-                if Some(&resolved_operand) == same.as_ref() {
-                    println!("Skipping operand (same as previous)");
-                    continue; // Same value as before
-                }
-                if same.is_some() {
-                    println!("Phi is not trivial - merges multiple values");
-                    return Value::Phi(phi_id); // The phi merges at least two values: not trivial
-                }
-                same = Some(resolved_operand);
-                println!("Set same to: {:?}", same);
+            if same.is_some() {
+                return Value::Phi(phi_id);
             }
-        } else {
-            return Value::Undefined; // Phi doesn't exist
+            same = Some(op.clone());
         }
-        
+
         if same.is_none() {
-            same = Some(Value::Undefined); // The phi is unreachable or in the start block
+            same = Some(Value::Undefined);
         }
-        
-        let replacement = same.unwrap();
-        
-        // Get users before removing the phi (to avoid borrow issues)
-        let users: Vec<PhiId> = if let Some(_phi) = self.phis.get(&phi_id) {
-            self.phis.values()
-                .filter(|other_phi| {
-                    other_phi.operands.iter().any(|op| {
-                        if let Value::Phi(id) = op {
-                            *id == phi_id
-                        } else {
-                            false
-                        }
-                    })
-                })
-                .map(|other_phi| other_phi.id)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        
-        // Replace all uses of phi with the replacement value and remove phi
-        self.replace_phi_uses(phi_id, replacement.clone());
-        self.remove_phi(phi_id);
-        
-        // Try to recursively remove all phi users, which might have become trivial
-        for user_phi_id in users {
-            if self.phis.contains_key(&user_phi_id) {
-                self.try_remove_trivial_phi(user_phi_id);
+
+        for user in phi.uses.iter().cloned() {
+            self.replace_phi_uses(phi_id, same.clone().unwrap());
+        }
+
+        for user in phi.uses.iter().cloned() {
+            match user {
+                PhiReference::Phi(user_phi_id) => {
+                    self.try_remove_trivial_phi(user_phi_id);
+                }
+                _ => {}
             }
         }
         
-        replacement
+        
+        same.unwrap()
     }
 
     fn seal_block(&mut self, block_id: BlockId) {
@@ -234,15 +179,23 @@ impl SSATranslator {
         };
         
         self.phis.insert(phi_id, phi);
+        let instruction_offset = self.blocks[block_id.0].instructions.len();
+        self.add_phi_use(phi_id, block_id, instruction_offset);
         phi_id
     }
 
     fn add_phi_use(&mut self, phi_id: PhiId, block_id: BlockId, instruction_offset: usize) {
         if let Some(phi) = self.phis.get_mut(&phi_id) {
-            phi.uses.push(PhiReference {
+            phi.uses.push(PhiReference::Instruction {
                 block_id,
                 instruction_offset,
             });
+        }
+    }
+
+    fn add_phi_phi_use(&mut self, phi_id: PhiId, user_phi_id: PhiId) {
+        if let Some(phi) = self.phis.get_mut(&phi_id) {
+            phi.uses.push(PhiReference::Phi(user_phi_id));
         }
     }
 
@@ -250,7 +203,17 @@ impl SSATranslator {
         if let Some(phi) = self.phis.get(&phi_id).cloned() {
             let uses = phi.uses.clone();
             for phi_ref in uses {
-                self.replace_value_at_location(phi_ref.block_id, phi_ref.instruction_offset, phi_id, replacement.clone());
+                match phi_ref {
+                    PhiReference::Instruction { block_id, instruction_offset } => {
+                        self.replace_value_at_location(block_id, instruction_offset, phi_id, replacement.clone());
+                    }
+                    PhiReference::Phi(ph_id) => {
+                        self.phis.get_mut(&ph_id).map(|p| {
+                            p.operands.retain(|op| !op.is_same_phi(phi_id));
+                            p.operands.push(replacement.clone());
+                        });
+                    }
+                }
             }
         }
     }
@@ -389,6 +352,7 @@ impl SSATranslator {
 
                 self.blocks[then_block.0].predecessors.push(current_block);
                 self.blocks[else_block.0].predecessors.push(current_block);
+                self.seal_block(current_block);
                 self.seal_block(then_block);
                 self.seal_block(else_block);
 
@@ -463,11 +427,10 @@ fn main() {
         (set y 5)
         (set sum (+ (var x) (var y)))
         (if (> (var sum) 10)
-            // (if (> (var y) 0)
-            //     (set result 1)
-            //     (set result 2))
-            (set result 0)
-            0)
+            (if (> (var y) 0)
+                (set result 1)
+                (set result 2))
+            (set result 1))
         (print (var result))
         // (while (> (var x) 0)
         //     (set x (- (var x) 1)))
@@ -487,7 +450,7 @@ fn main() {
     }
 
     
-    // if let Err(e) = visualizer.render_and_open("ssa_graph.png") {
-    //     eprintln!("Failed to visualize SSA: {}", e);
-    // }
+    if let Err(e) = visualizer.render_and_open("ssa_graph.png") {
+        eprintln!("Failed to visualize SSA: {}", e);
+    }
 }
