@@ -6,10 +6,14 @@ pub struct Variable(pub String);
 #[derive(Debug, Clone, Copy, PartialEq, Hash, Eq)]
 pub struct PhiId(pub usize);
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct PhiReference {
-    pub block_id: BlockId,
-    pub instruction_offset: usize,
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PhiReference {
+    Instruction {
+        block_id: BlockId,
+        instruction_offset: usize,
+    },
+    Phi(PhiId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
