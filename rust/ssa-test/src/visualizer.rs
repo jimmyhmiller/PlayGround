@@ -56,15 +56,17 @@ impl<'a> SSAVisualizer<'a> {
 
         // Add phi nodes for this block if any
         if let Some(phis) = self.translator.incomplete_phis.get(&block.id) {
-            for (var, phi) in phis {
-                node.push_str(&format!("Φ({}) = ", var));
-                let operands: Vec<String> = phi
-                    .operands
-                    .iter()
-                    .map(|op| self.format_value(op))
-                    .collect();
-                node.push_str(&operands.join(", "));
-                node.push_str("\\n");
+            for (var, phi_id) in phis {
+                if let Some(phi) = self.translator.phis.get(phi_id) {
+                    node.push_str(&format!("Φ({}) = ", var));
+                    let operands: Vec<String> = phi
+                        .operands
+                        .iter()
+                        .map(|op| self.format_value(op))
+                        .collect();
+                    node.push_str(&operands.join(", "));
+                    node.push_str("\\n");
+                }
             }
             if !phis.is_empty() {
                 node.push_str("─────────────\\n");
@@ -143,16 +145,20 @@ impl<'a> SSAVisualizer<'a> {
         match value {
             Value::Literal(n) => n.to_string(),
             Value::Var(var) => self.format_variable(var),
-            Value::PhiValue(phi) => {
-                if phi.operands.is_empty() {
-                    format!("Φ(block_{})", phi.block_id.0)
+            Value::Phi(phi_id) => {
+                if let Some(phi) = self.translator.phis.get(phi_id) {
+                    if phi.operands.is_empty() {
+                        format!("Φ{}", phi_id.0)
+                    } else {
+                        let operands: Vec<String> = phi
+                            .operands
+                            .iter()
+                            .map(|op| self.format_value(op))
+                            .collect();
+                        format!("Φ{}({})", phi_id.0, operands.join(","))
+                    }
                 } else {
-                    let operands: Vec<String> = phi
-                        .operands
-                        .iter()
-                        .map(|op| self.format_value(op))
-                        .collect();
-                    format!("Φ({})", operands.join(","))
+                    format!("Φ{}", phi_id.0)
                 }
             }
             Value::Undefined => "⊥".to_string(),
