@@ -43,6 +43,11 @@ const createPrimitiveType = (name) => ({
   name
 });
 
+const createTypeVariable = (name) => ({
+  kind: 'variable',
+  name
+});
+
 const BOOL_TYPE = createPrimitiveType('boolean');
 const NUMBER_TYPE = createPrimitiveType('number');
 const STRING_TYPE = createPrimitiveType('string');
@@ -53,6 +58,8 @@ const typesEqual = (type1, type2) => {
   
   switch (type1.kind) {
     case 'primitive':
+      return type1.name === type2.name;
+    case 'variable':
       return type1.name === type2.name;
     case 'function':
       if (type1.paramTypes.length !== type2.paramTypes.length) return false;
@@ -74,6 +81,12 @@ const convertTypeAnnotation = (typeNode) => {
       return NUMBER_TYPE;
     case ts.SyntaxKind.StringKeyword:
       return STRING_TYPE;
+    case ts.SyntaxKind.TypeReference:
+      // Handle generic type variables like T, U, etc.
+      if (ts.isIdentifier(typeNode.typeName)) {
+        return createTypeVariable(typeNode.typeName.text);
+      }
+      throw new Error(`Unsupported type reference: ${typeNode.typeName}`);
     case ts.SyntaxKind.FunctionType:
       const paramTypes = typeNode.parameters.map(param => convertTypeAnnotation(param.type));
       const returnType = convertTypeAnnotation(typeNode.type);
@@ -81,6 +94,67 @@ const convertTypeAnnotation = (typeNode) => {
     default:
       throw new Error(`Unsupported type annotation: ${ts.SyntaxKind[typeNode.kind]}`);
   }
+};
+
+// Type variable utilities
+const isTypeVariable = (type) => type.kind === 'variable';
+
+const collectTypeVars = (type) => {
+  switch (type.kind) {
+    case 'variable':
+      return [type.name];
+    case 'function':
+      return [...new Set([
+        ...type.paramTypes.flatMap(collectTypeVars),
+        ...collectTypeVars(type.returnType)
+      ])];
+    default:
+      return [];
+  }
+};
+
+const substitute = (type, substitutions) => {
+  switch (type.kind) {
+    case 'variable':
+      return substitutions[type.name] || type;
+    case 'function':
+      return createFunctionType(
+        type.paramTypes.map(param => substitute(param, substitutions)),
+        substitute(type.returnType, substitutions)
+      );
+    default:
+      return type;
+  }
+};
+
+const unify = (type1, type2, substitutions = {}) => {
+  type1 = substitute(type1, substitutions);
+  type2 = substitute(type2, substitutions);
+  
+  if (typesEqual(type1, type2)) {
+    return substitutions;
+  } else if (isTypeVariable(type1)) {
+    return { ...substitutions, [type1.name]: type2 };
+  } else if (isTypeVariable(type2)) {
+    return { ...substitutions, [type2.name]: type1 };
+  } else if (type1.kind === 'function' && type2.kind === 'function') {
+    if (type1.paramTypes.length !== type2.paramTypes.length) {
+      throw new Error(`Cannot unify function types with different arity`);
+    }
+    
+    let newSubs = substitutions;
+    for (let i = 0; i < type1.paramTypes.length; i++) {
+      newSubs = unify(type1.paramTypes[i], type2.paramTypes[i], newSubs);
+    }
+    newSubs = unify(type1.returnType, type2.returnType, newSubs);
+    return newSubs;
+  } else {
+    throw new Error(`Cannot unify ${JSON.stringify(type1)} with ${JSON.stringify(type2)}`);
+  }
+};
+
+const isGenericFunctionType = (type) => {
+  return type.kind === 'function' && collectTypeVars(type).length > 0;
 };
 
 // Synthesize type for an expression
@@ -126,14 +200,28 @@ const synthesize = (node, context) => {
         throw new Error(`Expected ${functionType.paramTypes.length} arguments, got ${node.arguments.length}`);
       }
       
-      for (let i = 0; i < node.arguments.length; i++) {
-        const argType = synthesize(node.arguments[i], context);
-        if (!typesEqual(functionType.paramTypes[i], argType)) {
-          throw new Error(`Expected argument ${i} of type ${JSON.stringify(functionType.paramTypes[i])}, got ${JSON.stringify(argType)}`);
+      if (isGenericFunctionType(functionType)) {
+        // Handle generic function application with type inference
+        let substitutions = {};
+        
+        for (let i = 0; i < node.arguments.length; i++) {
+          const argType = synthesize(node.arguments[i], context);
+          substitutions = unify(functionType.paramTypes[i], argType, substitutions);
         }
+        
+        const instantiatedReturnType = substitute(functionType.returnType, substitutions);
+        return instantiatedReturnType;
+      } else {
+        // Handle non-generic function application
+        for (let i = 0; i < node.arguments.length; i++) {
+          const argType = synthesize(node.arguments[i], context);
+          if (!typesEqual(functionType.paramTypes[i], argType)) {
+            throw new Error(`Expected argument ${i} of type ${JSON.stringify(functionType.paramTypes[i])}, got ${JSON.stringify(argType)}`);
+          }
+        }
+        
+        return functionType.returnType;
       }
-      
-      return functionType.returnType;
       
     case ts.SyntaxKind.BinaryExpression:
       const left = synthesize(node.left, context);
@@ -279,5 +367,6 @@ export {
   BOOL_TYPE,
   NUMBER_TYPE,
   STRING_TYPE,
-  createFunctionType
+  createFunctionType,
+  createTypeVariable
 };

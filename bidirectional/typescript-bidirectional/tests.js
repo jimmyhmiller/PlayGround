@@ -9,7 +9,8 @@ import {
   BOOL_TYPE,
   NUMBER_TYPE,
   STRING_TYPE,
-  createFunctionType
+  createFunctionType,
+  createTypeVariable
 } from './index.js';
 
 // Helper to test synthesize with TypeScript code
@@ -167,5 +168,84 @@ assertEquals(
 runFail(() => testSynthesize('add(10)', contextWithAdd)); // too few arguments
 runFail(() => testSynthesize('add(10, 20, 30)', contextWithAdd)); // too many arguments
 runFail(() => testSynthesize('add(10, "hello")', contextWithAdd)); // wrong argument type
+
+// Generic function tests
+console.log('\n🧬 Testing generic functions:');
+
+// Generic identity function
+const T = createTypeVariable('T');
+assertEquals(
+  testSynthesize('(x: T) => x'),
+  createFunctionType([T], T),
+  'generic identity function'
+);
+
+// Generic function application with type inference
+const contextWithGenericId = { 
+  identity: createFunctionType([createTypeVariable('T')], createTypeVariable('T'))
+};
+
+assertEquals(
+  testSynthesize('identity(42)', contextWithGenericId),
+  NUMBER_TYPE,
+  'generic identity applied to number'
+);
+
+assertEquals(
+  testSynthesize('identity("hello")', contextWithGenericId),
+  STRING_TYPE,
+  'generic identity applied to string'
+);
+
+assertEquals(
+  testSynthesize('identity(true)', contextWithGenericId),
+  BOOL_TYPE,
+  'generic identity applied to boolean'
+);
+
+// Generic function with multiple type variables
+const U = createTypeVariable('U');
+const V = createTypeVariable('V');
+const contextWithGenericPair = {
+  first: createFunctionType([U, V], U)
+};
+
+assertEquals(
+  testSynthesize('first(42, "hello")', contextWithGenericPair),
+  NUMBER_TYPE,
+  'generic first function extracts first type'
+);
+
+assertEquals(
+  testSynthesize('first("world", true)', contextWithGenericPair),
+  STRING_TYPE,
+  'generic first function with different types'
+);
+
+// Inline generic function application
+assertEquals(
+  testSynthesize('((x: T) => x)(42)'),
+  NUMBER_TYPE,
+  'inline generic function application'
+);
+
+// Higher-order generic function
+const contextWithGenericMap = {
+  map: createFunctionType(
+    [createFunctionType([createTypeVariable('A')], createTypeVariable('B')), createTypeVariable('A')],
+    createTypeVariable('B')
+  )
+};
+
+const contextWithIncrement = {
+  ...contextWithGenericMap,
+  increment: createFunctionType([NUMBER_TYPE], NUMBER_TYPE)
+};
+
+assertEquals(
+  testSynthesize('map(increment, 5)', contextWithIncrement),
+  NUMBER_TYPE,
+  'higher-order generic function application'
+);
 
 console.log('\n✅ All tests passed!');
