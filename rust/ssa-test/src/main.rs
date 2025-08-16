@@ -91,6 +91,13 @@ impl SSATranslator {
 
     fn add_phi_operands(&mut self, variable: &String, phi_id: PhiId) -> Value {
         let block_id = self.phis.get(&phi_id).unwrap().block_id;
+        
+        // Check if this phi already has operands
+        if !self.phis.get(&phi_id).unwrap().operands.is_empty() {
+            return Value::Phi(phi_id);
+        }
+        
+        
         let block = self
             .blocks
             .get(block_id.0)
@@ -105,47 +112,61 @@ impl SSATranslator {
                 self.add_phi_phi_use(phi_id, id);
             }
         }
-        
-        self.try_remove_trivial_phi(phi_id)
+        // Don't try to remove trivial phi immediately - wait until all phis are resolved
+        return self.try_remove_trivial_phi(phi_id);
     }
 
     fn try_remove_trivial_phi(&mut self, phi_id: PhiId) -> Value {
         let mut same: Option<Value> = None;
         let phi = self.phis.get(&phi_id).expect("Phi not found").clone();
+        
+        
         for op in phi.operands.iter() {
-            println!("{:?}", op);
+            // Skip self-references and duplicates
             if Some(op) == same.as_ref() || op == &Value::Phi(phi_id) {
                 continue;
             }
+            // If we already found one operand and this is different, keep the phi
             if same.is_some() {
                 return Value::Phi(phi_id);
             }
             same = Some(op.clone());
         }
 
-        if same.is_none() {
-            same = Some(Value::Undefined);
-        }
+        // Determine replacement value
+        let replacement = if same.is_none() {
+            Value::Undefined
+        } else {
+            same.unwrap()
+        };
 
+        // Replace all uses of this phi with the replacement
         for user in phi.uses.iter().cloned() {
-            self.replace_phi_uses(phi_id, same.clone().unwrap());
+            self.replace_phi_uses(phi_id, replacement.clone());
         }
 
+        // Try to recursively remove all phi users, which might have become trivial
         for user in phi.uses.iter().cloned() {
             match user {
                 PhiReference::Phi(user_phi_id) => {
-                    self.try_remove_trivial_phi(user_phi_id);
+                    // Only process phis that are not incomplete (have been through addPhiOperands)
+                    let is_incomplete = self.incomplete_phis.values()
+                        .any(|block_phis| block_phis.values().any(|&phi_id| phi_id == user_phi_id));
+                    
+                    if !is_incomplete {
+                        self.try_remove_trivial_phi(user_phi_id);
+                    }
                 }
                 _ => {}
             }
         }
         
-        
-        same.unwrap()
+        replacement
     }
 
     fn seal_block(&mut self, block_id: BlockId) {
         self.sealed_blocks.insert(block_id);
+        self.blocks[block_id.0].seal();
 
         if let Some(phis) = self.incomplete_phis.clone().get(&block_id) {
             for variable in phis.keys() {
@@ -170,6 +191,7 @@ impl SSATranslator {
     fn create_phi(&mut self, block_id: BlockId) -> PhiId {
         let phi_id = PhiId(self.next_phi_id);
         self.next_phi_id += 1;
+        
         
         let phi = Phi {
             id: phi_id,
@@ -209,8 +231,11 @@ impl SSATranslator {
                     }
                     PhiReference::Phi(ph_id) => {
                         self.phis.get_mut(&ph_id).map(|p| {
-                            p.operands.retain(|op| !op.is_same_phi(phi_id));
-                            p.operands.push(replacement.clone());
+                            for operand in &mut p.operands {
+                                if operand.is_same_phi(phi_id) {
+                                    *operand = replacement.clone();
+                                }
+                            }
                         });
                     }
                 }
@@ -342,16 +367,8 @@ impl SSATranslator {
                 let then_block = self.create_block();
                 let else_block = self.create_block();
 
-                // TODO: I think I need to do this a bit better. It really should
-                // be that I
-                // 1. Change the current block
-                // 2. Translate the if
-                // 3. then setup the merge block
-                // 4. then same on the else.
-                // This will ensure that if things are nested they don't get all confused.
-
-                self.blocks[then_block.0].predecessors.push(current_block);
-                self.blocks[else_block.0].predecessors.push(current_block);
+                self.blocks[then_block.0].add_predecessor(current_block);
+                self.blocks[else_block.0].add_predecessor(current_block);
                 self.seal_block(current_block);
                 self.seal_block(then_block);
                 self.seal_block(else_block);
@@ -369,8 +386,7 @@ impl SSATranslator {
                 }
 
                 self.blocks[merge_block.0]
-                    .predecessors
-                    .push(self.current_block);
+                    .add_predecessor(self.current_block);
 
                 self.blocks[self.current_block.0].add_instruction(Instruction::Jump {
                     target: merge_block,
@@ -383,8 +399,7 @@ impl SSATranslator {
                     }
                 }
                 self.blocks[merge_block.0]
-                    .predecessors
-                    .push(self.current_block);
+                    .add_predecessor(self.current_block);
 
                 self.blocks[self.current_block.0].add_instruction(Instruction::Jump {
                     target: merge_block,
@@ -406,6 +421,65 @@ impl SSATranslator {
                     value: Value::Var(temp_var.clone()),
                 });
                 Value::Var(temp_var)
+            }
+            Ast::While { condition, body } => {
+                let loop_start = self.create_block();
+                let loop_body = self.create_block();
+                let loop_end = self.create_block();
+
+                // Add predecessor from entry to loop start
+                self.blocks[loop_start.0].add_predecessor(current_block);
+                
+                // Jump to loop start
+                self.blocks[current_block.0].add_instruction(Instruction::Jump {
+                    target: loop_start,
+                });
+                
+                // Seal the current block since all its successors are known
+                self.seal_block(current_block);
+
+                // Switch to loop start block
+                self.current_block = loop_start;
+
+                // Translate condition
+                let condition_value = self.translate(condition);
+                
+                // Add conditional jump
+                self.blocks[self.current_block.0].add_instruction(Instruction::ConditionalJump {
+                    condition: condition_value,
+                    true_target: loop_body,
+                    false_target: loop_end,
+                });
+
+                // Add predecessors for loop body and loop end
+                self.blocks[loop_body.0].add_predecessor(loop_start);
+                self.blocks[loop_end.0].add_predecessor(loop_start);
+                
+                // Seal loop_end now - it won't get any more predecessors
+                self.seal_block(loop_end);
+
+                // Process loop body
+                self.current_block = loop_body;
+                for stmt in body {
+                    self.translate(stmt);
+                }
+
+                // Jump back to loop start from body
+                self.blocks[self.current_block.0].add_instruction(Instruction::Jump {
+                    target: loop_start,
+                });
+                
+                // Add the back-edge predecessor
+                self.blocks[loop_start.0].add_predecessor(self.current_block);
+
+                // Seal loop_body after processing it
+                self.seal_block(loop_body);
+                
+                // Seal loop_start last, after the back-edge is added
+                self.seal_block(loop_start);
+
+                self.current_block = loop_end;
+                Value::Undefined
             }
             ast => {
                 println!("Unsupported AST node: {:?}", ast);
@@ -432,8 +506,9 @@ fn main() {
                 (set result 2))
             (set result 1))
         (print (var result))
-        // (while (> (var x) 0)
-        //     (set x (- (var x) 1)))
+        (while (> (var x) 0)
+            (set x (- (var x) 1)))
+        (print (var x))
     };
 
     let mut ssa_translator = SSATranslator::new();

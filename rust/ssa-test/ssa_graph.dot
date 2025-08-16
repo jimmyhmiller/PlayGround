@@ -5,10 +5,13 @@ digraph SSA {
     block_0 [label="Block 0\n─────────────\nv0 := 10\nv1 := 5\nv2 := v0 + v1\nv3 := 10\nv4 := v2 > v3\nif v4 then block_1 else block_2\n─────────────\n[SEALED]\n"];
     block_1 [label="Block 1\n─────────────\nv5 := 0\nv6 := v1 > v5\nif v6 then block_4 else block_5\n─────────────\n[SEALED]\n"];
     block_2 [label="Block 2\n─────────────\nv9 := 1\njump block_3\n─────────────\n[SEALED]\n"];
-    block_3 [label="Block 3\n─────────────\nv10 := Φ0(Φ1(v7,v8),v9)\nprint v10\n─────────────\n[SEALED]\n"];
+    block_3 [label="Block 3\n─────────────\nv10 := Φ0(Φ1(v7,v8),v9)\nprint v10\njump block_7\n─────────────\n[SEALED]\n"];
     block_4 [label="Block 4\n─────────────\nv7 := 1\njump block_6\n─────────────\n[SEALED]\n"];
     block_5 [label="Block 5\n─────────────\nv8 := 2\njump block_6\n─────────────\n[SEALED]\n"];
     block_6 [label="Block 6\n─────────────\njump block_3\n─────────────\n[SEALED]\n"];
+    block_7 [label="Block 7\n─────────────\nΦ(x) = v0, v14\n─────────────\nv11 := 0\nv12 := Φ2(v0,v14) > v11\nif v12 then block_8 else block_9\n─────────────\n[SEALED]\n"];
+    block_8 [label="Block 8\n─────────────\nΦ(x) = Φ2(v0,v14)\n─────────────\nv13 := 1\nv14 := Φ3(Φ2(v0,v14)) - v13\njump block_7\n─────────────\n[SEALED]\n"];
+    block_9 [label="Block 9\n─────────────\nv15 := Φ2(v0,v14)\nprint v15\n─────────────\n[SEALED]\n"];
     block_0 -> block_1;
     block_0 -> block_2;
     block_6 -> block_3;
@@ -17,4 +20,15 @@ digraph SSA {
     block_1 -> block_5;
     block_4 -> block_6;
     block_5 -> block_6;
+    block_3 -> block_7;
+    block_8 -> block_7;
+    block_7 -> block_8;
+    block_7 -> block_9;
+
+    // Legend
+    subgraph cluster_legend {
+        label="Legend";
+        style=dotted;
+        "Φ = Phi function" [shape=plaintext];
+    }
 }

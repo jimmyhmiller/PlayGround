@@ -103,6 +103,7 @@ pub struct Block {
     pub id: BlockId,
     pub instructions: Vec<Instruction>,
     pub predecessors: Vec<BlockId>,
+    pub sealed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,11 +142,21 @@ impl Block {
             id,
             instructions: Vec::new(),
             predecessors: Vec::new(),
+            sealed: false,
         }
     }
 
     pub fn add_instruction(&mut self, instr: Instruction) {
         self.instructions.push(instr);
+    }
+    
+    pub fn add_predecessor(&mut self, predecessor: BlockId) {
+        assert!(!self.sealed, "Cannot add predecessor to sealed block {:?}", self.id);
+        self.predecessors.push(predecessor);
+    }
+    
+    pub fn seal(&mut self) {
+        self.sealed = true;
     }
 }
 
