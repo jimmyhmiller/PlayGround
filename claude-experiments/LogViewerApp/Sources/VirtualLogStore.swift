@@ -12,6 +12,10 @@ class VirtualLogStore: ObservableObject {
     private let isoFormatter: ISO8601DateFormatter
     
     @Published var selectedIndex: Int? = nil
+    @Published var isInitializing = true
+    @Published var estimatedLineCount: Int = 0
+    
+    private var cachedTimeRange: (start: Date, end: Date)?
     
     init?(url: URL) {
         guard let fileRef = LogFileReference(url: url) else { return nil }
@@ -25,23 +29,111 @@ class VirtualLogStore: ObservableObject {
         
         self.isoFormatter = ISO8601DateFormatter()
         self.isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        
+        // Do minimal sync initialization - just estimate
+        self.estimatedLineCount = estimateQuickLineCount()
+        self.isInitializing = false // Start ready immediately
+        
+        // Start background initialization for better estimates
+        Task {
+            await refineEstimatesInBackground()
+        }
     }
     
-    /// Get total number of lines in the file
+    /// Get total number of lines in the file (returns estimate during initialization)
     var totalLines: Int {
-        lineIndex.totalLines()
+        // Always use estimate if available, never force full indexing
+        if estimatedLineCount > 0 {
+            return estimatedLineCount
+        }
+        // Fallback to current indexed count, but don't trigger full indexing
+        return lineIndex.currentLineCount()
     }
     
-    /// Get log entry for a specific line number
+    /// Quick synchronous estimate (very fast)
+    private func estimateQuickLineCount() -> Int {
+        // Quick estimate based on file size and typical line length
+        let avgLineLength: Double = 80 // Reasonable estimate
+        return max(1, Int(Double(slice.length) / avgLineLength))
+    }
+    
+    /// Background refinement of estimates
+    @MainActor
+    private func refineEstimatesInBackground() async {
+        await withTaskGroup(of: Void.self) { group in
+            // Task 1: Better line count estimation from sampling
+            group.addTask { [weak self] in
+                await self?.estimateLineCount()
+            }
+            
+            // Task 2: Parse first and last entries for time range
+            group.addTask { [weak self] in
+                await self?.loadTimeRange()
+            }
+            
+            // Wait for both tasks
+            await group.waitForAll()
+        }
+    }
+    
+    private func estimateLineCount() async {
+        // Sample the first 1MB to estimate average line length
+        let sampleSize = min(1024 * 1024, slice.length)
+        guard let sampleData = slice.data(in: 0..<UInt64(sampleSize)) else { return }
+        
+        let newlineCount = sampleData.reduce(0) { count, byte in
+            count + (byte == 0x0A ? 1 : 0)
+        }
+        
+        if newlineCount > 0 {
+            let avgLineLength = Double(sampleSize) / Double(newlineCount)
+            let estimated = Int(Double(slice.length) / avgLineLength)
+            
+            await MainActor.run {
+                self.estimatedLineCount = estimated
+            }
+        }
+    }
+    
+    private func loadTimeRange() async {
+        // Parse first entry
+        guard let firstLineInfo = await lineIndex.lineInfoAsync(at: 0),
+              let firstLineText = slice.substring(in: firstLineInfo.byteRange) else { return }
+        
+        let firstEntry = parseLogLine(firstLineText.trimmingCharacters(in: .whitespacesAndNewlines), lineNumber: 0)
+        
+        // For last entry, sample backwards to avoid full indexing
+        let lastSampleOffset = max(0, Int64(slice.length) - 10000)
+        guard let lastSampleData = slice.data(in: UInt64(lastSampleOffset)..<slice.length),
+              let lastSampleText = String(data: lastSampleData, encoding: .utf8) else { return }
+        
+        // Find the last complete line in the sample
+        let lines = lastSampleText.components(separatedBy: .newlines)
+        for line in lines.reversed() {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                let lastEntry = parseLogLine(trimmed, lineNumber: -1)
+                
+                await MainActor.run {
+                    self.cachedTimeRange = (firstEntry.timestamp, lastEntry.timestamp)
+                }
+                break
+            }
+        }
+    }
+    
+    /// Get log entry for a specific line number (non-blocking)
     func entry(at lineNumber: Int) -> LogEntry? {
         // Check cache first
         if let cached = parsedEntries[lineNumber] {
             return cached
         }
         
-        // Get line info and parse
-        guard let lineInfo = lineIndex.lineInfo(at: lineNumber),
+        // Get line info but don't force indexing
+        guard let lineInfo = lineIndex.lineInfoNonBlocking(at: lineNumber),
               let lineText = slice.substring(in: lineInfo.byteRange) else {
+            // Trigger background indexing for this area
+            lineIndex.indexInBackgroundIfNeeded(around: lineNumber)
             return nil
         }
         
@@ -86,10 +178,14 @@ class VirtualLogStore: ObservableObject {
     
     /// Get the time range of the entire file (efficiently)
     func getTimeRange() -> (start: Date, end: Date)? {
-        // Get first entry
+        // Return cached time range if available
+        if let cached = cachedTimeRange {
+            return cached
+        }
+        
+        // Fallback to old method if not cached yet
         guard let firstEntry = entry(at: 0) else { return nil }
         
-        // Get last entry
         let lastLineIndex = totalLines - 1
         guard lastLineIndex >= 0,
               let lastEntry = entry(at: lastLineIndex) else {
