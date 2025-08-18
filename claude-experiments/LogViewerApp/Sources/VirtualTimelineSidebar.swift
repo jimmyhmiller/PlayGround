@@ -255,16 +255,15 @@ struct VirtualTimelineCanvas: View {
         }
         .onTapGesture { location in
             let progress = location.y / height
-            let targetTime = timeRange.start.addingTimeInterval(
-                timeRange.end.timeIntervalSince(timeRange.start) * progress
-            )
             
-            if let lineNumber = virtualStore.findEntryNear(timestamp: targetTime) {
-                NotificationCenter.default.post(
-                    name: .jumpToLogLine,
-                    object: lineNumber
-                )
-            }
+            // Direct calculation - no need to go through timestamp conversion
+            let totalLines = virtualStore.totalLines
+            let targetLineNumber = max(0, min(totalLines - 1, Int(Double(totalLines) * progress)))
+            
+            NotificationCenter.default.post(
+                name: .jumpToLogLine,
+                object: targetLineNumber
+            )
         }
     }
     
