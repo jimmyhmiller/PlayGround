@@ -2,6 +2,8 @@ import SwiftUI
 
 struct VirtualTimelineSidebar: View {
     @StateObject private var virtualStore: VirtualLogStore
+    @State private var stableTimeRange: (start: Date, end: Date)?
+    @State private var hasShownTimeline = false
     
     private let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -33,8 +35,8 @@ struct VirtualTimelineSidebar: View {
             ZStack {
                 Color(red: 0.12, green: 0.12, blue: 0.13)
                 
-                if virtualStore.totalLines > 0,
-                   let timeRange = virtualStore.getTimeRange() {
+                if let timeRange = stableTimeRange ?? virtualStore.getTimeRange(),
+                   virtualStore.totalLines > 0 {
                     
                     VStack(spacing: 0) {
                         // Date header
@@ -53,6 +55,36 @@ struct VirtualTimelineSidebar: View {
                             VirtualTimelineCanvas(
                                 virtualStore: virtualStore,
                                 timeRange: timeRange,
+                                height: geometry.size.height - 40
+                            )
+                            .frame(width: 44)
+                        }
+                        
+                        Spacer()
+                    }
+                    .onAppear {
+                        // Cache the time range once we have it to prevent disappearing
+                        if stableTimeRange == nil {
+                            stableTimeRange = timeRange
+                            hasShownTimeline = true
+                        }
+                    }
+                } else if hasShownTimeline && stableTimeRange != nil {
+                    // Show timeline with stable cached data even if other conditions fail
+                    VStack(spacing: 0) {
+                        Text(dateFormatter.string(from: stableTimeRange!.start))
+                            .font(.system(size: 10, weight: .medium).monospaced())
+                            .foregroundColor(.white)
+                            .padding(.top, 8)
+                            .padding(.bottom, 4)
+                        
+                        HStack(spacing: 2) {
+                            timeLabels(height: geometry.size.height - 40, timeRange: stableTimeRange!)
+                                .frame(width: 32)
+                            
+                            VirtualTimelineCanvas(
+                                virtualStore: virtualStore,
+                                timeRange: stableTimeRange!,
                                 height: geometry.size.height - 40
                             )
                             .frame(width: 44)
