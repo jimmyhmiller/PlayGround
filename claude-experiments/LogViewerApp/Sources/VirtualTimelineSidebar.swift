@@ -130,8 +130,22 @@ struct VirtualTimelineCanvas: View {
             drawBackground(context: context, size: size)
             
             let totalDuration = timeRange.end.timeIntervalSince(timeRange.start)
+            
+            // Validate timeline data
+            guard totalDuration > 0 && totalDuration.isFinite else {
+                // Just draw the border if we have invalid time data
+                drawBorderAndGrid(context: context, size: size)
+                return
+            }
+            
             let bucketHeight: CGFloat = 1
             let bucketCount = Int(size.height / bucketHeight)
+            
+            // Ensure reasonable bucket count
+            guard bucketCount > 0 && bucketCount < 10000 else {
+                drawBorderAndGrid(context: context, size: size)
+                return
+            }
             
             // First pass: collect all intensities to normalize
             var maxIntensity: Double = 1.0
@@ -143,6 +157,12 @@ struct VirtualTimelineCanvas: View {
                 
                 let startTime = timeRange.start.addingTimeInterval(totalDuration * startProgress)
                 let endTime = timeRange.start.addingTimeInterval(totalDuration * endProgress)
+                
+                // Ensure valid time range
+                guard startTime < endTime else {
+                    bucketData.append((intensity: 0, color: .clear))
+                    continue
+                }
                 
                 let sampleCount = sampleEntriesInTimeRange(startTime..<endTime)
                 
