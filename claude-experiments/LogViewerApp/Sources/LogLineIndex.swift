@@ -111,6 +111,15 @@ class LogLineIndex {
         }
     }
     
+    /// Fast synchronous indexing for immediate area around a line
+    func indexImmediateArea(around lineNumber: Int) {
+        if lineNumber >= lineOffsets.count && !isFullyIndexed {
+            // Index just enough for immediate rendering (small area)
+            let targetOffset = min(slice.length, UInt64(lineNumber + 100) * 100) // Smaller buffer
+            indexUpTo(byteOffset: targetOffset)
+        }
+    }
+    
     /// Non-blocking version that returns nil if line isn't indexed yet
     func lineInfoNonBlocking(at lineNumber: Int) -> LogLineInfo? {
         guard lineNumber < lineOffsets.count else { return nil }
