@@ -386,8 +386,8 @@ struct VirtualTimelineCanvas: View {
                 
                 for i in 0..<sampleCount {
                     let lineIndex = startLine + (i * step)
-                    // Check if this line was already cached during timeline generation
-                    if let entry = virtualStore.getCachedEntry(at: lineIndex) {
+                    // Use non-blocking entry access to get real log levels for colors
+                    if let entry = virtualStore.entry(at: lineIndex) {
                         total += 1
                         switch entry.level {
                         case .error: 
