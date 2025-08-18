@@ -156,6 +156,8 @@ struct VirtualTimelineCanvas: View {
     let timeRange: (start: Date, end: Date)
     let height: CGFloat
     
+    @State private var clickMap: [(yPos: CGFloat, lineNumber: Int)] = [] // Sorted Y positions -> line numbers
+    
     var body: some View {
         Canvas { context, size in
             // Draw background with subtle grid
@@ -179,9 +181,10 @@ struct VirtualTimelineCanvas: View {
                 return
             }
             
-            // First pass: collect all intensities to normalize
+            // First pass: collect all intensities to normalize and build click map
             var maxIntensity: Double = 1.0
             var bucketData: [(intensity: Double, color: Color)] = []
+            var newClickMap: [(yPos: CGFloat, lineNumber: Int)] = []
             
             for bucketIndex in 0..<bucketCount {
                 let startProgress = Double(bucketIndex) / Double(bucketCount)
@@ -189,6 +192,12 @@ struct VirtualTimelineCanvas: View {
                 
                 let startTime = timeRange.start.addingTimeInterval(totalDuration * startProgress)
                 let endTime = timeRange.start.addingTimeInterval(totalDuration * endProgress)
+                
+                // Build click map: Y position -> line number
+                let yPosition = CGFloat(bucketIndex) * bucketHeight
+                let totalLines = virtualStore.totalLines
+                let lineNumber = max(0, min(totalLines - 1, Int(Double(totalLines) * startProgress)))
+                newClickMap.append((yPos: yPosition, lineNumber: lineNumber))
                 
                 // Ensure valid time range
                 guard startTime < endTime else {
@@ -252,13 +261,42 @@ struct VirtualTimelineCanvas: View {
             
             // Draw enhanced border and grid
             drawBorderAndGrid(context: context, size: size)
+            
+            // Update click map after generation
+            DispatchQueue.main.async {
+                clickMap = newClickMap
+            }
         }
         .onTapGesture { location in
-            let progress = location.y / height
+            // Use pre-computed click map for instant lookup
+            let clickY = location.y
             
-            // Direct calculation - no need to go through timestamp conversion
-            let totalLines = virtualStore.totalLines
-            let targetLineNumber = max(0, min(totalLines - 1, Int(Double(totalLines) * progress)))
+            let targetLineNumber: Int
+            if clickMap.isEmpty {
+                // Fallback to calculation if map is empty
+                let progress = location.y / height
+                let totalLines = virtualStore.totalLines
+                targetLineNumber = max(0, min(totalLines - 1, Int(Double(totalLines) * progress)))
+            } else {
+                // Binary search in sorted click map for efficient lookup
+                var left = 0
+                var right = clickMap.count - 1
+                
+                while left <= right {
+                    let mid = (left + right) / 2
+                    let midY = clickMap[mid].yPos
+                    
+                    if midY <= clickY {
+                        left = mid + 1
+                    } else {
+                        right = mid - 1
+                    }
+                }
+                
+                // Use the closest entry
+                let index = max(0, min(clickMap.count - 1, right))
+                targetLineNumber = clickMap[index].lineNumber
+            }
             
             NotificationCenter.default.post(
                 name: .jumpToLogLine,
