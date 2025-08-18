@@ -20,6 +20,10 @@ class LogLineIndex {
     private let slice: LogSlice
     private var isFullyIndexed = false
     private let chunkSize: Int = 1024 * 1024 // 1MB chunks for indexing
+    private let indexingQueue = DispatchQueue(label: "line-indexing", qos: .userInitiated)
+    
+    // Notification for when more lines are indexed
+    static let indexingProgressNotification = Notification.Name("LogLineIndexingProgress")
     
     init(slice: LogSlice) {
         self.slice = slice
@@ -64,21 +68,83 @@ class LogLineIndex {
         if currentOffset >= slice.length {
             isFullyIndexed = true
         }
+        
+        // Notify UI that more lines are available
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: LogLineIndex.indexingProgressNotification, object: self.lineOffsets.count)
+        }
     }
     
     /// Get the total number of lines (may trigger full indexing)
     func totalLines() -> Int {
         if !isFullyIndexed {
-            indexUpTo(byteOffset: slice.length)
+            // Start background indexing if not already done
+            indexInBackground()
+            
+            // Return current count while indexing continues
+            return lineOffsets.count
         }
         return lineOffsets.count
     }
     
+    /// Get current line count without triggering indexing
+    func currentLineCount() -> Int {
+        return lineOffsets.count
+    }
+    
+    /// Background indexing that doesn't block the caller
+    private func indexInBackground() {
+        indexingQueue.async { [weak self] in
+            self?.indexUpTo(byteOffset: self?.slice.length ?? 0)
+        }
+    }
+    
+    /// Trigger background indexing around a specific line if needed
+    func indexInBackgroundIfNeeded(around lineNumber: Int) {
+        if lineNumber >= lineOffsets.count && !isFullyIndexed {
+            indexingQueue.async { [weak self] in
+                guard let self = self else { return }
+                // Index at least enough to reach this line plus some buffer
+                let targetOffset = min(self.slice.length, UInt64(lineNumber + 2000) * 100)
+                self.indexUpTo(byteOffset: targetOffset)
+            }
+        }
+    }
+    
+    /// Non-blocking version that returns nil if line isn't indexed yet
+    func lineInfoNonBlocking(at lineNumber: Int) -> LogLineInfo? {
+        guard lineNumber < lineOffsets.count else { return nil }
+        
+        let startOffset = lineOffsets[lineNumber]
+        let endOffset: UInt64
+        
+        if lineNumber + 1 < lineOffsets.count {
+            endOffset = lineOffsets[lineNumber + 1]
+        } else {
+            // Need to find the end of this line
+            if let data = slice.data(in: startOffset..<min(startOffset + 10000, slice.length)) {
+                if let newlineRange = data.range(of: Data([0x0A])) {
+                    endOffset = startOffset + UInt64(newlineRange.lowerBound) + 1
+                } else {
+                    endOffset = min(startOffset + UInt64(data.count), slice.length)
+                }
+            } else {
+                endOffset = slice.length
+            }
+        }
+        
+        return LogLineInfo(lineNumber: lineNumber,
+                          byteOffset: startOffset,
+                          byteLength: endOffset - startOffset)
+    }
+    
     /// Get line info for a specific line number
     func lineInfo(at lineNumber: Int) -> LogLineInfo? {
-        // Ensure we have indexed enough
-        if lineNumber >= lineOffsets.count {
-            indexUpTo(byteOffset: slice.length)
+        // Only index what we need - be much more conservative
+        if lineNumber >= lineOffsets.count && !isFullyIndexed {
+            // Index incrementally, not the whole file
+            let targetOffset = min(slice.length, UInt64(lineNumber + 1000) * 100) // Estimate 100 bytes per line
+            indexUpTo(byteOffset: targetOffset)
         }
         
         guard lineNumber < lineOffsets.count else { return nil }
@@ -104,6 +170,16 @@ class LogLineIndex {
         return LogLineInfo(lineNumber: lineNumber,
                           byteOffset: startOffset,
                           byteLength: endOffset - startOffset)
+    }
+    
+    /// Async version that doesn't block the main thread
+    func lineInfoAsync(at lineNumber: Int) async -> LogLineInfo? {
+        return await withCheckedContinuation { continuation in
+            Task.detached { [weak self] in
+                let result = self?.lineInfo(at: lineNumber)
+                continuation.resume(returning: result)
+            }
+        }
     }
     
     /// Find the line containing the given byte offset

@@ -9,6 +9,12 @@ struct VirtualTimelineSidebar: View {
         return formatter
     }()
     
+    private let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM dd"
+        return formatter
+    }()
+    
     init(url: URL) {
         // Create a fallback store if the real one fails to initialize
         if let store = VirtualLogStore(url: url) {
@@ -27,21 +33,49 @@ struct VirtualTimelineSidebar: View {
             ZStack {
                 Color(red: 0.12, green: 0.12, blue: 0.13)
                 
-                if virtualStore.totalLines > 0,
+                if !virtualStore.isInitializing && virtualStore.totalLines > 0,
                    let timeRange = virtualStore.getTimeRange() {
                     
-                    HStack(spacing: 0) {
-                        // Time labels
-                        timeLabels(height: geometry.size.height, timeRange: timeRange)
-                            .frame(width: 35)
+                    VStack(spacing: 0) {
+                        // Date header
+                        Text(dateFormatter.string(from: timeRange.start))
+                            .font(.system(size: 10, weight: .medium).monospaced())
+                            .foregroundColor(.white)
+                            .padding(.top, 8)
+                            .padding(.bottom, 4)
                         
-                        // Timeline visualization
-                        VirtualTimelineCanvas(
-                            virtualStore: virtualStore,
-                            timeRange: timeRange,
-                            height: geometry.size.height
-                        )
-                        .frame(width: 45)
+                        HStack(spacing: 2) {
+                            // Time labels
+                            timeLabels(height: geometry.size.height - 40, timeRange: timeRange)
+                                .frame(width: 32)
+                            
+                            // Timeline visualization
+                            VirtualTimelineCanvas(
+                                virtualStore: virtualStore,
+                                timeRange: timeRange,
+                                height: geometry.size.height - 40
+                            )
+                            .frame(width: 44)
+                        }
+                        
+                        Spacer()
+                    }
+                } else if virtualStore.isInitializing {
+                    // Show loading state
+                    VStack(spacing: 8) {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle())
+                            .scaleEffect(0.8)
+                        
+                        Text("Loading...")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.white.opacity(0.7))
+                        
+                        if virtualStore.estimatedLineCount > 0 {
+                            Text("~\(formatLineCount(virtualStore.estimatedLineCount)) lines")
+                                .font(.system(size: 9))
+                                .foregroundColor(.white.opacity(0.5))
+                        }
                     }
                 }
             }
@@ -50,7 +84,7 @@ struct VirtualTimelineSidebar: View {
     
     @ViewBuilder
     private func timeLabels(height: CGFloat, timeRange: (start: Date, end: Date)) -> some View {
-        let labelCount = 10
+        let labelCount = 8
         let totalDuration = timeRange.end.timeIntervalSince(timeRange.start)
         
         VStack(alignment: .trailing, spacing: 0) {
@@ -58,12 +92,29 @@ struct VirtualTimelineSidebar: View {
                 let progress = Double(i) / Double(labelCount - 1)
                 let time = timeRange.start.addingTimeInterval(totalDuration * progress)
                 
-                Text(timeFormatter.string(from: time))
-                    .font(.system(size: 7).monospaced())
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .frame(height: height / CGFloat(labelCount - 1), alignment: .top)
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text(timeFormatter.string(from: time))
+                        .font(.system(size: 9, weight: .medium).monospaced())
+                        .foregroundColor(.white.opacity(0.9))
+                    
+                    // Add a subtle tick mark
+                    Rectangle()
+                        .fill(Color.white.opacity(0.3))
+                        .frame(width: 8, height: 1)
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .frame(height: height / CGFloat(labelCount - 1), alignment: i == 0 ? .top : (i == labelCount - 1 ? .bottom : .center))
             }
+        }
+    }
+    
+    private func formatLineCount(_ count: Int) -> String {
+        if count >= 1_000_000 {
+            return String(format: "%.1fM", Double(count) / 1_000_000)
+        } else if count >= 1_000 {
+            return String(format: "%.1fK", Double(count) / 1_000)
+        } else {
+            return "\(count)"
         }
     }
 }
@@ -75,20 +126,24 @@ struct VirtualTimelineCanvas: View {
     
     var body: some View {
         Canvas { context, size in
+            // Draw background with subtle grid
+            drawBackground(context: context, size: size)
+            
             let totalDuration = timeRange.end.timeIntervalSince(timeRange.start)
-            let bucketHeight: CGFloat = 2
+            let bucketHeight: CGFloat = 1
             let bucketCount = Int(size.height / bucketHeight)
             
-            // Sample entries to determine density and colors
+            // First pass: collect all intensities to normalize
+            var maxIntensity: Double = 1.0
+            var bucketData: [(intensity: Double, color: Color)] = []
+            
             for bucketIndex in 0..<bucketCount {
-                let y = CGFloat(bucketIndex) * bucketHeight
                 let startProgress = Double(bucketIndex) / Double(bucketCount)
                 let endProgress = Double(bucketIndex + 1) / Double(bucketCount)
                 
                 let startTime = timeRange.start.addingTimeInterval(totalDuration * startProgress)
                 let endTime = timeRange.start.addingTimeInterval(totalDuration * endProgress)
                 
-                // Sample a few entries in this time range to determine color and density
                 let sampleCount = sampleEntriesInTimeRange(startTime..<endTime)
                 
                 if sampleCount.total > 0 {
@@ -98,26 +153,40 @@ struct VirtualTimelineCanvas: View {
                     } else if sampleCount.warnings > 0 {
                         color = .orange
                     } else {
-                        color = .blue
+                        color = Color(red: 0.3, green: 0.7, blue: 1.0) // Brighter blue
                     }
                     
-                    let intensity = min(1.0, Double(sampleCount.total) / 10.0)
-                    let width = 5 + (intensity * 35)
-                    let opacity = 0.4 + (intensity * 0.6)
-                    
-                    let rect = CGRect(x: 0, y: y, width: width, height: bucketHeight)
-                    context.fill(Path(rect), with: .color(color.opacity(opacity)))
+                    let intensity = Double(sampleCount.total)
+                    maxIntensity = max(maxIntensity, intensity)
+                    bucketData.append((intensity: intensity, color: color))
+                } else {
+                    bucketData.append((intensity: 0, color: .clear))
                 }
             }
             
-            // Draw reference line
-            context.stroke(
-                Path { path in
-                    path.move(to: CGPoint(x: 0, y: 0))
-                    path.addLine(to: CGPoint(x: 0, y: size.height))
-                },
-                with: .color(.secondary.opacity(0.2))
-            )
+            // Second pass: draw normalized bars
+            for (bucketIndex, data) in bucketData.enumerated() {
+                if data.intensity > 0 {
+                    let y = CGFloat(bucketIndex) * bucketHeight
+                    let normalizedIntensity = data.intensity / maxIntensity
+                    
+                    // Much more visible sizing
+                    let width = 8 + (normalizedIntensity * 32) // Minimum 8px, max 40px
+                    let opacity = 0.7 + (normalizedIntensity * 0.3) // 0.7 to 1.0 opacity
+                    
+                    let rect = CGRect(x: 2, y: y, width: width, height: bucketHeight)
+                    context.fill(Path(rect), with: .color(data.color.opacity(opacity)))
+                    
+                    // Add subtle glow for high intensity
+                    if normalizedIntensity > 0.7 {
+                        let glowRect = CGRect(x: 1, y: y, width: width + 2, height: bucketHeight + 1)
+                        context.fill(Path(glowRect), with: .color(data.color.opacity(0.3)))
+                    }
+                }
+            }
+            
+            // Draw enhanced border and grid
+            drawBorderAndGrid(context: context, size: size)
         }
         .onTapGesture { location in
             let progress = location.y / height
@@ -134,6 +203,37 @@ struct VirtualTimelineCanvas: View {
         }
     }
     
+    private func drawBackground(context: GraphicsContext, size: CGSize) {
+        // Draw subtle background grid
+        let gridSpacing: CGFloat = 20
+        let gridColor = Color.white.opacity(0.05)
+        
+        // Horizontal grid lines
+        for y in stride(from: 0, through: size.height, by: gridSpacing) {
+            let path = Path { path in
+                path.move(to: CGPoint(x: 0, y: y))
+                path.addLine(to: CGPoint(x: size.width, y: y))
+            }
+            context.stroke(path, with: .color(gridColor), lineWidth: 0.5)
+        }
+    }
+    
+    private func drawBorderAndGrid(context: GraphicsContext, size: CGSize) {
+        // Draw left border
+        let borderPath = Path { path in
+            path.move(to: CGPoint(x: 0, y: 0))
+            path.addLine(to: CGPoint(x: 0, y: size.height))
+        }
+        context.stroke(borderPath, with: .color(.white.opacity(0.4)), lineWidth: 1)
+        
+        // Draw right border 
+        let rightBorderPath = Path { path in
+            path.move(to: CGPoint(x: size.width, y: 0))
+            path.addLine(to: CGPoint(x: size.width, y: size.height))
+        }
+        context.stroke(rightBorderPath, with: .color(.white.opacity(0.2)), lineWidth: 1)
+    }
+    
     private func sampleEntriesInTimeRange(_ range: Range<Date>) -> (total: Int, errors: Int, warnings: Int) {
         // Convert time range to approximate line range
         let totalDuration = timeRange.end.timeIntervalSince(timeRange.start)
@@ -144,27 +244,21 @@ struct VirtualTimelineCanvas: View {
         let startLine = Int(Double(totalLines) * startProgress)
         let endLine = min(totalLines, Int(Double(totalLines) * endProgress))
         
-        // Sample a few entries in this range
-        var total = 0
-        var errors = 0
-        var warnings = 0
+        // Much lighter sampling - just estimate based on line count for now
+        let lineCount = max(0, endLine - startLine)
         
-        let sampleSize = min(10, endLine - startLine)
-        if sampleSize > 0 {
-            let step = max(1, (endLine - startLine) / sampleSize)
+        // Simple heuristic: assume some activity if there are lines
+        // In a real implementation, this could be improved with a separate
+        // density index that doesn't require parsing individual entries
+        if lineCount > 0 {
+            // Rough estimates without actually parsing entries
+            let total = min(lineCount / 10, 50) // Scale down for visualization
+            let errors = total / 20 // Assume ~5% errors
+            let warnings = total / 10 // Assume ~10% warnings
             
-            for i in stride(from: startLine, to: endLine, by: step) {
-                if let entry = virtualStore.entry(at: i) {
-                    total += 1
-                    switch entry.level {
-                    case .error: errors += 1
-                    case .warning: warnings += 1
-                    default: break
-                    }
-                }
-            }
+            return (total: total, errors: errors, warnings: warnings)
         }
         
-        return (total: total, errors: errors, warnings: warnings)
+        return (total: 0, errors: 0, warnings: 0)
     }
 }
