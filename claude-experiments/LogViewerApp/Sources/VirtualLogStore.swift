@@ -5,8 +5,8 @@ import Foundation
 import SwiftUI
 
 class VirtualLogStore: ObservableObject {
-    private let lineIndex: LogLineIndex
-    private let slice: LogSlice
+    internal let lineIndex: LogLineIndex
+    internal let slice: LogSlice
     private var parsedEntries: [Int: LogEntry] = [:] // Cache parsed entries
     private let dateFormatter: DateFormatter
     private let isoFormatter: ISO8601DateFormatter
@@ -183,16 +183,29 @@ class VirtualLogStore: ObservableObject {
             return cached
         }
         
-        // Fallback to old method if not cached yet
-        guard let firstEntry = entry(at: 0) else { return nil }
+        // Force indexing for first and last entries to get time range
+        guard let firstLineInfo = lineIndex.lineInfo(at: 0),
+              let firstLineText = slice.substring(in: firstLineInfo.byteRange) else { 
+            return nil 
+        }
+        
+        let firstEntry = parseLogLine(firstLineText.trimmingCharacters(in: .whitespacesAndNewlines), lineNumber: 0)
         
         let lastLineIndex = totalLines - 1
-        guard lastLineIndex >= 0,
-              let lastEntry = entry(at: lastLineIndex) else {
+        guard lastLineIndex > 0,
+              let lastLineInfo = lineIndex.lineInfo(at: lastLineIndex),
+              let lastLineText = slice.substring(in: lastLineInfo.byteRange) else {
             return (firstEntry.timestamp, firstEntry.timestamp)
         }
         
-        return (firstEntry.timestamp, lastEntry.timestamp)
+        let lastEntry = parseLogLine(lastLineText.trimmingCharacters(in: .whitespacesAndNewlines), lineNumber: lastLineIndex)
+        
+        let timeRange = (firstEntry.timestamp, lastEntry.timestamp)
+        
+        // Cache it for future use
+        cachedTimeRange = timeRange
+        
+        return timeRange
     }
     
     /// Find entry closest to a given timestamp
@@ -235,7 +248,7 @@ class VirtualLogStore: ObservableObject {
         return max(0, endLine - startLine)
     }
     
-    private func parseLogLine(_ line: String, lineNumber: Int) -> LogEntry {
+    internal func parseLogLine(_ line: String, lineNumber: Int) -> LogEntry {
         // Try JSON format first
         if line.starts(with: "{") {
             if let entry = parseJSONLog(line, lineNumber: lineNumber) {
