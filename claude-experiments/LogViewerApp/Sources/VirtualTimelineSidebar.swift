@@ -298,8 +298,7 @@ struct VirtualTimelineCanvas: View {
                 targetLineNumber = clickMap[index].lineNumber
             }
             
-            // Pre-index immediate area synchronously for fast rendering
-            virtualStore.lineIndex.indexImmediateArea(around: targetLineNumber)
+            // No need to pre-index - data should already be cached from timeline generation!
             
             NotificationCenter.default.post(
                 name: .jumpToLogLine,
@@ -387,8 +386,8 @@ struct VirtualTimelineCanvas: View {
                 
                 for i in 0..<sampleCount {
                     let lineIndex = startLine + (i * step)
-                    // Use non-blocking entry access - if not cached, skip
-                    if let entry = virtualStore.entry(at: lineIndex) {
+                    // Check if this line was already cached during timeline generation
+                    if let entry = virtualStore.getCachedEntry(at: lineIndex) {
                         total += 1
                         switch entry.level {
                         case .error: 
