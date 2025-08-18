@@ -298,6 +298,9 @@ struct VirtualTimelineCanvas: View {
                 targetLineNumber = clickMap[index].lineNumber
             }
             
+            // Pre-index immediate area synchronously for fast rendering
+            virtualStore.lineIndex.indexImmediateArea(around: targetLineNumber)
+            
             NotificationCenter.default.post(
                 name: .jumpToLogLine,
                 object: targetLineNumber
@@ -372,19 +375,54 @@ struct VirtualTimelineCanvas: View {
         let lineCount = max(0, endLine - startLine)
         
         if lineCount > 0 {
-            // Use fast heuristics only - no entry parsing for timeline generation
-            let intensity = max(5, min(lineCount / 5, 50)) // More generous intensity
+            // Try limited non-blocking sampling for real colors
+            var total = 0
+            var errors = 0  
+            var warnings = 0
             
-            // Add variation based on position for interesting timeline colors
-            let safeProgress = max(0.0, min(1.0, startProgress)) // Clamp to [0,1]
-            let timeVariation = abs(sin(safeProgress * 8 + startProgress * 3)) // Create variation
-            let errorRate = timeVariation > 0.8 ? 0.2 : (timeVariation > 0.6 ? 0.1 : 0.02) 
-            let warningRate = timeVariation > 0.7 ? 0.25 : (timeVariation > 0.4 ? 0.15 : 0.05)
+            // Sample at most 2 entries per bucket to minimize performance impact
+            let sampleCount = min(2, lineCount)
+            if sampleCount > 0 {
+                let step = max(1, lineCount / sampleCount)
+                
+                for i in 0..<sampleCount {
+                    let lineIndex = startLine + (i * step)
+                    // Use non-blocking entry access - if not cached, skip
+                    if let entry = virtualStore.entry(at: lineIndex) {
+                        total += 1
+                        switch entry.level {
+                        case .error: 
+                            errors += 1
+                        case .warning: 
+                            warnings += 1
+                        default: 
+                            break
+                        }
+                    }
+                }
+            }
             
-            let estimatedErrors = max(0, min(100, Int(Double(intensity) * errorRate)))
-            let estimatedWarnings = max(0, min(100, Int(Double(intensity) * warningRate)))
-            
-            return (total: max(5, intensity), errors: estimatedErrors, warnings: estimatedWarnings)
+            // If we got real data, use it with scaling
+            if total > 0 {
+                let scaleFactor = max(1, lineCount / 20) // Represent density
+                let safeTotal = min(total * scaleFactor, 1000)
+                let safeErrors = min(errors * scaleFactor, 1000)
+                let safeWarnings = min(warnings * scaleFactor, 1000)
+                
+                return (total: safeTotal, errors: safeErrors, warnings: safeWarnings)
+            } else {
+                // Fallback to smart heuristics if no entries were cached
+                let intensity = max(5, min(lineCount / 10, 30))
+                let safeProgress = max(0.0, min(1.0, startProgress))
+                let timeVariation = abs(sin(safeProgress * 6 + startProgress * 2))
+                let errorRate = timeVariation > 0.8 ? 0.15 : 0.03
+                let warningRate = timeVariation > 0.6 ? 0.2 : 0.05
+                
+                let estimatedErrors = Int(Double(intensity) * errorRate)
+                let estimatedWarnings = Int(Double(intensity) * warningRate)
+                
+                return (total: intensity, errors: estimatedErrors, warnings: estimatedWarnings)
+            }
         }
         
         return (total: 0, errors: 0, warnings: 0)
