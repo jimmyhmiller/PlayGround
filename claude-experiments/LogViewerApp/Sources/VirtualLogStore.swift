@@ -208,24 +208,19 @@ class VirtualLogStore: ObservableObject {
         return timeRange
     }
     
-    /// Find entry closest to a given timestamp
+    /// Find entry closest to a given timestamp (fast approximation)
     func findEntryNear(timestamp: Date) -> Int? {
-        // Binary search approach - sample entries to find approximate location
-        var left = 0
-        var right = totalLines - 1
+        // Use fast approximation based on time range instead of binary search
+        guard let timeRange = getTimeRange() else { return nil }
         
-        while left < right {
-            let mid = (left + right) / 2
-            guard let midEntry = entry(at: mid) else { break }
-            
-            if midEntry.timestamp <= timestamp {
-                left = mid + 1
-            } else {
-                right = mid
-            }
-        }
+        let totalDuration = timeRange.end.timeIntervalSince(timeRange.start)
+        guard totalDuration > 0 else { return 0 }
         
-        return max(0, left - 1)
+        let targetInterval = timestamp.timeIntervalSince(timeRange.start)
+        let progress = max(0.0, min(1.0, targetInterval / totalDuration))
+        
+        let approximateLineNumber = Int(Double(totalLines) * progress)
+        return max(0, min(totalLines - 1, approximateLineNumber))
     }
     
     /// Jump to a specific time
