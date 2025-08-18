@@ -33,7 +33,7 @@ struct VirtualTimelineSidebar: View {
             ZStack {
                 Color(red: 0.12, green: 0.12, blue: 0.13)
                 
-                if !virtualStore.isInitializing && virtualStore.totalLines > 0,
+                if virtualStore.totalLines > 0,
                    let timeRange = virtualStore.getTimeRange() {
                     
                     VStack(spacing: 0) {
@@ -315,7 +315,10 @@ struct VirtualTimelineCanvas: View {
                 
                 for i in 0..<sampleCount {
                     let lineIndex = startLine + (i * step)
-                    if let entry = virtualStore.entry(at: lineIndex) {
+                    // Force entry parsing for timeline sampling (small number of entries)
+                    if let lineInfo = virtualStore.lineIndex.lineInfo(at: lineIndex),
+                       let lineText = virtualStore.slice.substring(in: lineInfo.byteRange) {
+                        let entry = virtualStore.parseLogLine(lineText.trimmingCharacters(in: .whitespacesAndNewlines), lineNumber: lineIndex)
                         total += 1
                         switch entry.level {
                         case .error: 
@@ -342,18 +345,19 @@ struct VirtualTimelineCanvas: View {
                 return (total: safeTotal, errors: safeErrors, warnings: safeWarnings)
             } else {
                 // Fallback to variable heuristics based on position and time
-                let intensity = min(lineCount / 20, 30)
+                // Make this more generous so timeline shows some activity
+                let intensity = max(5, min(lineCount / 5, 50)) // More generous intensity
                 
                 // Add some variation based on the time range position with safety checks
                 let safeProgress = max(0.0, min(1.0, startProgress)) // Clamp to [0,1]
-                let timeVariation = abs(sin(safeProgress * 10)) // Creates some variation
-                let errorRate = timeVariation > 0.7 ? 0.15 : 0.05 // Sometimes more errors
-                let warningRate = timeVariation > 0.5 ? 0.2 : 0.1 // Sometimes more warnings
+                let timeVariation = abs(sin(safeProgress * 8 + startProgress * 3)) // More variation
+                let errorRate = timeVariation > 0.8 ? 0.2 : (timeVariation > 0.6 ? 0.1 : 0.02) 
+                let warningRate = timeVariation > 0.7 ? 0.25 : (timeVariation > 0.4 ? 0.15 : 0.05)
                 
                 let estimatedErrors = max(0, min(100, Int(Double(intensity) * errorRate)))
                 let estimatedWarnings = max(0, min(100, Int(Double(intensity) * warningRate)))
                 
-                return (total: max(0, intensity), errors: estimatedErrors, warnings: estimatedWarnings)
+                return (total: max(5, intensity), errors: estimatedErrors, warnings: estimatedWarnings)
             }
         }
         
