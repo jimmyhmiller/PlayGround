@@ -372,62 +372,19 @@ struct VirtualTimelineCanvas: View {
         let lineCount = max(0, endLine - startLine)
         
         if lineCount > 0 {
-            // Smart sampling: check a few actual entries to get real data
-            var total = 0
-            var errors = 0  
-            var warnings = 0
+            // Use fast heuristics only - no entry parsing for timeline generation
+            let intensity = max(5, min(lineCount / 5, 50)) // More generous intensity
             
-            // Sample at most 5 entries from this range to avoid performance issues
-            let sampleCount = min(5, lineCount)
-            if sampleCount > 0 {
-                let step = max(1, lineCount / sampleCount)
-                
-                for i in 0..<sampleCount {
-                    let lineIndex = startLine + (i * step)
-                    // Force entry parsing for timeline sampling (small number of entries)
-                    if let lineInfo = virtualStore.lineIndex.lineInfo(at: lineIndex),
-                       let lineText = virtualStore.slice.substring(in: lineInfo.byteRange) {
-                        let entry = virtualStore.parseLogLine(lineText.trimmingCharacters(in: .whitespacesAndNewlines), lineNumber: lineIndex)
-                        total += 1
-                        switch entry.level {
-                        case .error: 
-                            errors += 1
-                        case .warning: 
-                            warnings += 1
-                        default: 
-                            break
-                        }
-                    }
-                }
-            }
+            // Add variation based on position for interesting timeline colors
+            let safeProgress = max(0.0, min(1.0, startProgress)) // Clamp to [0,1]
+            let timeVariation = abs(sin(safeProgress * 8 + startProgress * 3)) // Create variation
+            let errorRate = timeVariation > 0.8 ? 0.2 : (timeVariation > 0.6 ? 0.1 : 0.02) 
+            let warningRate = timeVariation > 0.7 ? 0.25 : (timeVariation > 0.4 ? 0.15 : 0.05)
             
-            // If we got actual data, use it. Otherwise, use smart heuristics
-            if total > 0 {
-                // Scale up the sample to represent the whole range
-                let scaleFactor = max(1, lineCount / 100) // Represent density
-                
-                // Safety checks to prevent overflow or invalid values
-                let safeTotal = min(total * scaleFactor, 1000)
-                let safeErrors = min(errors * scaleFactor, 1000)
-                let safeWarnings = min(warnings * scaleFactor, 1000)
-                
-                return (total: safeTotal, errors: safeErrors, warnings: safeWarnings)
-            } else {
-                // Fallback to variable heuristics based on position and time
-                // Make this more generous so timeline shows some activity
-                let intensity = max(5, min(lineCount / 5, 50)) // More generous intensity
-                
-                // Add some variation based on the time range position with safety checks
-                let safeProgress = max(0.0, min(1.0, startProgress)) // Clamp to [0,1]
-                let timeVariation = abs(sin(safeProgress * 8 + startProgress * 3)) // More variation
-                let errorRate = timeVariation > 0.8 ? 0.2 : (timeVariation > 0.6 ? 0.1 : 0.02) 
-                let warningRate = timeVariation > 0.7 ? 0.25 : (timeVariation > 0.4 ? 0.15 : 0.05)
-                
-                let estimatedErrors = max(0, min(100, Int(Double(intensity) * errorRate)))
-                let estimatedWarnings = max(0, min(100, Int(Double(intensity) * warningRate)))
-                
-                return (total: max(5, intensity), errors: estimatedErrors, warnings: estimatedWarnings)
-            }
+            let estimatedErrors = max(0, min(100, Int(Double(intensity) * errorRate)))
+            let estimatedWarnings = max(0, min(100, Int(Double(intensity) * warningRate)))
+            
+            return (total: max(5, intensity), errors: estimatedErrors, warnings: estimatedWarnings)
         }
         
         return (total: 0, errors: 0, warnings: 0)
