@@ -195,8 +195,9 @@ struct VirtualTimelineCanvas: View {
                 
                 // Build click map: Y position -> line number
                 let yPosition = CGFloat(bucketIndex) * bucketHeight
-                let totalLines = virtualStore.totalLines
-                let lineNumber = max(0, min(totalLines - 1, Int(Double(totalLines) * startProgress)))
+                
+                // Use the exact same time-to-line mapping as the color calculation
+                let lineNumber = timeToLineNumber(startTime)
                 newClickMap.append((yPos: yPosition, lineNumber: lineNumber))
                 
                 // Ensure valid time range
@@ -425,5 +426,26 @@ struct VirtualTimelineCanvas: View {
         }
         
         return (total: 0, errors: 0, warnings: 0)
+    }
+    
+    /// Convert a timestamp to line number using the same logic as color calculation
+    private func timeToLineNumber(_ timestamp: Date) -> Int {
+        let totalDuration = timeRange.end.timeIntervalSince(timeRange.start)
+        
+        guard totalDuration > 0 && totalDuration.isFinite else {
+            return 0
+        }
+        
+        let targetInterval = timestamp.timeIntervalSince(timeRange.start)
+        
+        guard targetInterval.isFinite else {
+            return 0
+        }
+        
+        let progress = max(0.0, min(1.0, targetInterval / totalDuration))
+        let totalLines = virtualStore.totalLines
+        let lineNumber = max(0, min(totalLines - 1, Int(Double(totalLines) * progress)))
+        
+        return lineNumber
     }
 }
