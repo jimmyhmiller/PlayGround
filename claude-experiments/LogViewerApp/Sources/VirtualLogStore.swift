@@ -10,10 +10,12 @@ class VirtualLogStore: ObservableObject {
     private var parsedEntries: [Int: LogEntry] = [:] // Cache parsed entries
     private let dateFormatter: DateFormatter
     private let isoFormatter: ISO8601DateFormatter
+    private let timestampRegex: NSRegularExpression
     
     @Published var selectedIndex: Int? = nil
     @Published var isInitializing = true
     @Published var estimatedLineCount: Int = 0
+    @Published var actualLineCount: Int? = nil
     
     private var cachedTimeRange: (start: Date, end: Date)?
     
@@ -30,6 +32,13 @@ class VirtualLogStore: ObservableObject {
         self.isoFormatter = ISO8601DateFormatter()
         self.isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         
+        // Compile regex once for performance
+        let pattern = #"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{3})?)(?:\s+\[(\w+)\])?\s+(.+)$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        self.timestampRegex = regex
+        
         // Do minimal sync initialization - just estimate
         self.estimatedLineCount = estimateQuickLineCount()
         self.isInitializing = false // Start ready immediately
@@ -42,10 +51,16 @@ class VirtualLogStore: ObservableObject {
     
     /// Get total number of lines in the file (returns estimate during initialization)
     var totalLines: Int {
-        // Always use estimate if available, never force full indexing
+        // Use actual count if we've discovered it
+        if let actual = actualLineCount {
+            return actual
+        }
+        
+        // Otherwise use estimate if available
         if estimatedLineCount > 0 {
             return estimatedLineCount
         }
+        
         // Fallback to current indexed count, but don't trigger full indexing
         return lineIndex.currentLineCount()
     }
@@ -124,6 +139,9 @@ class VirtualLogStore: ObservableObject {
     
     /// Get log entry for a specific line number (non-blocking)
     func entry(at lineNumber: Int) -> LogEntry? {
+        // Check if indexing is complete and update actual line count
+        updateActualLineCountIfNeeded()
+        
         // Check cache first
         if let cached = parsedEntries[lineNumber] {
             return cached
@@ -143,6 +161,13 @@ class VirtualLogStore: ObservableObject {
         // Cache it
         parsedEntries[lineNumber] = entry
         return entry
+    }
+    
+    /// Update actual line count if indexing is complete
+    private func updateActualLineCountIfNeeded() {
+        if lineIndex.isComplete && actualLineCount == nil {
+            actualLineCount = lineIndex.currentLineCount()
+        }
     }
     
     /// Get multiple entries efficiently
@@ -300,10 +325,8 @@ class VirtualLogStore: ObservableObject {
     
     private func parseTimestampedLog(_ line: String, lineNumber: Int) -> LogEntry? {
         // Common format: "2024-01-01 12:00:00.000 [LEVEL] message"
-        let pattern = #"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{3})?)(?:\s+\[(\w+)\])?\s+(.+)$"#
-        
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) else {
+        // Use pre-compiled regex for performance
+        guard let match = timestampRegex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) else {
             return nil
         }
         

@@ -92,6 +92,11 @@ class LogLineIndex {
         return lineOffsets.count
     }
     
+    /// Check if the file is fully indexed
+    var isComplete: Bool {
+        return isFullyIndexed
+    }
+    
     /// Background indexing that doesn't block the caller
     private func indexInBackground() {
         indexingQueue.async { [weak self] in

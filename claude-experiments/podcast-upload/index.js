@@ -51,7 +51,8 @@ async function uploadToS3(filePath) {
   const bucketName = process.env.S3_BUCKET_NAME || 'jimmyhmiller-bucket';
   
   const fileContent = fs.readFileSync(filePath);
-  const key = `jimmy-uploads/${fileName}`;
+  const sanitizedFileName = fileName.replace(/\s+/g, '-');
+  const key = `jimmy-uploads/${sanitizedFileName}`;
   
   // Check if file already exists in S3
   try {
@@ -74,7 +75,7 @@ async function uploadToS3(filePath) {
       Key: key,
       Body: fileContent,
       ACL: 'public-read',
-      ContentType: getContentType(fileName)
+      ContentType: getContentType(sanitizedFileName)
     }));
     
     const publicUrl = `https://${bucketName}.s3.amazonaws.com/${key}`;
