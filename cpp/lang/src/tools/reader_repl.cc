@@ -52,82 +52,85 @@ void print_node(const ReaderNode &node, int level = 0) {
   }
 }
 
-void run_reader_repl() {
-  bool is_interactive = isatty(fileno(stdin));
-
-  if (is_interactive) {
-    std::cout
-        << "Reader REPL - Enter expressions, press Enter twice to execute "
-           "(Ctrl+D to exit):\n";
-    std::cout << ">>> ";
+void print_parsed_result(const Reader &reader) {
+  if (reader.root.children.empty()) {
+    std::cout << "(empty)\n";
+  } else if (reader.root.children.size() == 1) {
+    print_node(reader.root.children[0]);
+    std::cout << "\n";
+  } else {
+    print_node(reader.root);
+    std::cout << "\n";
   }
+}
+
+void run_interactive_repl() {
+  std::cout
+      << "Reader REPL - Enter expressions, press Enter twice to execute "
+         "(Ctrl+D to exit):\n";
+  std::cout << ">>> ";
 
   std::string line;
   std::string input;
 
   while (std::getline(std::cin, line)) {
     if (line.empty()) {
-      if (is_interactive) {
-        if (input.empty()) {
-          std::cout << ">>> ";
-          continue;
-        } else {
-          try {
-            Reader reader(input);
-            reader.read();
-
-            if (reader.root.children.empty()) {
-              std::cout << "(empty)\n";
-            } else if (reader.root.children.size() == 1) {
-              print_node(reader.root.children[0]);
-              std::cout << "\n";
-            } else {
-              print_node(reader.root);
-              std::cout << "\n";
-            }
-          } catch (const std::exception &e) {
-            std::cout << "Error: " << e.what() << "\n";
-          }
-
-          input.clear();
-          std::cout << ">>> ";
-        }
+      if (input.empty()) {
+        std::cout << ">>> ";
+        continue;
       } else {
-        break;
+        try {
+          Reader reader(input);
+          reader.read();
+          print_parsed_result(reader);
+        } catch (const std::exception &e) {
+          std::cout << "Error: " << e.what() << "\n";
+        }
+
+        input.clear();
+        std::cout << ">>> ";
       }
     } else {
       if (!input.empty()) {
         input += "\n";
       }
       input += line;
-
-      if (is_interactive) {
-        std::cout << "... ";
-      }
+      std::cout << "... ";
     }
+  }
+
+  std::cout << "\nGoodbye!\n";
+}
+
+void run_batch_mode() {
+  std::string line;
+  std::string input;
+
+  while (std::getline(std::cin, line)) {
+    if (!input.empty()) {
+      input += "\n";
+    }
+    input += line;
   }
 
   if (!input.empty()) {
     try {
       Reader reader(input);
       reader.read();
-
-      if (reader.root.children.empty()) {
-        std::cout << "(empty)\n";
-      } else if (reader.root.children.size() == 1) {
-        print_node(reader.root.children[0]);
-        std::cout << "\n";
-      } else {
-        print_node(reader.root);
-        std::cout << "\n";
-      }
+      print_parsed_result(reader);
     } catch (const std::exception &e) {
       std::cout << "Error: " << e.what() << "\n";
     }
   }
+}
+
+void run_reader_repl() {
+  bool is_interactive = isatty(fileno(stdin));
 
   if (is_interactive) {
-    std::cout << "\nGoodbye!\n";
+    run_interactive_repl();
+  } else {
+    run_batch_mode();
   }
 }
 

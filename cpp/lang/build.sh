@@ -20,6 +20,7 @@ show_help() {
     echo "  run               - Build (if needed) and run the project"
     echo "  ast-to-json       - Parse input from stdin and output AST as JSON"
     echo "  reader-repl       - Interactive REPL showing parsed structure"
+    echo "  tokenizer-debug   - Show all tokens from input"
     echo "  tools [tool]      - Build and run a specific tool (run 'tools' with no args to see available tools)"
     echo "  fmt               - Format all C++ source files using clang-format"
     echo "  clean             - Clean build artifacts"
@@ -257,6 +258,25 @@ cmd_reader_repl() {
     "${BUILD_DIR}/reader_repl"
 }
 
+cmd_tokenizer_debug() {
+    echo "Building tokenizer_debug tool..."
+    mkdir -p "${BUILD_DIR}"
+    
+    # Build library sources (excluding main.cc and tools)
+    lib_sources=$(find "${SRC_DIR}" -name "*.cc" -o -name "*.cpp" | grep -v main.cc | grep -v "/tools/" | sort)
+    
+    if [ -z "$lib_sources" ]; then
+        echo "Error: No library source files found in ${SRC_DIR}"
+        exit 1
+    fi
+    
+    # Build the tokenizer_debug tool
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources "${SRC_DIR}/tools/tokenizer_debug.cc" -o "${BUILD_DIR}/tokenizer_debug"
+    
+    # Run the tool
+    "${BUILD_DIR}/tokenizer_debug"
+}
+
 # Main script
 case ${1:-help} in
     build)
@@ -273,6 +293,9 @@ case ${1:-help} in
         ;;
     reader-repl)
         cmd_reader_repl
+        ;;
+    tokenizer-debug)
+        cmd_tokenizer_debug
         ;;
     tools)
         cmd_tools "$@"
