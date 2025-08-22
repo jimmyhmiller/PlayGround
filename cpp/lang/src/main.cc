@@ -1,4 +1,3 @@
-#include "lang.h"
 #include <iostream>
 #include <string>
 
@@ -23,7 +22,6 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // Default behavior
   std::cout << "Hello, world!" << std::endl;
   return 0;
 }

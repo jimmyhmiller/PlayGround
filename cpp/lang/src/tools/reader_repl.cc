@@ -1,6 +1,8 @@
-#include "../lang.h"
+#include "../reader.h"
+#include <cstdio> // for fileno
 #include <iostream>
 #include <string>
+#include <unistd.h> // for isatty
 
 std::string indent(int level) { return std::string(level * 2, ' '); }
 
@@ -51,55 +53,82 @@ void print_node(const ReaderNode &node, int level = 0) {
 }
 
 void run_reader_repl() {
-  std::cout << "Reader REPL - Enter expressions, press Enter twice to execute "
-               "(Ctrl+D to exit):\n";
-  std::cout << ">>> ";
+  bool is_interactive = isatty(fileno(stdin));
+
+  if (is_interactive) {
+    std::cout
+        << "Reader REPL - Enter expressions, press Enter twice to execute "
+           "(Ctrl+D to exit):\n";
+    std::cout << ">>> ";
+  }
 
   std::string line;
   std::string input;
 
   while (std::getline(std::cin, line)) {
     if (line.empty()) {
-      if (input.empty()) {
-        // First empty line, just show prompt again
-        std::cout << ">>> ";
-        continue;
-      } else {
-        // Second empty line, execute the accumulated input
-        try {
-          Reader reader(input);
-          reader.read();
+      if (is_interactive) {
+        if (input.empty()) {
+          std::cout << ">>> ";
+          continue;
+        } else {
+          try {
+            Reader reader(input);
+            reader.read();
 
-          if (reader.root.children.empty()) {
-            std::cout << "(empty)\n";
-          } else if (reader.root.children.size() == 1) {
-            // For single expressions, print without the outer list wrapper
-            print_node(reader.root.children[0]);
-            std::cout << "\n";
-          } else {
-            // For multiple expressions, show the list
-            print_node(reader.root);
-            std::cout << "\n";
+            if (reader.root.children.empty()) {
+              std::cout << "(empty)\n";
+            } else if (reader.root.children.size() == 1) {
+              print_node(reader.root.children[0]);
+              std::cout << "\n";
+            } else {
+              print_node(reader.root);
+              std::cout << "\n";
+            }
+          } catch (const std::exception &e) {
+            std::cout << "Error: " << e.what() << "\n";
           }
-        } catch (const std::exception &e) {
-          std::cout << "Error: " << e.what() << "\n";
-        }
 
-        // Reset for next input
-        input.clear();
-        std::cout << ">>> ";
+          input.clear();
+          std::cout << ">>> ";
+        }
+      } else {
+        break;
       }
     } else {
-      // Non-empty line, add to input buffer
       if (!input.empty()) {
         input += "\n";
       }
       input += line;
-      std::cout << "... ";
+
+      if (is_interactive) {
+        std::cout << "... ";
+      }
     }
   }
 
-  std::cout << "\nGoodbye!\n";
+  if (!input.empty()) {
+    try {
+      Reader reader(input);
+      reader.read();
+
+      if (reader.root.children.empty()) {
+        std::cout << "(empty)\n";
+      } else if (reader.root.children.size() == 1) {
+        print_node(reader.root.children[0]);
+        std::cout << "\n";
+      } else {
+        print_node(reader.root);
+        std::cout << "\n";
+      }
+    } catch (const std::exception &e) {
+      std::cout << "Error: " << e.what() << "\n";
+    }
+  }
+
+  if (is_interactive) {
+    std::cout << "\nGoodbye!\n";
+  }
 }
 
 int main() {

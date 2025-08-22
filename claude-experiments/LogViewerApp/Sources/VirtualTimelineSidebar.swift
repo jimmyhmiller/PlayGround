@@ -4,6 +4,7 @@ struct VirtualTimelineSidebar: View {
     @StateObject private var virtualStore: VirtualLogStore
     @State private var stableTimeRange: (start: Date, end: Date)?
     @State private var hasShownTimeline = false
+    @State private var timeMarkers: [(position: CGFloat, time: Date, lineNumber: Int)] = []
     
     private let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -55,7 +56,10 @@ struct VirtualTimelineSidebar: View {
                             VirtualTimelineCanvas(
                                 virtualStore: virtualStore,
                                 timeRange: timeRange,
-                                height: geometry.size.height - 40
+                                height: geometry.size.height - 40,
+                                onTimeMarkersGenerated: { markers in
+                                    self.timeMarkers = markers
+                                }
                             )
                             .frame(width: 44)
                         }
@@ -85,7 +89,10 @@ struct VirtualTimelineSidebar: View {
                             VirtualTimelineCanvas(
                                 virtualStore: virtualStore,
                                 timeRange: stableTimeRange!,
-                                height: geometry.size.height - 40
+                                height: geometry.size.height - 40,
+                                onTimeMarkersGenerated: { markers in
+                                    self.timeMarkers = markers
+                                }
                             )
                             .frame(width: 44)
                         }
@@ -116,26 +123,64 @@ struct VirtualTimelineSidebar: View {
     
     @ViewBuilder
     private func timeLabels(height: CGFloat, timeRange: (start: Date, end: Date)) -> some View {
-        let labelCount = 8
-        let totalDuration = timeRange.end.timeIntervalSince(timeRange.start)
-        
-        VStack(alignment: .trailing, spacing: 0) {
-            ForEach(0..<labelCount, id: \.self) { i in
-                let progress = Double(i) / Double(labelCount - 1)
-                let time = timeRange.start.addingTimeInterval(totalDuration * progress)
-                
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text(timeFormatter.string(from: time))
-                        .font(.system(size: 9, weight: .medium).monospaced())
-                        .foregroundColor(.white.opacity(0.9))
-                    
-                    // Add a subtle tick mark
-                    Rectangle()
-                        .fill(Color.white.opacity(0.3))
-                        .frame(width: 8, height: 1)
+        if !timeMarkers.isEmpty {
+            // Use actual time markers from the timeline data
+            ZStack(alignment: .topTrailing) {
+                ForEach(Array(timeMarkers.enumerated()), id: \.offset) { index, marker in
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(timeFormatter.string(from: marker.time))
+                            .font(.system(size: 9, weight: .medium).monospaced())
+                            .foregroundColor(.white.opacity(0.9))
+                        
+                        Rectangle()
+                            .fill(Color.white.opacity(0.3))
+                            .frame(width: 8, height: 1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .position(x: 16, y: marker.position - 4.5) // Move up by half font height (9pt ≈ 9px)
+                    .onTapGesture {
+                        // Find the earliest entry in this minute
+                        if let lineNumber = virtualStore.findEarliestEntryInMinute(for: marker.time) {
+                            NotificationCenter.default.post(
+                                name: .jumpToLogLine,
+                                object: lineNumber
+                            )
+                        }
+                    }
                 }
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .frame(height: height / CGFloat(labelCount - 1), alignment: i == 0 ? .top : (i == labelCount - 1 ? .bottom : .center))
+            }
+            .frame(height: height)
+        } else {
+            // Fallback to evenly spaced labels if no markers available
+            let labelCount = 8
+            let totalDuration = timeRange.end.timeIntervalSince(timeRange.start)
+            
+            VStack(alignment: .trailing, spacing: 0) {
+                ForEach(0..<labelCount, id: \.self) { i in
+                    let progress = Double(i) / Double(labelCount - 1)
+                    let time = timeRange.start.addingTimeInterval(totalDuration * progress)
+                    
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(timeFormatter.string(from: time))
+                            .font(.system(size: 9, weight: .medium).monospaced())
+                            .foregroundColor(.white.opacity(0.9))
+                        
+                        Rectangle()
+                            .fill(Color.white.opacity(0.3))
+                            .frame(width: 8, height: 1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .frame(height: height / CGFloat(labelCount - 1), alignment: i == 0 ? .top : (i == labelCount - 1 ? .bottom : .center))
+                    .onTapGesture {
+                        // Find the earliest entry in this minute
+                        if let lineNumber = virtualStore.findEarliestEntryInMinute(for: time) {
+                            NotificationCenter.default.post(
+                                name: .jumpToLogLine,
+                                object: lineNumber
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -155,107 +200,86 @@ struct VirtualTimelineCanvas: View {
     let virtualStore: VirtualLogStore
     let timeRange: (start: Date, end: Date)
     let height: CGFloat
+    let onTimeMarkersGenerated: ([(position: CGFloat, time: Date, lineNumber: Int)]) -> Void
     
     @State private var clickMap: [(yPos: CGFloat, lineNumber: Int)] = [] // Sorted Y positions -> line numbers
+    @State private var timelineData: TimelineData? = nil
+    @State private var lastHeight: CGFloat = 0
+    
+    struct TimelineData {
+        let buckets: [(color: Color, intensity: Double, lineNumber: Int, timestamp: Date?)]
+        let timeMarkers: [(bucketIndex: Int, time: Date)]  // Store bucket index instead of yPos
+        let maxIntensity: Double
+    }
     
     var body: some View {
         Canvas { context, size in
             // Draw background with subtle grid
             drawBackground(context: context, size: size)
             
-            let totalDuration = timeRange.end.timeIntervalSince(timeRange.start)
+            // Invalidate cache if height changed significantly
+            let heightChanged = abs(size.height - lastHeight) > 1
             
-            // Validate timeline data
-            guard totalDuration > 0 && totalDuration.isFinite else {
-                // Just draw the border if we have invalid time data
-                drawBorderAndGrid(context: context, size: size)
-                return
-            }
-            
-            let bucketHeight: CGFloat = 1
-            let bucketCount = Int(size.height / bucketHeight)
-            
-            // Ensure reasonable bucket count
-            guard bucketCount > 0 && bucketCount < 10000 else {
-                drawBorderAndGrid(context: context, size: size)
-                return
-            }
-            
-            // First pass: collect all intensities to normalize and build click map
-            var maxIntensity: Double = 1.0
-            var bucketData: [(intensity: Double, color: Color)] = []
-            var newClickMap: [(yPos: CGFloat, lineNumber: Int)] = []
-            
-            for bucketIndex in 0..<bucketCount {
-                let startProgress = Double(bucketIndex) / Double(bucketCount)
-                let endProgress = Double(bucketIndex + 1) / Double(bucketCount)
-                
-                let startTime = timeRange.start.addingTimeInterval(totalDuration * startProgress)
-                let endTime = timeRange.start.addingTimeInterval(totalDuration * endProgress)
-                
-                // Build click map: Y position -> line number
-                let yPosition = CGFloat(bucketIndex) * bucketHeight
-                
-                // Use the exact same time-to-line mapping as the color calculation
-                let lineNumber = timeToLineNumber(startTime)
-                newClickMap.append((yPos: yPosition, lineNumber: lineNumber))
-                
-                // Ensure valid time range
-                guard startTime < endTime else {
-                    bucketData.append((intensity: 0, color: .clear))
-                    continue
+            // Use cached timeline data if available and size hasn't changed, otherwise generate it
+            let data: TimelineData
+            if let cached = timelineData, !heightChanged {
+                data = cached
+            } else {
+                guard let generated = generateTimelineData(height: size.height) else {
+                    drawBorderAndGrid(context: context, size: size)
+                    return
                 }
-                
-                let sampleCount = sampleEntriesInTimeRange(startTime..<endTime)
-                
-                if sampleCount.total > 0 {
-                    let color: Color
-                    
-                    // Determine color based on error/warning ratio with safety checks
-                    let safeTotal = max(1, sampleCount.total) // Prevent division by zero
-                    let errorRatio = Double(sampleCount.errors) / Double(safeTotal)
-                    let warningRatio = Double(sampleCount.warnings) / Double(safeTotal)
-                    
-                    if errorRatio > 0.3 { // High error rate
-                        color = Color(red: 1.0, green: 0.2, blue: 0.2) // Bright red
-                    } else if errorRatio > 0.1 { // Some errors
-                        color = Color(red: 1.0, green: 0.4, blue: 0.3) // Orange-red
-                    } else if warningRatio > 0.4 { // High warning rate
-                        color = Color(red: 1.0, green: 0.6, blue: 0.1) // Orange
-                    } else if warningRatio > 0.1 { // Some warnings
-                        color = Color(red: 1.0, green: 0.8, blue: 0.2) // Yellow-orange
-                    } else if sampleCount.total > 20 { // High activity, no issues
-                        color = Color(red: 0.2, green: 0.8, blue: 0.3) // Green
-                    } else { // Normal activity
-                        color = Color(red: 0.3, green: 0.7, blue: 1.0) // Blue
+                data = generated
+                // Cache it asynchronously and notify about time markers
+                DispatchQueue.main.async {
+                    self.timelineData = generated
+                    self.lastHeight = size.height
+                    // Convert bucket indices to actual Y positions based on canvas size
+                    let bucketHeight = size.height / CGFloat(generated.buckets.count)
+                    let markers = generated.timeMarkers.map { marker in
+                        let bucket = generated.buckets[marker.bucketIndex]
+                        return (position: CGFloat(marker.bucketIndex) * bucketHeight + bucketHeight / 2, 
+                                time: marker.time,
+                                lineNumber: bucket.lineNumber)
                     }
-                    
-                    let intensity = Double(sampleCount.total)
-                    maxIntensity = max(maxIntensity, intensity)
-                    bucketData.append((intensity: intensity, color: color))
-                } else {
-                    bucketData.append((intensity: 0, color: .clear))
+                    self.onTimeMarkersGenerated(markers)
                 }
             }
             
-            // Second pass: draw normalized bars
-            for (bucketIndex, data) in bucketData.enumerated() {
-                if data.intensity > 0 {
-                    let y = CGFloat(bucketIndex) * bucketHeight
-                    let safeMaxIntensity = max(1.0, maxIntensity) // Prevent division by zero
-                    let normalizedIntensity = min(1.0, data.intensity / safeMaxIntensity) // Clamp to [0,1]
+            // Always recalculate time marker positions based on current size
+            if heightChanged && timelineData != nil {
+                DispatchQueue.main.async {
+                    let bucketHeight = size.height / CGFloat(data.buckets.count)
+                    let markers = data.timeMarkers.map { marker in
+                        let bucket = data.buckets[marker.bucketIndex]
+                        return (position: CGFloat(marker.bucketIndex) * bucketHeight + bucketHeight / 2, 
+                                time: marker.time,
+                                lineNumber: bucket.lineNumber)
+                    }
+                    self.onTimeMarkersGenerated(markers)
+                }
+            }
+            
+            // Calculate bucket height to fill the entire canvas
+            let bucketHeight = size.height / CGFloat(data.buckets.count)
+            
+            // Draw the timeline bars from cached data
+            for (index, bucket) in data.buckets.enumerated() {
+                if bucket.intensity > 0 {
+                    let y = CGFloat(index) * bucketHeight
+                    let safeMaxIntensity = max(1.0, data.maxIntensity)
+                    let normalizedIntensity = min(1.0, bucket.intensity / safeMaxIntensity)
                     
-                    // Much more visible sizing with safety checks
-                    let width = max(2, min(40, 8 + (normalizedIntensity * 32))) // Clamp width
-                    let opacity = max(0.1, min(1.0, 0.7 + (normalizedIntensity * 0.3))) // Clamp opacity
+                    let width = max(2, min(40, 8 + (normalizedIntensity * 32)))
+                    let opacity = max(0.1, min(1.0, 0.7 + (normalizedIntensity * 0.3)))
                     
                     let rect = CGRect(x: 2, y: y, width: width, height: bucketHeight)
-                    context.fill(Path(rect), with: .color(data.color.opacity(opacity)))
+                    context.fill(Path(rect), with: .color(bucket.color.opacity(opacity)))
                     
                     // Add subtle glow for high intensity
                     if normalizedIntensity > 0.7 {
                         let glowRect = CGRect(x: 1, y: y, width: width + 2, height: bucketHeight + 1)
-                        context.fill(Path(glowRect), with: .color(data.color.opacity(0.3)))
+                        context.fill(Path(glowRect), with: .color(bucket.color.opacity(0.3)))
                     }
                 }
             }
@@ -263,9 +287,12 @@ struct VirtualTimelineCanvas: View {
             // Draw enhanced border and grid
             drawBorderAndGrid(context: context, size: size)
             
-            // Update click map after generation
+            // Update click map from timeline data with proper Y positions
             DispatchQueue.main.async {
-                clickMap = newClickMap
+                let bucketHeight = size.height / CGFloat(data.buckets.count)
+                self.clickMap = data.buckets.enumerated().map { index, bucket in
+                    (yPos: CGFloat(index) * bucketHeight, lineNumber: bucket.lineNumber)
+                }
             }
         }
         .onTapGesture { location in
@@ -279,24 +306,24 @@ struct VirtualTimelineCanvas: View {
                 let totalLines = virtualStore.totalLines
                 targetLineNumber = max(0, min(totalLines - 1, Int(Double(totalLines) * progress)))
             } else {
-                // Binary search in sorted click map for efficient lookup
-                var left = 0
-                var right = clickMap.count - 1
-                
-                while left <= right {
-                    let mid = (left + right) / 2
-                    let midY = clickMap[mid].yPos
+                // Special case: if clicking at the very bottom, go to last line
+                if clickY >= height - 5 { // Within 5 pixels of bottom
+                    targetLineNumber = virtualStore.totalLines - 1
+                } else {
+                    // Find the bucket that contains this Y position
+                    var closestIndex = 0
+                    var closestDistance = CGFloat.infinity
                     
-                    if midY <= clickY {
-                        left = mid + 1
-                    } else {
-                        right = mid - 1
+                    for (index, entry) in clickMap.enumerated() {
+                        let distance = abs(entry.yPos - clickY)
+                        if distance < closestDistance {
+                            closestDistance = distance
+                            closestIndex = index
+                        }
                     }
+                    
+                    targetLineNumber = clickMap[closestIndex].lineNumber
                 }
-                
-                // Use the closest entry
-                let index = max(0, min(clickMap.count - 1, right))
-                targetLineNumber = clickMap[index].lineNumber
             }
             
             // No need to pre-index - data should already be cached from timeline generation!
@@ -428,24 +455,107 @@ struct VirtualTimelineCanvas: View {
         return (total: 0, errors: 0, warnings: 0)
     }
     
-    /// Convert a timestamp to line number using the same logic as color calculation
-    private func timeToLineNumber(_ timestamp: Date) -> Int {
-        let totalDuration = timeRange.end.timeIntervalSince(timeRange.start)
+    /// Generate timeline data by sampling log entries
+    private func generateTimelineData(height: CGFloat) -> TimelineData? {
+        // Use a reasonable number of buckets that scales with height but has limits
+        let targetBucketHeight: CGFloat = 2.0 // Target 2 pixels per bucket for good granularity
+        let idealBucketCount = Int(height / targetBucketHeight)
+        let bucketCount = min(max(50, idealBucketCount), 500) // Clamp between 50 and 500 buckets
         
-        guard totalDuration > 0 && totalDuration.isFinite else {
-            return 0
-        }
+        guard bucketCount > 0 else { return nil }
         
-        let targetInterval = timestamp.timeIntervalSince(timeRange.start)
-        
-        guard targetInterval.isFinite else {
-            return 0
-        }
-        
-        let progress = max(0.0, min(1.0, targetInterval / totalDuration))
         let totalLines = virtualStore.totalLines
-        let lineNumber = max(0, min(totalLines - 1, Int(Double(totalLines) * progress)))
+        guard totalLines > 0 else { return nil }
         
-        return lineNumber
+        var buckets: [(color: Color, intensity: Double, lineNumber: Int, timestamp: Date?)] = []
+        var timeMarkers: [(bucketIndex: Int, time: Date)] = []
+        var maxIntensity: Double = 1.0
+        
+        // Sample strategy: divide lines into buckets and sample each bucket
+        let linesPerBucket = max(1, totalLines / bucketCount)
+        
+        for bucketIndex in 0..<bucketCount {
+            let startLine = bucketIndex * linesPerBucket
+            let endLine = min((bucketIndex + 1) * linesPerBucket, totalLines)
+            
+            // Sample a few entries from this bucket to determine color and get actual timestamp
+            var bucketErrors = 0
+            var bucketWarnings = 0
+            var bucketTotal = 0
+            var bucketTimestamp: Date?
+            
+            // Sample up to 5 entries per bucket for color determination
+            let sampleStep = max(1, (endLine - startLine) / 5)
+            for lineNum in stride(from: startLine, to: endLine, by: sampleStep) {
+                if let entry = virtualStore.entry(at: lineNum) {
+                    bucketTotal += 1
+                    if bucketTimestamp == nil {
+                        bucketTimestamp = entry.timestamp
+                    }
+                    switch entry.level {
+                    case .error: bucketErrors += 1
+                    case .warning: bucketWarnings += 1
+                    default: break
+                    }
+                }
+            }
+            
+            // Determine color based on sampled entries
+            let color: Color
+            let intensity: Double
+            
+            if bucketTotal > 0 {
+                let errorRatio = Double(bucketErrors) / Double(bucketTotal)
+                let warningRatio = Double(bucketWarnings) / Double(bucketTotal)
+                
+                if errorRatio > 0.3 {
+                    color = Color(red: 1.0, green: 0.2, blue: 0.2)
+                } else if errorRatio > 0.1 {
+                    color = Color(red: 1.0, green: 0.4, blue: 0.3)
+                } else if warningRatio > 0.4 {
+                    color = Color(red: 1.0, green: 0.6, blue: 0.1)
+                } else if warningRatio > 0.1 {
+                    color = Color(red: 1.0, green: 0.8, blue: 0.2)
+                } else if endLine - startLine > 20 {
+                    color = Color(red: 0.2, green: 0.8, blue: 0.3)
+                } else {
+                    color = Color(red: 0.3, green: 0.7, blue: 1.0)
+                }
+                
+                // Intensity based on line density
+                intensity = Double(endLine - startLine)
+                maxIntensity = max(maxIntensity, intensity)
+            } else {
+                color = .clear
+                intensity = 0
+            }
+            
+            buckets.append((color: color, intensity: intensity, lineNumber: startLine, timestamp: bucketTimestamp))
+            
+            // Add time marker for this bucket (we'll filter later for display)
+            if let timestamp = bucketTimestamp {
+                timeMarkers.append((bucketIndex: bucketIndex, time: timestamp))
+            }
+        }
+        
+        // Filter time markers to show only ~8 well-distributed ones
+        let filteredMarkers = filterTimeMarkers(timeMarkers, targetCount: 8)
+        
+        return TimelineData(buckets: buckets, timeMarkers: filteredMarkers, maxIntensity: maxIntensity)
+    }
+    
+    /// Filter time markers to show a reasonable number with good distribution
+    private func filterTimeMarkers(_ markers: [(bucketIndex: Int, time: Date)], targetCount: Int) -> [(bucketIndex: Int, time: Date)] {
+        guard markers.count > targetCount else { return markers }
+        
+        var filtered: [(bucketIndex: Int, time: Date)] = []
+        let step = markers.count / targetCount
+        
+        for i in 0..<targetCount {
+            let index = min(i * step, markers.count - 1)
+            filtered.append(markers[index])
+        }
+        
+        return filtered
     }
 }

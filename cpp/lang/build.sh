@@ -18,6 +18,8 @@ show_help() {
     echo "  test [test_name]  - Build and run tests (all tests or specific test by name)"
     echo "  stress            - Build and run stress tests (random input generation)"
     echo "  run               - Build (if needed) and run the project"
+    echo "  ast-to-json       - Parse input from stdin and output AST as JSON"
+    echo "  reader-repl       - Interactive REPL showing parsed structure"
     echo "  tools [tool]      - Build and run a specific tool (run 'tools' with no args to see available tools)"
     echo "  fmt               - Format all C++ source files using clang-format"
     echo "  clean             - Clean build artifacts"
@@ -135,10 +137,10 @@ cmd_test() {
     
     if [ -n "$test_name" ]; then
         # Build with individual test flag
-        ${CXX} ${CXXFLAGS} ${INCLUDES} "-DRUN_INDIVIDUAL_TEST=\"$test_name\"" $lib_sources test_main.cc -o "${BUILD_DIR}/${PROJECT_NAME}_test"
+        ${CXX} ${CXXFLAGS} ${INCLUDES} "-DRUN_INDIVIDUAL_TEST=\"$test_name\"" $lib_sources tests/test_reader.cc -o "${BUILD_DIR}/${PROJECT_NAME}_test"
     else
         # Build normally for all tests
-        ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources test_main.cc -o "${BUILD_DIR}/${PROJECT_NAME}_test"
+        ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/test_reader.cc -o "${BUILD_DIR}/${PROJECT_NAME}_test"
     fi
     
     echo "Running tests..."
@@ -157,7 +159,7 @@ cmd_stress() {
         exit 1
     fi
     
-    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources stress_test.cc -o "${BUILD_DIR}/${PROJECT_NAME}_stress"
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/reader_stress_test.cc -o "${BUILD_DIR}/${PROJECT_NAME}_stress"
     echo "Running stress tests..."
     "${BUILD_DIR}/${PROJECT_NAME}_stress"
 }
@@ -217,6 +219,44 @@ cmd_run() {
     "${BUILD_DIR}/${PROJECT_NAME}" "$@"
 }
 
+cmd_ast_to_json() {
+    echo "Building ast_to_json tool..."
+    mkdir -p "${BUILD_DIR}"
+    
+    # Build library sources (excluding main.cc and tools)
+    lib_sources=$(find "${SRC_DIR}" -name "*.cc" -o -name "*.cpp" | grep -v main.cc | grep -v "/tools/" | sort)
+    
+    if [ -z "$lib_sources" ]; then
+        echo "Error: No library source files found in ${SRC_DIR}"
+        exit 1
+    fi
+    
+    # Build the ast_to_json tool
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources "${SRC_DIR}/tools/ast_to_json.cc" -o "${BUILD_DIR}/ast_to_json"
+    
+    # Run the tool with stdin
+    "${BUILD_DIR}/ast_to_json"
+}
+
+cmd_reader_repl() {
+    echo "Building reader_repl tool..."
+    mkdir -p "${BUILD_DIR}"
+    
+    # Build library sources (excluding main.cc and tools)
+    lib_sources=$(find "${SRC_DIR}" -name "*.cc" -o -name "*.cpp" | grep -v main.cc | grep -v "/tools/" | sort)
+    
+    if [ -z "$lib_sources" ]; then
+        echo "Error: No library source files found in ${SRC_DIR}"
+        exit 1
+    fi
+    
+    # Build the reader_repl tool
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources "${SRC_DIR}/tools/reader_repl.cc" -o "${BUILD_DIR}/reader_repl"
+    
+    # Run the REPL
+    "${BUILD_DIR}/reader_repl"
+}
+
 # Main script
 case ${1:-help} in
     build)
@@ -227,6 +267,12 @@ case ${1:-help} in
         ;;
     stress)
         cmd_stress
+        ;;
+    ast-to-json)
+        cmd_ast_to_json
+        ;;
+    reader-repl)
+        cmd_reader_repl
         ;;
     tools)
         cmd_tools "$@"
