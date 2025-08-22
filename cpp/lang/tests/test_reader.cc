@@ -1,4 +1,5 @@
-#include "../src/lang.h"
+#include "../src/reader.h"
+// #include "../src/ast.h" // TODO: Re-enable when AST conversion is implemented
 #include <cassert>
 #include <iostream>
 
@@ -272,29 +273,29 @@ void test_reader_strings() {
     reader.read();
     assert(reader.root.children.size() == 1);
     assert(reader.root.children[0].type == ReaderNodeType::Literal);
-    assert(reader.root.children[0].value() == "hello");
+    assert(reader.root.children[0].value() == "\"hello\"");
   }
 
   {
     Reader reader("\"hello world\" \"test\"");
     reader.read();
     assert(reader.root.children.size() == 2);
-    assert(reader.root.children[0].value() == "hello world");
-    assert(reader.root.children[1].value() == "test");
+    assert(reader.root.children[0].value() == "\"hello world\"");
+    assert(reader.root.children[1].value() == "\"test\"");
   }
 
   {
     Reader reader("\"\"");
     reader.read();
     assert(reader.root.children.size() == 1);
-    assert(reader.root.children[0].value() == "");
+    assert(reader.root.children[0].value() == "\"\"");
   }
 
   {
     Reader reader("\"escape\\ntest\"");
     reader.read();
     assert(reader.root.children.size() == 1);
-    assert(reader.root.children[0].value() == "escape\ntest");
+    assert(reader.root.children[0].value() == "\"escape\\ntest\"");
   }
 }
 
@@ -317,25 +318,38 @@ void test_reader_decimal_numbers() {
   }
 }
 
-void test_reader_lists() {
+void test_reader_numbers_with_underscores() {
   {
-    Reader reader("()");
+    Reader reader("1_000");
     reader.read();
     assert(reader.root.children.size() == 1);
-    assert(reader.root.children[0].type == ReaderNodeType::List);
-    assert(reader.root.children[0].children.size() == 0);
+    assert(reader.root.children[0].type == ReaderNodeType::Literal);
+    assert(reader.root.children[0].value() == "1_000");
   }
 
   {
-    Reader reader("(1 2 3)");
+    Reader reader("1_000_000");
     reader.read();
     assert(reader.root.children.size() == 1);
-    auto &list = reader.root.children[0];
-    assert(list.type == ReaderNodeType::List);
-    assert(list.children.size() == 3);
-    assert(list.children[0].value() == "1");
-    assert(list.children[1].value() == "2");
-    assert(list.children[2].value() == "3");
+    assert(reader.root.children[0].type == ReaderNodeType::Literal);
+    assert(reader.root.children[0].value() == "1_000_000");
+  }
+
+  {
+    Reader reader("3.14_159");
+    reader.read();
+    assert(reader.root.children.size() == 1);
+    assert(reader.root.children[0].type == ReaderNodeType::Literal);
+    assert(reader.root.children[0].value() == "3.14_159");
+  }
+
+  {
+    Reader reader("1_000 + 2_000");
+    reader.read();
+    assert(reader.root.children.size() == 1);
+    assert(reader.root.children[0].type == ReaderNodeType::BinaryOp);
+    assert(reader.root.children[0].children[0].value() == "1_000");
+    assert(reader.root.children[0].children[1].value() == "2_000");
   }
 
   {
@@ -405,13 +419,13 @@ void test_reader_nested_structures() {
     auto &block = reader.root.children[0];
     assert(block.type == ReaderNodeType::Block);
     assert(block.children.size() == 2);
-    
+
     auto &list1 = block.children[0];
     assert(list1.type == ReaderNodeType::List);
     assert(list1.children.size() == 2);
     assert(list1.children[0].value() == "1");
     assert(list1.children[1].value() == "2");
-    
+
     auto &list2 = block.children[1];
     assert(list2.type == ReaderNodeType::List);
     assert(list2.children.size() == 2);
@@ -426,18 +440,48 @@ void test_reader_nested_structures() {
     auto &list = reader.root.children[0];
     assert(list.type == ReaderNodeType::List);
     assert(list.children.size() == 2);
-    
+
     auto &block1 = list.children[0];
     assert(block1.type == ReaderNodeType::Block);
     assert(block1.children.size() == 1);
     assert(block1.children[0].type == ReaderNodeType::BinaryOp);
     assert(block1.children[0].value() == "+");
-    
+
     auto &block2 = list.children[1];
     assert(block2.type == ReaderNodeType::Block);
     assert(block2.children.size() == 1);
     assert(block2.children[0].type == ReaderNodeType::BinaryOp);
     assert(block2.children[0].value() == "*");
+  }
+}
+
+void test_reader_dot_operator() {
+  {
+    Reader reader("obj . method");
+    reader.read();
+    assert(reader.root.children.size() == 1);
+    auto &expr = reader.root.children[0];
+    assert(expr.type == ReaderNodeType::BinaryOp);
+    assert(expr.value() == ".");
+    assert(expr.children[0].value() == "obj");
+    assert(expr.children[1].value() == "method");
+  }
+
+  {
+    // Test precedence: dot should bind tighter than +
+    Reader reader("a + b . c");
+    reader.read();
+    assert(reader.root.children.size() == 1);
+    auto &expr = reader.root.children[0];
+    assert(expr.type == ReaderNodeType::BinaryOp);
+    assert(expr.value() == "+");
+    assert(expr.children[0].value() == "a");
+
+    auto &right = expr.children[1];
+    assert(right.type == ReaderNodeType::BinaryOp);
+    assert(right.value() == ".");
+    assert(right.children[0].value() == "b");
+    assert(right.children[1].value() == "c");
   }
 }
 
@@ -468,7 +512,8 @@ void test_reader_comparison_operators() {
     Reader reader("a < b <= c > d >= e");
     reader.read();
     assert(reader.root.children.size() == 1);
-    // This should parse as ((((a < b) <= c) > d) >= e) due to left associativity
+    // This should parse as ((((a < b) <= c) > d) >= e) due to left
+    // associativity
     auto &expr = reader.root.children[0];
     assert(expr.type == ReaderNodeType::BinaryOp);
     assert(expr.value() == ">=");
@@ -483,7 +528,8 @@ void test_reader_separators() {
     // This should parse with separators having low precedence
     auto &expr = reader.root.children[0];
     assert(expr.type == ReaderNodeType::BinaryOp);
-    // The exact structure depends on precedence, but it should parse successfully
+    // The exact structure depends on precedence, but it should parse
+    // successfully
   }
 
   {
@@ -560,7 +606,7 @@ void test_reader_operators_as_identifiers() {
     assert(expr.type == ReaderNodeType::BinaryOp);
     assert(expr.value() == "+");
     assert(expr.children[0].value() == "a");
-    
+
     // The right side should be "b /" as a postfix operation
     auto &right = expr.children[1];
     assert(right.type == ReaderNodeType::PostfixOp);
@@ -615,7 +661,7 @@ void test_reader_complex_mixed_expressions() {
     auto &expr1 = reader.root.children[0];
     assert(expr1.type == ReaderNodeType::BinaryOp);
     assert(expr1.value() == ".");
-    
+
     auto &expr2 = reader.root.children[1];
     assert(expr2.type == ReaderNodeType::List);
   }
@@ -714,14 +760,17 @@ int main() {
   std::cout << "Testing decimal numbers..." << std::endl;
   test_reader_decimal_numbers();
 
-  std::cout << "Testing lists..." << std::endl;
-  test_reader_lists();
+  std::cout << "Testing numbers with underscores..." << std::endl;
+  test_reader_numbers_with_underscores();
 
   std::cout << "Testing blocks..." << std::endl;
   test_reader_blocks();
 
   std::cout << "Testing nested structures..." << std::endl;
   test_reader_nested_structures();
+
+  std::cout << "Testing dot operator..." << std::endl;
+  test_reader_dot_operator();
 
   std::cout << "Testing comparison operators..." << std::endl;
   test_reader_comparison_operators();

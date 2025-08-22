@@ -253,6 +253,48 @@ class VirtualLogStore: ObservableObject {
         selectedIndex = findEntryNear(timestamp: targetTime)
     }
     
+    /// Find the earliest log entry within the same minute as the given timestamp
+    func findEarliestEntryInMinute(for timestamp: Date) -> Int? {
+        let calendar = Calendar.current
+        
+        // Get the start of the minute for the given timestamp
+        guard let minuteStart = calendar.dateInterval(of: .minute, for: timestamp)?.start,
+              let minuteEnd = calendar.date(byAdding: .minute, value: 1, to: minuteStart) else {
+            return findEntryNear(timestamp: timestamp)
+        }
+        
+        // Use binary search to find the first entry in this minute
+        var left = 0
+        var right = totalLines - 1
+        var result: Int? = nil
+        
+        while left <= right {
+            let mid = (left + right) / 2
+            
+            if let entry = entry(at: mid) {
+                let entryTime = entry.timestamp
+                
+                if entryTime >= minuteStart && entryTime < minuteEnd {
+                    // Found an entry in this minute - this could be our answer
+                    result = mid
+                    // But search left to find the earliest one
+                    right = mid - 1
+                } else if entryTime < minuteStart {
+                    // Entry is before our target minute
+                    left = mid + 1
+                } else {
+                    // Entry is after our target minute
+                    right = mid - 1
+                }
+            } else {
+                // If we can't get the entry, try the next one
+                left = mid + 1
+            }
+        }
+        
+        return result ?? findEntryNear(timestamp: timestamp)
+    }
+    
     /// Get count of entries in a time range (for timeline)
     func getEntriesCount(in timeRange: Range<Date>) -> Int {
         // For now, sample the range - could be optimized with time indexing

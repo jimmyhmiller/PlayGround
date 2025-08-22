@@ -1,4 +1,4 @@
-#include "src/lang.h"
+#include "../src/reader.h"
 #include <cassert>
 #include <iostream>
 #include <random>
@@ -14,21 +14,21 @@ private:
   std::uniform_int_distribution<int> char_dist;
 
   // Token type pools
-  std::vector<std::string> identifiers = {"foo", "bar", "baz", "hello", "world",
-                                          "test", "var", "func", "class", "obj",
-                                          "x", "y", "z", "a", "b", "c"};
+  std::vector<std::string> identifiers = {
+      "foo",   "bar", "baz", "hello", "world", "test", "var", "func",
+      "class", "obj", "x",   "y",     "z",     "a",    "b",   "c"};
 
-  std::vector<std::string> numbers = {"0",    "1",     "42",   "123",   "999",
-                                      "3.14", "0.5",   "2.71", "10.0",  "0.0",
-                                      "100",  "0.001", "42.5", "99.99", "1.414"};
+  std::vector<std::string> numbers = {
+      "0",    "1",   "42",  "123",   "999",  "3.14",  "0.5",  "2.71",
+      "10.0", "0.0", "100", "0.001", "42.5", "99.99", "1.414"};
 
   std::vector<std::string> strings = {
-      "\"hello\"",     "\"world\"",     "\"test\"",    "\"foo bar\"",
-      "\"\"",          "\"123\"",       "\"a\"",       "\"hello world\"",
+      "\"hello\"",     "\"world\"",      "\"test\"",      "\"foo bar\"",
+      "\"\"",          "\"123\"",        "\"a\"",         "\"hello world\"",
       "\"test\\nme\"", "\"tab\\there\"", "\"quote\\\"\"", "\"back\\\\slash\""};
 
-  std::vector<std::string> operators = {"+", "-", "*", "/", "=",  "==", "!=",
-                                        "<", ">", "<=", ">=", "^", "!", "."};
+  std::vector<std::string> operators = {
+      "+", "-", "*", "/", "=", "==", "!=", "<", ">", "<=", ">=", "^", "!", "."};
 
   std::vector<std::string> separators = {",", ";", ":"};
 
@@ -204,7 +204,8 @@ public:
     for (const auto &child : node.children) {
       // Each child should have valid type
       assert(static_cast<int>(child.type) >= 0 &&
-             static_cast<int>(child.type) <= static_cast<int>(ReaderNodeType::Call));
+             static_cast<int>(child.type) <=
+                 static_cast<int>(ReaderNodeType::Call));
 
       // Recursively validate children
       validate_tree(child);
@@ -254,7 +255,8 @@ public:
     std::cout << "\nStress test results:\n";
     std::cout << "Tests run: " << tests_run << "\n";
     std::cout << "Tests passed: " << tests_passed << "\n";
-    std::cout << "Success rate: " << (100.0 * tests_passed / tests_run) << "%\n";
+    std::cout << "Success rate: " << (100.0 * tests_passed / tests_run)
+              << "%\n";
 
     if (tests_passed == tests_run) {
       std::cout << "✓ All stress tests passed!\n";
@@ -282,7 +284,7 @@ public:
         "\"string with spaces\" + 42.5 * ( a ! )",
         "[ ] { } ( )",
         "a ; b , c : d",
-        "; , :",  // Test standalone separators
+        "; , :", // Test standalone separators
     };
 
     for (const auto &test : specific_tests) {
@@ -315,8 +317,8 @@ int main() {
   tester.run_stress_tests(1000);
 
   std::cout << "\n✓ All stress tests completed successfully!\n";
-  std::cout
-      << "The reader successfully parsed all generated text into valid trees.\n";
+  std::cout << "The reader successfully parsed all generated text into valid "
+               "trees.\n";
 
   return 0;
 }

@@ -1,18 +1,38 @@
 # Project Information
 
-This C++ project uses Cabin as its build system.
+This is a project creating a C-like language, but we are doing things slightly different. Like Lisp, we are having a "Reader" before we do conversion to ast. The goal here is in the early days we will use this reader layer as a way to desurgar things, eventually, this wil power an nice macro system.
+
+
+
+
+## Building
+This C++ project uses its own build system in build.sh
+
+You can find all the available things using
+```bash
+./build.sh
+```
+which will print a nice helpful message for you.
 
 ## Running Tests
 
 To run tests, use the following command:
 
 ```bash
-cabin test
+./build.sh test
 ```
 
-This will compile and run all test files in the project.
 
-## Project Structure
+## Coding Standards
 
-- `src/main.cc` - Main source file containing the tokenizer and reader implementation
-- `test_reader.cc` - Comprehensive test suite for the Reader class
+Comments **MUST** only be for explaining why we are doing something non-obvious. You should not leave comments like
+
+```cpp
+// parse let statement
+... code that parses let statement
+```
+
+If you see comments like this as you are working, remove them.
+
+### Formating
+All code needs to be formatted with `build.sh fmt`
