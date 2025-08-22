@@ -1,0 +1,19 @@
+(list
+  (ident "fn" [1:0])
+  (binary-op ":" [1:6]
+    (ident "id" [1:3])
+    (binary-op "-" [1:15]
+      (list
+        (binary-op ":" [1:10]
+          (ident "x" [1:9])
+          (ident "t" [1:12])
+        )
+      )
+      (ident ">" [1:16])
+    )
+  )
+  (ident "t" [1:18])
+  (block "{" [1:20]
+    (ident "x" [2:2])
+  )
+)
