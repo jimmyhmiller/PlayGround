@@ -51,7 +51,7 @@ int main() {
 
   do {
     token = tokenizer.next_token(input);
-    std::cout << token_type_to_string(token.type) << ": \"" << token.value 
+    std::cout << token_type_to_string(token.type) << ": \"" << token.value
               << "\" [" << token.line << ":" << token.column << "]\n";
   } while (token.type != TokenType::End);
 

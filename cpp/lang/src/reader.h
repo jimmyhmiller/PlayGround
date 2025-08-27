@@ -54,9 +54,20 @@ struct Reader {
 
   Reader(const std::string_view input) : input(input) {}
 
+  enum Associativity {
+    LEFT,
+    RIGHT
+  };
+  
+  struct OperatorInfo {
+    int precedence;
+    Associativity associativity;
+  };
+  
   Token advance();
   Token peek() const;
   void read();
+  OperatorInfo get_operator_info(const Token &token, bool isPostfix = false);
   int get_binding_power(const Token &token, bool isPostfix = false);
   ReaderNode parse_expression(int rightBindingPower = 0);
   ReaderNode parse_prefix(const Token &token);
