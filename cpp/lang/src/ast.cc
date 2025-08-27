@@ -123,6 +123,10 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_statement() {
   if (match_token("fn")) {
     return parse_function_declaration();
   }
+  // Check for struct declaration (sequence: struct, name, block)
+  if (match_token("struct")) {
+    return parse_struct_declaration();
+  }
   if (match_token("let")) {
     return parse_let_statement();
   }
@@ -233,6 +237,71 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_function_declaration() {
   }
 
   return fn_node;
+}
+
+std::unique_ptr<ASTNode> ASTBuilder::parse_struct_declaration() {
+  if (!match_token("struct")) {
+    return nullptr;
+  }
+
+  auto struct_node = std::make_unique<ASTNode>(ASTNodeType::StructDeclaration, current().token);
+  advance(); // consume 'struct'
+  
+  // Parse struct name (could be simple name or generic call)
+  if (!is_at_end()) {
+    if (current().type == ReaderNodeType::Ident) {
+      // Simple struct: struct Point
+      struct_node->name = std::string(current().value());
+      advance(); // consume name
+    } else if (current().type == ReaderNodeType::Call) {
+      // Generic struct: struct Point(T, U) -> (call Point T U)
+      const auto& call_node = current();
+      if (!call_node.children.empty()) {
+        struct_node->name = std::string(call_node.children[0].value());
+        
+        // Add generic parameters
+        for (size_t i = 1; i < call_node.children.size(); ++i) {
+          ASTBuilder param_builder({call_node.children[i]});
+          auto param = param_builder.parse_expression();
+          if (param) {
+            struct_node->add_child(std::move(param));
+          }
+        }
+      }
+      advance(); // consume call
+    }
+  }
+  
+  // Parse struct body (block with field declarations)
+  if (!is_at_end() && current().type == ReaderNodeType::Block) {
+    const auto& block_node = current();
+    
+    // Parse each field declaration
+    for (const auto& field_reader : block_node.children) {
+      if (field_reader.type == ReaderNodeType::BinaryOp && field_reader.value() == ":") {
+        // Field declaration: x: int -> (: x int)
+        auto field_node = std::make_unique<ASTNode>(ASTNodeType::FieldDeclaration, field_reader.token);
+        
+        if (field_reader.children.size() >= 1) {
+          field_node->name = std::string(field_reader.children[0].value());
+        }
+        
+        if (field_reader.children.size() >= 2) {
+          ASTBuilder type_builder({field_reader.children[1]});
+          auto field_type = type_builder.parse_type();
+          if (field_type) {
+            field_node->add_child(std::move(field_type));
+          }
+        }
+        
+        struct_node->add_child(std::move(field_node));
+      }
+    }
+    
+    advance(); // consume block
+  }
+
+  return struct_node;
 }
 
 std::unique_ptr<ASTNode> ASTBuilder::parse_let_statement() {

@@ -20,6 +20,9 @@ std::string ast_to_code(const ASTNode* node, int indent) {
     case ASTNodeType::FunctionDeclaration:
       return generate_function_declaration(node, indent);
       
+    case ASTNodeType::StructDeclaration:
+      return generate_struct_declaration(node, indent);
+      
     case ASTNodeType::LetStatement:
       return generate_let_statement(node, indent);
       
@@ -93,6 +96,66 @@ std::string generate_function_declaration(const ASTNode* node, int indent) {
   if (node->body) {
     result << " " << generate_block(node->body.get(), indent);
   }
+  
+  return result.str();
+}
+
+std::string generate_struct_declaration(const ASTNode* node, int indent) {
+  std::string indentStr(indent * 2, ' ');
+  std::ostringstream result;
+  
+  result << indentStr << "struct";
+  if (!node->name.empty()) {
+    result << " " << node->name;
+  }
+  
+  // Generate generic parameters if any
+  bool has_generic_params = false;
+  for (size_t i = 0; i < node->child_count(); ++i) {
+    const auto* child = node->child(i);
+    if (child->type != ASTNodeType::FieldDeclaration) {
+      if (!has_generic_params) {
+        result << "(";
+        has_generic_params = true;
+      } else {
+        result << ", ";
+      }
+      
+      // Special formatting for generic parameters (x: Type -> x:Type)
+      if (child->type == ASTNodeType::BinaryExpression && child->value == ":" && child->child_count() >= 2) {
+        result << generate_expression(child->child(0), 0) << ":" << generate_expression(child->child(1), 0);
+      } else {
+        result << generate_expression(child, 0);
+      }
+    }
+  }
+  if (has_generic_params) {
+    result << ")";
+  }
+  
+  result << " {\n";
+  
+  // Generate field declarations
+  bool first_field = true;
+  for (size_t i = 0; i < node->child_count(); ++i) {
+    const auto* child = node->child(i);
+    if (child->type == ASTNodeType::FieldDeclaration) {
+      if (!first_field) {
+        result << ",\n";
+      }
+      first_field = false;
+      
+      result << std::string((indent + 1) * 2, ' ') << child->name;
+      if (child->child_count() > 0) {
+        result << ": " << generate_type(child->child(0));
+      }
+    }
+  }
+  
+  if (!first_field) {
+    result << "\n";
+  }
+  result << indentStr << "}";
   
   return result.str();
 }
