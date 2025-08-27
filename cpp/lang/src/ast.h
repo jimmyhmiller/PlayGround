@@ -48,6 +48,10 @@ enum class ASTNodeType {
   // Parameters and arguments
   Parameter,
   Argument,
+
+  // Struct declarations
+  StructDeclaration,
+  FieldDeclaration,
 };
 
 struct ASTNode {
@@ -90,6 +94,7 @@ struct ASTBuilder {
   std::unique_ptr<ASTNode> parse_infix(std::unique_ptr<ASTNode> left);
   std::unique_ptr<ASTNode> parse_statement();
   std::unique_ptr<ASTNode> parse_function_declaration();
+  std::unique_ptr<ASTNode> parse_struct_declaration();
   std::unique_ptr<ASTNode> parse_let_statement();
   std::unique_ptr<ASTNode> parse_if_statement();
   std::unique_ptr<ASTNode> parse_loop_statement();

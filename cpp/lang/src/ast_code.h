@@ -6,6 +6,7 @@
 
 std::string ast_to_code(const ASTNode* node, int indent = 0);
 std::string generate_function_declaration(const ASTNode* node, int indent);
+std::string generate_struct_declaration(const ASTNode* node, int indent);
 std::string generate_let_statement(const ASTNode* node, int indent);
 std::string generate_mutable_let_statement(const ASTNode* node, int indent);
 std::string generate_assignment_statement(const ASTNode* node, int indent);

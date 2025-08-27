@@ -97,5 +97,10 @@ fn get_or_else : (o: Option(t), fallback: t) -> t {
 
 struct Point {
   x: int,
-  y: int,
+  y: int
+}
+
+struct GenericPoint(x: Type, y: Type) {
+  x: x,
+  y: y
 }
