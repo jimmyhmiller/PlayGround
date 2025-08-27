@@ -108,6 +108,24 @@ Token Tokenizer::next_token(const std::string_view input) {
         consume(input, 2); // consume ">="
         return Token{TokenType::Operator, input.substr(start, 2), start_line,
                      start_column};
+      } else if (current_char == '-' &&
+                 static_cast<size_t>(pos + 1) < input.size() &&
+                 input[pos + 1] == '>') {
+        consume(input, 2); // consume "->"
+        return Token{TokenType::Operator, input.substr(start, 2), start_line,
+                     start_column};
+      } else if (current_char == '=' &&
+                 static_cast<size_t>(pos + 1) < input.size() &&
+                 input[pos + 1] == '>') {
+        consume(input, 2); // consume "=>"
+        return Token{TokenType::Operator, input.substr(start, 2), start_line,
+                     start_column};
+      } else if (current_char == '|' &&
+                 static_cast<size_t>(pos + 1) < input.size() &&
+                 input[pos + 1] == '|') {
+        consume(input, 2); // consume "||"
+        return Token{TokenType::Operator, input.substr(start, 2), start_line,
+                     start_column};
       } else {
         Token token{TokenType::Operator, std::string_view(&input[pos], 1),
                     start_line, start_column};

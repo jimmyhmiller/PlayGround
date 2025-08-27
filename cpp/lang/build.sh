@@ -19,6 +19,7 @@ show_help() {
     echo "  stress            - Build and run stress tests (random input generation)"
     echo "  run               - Build (if needed) and run the project"
     echo "  ast-to-json       - Parse input from stdin and output AST as JSON"
+    echo "  ast-to-code       - Parse input from stdin and generate code from AST"
     echo "  reader-repl       - Interactive REPL showing parsed structure"
     echo "  tokenizer-debug   - Show all tokens from input"
     echo "  tools [tool]      - Build and run a specific tool (run 'tools' with no args to see available tools)"
@@ -93,9 +94,6 @@ cmd_build() {
         build_mode="release"
         cxxflags="-std=c++20 -Wall -Wextra -O3 -DNDEBUG"
         output_suffix="_release"
-        echo "Building ${PROJECT_NAME} (release mode)..."
-    else
-        echo "Building ${PROJECT_NAME} (debug mode)..."
     fi
     
     mkdir -p "${BUILD_DIR}"
@@ -120,11 +118,6 @@ cmd_build() {
 cmd_test() {
     local test_name="$1"
     
-    if [ -n "$test_name" ]; then
-        echo "Building and running individual test: $test_name"
-    else
-        echo "Building and running all tests..."
-    fi
     
     mkdir -p "${BUILD_DIR}"
     
@@ -144,12 +137,32 @@ cmd_test() {
         ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/test_reader.cc -o "${BUILD_DIR}/${PROJECT_NAME}_test"
     fi
     
-    echo "Running tests..."
+    echo "Running reader tests..."
     "${BUILD_DIR}/${PROJECT_NAME}_test"
+    
+    # Build and run AST tests
+    echo "Building AST tests..."
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/test_ast.cc -o "${BUILD_DIR}/test_ast"
+    
+    echo "Running AST tests..."
+    "${BUILD_DIR}/test_ast"
+    
+    # Build and run parameter tests
+    echo "Building parameter tests..."
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources test_parameters.cc -o "${BUILD_DIR}/test_parameters"
+    
+    echo "Running parameter tests..."
+    "${BUILD_DIR}/test_parameters"
+    
+    # Build and run example syntax tests
+    echo "Building example syntax tests..."
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/test_example_syntax.cc -o "${BUILD_DIR}/test_example_syntax"
+    
+    echo "Running example syntax tests..."
+    "${BUILD_DIR}/test_example_syntax"
 }
 
 cmd_stress() {
-    echo "Building and running stress tests..."
     mkdir -p "${BUILD_DIR}"
     
     # Build library sources (excluding main.cc, test files, and tools)
@@ -193,7 +206,6 @@ cmd_tools() {
         exit 1
     fi
     
-    echo "Building and running $tool_name..."
     mkdir -p "${BUILD_DIR}"
     
     # Build library sources (excluding main.cc and tools)
@@ -221,7 +233,6 @@ cmd_run() {
 }
 
 cmd_ast_to_json() {
-    echo "Building ast_to_json tool..."
     mkdir -p "${BUILD_DIR}"
     
     # Build library sources (excluding main.cc and tools)
@@ -239,8 +250,25 @@ cmd_ast_to_json() {
     "${BUILD_DIR}/ast_to_json"
 }
 
+cmd_ast_to_code() {
+    mkdir -p "${BUILD_DIR}"
+    
+    # Build library sources (excluding main.cc and tools)
+    lib_sources=$(find "${SRC_DIR}" -name "*.cc" -o -name "*.cpp" | grep -v main.cc | grep -v "/tools/" | sort)
+    
+    if [ -z "$lib_sources" ]; then
+        echo "Error: No library source files found in ${SRC_DIR}"
+        exit 1
+    fi
+    
+    # Build the ast_to_code tool
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources "${SRC_DIR}/tools/ast_to_code.cc" -o "${BUILD_DIR}/ast_to_code"
+    
+    # Run the tool with stdin
+    "${BUILD_DIR}/ast_to_code"
+}
+
 cmd_reader_repl() {
-    echo "Building reader_repl tool..."
     mkdir -p "${BUILD_DIR}"
     
     # Build library sources (excluding main.cc and tools)
@@ -254,12 +282,12 @@ cmd_reader_repl() {
     # Build the reader_repl tool
     ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources "${SRC_DIR}/tools/reader_repl.cc" -o "${BUILD_DIR}/reader_repl"
     
-    # Run the REPL
-    "${BUILD_DIR}/reader_repl"
+    # Run the REPL with any additional arguments (skip the first one which is "reader-repl")
+    shift
+    "${BUILD_DIR}/reader_repl" "$@"
 }
 
 cmd_tokenizer_debug() {
-    echo "Building tokenizer_debug tool..."
     mkdir -p "${BUILD_DIR}"
     
     # Build library sources (excluding main.cc and tools)
@@ -291,8 +319,11 @@ case ${1:-help} in
     ast-to-json)
         cmd_ast_to_json
         ;;
+    ast-to-code)
+        cmd_ast_to_code
+        ;;
     reader-repl)
-        cmd_reader_repl
+        cmd_reader_repl "$@"
         ;;
     tokenizer-debug)
         cmd_tokenizer_debug

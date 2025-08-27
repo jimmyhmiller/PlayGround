@@ -1,5 +1,5 @@
 #include "../ast.h"
-#include "../ast_json.h"
+#include "../ast_code.h"
 #include "../reader.h"
 #include <iostream>
 #include <sstream>
@@ -21,8 +21,8 @@ int main() {
 
     ASTBuilder builder(reader.root.children);
     auto ast = builder.build();
-
-    std::cout << ast_to_json(ast.get()) << std::endl;
+    
+    std::cout << ast_to_code(ast.get()) << std::endl;
 
     return 0;
   } catch (const std::exception &e) {

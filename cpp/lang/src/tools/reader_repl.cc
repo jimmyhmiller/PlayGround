@@ -2,6 +2,7 @@
 #include <cstdio> // for fileno
 #include <iostream>
 #include <string>
+#include <cstring> // for strcmp
 #include <unistd.h> // for isatty
 
 std::string indent(int level) { return std::string(level * 2, ' '); }
@@ -52,22 +53,91 @@ void print_node(const ReaderNode &node, int level = 0) {
   }
 }
 
-void print_parsed_result(const Reader &reader) {
-  if (reader.root.children.empty()) {
-    std::cout << "(empty)\n";
-  } else if (reader.root.children.size() == 1) {
-    print_node(reader.root.children[0]);
-    std::cout << "\n";
+void print_sexpr(const ReaderNode &node) {
+  if (node.type == ReaderNodeType::BinaryOp) {
+    std::cout << "(" << node.value();
+    for (const auto &child : node.children) {
+      std::cout << " ";
+      print_sexpr(child);
+    }
+    std::cout << ")";
+  } else if (node.type == ReaderNodeType::PrefixOp) {
+    std::cout << "(" << node.value();
+    for (const auto &child : node.children) {
+      std::cout << " ";
+      print_sexpr(child);
+    }
+    std::cout << ")";
+  } else if (node.type == ReaderNodeType::PostfixOp) {
+    std::cout << "(postfix-" << node.value();
+    for (const auto &child : node.children) {
+      std::cout << " ";
+      print_sexpr(child);
+    }
+    std::cout << ")";
+  } else if (node.type == ReaderNodeType::Call) {
+    std::cout << "(call";
+    for (const auto &child : node.children) {
+      std::cout << " ";
+      print_sexpr(child);
+    }
+    std::cout << ")";
+  } else if (node.type == ReaderNodeType::List) {
+    std::cout << "(";
+    bool first = true;
+    for (const auto &child : node.children) {
+      if (!first) std::cout << " ";
+      first = false;
+      print_sexpr(child);
+    }
+    std::cout << ")";
+  } else if (node.type == ReaderNodeType::Block) {
+    std::cout << "(block";
+    for (const auto &child : node.children) {
+      std::cout << " ";
+      print_sexpr(child);
+    }
+    std::cout << ")";
+  } else if (node.type == ReaderNodeType::Ident || node.type == ReaderNodeType::Literal) {
+    std::cout << node.value();
   } else {
-    print_node(reader.root);
-    std::cout << "\n";
+    std::cout << node.value();
   }
 }
 
-void run_interactive_repl() {
-  std::cout
-      << "Reader REPL - Enter expressions, press Enter twice to execute "
-         "(Ctrl+D to exit):\n";
+void print_parsed_result(const Reader &reader, bool sexpr_mode = false) {
+  if (sexpr_mode) {
+    if (reader.root.children.empty()) {
+      std::cout << "()\n";
+    } else if (reader.root.children.size() == 1) {
+      print_sexpr(reader.root.children[0]);
+      std::cout << "\n";
+    } else {
+      std::cout << "(";
+      bool first = true;
+      for (const auto &child : reader.root.children) {
+        if (!first) std::cout << " ";
+        first = false;
+        print_sexpr(child);
+      }
+      std::cout << ")\n";
+    }
+  } else {
+    if (reader.root.children.empty()) {
+      std::cout << "(empty)\n";
+    } else if (reader.root.children.size() == 1) {
+      print_node(reader.root.children[0]);
+      std::cout << "\n";
+    } else {
+      print_node(reader.root);
+      std::cout << "\n";
+    }
+  }
+}
+
+void run_interactive_repl(bool sexpr_mode) {
+  std::cout << "Reader REPL - Enter expressions, press Enter twice to execute "
+               "(Ctrl+D to exit):\n";
   std::cout << ">>> ";
 
   std::string line;
@@ -82,7 +152,7 @@ void run_interactive_repl() {
         try {
           Reader reader(input);
           reader.read();
-          print_parsed_result(reader);
+          print_parsed_result(reader, sexpr_mode);
         } catch (const std::exception &e) {
           std::cout << "Error: " << e.what() << "\n";
         }
@@ -102,7 +172,7 @@ void run_interactive_repl() {
   std::cout << "\nGoodbye!\n";
 }
 
-void run_batch_mode() {
+void run_batch_mode(bool sexpr_mode) {
   std::string line;
   std::string input;
 
@@ -117,24 +187,34 @@ void run_batch_mode() {
     try {
       Reader reader(input);
       reader.read();
-      print_parsed_result(reader);
+      print_parsed_result(reader, sexpr_mode);
     } catch (const std::exception &e) {
       std::cout << "Error: " << e.what() << "\n";
     }
   }
 }
 
-void run_reader_repl() {
+void run_reader_repl(bool sexpr_mode) {
   bool is_interactive = isatty(fileno(stdin));
 
   if (is_interactive) {
-    run_interactive_repl();
+    run_interactive_repl(sexpr_mode);
   } else {
-    run_batch_mode();
+    run_batch_mode(sexpr_mode);
   }
 }
 
-int main() {
-  run_reader_repl();
+int main(int argc, char* argv[]) {
+  bool sexpr_mode = false;
+  
+  // Check for --sexpr flag
+  for (int i = 1; i < argc; i++) {
+    if (std::strcmp(argv[i], "--sexpr") == 0) {
+      sexpr_mode = true;
+      break;
+    }
+  }
+  
+  run_reader_repl(sexpr_mode);
   return 0;
 }

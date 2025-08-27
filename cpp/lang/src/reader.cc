@@ -20,29 +20,45 @@ void Reader::read() {
   }
 }
 
-int Reader::get_binding_power(const Token &token, bool isPostfix) {
+Reader::OperatorInfo Reader::get_operator_info(const Token &token, bool isPostfix) {
   if (token.type == TokenType::Operator) {
     if (isPostfix && token.value == "!")
-      return 40;
+      return {40, LEFT};
     if (!isPostfix && token.value == "!")
-      return 0;
+      return {0, RIGHT};
+    if (token.value == "||")
+      return {2, LEFT};
     if (token.value == "==" || token.value == "!=" || token.value == "<" ||
         token.value == ">" || token.value == "<=" || token.value == ">=")
-      return 5;
+      return {5, LEFT};
     if (token.value == "+" || token.value == "-")
-      return 10;
+      return {10, LEFT};
+    if (token.value == "->")
+      return {8, RIGHT};  // Higher precedence than : and right-associative
+    if (token.value == "=>")
+      return {1, RIGHT};  // Low precedence, right-associative
     if (token.value == "*" || token.value == "/")
-      return 20;
+      return {20, LEFT};
     if (token.value == "^")
-      return 30;
+      return {30, RIGHT};  // Exponentiation is typically right-associative
     if (token.value == ".")
-      return 35;
-    return 2;
+      return {35, LEFT};
+    return {2, LEFT};
   }
   if (token.type == TokenType::Separator) {
-    return 1;
+    if (token.value == ":")
+      return {3, RIGHT};  // Lower precedence than ->, right-associative
+    // Comma is not a binary operator - it's only a list separator
+    return {0, LEFT};  // No precedence for other separators
   }
-  return 0;
+  if (isPostfix && token.type == TokenType::Delimiter && token.value == "(") {
+    return {50, LEFT};  // Function calls have very high precedence
+  }
+  return {0, LEFT};
+}
+
+int Reader::get_binding_power(const Token &token, bool isPostfix) {
+  return get_operator_info(token, isPostfix).precedence;
 }
 
 ReaderNode Reader::parse_expression(int rightBindingPower) {
@@ -98,8 +114,16 @@ ReaderNode Reader::parse_prefix(const Token &token) {
   if (token.type == TokenType::Delimiter && token.value == "{") {
     std::vector<ReaderNode> statements;
 
+    // Parse semicolon-terminated statements
     while (current_token.type != TokenType::End && current_token.value != "}") {
       statements.push_back(parse_expression());
+      
+      // If we hit a semicolon, consume it and continue
+      if (current_token.value == ";") {
+        advance(); // consume the semicolon
+      }
+      // If we don't hit a semicolon, we should still continue parsing
+      // The last expression in a block doesn't need a semicolon
     }
 
     if (current_token.type == TokenType::End) {
@@ -117,8 +141,17 @@ ReaderNode Reader::parse_prefix(const Token &token) {
   if (token.type == TokenType::Delimiter && token.value == "(") {
     std::vector<ReaderNode> elements;
 
+    // Parse comma-separated expressions
     while (current_token.type != TokenType::End && current_token.value != ")") {
       elements.push_back(parse_expression());
+      
+      // If we hit a comma, consume it and continue
+      if (current_token.value == ",") {
+        advance(); // consume the comma
+      } else if (current_token.value != ")") {
+        // If it's not a comma and not a closing paren, we have an error
+        break;
+      }
     }
 
     if (current_token.type == TokenType::End) {
@@ -176,15 +209,37 @@ ReaderNode Reader::parse_prefix(const Token &token) {
 }
 
 ReaderNode Reader::parse_infix(ReaderNode left, const Token &token) {
-  int bp = get_binding_power(token);
-  bool rightAssoc = (token.value == "^");
-  int nextBp = rightAssoc ? bp - 1 : bp;
+  OperatorInfo info = get_operator_info(token);
+  int nextBp = (info.associativity == RIGHT) ? info.precedence : info.precedence + 1;
   ReaderNode right = parse_expression(nextBp);
   return ReaderNode(ReaderNodeType::BinaryOp, token,
                     {std::move(left), std::move(right)});
 }
 
 ReaderNode Reader::parse_postfix(ReaderNode left, const Token &token) {
+  if (token.type == TokenType::Delimiter && token.value == "(") {
+    // This is a function call
+    std::vector<ReaderNode> arguments;
+    
+    // Parse arguments until we hit the closing parenthesis
+    while (current_token.type != TokenType::End && current_token.value != ")") {
+      arguments.push_back(parse_expression());
+    }
+    
+    if (current_token.value == ")") {
+      advance(); // consume the closing parenthesis
+    }
+    
+    // Create a Call node with the function as first child, then arguments
+    ReaderNode call_node(ReaderNodeType::Call, token);
+    call_node.children.push_back(std::move(left));
+    for (auto& arg : arguments) {
+      call_node.children.push_back(std::move(arg));
+    }
+    
+    return call_node;
+  }
+  
   return ReaderNode(ReaderNodeType::PostfixOp, token, {std::move(left)});
 }
 
