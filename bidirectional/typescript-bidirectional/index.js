@@ -48,6 +48,11 @@ const createTypeVariable = (name) => ({
   name
 });
 
+const createUnknownType = (name) => ({
+  kind: 'unknown',
+  name
+});
+
 const BOOL_TYPE = createPrimitiveType('boolean');
 const NUMBER_TYPE = createPrimitiveType('number');
 const STRING_TYPE = createPrimitiveType('string');
@@ -60,6 +65,8 @@ const typesEqual = (type1, type2) => {
     case 'primitive':
       return type1.name === type2.name;
     case 'variable':
+      return type1.name === type2.name;
+    case 'unknown':
       return type1.name === type2.name;
     case 'function':
       if (type1.paramTypes.length !== type2.paramTypes.length) return false;
@@ -167,6 +174,8 @@ const formatType = (type) => {
       return `(${paramStr}) => ${formatType(type.returnType)}`;
     case 'variable':
       return type.name;
+    case 'unknown':
+      return `unknown(${type.name})`;
     default:
       return JSON.stringify(type);
   }
@@ -215,13 +224,14 @@ const processVariableDeclaration = (node, context) => {
     return { ...context, [varName]: annotatedType };
   }
   
-  // Otherwise, infer the type from the initializer
-  if (!node.initializer) {
-    throw new Error(`Variable ${varName} needs either a type annotation or an initializer`);
+  // If there's an initializer, infer the type from it
+  if (node.initializer) {
+    const inferredType = synthesize(node.initializer, context);
+    return { ...context, [varName]: inferredType };
   }
   
-  const inferredType = synthesize(node.initializer, context);
-  return { ...context, [varName]: inferredType };
+  // No type annotation and no initializer - mark as unknown for later inference
+  return { ...context, [varName]: createUnknownType(varName) };
 };
 
 // Process a statement and return updated context
@@ -236,12 +246,50 @@ const processStatement = (statement, context) => {
       return newContext;
       
     case ts.SyntaxKind.ExpressionStatement:
-      // For expression statements, just synthesize but don't update context
+      // Check if this is an assignment that could infer a type
+      const expr = statement.expression;
+      if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.FirstAssignment) {
+        return processAssignment(expr, context);
+      }
+      
+      // For other expression statements, just synthesize but don't update context
       synthesize(statement.expression, context);
       return context;
       
     default:
       throw new Error(`Unsupported statement: ${ts.SyntaxKind[statement.kind]}`);
+  }
+};
+
+// Process assignment expressions and infer types for unknown variables
+const processAssignment = (node, context) => {
+  if (!ts.isBinaryExpression(node) || node.operatorToken.kind !== ts.SyntaxKind.FirstAssignment) {
+    throw new Error('Expected assignment expression');
+  }
+  
+  if (!ts.isIdentifier(node.left)) {
+    throw new Error('Left side of assignment must be an identifier');
+  }
+  
+  const varName = node.left.text;
+  const rightType = synthesize(node.right, context);
+  
+  // Check if variable exists in context
+  if (context[varName] === undefined) {
+    throw new Error(`Variable ${varName} not declared`);
+  }
+  
+  const currentType = context[varName];
+  
+  if (currentType.kind === 'unknown') {
+    // First assignment to an unknown variable - infer its type
+    return { ...context, [varName]: rightType };
+  } else {
+    // Variable already has a type - check consistency
+    if (!typesEqual(currentType, rightType)) {
+      throw new Error(`Cannot assign ${formatType(rightType)} to variable ${varName} of type ${formatType(currentType)}`);
+    }
+    return context;
   }
 };
 
@@ -263,11 +311,22 @@ const processStatements = (statements, initialContext = {}) => {
         });
       }
     } else if (statement.kind === ts.SyntaxKind.ExpressionStatement) {
-      const type = synthesize(statement.expression, context);
-      results.push({ 
-        kind: 'expression', 
-        type 
-      });
+      const expr = statement.expression;
+      // Check if this is an assignment
+      if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.FirstAssignment) {
+        context = processAssignment(expr, context);
+        results.push({ 
+          kind: 'assignment',
+          variable: expr.left.text,
+          type: context[expr.left.text]
+        });
+      } else {
+        const type = synthesize(statement.expression, context);
+        results.push({ 
+          kind: 'expression', 
+          type 
+        });
+      }
     } else {
       context = processStatement(statement, context);
     }
@@ -290,7 +349,14 @@ const synthesize = (node, context) => {
       return STRING_TYPE;
       
     case ts.SyntaxKind.Identifier:
-      return lookupVariable(context, node.text);
+      const varType = context[node.text];
+      if (varType === undefined) {
+        throw new Error(`Variable ${node.text} not found in context`);
+      }
+      if (varType.kind === 'unknown') {
+        throw new Error(`Variable ${node.text} used before assignment`);
+      }
+      return varType;
       
     case ts.SyntaxKind.ArrowFunction:
     case ts.SyntaxKind.FunctionExpression:
@@ -343,6 +409,11 @@ const synthesize = (node, context) => {
       }
       
     case ts.SyntaxKind.BinaryExpression:
+      // Handle assignment separately (this shouldn't happen in expression context)
+      if (node.operatorToken.kind === ts.SyntaxKind.FirstAssignment) {
+        throw new Error('Assignment should be handled at statement level, not expression level');
+      }
+      
       const left = synthesize(node.left, context);
       const right = synthesize(node.right, context);
       
@@ -511,6 +582,7 @@ export {
   processVariableDeclaration,
   processStatement,
   processStatements,
+  processAssignment,
   synthesizeFunctionBody,
   formatType,
   runTest,
@@ -521,5 +593,6 @@ export {
   STRING_TYPE,
   createFunctionType,
   createTypeVariable,
-  createPrimitiveType
+  createPrimitiveType,
+  createUnknownType
 };
