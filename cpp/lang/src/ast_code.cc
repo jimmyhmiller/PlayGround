@@ -121,9 +121,9 @@ std::string generate_struct_declaration(const ASTNode* node, int indent) {
         result << ", ";
       }
       
-      // Special formatting for generic parameters (x: Type -> x:Type)
+      // Special formatting for generic parameters (x: Type -> x: Type) 
       if (child->type == ASTNodeType::BinaryExpression && child->value == ":" && child->child_count() >= 2) {
-        result << generate_expression(child->child(0), 0) << ":" << generate_expression(child->child(1), 0);
+        result << generate_expression(child->child(0), 0) << ": " << generate_expression(child->child(1), 0);
       } else {
         result << generate_expression(child, 0);
       }

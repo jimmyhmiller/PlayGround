@@ -163,7 +163,7 @@ const collectTypeVars = (type) => {
   }
 };
 
-const substitute = (type, substitutions) => {
+const substitute = (type, substitutions = {}) => {
   switch (type.kind) {
     case 'variable':
       return substitutions[type.name] || type;
@@ -535,7 +535,7 @@ const synthesize = (node, context) => {
         case ts.SyntaxKind.SlashToken:
         case ts.SyntaxKind.PercentToken:
           if (!typesEqual(left, NUMBER_TYPE) || !typesEqual(right, NUMBER_TYPE)) {
-            throw new Error(`${ts.tokenToString(node.operatorToken.kind)} requires number operands`);
+            throw new Error(`${ts.SyntaxKind[node.operatorToken.kind]} requires number operands`);
           }
           return NUMBER_TYPE;
           
@@ -612,7 +612,25 @@ const check = (node, expectedType, context) => {
         extendedContext[param.name.text] = paramType;
       }
       
-      check(node.body, expectedType.returnType, extendedContext);
+      if (ts.isBlock(node.body)) {
+        // Handle block statement body
+        const { context: finalContext, results } = processStatements(node.body.statements, extendedContext);
+        
+        // Find the last non-declaration statement's type and check it
+        for (let i = results.length - 1; i >= 0; i--) {
+          if (results[i].kind === 'expression') {
+            if (!typesEqual(results[i].type, expectedType.returnType)) {
+              throw new Error(`Expected function return type ${formatType(expectedType.returnType)}, got ${formatType(results[i].type)}`);
+            }
+            return;
+          }
+        }
+        
+        throw new Error('Function body must end with an expression');
+      } else {
+        // Handle expression body
+        check(node.body, expectedType.returnType, extendedContext);
+      }
       return;
       
     case ts.SyntaxKind.ParenthesizedExpression:

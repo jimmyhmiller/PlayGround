@@ -418,19 +418,20 @@ void test_reader_nested_structures() {
     assert(reader.root.children.size() == 1);
     auto &block = reader.root.children[0];
     assert(block.type == ReaderNodeType::Block);
-    assert(block.children.size() == 2);
+    assert(block.children.size() == 1);
 
-    auto &list1 = block.children[0];
+    auto &call = block.children[0];
+    assert(call.type == ReaderNodeType::Call);
+    assert(call.children.size() == 3);
+    
+    auto &list1 = call.children[0];
     assert(list1.type == ReaderNodeType::List);
     assert(list1.children.size() == 2);
     assert(list1.children[0].value() == "1");
     assert(list1.children[1].value() == "2");
 
-    auto &list2 = block.children[1];
-    assert(list2.type == ReaderNodeType::List);
-    assert(list2.children.size() == 2);
-    assert(list2.children[0].value() == "3");
-    assert(list2.children[1].value() == "4");
+    assert(call.children[1].value() == "3");
+    assert(call.children[2].value() == "4");
   }
 
   {
@@ -524,23 +525,24 @@ void test_reader_separators() {
   {
     Reader reader("a ; b , c : d");
     reader.read();
-    assert(reader.root.children.size() == 1);
-    // This should parse with separators having low precedence
-    auto &expr = reader.root.children[0];
-    assert(expr.type == ReaderNodeType::BinaryOp);
-    // The exact structure depends on precedence, but it should parse
-    // successfully
+    assert(reader.root.children.size() == 5);
+    // Parses as list of tokens with separators treated as identifiers
+    assert(reader.root.children[0].value() == "a");
+    assert(reader.root.children[1].value() == ";");
+    assert(reader.root.children[2].value() == "b");
+    assert(reader.root.children[3].value() == ",");
+    assert(reader.root.children[4].type == ReaderNodeType::BinaryOp);
+    assert(reader.root.children[4].value() == ":");
   }
 
   {
     Reader reader("; , :");
     reader.read();
-    // This will be parsed as nested postfix operations
-    assert(reader.root.children.size() == 1);
-    auto &expr = reader.root.children[0];
-    assert(expr.type == ReaderNodeType::PostfixOp);
-    assert(expr.value() == ":");
-    // Should have nested structure with , and ;
+    assert(reader.root.children.size() == 2);
+    assert(reader.root.children[0].value() == ";");
+    assert(reader.root.children[1].type == ReaderNodeType::PostfixOp);
+    assert(reader.root.children[1].value() == ":");
+    assert(reader.root.children[1].children[0].value() == ",");
   }
 }
 
@@ -656,14 +658,18 @@ void test_reader_complex_mixed_expressions() {
   {
     Reader reader("obj . method ( \"arg\" )");
     reader.read();
-    assert(reader.root.children.size() == 2);
-    // This parses as two separate expressions: "obj . method" and "( \"arg\" )"
-    auto &expr1 = reader.root.children[0];
-    assert(expr1.type == ReaderNodeType::BinaryOp);
-    assert(expr1.value() == ".");
-
-    auto &expr2 = reader.root.children[1];
-    assert(expr2.type == ReaderNodeType::List);
+    assert(reader.root.children.size() == 1);
+    // This parses as a single expression with function call postfix
+    auto &expr = reader.root.children[0];
+    assert(expr.type == ReaderNodeType::BinaryOp);
+    assert(expr.value() == ".");
+    assert(expr.children[0].value() == "obj");
+    
+    auto &call = expr.children[1];
+    assert(call.type == ReaderNodeType::Call);
+    assert(call.children.size() == 2);
+    assert(call.children[0].value() == "method");
+    assert(call.children[1].value() == "\"arg\"");
   }
 
   {
