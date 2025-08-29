@@ -141,9 +141,14 @@ ReaderNode Reader::parse_prefix(const Token &token) {
   if (token.type == TokenType::Delimiter && token.value == "(") {
     std::vector<ReaderNode> elements;
 
-    // Parse space-separated expressions (like lists and blocks)
+    // Parse space or comma-separated expressions
     while (current_token.type != TokenType::End && current_token.value != ")") {
       elements.push_back(parse_expression());
+      
+      // If we hit a comma, consume it and continue
+      if (current_token.value == ",") {
+        advance(); // consume the comma
+      }
     }
 
     if (current_token.type == TokenType::End) {
@@ -202,7 +207,7 @@ ReaderNode Reader::parse_prefix(const Token &token) {
 
 ReaderNode Reader::parse_infix(ReaderNode left, const Token &token) {
   OperatorInfo info = get_operator_info(token);
-  int nextBp = (info.associativity == RIGHT) ? info.precedence : info.precedence + 1;
+  int nextBp = (info.associativity == RIGHT) ? info.precedence - 1 : info.precedence + 1;
   ReaderNode right = parse_expression(nextBp);
   return ReaderNode(ReaderNodeType::BinaryOp, token,
                     {std::move(left), std::move(right)});
@@ -213,16 +218,13 @@ ReaderNode Reader::parse_postfix(ReaderNode left, const Token &token) {
     // This is a function call
     std::vector<ReaderNode> arguments;
     
-    // Parse comma-separated arguments
+    // Parse space or comma-separated arguments
     while (current_token.type != TokenType::End && current_token.value != ")") {
       arguments.push_back(parse_expression());
       
       // If we hit a comma, consume it and continue
       if (current_token.value == ",") {
         advance(); // consume the comma
-      } else if (current_token.value != ")") {
-        // If it's not a comma and not a closing paren, we have an error
-        break;
       }
     }
     
