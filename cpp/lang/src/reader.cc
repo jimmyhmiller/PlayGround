@@ -141,17 +141,9 @@ ReaderNode Reader::parse_prefix(const Token &token) {
   if (token.type == TokenType::Delimiter && token.value == "(") {
     std::vector<ReaderNode> elements;
 
-    // Parse comma-separated expressions
+    // Parse space-separated expressions (like lists and blocks)
     while (current_token.type != TokenType::End && current_token.value != ")") {
       elements.push_back(parse_expression());
-      
-      // If we hit a comma, consume it and continue
-      if (current_token.value == ",") {
-        advance(); // consume the comma
-      } else if (current_token.value != ")") {
-        // If it's not a comma and not a closing paren, we have an error
-        break;
-      }
     }
 
     if (current_token.type == TokenType::End) {
