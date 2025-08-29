@@ -1,5 +1,4 @@
 #include "ast.h"
-#include <stdexcept>
 #include <functional>
 
 std::unique_ptr<ASTNode> ASTBuilder::build() {

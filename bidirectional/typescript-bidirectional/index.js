@@ -157,6 +157,125 @@ const isGenericFunctionType = (type) => {
   return type.kind === 'function' && collectTypeVars(type).length > 0;
 };
 
+// Helper function to format types nicely
+const formatType = (type) => {
+  switch (type.kind) {
+    case 'primitive':
+      return type.name;
+    case 'function':
+      const paramStr = type.paramTypes.map(formatType).join(', ');
+      return `(${paramStr}) => ${formatType(type.returnType)}`;
+    case 'variable':
+      return type.name;
+    default:
+      return JSON.stringify(type);
+  }
+};
+
+// Synthesize the type of a function body (could be block or expression)
+const synthesizeFunctionBody = (bodyNode, context) => {
+  if (ts.isBlock(bodyNode)) {
+    // Handle block statement - process all statements and return the type of the last expression
+    const { context: finalContext, results } = processStatements(bodyNode.statements, context);
+    
+    // Find the last non-declaration statement's type
+    for (let i = results.length - 1; i >= 0; i--) {
+      if (results[i].kind === 'expression') {
+        return results[i].type;
+      }
+    }
+    
+    throw new Error('Function body must end with an expression');
+  } else {
+    // Handle expression body
+    return synthesize(bodyNode, context);
+  }
+};
+
+// Process variable declarations and build context
+const processVariableDeclaration = (node, context) => {
+  if (node.kind !== ts.SyntaxKind.VariableDeclaration) {
+    throw new Error('Expected variable declaration');
+  }
+  
+  const varName = node.name.text;
+  
+  // If there's an explicit type annotation, use it
+  if (node.type) {
+    const annotatedType = convertTypeAnnotation(node.type);
+    
+    // If there's also an initializer, check that it matches the annotation
+    if (node.initializer) {
+      const initializerType = synthesize(node.initializer, context);
+      if (!typesEqual(annotatedType, initializerType)) {
+        throw new Error(`Variable ${varName} annotated as ${formatType(annotatedType)} but initialized with ${formatType(initializerType)}`);
+      }
+    }
+    
+    return { ...context, [varName]: annotatedType };
+  }
+  
+  // Otherwise, infer the type from the initializer
+  if (!node.initializer) {
+    throw new Error(`Variable ${varName} needs either a type annotation or an initializer`);
+  }
+  
+  const inferredType = synthesize(node.initializer, context);
+  return { ...context, [varName]: inferredType };
+};
+
+// Process a statement and return updated context
+const processStatement = (statement, context) => {
+  switch (statement.kind) {
+    case ts.SyntaxKind.VariableStatement:
+      // Process each declaration in the statement
+      let newContext = context;
+      for (const declaration of statement.declarationList.declarations) {
+        newContext = processVariableDeclaration(declaration, newContext);
+      }
+      return newContext;
+      
+    case ts.SyntaxKind.ExpressionStatement:
+      // For expression statements, just synthesize but don't update context
+      synthesize(statement.expression, context);
+      return context;
+      
+    default:
+      throw new Error(`Unsupported statement: ${ts.SyntaxKind[statement.kind]}`);
+  }
+};
+
+// Process multiple statements and build context incrementally
+const processStatements = (statements, initialContext = {}) => {
+  let context = initialContext;
+  const results = [];
+  
+  for (const statement of statements) {
+    if (statement.kind === ts.SyntaxKind.VariableStatement) {
+      context = processStatement(statement, context);
+      // Store the variable declarations for reporting
+      for (const declaration of statement.declarationList.declarations) {
+        const varName = declaration.name.text;
+        results.push({ 
+          kind: 'variable', 
+          name: varName, 
+          type: context[varName] 
+        });
+      }
+    } else if (statement.kind === ts.SyntaxKind.ExpressionStatement) {
+      const type = synthesize(statement.expression, context);
+      results.push({ 
+        kind: 'expression', 
+        type 
+      });
+    } else {
+      context = processStatement(statement, context);
+    }
+  }
+  
+  return { context, results };
+};
+
 // Synthesize type for an expression
 const synthesize = (node, context) => {
   switch (node.kind) {
@@ -186,7 +305,7 @@ const synthesize = (node, context) => {
         extendedContext[param.name.text] = paramTypes[i];
       });
       
-      const bodyType = synthesize(node.body, extendedContext);
+      const bodyType = synthesizeFunctionBody(node.body, extendedContext);
       
       return createFunctionType(paramTypes, bodyType);
       
@@ -240,10 +359,31 @@ const synthesize = (node, context) => {
         case ts.SyntaxKind.MinusToken:
         case ts.SyntaxKind.AsteriskToken:
         case ts.SyntaxKind.SlashToken:
+        case ts.SyntaxKind.PercentToken:
           if (!typesEqual(left, NUMBER_TYPE) || !typesEqual(right, NUMBER_TYPE)) {
             throw new Error(`${ts.tokenToString(node.operatorToken.kind)} requires number operands`);
           }
           return NUMBER_TYPE;
+          
+        case ts.SyntaxKind.GreaterThanToken:
+        case ts.SyntaxKind.LessThanToken:
+        case ts.SyntaxKind.GreaterThanEqualsToken:
+        case ts.SyntaxKind.LessThanEqualsToken:
+        case ts.SyntaxKind.EqualsEqualsToken:
+        case ts.SyntaxKind.EqualsEqualsEqualsToken:
+        case ts.SyntaxKind.ExclamationEqualsToken:
+        case ts.SyntaxKind.ExclamationEqualsEqualsToken:
+          // Comparison operators return boolean
+          if (typesEqual(left, NUMBER_TYPE) && typesEqual(right, NUMBER_TYPE)) {
+            return BOOL_TYPE;
+          }
+          if (typesEqual(left, STRING_TYPE) && typesEqual(right, STRING_TYPE)) {
+            return BOOL_TYPE;
+          }
+          if (typesEqual(left, BOOL_TYPE) && typesEqual(right, BOOL_TYPE)) {
+            return BOOL_TYPE;
+          }
+          throw new Error(`Comparison requires matching operand types`);
           
         default:
           throw new Error(`Unsupported binary operator: ${ts.SyntaxKind[node.operatorToken.kind]}`);
@@ -322,6 +462,12 @@ const getExpression = (sourceFile) => {
   return statement;
 };
 
+// Helper to process a full program (multiple statements)
+const processProgram = (code, initialContext = {}) => {
+  const sourceFile = parseTypeScript(code);
+  return processStatements(sourceFile.statements, initialContext);
+};
+
 // Test runner utilities
 const runTest = (testCase, shouldFail = false) => {
   try {
@@ -361,6 +507,12 @@ export {
   synthesize, 
   check, 
   getExpression,
+  processProgram,
+  processVariableDeclaration,
+  processStatement,
+  processStatements,
+  synthesizeFunctionBody,
+  formatType,
   runTest,
   runFail, 
   assertEquals,
@@ -368,5 +520,6 @@ export {
   NUMBER_TYPE,
   STRING_TYPE,
   createFunctionType,
-  createTypeVariable
+  createTypeVariable,
+  createPrimitiveType
 };
