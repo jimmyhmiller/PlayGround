@@ -4,6 +4,7 @@ import {
   check, 
   getExpression,
   processProgram,
+  formatType,
   runTest,
   runFail, 
   assertEquals,
@@ -11,7 +12,8 @@ import {
   NUMBER_TYPE,
   STRING_TYPE,
   createFunctionType,
-  createTypeVariable
+  createTypeVariable,
+  createUnknownType
 } from './index.js';
 
 // Helper to test synthesize with TypeScript code
@@ -404,11 +406,10 @@ console.log('✓ var declarations work with inference\n');
 // Error cases for variable declarations
 console.log('Testing variable declaration error cases...');
 
-// Should fail: variable without initializer or type
-runFail(() => {
-  processProgram('let x');
-});
-console.log('✓ Fails when variable has no initializer or type');
+// Now allowed: variable without initializer (creates unknown type until assigned)
+const uninitializedTest = processProgram('let x');
+assertEquals(uninitializedTest.context.x.kind, 'unknown', 'uninitialized variable should be unknown');
+console.log('✓ Uninitialized variables are allowed (marked as unknown)');
 
 // Should fail: type mismatch with explicit annotation
 runFail(() => {
@@ -549,13 +550,277 @@ assertEquals(
 console.log('✓ Complex realistic function works correctly\n');
 
 console.log('✅ All complex function tests passed!');
-console.log('\n📝 Variable Declaration Summary:');
-console.log('- Variables can be declared without type annotations');
-console.log('- Types are automatically inferred from initializers');
-console.log('- let, const, and var all support type inference');
-console.log('- Inferred variables can be used in subsequent expressions');
-console.log('- Explicit type annotations are still supported when needed');
-console.log('- Variables can reference other variables in their initializers');
-console.log('- Complex functions with many locals work correctly');
-console.log('- Function bodies can contain multiple variable declarations');
-console.log('- Local variables are properly scoped within function bodies');
+
+// Deferred Type Inference Tests
+console.log('\n🔮 Testing Deferred Type Inference (Assignment-Based)...\n');
+
+// Test 1: Basic deferred inference
+console.log('Test 1: Declare then assign');
+const deferredTest1 = processProgram(`
+  let x
+  x = 42
+`);
+assertEquals(deferredTest1.context.x, NUMBER_TYPE, 'x should be inferred as number after assignment');
+console.log('✓ Variable type inferred from first assignment\n');
+
+// Test 2: Multiple variables with deferred inference
+console.log('Test 2: Multiple variables with deferred inference');
+const deferredTest2 = processProgram(`
+  let a
+  let b
+  let c
+  a = 100
+  b = "hello"
+  c = true
+`);
+assertEquals(deferredTest2.context.a, NUMBER_TYPE, 'a should be number');
+assertEquals(deferredTest2.context.b, STRING_TYPE, 'b should be string');
+assertEquals(deferredTest2.context.c, BOOL_TYPE, 'c should be boolean');
+console.log('✓ Multiple variables inferred from assignments\n');
+
+// Test 3: Using variables after assignment
+console.log('Test 3: Using variables after assignment');
+const deferredTest3 = processProgram(`
+  let x
+  let y
+  x = 10
+  y = 20
+  x + y
+`);
+assertEquals(deferredTest3.context.x, NUMBER_TYPE, 'x should be number');
+assertEquals(deferredTest3.context.y, NUMBER_TYPE, 'y should be number');
+const lastExpr = deferredTest3.results[deferredTest3.results.length - 1];
+assertEquals(lastExpr.type, NUMBER_TYPE, 'x + y should be number');
+console.log('✓ Variables can be used after type inference\n');
+
+// Test 4: Complex expressions in assignments
+console.log('Test 4: Complex expressions in assignments');
+const deferredTest4 = processProgram(`
+  let result
+  let message
+  let flag
+  result = 10 + 5 * 2
+  message = "Value: " + "computed"
+  flag = result > 15
+`);
+assertEquals(deferredTest4.context.result, NUMBER_TYPE, 'result should be number');
+assertEquals(deferredTest4.context.message, STRING_TYPE, 'message should be string');
+assertEquals(deferredTest4.context.flag, BOOL_TYPE, 'flag should be boolean');
+console.log('✓ Complex expressions infer correct types\n');
+
+// Test 5: Function assignment with deferred inference
+console.log('Test 5: Function assignment with deferred inference');
+const deferredTest5 = processProgram(`
+  let myFunc
+  myFunc = (x: number) => x * 2
+`);
+assertEquals(
+  deferredTest5.context.myFunc,
+  createFunctionType([NUMBER_TYPE], NUMBER_TYPE),
+  'myFunc should be (number) => number'
+);
+console.log('✓ Function type inferred from assignment\n');
+
+// Test 6: Chain of assignments
+console.log('Test 6: Chain of assignments');
+const deferredTest6 = processProgram(`
+  let first
+  let second
+  first = 100
+  second = first
+`);
+assertEquals(deferredTest6.context.first, NUMBER_TYPE, 'first should be number');
+assertEquals(deferredTest6.context.second, NUMBER_TYPE, 'second should be number (from first)');
+console.log('✓ Variables can be assigned from other variables\n');
+
+// Error cases
+console.log('Testing deferred inference error cases...');
+
+// Should fail: using variable before assignment
+runFail(() => {
+  processProgram(`
+    let x
+    x + 1
+  `);
+});
+console.log('✓ Fails when using variable before assignment');
+
+// Should fail: inconsistent assignment
+runFail(() => {
+  processProgram(`
+    let x
+    x = 42
+    x = "hello"
+  `);
+});
+console.log('✓ Fails when assignment type is inconsistent');
+
+// Should fail: assignment to undeclared variable
+runFail(() => {
+  processProgram(`
+    y = 42
+  `);
+});
+console.log('✓ Fails when assigning to undeclared variable\n');
+
+// Test 7: Mixed declaration styles
+console.log('Test 7: Mixed declaration and assignment styles');
+const mixedTest = processProgram(`
+  let initialized = 10
+  let deferred
+  deferred = initialized + 5
+  let another = deferred * 2
+`);
+assertEquals(mixedTest.context.initialized, NUMBER_TYPE, 'initialized should be number');
+assertEquals(mixedTest.context.deferred, NUMBER_TYPE, 'deferred should be number');
+assertEquals(mixedTest.context.another, NUMBER_TYPE, 'another should be number');
+console.log('✓ Mixed styles work together\n');
+
+// Test 8: Complex function with deferred inference inside
+console.log('Test 8: Function with deferred inference inside');
+const deferredInFunction = processProgram(`
+  let processor = (input: number) => {
+    let temp
+    let result
+    temp = input * 2
+    result = temp + 10
+    result
+  }
+`);
+assertEquals(
+  deferredInFunction.context.processor,
+  createFunctionType([NUMBER_TYPE], NUMBER_TYPE),
+  'processor should be (number) => number'
+);
+console.log('✓ Deferred inference works inside functions\n');
+
+console.log('✅ All deferred type inference tests passed!');
+
+// Advanced Edge Case Tests for Deferred Inference
+console.log('\n⚡ Testing Advanced Edge Cases...\n');
+
+// Test 1: Variable never assigned - should fail when used
+console.log('Test 1: Variable never assigned');
+runFail(() => {
+  processProgram(`
+    let x
+    let y = x + 1
+  `);
+});
+console.log('✓ Fails when variable used without assignment');
+
+// Test 2: Multiple assignments to same variable (consistency)
+console.log('Test 2: Multiple consistent assignments');
+const consistentTest = processProgram(`
+  let x
+  x = 10
+  x = 20
+  x = 30
+`);
+assertEquals(consistentTest.context.x, NUMBER_TYPE, 'x should remain number');
+console.log('✓ Multiple consistent assignments work\n');
+
+// Test 3: Assignment from conditional expression works
+console.log('Test 3: Assignment from conditional expression');
+const conditionalExprTest = processProgram(`
+  let result
+  result = true ? 42 : 100
+`);
+assertEquals(conditionalExprTest.context.result, NUMBER_TYPE, 'result should be number');
+console.log('✓ Conditional expression assignment works');
+
+// Test 4: Assignment from conditional with different types should fail
+console.log('Test 4: Conditional with different types should fail');
+runFail(() => {
+  processProgram(`
+    let result
+    result = true ? 42 : "hello"
+  `);
+});
+console.log('✓ Conditional with mismatched types fails\n');
+
+// Test 5: Complex assignment chains
+console.log('Test 5: Complex assignment dependency chains');
+const chainTest = processProgram(`
+  let a
+  let b  
+  let c
+  a = 10
+  b = a * 2
+  c = b + a
+`);
+assertEquals(chainTest.context.a, NUMBER_TYPE, 'a should be number');
+assertEquals(chainTest.context.b, NUMBER_TYPE, 'b should be number');
+assertEquals(chainTest.context.c, NUMBER_TYPE, 'c should be number');
+console.log('✓ Complex dependency chains work\n');
+
+// Test 6: Function parameter shadowing
+console.log('Test 6: Function parameter shadowing deferred variables');
+const shadowTest = processProgram(`
+  let x
+  let fn = (x: string) => {
+    let y
+    y = x + " processed"
+    y
+  }
+  x = 42
+`);
+assertEquals(shadowTest.context.x, NUMBER_TYPE, 'outer x should be number');
+assertEquals(
+  shadowTest.context.fn,
+  createFunctionType([STRING_TYPE], STRING_TYPE),
+  'fn should be (string) => string'
+);
+console.log('✓ Parameter shadowing works correctly\n');
+
+// Test 7: Assignment ordering matters
+console.log('Test 7: Assignment ordering validation');
+runFail(() => {
+  processProgram(`
+    let x
+    let y = x  // Error: x not assigned yet
+    x = 42
+  `);
+});
+console.log('✓ Fails when using variable before it\'s assigned');
+
+// Test 8: Reassignment type checking
+console.log('Test 8: Reassignment type consistency');
+runFail(() => {
+  processProgram(`
+    let counter
+    counter = 0
+    counter = counter + 1  // This should work
+    counter = "done"       // This should fail
+  `);
+});
+console.log('✓ Fails on inconsistent reassignment\n');
+
+// Current limitations (documented for future implementation)
+console.log('📋 Current Limitations (by design for safety):');
+console.log('• if/else statements not supported (would require control flow analysis)');
+console.log('• Arrays/objects not yet supported (would require structural typing)');
+console.log('• Loop constructs not supported (would require flow analysis)');
+console.log('• This prevents complex assignment scenarios that could be unsafe\n');
+
+// Show what conditional expressions DO work
+console.log('✓ Conditional expressions (ternary) ARE supported:');
+const ternaryExample = processProgram(`
+  let value
+  value = true ? 100 : 200
+`);
+console.log(`✓ value: ${formatType(ternaryExample.context.value)} (from ternary)\n`);
+
+console.log('✅ All edge case tests passed!');
+console.log('\n📝 Complete Variable Declaration Summary:');
+console.log('- Variables can be declared without type annotations or initializers');
+console.log('- Types are inferred from first assignment when not initialized');
+console.log('- Subsequent assignments must be consistent with inferred type');
+console.log('- Variables cannot be used before their type is determined');
+console.log('- let, const, and var all support deferred type inference');
+console.log('- Mixed initialization and assignment styles work together');
+console.log('- Deferred inference works within function bodies');
+console.log('- Complex expressions and function assignments work correctly');
+console.log('- Assignment ordering is validated for safety');
+console.log('- Conditional expressions (ternary) work for assignments');
+console.log('- Control flow statements avoided to prevent unsafe type states');
