@@ -53,6 +53,49 @@ const createUnknownType = (name) => ({
   name
 });
 
+// Merge two contexts, handling conflicts for unknown types
+const mergeContexts = (context1, context2, conflictHandler) => {
+  const merged = { ...context1 };
+  
+  for (const [varName, type2] of Object.entries(context2)) {
+    const type1 = context1[varName];
+    
+    if (type1 === undefined) {
+      merged[varName] = type2;
+    } else if (type1.kind === 'unknown' && type2.kind !== 'unknown') {
+      // Type inferred in context2 but not context1 - use conflict handler if available
+      if (conflictHandler) {
+        merged[varName] = conflictHandler(varName, type1, type2);
+      } else {
+        merged[varName] = type2; // Default: use the concrete type
+      }
+    } else if (type1.kind !== 'unknown' && type2.kind === 'unknown') {
+      // Type inferred in context1 but not context2 - use conflict handler if available
+      if (conflictHandler) {
+        merged[varName] = conflictHandler(varName, type1, type2);
+      } else {
+        merged[varName] = type1; // Default: keep the concrete type
+      }
+    } else if (!typesEqual(type1, type2)) {
+      if (conflictHandler) {
+        merged[varName] = conflictHandler(varName, type1, type2);
+      } else {
+        throw new Error(`Type conflict for variable ${varName}: ${formatType(type1)} vs ${formatType(type2)}`);
+      }
+    } else {
+      merged[varName] = type1; // Same type, keep it
+    }
+  }
+  
+  return merged;
+};
+
+// Check if a variable is definitely assigned (not unknown) in a context
+const isDefinitelyAssigned = (context, varName) => {
+  const varType = context[varName];
+  return varType !== undefined && varType.kind !== 'unknown';
+};
+
 const BOOL_TYPE = createPrimitiveType('boolean');
 const NUMBER_TYPE = createPrimitiveType('number');
 const STRING_TYPE = createPrimitiveType('string');
@@ -234,6 +277,57 @@ const processVariableDeclaration = (node, context) => {
   return { ...context, [varName]: createUnknownType(varName) };
 };
 
+// Process if statements with control flow analysis
+const processIfStatement = (ifStatement, context) => {
+  // Type check the condition
+  const conditionType = synthesize(ifStatement.expression, context);
+  if (!typesEqual(conditionType, BOOL_TYPE)) {
+    throw new Error(`If condition must be boolean, got ${formatType(conditionType)}`);
+  }
+  
+  // Process the then branch
+  const thenContext = ifStatement.thenStatement.kind === ts.SyntaxKind.Block 
+    ? processStatements(ifStatement.thenStatement.statements, context).context
+    : processStatement(ifStatement.thenStatement, context);
+  
+  // Process the else branch if it exists
+  let elseContext = context;
+  if (ifStatement.elseStatement) {
+    elseContext = ifStatement.elseStatement.kind === ts.SyntaxKind.Block
+      ? processStatements(ifStatement.elseStatement.statements, context).context 
+      : processStatement(ifStatement.elseStatement, context);
+  }
+  
+  // Merge the contexts with type consistency checking
+  return mergeContexts(thenContext, elseContext, (varName, thenType, elseType) => {
+    // If both branches assign the same type, use it
+    if (typesEqual(thenType, elseType)) {
+      return thenType;
+    }
+    
+    // Handle unbalanced assignments
+    if (thenType.kind === 'unknown' && elseType.kind !== 'unknown') {
+      if (ifStatement.elseStatement) {
+        throw new Error(`Variable ${varName} assigned in else branch but not then branch`);
+      } else {
+        // No else clause, variable not assigned in then - keep unknown
+        return thenType;
+      }
+    }
+    
+    if (elseType.kind === 'unknown' && thenType.kind !== 'unknown') {
+      if (ifStatement.elseStatement) {
+        throw new Error(`Variable ${varName} assigned in then branch but not else branch`);
+      } else {
+        throw new Error(`Variable ${varName} assigned in then branch but not on all paths (missing else branch)`);
+      }
+    }
+    
+    // Different concrete types - this is an error
+    throw new Error(`Variable ${varName} assigned different types: ${formatType(thenType)} vs ${formatType(elseType)}`);
+  });
+};
+
 // Process a statement and return updated context
 const processStatement = (statement, context) => {
   switch (statement.kind) {
@@ -255,6 +349,9 @@ const processStatement = (statement, context) => {
       // For other expression statements, just synthesize but don't update context
       synthesize(statement.expression, context);
       return context;
+      
+    case ts.SyntaxKind.IfStatement:
+      return processIfStatement(statement, context);
       
     default:
       throw new Error(`Unsupported statement: ${ts.SyntaxKind[statement.kind]}`);
@@ -327,6 +424,12 @@ const processStatements = (statements, initialContext = {}) => {
           type 
         });
       }
+    } else if (statement.kind === ts.SyntaxKind.IfStatement) {
+      context = processStatement(statement, context);
+      results.push({
+        kind: 'if-statement',
+        description: 'if statement processed'
+      });
     } else {
       context = processStatement(statement, context);
     }

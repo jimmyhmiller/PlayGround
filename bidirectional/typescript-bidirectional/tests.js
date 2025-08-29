@@ -812,6 +812,137 @@ const ternaryExample = processProgram(`
 console.log(`✓ value: ${formatType(ternaryExample.context.value)} (from ternary)\n`);
 
 console.log('✅ All edge case tests passed!');
+
+// Control Flow Tests with If Statements
+console.log('\n🌊 Testing Control Flow with If Statements...\n');
+
+// Test 1: Same type assigned in both branches
+console.log('Test 1: Same type in both if/else branches');
+const sameTypeTest = processProgram(`
+  let x
+  if (true) {
+    x = 42
+  } else {
+    x = 100
+  }
+  x + 1
+`);
+assertEquals(sameTypeTest.context.x, NUMBER_TYPE, 'x should be number from both branches');
+console.log('✓ Same type in both branches works\n');
+
+// Test 2: Different types should fail
+console.log('Test 2: Different types in if/else branches should fail');
+runFail(() => {
+  processProgram(`
+    let x
+    if (true) {
+      x = 42
+    } else {
+      x = "hello"
+    }
+  `);
+});
+console.log('✓ Different types in branches correctly fails');
+
+// Test 3: Assignment in then branch only (no else)
+console.log('Test 3: Assignment in then branch only should fail');
+runFail(() => {
+  processProgram(`
+    let x
+    if (true) {
+      x = 42
+    }
+  `);
+});
+console.log('✓ Assignment in then-only branch correctly fails\n');
+
+// Test 4: Assignment in else but not then
+console.log('Test 4: Assignment in else but not then should fail');
+runFail(() => {
+  processProgram(`
+    let x
+    if (true) {
+      // x not assigned here
+    } else {
+      x = 42
+    }
+  `);
+});
+console.log('✓ Unbalanced assignment fails');
+
+// Test 5: Multiple variables with different assignment patterns
+console.log('Test 5: Multiple variables with complex patterns');
+const multiVarTest = processProgram(`
+  let a
+  let b
+  let c
+  a = 10  // Always assigned
+  if (true) {
+    b = 20
+    c = 30
+  } else {
+    b = 40
+    c = 50
+  }
+  a + b + c
+`);
+assertEquals(multiVarTest.context.a, NUMBER_TYPE, 'a should be number');
+assertEquals(multiVarTest.context.b, NUMBER_TYPE, 'b should be number');
+assertEquals(multiVarTest.context.c, NUMBER_TYPE, 'c should be number');
+console.log('✓ Multiple variables with if/else work\n');
+
+// Test 6: Nested if statements
+console.log('Test 6: Nested if statements');
+const nestedTest = processProgram(`
+  let x
+  let y
+  if (true) {
+    x = 10
+    if (false) {
+      y = 20
+    } else {
+      y = 30
+    }
+  } else {
+    x = 40
+    y = 50
+  }
+  x * y
+`);
+assertEquals(nestedTest.context.x, NUMBER_TYPE, 'x should be number');
+assertEquals(nestedTest.context.y, NUMBER_TYPE, 'y should be number');
+console.log('✓ Nested if statements work\n');
+
+// Test 7: If with function calls and complex expressions
+console.log('Test 7: If with complex expressions');
+const complexIfTest = processProgram(`
+  let result
+  let processor = (n: number) => n * 2
+  if (processor(5) > 8) {
+    result = 100
+  } else {
+    result = 200
+  }
+`);
+assertEquals(complexIfTest.context.result, NUMBER_TYPE, 'result should be number');
+console.log('✓ If with complex condition expressions work\n');
+
+// Test 8: Block statements vs single statements
+console.log('Test 8: Block vs single statement branches');
+runFail(() => {
+  processProgram(`
+    let x
+    let y
+    if (true) {
+      x = 10
+      y = 20
+    } else
+      x = 30
+  `);
+});
+console.log('✓ Block vs single statement handling works\n');
+
+console.log('✅ All control flow tests passed!');
 console.log('\n📝 Complete Variable Declaration Summary:');
 console.log('- Variables can be declared without type annotations or initializers');
 console.log('- Types are inferred from first assignment when not initialized');
@@ -823,4 +954,7 @@ console.log('- Deferred inference works within function bodies');
 console.log('- Complex expressions and function assignments work correctly');
 console.log('- Assignment ordering is validated for safety');
 console.log('- Conditional expressions (ternary) work for assignments');
-console.log('- Control flow statements avoided to prevent unsafe type states');
+console.log('- If/else statements with consistent types across branches work');
+console.log('- Variables assigned in all branches are properly typed');
+console.log('- Variables not assigned in all branches remain unknown');
+console.log('- Type conflicts across branches are detected and prevented');
