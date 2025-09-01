@@ -48,6 +48,36 @@ For these trivial cases, this may seem like almost nothing. But using these simp
 
 ## A Real Implementation
 
+In this tutorial we are going to aim to get a very simple example working. It's an example that falls short of a full implementation, but that hopefully gives you enough to make it clear how you handle additions to it.
+
+```typescript
+function log(message: string) {
+  // does some logging
+}
+
+function calculateShipping(weight: number, distance: number): number {
+  let baseRate = 5.00;
+  let weightFee = weight * 0.50;
+  let distanceFee = distance * 0.25;
+  let freeShippingThreshold = 75.0;
+  
+  let total = baseRate + weightFee + distanceFee;
+  
+  if (total > freeShippingThreshold) {
+    log("Free shipping applied! Saved: $" + total)
+    return 0.0;
+  }
+  
+  return total;
+}
+```
+
+You will probably recognize this as typescript. We will of course not be implementing typescript's type system. Doing so is [no small feat](https://github.com/microsoft/TypeScript/blob/main/src/compiler/checker.ts). Instead we are are just going to use typescripts syntax so we don't have to write our own parse and so people who don't like parenthesis aren't annoyed.
+
+### Checking simple types
+
+ 
+
 
 
 [^1]: I was however luckily enough to find [David Christiansen's presentation](https://www.youtube.com/watch?v=utyBNDj7s2w) where he translates a bidirectional type system into code. It wasn't fully complete, but enough for me to go on. The audio has a terrible high pitch squeal, so can't recommend it as a nice listen.

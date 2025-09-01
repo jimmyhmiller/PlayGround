@@ -99,6 +99,7 @@ const isDefinitelyAssigned = (context, varName) => {
 const BOOL_TYPE = createPrimitiveType('boolean');
 const NUMBER_TYPE = createPrimitiveType('number');
 const STRING_TYPE = createPrimitiveType('string');
+const VOID_TYPE = createPrimitiveType('void');
 
 // Type equality check
 const typesEqual = (type1, type2) => {
@@ -227,19 +228,32 @@ const formatType = (type) => {
 // Infer the type of a function body (could be block or expression)
 const inferFunctionBody = (bodyNode, context) => {
   if (ts.isBlock(bodyNode)) {
-    // Handle block statement - process all statements and return the type of the last expression
+    // Handle block statement - look for return statements
     const { context: finalContext, results } = processStatements(bodyNode.statements, context);
     
-    // Find the last non-declaration statement's type
-    for (let i = results.length - 1; i >= 0; i--) {
-      if (results[i].kind === 'expression') {
-        return results[i].type;
+    // Find and validate return statement types
+    let returnType = null;
+    let hasReturn = false;
+    
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].kind === 'return') {
+        if (!hasReturn) {
+          // First return statement - set the expected type
+          returnType = results[i].type;
+          hasReturn = true;
+        } else {
+          // Subsequent return statements must match the first
+          if (!typesEqual(results[i].type, returnType)) {
+            throw new Error(`All return statements must have the same type. Expected ${formatType(returnType)}, got ${formatType(results[i].type)}`);
+          }
+        }
       }
     }
     
-    throw new Error('Function body must end with an expression');
+    // If no return statement found, this is a void function
+    return hasReturn ? returnType : VOID_TYPE;
   } else {
-    // Handle expression body
+    // Handle expression body (arrow functions)
     return infer(bodyNode, context);
   }
 };
@@ -286,20 +300,23 @@ const processIfStatement = (ifStatement, context) => {
   }
   
   // Process the then branch
-  const thenContext = ifStatement.thenStatement.kind === ts.SyntaxKind.Block 
-    ? processStatements(ifStatement.thenStatement.statements, context).context
-    : processStatement(ifStatement.thenStatement, context);
+  const thenResult = ifStatement.thenStatement.kind === ts.SyntaxKind.Block 
+    ? processStatements(ifStatement.thenStatement.statements, context)
+    : { context: processStatement(ifStatement.thenStatement, context), results: [] };
   
   // Process the else branch if it exists
-  let elseContext = context;
+  let elseResult = { context, results: [] };
   if (ifStatement.elseStatement) {
-    elseContext = ifStatement.elseStatement.kind === ts.SyntaxKind.Block
-      ? processStatements(ifStatement.elseStatement.statements, context).context 
-      : processStatement(ifStatement.elseStatement, context);
+    elseResult = ifStatement.elseStatement.kind === ts.SyntaxKind.Block
+      ? processStatements(ifStatement.elseStatement.statements, context)
+      : { context: processStatement(ifStatement.elseStatement, context), results: [] };
   }
   
+  // Collect all results from both branches
+  const allResults = [...thenResult.results, ...elseResult.results];
+  
   // Merge the contexts with type consistency checking
-  return mergeContexts(thenContext, elseContext, (varName, thenType, elseType) => {
+  const finalContext = mergeContexts(thenResult.context, elseResult.context, (varName, thenType, elseType) => {
     // If both branches assign the same type, use it
     if (typesEqual(thenType, elseType)) {
       return thenType;
@@ -326,6 +343,8 @@ const processIfStatement = (ifStatement, context) => {
     // Different concrete types - this is an error
     throw new Error(`Variable ${varName} assigned different types: ${formatType(thenType)} vs ${formatType(elseType)}`);
   });
+  
+  return { context: finalContext, results: allResults };
 };
 
 // Process a statement and return updated context
@@ -345,6 +364,10 @@ const processStatement = (statement, context) => {
       const functionType = infer(statement, context);
       return { ...context, [functionName]: functionType };
       
+    case ts.SyntaxKind.ReturnStatement:
+      // Return statements don't modify context, they're handled by function body processing
+      return context;
+      
     case ts.SyntaxKind.ExpressionStatement:
       // Check if this is an assignment that could infer a type
       const expr = statement.expression;
@@ -357,7 +380,7 @@ const processStatement = (statement, context) => {
       return context;
       
     case ts.SyntaxKind.IfStatement:
-      return processIfStatement(statement, context);
+      return processIfStatement(statement, context).context;
       
     default:
       throw new Error(`Unsupported statement: ${ts.SyntaxKind[statement.kind]}`);
@@ -422,6 +445,22 @@ const processStatements = (statements, initialContext = {}) => {
         name: functionName, 
         type: context[functionName] 
       });
+    } else if (statement.kind === ts.SyntaxKind.ReturnStatement) {
+      // Process return statement
+      if (statement.expression) {
+        const returnType = infer(statement.expression, context);
+        results.push({
+          kind: 'return',
+          type: returnType
+        });
+      } else {
+        // Return with no expression (void)
+        results.push({
+          kind: 'return',
+          type: { kind: 'primitive', name: 'void' }
+        });
+      }
+      context = processStatement(statement, context);
     } else if (statement.kind === ts.SyntaxKind.ExpressionStatement) {
       const expr = statement.expression;
       // Check if this is an assignment
@@ -440,11 +479,9 @@ const processStatements = (statements, initialContext = {}) => {
         });
       }
     } else if (statement.kind === ts.SyntaxKind.IfStatement) {
-      context = processStatement(statement, context);
-      results.push({
-        kind: 'if-statement',
-        description: 'if statement processed'
-      });
+      const ifResult = processIfStatement(statement, context);
+      context = ifResult.context;
+      results.push(...ifResult.results);
     } else {
       context = processStatement(statement, context);
     }
@@ -549,13 +586,23 @@ const infer = (node, context) => {
       
       switch (node.operatorToken.kind) {
         case ts.SyntaxKind.PlusToken:
+          // Number + Number = Number (arithmetic)
           if (typesEqual(left, NUMBER_TYPE) && typesEqual(right, NUMBER_TYPE)) {
             return NUMBER_TYPE;
           }
+          // String + String = String (concatenation)
           if (typesEqual(left, STRING_TYPE) && typesEqual(right, STRING_TYPE)) {
             return STRING_TYPE;
           }
-          throw new Error(`+ requires matching operand types (number+number or string+string)`);
+          // String + Number = String (concatenation with coercion)
+          if (typesEqual(left, STRING_TYPE) && typesEqual(right, NUMBER_TYPE)) {
+            return STRING_TYPE;
+          }
+          // Number + String = String (concatenation with coercion)
+          if (typesEqual(left, NUMBER_TYPE) && typesEqual(right, STRING_TYPE)) {
+            return STRING_TYPE;
+          }
+          throw new Error(`+ requires operands of types (number, number) or (string, string) or (string, number) or (number, string)`);
           
         case ts.SyntaxKind.MinusToken:
         case ts.SyntaxKind.AsteriskToken:
@@ -651,17 +698,21 @@ const check = (node, expectedType, context) => {
         // Handle block statement body
         const { context: finalContext, results } = processStatements(node.body.statements, extendedContext);
         
-        // Find the last non-declaration statement's type and check it
-        for (let i = results.length - 1; i >= 0; i--) {
-          if (results[i].kind === 'expression') {
+        // Check ALL return statements have the correct type
+        let foundReturn = false;
+        for (let i = 0; i < results.length; i++) {
+          if (results[i].kind === 'return') {
+            foundReturn = true;
             if (!typesEqual(results[i].type, returnTypeToCheck)) {
               throw new Error(`Expected function return type ${formatType(returnTypeToCheck)}, got ${formatType(results[i].type)}`);
             }
-            return;
           }
         }
         
-        throw new Error('Function body must end with an expression');
+        // If no return statement found, check if this should be void
+        if (!foundReturn && !typesEqual(returnTypeToCheck, VOID_TYPE)) {
+          throw new Error(`Expected function return type ${formatType(returnTypeToCheck)}, but function has no return statement (void)`);
+        }
       } else {
         // Handle expression body
         check(node.body, returnTypeToCheck, extendedContext);
@@ -747,7 +798,8 @@ export {
   BOOL_TYPE,
   NUMBER_TYPE,
   STRING_TYPE,
-  createFunctionType,
+  VOID_TYPE,
+  createFunctionType, // Still needed internally by parseType helper
   createTypeVariable,
   createPrimitiveType,
   createUnknownType
