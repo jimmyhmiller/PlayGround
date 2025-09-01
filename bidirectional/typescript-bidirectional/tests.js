@@ -1,6 +1,6 @@
 import { 
   parseTypeScript, 
-  synthesize, 
+  infer, 
   check, 
   getExpression,
   processProgram,
@@ -16,11 +16,11 @@ import {
   createUnknownType
 } from './index.js';
 
-// Helper to test synthesize with TypeScript code
-const testSynthesize = (code, context = {}) => {
+// Helper to test infer with TypeScript code
+const testInfer = (code, context = {}) => {
   const sourceFile = parseTypeScript(code);
   const expression = getExpression(sourceFile);
-  return synthesize(expression, context);
+  return infer(expression, context);
 };
 
 // Helper to test check with TypeScript code
@@ -33,37 +33,37 @@ const testCheck = (code, expectedType, context = {}) => {
 console.log('Starting TypeScript bidirectional type checker tests...\n');
 
 // Basic literal tests
-assertEquals(testSynthesize('true'), BOOL_TYPE, 'boolean literal');
-assertEquals(testSynthesize('false'), BOOL_TYPE, 'boolean literal false');
-assertEquals(testSynthesize('42'), NUMBER_TYPE, 'number literal');
-assertEquals(testSynthesize('"hello"'), STRING_TYPE, 'string literal');
+assertEquals(testInfer('true'), BOOL_TYPE, 'boolean literal');
+assertEquals(testInfer('false'), BOOL_TYPE, 'boolean literal false');
+assertEquals(testInfer('42'), NUMBER_TYPE, 'number literal');
+assertEquals(testInfer('"hello"'), STRING_TYPE, 'string literal');
 
 // Variable tests
 const contextWithVar = { x: BOOL_TYPE };
-assertEquals(testSynthesize('x', contextWithVar), BOOL_TYPE, 'boolean variable');
+assertEquals(testInfer('x', contextWithVar), BOOL_TYPE, 'boolean variable');
 
 // Function tests - with type annotations
 assertEquals(
-  testSynthesize('(x: number) => x'),
+  testInfer('(x: number) => x'),
   createFunctionType([NUMBER_TYPE], NUMBER_TYPE),
   'identity function with annotation'
 );
 
 assertEquals(
-  testSynthesize('(x: number) => true'),
+  testInfer('(x: number) => true'),
   createFunctionType([NUMBER_TYPE], BOOL_TYPE),
   'function number -> boolean'
 );
 
 // Multi-parameter function tests
 assertEquals(
-  testSynthesize('(x: number, y: string) => x + 42'),
+  testInfer('(x: number, y: string) => x + 42'),
   createFunctionType([NUMBER_TYPE, STRING_TYPE], NUMBER_TYPE),
   'two-parameter function'
 );
 
 assertEquals(
-  testSynthesize('(a: number, b: number, c: string) => a + b'),
+  testInfer('(a: number, b: number, c: string) => a + b'),
   createFunctionType([NUMBER_TYPE, NUMBER_TYPE, STRING_TYPE], NUMBER_TYPE),
   'three-parameter function'
 );
@@ -71,28 +71,28 @@ assertEquals(
 // Function application tests
 const contextWithIdentity = { identity: createFunctionType([NUMBER_TYPE], NUMBER_TYPE) };
 assertEquals(
-  testSynthesize('identity(42)', contextWithIdentity),
+  testInfer('identity(42)', contextWithIdentity),
   NUMBER_TYPE,
   'function application'
 );
 
 // Inline function application with type annotation
 assertEquals(
-  testSynthesize('((x: number) => x)(42)'),
+  testInfer('((x: number) => x)(42)'),
   NUMBER_TYPE,
   'inline function application'
 );
 
 // Binary expressions
-assertEquals(testSynthesize('10 + 20'), NUMBER_TYPE, 'number addition');
-assertEquals(testSynthesize('10 - 5'), NUMBER_TYPE, 'number subtraction');
-assertEquals(testSynthesize('10 * 5'), NUMBER_TYPE, 'number multiplication');
-assertEquals(testSynthesize('10 / 2'), NUMBER_TYPE, 'number division');
-assertEquals(testSynthesize('"hello" + "world"'), STRING_TYPE, 'string concatenation');
+assertEquals(testInfer('10 + 20'), NUMBER_TYPE, 'number addition');
+assertEquals(testInfer('10 - 5'), NUMBER_TYPE, 'number subtraction');
+assertEquals(testInfer('10 * 5'), NUMBER_TYPE, 'number multiplication');
+assertEquals(testInfer('10 / 2'), NUMBER_TYPE, 'number division');
+assertEquals(testInfer('"hello" + "world"'), STRING_TYPE, 'string concatenation');
 
 // Conditional expressions
-assertEquals(testSynthesize('true ? 10 : 20'), NUMBER_TYPE, 'conditional with numbers');
-assertEquals(testSynthesize('false ? "yes" : "no"'), STRING_TYPE, 'conditional with strings');
+assertEquals(testInfer('true ? 10 : 20'), NUMBER_TYPE, 'conditional with numbers');
+assertEquals(testInfer('false ? "yes" : "no"'), STRING_TYPE, 'conditional with strings');
 
 // Check function tests
 runTest(() => {
@@ -112,18 +112,18 @@ runTest(() => {
 
 // Error cases
 runFail(() => testCheck('true', NUMBER_TYPE)); // wrong type
-runFail(() => testSynthesize('unknownVar')); // undefined variable
-runFail(() => testSynthesize('10 + "hello"')); // type mismatch in addition
-runFail(() => testSynthesize('true ? 10 : "hello"')); // conditional branch type mismatch
-runFail(() => testSynthesize('"hello" ? 1 : 2')); // non-boolean condition
+runFail(() => testInfer('unknownVar')); // undefined variable
+runFail(() => testInfer('10 + "hello"')); // type mismatch in addition
+runFail(() => testInfer('true ? 10 : "hello"')); // conditional branch type mismatch
+runFail(() => testInfer('"hello" ? 1 : 2')); // non-boolean condition
 
 // Test the problematic case: unannotated lambda in function application
 console.log('\nTesting the problematic case from the original question:');
-runFail(() => testSynthesize('((b) => b ? false : true)(true)'));
+runFail(() => testInfer('((b) => b ? false : true)(true)'));
 
 // But it works with type annotation:
 assertEquals(
-  testSynthesize('((b: boolean) => b ? false : true)(true)'),
+  testInfer('((b: boolean) => b ? false : true)(true)'),
   BOOL_TYPE,
   'annotated lambda in application works'
 );
@@ -131,28 +131,28 @@ assertEquals(
 // Multi-parameter function applications
 const contextWithAdd = { add: createFunctionType([NUMBER_TYPE, NUMBER_TYPE], NUMBER_TYPE) };
 assertEquals(
-  testSynthesize('add(10, 20)', contextWithAdd),
+  testInfer('add(10, 20)', contextWithAdd),
   NUMBER_TYPE,
   'two-argument function application'
 );
 
 const contextWithThreeParam = { fn: createFunctionType([NUMBER_TYPE, STRING_TYPE, BOOL_TYPE], NUMBER_TYPE) };
 assertEquals(
-  testSynthesize('fn(42, "hello", true)', contextWithThreeParam),
+  testInfer('fn(42, "hello", true)', contextWithThreeParam),
   NUMBER_TYPE,
   'three-argument function application'
 );
 
 // Inline multi-parameter function application
 assertEquals(
-  testSynthesize('((x: number, y: number) => x + y)(10, 20)'),
+  testInfer('((x: number, y: number) => x + y)(10, 20)'),
   NUMBER_TYPE,
   'inline two-parameter function application'
 );
 
 // Higher-order functions
 assertEquals(
-  testSynthesize('(f: (x: number) => number) => (x: number) => f(x)'),
+  testInfer('(f: (x: number) => number) => (x: number) => f(x)'),
   createFunctionType(
     [createFunctionType([NUMBER_TYPE], NUMBER_TYPE)],
     createFunctionType([NUMBER_TYPE], NUMBER_TYPE)
@@ -162,15 +162,15 @@ assertEquals(
 
 // Complex nested expression
 assertEquals(
-  testSynthesize('((f: (x: number) => number) => f(10))((x: number) => x + 1)'),
+  testInfer('((f: (x: number) => number) => f(10))((x: number) => x + 1)'),
   NUMBER_TYPE,
   'complex nested function application'
 );
 
 // Test error cases for multi-parameter functions
-runFail(() => testSynthesize('add(10)', contextWithAdd)); // too few arguments
-runFail(() => testSynthesize('add(10, 20, 30)', contextWithAdd)); // too many arguments
-runFail(() => testSynthesize('add(10, "hello")', contextWithAdd)); // wrong argument type
+runFail(() => testInfer('add(10)', contextWithAdd)); // too few arguments
+runFail(() => testInfer('add(10, 20, 30)', contextWithAdd)); // too many arguments
+runFail(() => testInfer('add(10, "hello")', contextWithAdd)); // wrong argument type
 
 // Generic function tests
 console.log('\n🧬 Testing generic functions:');
@@ -178,7 +178,7 @@ console.log('\n🧬 Testing generic functions:');
 // Generic identity function
 const T = createTypeVariable('T');
 assertEquals(
-  testSynthesize('(x: T) => x'),
+  testInfer('(x: T) => x'),
   createFunctionType([T], T),
   'generic identity function'
 );
@@ -189,19 +189,19 @@ const contextWithGenericId = {
 };
 
 assertEquals(
-  testSynthesize('identity(42)', contextWithGenericId),
+  testInfer('identity(42)', contextWithGenericId),
   NUMBER_TYPE,
   'generic identity applied to number'
 );
 
 assertEquals(
-  testSynthesize('identity("hello")', contextWithGenericId),
+  testInfer('identity("hello")', contextWithGenericId),
   STRING_TYPE,
   'generic identity applied to string'
 );
 
 assertEquals(
-  testSynthesize('identity(true)', contextWithGenericId),
+  testInfer('identity(true)', contextWithGenericId),
   BOOL_TYPE,
   'generic identity applied to boolean'
 );
@@ -214,20 +214,20 @@ const contextWithGenericPair = {
 };
 
 assertEquals(
-  testSynthesize('first(42, "hello")', contextWithGenericPair),
+  testInfer('first(42, "hello")', contextWithGenericPair),
   NUMBER_TYPE,
   'generic first function extracts first type'
 );
 
 assertEquals(
-  testSynthesize('first("world", true)', contextWithGenericPair),
+  testInfer('first("world", true)', contextWithGenericPair),
   STRING_TYPE,
   'generic first function with different types'
 );
 
 // Inline generic function application
 assertEquals(
-  testSynthesize('((x: T) => x)(42)'),
+  testInfer('((x: T) => x)(42)'),
   NUMBER_TYPE,
   'inline generic function application'
 );
@@ -246,7 +246,7 @@ const contextWithIncrement = {
 };
 
 assertEquals(
-  testSynthesize('map(increment, 5)', contextWithIncrement),
+  testInfer('map(increment, 5)', contextWithIncrement),
   NUMBER_TYPE,
   'higher-order generic function application'
 );
@@ -295,7 +295,7 @@ const test5 = processProgram(`
 `);
 assertEquals(test5.context.x, NUMBER_TYPE, 'x should be number');
 assertEquals(test5.context.y, NUMBER_TYPE, 'y should be number');
-// The last expression should synthesize to number
+// The last expression should infer to number
 const lastResult = test5.results[test5.results.length - 1];
 assertEquals(lastResult.type, NUMBER_TYPE, 'x + y should be number');
 console.log('✓ Variables can be used in expressions\n');
@@ -550,6 +550,69 @@ assertEquals(
 console.log('✓ Complex realistic function works correctly\n');
 
 console.log('✅ All complex function tests passed!');
+
+// Test return type annotations
+console.log('\n🎯 Testing Return Type Annotations...\n');
+
+console.log('Test: Function with explicit return type');
+const returnTypeTest = processProgram(`
+  let createMultiplier = (factor: number): (x: number) => number => {
+    let cachedFactor = factor
+    let multiplier = (x: number) => {
+      let adjusted = x + 1
+      let result = adjusted * cachedFactor
+      result
+    }
+    multiplier
+  }
+`);
+
+assertEquals(
+  returnTypeTest.context.createMultiplier,
+  createFunctionType(
+    [NUMBER_TYPE], 
+    createFunctionType([NUMBER_TYPE], NUMBER_TYPE)
+  ),
+  'createMultiplier should be (number) => (number) => number with explicit return type'
+);
+console.log('✓ Function with explicit return type works correctly\n');
+
+// Test simple return type annotation
+console.log('Test: Simple function with return type annotation');
+const simpleReturnType = processProgram(`
+  let addOne = (x: number): number => x + 1
+`);
+
+assertEquals(
+  simpleReturnType.context.addOne,
+  createFunctionType([NUMBER_TYPE], NUMBER_TYPE),
+  'addOne should be (number) => number'
+);
+console.log('✓ Simple return type annotation works\n');
+
+// Test that return type mismatch fails
+console.log('Test: Return type mismatch should fail');
+runFail(() => {
+  processProgram(`
+    let badFunction = (x: number): string => x + 1
+  `);
+});
+console.log('✓ Return type mismatch correctly fails\n');
+
+// Test return type with boolean
+console.log('Test: Return type with boolean');
+const booleanReturnType = processProgram(`
+  let isPositive = (x: number): boolean => x > 0
+`);
+
+assertEquals(
+  booleanReturnType.context.isPositive,
+  createFunctionType([NUMBER_TYPE], BOOL_TYPE),
+  'isPositive should be (number) => boolean'
+);
+console.log('✓ Boolean return type annotation works\n');
+
+console.log('✅ All return type annotation tests passed!');
 
 // Deferred Type Inference Tests
 console.log('\n🔮 Testing Deferred Type Inference (Assignment-Based)...\n');

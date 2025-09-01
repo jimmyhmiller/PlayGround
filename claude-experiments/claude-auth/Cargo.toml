@@ -1,0 +1,72 @@
+[package]
+name = "claude-auth"
+version = "0.1.0"
+edition = "2021"
+description = "Claude Code subscription authentication library"
+authors = ["Claude Code Team"]
+license = "MIT"
+repository = "https://github.com/anthropics/claude-code"
+
+[[bin]]
+name = "claude-auth-cli"
+path = "src/bin/cli.rs"
+
+[[bin]]
+name = "example"
+path = "src/bin/example.rs"
+
+[[bin]]
+name = "test-env"
+path = "src/bin/test_env.rs"
+
+[[bin]]
+name = "repl"
+path = "src/bin/repl.rs"
+
+[[bin]]
+name = "repl-tools"
+path = "src/bin/repl_with_tools.rs"
+
+[[bin]]
+name = "repl-complete"
+path = "src/bin/repl_complete.rs"
+
+[[bin]]
+name = "repl-dimichgh"
+path = "src/bin/repl_dimichgh.rs"
+
+[[bin]]
+name = "repl-dimichgh-simple"
+path = "src/bin/repl_dimichgh_simple.rs"
+
+[[example]]
+name = "simple_usage"
+path = "examples/simple_usage.rs"
+
+[[example]]
+name = "with_tools"
+path = "examples/with_tools.rs"
+
+[[example]]
+name = "test_dimichgh_anthropic"
+path = "examples/test_dimichgh_anthropic.rs"
+
+[dependencies]
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+uuid = { version = "1.0", features = ["v4"] }
+base64 = "0.21"
+sha2 = "0.10"
+url = "2.4"
+dirs = "5.0"
+clap = { version = "4.0", features = ["derive"] }
+anyhow = "1.0"
+thiserror = "1.0"
+getrandom = "0.2"
+chrono = { version = "0.4", features = ["serde"] }
+anthropic-sdk-rust = { path = "../../../open-source/anthropic-sdk-rust" }
+
+[dev-dependencies]
+
