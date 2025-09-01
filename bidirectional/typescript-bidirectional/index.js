@@ -224,8 +224,8 @@ const formatType = (type) => {
   }
 };
 
-// Synthesize the type of a function body (could be block or expression)
-const synthesizeFunctionBody = (bodyNode, context) => {
+// Infer the type of a function body (could be block or expression)
+const inferFunctionBody = (bodyNode, context) => {
   if (ts.isBlock(bodyNode)) {
     // Handle block statement - process all statements and return the type of the last expression
     const { context: finalContext, results } = processStatements(bodyNode.statements, context);
@@ -240,7 +240,7 @@ const synthesizeFunctionBody = (bodyNode, context) => {
     throw new Error('Function body must end with an expression');
   } else {
     // Handle expression body
-    return synthesize(bodyNode, context);
+    return infer(bodyNode, context);
   }
 };
 
@@ -258,7 +258,7 @@ const processVariableDeclaration = (node, context) => {
     
     // If there's also an initializer, check that it matches the annotation
     if (node.initializer) {
-      const initializerType = synthesize(node.initializer, context);
+      const initializerType = infer(node.initializer, context);
       if (!typesEqual(annotatedType, initializerType)) {
         throw new Error(`Variable ${varName} annotated as ${formatType(annotatedType)} but initialized with ${formatType(initializerType)}`);
       }
@@ -269,7 +269,7 @@ const processVariableDeclaration = (node, context) => {
   
   // If there's an initializer, infer the type from it
   if (node.initializer) {
-    const inferredType = synthesize(node.initializer, context);
+    const inferredType = infer(node.initializer, context);
     return { ...context, [varName]: inferredType };
   }
   
@@ -280,7 +280,7 @@ const processVariableDeclaration = (node, context) => {
 // Process if statements with control flow analysis
 const processIfStatement = (ifStatement, context) => {
   // Type check the condition
-  const conditionType = synthesize(ifStatement.expression, context);
+  const conditionType = infer(ifStatement.expression, context);
   if (!typesEqual(conditionType, BOOL_TYPE)) {
     throw new Error(`If condition must be boolean, got ${formatType(conditionType)}`);
   }
@@ -339,6 +339,12 @@ const processStatement = (statement, context) => {
       }
       return newContext;
       
+    case ts.SyntaxKind.FunctionDeclaration:
+      // Process function declaration and add it to context
+      const functionName = statement.name.text;
+      const functionType = infer(statement, context);
+      return { ...context, [functionName]: functionType };
+      
     case ts.SyntaxKind.ExpressionStatement:
       // Check if this is an assignment that could infer a type
       const expr = statement.expression;
@@ -346,8 +352,8 @@ const processStatement = (statement, context) => {
         return processAssignment(expr, context);
       }
       
-      // For other expression statements, just synthesize but don't update context
-      synthesize(statement.expression, context);
+      // For other expression statements, just infer but don't update context
+      infer(statement.expression, context);
       return context;
       
     case ts.SyntaxKind.IfStatement:
@@ -369,7 +375,7 @@ const processAssignment = (node, context) => {
   }
   
   const varName = node.left.text;
-  const rightType = synthesize(node.right, context);
+  const rightType = infer(node.right, context);
   
   // Check if variable exists in context
   if (context[varName] === undefined) {
@@ -407,6 +413,15 @@ const processStatements = (statements, initialContext = {}) => {
           type: context[varName] 
         });
       }
+    } else if (statement.kind === ts.SyntaxKind.FunctionDeclaration) {
+      context = processStatement(statement, context);
+      // Store the function declaration for reporting
+      const functionName = statement.name.text;
+      results.push({ 
+        kind: 'function', 
+        name: functionName, 
+        type: context[functionName] 
+      });
     } else if (statement.kind === ts.SyntaxKind.ExpressionStatement) {
       const expr = statement.expression;
       // Check if this is an assignment
@@ -418,7 +433,7 @@ const processStatements = (statements, initialContext = {}) => {
           type: context[expr.left.text]
         });
       } else {
-        const type = synthesize(statement.expression, context);
+        const type = infer(statement.expression, context);
         results.push({ 
           kind: 'expression', 
           type 
@@ -438,8 +453,8 @@ const processStatements = (statements, initialContext = {}) => {
   return { context, results };
 };
 
-// Synthesize type for an expression
-const synthesize = (node, context) => {
+// Infer type for an expression
+const infer = (node, context) => {
   switch (node.kind) {
     case ts.SyntaxKind.TrueKeyword:
     case ts.SyntaxKind.FalseKeyword:
@@ -463,6 +478,7 @@ const synthesize = (node, context) => {
       
     case ts.SyntaxKind.ArrowFunction:
     case ts.SyntaxKind.FunctionExpression:
+    case ts.SyntaxKind.FunctionDeclaration:
       if (node.parameters.some(param => !param.type)) {
         throw new Error("Can't determine type. Please add type annotation to function parameter");
       }
@@ -474,12 +490,23 @@ const synthesize = (node, context) => {
         extendedContext[param.name.text] = paramTypes[i];
       });
       
-      const bodyType = synthesizeFunctionBody(node.body, extendedContext);
-      
-      return createFunctionType(paramTypes, bodyType);
+      // Check if there's an explicit return type annotation
+      if (node.type) {
+        const explicitReturnType = convertTypeAnnotation(node.type);
+        // Verify the body matches the declared return type
+        const bodyType = inferFunctionBody(node.body, extendedContext);
+        if (!typesEqual(bodyType, explicitReturnType)) {
+          throw new Error(`Function body returns ${formatType(bodyType)} but declared return type is ${formatType(explicitReturnType)}`);
+        }
+        return createFunctionType(paramTypes, explicitReturnType);
+      } else {
+        // No explicit return type - infer from body
+        const bodyType = inferFunctionBody(node.body, extendedContext);
+        return createFunctionType(paramTypes, bodyType);
+      }
       
     case ts.SyntaxKind.CallExpression:
-      const functionType = synthesize(node.expression, context);
+      const functionType = infer(node.expression, context);
       if (functionType.kind !== 'function') {
         throw new Error(`Expected function type, got ${functionType.kind}`);
       }
@@ -493,7 +520,7 @@ const synthesize = (node, context) => {
         let substitutions = {};
         
         for (let i = 0; i < node.arguments.length; i++) {
-          const argType = synthesize(node.arguments[i], context);
+          const argType = infer(node.arguments[i], context);
           substitutions = unify(functionType.paramTypes[i], argType, substitutions);
         }
         
@@ -502,7 +529,7 @@ const synthesize = (node, context) => {
       } else {
         // Handle non-generic function application
         for (let i = 0; i < node.arguments.length; i++) {
-          const argType = synthesize(node.arguments[i], context);
+          const argType = infer(node.arguments[i], context);
           if (!typesEqual(functionType.paramTypes[i], argType)) {
             throw new Error(`Expected argument ${i} of type ${JSON.stringify(functionType.paramTypes[i])}, got ${JSON.stringify(argType)}`);
           }
@@ -517,8 +544,8 @@ const synthesize = (node, context) => {
         throw new Error('Assignment should be handled at statement level, not expression level');
       }
       
-      const left = synthesize(node.left, context);
-      const right = synthesize(node.right, context);
+      const left = infer(node.left, context);
+      const right = infer(node.right, context);
       
       switch (node.operatorToken.kind) {
         case ts.SyntaxKind.PlusToken:
@@ -564,13 +591,13 @@ const synthesize = (node, context) => {
       }
       
     case ts.SyntaxKind.ConditionalExpression:
-      const conditionType = synthesize(node.condition, context);
+      const conditionType = infer(node.condition, context);
       if (!typesEqual(conditionType, BOOL_TYPE)) {
         throw new Error(`Conditional expression condition must be boolean`);
       }
       
-      const thenType = synthesize(node.whenTrue, context);
-      const elseType = synthesize(node.whenFalse, context);
+      const thenType = infer(node.whenTrue, context);
+      const elseType = infer(node.whenFalse, context);
       
       if (!typesEqual(thenType, elseType)) {
         throw new Error(`Conditional expression branches must have same type`);
@@ -579,7 +606,7 @@ const synthesize = (node, context) => {
       return thenType;
       
     case ts.SyntaxKind.ParenthesizedExpression:
-      return synthesize(node.expression, context);
+      return infer(node.expression, context);
       
     default:
       throw new Error(`Unsupported expression: ${ts.SyntaxKind[node.kind]}`);
@@ -591,6 +618,7 @@ const check = (node, expectedType, context) => {
   switch (node.kind) {
     case ts.SyntaxKind.ArrowFunction:
     case ts.SyntaxKind.FunctionExpression:
+    case ts.SyntaxKind.FunctionDeclaration:
       if (expectedType.kind !== 'function') {
         throw new Error(`Expected function type, got ${expectedType.kind}`);
       }
@@ -612,6 +640,13 @@ const check = (node, expectedType, context) => {
         extendedContext[param.name.text] = paramType;
       }
       
+      // Check if there's an explicit return type annotation
+      const returnTypeToCheck = node.type ? convertTypeAnnotation(node.type) : expectedType.returnType;
+      
+      if (!typesEqual(returnTypeToCheck, expectedType.returnType)) {
+        throw new Error(`Function declares return type ${formatType(returnTypeToCheck)} but expected ${formatType(expectedType.returnType)}`);
+      }
+      
       if (ts.isBlock(node.body)) {
         // Handle block statement body
         const { context: finalContext, results } = processStatements(node.body.statements, extendedContext);
@@ -619,8 +654,8 @@ const check = (node, expectedType, context) => {
         // Find the last non-declaration statement's type and check it
         for (let i = results.length - 1; i >= 0; i--) {
           if (results[i].kind === 'expression') {
-            if (!typesEqual(results[i].type, expectedType.returnType)) {
-              throw new Error(`Expected function return type ${formatType(expectedType.returnType)}, got ${formatType(results[i].type)}`);
+            if (!typesEqual(results[i].type, returnTypeToCheck)) {
+              throw new Error(`Expected function return type ${formatType(returnTypeToCheck)}, got ${formatType(results[i].type)}`);
             }
             return;
           }
@@ -629,7 +664,7 @@ const check = (node, expectedType, context) => {
         throw new Error('Function body must end with an expression');
       } else {
         // Handle expression body
-        check(node.body, expectedType.returnType, extendedContext);
+        check(node.body, returnTypeToCheck, extendedContext);
       }
       return;
       
@@ -638,7 +673,7 @@ const check = (node, expectedType, context) => {
       return;
       
     default:
-      const actualType = synthesize(node, context);
+      const actualType = infer(node, context);
       if (!typesEqual(actualType, expectedType)) {
         throw new Error(`Expected type ${JSON.stringify(expectedType)}, got ${JSON.stringify(actualType)}`);
       }
@@ -696,7 +731,7 @@ const assertEquals = (actual, expected, testName = '') => {
 // Export for testing
 export { 
   parseTypeScript, 
-  synthesize, 
+  infer, 
   check, 
   getExpression,
   processProgram,
@@ -704,7 +739,7 @@ export {
   processStatement,
   processStatements,
   processAssignment,
-  synthesizeFunctionBody,
+  inferFunctionBody,
   formatType,
   runTest,
   runFail, 
