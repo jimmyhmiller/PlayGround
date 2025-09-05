@@ -26,24 +26,17 @@ const typesEqual = (a: Type, b: Type): boolean => {
 // Convert TypeScript AST types to our types
 const convertTypeAnnotation = (node: ts.TypeNode): Type => {
   switch (node.kind) {
-    case ts.SyntaxKind.NumberKeyword: 
-      return NUMBER_TYPE;
-    case ts.SyntaxKind.StringKeyword: 
-      return STRING_TYPE;
-    case ts.SyntaxKind.BooleanKeyword: 
-      return BOOLEAN_TYPE;
-    case ts.SyntaxKind.VoidKeyword: 
-      return VOID_TYPE;
-    default: 
-      throw new Error(`Unsupported type: ${ts.SyntaxKind[node.kind]}`);
+    case ts.SyntaxKind.NumberKeyword: return NUMBER_TYPE;
+    case ts.SyntaxKind.StringKeyword: return STRING_TYPE;
+    case ts.SyntaxKind.BooleanKeyword: return BOOLEAN_TYPE;
+    case ts.SyntaxKind.VoidKeyword: return VOID_TYPE;
+    default: throw new Error(`Unsupported type: ${ts.SyntaxKind[node.kind]}`);
   }
 };
 
 // Format types for display
 const formatType = (type: Type): string => {
-  if (type.kind === 'primitive') {
-    return type.name;
-  }
+  if (type.kind === 'primitive') return type.name;
   if (type.kind === 'function') {
     const params = type.paramTypes.map(formatType).join(', ');
     return `(${params}) => ${formatType(type.returnType)}`;
@@ -55,33 +48,22 @@ const formatType = (type: Type): string => {
 type Context = Record<string, Type>;
 
 // Results from processing statements
-type StatementResult = { kind: 'return'; type: Type };
-
-// Type checking - check that an expression has the expected type
-const check = (node: ts.Node, expectedType: Type, context: Context): void => {
-  const inferredType = infer(node, context);
-  if (!typesEqual(inferredType, expectedType)) {
-    throw new Error(`Expected ${formatType(expectedType)}, got ${formatType(inferredType)}`);
-  }
-};
+type StatementResult = 
+  | { kind: 'return'; type: Type }
+  | { kind: 'if-results'; results: StatementResult[] };
 
 // Type inference
 const infer = (node: ts.Node, context: Context): Type => {
   switch (node.kind) {
-    case ts.SyntaxKind.NumericLiteral: 
-      return NUMBER_TYPE;
-    case ts.SyntaxKind.StringLiteral: 
-      return STRING_TYPE;
+    case ts.SyntaxKind.NumericLiteral: return NUMBER_TYPE;
+    case ts.SyntaxKind.StringLiteral: return STRING_TYPE;
     case ts.SyntaxKind.TrueKeyword:
-    case ts.SyntaxKind.FalseKeyword: 
-      return BOOLEAN_TYPE;
+    case ts.SyntaxKind.FalseKeyword: return BOOLEAN_TYPE;
     
     case ts.SyntaxKind.Identifier: {
       const name = (node as ts.Identifier).text;
       const type = context[name];
-      if (!type) {
-        throw new Error(`Variable '${name}' is not defined`);
-      }
+      if (!type) throw new Error(`Variable '${name}' is not defined`);
       return type;
     }
     
@@ -93,18 +75,10 @@ const infer = (node: ts.Node, context: Context): Type => {
       switch (binary.operatorToken.kind) {
         case ts.SyntaxKind.PlusToken:
           // Arithmetic or concatenation
-          if (typesEqual(left, NUMBER_TYPE) && typesEqual(right, NUMBER_TYPE)) {
-            return NUMBER_TYPE;
-          }
-          if (typesEqual(left, STRING_TYPE) && typesEqual(right, STRING_TYPE)) {
-            return STRING_TYPE;
-          }
-          if (typesEqual(left, STRING_TYPE) && typesEqual(right, NUMBER_TYPE)) {
-            return STRING_TYPE;
-          }
-          if (typesEqual(left, NUMBER_TYPE) && typesEqual(right, STRING_TYPE)) {
-            return STRING_TYPE;
-          }
+          if (typesEqual(left, NUMBER_TYPE) && typesEqual(right, NUMBER_TYPE)) return NUMBER_TYPE;
+          if (typesEqual(left, STRING_TYPE) && typesEqual(right, STRING_TYPE)) return STRING_TYPE;
+          if (typesEqual(left, STRING_TYPE) && typesEqual(right, NUMBER_TYPE)) return STRING_TYPE;
+          if (typesEqual(left, NUMBER_TYPE) && typesEqual(right, STRING_TYPE)) return STRING_TYPE;
           throw new Error('Invalid operands for + operator');
           
         case ts.SyntaxKind.MinusToken:
@@ -116,7 +90,6 @@ const infer = (node: ts.Node, context: Context): Type => {
           return NUMBER_TYPE;
           
         case ts.SyntaxKind.GreaterThanToken:
-        case ts.SyntaxKind.LessThanToken:
           if (!typesEqual(left, NUMBER_TYPE) || !typesEqual(right, NUMBER_TYPE)) {
             throw new Error('Comparison requires number operands');
           }
@@ -131,16 +104,17 @@ const infer = (node: ts.Node, context: Context): Type => {
       const call = node as ts.CallExpression;
       const funcType = infer(call.expression, context);
       
-      if (funcType.kind !== 'function') {
-        throw new Error('Cannot call non-function');
-      }
+      if (funcType.kind !== 'function') throw new Error('Cannot call non-function');
       if (call.arguments.length !== funcType.paramTypes.length) {
         throw new Error(`Expected ${funcType.paramTypes.length} arguments, got ${call.arguments.length}`);
       }
       
-      // Use bidirectional checking for arguments
+      // Check argument types
       call.arguments.forEach((arg, i) => {
-        check(arg, funcType.paramTypes[i], context);
+        const argType = infer(arg, context);
+        if (!typesEqual(argType, funcType.paramTypes[i])) {
+          throw new Error(`Argument ${i} expects ${formatType(funcType.paramTypes[i])}, got ${formatType(argType)}`);
+        }
       });
       
       return funcType.returnType;
@@ -157,15 +131,21 @@ const processStatements = (statements: readonly ts.Statement[], context: Context
   const results: StatementResult[] = [];
   
   for (const stmt of statements) {
-    const stmtResults = processStatement(stmt, newContext);
-    results.push(...stmtResults);
+    const result = processStatement(stmt, newContext);
+    if (result) {
+      if (result.kind === 'if-results') {
+        results.push(...result.results);
+      } else {
+        results.push(result);
+      }
+    }
   }
   
   return { context: newContext, results };
 };
 
 // Process individual statement
-const processStatement = (node: ts.Statement, context: Context): StatementResult[] => {
+const processStatement = (node: ts.Statement, context: Context): StatementResult | null => {
   switch (node.kind) {
     case ts.SyntaxKind.VariableStatement: {
       const varStmt = node as ts.VariableStatement;
@@ -175,13 +155,13 @@ const processStatement = (node: ts.Statement, context: Context): StatementResult
           context[(decl.name as ts.Identifier).text] = type;
         }
       }
-      return [];
+      return null;
     }
     
     case ts.SyntaxKind.ReturnStatement: {
       const returnStmt = node as ts.ReturnStatement;
       const type = returnStmt.expression ? infer(returnStmt.expression, context) : VOID_TYPE;
-      return [{ kind: 'return', type }];
+      return { kind: 'return', type };
     }
     
     case ts.SyntaxKind.IfStatement: {
@@ -190,50 +170,27 @@ const processStatement = (node: ts.Statement, context: Context): StatementResult
       // Process condition
       infer(ifStmt.expression, context);
       
-      // Process then branch and return all results from it
+      // Process then branch
+      const results: StatementResult[] = [];
       if (ifStmt.thenStatement) {
         if (ts.isBlock(ifStmt.thenStatement)) {
           const thenResult = processStatements(ifStmt.thenStatement.statements, context);
-          return thenResult.results;
+          results.push(...thenResult.results);
         } else {
-          return processStatement(ifStmt.thenStatement, context);
+          const result = processStatement(ifStmt.thenStatement, context);
+          if (result) results.push(result);
         }
       }
       
-      return [];
+      return results.length > 0 ? { kind: 'if-results', results } : null;
     }
     
     case ts.SyntaxKind.ExpressionStatement:
       infer((node as ts.ExpressionStatement).expression, context);
-      return [];
+      return null;
       
     default:
       throw new Error(`Unsupported statement: ${ts.SyntaxKind[node.kind]}`);
-  }
-};
-
-// Check function body against expected return type (bidirectional checking)
-const checkFunctionBody = (body: ts.ConciseBody, expectedType: Type, context: Context): void => {
-  if (ts.isBlock(body)) {
-    const { results } = processStatements(body.statements, context);
-    
-    // If no return statements, should be void
-    if (results.length === 0) {
-      if (!typesEqual(expectedType, VOID_TYPE)) {
-        throw new Error(`Expected ${formatType(expectedType)}, but function has no return statement (void)`);
-      }
-      return;
-    }
-    
-    // Check all return statements match expected type
-    for (const result of results) {
-      if (!typesEqual(result.type, expectedType)) {
-        throw new Error(`Expected function return type ${formatType(expectedType)}, got ${formatType(result.type)}`);
-      }
-    }
-  } else {
-    // Expression body - check against expected type
-    check(body, expectedType, context);
   }
 };
 
@@ -242,20 +199,22 @@ const inferFunctionBody = (body: ts.ConciseBody, context: Context): Type => {
   if (ts.isBlock(body)) {
     const { results } = processStatements(body.statements, context);
     
-    // If no return statements, it's void
-    if (results.length === 0) {
-      return VOID_TYPE;
-    }
+    // Validate all return statements have the same type
+    let returnType: Type | null = null;
+    let hasReturn = false;
     
-    // Check all return statements have the same type
-    const firstType = results[0].type;
     for (const result of results) {
-      if (!typesEqual(result.type, firstType)) {
-        throw new Error(`All return statements must have the same type. Expected ${formatType(firstType)}, got ${formatType(result.type)}`);
+      if (result.kind === 'return') {
+        if (!hasReturn) {
+          returnType = result.type;
+          hasReturn = true;
+        } else if (!typesEqual(result.type, returnType!)) {
+          throw new Error(`All return statements must have the same type. Expected ${formatType(returnType!)}, got ${formatType(result.type)}`);
+        }
       }
     }
     
-    return firstType;
+    return hasReturn ? returnType! : VOID_TYPE;
   } else {
     // Expression body
     return infer(body, context);
@@ -282,14 +241,15 @@ const processProgram = (sourceCode: string) => {
         extendedContext[(param.name as ts.Identifier).text] = paramTypes[i];
       });
       
-      // Infer or check return type using bidirectional typing
+      // Infer or check return type
       let returnType: Type;
       if (stmt.type) {
-        // Checking mode: verify body matches declared return type
         returnType = convertTypeAnnotation(stmt.type);
-        checkFunctionBody(stmt.body!, returnType, extendedContext);
+        const bodyType = inferFunctionBody(stmt.body!, extendedContext);
+        if (!typesEqual(bodyType, returnType)) {
+          throw new Error(`Function body returns ${formatType(bodyType)} but declared ${formatType(returnType)}`);
+        }
       } else {
-        // Inference mode: infer return type from body
         returnType = inferFunctionBody(stmt.body!, extendedContext);
       }
       
@@ -303,8 +263,8 @@ const processProgram = (sourceCode: string) => {
 };
 
 // CLI functionality
-const processFile = async (filename: string) => {
-  const fs = await import('fs');
+const processFile = (filename: string) => {
+  const fs = require('fs');
   
   try {
     const sourceCode = fs.readFileSync(filename, 'utf8');
@@ -329,24 +289,20 @@ const processFile = async (filename: string) => {
     console.log('Status: \x1b[31m✗ FAILED\x1b[0m');
     console.log();
     console.log('\x1b[31mType Error:\x1b[0m');
-    console.log(`  ${(error as Error).message}`);
+    console.log(`  ${error.message}`);
     console.log();
     console.log('\x1b[33m💡 Fix the type error and try again!\x1b[0m');
   }
 };
 
 // Main CLI
-const main = async () => {
+if (require.main === module) {
   const filename = process.argv[2];
   if (!filename) {
     console.log('Usage: npx ts-node reduced.ts <filename>');
     process.exit(1);
   }
-  await processFile(filename);
-};
-
-if (import.meta.url === `file://${process.argv[1]}`) {
-  main();
+  processFile(filename);
 }
 
 export { processProgram, formatType, NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE, VOID_TYPE };
