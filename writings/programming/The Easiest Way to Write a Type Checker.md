@@ -76,7 +76,67 @@ You will probably recognize this as typescript. We will of course not be impleme
 
 ### Checking simple types
 
- 
+In order to check our types we need a way to represent them.
+
+```typescript
+type PrimitiveType = { 
+  kind: 'primitive';
+  name: 'number' | 'string' | 'boolean'
+};
+type Type = PrimitiveType;
+
+const NUMBER_TYPE: Type = { kind: 'primitive', name: 'number' };
+const STRING_TYPE: Type = { kind: 'primitive', name: 'string' };
+const BOOLEAN_TYPE: Type = { kind: 'primitive', name: 'boolean' };
+
+const typesEqual = (a: Type, b: Type): boolean => {
+  if (a.kind !== b.kind) {
+    return false;
+  }
+  if (a.kind === 'primitive' && b.kind === 'primitive'){
+    return a.name === b.name;
+  }
+  return false;
+};
+```
+
+We will start with numbers, strings, and booleans, but we know in the future we are going to have functions as well. So we have intentionally made a system that will make it easy to expand the future (hence the currently pointless `Type = PrimitiveType`). Now that we have some of our types defined we need two things, 1) A way to actually parse some code, 2) a way to check the types of it. Let's start top down here and actually implement our main function that will parse our code and check it.
+
+```typescript
+// a top of file
+import * as ts from 'typescript';
+
+function parseAndCheckSimpleProgram(code: string, type: Type) {
+  const sourceFile = ts.createSourceFile('temp.ts', code, ts.ScriptTarget.Latest, true);
+  checkSimpleProgram(sourceFile, type);
+}
+
+function main() {
+  parseAndCheck("2", NUMBER_TYPE);
+  parseAndCheck("true", BOOLEAN_TYPE);
+  parseAndCheck("'hello'", STRING_TYPE);
+}
+```
+
+Here we are using typescripts api to parse our code. If you aren't familiar with parsing, all you need to know is that this going to convert our code into a big tree called an [abstract syntax tree](https://astexplorer.net/#/gist/92c7e41b058764c983b97502bd8c29e2/9146943079dcecfd6fb16827d0b53001c7b85ff2), think of it like a big json object that represents our code.
+
+Now we just need to walk this tree and check that our types match. At this point, we are make some simple assumptions. We are just going to have a single statement that is an expression statement.
+
+```typescript
+function checkSimpleProgram(sourceFile: ts.SourceFile, expectedType: Type): void {
+  const statement = sourceFile.statements[0];
+  
+  if (!ts.isExpressionStatement(statement)) {
+    throw new Error("Only expression statements supported");
+  }
+  
+  check(statement.expression, expectedType);
+}
+```
+
+
+
+
 
 
 
