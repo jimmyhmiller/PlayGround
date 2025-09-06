@@ -20,6 +20,7 @@ show_help() {
     echo "  run               - Build (if needed) and run the project"
     echo "  ast-to-json       - Parse input from stdin and output AST as JSON"
     echo "  ast-to-code       - Parse input from stdin and generate code from AST"
+    echo "  ast-to-ssa        - Parse input from stdin and convert AST to SSA form with visualization"
     echo "  reader-repl       - Interactive REPL showing parsed structure"
     echo "  tokenizer-debug   - Show all tokens from input"
     echo "  tools [tool]      - Build and run a specific tool (run 'tools' with no args to see available tools)"
@@ -160,6 +161,13 @@ cmd_test() {
     
     echo "Running example syntax tests..."
     "${BUILD_DIR}/test_example_syntax"
+    
+    # Build and run SSA formal properties tests
+    echo "Building SSA formal properties tests..."
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/test_ssa_formal_properties.cc -o "${BUILD_DIR}/test_ssa_formal_properties"
+    
+    echo "Running SSA formal properties tests..."
+    "${BUILD_DIR}/test_ssa_formal_properties"
 }
 
 cmd_stress() {
@@ -268,6 +276,24 @@ cmd_ast_to_code() {
     "${BUILD_DIR}/ast_to_code"
 }
 
+cmd_ast_to_ssa() {
+    mkdir -p "${BUILD_DIR}"
+    
+    # Build library sources (excluding main.cc and tools)
+    lib_sources=$(find "${SRC_DIR}" -name "*.cc" -o -name "*.cpp" | grep -v main.cc | grep -v "/tools/" | sort)
+    
+    if [ -z "$lib_sources" ]; then
+        echo "Error: No library source files found in ${SRC_DIR}"
+        exit 1
+    fi
+    
+    # Build the ast_to_ssa tool
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources "${SRC_DIR}/tools/ast_to_ssa.cc" -o "${BUILD_DIR}/ast_to_ssa"
+    
+    # Run the tool with stdin
+    "${BUILD_DIR}/ast_to_ssa"
+}
+
 cmd_reader_repl() {
     mkdir -p "${BUILD_DIR}"
     
@@ -321,6 +347,9 @@ case ${1:-help} in
         ;;
     ast-to-code)
         cmd_ast_to_code
+        ;;
+    ast-to-ssa)
+        cmd_ast_to_ssa
         ;;
     reader-repl)
         cmd_reader_repl "$@"

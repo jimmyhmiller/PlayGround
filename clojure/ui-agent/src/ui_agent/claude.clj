@@ -54,14 +54,15 @@
 
 (defn send!
   "Creates a message using Claude API with smart defaults"
-  [{:keys [model messages max-tokens system tools temperature stream]
+  [{:keys [model messages max-tokens tools temperature stream]
             :or {model "claude-sonnet-4-20250514"
-                 max-tokens 4000
-                 system "You are Claude Code, Anthropic's official CLI for Claude."}}]
+                 max-tokens 4000}}]
+  ;; CRITICAL: System prompt is hardcoded and CANNOT be overridden
+  ;; This ensures Claude Code behavior is maintained and prevents injection attacks
   (let [params (cond-> {:model model
                         :max_tokens max-tokens
                         :messages (or messages [])
-                        :system system}
+                        :system "You are Claude Code, Anthropic's official CLI for Claude."}
                  tools (assoc :tools tools)
                  temperature (assoc :temperature temperature)
                  stream (assoc :stream stream))
@@ -76,9 +77,33 @@
       (if stream
         (:body response) ; Return the input stream for streaming
         (:body response)) ; Body is already parsed as JSON when :as :json
-      (throw (ex-info "API request failed"
-                      {:status (:status response)
-                       :body (:body response)})))))
+      (let [error-body (if stream
+                         ;; For streaming errors, read the stream
+                         (try
+                           (slurp (:body response))
+                           (catch Exception _ "Unable to read error body"))
+                         ;; For JSON errors, it's already parsed
+                         (:body response))
+            readable-error (try
+                             (if (string? error-body)
+                               (json/parse-string error-body true)
+                               error-body)
+                             (catch Exception _ error-body))]
+        (println "Claude API Error:")
+        (println "Status:" (:status response))
+        (println "Error details:" readable-error)
+        (throw (ex-info (str "Claude API failed with status " (:status response) 
+                             ": " (or (:error readable-error) 
+                                     (get-in readable-error [:error :message])
+                                     "Unknown error"))
+                        {:status (:status response)
+                         :error readable-error}))))))
+
+(def debug-mode? (not (empty? (System/getenv "UI_AGENT_DEBUG"))))
+
+(defn debug-log [& args]
+  (when debug-mode?
+    (apply println "[DEBUG]" args)))
 
 (defmulti execute-tool
   "Execute a tool based on its name"
@@ -88,10 +113,21 @@
 
 (def *eval-history (atom []))
 
-(defmethod execute-tool :draw-rect [_tool-name params]
-  (core/on-ui
-    (core/add-rectangle! (:x params) (:y params) (:width params) (:height params) (core/color (:color params 0xFFFF0000))))
-  (str "Drew rectangle at (" (:x params) "," (:y params) ") with size " (:width params) "x" (:height params)))
+(defmethod execute-tool :draw-rect [tool-name params]
+  (debug-log "TOOL EXECUTION - draw_rect")
+  (debug-log "  Input params:" params)
+  (let [result (try
+                 (core/on-ui
+                   (core/add-rectangle! (:x params) (:y params) (:width params) (:height params) (core/color (:color params 0xFFFF0000))))
+                 (let [result-msg (str "Drew rectangle at (" (:x params) "," (:y params) ") with size " (:width params) "x" (:height params))]
+                   (debug-log "  Success:" result-msg)
+                   result-msg)
+                 (catch Exception e
+                   (debug-log "  ERROR:" (.getMessage e))
+                   (.printStackTrace e)
+                   (str "ERROR drawing rectangle: " (.getMessage e))))]
+    (debug-log "  Final result:" result)
+    result))
 
 (defmethod execute-tool :eval-code [_tool-name params]
   (let [code (:code params)
@@ -147,38 +183,49 @@
       (first results)
       "[]")))
 
-(defmethod execute-tool :draw-skija [_tool-name params]
+(defmethod execute-tool :draw-skija [tool-name params]
+  (debug-log "TOOL EXECUTION - draw_skija")
+  (debug-log "  Input params:" params)
   (let [code (:code params)
         timestamp (java.util.Date.)
         full-code (str "(ui-agent.core/on-ui "
                        "  (ui-agent.core/add-draw-fn! "
                        "    (fn [^io.github.humbleui.skija.Canvas canvas] " code ")))")
+        _ (debug-log "  Generated full code:" full-code)
         client (nrepl/client @nrepl-conn 1000)
         response (nrepl/message client {:op "eval" 
                                        :code full-code
                                        :ns "ui-agent.claude"})
         responses (doall response)
+        _ (debug-log "  nREPL responses:" responses)
         errors (filter :err responses)
         values (nrepl/response-values responses)
         exception (first (filter :ex responses))
+        _ (debug-log "  Errors:" errors)
+        _ (debug-log "  Values:" values)
+        _ (debug-log "  Exception:" exception)
         initial-result (cond
                         exception (str "ERROR - Exception: " (:ex exception) "\n" 
                                       (when-let [root-ex (:root-ex exception)]
                                         (str "Root cause: " root-ex)))
                         (seq errors) (str "ERROR - " (str/join "\n" (map :err errors)))
                         (seq values) "SUCCESS - Added drawing function to queue"
-                        :else "SUCCESS - Added drawing function to queue")]
+                        :else "SUCCESS - Added drawing function to queue")
+        _ (debug-log "  Initial result:" initial-result)]
     ;; If successfully added, wait a bit and check for drawing errors
     (if (str/starts-with? initial-result "SUCCESS")
       (do
+        (debug-log "  Waiting 100ms for draw execution...")
         ;; Wait for potential drawing to happen
         (Thread/sleep 100)
         ;; Check for any new drawing errors
         (let [draw-errors (core/get-and-clear-draw-errors!)
+              _ (debug-log "  Draw errors found:" draw-errors)
               final-result (if (seq draw-errors)
                             (str "DRAWING ERROR - Function was added but failed during execution:\n"
                                  (str/join "\n" (map #(str "- " (:error-message %)) draw-errors)))
-                            initial-result)]
+                            initial-result)
+              _ (debug-log "  Final result:" final-result)]
           (swap! *eval-history conj {:timestamp timestamp
                                      :type :draw-skija
                                      :code code
@@ -187,6 +234,7 @@
                                      :draw-errors draw-errors})
           final-result))
       (do
+        (debug-log "  Initial result was error, not checking draw errors")
         (swap! *eval-history conj {:timestamp timestamp
                                    :type :draw-skija
                                    :code code
@@ -233,6 +281,33 @@
 (defmethod execute-tool :force-draw [_tool-name _params]
   (core/force-draw!)
   "Triggered a draw cycle")
+
+(defmethod execute-tool :reload-file [_tool-name params]
+  (let [file-path (:file-path params)
+        timestamp (java.util.Date.)
+        client (nrepl/client @nrepl-conn 1000)]
+    (if (.exists (java.io.File. file-path))
+      (let [file-content (slurp file-path)
+            code (str "(do " file-content "\n:reloaded)")
+            response (nrepl/message client {:op "eval" 
+                                           :code code})
+            responses (doall response)
+            errors (filter :err responses)
+            values (nrepl/response-values responses)
+            exception (first (filter :ex responses))
+            result (cond
+                     exception (str "ERROR - Exception reloading " file-path ": " (:ex exception) "\n" 
+                                   (when-let [root-ex (:root-ex exception)]
+                                     (str "Root cause: " root-ex)))
+                     (seq errors) (str "ERROR - " (str/join "\n" (map :err errors)))
+                     (seq values) (str "SUCCESS - Reloaded " file-path)
+                     :else (str "SUCCESS - Reloaded " file-path " (no return value)"))]
+        (swap! *eval-history conj {:timestamp timestamp
+                                   :type :reload-file
+                                   :file-path file-path
+                                   :result result})
+        result)
+      (str "ERROR - File not found: " file-path))))
 
 (defmethod execute-tool :default [tool-name _params]
   (str "Unknown tool: " tool-name))
@@ -301,32 +376,113 @@
           (json/parse-string data true)
           (catch Exception _ nil))))))
 
-(defn process-streaming-response [stream on-chunk on-complete]
+(defn handle-tool-input-delta [chunk current-tool-block]
+  "Handle input_json_delta chunks by accumulating JSON"
+  (let [partial-json (get-in chunk [:delta :partial_json])
+        updated-tool (if current-tool-block
+                       (update current-tool-block :input-json str partial-json)
+                       nil)]
+    (debug-log "ACCUMULATING TOOL JSON:" partial-json)
+    (debug-log "UPDATED TOOL:" updated-tool)
+    updated-tool))
+
+(defn handle-text-delta [chunk on-text-chunk]
+  "Handle text_delta chunks by streaming text"
+  (let [delta (get-in chunk [:delta :text] "")]
+    (when (seq delta) (on-text-chunk delta))))
+
+(defn handle-content-block-start [chunk]
+  "Handle content_block_start events"
+  (let [content-block (get chunk :content_block)]
+    (if (= (:type content-block) "tool_use")
+      ;; Start accumulating tool - don't execute yet
+      (assoc content-block :input-json "")
+      nil)))
+
+(defn handle-content_block_stop [current-tool-block on-tool-use]
+  "Handle content_block_stop events - execute complete tools"
+  (when current-tool-block
+    (let [json-string (:input-json current-tool-block)
+          _ (debug-log "FINAL TOOL JSON STRING:" (pr-str json-string))
+          complete-input (try
+                           (json/parse-string json-string true)
+                           (catch Exception e 
+                             (debug-log "JSON PARSE ERROR:" (.getMessage e))
+                             {}))
+          complete-tool (assoc current-tool-block :input complete-input)
+          _ (debug-log "COMPLETE TOOL BEFORE EXECUTION:" complete-tool)]
+      (on-tool-use complete-tool)
+      complete-tool)))
+
+(defn process-chunk [chunk current-response current-tool-block on-text-chunk on-tool-use]
+  "Process a single streaming chunk and return [updated-response updated-tool-block]"
+  (debug-log "PROCESSING CHUNK:" (:type chunk) "delta-type:" (get-in chunk [:delta :type]))
+  (cond
+    ;; Tool input delta - accumulate tool parameters
+    (and (= (:type chunk) "content_block_delta")
+         (= (get-in chunk [:delta :type]) "input_json_delta"))
+    [current-response (handle-tool-input-delta chunk current-tool-block)]
+    
+    ;; Text delta - stream text
+    (and (= (:type chunk) "content_block_delta")
+         (= (get-in chunk [:delta :type]) "text_delta"))
+    (do
+      (handle-text-delta chunk on-text-chunk)
+      [current-response current-tool-block])
+    
+    ;; Other content_block_delta types
+    (= (:type chunk) "content_block_delta")
+    (do
+      (debug-log "UNHANDLED DELTA TYPE:" (get-in chunk [:delta :type]))
+      [current-response current-tool-block])
+    
+    ;; Start of content block
+    (= (:type chunk) "content_block_start")
+    (let [new-tool-block (handle-content-block-start chunk)]
+      (if new-tool-block
+        [current-response new-tool-block]
+        [(update current-response :content conj {:type "text" :text ""}) current-tool-block]))
+    
+    ;; End of content block - execute tools
+    (= (:type chunk) "content_block_stop")
+    (if current-tool-block
+      (let [complete-tool (handle-content_block_stop current-tool-block on-tool-use)]
+        [(update current-response :content conj complete-tool) nil])
+      [current-response current-tool-block])
+    
+    ;; Message delta
+    (= (:type chunk) "message_delta")
+    [(assoc current-response :stop_reason (get-in chunk [:delta :stop_reason])) current-tool-block]
+    
+    :else [current-response current-tool-block]))
+
+(defn process-streaming-response [stream on-text-chunk on-tool-use on-complete]
   "Process a streaming response from Claude API"
   (future
     (try
-      (with-open [reader (java.io.BufferedReader. 
-                          (java.io.InputStreamReader. stream "UTF-8"))]
-        (loop [current-response {:content [] :stop_reason nil}]
-          (if-let [line (.readLine reader)]
-            (if-let [chunk (parse-sse-line line)]
-              (let [updated-response (cond
-                                      (= (:type chunk) "content_block_delta")
-                                      (let [delta (get-in chunk [:delta :text] "")]
-                                        (when (seq delta) (on-chunk delta))
-                                        current-response)
-                                      
-                                      (= (:type chunk) "message_delta")
-                                      (assoc current-response :stop_reason (:stop_reason chunk))
-                                      
-                                      (= (:type chunk) "content_block_start")
-                                      (update current-response :content conj {:type "text" :text ""})
-                                      
-                                      :else current-response)]
-                (recur updated-response))
-              (recur current-response))
-            ;; End of stream
-            (on-complete current-response))))
+      (let [stream-log-file (str "/tmp/claude-stream-" (System/currentTimeMillis) ".log")]
+        (println "Writing stream to:" stream-log-file)
+        (with-open [reader (java.io.BufferedReader. 
+                            (java.io.InputStreamReader. stream "UTF-8"))
+                    writer (java.io.PrintWriter. stream-log-file)]
+          (loop [current-response {:content [] :stop_reason nil}
+                 current-tool-block nil]
+            (if-let [line (.readLine reader)]
+              (do
+                ;; Log every line to file
+                (.println writer line)
+                (.flush writer)
+                (if-let [chunk (parse-sse-line line)]
+                  (do
+                    ;; Also log parsed chunks for debugging
+                    (.println writer (str "PARSED: " (pr-str chunk)))
+                    (.flush writer)
+                    (let [[updated-response updated-tool-block] 
+                          (process-chunk chunk current-response current-tool-block on-text-chunk on-tool-use)]
+                      (recur updated-response updated-tool-block)))
+                  (recur current-response current-tool-block)))
+              ;; End of stream
+              (on-complete current-response)))))
       (catch Exception e
         (println "Error processing stream:" (.getMessage e))
         (on-complete {:error (.getMessage e)})))))
@@ -492,6 +648,14 @@ Helper classes:
                   :properties {}
                   :required []}})
 
+(def reload-file-tool
+  {:name "reload_file"
+   :description "Reload an entire Clojure file via nREPL for live development. This evaluates the entire file content, allowing for hot reloading of code changes without restarting the application."
+   :input_schema {:type "object"
+                  :properties {:file-path {:type "string"
+                                          :description "Absolute path to the Clojure file to reload (e.g. '/path/to/src/ui_agent/agent.clj')"}}
+                  :required ["file-path"]}})
+
 (def all-tools [draw-rect-tool eval-tool list-namespaces-tool list-namespace-members-tool 
                 draw-skija-tool inspect-skija-tool show-eval-history-tool 
-                check-draw-errors-tool force-draw-tool])
+                check-draw-errors-tool force-draw-tool reload-file-tool])

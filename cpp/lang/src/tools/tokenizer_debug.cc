@@ -10,6 +10,8 @@ std::string token_type_to_string(TokenType type) {
     return "NUMBER";
   case TokenType::String:
     return "String";
+  case TokenType::Boolean:
+    return "Boolean";
   case TokenType::Operator:
     return "Operator";
   case TokenType::Delimiter:

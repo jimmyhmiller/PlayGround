@@ -17,10 +17,16 @@ void Reader::read() {
 
   while (current_token.type != TokenType::End) {
     root.children.push_back(parse_expression());
+    
+    // If we hit a semicolon, consume it and continue
+    if (current_token.value == ";") {
+      advance(); // consume the semicolon
+    }
   }
 }
 
-Reader::OperatorInfo Reader::get_operator_info(const Token &token, bool isPostfix) {
+Reader::OperatorInfo Reader::get_operator_info(const Token &token,
+                                               bool isPostfix) {
   if (token.type == TokenType::Operator) {
     if (isPostfix && token.value == "!")
       return {40, LEFT};
@@ -34,25 +40,25 @@ Reader::OperatorInfo Reader::get_operator_info(const Token &token, bool isPostfi
     if (token.value == "+" || token.value == "-")
       return {10, LEFT};
     if (token.value == "->")
-      return {8, RIGHT};  // Higher precedence than : and right-associative
+      return {8, RIGHT}; // Higher precedence than : and right-associative
     if (token.value == "=>")
-      return {1, RIGHT};  // Low precedence, right-associative
+      return {1, RIGHT}; // Low precedence, right-associative
     if (token.value == "*" || token.value == "/")
       return {20, LEFT};
     if (token.value == "^")
-      return {30, RIGHT};  // Exponentiation is typically right-associative
+      return {30, RIGHT}; // Exponentiation is typically right-associative
     if (token.value == ".")
       return {35, LEFT};
     return {2, LEFT};
   }
   if (token.type == TokenType::Separator) {
     if (token.value == ":")
-      return {3, RIGHT};  // Lower precedence than ->, right-associative
+      return {3, RIGHT}; // Lower precedence than ->, right-associative
     // Comma is not a binary operator - it's only a list separator
-    return {0, LEFT};  // No precedence for other separators
+    return {0, LEFT}; // No precedence for other separators
   }
   if (isPostfix && token.type == TokenType::Delimiter && token.value == "(") {
-    return {50, LEFT};  // Function calls have very high precedence
+    return {50, LEFT}; // Function calls have very high precedence
   }
   return {0, LEFT};
 }
@@ -108,6 +114,9 @@ ReaderNode Reader::parse_prefix(const Token &token) {
   if (token.type == TokenType::String) {
     return ReaderNode(ReaderNodeType::Literal, token);
   }
+  if (token.type == TokenType::Boolean) {
+    return ReaderNode(ReaderNodeType::Literal, token);
+  }
   if (token.type == TokenType::Identifier) {
     return ReaderNode(ReaderNodeType::Ident, token);
   }
@@ -117,7 +126,7 @@ ReaderNode Reader::parse_prefix(const Token &token) {
     // Parse statements with semicolon or comma separators
     while (current_token.type != TokenType::End && current_token.value != "}") {
       statements.push_back(parse_expression());
-      
+
       // If we hit a semicolon or comma, consume it and continue
       if (current_token.value == ";" || current_token.value == ",") {
         advance(); // consume the separator
@@ -144,7 +153,7 @@ ReaderNode Reader::parse_prefix(const Token &token) {
     // Parse space or comma-separated expressions
     while (current_token.type != TokenType::End && current_token.value != ")") {
       elements.push_back(parse_expression());
-      
+
       // If we hit a comma, consume it and continue
       if (current_token.value == ",") {
         advance(); // consume the comma
@@ -197,9 +206,6 @@ ReaderNode Reader::parse_prefix(const Token &token) {
       return ReaderNode(ReaderNodeType::Ident, token);
     }
   }
-  if (token.type == TokenType::Separator) {
-    return ReaderNode(ReaderNodeType::Ident, token);
-  }
   throw std::runtime_error(
       "Unexpected token in parsePrefix: " + std::string(token.value) +
       " (type: " + std::to_string(static_cast<int>(token.type)) + ")");
@@ -207,7 +213,8 @@ ReaderNode Reader::parse_prefix(const Token &token) {
 
 ReaderNode Reader::parse_infix(ReaderNode left, const Token &token) {
   OperatorInfo info = get_operator_info(token);
-  int nextBp = (info.associativity == RIGHT) ? info.precedence - 1 : info.precedence + 1;
+  int nextBp =
+      (info.associativity == RIGHT) ? info.precedence - 1 : info.precedence + 1;
   ReaderNode right = parse_expression(nextBp);
   return ReaderNode(ReaderNodeType::BinaryOp, token,
                     {std::move(left), std::move(right)});
@@ -217,31 +224,31 @@ ReaderNode Reader::parse_postfix(ReaderNode left, const Token &token) {
   if (token.type == TokenType::Delimiter && token.value == "(") {
     // This is a function call
     std::vector<ReaderNode> arguments;
-    
+
     // Parse space or comma-separated arguments
     while (current_token.type != TokenType::End && current_token.value != ")") {
       arguments.push_back(parse_expression());
-      
+
       // If we hit a comma, consume it and continue
       if (current_token.value == ",") {
         advance(); // consume the comma
       }
     }
-    
+
     if (current_token.value == ")") {
       advance(); // consume the closing parenthesis
     }
-    
+
     // Create a Call node with the function as first child, then arguments
     ReaderNode call_node(ReaderNodeType::Call, token);
     call_node.children.push_back(std::move(left));
-    for (auto& arg : arguments) {
+    for (auto &arg : arguments) {
       call_node.children.push_back(std::move(arg));
     }
-    
+
     return call_node;
   }
-  
+
   return ReaderNode(ReaderNodeType::PostfixOp, token, {std::move(left)});
 }
 

@@ -60,6 +60,10 @@ std::string ast_node_type_to_string(ASTNodeType type) {
     return "Parameter";
   case ASTNodeType::Argument:
     return "Argument";
+  case ASTNodeType::StructDeclaration:
+    return "StructDeclaration";
+  case ASTNodeType::FieldDeclaration:
+    return "FieldDeclaration";
   default:
     return "Unknown";
   }
@@ -137,14 +141,16 @@ std::string ast_to_json(const ASTNode *node, int indent) {
 
   // Add function type if present
   if (node->function_type) {
-    json << ",\n" << nextIndentStr << "\"function_type\": "
+    json << ",\n"
+         << nextIndentStr << "\"function_type\": "
          << ast_to_json(node->function_type.get(), indent + 1);
   }
 
   // Add body if present
   if (node->body) {
-    json << ",\n" << nextIndentStr << "\"body\": "
-         << ast_to_json(node->body.get(), indent + 1);
+    json << ",\n"
+         << nextIndentStr
+         << "\"body\": " << ast_to_json(node->body.get(), indent + 1);
   }
 
   // Add children if present

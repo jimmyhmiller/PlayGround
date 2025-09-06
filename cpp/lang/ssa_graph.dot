@@ -1,0 +1,166 @@
+digraph SSA {
+    rankdir=TB;
+    node [shape=box, style=rounded];
+    
+    subgraph cluster_main {
+        label="Main Program";
+        style=filled;
+        fillcolor=lightgray;
+        
+        block_0 [label="Block 0\n─────────────\n"];
+    }
+    subgraph cluster_id {
+        label="Function: id";
+        style=filled;
+        fillcolor=lightblue;
+        
+        id_block_0 [label="Block 0\n─────────────\nreturn x\n─────────────\n[SEALED]\n"];
+    }
+    subgraph cluster_first {
+        label="Function: first";
+        style=filled;
+        fillcolor=lightblue;
+        
+        first_block_0 [label="Block 0\n─────────────\nreturn a\n─────────────\n[SEALED]\n"];
+    }
+    subgraph cluster_len {
+        label="Function: len";
+        style=filled;
+        fillcolor=lightblue;
+        
+        len_block_0 [label="Block 0\n─────────────\nv0 := 0\njump block_1\n─────────────\n[SEALED]\n"];
+        len_block_1 [label="Block 1\n─────────────\nv6 := φ(?)\nv4 := φ(?)\njump block_2\n─────────────\n[SEALED]\n"];
+        len_block_2 [label="Block 2\n─────────────\nv1 := φ(?)\nv2 := 0\nv3 := v1 == v2\nif v3 then block_4 else block_5\n─────────────\n[SEALED]\n"];
+        len_block_3 [label="Block 3\n─────────────\nreturn v6\n─────────────\n[SEALED]\n"];
+        len_block_4 [label="Block 4\n─────────────\njump block_3\njump block_6\n─────────────\n[SEALED]\n"];
+        len_block_5 [label="Block 5\n─────────────\njump block_6\n─────────────\n[SEALED]\n"];
+        len_block_6 [label="Block 6\n─────────────\nv5 := φ(?)\nv7 := 1\nv8 := v5 + v7\nv9 := 0\njump block_1\n─────────────\n[SEALED]\n"];
+        len_block_0 -> len_block_1;
+        len_block_6 -> len_block_1;
+        len_block_1 -> len_block_2;
+        len_block_4 -> len_block_3;
+        len_block_2 -> len_block_4;
+        len_block_2 -> len_block_5;
+        len_block_4 -> len_block_6;
+        len_block_5 -> len_block_6;
+    }
+    subgraph cluster_sum {
+        label="Function: sum";
+        style=filled;
+        fillcolor=lightblue;
+        
+        sum_block_0 [label="Block 0\n─────────────\nv0 := 0\njump block_1\n─────────────\n[SEALED]\n"];
+        sum_block_1 [label="Block 1\n─────────────\nv6 := φ(?)\nv4 := φ(?)\njump block_2\n─────────────\n[SEALED]\n"];
+        sum_block_2 [label="Block 2\n─────────────\nv1 := φ(?)\nv2 := 0\nv3 := v1 == v2\nif v3 then block_4 else block_5\n─────────────\n[SEALED]\n"];
+        sum_block_3 [label="Block 3\n─────────────\nreturn v6\n─────────────\n[SEALED]\n"];
+        sum_block_4 [label="Block 4\n─────────────\njump block_3\njump block_6\n─────────────\n[SEALED]\n"];
+        sum_block_5 [label="Block 5\n─────────────\njump block_6\n─────────────\n[SEALED]\n"];
+        sum_block_6 [label="Block 6\n─────────────\nv5 := φ(?)\nv7 := 0\nv8 := v5 + v7\nv9 := 0\njump block_1\n─────────────\n[SEALED]\n"];
+        sum_block_0 -> sum_block_1;
+        sum_block_6 -> sum_block_1;
+        sum_block_1 -> sum_block_2;
+        sum_block_4 -> sum_block_3;
+        sum_block_2 -> sum_block_4;
+        sum_block_2 -> sum_block_5;
+        sum_block_4 -> sum_block_6;
+        sum_block_5 -> sum_block_6;
+    }
+    subgraph cluster_map {
+        label="Function: map";
+        style=filled;
+        fillcolor=lightblue;
+        
+        map_block_0 [label="Block 0\n─────────────\nv0 := 0\njump block_1\n─────────────\n[SEALED]\n"];
+        map_block_1 [label="Block 1\n─────────────\nv7 := φ(?)\nv4 := φ(?)\njump block_2\n─────────────\n[SEALED]\n"];
+        map_block_2 [label="Block 2\n─────────────\nv1 := φ(?)\nv2 := 0\nv3 := v1 == v2\nif v3 then block_4 else block_5\n─────────────\n[SEALED]\n"];
+        map_block_3 [label="Block 3\n─────────────\nreturn v7\n─────────────\n[SEALED]\n"];
+        map_block_4 [label="Block 4\n─────────────\njump block_3\njump block_6\n─────────────\n[SEALED]\n"];
+        map_block_5 [label="Block 5\n─────────────\njump block_6\n─────────────\n[SEALED]\n"];
+        map_block_6 [label="Block 6\n─────────────\nv6 := φ(?)\nv5 := 0\nv8 := 0\nv9 := v6 + v8\nv10 := 0\njump block_1\n─────────────\n[SEALED]\n"];
+        map_block_0 -> map_block_1;
+        map_block_6 -> map_block_1;
+        map_block_1 -> map_block_2;
+        map_block_4 -> map_block_3;
+        map_block_2 -> map_block_4;
+        map_block_2 -> map_block_5;
+        map_block_4 -> map_block_6;
+        map_block_5 -> map_block_6;
+    }
+    subgraph cluster_option_map {
+        label="Function: option_map";
+        style=filled;
+        fillcolor=lightblue;
+        
+        option_map_block_0 [label="Block 0\n─────────────\nv0 := φ(?)\nv1 := o == v0\nif v1 then block_1 else block_2\n─────────────\n[SEALED]\n"];
+        option_map_block_1 [label="Block 1\n─────────────\nv2 := φ(?)\njump block_3\n─────────────\n[SEALED]\n"];
+        option_map_block_2 [label="Block 2\n─────────────\nv3 := 0\njump block_3\n─────────────\n[SEALED]\n"];
+        option_map_block_3 [label="Block 3\n─────────────\n─────────────\n[SEALED]\n"];
+        option_map_block_0 -> option_map_block_1;
+        option_map_block_0 -> option_map_block_2;
+        option_map_block_1 -> option_map_block_3;
+        option_map_block_2 -> option_map_block_3;
+    }
+    subgraph cluster_zip {
+        label="Function: zip";
+        style=filled;
+        fillcolor=lightblue;
+        
+        zip_block_0 [label="Block 0\n─────────────\nv0 := 0\njump block_1\n─────────────\n[SEALED]\n"];
+        zip_block_1 [label="Block 1\n─────────────\nv14 := φ(?)\nv9 := φ(?)\nv8 := φ(?)\njump block_2\n─────────────\n[SEALED]\n"];
+        zip_block_2 [label="Block 2\n─────────────\nv4 := φ(?)\nv1 := φ(?)\nv2 := 0\nv3 := v1 == v2\nv5 := 0\nv6 := v4 == v5\nv7 := v3 || v6\nif v7 then block_4 else block_5\n─────────────\n[SEALED]\n"];
+        zip_block_3 [label="Block 3\n─────────────\nreturn v14\n─────────────\n[SEALED]\n"];
+        zip_block_4 [label="Block 4\n─────────────\njump block_3\njump block_6\n─────────────\n[SEALED]\n"];
+        zip_block_5 [label="Block 5\n─────────────\njump block_6\n─────────────\n[SEALED]\n"];
+        zip_block_6 [label="Block 6\n─────────────\nv13 := φ(?)\nv10 := 0\nv11 := 0\nv12 := 0\nv15 := 0\nv16 := v13 + v15\nv17 := 0\nv18 := 0\njump block_1\n─────────────\n[SEALED]\n"];
+        zip_block_0 -> zip_block_1;
+        zip_block_6 -> zip_block_1;
+        zip_block_1 -> zip_block_2;
+        zip_block_4 -> zip_block_3;
+        zip_block_2 -> zip_block_4;
+        zip_block_2 -> zip_block_5;
+        zip_block_4 -> zip_block_6;
+        zip_block_5 -> zip_block_6;
+    }
+    subgraph cluster_compose {
+        label="Function: compose";
+        style=filled;
+        fillcolor=lightblue;
+        
+        compose_block_0 [label="Block 0\n─────────────\n─────────────\n[SEALED]\n"];
+    }
+    subgraph cluster_reverse {
+        label="Function: reverse";
+        style=filled;
+        fillcolor=lightblue;
+        
+        reverse_block_0 [label="Block 0\n─────────────\nv0 := 0\njump block_1\n─────────────\n[SEALED]\n"];
+        reverse_block_1 [label="Block 1\n─────────────\nv8 := φ(?)\nv4 := φ(?)\njump block_2\n─────────────\n[SEALED]\n"];
+        reverse_block_2 [label="Block 2\n─────────────\nv1 := φ(?)\nv2 := 0\nv3 := v1 == v2\nif v3 then block_4 else block_5\n─────────────\n[SEALED]\n"];
+        reverse_block_3 [label="Block 3\n─────────────\nreturn v8\n─────────────\n[SEALED]\n"];
+        reverse_block_4 [label="Block 4\n─────────────\njump block_3\njump block_6\n─────────────\n[SEALED]\n"];
+        reverse_block_5 [label="Block 5\n─────────────\njump block_6\n─────────────\n[SEALED]\n"];
+        reverse_block_6 [label="Block 6\n─────────────\nv7 := φ(?)\nv5 := 0\nv6 := 0\nv9 := v6 + v7\nv10 := 0\njump block_1\n─────────────\n[SEALED]\n"];
+        reverse_block_0 -> reverse_block_1;
+        reverse_block_6 -> reverse_block_1;
+        reverse_block_1 -> reverse_block_2;
+        reverse_block_4 -> reverse_block_3;
+        reverse_block_2 -> reverse_block_4;
+        reverse_block_2 -> reverse_block_5;
+        reverse_block_4 -> reverse_block_6;
+        reverse_block_5 -> reverse_block_6;
+    }
+    subgraph cluster_get_or_else {
+        label="Function: get_or_else";
+        style=filled;
+        fillcolor=lightblue;
+        
+        get_or_else_block_0 [label="Block 0\n─────────────\nv0 := φ(?)\nv1 := o == v0\nif v1 then block_1 else block_2\n─────────────\n[SEALED]\n"];
+        get_or_else_block_1 [label="Block 1\n─────────────\nv2 := φ(?)\njump block_3\n─────────────\n[SEALED]\n"];
+        get_or_else_block_2 [label="Block 2\n─────────────\nv3 := 0\njump block_3\n─────────────\n[SEALED]\n"];
+        get_or_else_block_3 [label="Block 3\n─────────────\n─────────────\n[SEALED]\n"];
+        get_or_else_block_0 -> get_or_else_block_1;
+        get_or_else_block_0 -> get_or_else_block_2;
+        get_or_else_block_1 -> get_or_else_block_3;
+        get_or_else_block_2 -> get_or_else_block_3;
+    }
+}

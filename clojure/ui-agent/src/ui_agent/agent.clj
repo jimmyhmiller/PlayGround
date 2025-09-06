@@ -5,31 +5,6 @@
    [cheshire.core :as json]
    [clojure.string :as str]))
 
-(def agent-system-prompt
-  "You are a UI-generating agent. Analyze incoming messages and immediately create helpful visualizations using your tools.
-
-ALWAYS start by clearing the canvas: eval_code with `(ui-agent.core/clear-draw-queue!)` in namespace `ui-agent.core`
-
-Key patterns to recognize and visualize:
-- Numbers/data → Create charts or tables  
-- Lists → Create organized displays
-- Comparisons → Create side-by-side layouts
-- Processes → Create flowcharts
-- Time series → Create timelines
-
-Available tools:
-- eval_code: Execute Clojure (use to clear canvas, manipulate data)
-- draw_skija: Draw using Skija Canvas API (preferred for all graphics)
-
-Be direct and fast - don't explain, just create the UI immediately.
-
-Example for data like 'Q1=100, Q2=150':
-1. Clear canvas with eval_code
-2. Draw title with draw_skija 
-3. Draw bar chart with draw_skija
-4. Add labels with draw_skija
-
-Use draw_skija for everything visual. Always clear the canvas first.")
 
 (def *message-history (atom []))
 (def *current-context (atom {}))
@@ -70,6 +45,9 @@ Use draw_skija for everything visual. Always clear the canvas first.")
     (let [extracted-data (extract-data-from-message message)
           history @*message-history
           context-prompt (generate-context-prompt message metadata extracted-data history)
+          _ (claude/debug-log "AGENT PROCESSING MESSAGE:" message)
+          _ (claude/debug-log "EXTRACTED DATA:" extracted-data) 
+          _ (claude/debug-log "CONTEXT PROMPT:" context-prompt)
           
           ;; Store this message in history
           message-record {:timestamp (System/currentTimeMillis)
@@ -79,27 +57,101 @@ Use draw_skija for everything visual. Always clear the canvas first.")
           _ (swap! *message-history conj message-record)
           _ (swap! *message-history #(take-last 10 %)) ; Keep last 10 messages
           
-          ;; Use regular chat with tools for proper tool execution
-          responses (claude/chat-with-tools! 
-                     {:messages [(claude/text context-prompt)]
-                      :tools claude/all-tools})
+          ;; Use streaming for immediate response
+          accumulated-text (atom "")
+          tool-results (atom [])
+          tools-executed (atom 0)
+          stream (claude/send! {:messages [(claude/text context-prompt)]
+                               :tools claude/all-tools
+                               :stream true})
           
-          ;; Extract text responses 
-          text-responses (mapcat 
-                          (fn [response]
-                            (->> (:content response)
-                                 (filter #(= (:type %) "text"))
-                                 (map :text)))
-                          responses)]
+          ;; Process streaming response
+          _ (claude/process-streaming-response 
+              stream
+              ;; on-chunk callback for text
+              (fn [text-chunk]
+                (swap! accumulated-text str text-chunk)
+                (print text-chunk)
+                (flush)
+                (claude/debug-log "STREAMING TEXT CHUNK:" text-chunk))
+              ;; on-tool-use callback for complete tool blocks
+              (fn [tool-use]
+                (println "\nExecuting tool:" (:name tool-use))
+                (claude/debug-log "STREAMING TOOL USE:" tool-use)
+                (let [tool-result (claude/execute-tool (:name tool-use) (:input tool-use))
+                      tool-result-message {:type "tool_result"
+                                          :tool_use_id (:id tool-use)
+                                          :content (if (string? tool-result)
+                                                     tool-result
+                                                     (cheshire.core/generate-string tool-result))}]
+                  (claude/debug-log "TOOL RESULT:" tool-result)
+                  (swap! tool-results conj tool-result-message))
+                (swap! tools-executed inc))
+              ;; on-complete callback
+              (fn [final-response]
+                (println "\nStreaming complete")
+                (claude/debug-log "STREAMING FINAL RESPONSE:" final-response)
+                ;; If we have tool results, send them back to Claude
+                (when (seq @tool-results)
+                  (println "\nSending tool results back to Claude...")
+                  (claude/debug-log "TOOL RESULTS TO SEND:" @tool-results)
+                  (try
+                    (let [;; Clean up the assistant message content to only include valid API fields
+                          clean-content (->> (:content final-response)
+                                            (map (fn [item]
+                                                  (if (= (:type item) "tool_use")
+                                                    ;; Select only valid tool_use fields for the API
+                                                    (select-keys item [:type :id :name :input])
+                                                    item)))
+                                            ;; Filter out empty text blocks
+                                            (filter (fn [item]
+                                                     (or (not= (:type item) "text")
+                                                         (and (= (:type item) "text")
+                                                              (not (empty? (str/trim (:text item)))))))))
+                          assistant-message {:role "assistant" 
+                                           :content clean-content}
+                          tool-result-message {:role "user"
+                                              :content @tool-results}
+                          follow-up-stream (claude/send! {:messages [(claude/text context-prompt)
+                                                                    assistant-message
+                                                                    tool-result-message]
+                                                         :tools claude/all-tools
+                                                         :stream true})]
+                      ;; Process the follow-up streaming response
+                      (claude/process-streaming-response
+                        follow-up-stream
+                        ;; on-chunk callback for follow-up text
+                        (fn [text-chunk]
+                          (swap! accumulated-text str text-chunk)
+                          (print text-chunk)
+                          (flush)
+                          (claude/debug-log "FOLLOW-UP TEXT CHUNK:" text-chunk))
+                        ;; on-tool-use callback for follow-up tools (recursive)
+                        (fn [tool-use]
+                          (println "\nExecuting follow-up tool:" (:name tool-use))
+                          (claude/debug-log "FOLLOW-UP TOOL USE:" tool-use)
+                          (let [tool-result (claude/execute-tool (:name tool-use) (:input tool-use))]
+                            (claude/debug-log "FOLLOW-UP TOOL RESULT:" tool-result))
+                          (swap! tools-executed inc))
+                        ;; on-complete callback for follow-up
+                        (fn [follow-up-final-response]
+                          (println "\nFollow-up streaming complete")
+                          (claude/debug-log "FOLLOW-UP FINAL RESPONSE:" follow-up-final-response))))
+                    (catch Exception e
+                      (println "Error sending tool results:" (.getMessage e))
+                      (claude/debug-log "TOOL RESULT SEND ERROR:" e))))))]
       
       ;; Stop processing indicator
       (core/on-ui (core/stop-processing!))
       
-      {:status "success"
-       :message-processed message
-       :ui-actions-taken (count responses)
-       :agent-response (str/join "\n\n" text-responses)
-       :timestamp (System/currentTimeMillis)})
+      (let [final-result {:status "success"
+                          :message-processed message
+                          :tools-executed @tools-executed
+                          :agent-response @accumulated-text
+                          :streaming true
+                          :timestamp (System/currentTimeMillis)}]
+        (claude/debug-log "AGENT FINAL RESULT:" final-result)
+        final-result))
     
     (catch Exception e
       ;; Stop processing indicator on error

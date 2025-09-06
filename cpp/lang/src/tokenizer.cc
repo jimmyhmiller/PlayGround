@@ -26,8 +26,14 @@ Token Tokenizer::next_token(const std::string_view input) {
                                 input[pos] == '!')) {
         consume(input);
       }
-      return Token{TokenType::Identifier, input.substr(start, pos - start),
-                   start_line, start_column};
+      std::string_view token_value = input.substr(start, pos - start);
+      
+      // Check for boolean literals
+      if (token_value == "true" || token_value == "false") {
+        return Token{TokenType::Boolean, token_value, start_line, start_column};
+      }
+      
+      return Token{TokenType::Identifier, token_value, start_line, start_column};
     } else if (std::isdigit(current_char)) {
       int start = pos;
       int start_line = line;

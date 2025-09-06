@@ -54,16 +54,13 @@ struct Reader {
 
   Reader(const std::string_view input) : input(input) {}
 
-  enum Associativity {
-    LEFT,
-    RIGHT
-  };
-  
+  enum Associativity { LEFT, RIGHT };
+
   struct OperatorInfo {
     int precedence;
     Associativity associativity;
   };
-  
+
   Token advance();
   Token peek() const;
   void read();
